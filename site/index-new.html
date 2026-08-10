@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIQT: governance guardrails for AI-assisted work</title>
+<meta name="description" content="AIQT is a governance pack for AI-assisted work. One priority ordering, Accuracy = Integrity = Quality = Trust before progress, speed, and cost, and a set of disciplines that decide how an AI assistant works.">
+<!--
+  STAGED LAUNCH DRAFT (index-new.html), authored 2026-08-10 for maintainer review.
+  The current site/index.html ("coming momentarily") stays live. Going live = delete
+  index.html, rename this file to index.html.
+  ACCURACY GATE before go-live: the "published conformance report" language in the
+  roadmap section is true only once launch-gate 1.26.7 passes for every launch-claimed
+  platform. If a platform fails, remove its evidence rather than soften the claim
+  (never claim beyond what the recorded evidence bounds). No specific platform rows or
+  report links are asserted on this page yet.
+-->
+<style>
+  :root{
+    --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
+    --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
+    --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
+      --ink:#101828; --muted:#41506a; --faint:#6b7d94;
+      --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    margin:0; background:var(--bg); color:var(--ink);
+    line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px; margin:0 auto; padding:0 1.4rem}
+  section{padding:4rem 0; border-top:1px solid var(--line)}
+  h1,h2,h3{line-height:1.25; letter-spacing:-.01em; font-weight:650}
+  h2{font-size:1.7rem; margin:0 0 1.2rem}
+  h3{font-size:1.1rem; margin:0 0 .4rem}
+  p{color:var(--muted); margin:0 0 1rem}
+  .lead{font-size:1.12rem; color:var(--ink)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
+
+  /* hero */
+  header{padding:5.5rem 0 4rem; border:0; text-align:center; background:
+    radial-gradient(1200px 380px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
+  .eyebrow{color:var(--accent-2); font-weight:600; letter-spacing:.06em;
+    text-transform:uppercase; font-size:.82rem; margin:0 0 1rem}
+  header h1{font-size:2.5rem; margin:0 auto 1.2rem; max-width:18ch}
+  header .lead{max-width:60ch; margin:0 auto 1.6rem}
+  .ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:.7rem 1rem; color:var(--ink); font-size:.98rem; margin-top:.4rem}
+  .ordering .tier{color:var(--accent-2); font-weight:600}
+  .cta{margin-top:2rem; display:flex; gap:.8rem; justify-content:center; flex-wrap:wrap}
+  .btn{display:inline-block; padding:.7rem 1.3rem; border-radius:9px; font-weight:600;
+    border:1px solid var(--line)}
+  .btn.primary{background:var(--accent); color:#08111f; border-color:transparent}
+  .btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
+  .btn.ghost{background:transparent; color:var(--ink)}
+
+  /* facets grid */
+  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1rem}
+  @media (max-width:640px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:1.2rem 1.3rem}
+  .card h3{color:var(--ink)}
+  .card p{margin:0}
+
+  /* rules */
+  ol.rules{counter-reset:r; list-style:none; padding:0; margin:0}
+  ol.rules li{background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
+    padding:1rem 1.1rem 1rem 3.3rem; position:relative; margin:.7rem 0}
+  ol.rules li::before{counter-increment:r; content:counter(r);
+    position:absolute; left:1rem; top:1rem; width:1.6rem; height:1.6rem; border-radius:50%;
+    background:var(--accent); color:#08111f; font-weight:700; font-size:.9rem;
+    display:flex; align-items:center; justify-content:center}
+  ol.rules b{color:var(--ink)}
+  ol.rules p{margin:.25rem 0 0}
+
+  /* is / is not */
+  .two{display:grid; grid-template-columns:1fr 1fr; gap:1rem}
+  @media (max-width:640px){.two{grid-template-columns:1fr}}
+  .is{border-left:3px solid var(--accent-2)}
+  .isnot{border-left:3px solid var(--faint)}
+
+  ul.clean{margin:.4rem 0 0; padding-left:1.1rem}
+  ul.clean li{margin:.3rem 0; color:var(--muted)}
+
+  .pill{display:inline-block; font-size:.74rem; font-weight:600; letter-spacing:.04em;
+    text-transform:uppercase; padding:.2rem .6rem; border-radius:999px; margin-bottom:.5rem}
+  .pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
+  .pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
+  .pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
+
+  footer{border-top:1px solid var(--line); padding:2.4rem 0 3rem; text-align:center}
+  footer p{color:var(--faint); font-size:.9rem; margin:.3rem 0}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="eyebrow">Governance you own. Depth you compose.</p>
+    <h1>Accuracy, Integrity, Quality &amp; Trust before progress, speed, and cost.</h1>
+    <p class="lead">AIQT is a governance pack for AI-assisted work. It is one priority
+      ordering and a set of disciplines that decide how an AI assistant works: what it must
+      verify before it may claim something is done, when it must stop and ask rather than
+      guess, what it may never quietly change, and what has to end up in the record.</p>
+    <div class="ordering">
+      (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">Read the pack</a>
+      <a class="btn ghost" href="#roadmap">Where it is going</a>
+    </div>
+  </div>
+</header>
+
+<section id="ordering">
+  <div class="wrap">
+    <h2>One ordering, decided in advance</h2>
+    <p class="lead">When correctness and craft pull against being fast or being cheap,
+      correctness wins, every time. Deciding that in advance means nobody has to re-argue it
+      under a deadline. The top tier has four facets, and they are co-equal: there is no
+      ranking among them, because an accurate but fabricated result, or a high-quality but
+      dishonest one, does not exist. If two ever seem to conflict, that is a framing problem
+      to surface, not a trade to make.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Accuracy</h3>
+        <p>Every factual claim matches its source. Every statement about the state of
+          something rests on an observation, not a guess. "Done" means a check actually ran.
+          If a fact is unknown, we say so rather than invent something plausible.</p>
+      </div>
+      <div class="card">
+        <h3>Integrity</h3>
+        <p>The work is what it appears to be. No stubbed or mocked results dressed up as
+          finished, no quietly weakened checks, no fabricated names or citations, no silent
+          changes. When something fails, we surface it.</p>
+      </div>
+      <div class="card">
+        <h3>Quality</h3>
+        <p>The work meets a standard of craft: correct against the requirements, consistent
+          with the conventions, and complete across every surface a change touches, not only
+          the one that was easy to remember.</p>
+      </div>
+      <div class="card">
+        <h3>Trust</h3>
+        <p>Trust is warranted by the record and granted by a person. It is never claimed by
+          the assistant. Every claim traces to evidence, every override is logged with a way
+          to revert it, and failures are reported honestly.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem"><b style="color:var(--ink)">Then Progress.</b> Just below
+      the top tier sits decisive advancement: when the answer is derivable, decide and act,
+      rather than over-deliberating or grinding marginal work. Progress never licenses less
+      verification. It is about not spinning in place, not about cutting checks.</p>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="wrap">
+    <h2>The five rules of AIQT</h2>
+    <p>The working form of the ordering, scoped to the issues the active work detects or
+      causes. Following the ordering is not about draining a backlog; it is about how the
+      work in front of you is done.</p>
+    <ol class="rules">
+      <li><b>You talk about AIQT.</b>
+        <p>When a guardrail catches something, say so: which guardrail, and what it caught.
+          Silent passes stay quiet, so the signal does not become noise.</p></li>
+      <li><b>You talk about AIQT.</b>
+        <p>Remind yourself, as an assistant, that you always follow AIQT. The same opening as
+          the first rule, turned inward: a short self-check, at least once a change.</p></li>
+      <li><b>Fix issues.</b>
+        <p>An issue the active work detected or caused, within the current change's scope, is
+          fixed before that change ships.</p></li>
+      <li><b>Fix other issues.</b>
+        <p>An issue the active work detected or caused but outside the current change's scope
+          is fixed in the next one, after the current change is finished.</p></li>
+      <li><b>Fix underlying issues, and share the fix.</b>
+        <p>When a guardrail gap let the issue through, create or improve a guardrail so it
+          should not recur, in addition to fixing the instance. Then, with permission, the
+          portable guardrail can be contributed back, so every assistant improves. Sharing is
+          opt-in.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="whatis">
+  <div class="wrap">
+    <h2>What AIQT is, and is not</h2>
+    <div class="two">
+      <div class="card is">
+        <h3>What it is</h3>
+        <ul class="clean">
+          <li>A governance pack for AI-assisted work: one priority ordering, a set of
+            disciplines, and one universal skill.</li>
+          <li>A thin, language-neutral security floor: never hardcode a secret, validate at
+            every trust boundary, contain before you open, gate the pipeline in order.</li>
+          <li>Traceable: rules connect to real maintenance events, not to abstractions.</li>
+        </ul>
+      </div>
+      <div class="card isnot">
+        <h3>What it is not</h3>
+        <ul class="clean">
+          <li>A comprehensive per-language secure-coding ruleset. A governance discipline and
+            a secure-coding rule fail differently and are maintained on different clocks.</li>
+          <li>"Never weaken a check to silence a failure" needs no update when a framework
+            ships a new version. Per-language depth has a shelf life in months.</li>
+          <li>So that depth stays the specialists' work, and AIQT composes it.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="composed">
+  <div class="wrap">
+    <h2>Composed Depth: discovery, not endorsement</h2>
+    <p>Breadth is built by composition, not by AIQT owning every language and framework.
+      When you set up a project, the installer detects your stack and shows the aligned
+      sources that apply, with their coverage, licence, and last-reviewed date, and the gaps
+      each one leaves. You choose: take all that apply, or decide one by one. AIQT lists a
+      source and shows the facts. It does not bless it, and it credits and links out to the
+      people who do that work.</p>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <h2>Where AIQT is now, and where it is going</h2>
+
+    <div class="card" style="margin-bottom:1rem">
+      <span class="pill now">Available now</span>
+      <h3>The chat assistant</h3>
+      <p>AIQT 1.0.0 is one skill you load into Claude, ChatGPT, Copilot, or another assistant
+        that accepts one, and it holds that assistant to a stated standard: claims match their
+        sources, checks are not quietly weakened, and work is finished rather than declared
+        finished. Every platform we test carries a published conformance report, so you can
+        see how it performed before you rely on it.</p>
+    </div>
+
+    <div class="card" style="margin-bottom:1rem">
+      <span class="pill next">Next</span>
+      <h3>The development assistant</h3>
+      <p>Version 1.1.0 installs the same governance core into a project instead of pasting it
+        into a chat. It generates the file each coding agent expects, sets itself up through a
+        wizard, and ships a doctor that verifies the install. It writes only inside its own
+        directory, so nothing else in your repository changes without your say-so. It
+        integrates with your CI, and its findings loop validates a finding before acting on it
+        rather than after.</p>
+    </div>
+
+    <div class="card">
+      <span class="pill idea">Ideas we are considering</span>
+      <h3>No commitments, no dates</h3>
+      <p>A web console would show governance activity across projects without requiring a
+        terminal. Enterprise management would cover what an organization needs and an
+        individual does not: central policy, shared configuration, and reporting across
+        teams. We move an idea into a release only when we can say what it does and show that
+        it works.</p>
+    </div>
+  </div>
+</section>
+
+<section id="open">
+  <div class="wrap">
+    <h2>Open, portable, and shared</h2>
+    <p>AIQT is published under Creative Commons Attribution-ShareAlike 4.0. The guardrails are
+      portable across toolchains, and improvements come back under the same ShareAlike
+      licence, so a fix one team makes becomes a fix everyone inherits. That is the system
+      working.</p>
+    <div class="cta" style="justify-content:flex-start">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+    <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>
