@@ -131,17 +131,20 @@
           <code>ask</code>, or <code>always</code>. Setup asks you which you want, with
           <code>ask</code> selected by default: the assistant checks with you before each
           contribution, so nothing is submitted without your say-so. Choose <code>never</code>
-          and it is never offered; choose <code>always</code> and it opens the PR for you,
-          still a pull request, reviewed like any other, never a silent push.</p>
+          and it is never offered. Choose <code>always</code> and each contribution is opened
+          automatically, using a credential you provide for that purpose, still as a pull request
+          to the AIQT project, never a merge into your own code.</p>
       </div>
       <div class="card">
         <h3>What travels, and what never does</h3>
-        <p>A seed carries the discipline and its incident provenance only, scrubbed of all
-          project specifics: the guardrail's concept, what triggers it, and the goal it
-          serves. A seed is scrubbed to concept, trigger, and goal before anything leaves your machine, and you preview exactly what it contains before it is submitted. The scrub is designed to remove project specifics; the preview is how you confirm it did. You open
-          the pull request yourself, from your own GitHub account, so the contribution is
-          openly yours; what stays private is your project's specifics, not the fact that you
-          contributed.</p>
+        <p>A seed is scrubbed to concept, trigger, and goal before anything leaves your machine:
+          the guardrail's concept, what triggers it, and the goal it serves, and nothing else.
+          The scrub is designed to remove your project's specifics, and you preview exactly what
+          a seed contains before it is submitted, so you confirm the scrub did its job. Under
+          <code>ask</code> you open the pull request yourself from your own account; under
+          <code>always</code> it is opened from the credential you set. Either way the pull
+          request is openly attributable, and what stays private is your project's specifics,
+          not the fact that you contributed.</p>
       </div>
     </div>
     <p style="margin-top:1.2rem"><b style="color:var(--ink)">Why this is worth turning
@@ -150,6 +153,12 @@
       and goal, you preview what travels before it goes. The exchange runs
       both ways: the guardrails your assistant ships with include the ones other developers
       contributed the same way, under the same ShareAlike licence.</p>
+    <p style="margin-top:1.2rem"><b style="color:var(--ink)">How the credential works.</b> The
+      <code>always</code> mode uses a credential scoped to opening pull requests on the AIQT
+      project, which you create and can revoke at any time. Before any seed is sent it is
+      scrubbed and shown to you in a preview, and the AIQT project reviews each pull request like
+      any other contribution.</p>
+    <p class="evidence-label">Exact credential scope and preview format: pending, documented before 1.1.0 ships</p>
   </div>
 </section>
 
