@@ -6,7 +6,7 @@
 <title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
 <meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811c">
+<link rel="stylesheet" href="/styles.css?v=20260811d">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -14,15 +14,18 @@
 <nav class="topnav"><div class="wrap navrow">
   <a class="brand" href="/draft">AIQT</a>
   <div class="navlinks">
-    <a class="navbtn" href="/install">Chat assistant</a>
-    <a class="navbtn" href="/development">Developers &amp; Coding</a>
-    <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
     <a class="plain" href="/roadmap">Roadmap</a>
     <a class="plain" href="/about">About</a>
     <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
     <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
   </div>
 </div></nav>
+<div class="subnav"><div class="wrap subrow">
+  <a href="/install">Chat assistant</a>
+  <a href="/development" class="active">Developers &amp; Coding</a>
+  <a href="/teams">Teams &amp; Enterprise</a>
+  <a href="/examples">Examples</a>
+</div></div>
 
 <div class="wrap pagehead">
   <p class="eyebrow">Under the hood</p>
