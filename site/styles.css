@@ -237,3 +237,10 @@ details.more>summary::-webkit-details-marker{display:none}
 details.more>summary::after{content:" \25B8"; color:var(--accent); font-weight:700}
 details.more[open]>summary::after{content:" \25BE"}
 details.more .inner{padding:0 1.2rem 1.2rem}
+
+/* examples audience filter (centered pills, distinct from body text) */
+.jumpfilter{text-align:center; margin:.4rem 0 1.4rem}
+.jumpfilter span{color:var(--faint); margin-right:.4rem}
+.jumpfilter a{display:inline-block; padding:.4rem .95rem; margin:.2rem; border-radius:999px;
+  border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650; text-decoration:none}
+.jumpfilter a:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
