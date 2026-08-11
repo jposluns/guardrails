@@ -41,30 +41,17 @@
     <h2>Choose the AI you use</h2>
     <p class="lead">One skill file serves every assistant. Platforms differ in how they load it and in how closely their models follow instructions, so pick yours below for the exact steps.</p>
     <div class="platform-actions">
-      <a class="platform-button" href="#download"><span class="platform-icon claude">C</span>
+      <a class="platform-button" href="#claude"><span class="platform-icon claude">C</span>
         <span><strong>Set up in Claude</strong><small>Download and add the Skill</small></span></a>
-      <a class="platform-button" href="#download"><span class="platform-icon chatgpt">O</span>
+      <a class="platform-button" href="#chatgpt"><span class="platform-icon chatgpt">O</span>
         <span><strong>Set up in ChatGPT</strong><small>Add it as your instructions</small></span></a>
-      <a class="platform-button" href="#download"><span class="platform-icon copilot">Co</span>
+      <a class="platform-button" href="#copilot"><span class="platform-icon copilot">Co</span>
         <span><strong>Set up in Copilot</strong><small>Add it to your assistant</small></span></a>
-      <a class="platform-button wide" href="#download"><span class="platform-icon guide">+</span>
+      <a class="platform-button wide" href="#other"><span class="platform-icon guide">+</span>
         <span><strong>Any other assistant</strong><small>Use the portable instruction file</small></span></a>
       <a class="platform-button wide" href="https://github.com/jposluns/guardrails"><span class="platform-icon source">&lt;/&gt;</span>
         <span><strong>View the source on GitHub</strong><small>Read every rule and the licence</small></span></a>
     </div>
-  </div>
-</section>
-
-<section id="cleanlanguage">
-  <div class="wrap">
-    <p class="eyebrow">While you are here</p>
-    <h2>We also recommend Clean Language</h2>
-    <p class="lead">AIQT keeps your assistant honest. <a href="https://cleanlanguage.ai">Clean
-      Language</a> keeps its writing clean: a free editorial standard, from the same family, that
-      strips out the habits that make AI prose grating, the robotic tone, the filler, the fake
-      enthusiasm, and the predictable vocabulary. It installs the same easy way, one skill you add
-      to your assistant, and we recommend adding it alongside AIQT. Visit
-      <a href="https://cleanlanguage.ai">cleanlanguage.ai</a> to install it.</p>
   </div>
 </section>
 
@@ -85,12 +72,11 @@
   </div>
 </section>
 
-<section id="add">
+<section id="claude">
   <div class="wrap">
-    <p class="eyebrow">Step two</p>
-    <h2>Add it to your assistant</h2>
-
-    <h3 style="margin-top:1rem">Claude (the recommended method)</h3>
+    <p class="eyebrow">Claude</p>
+    <h2>Set up in Claude</h2>
+    <p class="lead">The recommended method. You need the file from the download step above.</p>
     <ol class="steps">
       <li><b>Turn on code execution first.</b> The Skills section does not appear without it. Enabling code execution is Claude's requirement for using any Skill; AIQT itself contains no code to execute.
         In Claude, open Settings, then Capabilities, and enable code execution and file
@@ -103,16 +89,63 @@
       <li><b>That is it.</b> Start a chat and every conversation is held to the standard. You
         can switch the Skill off at any time.</li>
     </ol>
+  </div>
+</section>
 
-    <h3 style="margin-top:1.8rem">ChatGPT, Copilot, and other assistants</h3>
-    <p>For an assistant that supports its own Skills or a custom agent, add the downloaded
-      Skill the same way that assistant adds any other. For anything else, use the portable
-      instruction file below: open it, copy it, and paste it in wherever your assistant lets
-      you set its instructions.</p>
+<section id="chatgpt">
+  <div class="wrap">
+    <p class="eyebrow">ChatGPT</p>
+    <h2>Set up in ChatGPT</h2>
+    <p class="evidence-label">Tested steps: pending</p>
+    <p>We have not yet published a step-by-step tested path for ChatGPT. Both files below work
+      wherever the platform accepts them: add the Skill to a custom GPT or a project as its
+      instructions, or open the portable instruction file, copy it, and paste it in as your
+      assistant's instructions.</p>
     <div class="installlinks">
-      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file (any assistant)</a>
+      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
+      <a href="/downloads/aiqt-skill.zip" download>The Skill (.zip)</a>
+    </div>
+  </div>
+</section>
+
+<section id="copilot">
+  <div class="wrap">
+    <p class="eyebrow">Copilot</p>
+    <h2>Set up in Copilot</h2>
+    <p class="evidence-label">Tested steps: pending</p>
+    <p>We have not yet published a step-by-step tested path for Copilot. Add the Skill or the
+      portable instruction file wherever Copilot lets you set its instructions or create an
+      agent; both carry the same standard.</p>
+    <div class="installlinks">
+      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
+      <a href="/downloads/aiqt-skill.zip" download>The Skill (.zip)</a>
+    </div>
+  </div>
+</section>
+
+<section id="other">
+  <div class="wrap">
+    <p class="eyebrow">Any other assistant</p>
+    <h2>Any assistant that accepts instructions</h2>
+    <p>Use the portable instruction file: open it, copy it, and paste it in wherever your
+      assistant lets you set its instructions.</p>
+    <div class="installlinks">
+      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
       <a href="https://github.com/jposluns/guardrails">View the source on GitHub</a>
     </div>
+  </div>
+</section>
+
+<section id="verify">
+  <div class="wrap">
+    <p class="eyebrow">Confirm and control</p>
+    <h2>Check it is on, and switch it off</h2>
+    <p class="lead">To confirm AIQT is active, ask your assistant whether it is following AIQT
+      and which version.</p>
+    <p class="evidence-label">The exact confirming response: pending</p>
+    <p>To turn it off, remove or disable the Skill, or clear the instructions, in the same place
+      you added it. Removing it restores your assistant's default behaviour, and nothing else is
+      left behind.</p>
   </div>
 </section>
 
@@ -143,6 +176,19 @@
           or citations. Failures are surfaced to you first.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="cleanlanguage">
+  <div class="wrap">
+    <p class="eyebrow">Once you are set up</p>
+    <h2>We also recommend Clean Language</h2>
+    <p class="lead">AIQT keeps your assistant honest. <a href="https://cleanlanguage.ai">Clean
+      Language</a> keeps its writing clean: a free editorial standard, from the same family, that
+      strips out the habits that make AI prose grating, the robotic tone, the filler, the fake
+      enthusiasm, and the predictable vocabulary. It installs the same easy way, one skill you add
+      to your assistant, and we recommend adding it alongside AIQT. Visit
+      <a href="https://cleanlanguage.ai">cleanlanguage.ai</a> to install it.</p>
   </div>
 </section>
 
