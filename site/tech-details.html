@@ -6,7 +6,7 @@
 <title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
 <meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811r">
+<link rel="stylesheet" href="/styles.css?v=20260811s">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -82,7 +82,8 @@
         exactly one place, and nothing else in your repository changes without your say-so.</li>
     </ul>
 <div class="tablewrap"><table class="dtable">
-      <thead><tr><th>Who</th><th>When</th><th>May create or change</th><th>Never touches</th></tr></thead>
+      <caption class="vh">Who can create or change files in .aiqt/, by phase</caption>
+      <thead><tr><th scope="col">Who</th><th scope="col">When</th><th scope="col">May create or change</th><th scope="col">Never touches</th></tr></thead>
       <tbody>
         <tr><td>Setup wizard</td><td>Install, with your per-file consent</td><td><code>.aiqt/</code> and its files; the generated agent files at the repository root</td><td>Your source</td></tr>
         <tr><td>Updater</td><td>Update</td><td><code>.aiqt/core/</code> only (guard-enforced)</td><td>Everything else, including your <code>config.md</code></td></tr>
@@ -256,7 +257,8 @@
     </div>
 <h3 style="margin-top:1.6rem">The data flow, by tier</h3>
     <div class="tablewrap"><table class="dtable">
-      <thead><tr><th>Tier</th><th>What is sent</th><th>To which providers</th><th>Credentials</th><th>Retention</th><th>Cost and latency</th></tr></thead>
+      <caption class="vh">Model-review data flow, by tier</caption>
+      <thead><tr><th scope="col">Tier</th><th scope="col">What is sent</th><th scope="col">To which providers</th><th scope="col">Credentials</th><th scope="col">Retention</th><th scope="col">Cost and latency</th></tr></thead>
       <tbody>
         <tr><td>Routine</td><td>Nothing to a model; the ordinary gates run locally</td><td>None</td><td>None</td><td>None</td><td>Gate time only</td></tr>
         <tr><td>Substantive</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
