@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIQT Development Assistant (1.1.0, in development): governance that installs into your project</title>
 <meta name="description" content="In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .working/aiqt/, so nothing else in your repository changes without your say-so.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 
@@ -17,16 +19,19 @@
     <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
     <a class="plain" href="/roadmap">Roadmap</a>
     <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
   </div>
 </div></nav>
 
 <div class="wrap pagehead">
     <p class="eyebrow">The development assistant</p>
     <h1>Governance that installs into your project.</h1>
-    <p class="lead">AIQT 1.1.0 puts the governance core where your coding agents actually
-      read: in the repository itself. One wizard sets it up, one doctor verifies it, and a
-      write guard keeps every update inside a single directory you can inspect. 1.1.0 is
-      next, in development; the pack it installs is open source and readable today.</p>
+    <p class="lead">Every coding agent in your project should be working to the same standard;
+      today each one reads its own file and drifts its own way. AIQT 1.1.0 puts the governance
+      core where your coding agents actually read, in the repository itself. One wizard sets it
+      up, one doctor verifies it, and a write guard keeps every update inside a single directory
+      you can inspect. 1.1.0 is next, in development; the pack it installs is open source and
+      readable today.</p>
     <div class="ordering">
       (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
     </div>
@@ -69,6 +74,73 @@
   </div>
 </section>
 
+<section id="rules">
+  <div class="wrap">
+    <p class="eyebrow">The five rules</p>
+    <h2>How the five rules operate while you work</h2>
+    <p class="lead">The ordering at the top of this page is the standard; the five rules are
+      how the assistant applies it, change by change, in the 1.1.0 design. They are scoped to
+      issues the active work detects or causes, not to your whole backlog, so following them
+      never turns one change into a cleanup crusade.</p>
+    <ol class="rules">
+      <li><b>Talk about AIQT.</b>
+        <p>When a guardrail catches something, blocks something, or refuses something, the
+          assistant says so in the console: which guardrail fired, and what it caught. You
+          see catches as they happen, not in a summary after the fact. Silent passes are not
+          announced, so the console carries signal, never a firehose.</p></li>
+      <li><b>Keep the standard in mind.</b>
+        <p>The assistant reminds itself to follow AIQT: a short self-check, at least once per
+          change, in which it states what the standard is being held against on this
+          specific change. You see the check in the console, so "the standard was applied"
+          is itself something you can verify.</p></li>
+      <li><b>Fix issues.</b>
+        <p>An issue detected or caused by the active work, and within the current change's
+          scope, is fixed before that change merges. Not filed, not deferred, not summarised
+          into a tidy table: fixed. What you see is a change that does not merge while it
+          carries a known in-scope defect.</p></li>
+      <li><b>Fix other issues.</b>
+        <p>An issue the work surfaces outside the current change's scope is fixed in the
+          next change. The current change finishes first, so nothing is left half-applied,
+          and the out-of-scope issue is next in line rather than quietly forgotten.</p></li>
+      <li><b>Fix underlying issues, and share the fix.</b>
+        <p>When a guardrail gap let the issue through, fixing the instance is not enough:
+          the assistant also creates or fixes a guardrail so the issue should not recur.
+          This is additive, the instance still gets fixed. Then, if your configuration
+          permits and with your permission, the new guardrail can go back to the AIQT
+          project as a seed PR, so every developer's assistant improves. Sharing is opt-in;
+          the details are in <a href="#seeds">seed PRs</a> below.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="self-learning">
+  <div class="wrap">
+    <p class="eyebrow">Self-learning</p>
+    <h2>It self-learns: new guardrails, created as it goes</h2>
+    <p class="lead">The fifth rule is where AIQT gets better on its own. When a gap lets an
+      issue through, the assistant does not just fix the one instance; it writes a new
+      guardrail so that shape of issue is caught from then on. Your setup self-learns: every
+      gap it hits becomes a guard it keeps.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>A gap becomes a guardrail</h3>
+        <p>Fixing the instance is never the whole job. When the miss traces to a guardrail
+          gap, the assistant creates or strengthens a guardrail as part of the same work, so
+          the next time that shape of issue appears, it is caught before it lands.</p>
+      </div>
+      <div class="card">
+        <h3>Better with use, not only with upgrades</h3>
+        <p>The standard does not only improve when a new version ships. It improves as you
+          work, because each caught gap hardens the system that caught it. Self-learning is
+          built into the rules, not bolted on as a feature.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem">Everything it learns stays yours by default. A new guardrail
+      is created and runs locally the moment the gap is found; sharing it back to every other
+      developer is a separate, opt-in step, covered under <a href="#seeds">seed PRs</a>.</p>
+  </div>
+</section>
+
 <section id="directory">
   <div class="wrap">
     <p class="eyebrow">Write guard</p>
@@ -100,6 +172,70 @@
       your own <code>config.md</code> sit outside the updater's write surface entirely.
       Reviewing an AIQT update takes the same shape as reviewing any other change: read the
       diff, and the diff is small and contained.</p>
+  </div>
+</section>
+
+<section id="config">
+  <div class="wrap">
+    <p class="eyebrow">Your configuration</p>
+    <h2>The config file you own</h2>
+    <p class="lead">Your choices live in <code>.working/aiqt/config.md</code>, and that file
+      is yours: you own it, you edit it, you commit it. In the 1.1.0 design, updates never
+      rewrite it.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Guardrails, individually</h3>
+        <p>The config records which guardrails are active, and the switch is per guardrail,
+          not all-or-nothing. Enable the ones that fit your project, disable the ones that
+          do not, and the file is the record of what you chose.</p>
+      </div>
+      <div class="card">
+        <h3>A file, not a dashboard</h3>
+        <p>Because the configuration is a file in your repository, it behaves like the rest
+          of your project: it is versioned, it is diffed, it is reviewed, and a teammate can
+          see exactly which guardrails your project runs and when that changed.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem">The config also carries the sharing setting described in the
+      next section, so the decision about what leaves your project sits in a file you
+      control, alongside every other decision you have made.</p>
+  </div>
+</section>
+
+<section id="seeds">
+  <div class="wrap">
+    <p class="eyebrow">Sharing back</p>
+    <h2>New-guardrail seed PRs</h2>
+    <p class="lead">When a guardrail gap lets an issue through, the fifth rule closes the gap
+      locally. The 1.1.0 design adds an optional last step: contributing the new guardrail
+      back to the AIQT project as a seed PR, so a gap found once is closed for every
+      developer who uses AIQT.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Off by default, and yours to set</h3>
+        <p>Sharing is governed by one setting in your config file,
+          <code>contribute_guardrails</code>, with three values: <code>never</code>,
+          <code>ask</code>, or <code>always</code>. The default is <code>never</code>:
+          nothing leaves your project unless you decide it should. Set it to
+          <code>ask</code> and the assistant confirms each contribution with you before
+          anything is submitted. Set it to <code>always</code> and it opens the PR for you,
+          and it is still a pull request, reviewed like any other, never a silent push.</p>
+      </div>
+      <div class="card">
+        <h3>What travels, and what never does</h3>
+        <p>A seed carries the discipline and its incident provenance only, scrubbed of all
+          project specifics: the guardrail's concept, what triggers it, and the goal it
+          serves. None of your project's details, code, or content is included. The seed
+          says "an issue of this shape got through, and this check would have caught it",
+          and nothing about whose project it got through in.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem"><b style="color:var(--ink)">Why this is worth turning
+      on.</b> Every team's assistant misses different things. A seed PR turns one team's
+      miss into everyone's guardrail, and because seeds are scrubbed to concept, trigger,
+      and goal, contributing costs you nothing you would want to keep. The exchange runs
+      both ways: the guardrails your assistant ships with include the ones other developers
+      contributed the same way, under the same ShareAlike licence.</p>
   </div>
 </section>
 
@@ -137,7 +273,8 @@
           that survives validation is worth an action; a finding that fails validation is
           recorded as such. Acting on validated findings keeps the signal clean, and it is
           the five rules of AIQT at work: say what was caught, fix in-scope issues in the
-          current change, and fix the rest in the next one.</p>
+          current change, and fix the rest in the next one. The five rules are spelled out
+          <a href="#rules">above</a>.</p>
       </div>
     </div>
   </div>
@@ -145,17 +282,17 @@
 
 <section id="composed">
   <div class="wrap">
-    <p class="eyebrow">Composed Depth</p>
-    <h2>Composed Depth at install</h2>
+    <p class="eyebrow">Per-language depth</p>
+    <h2>Language and framework depth, composed at install</h2>
     <p class="lead">The governance core is deliberately language-neutral. Deep per-language
       and per-framework guidance comes from vetted aligned sources, and the setup generator
       composes them in at install time.</p>
     <p>During setup, the generator detects your stack and presents the aligned sources that
       apply to it. For each source you see the facts a decision needs: what it covers, its
       licence, when it was last reviewed, and the gaps it leaves. Then you choose, taking
-      all that apply or deciding one by one. AIQT lists a source and shows the facts so you
-      can decide, and it credits and links out to the people who do that work. You discover
-      the sources and you decide whether to use them.</p>
+      all that apply or deciding one by one. AIQT lists each source, shows you these facts,
+      and credits and links the people who do that work. The decision to use a source is
+      always yours.</p>
     <ul class="clean">
       <li><b style="color:var(--ink)">Coverage:</b> what the source addresses in your stack.</li>
       <li><b style="color:var(--ink)">Licence:</b> the terms it is published under.</li>
@@ -183,7 +320,8 @@
       <span class="pill next">Next</span>
       <h3>The development assistant (1.1.0)</h3>
       <p>In development. The wizard, the doctor, the write guard, the generated agent files,
-        the CI integration, and the findings loop described on this page are the 1.1.0
+        the CI integration, the findings loop, the five-rule workflow, the per-guardrail
+        configuration, and seed PRs described on this page are the 1.1.0
         design, and we ship it when it does what this page says it does. Until then, the
         best way to evaluate AIQT is the way we would want you to: read the source.</p>
     </div>

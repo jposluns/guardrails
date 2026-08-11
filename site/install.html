@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Add AIQT to your assistant</title>
 <meta name="description" content="Install AIQT into your chat assistant. AIQT 1.0.0 is one skill for chat assistants; the install is the same everywhere. Claude, ChatGPT, and Copilot are among them.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 
@@ -17,15 +19,17 @@
     <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
     <a class="plain" href="/roadmap">Roadmap</a>
     <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
   </div>
 </div></nav>
 
 <div class="wrap pagehead">
   <p class="eyebrow">You and your chat assistant</p>
   <h1>Add AIQT to your assistant.</h1>
-  <p class="lead">AIQT 1.0.0 is available now as one skill for chat assistants. The install is
-    the same everywhere: get the skill from the guardrails repository and add it to an
-    assistant that accepts one. Claude, ChatGPT, and Copilot are among them. From then on,
+  <p class="lead">Your assistant will sound just as confident when it is guessing as when it
+    knows. AIQT 1.0.0 fixes that, and it is available now as one skill for chat assistants. The
+    install is the same everywhere: get the skill from the guardrails repository and add it to
+    any assistant that can take one. Claude, ChatGPT, and Copilot are among them. From then on,
     every conversation is held to the standard.</p>
 </div>
 
@@ -86,8 +90,9 @@
           or citations. Failures are surfaced first.</p>
       </div>
     </div>
-    <p style="margin-top:1.5rem">Platforms we test carry a published conformance report, so
-      before you rely on a tested platform you can see how it performed.</p>
+    <p style="margin-top:1.5rem">For the platforms we test, we publish a conformance report:
+      how that platform performed under the standard, so you can see the results before you
+      rely on it.</p>
   </div>
 </section>
 
@@ -95,9 +100,9 @@
   <div class="wrap">
     <p class="eyebrow">Beyond chat</p>
     <h2>Working in a codebase?</h2>
-    <p class="lead">The <a href="/development">development assistant (1.1.0, in
-      development)</a> installs the same governance core into a project: it generates the file
-      each coding agent expects and writes only inside its own directory. Teams can share one
+    <p class="lead">Writing code? The <a href="/development">development assistant (1.1.0, in
+      development)</a> brings the same standard into your repository: it generates the file
+      each coding agent reads and writes only inside its own directory. Teams can share one
       standard across every assistant they use, on the <a href="/teams">Teams &amp;
       Enterprise</a> path.</p>
   </div>

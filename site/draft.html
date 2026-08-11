@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIQT: hold your AI assistant to a standard</title>
 <meta name="description" content="AIQT is a standard you add to your AI assistant. It checks its own work before calling anything done, says plainly when it does not know, and never changes anything quietly. Open source, CC BY-SA 4.0.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 
@@ -17,6 +19,7 @@
     <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
     <a class="plain" href="/roadmap">Roadmap</a>
     <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
   </div>
 </div></nav>
 
@@ -24,10 +27,11 @@
   <div class="wrap">
     <p class="eyebrow">For anyone who uses an AI assistant</p>
     <h1>Hold your AI assistant to a standard.</h1>
-    <p class="lead">AIQT is a standard you add to your AI assistant. With it in place, your
-      assistant checks its own work before it calls anything done, tells you plainly when it
-      does not know, stops and asks when a decision is yours to make, and never changes
-      anything quietly. You get answers you can rely on, and a clear record of why.</p>
+    <p class="lead">An AI assistant will sound confident when it is wrong, and call work done
+      that it never checked. AIQT is a skill you add to your assistant to stop that. With
+      it in place, your assistant checks its own work before it calls anything done, tells you
+      plainly when it does not know, stops and asks when a decision is yours to make, and never
+      changes anything quietly. You get answers you can rely on, and a clear record of why.</p>
     <div class="cta">
       <a class="btn primary" href="/install">Add AIQT to your assistant</a>
       <a class="btn ghost" href="#why">See how it works</a>
@@ -77,9 +81,9 @@
   <div class="wrap">
     <p class="eyebrow">What changes</p>
     <h2>What changes when AIQT is on</h2>
-    <p class="lead">An AI assistant can sound confident with nothing behind it, call
-      unchecked work done, or change a detail between one reply and the next. AIQT holds
-      your assistant to a standard on every one of them.</p>
+    <p class="lead">Three failures cause most of the damage: confident claims with nothing
+      behind them, unchecked work called done, and details that change between one reply and
+      the next. AIQT holds your assistant to a standard on all three.</p>
     <div class="grid">
       <div class="card">
         <h3>Your assistant shows its work</h3>
@@ -144,8 +148,8 @@
       correctness and craft pull against being fast or being cheap, correctness wins, every
       time. That call is made once, up front, so nobody has to re-argue it under a deadline.
       The four facets in the top tier are co-equal, with no ranking among them. Just below
-      them sits Progress, decisive advancement: when the answer is derivable, decide and act.
-      Progress never licenses less verification.</p>
+      them sits Progress: when the answer is already clear, decide and act rather than
+      deliberate. Progress never means less checking.</p>
   </div>
 </section>
 
@@ -154,9 +158,9 @@
     <p class="eyebrow">Open source</p>
     <h2>Open, portable, and shared</h2>
     <p class="lead">AIQT is open source under Creative Commons Attribution-ShareAlike 4.0.
-      The guardrails are portable across toolchains, and improvements contributed back carry
-      the same ShareAlike licence, so a fix one team chooses to contribute can be reused by
-      any other team. Contribution is opt-in.</p>
+      The guardrails work across tools, and any improvement contributed back stays open under
+      the same licence, so a fix one team shares can be used by every other team. Contribution
+      is opt-in.</p>
     <div class="cta" style="justify-content:flex-start; margin-top:1.6rem">
       <a class="btn primary" href="https://github.com/jposluns/guardrails">View on GitHub</a>
       <a class="btn ghost" href="/roadmap">See the roadmap</a>
