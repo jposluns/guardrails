@@ -210,3 +210,10 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 /* evidence-status label under an example title */
 .evidence-label{display:inline-block; font-size:.82rem; font-weight:700; letter-spacing:.05em;
   text-transform:uppercase; color:var(--faint); margin:.1rem 0 .55rem}
+
+/* one status model: the available/in-development/ideas strip */
+.statusstrip{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.1rem 1.4rem}
+.statusstrip p{margin:.55rem 0; color:var(--muted)}
+.statusstrip p:first-child{margin-top:0}
+.statusstrip p:last-child{margin-bottom:0}
+.statusstrip .pill{margin-right:.55rem}
