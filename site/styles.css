@@ -251,7 +251,7 @@ details.more .inner{padding:0 1.2rem 1.2rem}
 
 /* single-line nav tabs (content sections + roadmap/about as buttons) */
 .navtab{display:inline-flex; align-items:center; padding:.5rem 1.05rem; border-radius:999px;
-  border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650;
+  border:1px solid var(--accent); background:var(--panel); color:var(--accent); font-weight:700;
   font-size:1.02rem; text-decoration:none}
-.navtab:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
+.navtab:hover{background:var(--accent); color:var(--on-accent); border-color:transparent; text-decoration:none}
 .navtab.active,.navtab.active:hover{background:var(--accent); border-color:transparent; color:var(--on-accent)}
