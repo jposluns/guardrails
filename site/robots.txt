@@ -1,0 +1,6 @@
+# aiqt.ai
+# PRE-LAUNCH: this is a draft/preview site. It is intentionally kept out of search
+# until launch. AT LAUNCH, replace the block below with an allow policy and add a
+# Sitemap: line. See _private/.working/aiqt-site-launch-backlog.md.
+User-agent: *
+Disallow: /
