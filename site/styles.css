@@ -56,7 +56,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
   text-transform:uppercase; font-size:1.02rem; margin:0 0 .95rem}
 
 /* top navigation */
-.topnav{border-bottom:1px solid var(--line); padding:1rem 0}
+.topnav{padding:.85rem 0 .3rem}
 .navrow{display:flex; justify-content:space-between; align-items:center;
   flex-wrap:wrap; gap:.7rem}
 .brand{font-weight:800; font-size:1.15rem; color:var(--ink); letter-spacing:.02em}
@@ -199,8 +199,8 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 .platform-icon.source{background:#4a5568; font-size:.92rem}
 
 /* secondary content-tab bar (row 2, cleanlanguage-style pills) */
-.subnav{border-bottom:1px solid var(--line); padding:.55rem 0}
-.subrow{display:flex; flex-wrap:wrap; gap:.5rem; align-items:center}
+.subnav{border-bottom:1px solid var(--line); padding:.3rem 0 .7rem}
+.subrow{display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; justify-content:center}
 .subnav a{display:inline-flex; align-items:center; padding:.5rem 1.1rem; border-radius:999px;
   border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650;
   font-size:1.02rem; text-decoration:none}
