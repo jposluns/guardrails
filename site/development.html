@@ -6,7 +6,7 @@
 <title>AIQT Development Assistant (1.1.0, in development): governance that installs into your project</title>
 <meta name="description" content="In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .working/aiqt/, so nothing else in your repository changes without your say-so.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811a">
+<link rel="stylesheet" href="/styles.css?v=20260811b">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -87,32 +87,27 @@
       issues the active work detects or causes, not to your whole backlog, so following them
       never turns one change into a cleanup crusade.</p>
     <ol class="rules">
-      <li><b>Talk about AIQT.</b>
-        <p>When a guardrail catches something, blocks something, or refuses something, the
-          assistant says so in the console: which guardrail fired, and what it caught. You
-          see catches as they happen, not in a summary after the fact. Silent passes are not
-          announced, so the console carries signal, never a firehose.</p></li>
-      <li><b>Keep the standard in mind.</b>
-        <p>The assistant reminds itself to follow AIQT: a short self-check, at least once per
-          change, in which it states what the standard is being held against on this
-          specific change. You see the check in the console, so "the standard was applied"
-          is itself something you can verify.</p></li>
-      <li><b>Fix issues.</b>
+      <li><b>The first rule of AIQT is: you talk about AIQT.</b>
+        <p>When a guardrail catches something (it blocks, flags, or refuses an action), the
+          assistant surfaces it in the console: which guardrail, and what it caught. Silent
+          passes are not surfaced, so the console carries signal, not a firehose.</p></li>
+      <li><b>The second rule of AIQT is: you talk about AIQT.</b>
+        <p>The assistant reminds itself that it must always follow AIQT: a short "AIQT check"
+          self-reminder, at least once per change, self-acknowledged, so that the standard was
+          applied is itself something you can see.</p></li>
+      <li><b>The third rule of AIQT is: fix issues.</b>
         <p>An issue detected or caused by the active work, and within the current change's
-          scope, is fixed before that change merges. Not filed, not deferred, not summarized
-          into a tidy table: fixed. What you see is a change that does not merge while it
-          carries a known in-scope defect.</p></li>
-      <li><b>Fix other issues.</b>
-        <p>An issue the work surfaces outside the current change's scope is fixed in the
-          next change. The current change finishes first, so nothing is left half-applied,
-          and the out-of-scope issue is next in line rather than quietly forgotten.</p></li>
-      <li><b>Fix underlying issues, and share the fix.</b>
-        <p>When a guardrail gap let the issue through, fixing the instance is not enough:
-          the assistant also creates or fixes a guardrail so the issue should not recur.
-          This is additive, the instance still gets fixed. Then, if your configuration
-          permits and with your permission, the new guardrail can go back to the AIQT
-          project as a seed PR, so every developer's assistant improves. Sharing is opt-in;
-          the details are on the <a href="/tech-details#seeds">technical details</a> page.</p></li>
+          scope, is fixed before that change merges.</p></li>
+      <li><b>The fourth rule of AIQT is: fix other issues.</b>
+        <p>An issue detected or caused by the active work but outside the current change's
+          scope is fixed in the next change (the current change finishes first).</p></li>
+      <li><b>The fifth and final rule of AIQT is: fix underlying issues, and share the fix.</b>
+        <p>When the assistant caused the issue through a guardrail gap, it also creates or fixes
+          a guardrail so it should not recur, additive to rules three and four: the instance is
+          still fixed. Then, if your configuration permits and with your permission, the new
+          guardrail can go back to the AIQT project as a seed PR, so every developer's assistant
+          improves. Sharing is opt-in; the details are on the
+          <a href="/tech-details#seeds">technical details</a> page.</p></li>
     </ol>
   </div>
 </section>

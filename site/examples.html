@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIQT examples: the priority ordering making real calls</title>
+<meta name="description" content="Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="/styles.css?v=20260811b">
+<script src="/theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav"><div class="wrap navrow">
+  <a class="brand" href="/draft">AIQT</a>
+  <div class="navlinks">
+    <a class="navbtn" href="/install">Chat assistant</a>
+    <a class="navbtn" href="/development">Developers &amp; Coding</a>
+    <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
+    <a class="plain" href="/roadmap">Roadmap</a>
+    <a class="plain" href="/about">About</a>
+    <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
+  </div>
+</div></nav>
+
+<div class="wrap pagehead">
+  <p class="eyebrow">Examples</p>
+  <h1>What changes when the ordering decides.</h1>
+  <p class="lead">See what happens when a lower priority wins, and what happens when AIQT
+    holds the line. The five comparisons below are drawn from the GRC Library, the project
+    where AIQT was built and held to its own standard first. Each one is a real tradeoff,
+    shown both ways.</p>
+</div>
+
+<section id="examples">
+  <div class="wrap">
+    <p class="eyebrow">Five comparisons</p>
+    <h2>Without AIQT, and with it</h2>
+    <p class="lead">Each example names the tension, then shows the same moment resolved
+      twice: once with the shortcut taken, once with the standard applied.</p>
+
+    <div class="example">
+      <h3>Speed vs Accuracy</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>The citation checks are green and the document reads well, so a fixed 180-day
+            baseline ships attributed to a NIST control and an ISO/IEC 27001 clause. Neither
+            source prescribes a fixed interval. The wrong attribution is now citable, other
+            documents repeat it, and every downstream reader inherits a claim no standard
+            actually makes.</p>
+        </div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A claim matches its source, or it waits. A precision audit reads the source text
+            itself before the claim ships, finds that neither source prescribes the interval,
+            and the attribution is corrected: the value stays, the claim about who requires
+            it does not. Shipping takes slightly longer; what ships is true.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Progress vs Integrity</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>The change is ready, one audit gate fails, and the deadline argues for an
+            exemption. The gate is weakened and the work keeps moving. The defect the gate
+            was reporting ships anyway, the gate now protects nothing, and every future
+            failure has a precedent for being silenced.</p>
+        </div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A failing gate is signal, never friction. The artefact is fixed, or the change
+            is descoped, and the rule deliberately offers no exception path. Progress resumes
+            one fix later, on work that actually passes: a pass obtained by lowering the bar
+            is not a pass.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Speed vs Trust</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>The request has two reasonable readings, and guessing the likelier one keeps
+            things moving. The guess is wrong often enough. When it is, the work is unwound,
+            the time is paid twice, and the reader learns that a confident answer can rest
+            on nothing.</p>
+        </div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A decision that belongs to you is asked, never taken. The assistant surfaces
+            the ambiguity in one sentence with named options and waits for your call. The
+            question costs seconds; every answer after it can be relied on.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Cost vs Quality</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>A completeness check treats "the file exists" as "the delivery is complete",
+            and a half-written file passes. The cheap fix is to patch that one check and
+            move on. The same shape of gap survives in every other check that trusts an
+            input unable to answer its question, and the next defect arrives by the same
+            door.</p>
+        </div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>The instance is fixed with an explicit end-of-delivery marker, its limits
+            stated plainly, and the lesson becomes a standing guardrail: every consequential
+            check must ask whether its input can, even in principle, answer the question
+            asked of it. The class is closed, not only the case. Paying once for the
+            guardrail is cheaper than paying per defect.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Progress vs Accuracy</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>Near the end of a long run, a partial review concludes that every remaining
+            item is blocked, and the run stops on a claim that looks like completion.
+            Actionable work sits untouched behind an assertion nobody verified. The record
+            says finished; the backlog says otherwise.</p>
+        </div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A claim that licenses doing less carries a higher evidence bar, not a lower
+            one. Every open item must be enumerated with a shown disposition before the
+            claim can stand; the full enumeration turns up actionable work, and the run
+            continues. A guardrail now requires any such claim to be the complete output of
+            an audit, never a hand summary.</p>
+        </div>
+      </div>
+    </div>
+
+    <p style="margin-top:1.6rem">None of these calls needed judgement in the moment. Each
+      one is the ordering doing its single job: which value wins was decided in advance, so
+      nobody had to re-argue it under pressure.</p>
+    <div class="cta" style="justify-content:flex-start">
+      <a class="btn primary" href="/draft#standard">Read the standard</a>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+  <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+</div></footer>
+
+</body>
+</html>
