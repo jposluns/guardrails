@@ -6,7 +6,7 @@
 <title>Add AIQT to ChatGPT</title>
 <meta name="description" content="Add AIQT to ChatGPT: upload the Skill, keep it enabled, and add one always-on line to your custom instructions so it applies to every response. Includes a paste-in fallback.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811t">
+<link rel="stylesheet" href="/styles.css?v=20260811u">
 <script src="/theme.js"></script>
 <link rel="canonical" href="https://aiqt.ai/install-chatgpt">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -19,17 +19,28 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
-<nav class="topnav"><div class="wrap navrow">
+<button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776; Menu</button>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
   <a class="brand" href="/draft">AIQT</a>
-  <div class="navlinks">
-    <a class="navtab active" aria-current="page" href="/install">Chat assistant</a>
-    <a class="navtab" href="/development">Developers &amp; Coding</a>
-    <a class="navtab" href="/teams">Teams &amp; Enterprise</a>
-    <a class="navtab" href="/learn">Learn more</a>
-    <a class="navtab" href="/about">About</a>
-    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
-  </div>
-</div></nav>
+  <h4>Start</h4>
+  <a class="navlink" href="/draft">Home</a>
+  <h4>Your path</h4>
+  <a class="navlink active" href="/install" aria-current="page">Chat assistants</a>
+  <a class="navlink" href="/development">Developers &amp; Coding</a>
+  <a class="navlink" href="/teams">Teams &amp; Enterprise</a>
+  <h4>Learn more</h4>
+  <a class="navlink" href="/standard">The Standard</a>
+  <a class="navlink" href="/examples">Examples</a>
+  <a class="navlink" href="/tech-details">Technical details</a>
+  <a class="navlink" href="/roadmap">Roadmap</a>
+  <a class="navlink" href="/evidence">Evidence</a>
+  <h4>Project</h4>
+  <a class="navlink" href="/about">About</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
 
 <main id="main">
 <div class="wrap pagehead">
@@ -126,5 +137,6 @@
   <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
 </div></footer>
 
+</div>
 </body>
 </html>

@@ -16,3 +16,13 @@ function setThemeLabel(t){
 document.addEventListener('DOMContentLoaded',function(){
   setThemeLabel(document.documentElement.getAttribute('data-theme')||'dark');
 });
+
+function toggleNav(){
+  var sb=document.getElementById('sidebar');
+  var bd=document.getElementById('navbackdrop');
+  var btn=document.querySelector('.navtoggle');
+  if(!sb)return;
+  var open=sb.classList.toggle('open');
+  if(bd) bd.classList.toggle('open', open);
+  if(btn) btn.setAttribute('aria-expanded', open?'true':'false');
+}
