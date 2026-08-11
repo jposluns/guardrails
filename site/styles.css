@@ -156,7 +156,7 @@ ul.clean li{margin:.35rem 0; color:var(--muted)}
 .idea-note{font-size:1.02rem; color:var(--faint)}
 
 footer{border-top:1px solid var(--line); padding:2.6rem 0 3.2rem; text-align:center; margin-top:2rem}
-footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
+footer p{color:var(--faint); font-size:0.97rem; margin:.35rem 0}
 
 /* dark/light toggle */
 .themetoggle{font:inherit; cursor:pointer; color:var(--muted); background:var(--panel);
