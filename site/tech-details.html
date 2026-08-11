@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
+<meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="/styles.css">
+<script src="/theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav"><div class="wrap navrow">
+  <a class="brand" href="/draft">AIQT</a>
+  <div class="navlinks">
+    <a class="navbtn" href="/install">Chat assistant</a>
+    <a class="navbtn" href="/development">Developers &amp; Coding</a>
+    <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
+    <a class="plain" href="/roadmap">Roadmap</a>
+    <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
+  </div>
+</div></nav>
+
+<div class="wrap pagehead">
+  <p class="eyebrow">Under the hood</p>
+  <h1>Technical details of the development assistant.</h1>
+  <p class="lead">Everything on this page is the AIQT 1.1.0 design, in development: what you
+    own, what you configure, what can travel back, how it fits your pipeline, and how it
+    composes per-language depth. The <a href="/development">overview</a> is the place to start;
+    this is the detail once you are interested.</p>
+</div>
+
+<section id="practices">
+  <div class="wrap">
+    <p class="eyebrow">Good practice, set up for you</p>
+    <h2>The project habits that keep you and your assistant in sync</h2>
+    <p class="lead">With your permission, AIQT scaffolds the project practices that good teams
+      keep anyway: a changelog, a to-do list, a done list, and a roadmap. You can decline any
+      of them, and the ones you keep are yours to own, edit, and commit.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>CHANGELOG.md</h3>
+        <p>What changed and when, so the history of the project is a record you can read
+          rather than a git-archaeology exercise.</p>
+      </div>
+      <div class="card">
+        <h3>TODO.md and DONE.md</h3>
+        <p>The work coming up, and the work that has shipped. Nothing in progress is lost
+          between one session and the next.</p>
+      </div>
+      <div class="card">
+        <h3>ROADMAP.md</h3>
+        <p>Where the project is heading, stated plainly, so a new contributor, human or
+          assistant, can orient in a minute.</p>
+      </div>
+      <div class="card">
+        <h3>One shared source of truth</h3>
+        <p>These files help you and your development assistant equally. The assistant reads
+          them to pick up context and updates them as it works, so the two of you are never
+          out of sync.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem">None of this is imposed. AIQT sets up only what you allow,
+      and every file it creates is yours to keep, edit, or remove. The point is not ceremony:
+      good development practice, kept consistently, is exactly what lets a person and an
+      assistant hand work back and forth without dropping it.</p>
+  </div>
+</section>
+
+<section id="config">
+  <div class="wrap">
+    <p class="eyebrow">Your configuration</p>
+    <h2>The config file you own</h2>
+    <p class="lead">Your choices live in <code>.working/aiqt/config.md</code>, and that file
+      is yours: you own it, you edit it, you commit it. In the 1.1.0 design, updates never
+      rewrite it.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Guardrails, individually</h3>
+        <p>The config records which guardrails are active, and the switch is per guardrail,
+          not all-or-nothing. Enable the ones that fit your project, disable the ones that
+          do not, and the file is the record of what you chose.</p>
+      </div>
+      <div class="card">
+        <h3>A file, not a dashboard</h3>
+        <p>Because the configuration is a file in your repository, it behaves like the rest
+          of your project: it is versioned, it is diffed, it is reviewed, and a teammate can
+          see exactly which guardrails your project runs and when that changed.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem">The config also carries the sharing setting described in the
+      next section, so the decision about what leaves your project sits in a file you
+      control, alongside every other decision you have made.</p>
+  </div>
+</section>
+
+<section id="seeds">
+  <div class="wrap">
+    <p class="eyebrow">Sharing back</p>
+    <h2>New-guardrail seed PRs</h2>
+    <p class="lead">When a guardrail gap lets an issue through, the fifth rule closes the gap
+      locally. The 1.1.0 design adds an optional last step: contributing the new guardrail
+      back to the AIQT project as a seed PR, so a gap found once is closed for every
+      developer who uses AIQT.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>You choose it at install</h3>
+        <p>Sharing is governed by one setting in your config file,
+          <code>contribute_guardrails</code>, with three values: <code>never</code>,
+          <code>ask</code>, or <code>always</code>. Setup asks you which you want, with
+          <code>ask</code> selected by default: the assistant checks with you before each
+          contribution, so nothing is submitted without your say-so. Choose <code>never</code>
+          and it is never offered; choose <code>always</code> and it opens the PR for you,
+          still a pull request, reviewed like any other, never a silent push.</p>
+      </div>
+      <div class="card">
+        <h3>What travels, and what never does</h3>
+        <p>A seed carries the discipline and its incident provenance only, scrubbed of all
+          project specifics: the guardrail's concept, what triggers it, and the goal it
+          serves. None of your project's details, code, or content travels with it. You open
+          the pull request yourself, from your own GitHub account, so the contribution is
+          openly yours; what stays private is your project's specifics, not the fact that you
+          contributed.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem"><b style="color:var(--ink)">Why this is worth turning
+      on.</b> Every team's assistant misses different things. A seed PR turns one team's
+      miss into everyone's guardrail, and because seeds are scrubbed to concept, trigger,
+      and goal, contributing costs you nothing you would want to keep. The exchange runs
+      both ways: the guardrails your assistant ships with include the ones other developers
+      contributed the same way, under the same ShareAlike licence.</p>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <p class="eyebrow">CI</p>
+    <h2>In your pipeline</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>CI integration</h3>
+        <p>The development assistant integrates with your CI, so the standard that governs
+          the assistant during development also holds at the gate. The same discipline
+          applies on both sides: a check that passes has actually run, and a check that
+          fails is surfaced, never quietly weakened to get a green build.</p>
+      </div>
+      <div class="card">
+        <h3>The findings loop</h3>
+        <p>When a finding comes in, the loop validates it before it acts on it. A finding
+          that survives validation is worth an action; a finding that fails validation is
+          recorded as such. Acting on validated findings keeps the signal clean, and it is
+          the five rules of AIQT at work: say what was caught, fix in-scope issues in the
+          current change, and fix the rest in the next one. The five rules are spelled out
+          <a href="#rules">above</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="composed">
+  <div class="wrap">
+    <p class="eyebrow">Per-language depth</p>
+    <h2>Language and framework depth, composed at install</h2>
+    <p class="lead">The governance core is deliberately language-neutral. Deep per-language
+      and per-framework guidance comes from vetted aligned sources, and the setup generator
+      composes them in at install time.</p>
+    <p>During setup, the generator detects your stack and presents the aligned sources that
+      apply to it. For each source you see the facts a decision needs: what it covers, its
+      licence, when it was last reviewed, and the gaps it leaves. Then you choose, taking
+      all that apply or deciding one by one. AIQT lists each source, shows you these facts,
+      and credits and links the people who do that work. The decision to use a source is
+      always yours.</p>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Coverage:</b> what the source addresses in your stack.</li>
+      <li><b style="color:var(--ink)">Licence:</b> the terms it is published under.</li>
+      <li><b style="color:var(--ink)">Last reviewed:</b> when it was last checked, because
+        per-language depth has a shelf life.</li>
+      <li><b style="color:var(--ink)">Gaps:</b> what it leaves uncovered, stated up front.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="back">
+  <div class="wrap">
+    <p class="eyebrow">Ready to try it</p>
+    <h2>Set it up, or read the source</h2>
+    <p class="lead">The <a href="/development#setup">setup and verification steps</a> are on the
+      overview page, and where 1.1.0 stands is <a href="/development#availability">stated plainly
+      there too</a>.</p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">Read the pack on GitHub</a>
+      <a class="btn ghost" href="/development">Back to the overview</a>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+  <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+</div></footer>
+
+</body>
+</html>
