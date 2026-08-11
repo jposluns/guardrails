@@ -217,3 +217,10 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 .statusstrip p:first-child{margin-top:0}
 .statusstrip p:last-child{margin-bottom:0}
 .statusstrip .pill{margin-right:.55rem}
+
+/* precision tables (permissions, data-flow), pending-marked */
+.tablewrap{overflow-x:auto; margin:1.2rem 0}
+.dtable{width:100%; border-collapse:collapse; font-size:1rem}
+.dtable th,.dtable td{border:1px solid var(--line); padding:.6rem .8rem; text-align:left; vertical-align:top; color:var(--muted)}
+.dtable th{color:var(--ink); font-weight:700; background:var(--panel-2)}
+.dtable .pending{color:var(--faint); font-style:italic}
