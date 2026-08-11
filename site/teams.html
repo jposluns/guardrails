@@ -29,19 +29,22 @@
 
 <div class="wrap pagehead">
     <p class="eyebrow">For teams and organizations</p>
-    <h1>One standard, shared by every assistant your team uses.</h1>
+    <h1>One standard your whole team can work to.</h1>
     <p class="lead">Ask two colleagues what their AI assistant means by "done" and you will get two answers.
       Today the quality of your team's AI-assisted work depends on who did it and which tool
       they used. AIQT replaces that with a single governance standard: the
       same skill loads into Claude, ChatGPT, or Copilot, so the same rules apply whichever
       assistant a colleague uses. Because the pack is published under CC BY-SA, a fix one
-      team contributes can be reused by every other team under the same licence.</p>
+      team contributes can be reused by every other team under the same licence. Adoption today is
+      human-led: each person loads the Skill into their own assistant, under a rollout your team
+      runs. Central deployment, policy enforcement, and cross-team reporting do not exist today;
+      two of them are ideas we are considering.</p>
     <div class="ordering">
       (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
     </div>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/jposluns/guardrails">Get the pack</a>
-      <a class="btn ghost" href="#ideas">Ideas we are considering</a>
+      <a class="btn primary" href="#pilot">Start a team pilot</a>
+      <a class="btn ghost" href="#today">See what is available today</a>
     </div>
 </div>
 
@@ -55,12 +58,14 @@
   </div>
 </section>
 
-<section id="value">
+<section id="today">
   <div class="wrap">
-    <p class="eyebrow">The value proposition</p>
-    <h2>What adopting AIQT across a team actually gets you</h2>
+    <p class="eyebrow">Today</p>
+    <h2>What a shared standard gives your team today</h2>
     <p class="lead">One definition of "done", applied by every assistant, with a record behind
-      it. That is the whole proposition, and here is what it changes.</p>
+      it. Most teams already have people using AI assistants, each with their own habits and
+      their own idea of what "done" means; AIQT replaces that spread with one ordering, decided
+      in advance.</p>
     <div class="grid">
       <div class="card">
         <h3>Consistency you did not have to police</h3>
@@ -69,67 +74,71 @@
           already made before the pressure arrives.</p>
       </div>
       <div class="card">
-        <h3>Sign-off backed by evidence</h3>
-        <p>Claims trace to sources, catches are named, overrides are logged with a way to
-          revert them. Whoever approves AI-assisted work approves something they can check,
-          not something they have to take on faith.</p>
+        <h3>Sign-off backed by evidence you can check</h3>
+        <p>Claims trace to sources, catches are named, and overrides are logged. With the 1.0.0
+          chat Skill, that record lives in the conversation itself: the stated sources, the
+          named catches, and the logged overrides you can scroll back to. Repository-level
+          records are part of the 1.1.0 design, in development, and aggregate reporting across a
+          team is an idea we are considering.</p>
       </div>
       <div class="card">
         <h3>A standard that survives tool changes</h3>
-        <p>The standard is portable across assistants and toolchains. Swap Claude for
-          ChatGPT, or add Copilot, and the rules travel; your team's definition of "done"
-          is not locked to any vendor.</p>
+        <p>The standard is portable across assistants and toolchains. Swap Claude for ChatGPT,
+          or add Copilot, and the rules travel; your team's definition of "done" is not locked
+          to any vendor.</p>
       </div>
       <div class="card">
-        <h3>Quality that compounds</h3>
-        <p>When a gap lets an issue through, the guardrail is fixed so it should not recur,
-          and teams that opt in can share the fix back. Under the ShareAlike licence, one
-          team's lesson becomes every team's guardrail.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="today">
-  <div class="wrap">
-    <p class="eyebrow">Today</p>
-    <h2>What a shared standard gives your team today</h2>
-    <p class="lead">Most teams already have people working with AI assistants, each with their
-      own habits, their own tools, and their own idea of what "done" means. AIQT replaces that
-      spread with one ordering, decided in advance: Accuracy, Integrity, Quality, and Trust
-      before progress, speed, and cost. Nobody has to re-argue it under a deadline.</p>
-    <div class="grid">
-      <div class="card">
-        <h3>One standard across people and tools</h3>
-        <p>AIQT 1.0.0 is one skill anyone on the team loads into a chat assistant that
-          accepts one. From then on, every assistant is held to the same stated standard:
-          claims match their sources, checks are kept at full strength, and work is finished only once a check confirms it. Put the skill in your onboarding and a new joiner works to the same standard from day one.</p>
-      </div>
-      <div class="card">
-        <h3>Work you can audit</h3>
-        <p>Under AIQT, every claim traces to evidence, and every override is logged with a
-          way to revert it. When a guardrail catches something, the assistant says which
-          guardrail and what it caught. When something fails, the failure is surfaced. That
-          gives a reviewer, a lead, or an auditor something concrete to check.</p>
-      </div>
-      <div class="card">
-        <h3>A record you can rely on</h3>
-        <p>Trust is granted by a person, and earned by the record. Because the record shows
-          what was verified, what was overridden, and what failed, a manager signing off on
-          AI-assisted work is signing off on evidence they can check.</p>
-      </div>
-      <div class="card">
-        <h3>Improvements that compound</h3>
-        <p>When a guardrail gap lets an issue through, the guardrail is improved so it should
-          not recur, and with permission the portable fix can be contributed back. Sharing is
-          opt-in, and the ShareAlike licence keeps every contributed improvement open, so a
-          fix another team contributes can be reused by yours under the same licence.</p>
+        <h3>Improvements that compound, opt-in</h3>
+        <p>When a gap lets an issue through, the guardrail is improved so it should not recur,
+          and teams that opt in can contribute the portable fix back. Sharing is opt-in, and the
+          ShareAlike licence keeps every contributed improvement open, so one team's lesson can
+          become every team's guardrail.</p>
       </div>
     </div>
     <p style="margin-top:1.2rem">Teams that write code have a version on the way: the
-      <a href="/development">development assistant</a>, currently in development, installs the
-      same governance core into a project, keeps to its own directory so nothing else in your
-      repository changes without your say-so, and integrates with your CI.</p>
+      <a href="/development">development assistant</a> (1.1.0, in development) installs the same
+      standard into a project, keeps to its own directory, and integrates with your CI.</p>
+  </div>
+</section>
+
+<section id="not-today">
+  <div class="wrap">
+    <p class="eyebrow">Not available today</p>
+    <h2>What does not exist yet</h2>
+    <p class="lead">Said plainly, so you can plan around it.</p>
+    <ul class="clean">
+      <li>Central deployment of the Skill to a team.</li>
+      <li>Technical enforcement of the standard: it is a behavioural standard the assistant
+        follows, not a control that blocks a model.</li>
+      <li>A shared or aggregate record across people.</li>
+      <li>Admin controls, policy management, and cross-team reporting.</li>
+      <li>Commercial support and service levels.</li>
+    </ul>
+    <p style="margin-top:1rem">The first four are ideas we are considering, below. AIQT is an
+      open project, not a commercial product with a support desk.</p>
+  </div>
+</section>
+
+<section id="pilot">
+  <div class="wrap">
+    <p class="eyebrow">Start a team pilot</p>
+    <h2>How to evaluate AIQT with your team</h2>
+    <p class="lead">Today's team path is a human-led pilot: a small group, the assistants they
+      already use, and a few weeks of normal work. Here is a shape that works.</p>
+    <ol class="steps">
+      <li><b>Choose a small group</b> and the assistants they already use (Claude, ChatGPT, or
+        Copilot).</li>
+      <li><b>Each person installs AIQT 1.0.0</b> and confirms it is on.</li>
+      <li><b>Run two or three weeks of normal work</b>, noting a few observations: unsupported
+        factual claims, completion claims without a check, missed requirements, clarification
+        questions asked, overrides, rework, and reviewer confidence.</li>
+      <li><b>Compare</b> against the period before, on the same observations.</li>
+      <li><b>Decide</b>: keep it, extend it, or remove it.</li>
+    </ol>
+    <p style="margin-top:1.1rem">Questions, or want to share what you found?
+      <a href="https://github.com/jposluns/guardrails/discussions">Open a GitHub discussion</a>.
+      There is no sales or support team yet; this is an open project, and that is the honest
+      state of it.</p>
   </div>
 </section>
 
@@ -149,8 +158,6 @@
         a terminal. The benefit for a team lead: one place to see what the guardrails caught,
         what was overridden, and how the standard is holding across the work, in a form the
         whole team can read, including the people who never open a command line.</p>
-      <p class="idea-note">This is an idea we are considering. It carries no date and no
-        commitment.</p>
     </div>
 
     <div class="card">
@@ -161,8 +168,6 @@
         organization could set its standard once and have every team inherit it, keep
         configuration consistent from one source, and see across teams how the
         standard is being applied.</p>
-      <p class="idea-note">This too is an idea we are considering. It carries no date and no
-        commitment.</p>
     </div>
   </div>
 </section>
