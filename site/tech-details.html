@@ -6,7 +6,7 @@
 <title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
 <meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811i">
+<link rel="stylesheet" href="/styles.css?v=20260811j">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -76,7 +76,17 @@
         guard refuses every write outside it, so a diff after any update shows changes in
         exactly one place, and nothing else in your repository changes without your say-so.</li>
     </ul>
-    <p style="margin-top:1.2rem">With your permission, AIQT sets these up, and every one is
+<div class="tablewrap"><table class="dtable">
+      <thead><tr><th>Who</th><th>When</th><th>May create or change</th><th>Never touches</th></tr></thead>
+      <tbody>
+        <tr><td>Setup wizard</td><td>Install, with your per-file consent</td><td><code>.aiqt/</code> and its files; the generated agent files at the repository root</td><td>Your source</td></tr>
+        <tr><td>Updater</td><td>Update</td><td><code>.aiqt/core/</code> only (guard-enforced)</td><td>Everything else, including your <code>config.md</code></td></tr>
+        <tr><td>Your assistant</td><td>While you work</td><td>The <code>.aiqt/</code> practice and QA records; your project files as you direct it</td><td><code>.aiqt/core/</code></td></tr>
+        <tr><td>Doctor</td><td>Verification</td><td>Nothing (read-only)</td><td>Everything</td></tr>
+        <tr><td>CI and local exec workers</td><td>Pipeline and desk checks</td><td class="pending">pending, documented before 1.1.0 ships</td><td class="pending">pending</td></tr>
+      </tbody>
+    </table></div>
+        <p style="margin-top:1.2rem">With your permission, AIQT sets these up, and every one is
       yours to keep, edit, or remove. They are committed with your project, not hidden away, so
       the record stays reviewable. They help you and your development assistant equally: the
       assistant reads them to pick up context and updates them as it works, so the two of you
@@ -239,7 +249,17 @@
           run on Linux today; Windows support is planned.</p>
       </div>
     </div>
-    <p style="margin-top:1.2rem">The result is one standard applied the same way wherever the
+<h3 style="margin-top:1.6rem">The data flow, by tier</h3>
+    <div class="tablewrap"><table class="dtable">
+      <thead><tr><th>Tier</th><th>What is sent</th><th>To which providers</th><th>Credentials</th><th>Retention</th><th>Cost and latency</th></tr></thead>
+      <tbody>
+        <tr><td>Routine</td><td>Nothing to a model; the ordinary gates run locally</td><td>None</td><td>None</td><td>None</td><td>Gate time only</td></tr>
+        <tr><td>Substantive</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
+        <tr><td>Delicate</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
+      </tbody>
+    </table></div>
+    <p class="evidence-label">The 1.1.0 data flow, providers, credentials, retention, and cost: pending, documented before 1.1.0 ships</p>
+        <p style="margin-top:1.2rem">The result is one standard applied the same way wherever the
       work runs and whichever model does the reviewing: quality stops depending on who ran the
       check or which tool they used.</p>
   </div>
