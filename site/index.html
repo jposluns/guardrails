@@ -5,18 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIQT Guardrails</title>
 <style>
-  body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;margin:0;
-       align-items:center;justify-content:center;background:#0b1220;color:#e6edf3}
-  main{text-align:center;padding:2rem}
-  h1{font-weight:600;letter-spacing:.02em}
-  p{color:#9fb0c3}
+  :root{--bg:#0b1220;--ink:#e6edf3;--muted:#9fb0c3;--accent:#5eb0ef;--accent-2:#7ee0c8}
+  @media (prefers-color-scheme:light){:root{--bg:#f7f9fc;--ink:#101828;--muted:#41506a;--accent:#1d6fd0;--accent-2:#0d9488}}
+  *{box-sizing:border-box}
+  body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;
+    background:var(--bg);color:var(--ink);line-height:1.6;-webkit-font-smoothing:antialiased}
+  main{text-align:center;padding:2rem;max-width:640px}
+  .eyebrow{color:var(--accent-2);font-weight:800;letter-spacing:.14em;text-transform:uppercase;
+    font-size:1rem;margin:0 0 1rem}
+  h1{font-weight:750;letter-spacing:-.02em;font-size:clamp(2.6rem,7vw,4rem);margin:0 0 1.2rem}
+  p{color:var(--muted);font-size:1.15rem;margin:0 0 1rem}
+  .draft{margin-top:2rem}
+  .draft a{display:inline-block;padding:.75rem 1.5rem;border-radius:10px;font-weight:650;
+    background:var(--accent);color:#08111f;text-decoration:none}
+  .draft a:hover{filter:brightness(1.08)}
+  .note{font-size:.95rem;color:var(--muted);margin-top:1.8rem}
+  a{color:var(--accent)}
 </style>
 </head>
 <body>
 <main>
+  <p class="eyebrow">Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
   <h1>AIQT Guardrails</h1>
-  <p>Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
   <p>Coming momentarily.</p>
+  <div class="draft"><a href="/draft">You may view the DRAFT site for now</a></div>
+  <p class="note">The GitHub repository will be made public on official launch.</p>
 </main>
 </body>
 </html>

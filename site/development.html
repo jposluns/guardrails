@@ -5,131 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIQT Development Assistant (1.1.0, in development): governance that installs into your project</title>
 <meta name="description" content="In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .working/aiqt/, so nothing else in your repository changes without your say-so.">
-<style>
-  :root{
-    --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
-    --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
-    --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
-  }
-  @media (prefers-color-scheme: light){
-    :root{
-      --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
-      --ink:#101828; --muted:#41506a; --faint:#54637a;
-      --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
-    }
-  }
-  *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
-  body{
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
-    margin:0; background:var(--bg); color:var(--ink);
-    line-height:1.65; -webkit-font-smoothing:antialiased;
-  }
-  a{color:var(--accent); text-decoration:none}
-  a:hover{text-decoration:underline}
-  .wrap{max-width:960px; margin:0 auto; padding:0 1.4rem}
-  section{padding:4rem 0; border-top:1px solid var(--line)}
-  h1,h2,h3{line-height:1.25; letter-spacing:-.01em; font-weight:650}
-  h2{font-size:1.7rem; margin:0 0 1.2rem}
-  h3{font-size:1.1rem; margin:0 0 .4rem}
-  p{color:var(--muted); margin:0 0 1rem}
-  .lead{font-size:1.12rem; color:var(--ink)}
-  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
-
-  /* hero */
-  header{padding:5.5rem 0 4rem; border:0; text-align:center; background:
-    radial-gradient(1200px 380px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
-  .eyebrow{color:var(--accent-2); font-weight:600; letter-spacing:.06em;
-    text-transform:uppercase; font-size:.82rem; margin:0 0 1rem}
-  header h1{font-size:2.5rem; margin:0 auto 1.2rem; max-width:20ch}
-  header .lead{max-width:60ch; margin:0 auto 1.6rem}
-  .ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    background:var(--panel); border:1px solid var(--line); border-radius:10px;
-    padding:.7rem 1rem; color:var(--ink); font-size:.98rem; margin-top:.4rem}
-  .ordering .tier{color:var(--accent-2); font-weight:600}
-  .cta{margin-top:2rem; display:flex; gap:.8rem; justify-content:center; flex-wrap:wrap}
-  .btn{display:inline-block; padding:.7rem 1.3rem; border-radius:9px; font-weight:600;
-    border:1px solid var(--line)}
-  .btn.primary{background:var(--accent); color:#08111f; border-color:transparent}
-  .btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
-  .btn.ghost{background:transparent; color:var(--ink)}
-
-  /* grids and cards */
-  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1rem}
-  @media (max-width:640px){.grid{grid-template-columns:1fr}}
-  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px;
-    padding:1.2rem 1.3rem}
-  .card h3{color:var(--ink)}
-  .card p{margin:0}
-
-  /* rules */
-  ol.rules{counter-reset:r; list-style:none; padding:0; margin:0}
-  ol.rules li{background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
-    padding:1rem 1.1rem 1rem 3.3rem; position:relative; margin:.7rem 0}
-  ol.rules li::before{counter-increment:r; content:counter(r);
-    position:absolute; left:1rem; top:1rem; width:1.6rem; height:1.6rem; border-radius:50%;
-    background:var(--accent); color:#08111f; font-weight:700; font-size:.9rem;
-    display:flex; align-items:center; justify-content:center}
-  ol.rules b{color:var(--ink)}
-  ol.rules p{margin:.25rem 0 0}
-
-  ul.clean{margin:.4rem 0 0; padding-left:1.1rem}
-  ul.clean li{margin:.3rem 0; color:var(--muted)}
-
-  .pill{display:inline-block; font-size:.74rem; font-weight:600; letter-spacing:.04em;
-    text-transform:uppercase; padding:.2rem .6rem; border-radius:999px; margin-bottom:.5rem}
-  .pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
-  .pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
-  .pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
-
-  footer{border-top:1px solid var(--line); padding:2.4rem 0 3rem; text-align:center}
-  footer p{color:var(--faint); font-size:.9rem; margin:.3rem 0}
-
-  /* page-specific: shared top navigation */
-  .topnav{border-bottom:1px solid var(--line); padding:.9rem 0}
-  .navrow{display:flex; align-items:center; justify-content:space-between;
-    flex-wrap:wrap; gap:.6rem 1rem}
-  .brand{font-weight:700; color:var(--ink); letter-spacing:.02em}
-  .brand:hover{text-decoration:none}
-  .navlinks{display:flex; flex-wrap:wrap; gap:1.2rem}
-  .navlinks a{color:var(--muted); font-size:.95rem}
-  .navlinks a:hover{color:var(--ink); text-decoration:none}
-
-  /* page-specific: directory tree */
-  .tree{background:var(--panel-2); border:1px solid var(--line); border-radius:12px;
-    padding:1.2rem 1.4rem; overflow-x:auto; margin:1.4rem 0 1rem}
-  .tree pre{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    font-size:.92rem; line-height:1.75; color:var(--muted)}
-  .tree .dir{color:var(--ink); font-weight:600}
-  .tree .yours{color:var(--accent-2); font-weight:600}
-  .tree .updater{color:var(--accent); font-weight:600}
-  .tree .note{color:var(--faint)}
-
-  /* page-specific: step list for setup */
-  .steps{list-style:none; counter-reset:s; padding:0; margin:0}
-  .steps li{background:var(--panel); border:1px solid var(--line); border-radius:10px;
-    padding:1rem 1.1rem 1rem 3.3rem; position:relative; margin:.7rem 0; color:var(--muted)}
-  .steps li::before{counter-increment:s; content:counter(s);
-    position:absolute; left:1rem; top:1rem; width:1.6rem; height:1.6rem; border-radius:50%;
-    background:var(--accent-2); color:#08111f; font-weight:700; font-size:.9rem;
-    display:flex; align-items:center; justify-content:center}
-  .steps b{color:var(--ink)}
-</style>
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
 <nav class="topnav"><div class="wrap navrow">
   <a class="brand" href="/draft">AIQT</a>
   <div class="navlinks">
-    <a href="/draft">Home</a>
-    <a href="/development">Development</a>
-    <a href="/teams">Teams &amp; Enterprise</a>
-    <a href="https://github.com/jposluns/guardrails">GitHub</a>
+    <a class="navbtn" href="/install">Chat assistant</a>
+    <a class="navbtn" href="/development">Developers &amp; Coding</a>
+    <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
+    <a class="plain" href="/roadmap">Roadmap</a>
+    <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
   </div>
 </div></nav>
 
-<header>
-  <div class="wrap">
+<div class="wrap pagehead">
     <p class="eyebrow">The development assistant</p>
     <h1>Governance that installs into your project.</h1>
     <p class="lead">AIQT 1.1.0 puts the governance core where your coding agents actually
@@ -143,11 +34,11 @@
       <a class="btn primary" href="https://github.com/jposluns/guardrails">Read the pack on GitHub</a>
       <a class="btn ghost" href="#directory">See what it creates</a>
     </div>
-  </div>
-</header>
+</div>
 
 <section id="what">
   <div class="wrap">
+    <p class="eyebrow">In your project</p>
     <h2>What it does</h2>
     <p class="lead">The development assistant installs the same governance core that runs the
       <a href="/draft">chat assistant</a>: the priority ordering above, the disciplines that
@@ -180,6 +71,7 @@
 
 <section id="directory">
   <div class="wrap">
+    <p class="eyebrow">Write guard</p>
     <h2>One directory, one write guard</h2>
     <p class="lead">Everything AIQT owns lives in <code>.working/aiqt/</code>. The wizard
       creates it at setup, and the layout separates what is yours from what the updater
@@ -213,6 +105,7 @@
 
 <section id="setup">
   <div class="wrap">
+    <p class="eyebrow">Setup</p>
     <h2>Setup and verification</h2>
     <p class="lead">Two commands own the lifecycle: a wizard that sets the project up, and a
       doctor that verifies the install.</p>
@@ -228,6 +121,7 @@
 
 <section id="pipeline">
   <div class="wrap">
+    <p class="eyebrow">CI</p>
     <h2>In your pipeline</h2>
     <div class="grid">
       <div class="card">
@@ -251,6 +145,7 @@
 
 <section id="composed">
   <div class="wrap">
+    <p class="eyebrow">Composed Depth</p>
     <h2>Composed Depth at install</h2>
     <p class="lead">The governance core is deliberately language-neutral. Deep per-language
       and per-framework guidance comes from vetted aligned sources, and the setup generator
@@ -273,6 +168,7 @@
 
 <section id="availability">
   <div class="wrap">
+    <p class="eyebrow">Availability</p>
     <h2>The same core, and where 1.1.0 stands</h2>
     <div class="card" style="margin-bottom:1rem">
       <span class="pill now">Available now</span>

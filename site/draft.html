@@ -4,146 +4,78 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIQT: hold your AI assistant to a standard</title>
-<meta name="description" content="AIQT is a governance pack you add to your AI assistant. It checks its own work before calling anything done, says plainly when it does not know, and never changes anything quietly. Open source, CC BY-SA 4.0.">
-<style>
-  :root{
-    --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
-    --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
-    --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
-  }
-  @media (prefers-color-scheme: light){
-    :root{
-      --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
-      --ink:#101828; --muted:#41506a; --faint:#54637a;
-      --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
-    }
-  }
-  *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
-  body{
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
-    margin:0; background:var(--bg); color:var(--ink);
-    line-height:1.65; -webkit-font-smoothing:antialiased;
-  }
-  a{color:var(--accent); text-decoration:none}
-  a:hover{text-decoration:underline}
-  .wrap{max-width:960px; margin:0 auto; padding:0 1.4rem}
-  section{padding:4rem 0; border-top:1px solid var(--line)}
-  h1,h2,h3{line-height:1.25; letter-spacing:-.01em; font-weight:650}
-  h2{font-size:1.7rem; margin:0 0 1.2rem}
-  h3{font-size:1.1rem; margin:0 0 .4rem}
-  p{color:var(--muted); margin:0 0 1rem}
-  .lead{font-size:1.12rem; color:var(--ink)}
-  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
-
-  /* top navigation */
-  .topnav{border-bottom:1px solid var(--line); padding:.9rem 0}
-  .navrow{display:flex; justify-content:space-between; align-items:center;
-    flex-wrap:wrap; gap:.6rem}
-  .brand{font-weight:700; color:var(--ink); letter-spacing:.02em}
-  .brand:hover{text-decoration:none}
-  .navlinks{display:flex; flex-wrap:wrap; gap:1.2rem}
-  .navlinks a{color:var(--muted); font-size:.95rem}
-  .navlinks a:hover{color:var(--ink); text-decoration:none}
-
-  /* hero */
-  header{padding:5.5rem 0 4rem; border:0; text-align:center; background:
-    radial-gradient(1200px 380px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
-  .eyebrow{color:var(--accent-2); font-weight:600; letter-spacing:.06em;
-    text-transform:uppercase; font-size:.82rem; margin:0 0 1rem}
-  header h1{font-size:2.5rem; margin:0 auto 1.2rem; max-width:18ch}
-  header .lead{max-width:60ch; margin:0 auto 1.6rem}
-  .ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    background:var(--panel); border:1px solid var(--line); border-radius:10px;
-    padding:.7rem 1rem; color:var(--ink); font-size:.98rem; margin-top:.4rem}
-  .ordering .tier{color:var(--accent-2); font-weight:600}
-  .orderingnote{font-size:.85rem; color:var(--faint); margin-top:.6rem}
-  .cta{margin-top:2rem; display:flex; gap:.8rem; justify-content:center; flex-wrap:wrap}
-  .btn{display:inline-block; padding:.7rem 1.3rem; border-radius:9px; font-weight:600;
-    border:1px solid var(--line)}
-  .btn.primary{background:var(--accent); color:#08111f; border-color:transparent}
-  .btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
-  .btn.ghost{background:transparent; color:var(--ink)}
-
-  /* facets grid */
-  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1rem}
-  @media (max-width:640px){.grid{grid-template-columns:1fr}}
-  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px;
-    padding:1.2rem 1.3rem}
-  .card h3{color:var(--ink)}
-  .card p{margin:0}
-
-  /* platform quick-start */
-  .platforms{display:grid; grid-template-columns:repeat(3,1fr); gap:1rem}
-  @media (max-width:720px){.platforms{grid-template-columns:1fr}}
-  .platform{background:var(--panel); border:1px solid var(--line); border-radius:12px;
-    padding:1.2rem 1.3rem; display:flex; flex-direction:column; gap:.6rem}
-  .platform h3{margin:0}
-  .platform p{margin:0; flex:1}
-  .platform .btn{align-self:flex-start; padding:.5rem 1rem; font-size:.92rem}
-  .installlinks{margin-top:1.2rem; display:flex; gap:1.6rem; flex-wrap:wrap}
-  .installlinks a{font-weight:600}
-
-  /* rules */
-  ol.rules{counter-reset:r; list-style:none; padding:0; margin:0}
-  ol.rules li{background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
-    padding:1rem 1.1rem 1rem 3.3rem; position:relative; margin:.7rem 0}
-  ol.rules li::before{counter-increment:r; content:counter(r);
-    position:absolute; left:1rem; top:1rem; width:1.6rem; height:1.6rem; border-radius:50%;
-    background:var(--accent); color:#08111f; font-weight:700; font-size:.9rem;
-    display:flex; align-items:center; justify-content:center}
-  ol.rules b{color:var(--ink)}
-  ol.rules p{margin:.25rem 0 0}
-
-  ul.clean{margin:.4rem 0 0; padding-left:1.1rem}
-  ul.clean li{margin:.3rem 0; color:var(--muted)}
-
-  .pill{display:inline-block; font-size:.74rem; font-weight:600; letter-spacing:.04em;
-    text-transform:uppercase; padding:.2rem .6rem; border-radius:999px; margin-bottom:.5rem}
-  .pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
-  .pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
-  .pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
-
-  footer{border-top:1px solid var(--line); padding:2.4rem 0 3rem; text-align:center}
-  footer p{color:var(--faint); font-size:.9rem; margin:.3rem 0}
-</style>
+<meta name="description" content="AIQT is a standard you add to your AI assistant. It checks its own work before calling anything done, says plainly when it does not know, and never changes anything quietly. Open source, CC BY-SA 4.0.">
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
 <nav class="topnav"><div class="wrap navrow">
   <a class="brand" href="/draft">AIQT</a>
   <div class="navlinks">
-    <a href="/draft">Home</a>
-    <a href="/development">Development</a>
-    <a href="/teams">Teams &amp; Enterprise</a>
-    <a href="https://github.com/jposluns/guardrails">GitHub</a>
+    <a class="navbtn" href="/install">Chat assistant</a>
+    <a class="navbtn" href="/development">Developers &amp; Coding</a>
+    <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
+    <a class="plain" href="/roadmap">Roadmap</a>
+    <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
   </div>
 </div></nav>
 
-<header>
+<header class="hero">
   <div class="wrap">
-    <p class="eyebrow">Governance you own. Depth you compose.</p>
-    <h1>Accuracy, Integrity, Quality and Trust before progress, speed, and cost.</h1>
+    <p class="eyebrow">For anyone who uses an AI assistant</p>
+    <h1>Hold your AI assistant to a standard.</h1>
     <p class="lead">AIQT is a standard you add to your AI assistant. With it in place, your
       assistant checks its own work before it calls anything done, tells you plainly when it
       does not know, stops and asks when a decision is yours to make, and never changes
       anything quietly. You get answers you can rely on, and a clear record of why.</p>
     <div class="cta">
-      <a class="btn primary" href="#install">Add AIQT to your assistant</a>
+      <a class="btn primary" href="/install">Add AIQT to your assistant</a>
       <a class="btn ghost" href="#why">See how it works</a>
     </div>
-    <div style="margin-top:2rem">
+    <div style="margin-top:2.2rem">
       <div class="ordering">
         (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
       </div>
-      <p class="orderingnote">The one priority ordering, decided in advance. The detail is
-        <a href="#standard">below</a>, for the reader who wants it.</p>
+      <p class="orderingnote">The one priority ordering, decided in advance. The plain-terms
+        version is <a href="#standard">below</a>, for the reader who wants it.</p>
     </div>
   </div>
 </header>
 
+<section id="paths">
+  <div class="wrap">
+    <p class="eyebrow">Where to start</p>
+    <h2>Three ways in</h2>
+    <p class="lead">One standard, three paths. Start where you are.</p>
+    <div class="paths">
+      <div class="path">
+        <span class="pill now">Available now</span>
+        <h3>You and your chat assistant</h3>
+        <p>Add AIQT to Claude, ChatGPT, or Copilot as one skill. From then on, every
+          conversation is held to the standard.</p>
+        <a class="btn primary" href="/install">Install AIQT</a>
+      </div>
+      <div class="path">
+        <span class="pill next">In development</span>
+        <h3>Developers &amp; Coding</h3>
+        <p>Install the governance core into your project. It sets itself up, generates the
+          file each coding agent expects, and writes only inside its own directory.</p>
+        <a class="btn ghost" href="/development">For developers</a>
+      </div>
+      <div class="path">
+        <span class="pill idea">Ideas we are considering</span>
+        <h3>Teams &amp; Enterprise</h3>
+        <p>One shared standard across every assistant your team uses, with central policy
+          and reporting when an organization needs it.</p>
+        <a class="btn ghost" href="/teams">For teams</a>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="why">
   <div class="wrap">
+    <p class="eyebrow">What changes</p>
     <h2>What changes when AIQT is on</h2>
     <p class="lead">An AI assistant can sound confident with nothing behind it, call
       unchecked work done, or change a detail between one reply and the next. AIQT holds
@@ -177,43 +109,9 @@
   </div>
 </section>
 
-<section id="install">
-  <div class="wrap">
-    <h2>Add AIQT to your assistant</h2>
-    <p class="lead">AIQT 1.0.0 is available now as one skill for chat assistants. The install
-      is the same everywhere: get the skill from the guardrails repository and add it to an
-      assistant that accepts one. Claude, ChatGPT, and Copilot are among them.</p>
-    <div class="platforms">
-      <div class="platform">
-        <h3>Claude</h3>
-        <p>Get the AIQT skill from the repository and add it to Claude. From then on, every
-          conversation is held to the standard.</p>
-        <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
-      </div>
-      <div class="platform">
-        <h3>ChatGPT</h3>
-        <p>Get the same skill and give it to ChatGPT as its working instructions. It follows
-          the same standard, stated the same way.</p>
-        <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
-      </div>
-      <div class="platform">
-        <h3>Copilot</h3>
-        <p>Get the skill and load it into Copilot. The standard travels with your
-          conversations, in chat and alongside your code.</p>
-        <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
-      </div>
-    </div>
-    <div class="installlinks">
-      <a href="https://github.com/jposluns/guardrails">General instructions for any assistant</a>
-      <a href="https://github.com/jposluns/guardrails">View on GitHub</a>
-    </div>
-    <p style="margin-top:1.4rem">Platforms we test carry a published conformance report, so
-      before you rely on a tested platform you can see how it performed.</p>
-  </div>
-</section>
-
 <section id="standard">
   <div class="wrap">
+    <p class="eyebrow">The standard</p>
     <h2>The standard, in plain terms</h2>
     <p class="lead">Four things you can expect from an assistant that follows AIQT. Together
       they are the top tier of the ordering, and they always come first.</p>
@@ -242,101 +140,26 @@
           it, and failures are reported honestly.</p>
       </div>
     </div>
-    <p style="margin-top:1.4rem"><b style="color:var(--ink)">Decided in advance.</b> When
+    <p style="margin-top:1.5rem"><b style="color:var(--ink)">Decided in advance.</b> When
       correctness and craft pull against being fast or being cheap, correctness wins, every
       time. That call is made once, up front, so nobody has to re-argue it under a deadline.
-      For the technical reader: the four facets in the top tier are co-equal, with no ranking
-      among them. If two ever seem to conflict, that is a framing problem to surface and
-      resolve. Just below the top tier sits Progress, which means decisive advancement: when
-      the answer is derivable, decide and act. Progress never licenses less verification.</p>
-  </div>
-</section>
-
-<section id="rules">
-  <div class="wrap">
-    <h2>The five rules, kept light</h2>
-    <p>The working form of the ordering, scoped to the work in front of you. The full
-      versions live in the pack.</p>
-    <ol class="rules">
-      <li><b>Say what was caught.</b>
-        <p>When a guardrail catches something, the assistant names the guardrail and what it
-          caught. Silent passes stay quiet.</p></li>
-      <li><b>Keep the standard in mind.</b>
-        <p>The assistant reminds itself that it follows AIQT: a short self-check, at least
-          once a change.</p></li>
-      <li><b>Fix it now.</b>
-        <p>An issue the active work found, inside the current change, is fixed before that
-          change ships.</p></li>
-      <li><b>Fix the rest next.</b>
-        <p>An in-scope issue outside the current change is fixed in the next one, once the
-          current change is finished.</p></li>
-      <li><b>Improve the guardrail, and share the fix.</b>
-        <p>When a gap let an issue through, the guardrail improves so it should not recur.
-          Then, with your permission, the portable fix goes back so every assistant improves.
-          Sharing is opt-in.</p></li>
-    </ol>
-  </div>
-</section>
-
-<section id="composed">
-  <div class="wrap">
-    <h2>Composed Depth</h2>
-    <p>The deep, per-language and per-framework expertise comes from vetted aligned sources,
-      the specialists who maintain that depth. AIQT composes that depth from independent
-      aligned sources: for each one you see the facts a decision needs, its coverage, its
-      licence, its last-reviewed date, and the gaps it leaves, and you choose which to use.
-      AIQT does not endorse the sources it lists. It credits and links out to the people who
-      do the work, and the decision stays yours. In the
-      <a href="/development">development assistant (1.1.0, in development)</a>, setup detects
-      your stack and presents the aligned sources that apply.</p>
-  </div>
-</section>
-
-<section id="roadmap">
-  <div class="wrap">
-    <h2>Where AIQT is now, and where it is going</h2>
-
-    <div class="card" style="margin-bottom:1rem">
-      <span class="pill now">Available now</span>
-      <h3>The chat assistant</h3>
-      <p>AIQT 1.0.0 is one skill you load into a chat assistant that accepts one (Claude,
-        ChatGPT, and Copilot among them). It holds that assistant to a stated standard:
-        claims match their sources, checks keep their full strength, and "finished" has been
-        verified before it is said. <a href="#install">Add it above.</a></p>
-    </div>
-
-    <div class="card" style="margin-bottom:1rem">
-      <span class="pill next">Next</span>
-      <h3>The development assistant</h3>
-      <p>Version 1.1.0, in development, installs the same governance core into a project. It
-        generates the file each coding agent expects, sets itself up through a wizard, and
-        ships a doctor that verifies the install. It writes only inside its own directory,
-        so nothing else in your repository changes without your say-so.
-        <a href="/development">Read about the development assistant.</a></p>
-    </div>
-
-    <div class="card">
-      <span class="pill idea">Ideas we are considering</span>
-      <h3>Teams and Enterprise</h3>
-      <p>A web console would show governance activity across projects without requiring a
-        terminal. Enterprise management would cover what an organization needs beyond an
-        individual: central policy, shared configuration, and reporting across teams. No
-        dates and no commitments: an idea moves into a release only when we can say what it
-        does and show that it works.
-        <a href="/teams">Read about Teams &amp; Enterprise.</a></p>
-    </div>
+      The four facets in the top tier are co-equal, with no ranking among them. Just below
+      them sits Progress, decisive advancement: when the answer is derivable, decide and act.
+      Progress never licenses less verification.</p>
   </div>
 </section>
 
 <section id="open">
   <div class="wrap">
+    <p class="eyebrow">Open source</p>
     <h2>Open, portable, and shared</h2>
-    <p>AIQT is open source under Creative Commons Attribution-ShareAlike 4.0. The guardrails
-      are portable across toolchains, and improvements contributed back carry the same
-      ShareAlike licence, so a fix one team chooses to contribute can be reused by any other
-      team under that licence. Contribution is opt-in.</p>
-    <div class="cta" style="justify-content:flex-start">
+    <p class="lead">AIQT is open source under Creative Commons Attribution-ShareAlike 4.0.
+      The guardrails are portable across toolchains, and improvements contributed back carry
+      the same ShareAlike licence, so a fix one team chooses to contribute can be reused by
+      any other team. Contribution is opt-in.</p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.6rem">
       <a class="btn primary" href="https://github.com/jposluns/guardrails">View on GitHub</a>
+      <a class="btn ghost" href="/roadmap">See the roadmap</a>
     </div>
   </div>
 </section>
