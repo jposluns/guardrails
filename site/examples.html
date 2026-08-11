@@ -28,17 +28,152 @@
   <p class="eyebrow">Examples</p>
   <h1>What changes when the ordering decides.</h1>
   <p class="lead">See what happens when a lower priority wins, and what happens when AIQT
-    holds the line. The five comparisons below are drawn from the GRC Library, the project
-    where AIQT was built and held to its own standard first. Each one is a real tradeoff,
-    shown both ways.</p>
+    holds the line. The comparisons below are grouped for three readers: anyone using a chat
+    assistant, developers, and the GRC Library, the project where AIQT was built and held to
+    its own standard first. Each one is shown both ways.</p>
 </div>
 
-<section id="examples">
+<section id="chat">
   <div class="wrap">
-    <p class="eyebrow">Five comparisons</p>
-    <h2>Without AIQT, and with it</h2>
-    <p class="lead">Each example names the tension, then shows the same moment resolved
-      twice: once with the shortcut taken, once with the standard applied.</p>
+    <p class="eyebrow">If you use a chat assistant</p>
+    <h2>Everyday moments, both ways</h2>
+    <p class="lead">You do not need to write code to feel these. Each one is an ordinary
+      moment with a chat assistant, shown twice: once the frustrating way, once with the
+      standard holding.</p>
+
+    <div class="example">
+      <h3>Asking for a fact and getting a confident guess</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>You ask for a figure, a date, or a name, and the answer arrives quickly and
+            confidently. It happens to be wrong. You repeat it in a conversation or a
+            document, and the mistake becomes yours.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>The assistant tells you what it actually knows and what it is not sure of. A
+            shaky answer arrives labelled as shaky, with a suggestion of where to check. You
+            know exactly how much weight the answer can bear.</p></div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Drafting an email that quietly drops a point</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>You ask for a message that covers three things, and the draft reads beautifully.
+            One of the three is missing. You only find out after you have sent it, because a
+            polished draft is easy to trust.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>Before calling the draft done, the assistant checks it against everything you
+            asked for. If a point will not fit, it says so and asks how you want to handle it.
+            Nothing you asked for disappears quietly.</p></div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>A request that could mean two things</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>Your request has two reasonable meanings, and the assistant silently picks one.
+            Often enough it picks wrong, and you spend the next few messages untangling an
+            answer to a question you never asked.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>The assistant notices the fork and asks one short question before it answers. The
+            question costs you seconds. Every reply after it is aimed at what you actually
+            meant.</p></div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>A detail that changes between replies</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>A date, a name, or a number appears one way in one reply and a different way in
+            the next, with no mention of the change. You are left wondering which version is
+            right, and whether anything else shifted too.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A detail, once given, stays put unless the change is announced. If the assistant
+            realizes an earlier detail was wrong, it says so plainly and corrects it in the
+            open. You never have to hunt for what moved.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="dev">
+  <div class="wrap">
+    <p class="eyebrow">If you write code</p>
+    <h2>The wasted afternoon, both ways</h2>
+    <p class="lead">Anyone who has paired with a coding assistant knows these four. Each shows
+      the same moment twice: once with the plausible shortcut taken, once with the guardrail
+      holding.</p>
+
+    <div class="example">
+      <h3>The API that does not exist</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>The assistant suggests a function, a config key, or a library version that looks
+            exactly right. It does not exist. You find out at build time if you are lucky, in
+            production if you are not, and you stop trusting every suggestion after it.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A name is only offered when it comes from a real source: the docs, the codebase,
+            or a check run this session. When the assistant does not know, it says so and looks
+            it up instead of inventing something plausible. Plausible and real stop being the
+            same thing.</p></div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>"The tests pass"</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>The assistant declares the tests green without having run them. The claim reads
+            exactly like a real result, so you merge on it. The failure surfaces later, further
+            downstream, in front of someone else.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>Done means a check actually ran, and the claim carries the run's real output. If
+            the tests have not been run, the assistant says "not run yet" rather than
+            "passing". A green claim you read is a green run that happened.</p></div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>The check that gets quietly loosened</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>One check fails, the deadline argues, and the assistant skips the test or lowers
+            the threshold to get a green build. The defect ships anyway. The check now catches
+            nothing, for this bug or the next one.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>A failing check is treated as signal, never as friction. The code is fixed, or the
+            work is descoped, and the check keeps its full strength. Green means the bar was
+            cleared, not moved.</p></div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>The refactor nobody asked for</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>You ask for one fix, and the diff comes back touching five files: renamed
+            variables, deleted helpers, a tidied module you needed left as it was. Reviewing it
+            takes longer than writing the fix yourself. Something that mattered is gone before
+            anyone notices.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>The assistant touches what you asked it to touch. A cleanup it believes is worth
+            doing is proposed as a separate change, in the open, for you to accept or decline.
+            The diff is the size of the request.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="grc">
+  <div class="wrap">
+    <p class="eyebrow">From the GRC Library</p>
+    <h2>Where AIQT was built and dogfooded</h2>
+    <p class="lead">These five are drawn from the GRC Library's own history, the project
+      that built AIQT and held itself to it first. They name the tension, then show the same
+      moment resolved twice: once with the shortcut taken, once with the standard applied.</p>
 
     <div class="example">
       <h3>Speed vs Accuracy</h3>
