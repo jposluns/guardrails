@@ -244,3 +244,7 @@ details.more .inner{padding:0 1.2rem 1.2rem}
 .jumpfilter a{display:inline-block; padding:.4rem .95rem; margin:.2rem; border-radius:999px;
   border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650; text-decoration:none}
 .jumpfilter a:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
+
+/* per-example one-line summary (a mobile aid below the pair) */
+.diff{margin:.9rem 0 0; color:var(--muted)}
+.diff b{color:var(--accent-2)}
