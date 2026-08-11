@@ -132,7 +132,8 @@
     <p class="lead">The fifth rule is where AIQT gets better on its own. When a gap lets an
       issue through, the assistant does not just fix the one instance; it writes a new
       guardrail so that shape of issue is caught from then on. Your setup self-learns: every
-      gap it hits becomes a guard it keeps.</p>
+      gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
+      rule file, listed in your config, and yours to disable or delete.</p>
     <p>Everything it learns stays yours by default. A new guardrail is created and runs locally
       the moment the gap is found; sharing it back to every other developer is a separate,
       opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
