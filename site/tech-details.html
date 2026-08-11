@@ -6,7 +6,7 @@
 <title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
 <meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811a">
+<link rel="stylesheet" href="/styles.css?v=20260811b">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -170,6 +170,64 @@
           <a href="#rules">above</a>.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="qa-standard">
+  <div class="wrap">
+    <p class="eyebrow">Standardizing quality assurance</p>
+    <h2>One QA standard, whichever model checks the work</h2>
+    <p class="lead">A review by a single model shares that model's blind spots. AIQT
+      standardizes the check itself: for substantive work, two verifiers from different model
+      families (one Claude-family, one GPT/Codex-family) are given the same brief, each
+      instructed to refute the change rather than confirm it, and their verdicts are
+      reconciled. Different families miss systematically different things, so the cross-family
+      pair catches what either alone would let through. This is how AIQT itself is built and
+      reviewed; in the 1.1.0 design, the development assistant brings the same standard to your
+      project.</p>
+    <ol class="steps">
+      <li><b>Routine changes</b> run the ordinary gates. Most work needs nothing heavier, and
+        a review that fires on everything stops being read.</li>
+      <li><b>Substantive changes</b> get the dual-family pair: the same refute-brief to both
+        families, verdicts reconciled, disagreements examined rather than averaged away.</li>
+      <li><b>Delicate changes</b> escalate to a heavier harness: where a wrong result is a
+        correctness defect no simple check catches, the change is large or delicate, and an
+        escaped error is costly, independent adversarial verifiers are briefed to refute the
+        work, and the result is applied deterministically rather than by hand. The review is
+        up-skilled for the work that warrants it, and only that work.</li>
+    </ol>
+    <p style="margin-top:1.2rem">The point of the tiers is that the standard scales with the
+      stakes instead of depending on who happened to run the check. A passing review means the
+      review actually ran; a failing one is surfaced, never quietly weakened. That is the AIQT
+      ordering applied to review itself.</p>
+  </div>
+</section>
+
+<section id="qa-where">
+  <div class="wrap">
+    <p class="eyebrow">Where it runs</p>
+    <h2>The same check, in your pipeline and on your machine</h2>
+    <p class="lead">A QA standard only standardizes anything if it holds in both places work
+      happens: at the gate, and at the desk. In the 1.1.0 design it runs in both.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>In your GitHub CI</h3>
+        <p>The model-based checks run as part of the pipeline on every change, alongside your
+          usual gates. A change is reviewed by the dual-family pair before it lands, under the
+          same discipline as every other check: it passes because it ran, and a failure blocks
+          rather than disappears.</p>
+      </div>
+      <div class="card">
+        <h3>In local development</h3>
+        <p>Exec workers, separate worker processes on your machine, run the same dual-family
+          QA at the relevant points while you work, and the heavier harness on the delicate
+          ones, so a finding surfaces before the change ever reaches the pipeline. Exec workers
+          run on Linux today; Windows support is planned.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem">The result is one standard applied the same way wherever the
+      work runs and whichever model does the reviewing: quality stops depending on who ran the
+      check or which tool they used.</p>
   </div>
 </section>
 
