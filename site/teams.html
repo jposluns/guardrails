@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIQT for Teams &amp; Enterprise: one governance standard your whole team shares</title>
+<meta name="description" content="AIQT gives a team one shared governance standard for AI-assisted work, portable across tools, with claims that trace to evidence and overrides that are logged. Plus the ideas we are considering for organizations.">
+<style>
+  :root{
+    --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
+    --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
+    --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
+      --ink:#101828; --muted:#41506a; --faint:#6b7d94;
+      --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    margin:0; background:var(--bg); color:var(--ink);
+    line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px; margin:0 auto; padding:0 1.4rem}
+  section{padding:4rem 0; border-top:1px solid var(--line)}
+  h1,h2,h3{line-height:1.25; letter-spacing:-.01em; font-weight:650}
+  h2{font-size:1.7rem; margin:0 0 1.2rem}
+  h3{font-size:1.1rem; margin:0 0 .4rem}
+  p{color:var(--muted); margin:0 0 1rem}
+  .lead{font-size:1.12rem; color:var(--ink)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
+
+  /* top navigation */
+  .topnav{border-bottom:1px solid var(--line); padding:.9rem 0}
+  .navrow{display:flex; align-items:center; justify-content:space-between;
+    flex-wrap:wrap; gap:.6rem}
+  .brand{font-weight:700; color:var(--ink); letter-spacing:.02em}
+  .brand:hover{text-decoration:none}
+  .navlinks{display:flex; flex-wrap:wrap; gap:1.2rem}
+  .navlinks a{color:var(--muted); font-size:.95rem}
+  .navlinks a:hover{color:var(--ink); text-decoration:none}
+
+  /* hero */
+  header{padding:5.5rem 0 4rem; border:0; text-align:center; background:
+    radial-gradient(1200px 380px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
+  .eyebrow{color:var(--accent-2); font-weight:600; letter-spacing:.06em;
+    text-transform:uppercase; font-size:.82rem; margin:0 0 1rem}
+  header h1{font-size:2.5rem; margin:0 auto 1.2rem; max-width:20ch}
+  header .lead{max-width:60ch; margin:0 auto 1.6rem}
+  .ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:.7rem 1rem; color:var(--ink); font-size:.98rem; margin-top:.4rem}
+  .ordering .tier{color:var(--accent-2); font-weight:600}
+  .cta{margin-top:2rem; display:flex; gap:.8rem; justify-content:center; flex-wrap:wrap}
+  .btn{display:inline-block; padding:.7rem 1.3rem; border-radius:9px; font-weight:600;
+    border:1px solid var(--line)}
+  .btn.primary{background:var(--accent); color:#08111f; border-color:transparent}
+  .btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
+  .btn.ghost{background:transparent; color:var(--ink)}
+
+  /* cards */
+  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1rem}
+  @media (max-width:640px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:1.2rem 1.3rem}
+  .card h3{color:var(--ink)}
+  .card p{margin:0}
+
+  .pill{display:inline-block; font-size:.74rem; font-weight:600; letter-spacing:.04em;
+    text-transform:uppercase; padding:.2rem .6rem; border-radius:999px; margin-bottom:.5rem}
+  .pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
+  .pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
+  .pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
+
+  /* idea cards keep their status visible */
+  .idea-note{color:var(--faint); font-size:.9rem; margin-top:.8rem}
+  .card .idea-note{margin-top:.8rem}
+
+  ul.clean{margin:.4rem 0 0; padding-left:1.1rem}
+  ul.clean li{margin:.3rem 0; color:var(--muted)}
+
+  footer{border-top:1px solid var(--line); padding:2.4rem 0 3rem; text-align:center}
+  footer p{color:var(--faint); font-size:.9rem; margin:.3rem 0}
+</style>
+</head>
+<body>
+
+<nav class="topnav"><div class="wrap navrow">
+  <a class="brand" href="/draft">AIQT</a>
+  <div class="navlinks">
+    <a href="/draft">Home</a>
+    <a href="/development">Development</a>
+    <a href="/teams">Teams &amp; Enterprise</a>
+    <a href="https://github.com/jposluns/guardrails">GitHub</a>
+  </div>
+</div></nav>
+
+<header>
+  <div class="wrap">
+    <p class="eyebrow">For teams and organizations</p>
+    <h1>One standard, shared by every assistant your team uses.</h1>
+    <p class="lead">AIQT gives your team a single governance standard for AI-assisted work.
+      It travels with the person, whichever assistant they open, so the same rules apply
+      whether a colleague works in Claude, ChatGPT, or Copilot. And because the pack is
+      published under CC BY-SA, a fix one team makes becomes a fix everyone inherits.</p>
+    <div class="ordering">
+      (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">Get the pack</a>
+      <a class="btn ghost" href="#ideas">Ideas we are considering</a>
+    </div>
+  </div>
+</header>
+
+<section id="today">
+  <div class="wrap">
+    <h2>What a shared standard gives your team today</h2>
+    <p class="lead">Most teams already have people working with AI assistants, each with their
+      own habits, their own tools, and their own idea of what "done" means. AIQT replaces that
+      spread with one ordering, decided in advance: Accuracy, Integrity, Quality, and Trust
+      before progress, speed, and cost. Nobody has to re-argue it under a deadline.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>One standard across people and tools</h3>
+        <p>AIQT 1.0.0 is one skill anyone on the team loads into a chat assistant that
+          accepts one. From then on, every assistant is held to the same stated standard:
+          claims match their sources, checks are kept at full strength, and work is finished only once a check confirms it. New joiners inherit the standard on day one.</p>
+      </div>
+      <div class="card">
+        <h3>Work you can audit</h3>
+        <p>Under AIQT, every claim traces to evidence, and every override is logged with a
+          way to revert it. When a guardrail catches something, the assistant says which
+          guardrail and what it caught. When something fails, the failure is surfaced. That
+          gives a reviewer, a lead, or an auditor something concrete to check.</p>
+      </div>
+      <div class="card">
+        <h3>A record you can rely on</h3>
+        <p>Trust is warranted by the record and granted by a person. Since the record shows
+          what was verified, what was overridden, and what failed, a manager signing off on
+          AI-assisted work is signing off on evidence they can check.</p>
+      </div>
+      <div class="card">
+        <h3>Improvements that compound</h3>
+        <p>When a guardrail gap lets an issue through, the guardrail is improved so it should
+          not recur, and with permission the portable fix can be contributed back. Sharing is
+          opt-in, and the ShareAlike licence keeps every improvement open, so your team
+          benefits from every other team's lessons.</p>
+      </div>
+    </div>
+    <p style="margin-top:1.2rem">Teams that write code have a version on the way: the
+      <a href="/development">development assistant</a>, currently in development, installs the
+      same governance core into a project, keeps to its own directory so nothing else in your
+      repository changes without your say-so, and integrates with your CI.</p>
+  </div>
+</section>
+
+<section id="ideas">
+  <div class="wrap">
+    <h2>Ideas we are considering for organizations</h2>
+    <p class="lead">The two directions below are ideas under consideration. We are sharing
+      them so you can see where our thinking is heading, and so you can tell us whether they
+      would help your organization. There are no dates attached and no commitment behind
+      them; they may change shape or may never ship.</p>
+
+    <div class="card" style="margin-bottom:1rem">
+      <span class="pill idea">Idea under consideration</span>
+      <h3>A web console for governance activity</h3>
+      <p>A web console would show governance activity across your projects without requiring
+        a terminal. The benefit for a team lead: one place to see what the guardrails caught,
+        what was overridden, and how the standard is holding across the work, in a form the
+        whole team can read, including the people who never open a command line.</p>
+      <p class="idea-note">This is an idea we are considering. It carries no date and no
+        commitment.</p>
+    </div>
+
+    <div class="card">
+      <span class="pill idea">Idea under consideration</span>
+      <h3>Enterprise management</h3>
+      <p>Enterprise management would cover what an organization needs beyond an individual:
+        central policy, shared configuration, and reporting across teams. The benefit: an
+        organization could set its standard once and have every team inherit it, keep
+        configuration consistent from one source, and see across teams how the
+        standard is being applied.</p>
+      <p class="idea-note">This too is an idea we are considering. It carries no date and no
+        commitment.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how-we-ship">
+  <div class="wrap">
+    <h2>How we decide what ships</h2>
+    <p class="lead">We move an idea into a release only when we can say what it does and show
+      that it works. That rule is why this page separates today's capabilities from ideas so
+      firmly: the same standard AIQT holds an assistant to, we hold ourselves to. A claim
+      about the product should trace to evidence, and "available" should mean a check
+      actually ran.</p>
+  </div>
+</section>
+
+<section id="open">
+  <div class="wrap">
+    <h2>Open, portable, and shared</h2>
+    <p>AIQT is published under Creative Commons Attribution-ShareAlike 4.0. The guardrails
+      are portable across toolchains, so adopting the standard leaves your team free to
+      change tools without changing rules. Improvements come back under the same ShareAlike
+      licence, so a fix one team makes becomes a fix everyone inherits. Start with the
+      <a href="/draft">overview on the home page</a>, or go straight to the source.</p>
+    <div class="cta" style="justify-content:flex-start">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">View on GitHub</a>
+      <a class="btn ghost" href="/draft">Back to Home</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+    <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>

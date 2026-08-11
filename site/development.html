@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIQT Development Assistant: governance that installs into your project</title>
+<meta name="description" content="AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. It writes only inside .working/aiqt/, so nothing else in your repository changes without your say-so.">
+<style>
+  :root{
+    --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
+    --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
+    --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
+      --ink:#101828; --muted:#41506a; --faint:#6b7d94;
+      --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    margin:0; background:var(--bg); color:var(--ink);
+    line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px; margin:0 auto; padding:0 1.4rem}
+  section{padding:4rem 0; border-top:1px solid var(--line)}
+  h1,h2,h3{line-height:1.25; letter-spacing:-.01em; font-weight:650}
+  h2{font-size:1.7rem; margin:0 0 1.2rem}
+  h3{font-size:1.1rem; margin:0 0 .4rem}
+  p{color:var(--muted); margin:0 0 1rem}
+  .lead{font-size:1.12rem; color:var(--ink)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
+
+  /* hero */
+  header{padding:5.5rem 0 4rem; border:0; text-align:center; background:
+    radial-gradient(1200px 380px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
+  .eyebrow{color:var(--accent-2); font-weight:600; letter-spacing:.06em;
+    text-transform:uppercase; font-size:.82rem; margin:0 0 1rem}
+  header h1{font-size:2.5rem; margin:0 auto 1.2rem; max-width:20ch}
+  header .lead{max-width:60ch; margin:0 auto 1.6rem}
+  .ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:.7rem 1rem; color:var(--ink); font-size:.98rem; margin-top:.4rem}
+  .ordering .tier{color:var(--accent-2); font-weight:600}
+  .cta{margin-top:2rem; display:flex; gap:.8rem; justify-content:center; flex-wrap:wrap}
+  .btn{display:inline-block; padding:.7rem 1.3rem; border-radius:9px; font-weight:600;
+    border:1px solid var(--line)}
+  .btn.primary{background:var(--accent); color:#08111f; border-color:transparent}
+  .btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
+  .btn.ghost{background:transparent; color:var(--ink)}
+
+  /* grids and cards */
+  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1rem}
+  @media (max-width:640px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:1.2rem 1.3rem}
+  .card h3{color:var(--ink)}
+  .card p{margin:0}
+
+  /* rules */
+  ol.rules{counter-reset:r; list-style:none; padding:0; margin:0}
+  ol.rules li{background:var(--panel-2); border:1px solid var(--line); border-radius:10px;
+    padding:1rem 1.1rem 1rem 3.3rem; position:relative; margin:.7rem 0}
+  ol.rules li::before{counter-increment:r; content:counter(r);
+    position:absolute; left:1rem; top:1rem; width:1.6rem; height:1.6rem; border-radius:50%;
+    background:var(--accent); color:#08111f; font-weight:700; font-size:.9rem;
+    display:flex; align-items:center; justify-content:center}
+  ol.rules b{color:var(--ink)}
+  ol.rules p{margin:.25rem 0 0}
+
+  ul.clean{margin:.4rem 0 0; padding-left:1.1rem}
+  ul.clean li{margin:.3rem 0; color:var(--muted)}
+
+  .pill{display:inline-block; font-size:.74rem; font-weight:600; letter-spacing:.04em;
+    text-transform:uppercase; padding:.2rem .6rem; border-radius:999px; margin-bottom:.5rem}
+  .pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
+  .pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
+  .pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
+
+  footer{border-top:1px solid var(--line); padding:2.4rem 0 3rem; text-align:center}
+  footer p{color:var(--faint); font-size:.9rem; margin:.3rem 0}
+
+  /* page-specific: shared top navigation */
+  .topnav{border-bottom:1px solid var(--line); padding:.9rem 0}
+  .navrow{display:flex; align-items:center; justify-content:space-between;
+    flex-wrap:wrap; gap:.6rem 1rem}
+  .brand{font-weight:700; color:var(--ink); letter-spacing:.02em}
+  .brand:hover{text-decoration:none}
+  .navlinks{display:flex; flex-wrap:wrap; gap:.2rem .4rem}
+  .navlinks a{color:var(--muted); padding:.25rem .6rem; border-radius:7px}
+  .navlinks a:hover{color:var(--ink); text-decoration:none}
+
+  /* page-specific: directory tree */
+  .tree{background:var(--panel-2); border:1px solid var(--line); border-radius:12px;
+    padding:1.2rem 1.4rem; overflow-x:auto; margin:1.4rem 0 1rem}
+  .tree pre{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:.92rem; line-height:1.75; color:var(--muted)}
+  .tree .dir{color:var(--ink); font-weight:600}
+  .tree .yours{color:var(--accent-2); font-weight:600}
+  .tree .updater{color:var(--accent); font-weight:600}
+  .tree .note{color:var(--faint)}
+
+  /* page-specific: step list for setup */
+  .steps{list-style:none; counter-reset:s; padding:0; margin:0}
+  .steps li{background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:1rem 1.1rem 1rem 3.3rem; position:relative; margin:.7rem 0; color:var(--muted)}
+  .steps li::before{counter-increment:s; content:counter(s);
+    position:absolute; left:1rem; top:1rem; width:1.6rem; height:1.6rem; border-radius:50%;
+    background:var(--accent-2); color:#08111f; font-weight:700; font-size:.9rem;
+    display:flex; align-items:center; justify-content:center}
+  .steps b{color:var(--ink)}
+</style>
+</head>
+<body>
+
+<nav class="topnav"><div class="wrap navrow">
+  <a class="brand" href="/draft">AIQT</a>
+  <div class="navlinks">
+    <a href="/draft">Home</a>
+    <a href="/development">Development</a>
+    <a href="/teams">Teams &amp; Enterprise</a>
+    <a href="https://github.com/jposluns/guardrails">GitHub</a>
+  </div>
+</div></nav>
+
+<header>
+  <div class="wrap">
+    <p class="eyebrow">The development assistant</p>
+    <h1>Governance that installs into your project.</h1>
+    <p class="lead">AIQT 1.1.0 puts the governance core where your coding agents actually
+      read: in the repository itself. One wizard sets it up, one doctor verifies it, and a
+      write guard keeps every update inside a single directory you can inspect. 1.1.0 is
+      next, in development; the pack it installs is open source and readable today.</p>
+    <div class="ordering">
+      (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">Read the pack on GitHub</a>
+      <a class="btn ghost" href="#directory">See what it creates</a>
+    </div>
+  </div>
+</header>
+
+<section id="what">
+  <div class="wrap">
+    <h2>What it does</h2>
+    <p class="lead">The development assistant installs the same governance core that runs the
+      <a href="/draft">chat assistant</a>: the priority ordering above, the disciplines that
+      apply it, and one universal skill. Then it generates the file each coding agent
+      expects, so every agent that touches your project reads the same standard.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Root instructions file</h3>
+        <p>The project-level instructions file your primary coding assistant loads on every
+          session, generated from the governance core and your configuration.</p>
+      </div>
+      <div class="card">
+        <h3>Agents file</h3>
+        <p>The agents file that agent-driven tools expect, carrying the same ordering and
+          disciplines, so a subagent works under the same rules as the session that spawned it.</p>
+      </div>
+      <div class="card">
+        <h3>Editor rules</h3>
+        <p>Rules files for editors that read them, so in-editor assistance answers to the
+          same standard as the terminal.</p>
+      </div>
+      <div class="card">
+        <h3>One source, many surfaces</h3>
+        <p>Each generated file derives from one core. Update the core, regenerate, and every
+          agent surface moves together; no file drifts to its own private version of the rules.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="directory">
+  <div class="wrap">
+    <h2>One directory, one write guard</h2>
+    <p class="lead">Everything AIQT owns lives in <code>.working/aiqt/</code>. The wizard
+      creates it at setup, and the layout separates what is yours from what the updater
+      maintains.</p>
+    <div class="tree">
+<pre>your-project/
+&#9500;&#9472;&#9472; <span class="dir">.working/</span>
+&#9474;   &#9492;&#9472;&#9472; <span class="dir">aiqt/</span>
+&#9474;       &#9500;&#9472;&#9472; <span class="yours">config.md</span>        <span class="note">yours: own it, edit it, commit it</span>
+&#9474;       &#9492;&#9472;&#9472; <span class="updater">core/</span>            <span class="note">the updater's only write location</span>
+&#9500;&#9472;&#9472; src/                     <span class="note">untouched</span>
+&#9492;&#9472;&#9472; ...                      <span class="note">untouched</span></pre>
+    </div>
+    <p><b style="color:var(--ink)"><code>config.md</code> is yours.</b> It holds your
+      choices, and you edit it like any other file you own. Updates never rewrite it.</p>
+    <p><b style="color:var(--ink)"><code>core/</code> belongs to the updater.</b> It is the
+      updater's only write location, and a guard enforces that: any attempted write outside
+      <code>.working/aiqt/core/</code> is refused. Nothing else in your repository changes
+      without your say-so.</p>
+    <p>That boundary is the point. A tool that updates itself inside your repository earns a
+      hard question: what else can it touch? With AIQT you can check the answer yourself. The write surface is one directory, the guard refuses everything outside it,
+      and a diff after any update shows changes in exactly one place. Your source, your
+      dependencies, your CI configuration, and your own <code>config.md</code> sit outside
+      the write surface entirely. Reviewing an AIQT update takes the same shape as reviewing
+      any other change: read the diff, and the diff is small and contained.</p>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="wrap">
+    <h2>Setup and verification</h2>
+    <p class="lead">Two commands own the lifecycle: a wizard that sets the project up, and a
+      doctor that verifies the install.</p>
+    <ol class="steps">
+      <li><b>The wizard sets it up.</b> It creates <code>.working/aiqt/</code>, walks you
+        through <code>config.md</code>, and generates the agent files from the governance
+        core and your choices. Setup is a conversation with defaults, and every choice lands
+        in a file you can read.</li>
+      <li><b>The doctor verifies it.</b> It checks that the install is present, complete,
+        and consistent: the directory is intact, the generated files match the core they
+        derive from, and the guard is in place. This is the ordering applied to the tool
+        itself: "installed" means a check actually ran, and the doctor is that check. Run it
+        any time; a clean bill of health is an observation, and a failure is reported
+        plainly with what to fix.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <h2>In your pipeline</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>CI integration</h3>
+        <p>The development assistant integrates with your CI, so the standard that governs
+          the assistant during development also holds at the gate. The same discipline
+          applies on both sides: a check that passes has actually run, and a check that
+          fails is surfaced, never quietly weakened to get a green build.</p>
+      </div>
+      <div class="card">
+        <h3>The findings loop</h3>
+        <p>When a finding comes in, the loop validates it before it acts on it. A finding
+          that survives validation is worth an action; a finding that fails validation is
+          recorded as such. Acting on validated findings keeps the signal clean, and it is
+          the five rules of AIQT at work: say what was caught, fix in-scope issues in the
+          current change, and fix the rest in the next one.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="composed">
+  <div class="wrap">
+    <h2>Composed Depth at install</h2>
+    <p class="lead">The governance core is deliberately language-neutral. Deep per-language
+      and per-framework guidance comes from vetted aligned sources, and the setup generator
+      composes them in at install time.</p>
+    <p>During setup, the generator detects your stack and presents the aligned sources that
+      apply to it. For each source you see the facts a decision needs: what it covers, its
+      licence, when it was last reviewed, and the gaps it leaves. Then you choose, taking
+      all that apply or deciding one by one. AIQT lists a source and shows the facts so you
+      can decide, and it credits and links out to the people who do that work. Discovery,
+      not endorsement.</p>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Coverage:</b> what the source addresses in your stack.</li>
+      <li><b style="color:var(--ink)">Licence:</b> the terms it is published under.</li>
+      <li><b style="color:var(--ink)">Last reviewed:</b> when it was last checked, because
+        per-language depth has a shelf life.</li>
+      <li><b style="color:var(--ink)">Gaps:</b> what it leaves uncovered, stated up front.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="availability">
+  <div class="wrap">
+    <h2>The same core, and where 1.1.0 stands</h2>
+    <div class="card" style="margin-bottom:1rem">
+      <span class="pill now">Available now</span>
+      <h3>The governance core, and the chat assistant</h3>
+      <p>Everything 1.1.0 installs already exists as the pack: the ordering, the
+        disciplines, the universal skill, and the thin security baselines. The
+        <a href="/draft">chat assistant (1.0.0)</a> runs this core today, so the standard
+        your project will adopt is the one you can hold a chat assistant to right now, and
+        the pack is open to read in full.</p>
+    </div>
+    <div class="card">
+      <span class="pill next">Next</span>
+      <h3>The development assistant (1.1.0)</h3>
+      <p>In development. The wizard, the doctor, the write guard, the generated agent files,
+        the CI integration, and the findings loop described on this page are the 1.1.0
+        design, and we ship it when it does what this page says it does. Until then, the
+        best way to evaluate AIQT is the way we would want you to: read the source.</p>
+    </div>
+    <div class="cta" style="justify-content:flex-start">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">Read the pack on GitHub</a>
+      <a class="btn ghost" href="/draft">Back to the overview</a>
+    </div>
+    <p style="margin-top:1.4rem">AIQT is published under CC BY-SA 4.0, and improvements come
+      back under the same licence. Rolling it out across an organization is covered on
+      <a href="/teams">Teams &amp; Enterprise</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+    <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>
