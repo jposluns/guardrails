@@ -6,7 +6,7 @@
 <title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
 <meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811g">
+<link rel="stylesheet" href="/styles.css?v=20260811h">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -138,7 +138,7 @@
         <h3>What travels, and what never does</h3>
         <p>A seed carries the discipline and its incident provenance only, scrubbed of all
           project specifics: the guardrail's concept, what triggers it, and the goal it
-          serves. None of your project's details, code, or content travels with it. You open
+          serves. A seed is scrubbed to concept, trigger, and goal before anything leaves your machine, and you preview exactly what it contains before it is submitted. The scrub is designed to remove project specifics; the preview is how you confirm it did. You open
           the pull request yourself, from your own GitHub account, so the contribution is
           openly yours; what stays private is your project's specifics, not the fact that you
           contributed.</p>
@@ -147,7 +147,7 @@
     <p style="margin-top:1.2rem"><b style="color:var(--ink)">Why this is worth turning
       on.</b> Every team's assistant misses different things. A seed PR turns one team's
       miss into everyone's guardrail, and because seeds are scrubbed to concept, trigger,
-      and goal, contributing costs you nothing you would want to keep. The exchange runs
+      and goal, you preview what travels before it goes. The exchange runs
       both ways: the guardrails your assistant ships with include the ones other developers
       contributed the same way, under the same ShareAlike licence.</p>
   </div>
@@ -217,7 +217,7 @@
     <div class="grid">
       <div class="card">
         <h3>In your GitHub CI</h3>
-        <p>The model-based checks run as part of the pipeline on every change, alongside your
+        <p>The model-based checks run in the pipeline at the tier the change warrants (routine changes run the ordinary gates alone, substantive changes add the dual-family pair, and delicate changes escalate to the heavier harness), alongside your
           usual gates. A change is reviewed by the dual-family pair before it lands, under the
           same discipline as every other check: it passes because it ran, and a failure blocks
           rather than disappears.</p>

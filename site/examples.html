@@ -6,7 +6,7 @@
 <title>AIQT examples: the priority ordering making real calls</title>
 <meta name="description" content="Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811g">
+<link rel="stylesheet" href="/styles.css?v=20260811h">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -46,6 +46,7 @@
 
     <div class="example">
       <h3>Asking for a fact and getting a confident guess</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>You ask for a figure, a date, or a name, and the answer arrives quickly and
@@ -61,6 +62,7 @@
 
     <div class="example">
       <h3>Drafting an email that quietly drops a point</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>You ask for a message that covers three things, and the draft reads beautifully.
@@ -75,6 +77,7 @@
 
     <div class="example">
       <h3>A request that could mean two things</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>Your request has two reasonable meanings, and the assistant silently picks one.
@@ -89,6 +92,7 @@
 
     <div class="example">
       <h3>A detail that changes between replies</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>A date, a name, or a number appears one way in one reply and a different way in
@@ -113,6 +117,7 @@
 
     <div class="example">
       <h3>The API that does not exist</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>The assistant suggests a function, a config key, or a library version that looks
@@ -128,6 +133,7 @@
 
     <div class="example">
       <h3>"The tests pass"</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>The assistant declares the tests green without having run them. The claim reads
@@ -142,6 +148,7 @@
 
     <div class="example">
       <h3>The check that gets quietly loosened</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>One check fails, the deadline argues, and the assistant skips the test or lowers
@@ -156,6 +163,7 @@
 
     <div class="example">
       <h3>The refactor nobody asked for</h3>
+      <p class="evidence-label">Illustrative</p>
       <div class="compare">
         <div class="col without"><p class="lbl">Without AIQT</p>
           <p>You ask for one fix, and the diff comes back touching five files: renamed
@@ -174,7 +182,7 @@
 <section id="grc">
   <div class="wrap">
     <p class="eyebrow">From the GRC Library</p>
-    <h2>Where AIQT was built and dogfooded</h2>
+    <h2>Where AIQT was built, used, and tested on itself</h2>
     <p class="lead">These five are drawn from the GRC Library's own history, the project
       that built AIQT and held itself to it first. They name the tension, then show the same
       moment resolved twice: once with the shortcut taken, once with the standard applied.</p>
@@ -272,9 +280,9 @@
       </div>
     </div>
 
-    <p style="margin-top:1.6rem">None of these calls needed judgement in the moment. Each
-      one is the ordering doing its single job: which value wins was decided in advance, so
-      nobody had to re-argue it under pressure.</p>
+    <p style="margin-top:1.6rem">In each case, which value wins was decided in advance, so the pressure of the moment did not
+      decide it. Judgement still identifies the facts, the scope, and the evidence; the ordering
+      settles which way the call goes.</p>
     <div class="cta" style="justify-content:flex-start">
       <a class="btn primary" href="/draft#standard">Read the standard</a>
     </div>

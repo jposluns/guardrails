@@ -6,7 +6,7 @@
 <title>Add AIQT to your assistant</title>
 <meta name="description" content="Add AIQT to your chat assistant. Pick the AI you use and follow a few simple steps. No command line, no developer account, no GitHub knowledge needed. Claude, ChatGPT, and Copilot are among them.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811g">
+<link rel="stylesheet" href="/styles.css?v=20260811h">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -31,7 +31,7 @@
   <p class="eyebrow">You and your chat assistant</p>
   <h1>Add AIQT to your assistant.</h1>
   <p class="lead">Your assistant sounds just as confident when it is guessing as when it
-    knows. AIQT 1.0.0 fixes that, and it is available now. Pick the AI you use below. You do
+    knows. AIQT 1.0.0 holds it to a stated standard, and it is available now. Pick the AI you use below. You do
     not need a command line, a developer account, or any knowledge of GitHub.</p>
 </div>
 
@@ -39,7 +39,7 @@
   <div class="wrap">
     <p class="eyebrow">Pick your assistant</p>
     <h2>Choose the AI you use</h2>
-    <p class="lead">The same skill works the same way in every assistant that accepts one.</p>
+    <p class="lead">One skill file serves every assistant. Platforms differ in how they load it and in how closely their models follow instructions, so pick yours below for the exact steps.</p>
     <div class="platform-actions">
       <a class="platform-button" href="#download"><span class="platform-icon claude">C</span>
         <span><strong>Set up in Claude</strong><small>Download and add the Skill</small></span></a>
@@ -78,7 +78,10 @@
     </div>
     <p style="margin-top:1.2rem">Your browser saves a file named <code>aiqt-skill.zip</code>.
       Do not unzip it. The Skill is prose instructions and reference material only: it contains
-      no executable code and makes no network calls. You cannot break anything with it.</p>
+      no executable code and makes no network calls. What it changes is how your assistant behaves in conversation, nothing else, and you can switch it off in your Skills list at any time.</p>
+    <p style="margin-top:.9rem">AIQT is a standard your assistant is required to follow, not a
+      guarantee the model is perfect: results still depend on the platform and model, and you
+      stay in charge. What it changes is what you can demand and check.</p>
   </div>
 </section>
 
@@ -89,7 +92,7 @@
 
     <h3 style="margin-top:1rem">Claude (the recommended method)</h3>
     <ol class="steps">
-      <li><b>Turn on code execution first.</b> The Skills section does not appear without it.
+      <li><b>Turn on code execution first.</b> The Skills section does not appear without it. Enabling code execution is Claude's requirement for using any Skill; AIQT itself contains no code to execute.
         In Claude, open Settings, then Capabilities, and enable code execution and file
         creation. Install from a desktop browser; the mobile apps are not documented to
         support Skill upload.</li>
@@ -121,8 +124,8 @@
     <div class="grid">
       <div class="card">
         <h3>No more confident bluffing</h3>
-        <p>Every factual claim points back to a source, and when a guardrail catches
-          something, your assistant names the guardrail and what it caught.</p>
+        <p>Your assistant is required to tie each factual claim to a source, and when a guardrail
+          catches something, it names the guardrail and what it caught.</p>
       </div>
       <div class="card">
         <h3>No more guessing to please you</h3>

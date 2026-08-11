@@ -6,7 +6,7 @@
 <title>AIQT Development Assistant (1.1.0, in development): governance that installs into your project</title>
 <meta name="description" content="In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811g">
+<link rel="stylesheet" href="/styles.css?v=20260811h">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -31,10 +31,10 @@
     <p class="eyebrow">The development assistant</p>
     <h1>Governance that installs into your project.</h1>
     <p class="lead">Every coding agent in your project follows its own rules, drifts its own way, and you
-      find out in review. AIQT 1.1.0 puts one governance core where every agent actually reads,
+      find out in review. AIQT 1.1.0 puts one governance core where coding agents read their instructions,
       in the repository itself. One wizard sets it
       up, one doctor verifies it, and a write guard keeps every update inside a single directory
-      you can inspect. 1.1.0 is next, in development; the pack it installs is open source and
+      you can inspect. 1.1.0 is in development; the pack it installs is open source and
       readable today.</p>
     <div style="text-align:center; margin-top:.6rem">
       <div class="ordering">
@@ -54,7 +54,7 @@
     <p class="lead">The development assistant installs the same governance core that runs the
       <a href="/draft">chat assistant</a>: the priority ordering above, the disciplines that
       apply it, and one universal skill. Then it generates the file each coding agent
-      expects, so every agent that touches your project reads the same standard.</p>
+      expects, so each supported agent surface, the root instructions file, the agents file, and the editor rules files, carries the same standard.</p>
     <div class="grid">
       <div class="card">
         <h3>Root instructions file</h3>
@@ -143,6 +143,9 @@
         <code>.aiqt/</code> and the file each coding agent expects, and asking the few
         choices that are yours to make.</li>
       <li><b>The doctor verifies it.</b> It confirms the install is present and consistent.
+        That is what the doctor proves: the files exist, agree with each other, and are current.
+        It does not prove that a given agent loaded them in a given session; the running evidence
+        for that is the visible AIQT check and the named catches while you work.
         This is the ordering applied to the tool itself: "installed" means a check actually
         ran, and the doctor is that check.</li>
     </ol>
@@ -169,14 +172,14 @@
     <div class="card" style="margin-bottom:1rem">
       <span class="pill now">Available now</span>
       <h3>The governance core, and the chat assistant</h3>
-      <p>Everything 1.1.0 installs already exists as the pack: the ordering, the
+      <p>The standard 1.1.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
         disciplines, and the universal skill. The
         <a href="/draft">chat assistant (1.0.0)</a> runs this core today, so the standard
         your project will adopt is the one you can hold a chat assistant to right now, and
         the pack is open to read in full.</p>
     </div>
     <div class="card">
-      <span class="pill next">Next</span>
+      <span class="pill next">In development</span>
       <h3>The development assistant (1.1.0)</h3>
       <p>In development. The wizard, the doctor, the write guard, the generated agent files,
         the CI integration, the findings loop, the five-rule workflow, the per-guardrail
