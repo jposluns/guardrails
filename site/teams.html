@@ -6,7 +6,7 @@
 <title>AIQT for Teams &amp; Enterprise: one governance standard your whole team shares</title>
 <meta name="description" content="AIQT gives a team one shared governance standard for AI-assisted work, portable across tools, with claims that trace to evidence and overrides that are logged. Plus the ideas we are considering for organizations.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811y">
+<link rel="stylesheet" href="/styles.css?v=20260811z">
 <script src="/theme.js"></script>
 <link rel="canonical" href="https://aiqt.ai/teams">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -19,11 +19,14 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
-<button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776; Menu</button>
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="/draft" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><defs><linearGradient id="aiqtg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent-2)"/></linearGradient></defs><text x="27" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="46" fill="var(--accent)" text-anchor="middle">A</text><text x="27" y="93" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="46" fill="var(--accent-2)" text-anchor="middle">Q</text><rect x="64" y="12" width="8" height="34" rx="1.5" fill="url(#aiqtg)"/><rect x="50" y="46" width="35" height="7" rx="3.5" fill="url(#aiqtg)"/><rect x="64" y="53" width="8" height="41" rx="1.5" fill="url(#aiqtg)"/></svg><span class="logotext">AIQT</span></a>
+  <div class="topformula" aria-label="AIQT priority ordering: Accuracy Integrity Quality Trust first, then Progress, Speed, Cost">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; <span class="t2">Progress</span> &gt; <span class="t3">Speed</span> &gt; <span class="t4">Cost</span></div>
+</header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
 <nav class="sidebar" id="sidebar" aria-label="Main navigation">
-  <a class="brand" href="/draft">AIQT</a>
   <h4>Start</h4>
   <a class="navlink" href="/draft">Home</a>
   <h4>Chat assistants</h4>
@@ -64,9 +67,6 @@
       human-led: each person loads the Skill into their own assistant, under a rollout your team
       runs. Central deployment, policy enforcement, and cross-team reporting do not exist today;
       two of them are ideas we are considering.</p>
-    <div class="ordering">
-      (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
-    </div>
     <div class="cta">
       <a class="btn primary" href="#pilot">Start a team pilot</a>
       <a class="btn ghost" href="#today">See what is available today</a>

@@ -332,3 +332,25 @@ section{padding:3.25rem 0}
 /* sharper eyebrow (main engine of the repetition) + readable measure */
 .eyebrow{font-size:.84rem; letter-spacing:.16em}
 .lead{max-width:74ch}
+
+
+/* ================= persistent top bar + 2x2 logo ================= */
+.topbar{position:sticky; top:0; z-index:60; display:flex; align-items:center; gap:.9rem;
+  height:3.6rem; padding:0 1rem; background:var(--panel); border-bottom:1px solid var(--line)}
+.topbar .navtoggle{display:none; position:static; align-items:center; background:none;
+  border:1px solid var(--line); border-radius:8px; color:var(--ink); padding:.3rem .55rem;
+  font-size:1.1rem; line-height:1; cursor:pointer}
+.topbar .logo{display:flex; align-items:center; gap:.5rem; text-decoration:none}
+.topbar .logomark{display:block; flex:0 0 auto}
+.topbar .logotext{color:var(--ink); font-weight:800; font-size:1.22rem; letter-spacing:.04em}
+.topbar .topformula{margin-left:auto; min-width:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.9rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.topbar .topformula .tier{background:linear-gradient(90deg,var(--accent),var(--accent-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent; font-weight:700}
+.topbar .topformula .t2{color:var(--ink)}
+.topbar .topformula .t3{color:var(--muted)}
+.topbar .topformula .t4{color:var(--faint)}
+/* the sidebar now sits below the top bar */
+.sidebar{top:3.6rem; height:calc(100vh - 3.6rem)}
+@media (max-width:860px){ .topbar .topformula{display:none} }
+@media (max-width:900px){ .topbar .navtoggle{display:inline-flex} }
