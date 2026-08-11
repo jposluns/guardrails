@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Add AIQT to your assistant</title>
-<meta name="description" content="Install AIQT in your chat assistant in a few clicks: download the Skill, upload it, switch it on. No command line, no developer account, no GitHub knowledge needed. Claude, ChatGPT, and Copilot are among them.">
+<meta name="description" content="Add AIQT to your chat assistant. Pick the AI you use and follow a few simple steps. No command line, no developer account, no GitHub knowledge needed. Claude, ChatGPT, and Copilot are among them.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811b">
+<link rel="stylesheet" href="/styles.css?v=20260811c">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -26,12 +26,44 @@
 
 <div class="wrap pagehead">
   <p class="eyebrow">You and your chat assistant</p>
-  <h1>Add AIQT to your assistant. It is a few clicks.</h1>
+  <h1>Add AIQT to your assistant.</h1>
   <p class="lead">Your assistant sounds just as confident when it is guessing as when it
-    knows. AIQT 1.0.0 fixes that, and it is available now. You download one file and add it to
-    your assistant. You do not need a command line, a developer account, or any knowledge of
-    GitHub.</p>
+    knows. AIQT 1.0.0 fixes that, and it is available now. Pick the AI you use below. You do
+    not need a command line, a developer account, or any knowledge of GitHub.</p>
 </div>
+
+<section id="pick">
+  <div class="wrap">
+    <p class="eyebrow">Pick your assistant</p>
+    <h2>Choose the AI you use</h2>
+    <p class="lead">The same skill works the same way in every assistant that accepts one.</p>
+    <div class="platform-actions">
+      <a class="platform-button" href="#download"><span class="platform-icon claude">C</span>
+        <span><strong>Set up in Claude</strong><small>Download and add the Skill</small></span></a>
+      <a class="platform-button" href="#download"><span class="platform-icon chatgpt">O</span>
+        <span><strong>Set up in ChatGPT</strong><small>Add it as your instructions</small></span></a>
+      <a class="platform-button" href="#download"><span class="platform-icon copilot">Co</span>
+        <span><strong>Set up in Copilot</strong><small>Add it to your assistant</small></span></a>
+      <a class="platform-button wide" href="#download"><span class="platform-icon guide">+</span>
+        <span><strong>Any other assistant</strong><small>Use the portable instruction file</small></span></a>
+      <a class="platform-button wide" href="https://github.com/jposluns/guardrails"><span class="platform-icon source">&lt;/&gt;</span>
+        <span><strong>View the source on GitHub</strong><small>Read every rule and the licence</small></span></a>
+    </div>
+  </div>
+</section>
+
+<section id="cleanlanguage">
+  <div class="wrap">
+    <p class="eyebrow">While you are here</p>
+    <h2>We also recommend Clean Language</h2>
+    <p class="lead">AIQT keeps your assistant honest. <a href="https://cleanlanguage.ai">Clean
+      Language</a> keeps its writing clean: a free editorial standard, from the same family, that
+      strips out the habits that make AI prose grating, the robotic tone, the filler, the fake
+      enthusiasm, and the predictable vocabulary. It installs the same easy way, one skill you add
+      to your assistant, and we recommend adding it alongside AIQT. Visit
+      <a href="https://cleanlanguage.ai">cleanlanguage.ai</a> to install it.</p>
+  </div>
+</section>
 
 <section id="download">
   <div class="wrap">
@@ -51,10 +83,8 @@
   <div class="wrap">
     <p class="eyebrow">Step two</p>
     <h2>Add it to your assistant</h2>
-    <p class="lead">Pick the assistant you use. The same Skill works the same way in every
-      assistant that accepts one. Claude, ChatGPT, and Copilot are among them.</p>
 
-    <h3 style="margin-top:1.6rem">Claude (the recommended method)</h3>
+    <h3 style="margin-top:1rem">Claude (the recommended method)</h3>
     <ol class="steps">
       <li><b>Turn on code execution first.</b> The Skills section does not appear without it.
         In Claude, open Settings, then Capabilities, and enable code execution and file

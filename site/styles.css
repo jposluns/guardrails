@@ -176,3 +176,24 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 .compare .without .lbl{color:var(--faint)}
 .compare .with .lbl{color:var(--accent-2)}
 .compare .col p:last-child{margin:0}
+
+/* cleanlanguage-style platform install buttons (welcoming, non-technical) */
+.platform-actions{margin:1.9rem 0 0; display:grid; grid-template-columns:repeat(12,1fr); gap:.9rem}
+.platform-button{grid-column:span 4; display:flex; align-items:center; gap:.95rem; min-height:86px;
+  padding:1.1rem 1.25rem; border:1px solid var(--line); border-radius:16px; background:var(--panel);
+  text-align:left; text-decoration:none;
+  transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease}
+.platform-button:hover{transform:translateY(-3px); border-color:var(--accent); text-decoration:none;
+  box-shadow:0 12px 30px rgba(0,0,0,.16)}
+.platform-button.wide{grid-column:span 6}
+@media (max-width:760px){.platform-button,.platform-button.wide{grid-column:span 12}}
+.platform-button strong,.platform-button small{display:block}
+.platform-button strong{font-size:1.1rem; line-height:1.2; color:var(--ink)}
+.platform-button small{margin-top:.25rem; color:var(--muted); font-size:.98rem; line-height:1.35}
+.platform-icon{flex:0 0 48px; width:48px; height:48px; display:grid; place-items:center;
+  border-radius:13px; color:#fff; font-size:1.1rem; font-weight:800; letter-spacing:-.03em}
+.platform-icon.claude{background:#c15f3c}
+.platform-icon.chatgpt{background:#10a37f}
+.platform-icon.copilot{background:linear-gradient(135deg,#0a6ed1,#2ec6c2)}
+.platform-icon.guide{background:var(--accent)}
+.platform-icon.source{background:#4a5568; font-size:.92rem}
