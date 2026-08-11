@@ -19,14 +19,14 @@
 :root[data-theme="light"]{
   --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
   --ink:#101828; --muted:#41506a; --faint:#54637a;
-  --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
+  --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0f766e;
   --on-accent:#ffffff; --on-accent-2:#ffffff;
 }
 @media (prefers-color-scheme: light){
   :root:not([data-theme]){
     --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
     --ink:#101828; --muted:#41506a; --faint:#54637a;
-    --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
+    --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0f766e;
     --on-accent:#ffffff; --on-accent-2:#ffffff;
   }
 }
