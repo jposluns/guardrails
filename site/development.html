@@ -135,21 +135,23 @@
   <div class="wrap">
     <p class="eyebrow">Write guard</p>
     <h2>One directory, one write guard</h2>
-    <p class="lead">Everything AIQT sets up lives in <code>.working/aiqt/</code>. The wizard
-      creates it at setup, and the layout separates what is yours (your configuration and your
-      project's practice files) from the one directory the updater maintains.</p>
+    <p class="lead">AIQT works inside your project's <code>.working/</code> directory. The
+      project-practice files it sets up (a changelog, a to-do list, and more) sit in
+      <code>.working/</code> itself; AIQT's own configuration and the single directory its
+      updater maintains sit under <code>.working/aiqt/</code>.</p>
     <div class="tree">
 <pre>your-project/
 &#9500;&#9472;&#9472; <span class="dir">.working/</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">CHANGELOG.md</span>      <span class="note">what changed, and when</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">TODO.md</span>           <span class="note">the work coming up</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">DONE.md</span>           <span class="note">what has shipped</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">ROADMAP.md</span>        <span class="note">where the project is heading</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="note">...</span>               <span class="note">other project-practice files</span>
 &#9474;   &#9492;&#9472;&#9472; <span class="dir">aiqt/</span>
-&#9474;       &#9500;&#9472;&#9472; <span class="yours">config.md</span>        <span class="note">yours: own it, edit it, commit it</span>
-&#9474;       &#9500;&#9472;&#9472; <span class="yours">CHANGELOG.md</span>     <span class="note">what changed, and when</span>
-&#9474;       &#9500;&#9472;&#9472; <span class="yours">TODO.md</span>          <span class="note">the work coming up</span>
-&#9474;       &#9500;&#9472;&#9472; <span class="yours">DONE.md</span>          <span class="note">what has shipped</span>
-&#9474;       &#9500;&#9472;&#9472; <span class="yours">ROADMAP.md</span>       <span class="note">where the project is heading</span>
-&#9474;       &#9492;&#9472;&#9472; <span class="updater">core/</span>            <span class="note">the updater's only write location</span>
-&#9500;&#9472;&#9472; src/                     <span class="note">untouched</span>
-&#9492;&#9472;&#9472; ...                      <span class="note">untouched</span></pre>
+&#9474;       &#9500;&#9472;&#9472; <span class="yours">config.md</span>     <span class="note">yours: own it, edit it, commit it</span>
+&#9474;       &#9492;&#9472;&#9472; <span class="updater">core/</span>         <span class="note">the updater's only write location</span>
+&#9500;&#9472;&#9472; src/                      <span class="note">untouched</span>
+&#9492;&#9472;&#9472; ...                       <span class="note">untouched</span></pre>
     </div>
     <p><b style="color:var(--ink)"><code>config.md</code> is yours.</b> It holds your
       choices, and you edit it like any other file you own. Updates never rewrite it.</p>
