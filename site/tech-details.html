@@ -33,40 +33,53 @@
     this is the detail once you are interested.</p>
 </div>
 
-<section id="practices">
+<section id="directory">
   <div class="wrap">
-    <p class="eyebrow">Good practice, set up for you</p>
-    <h2>The project habits that keep you and your assistant in sync</h2>
-    <p class="lead">With your permission, AIQT scaffolds the project practices that good teams
-      keep anyway: a changelog, a to-do list, a done list, and a roadmap. You can decline any
-      of them, and the ones you keep are yours to own, edit, and commit.</p>
-    <div class="grid">
-      <div class="card">
-        <h3>CHANGELOG.md</h3>
-        <p>What changed and when, so the history of the project is a record you can read
-          rather than a git-archaeology exercise.</p>
-      </div>
-      <div class="card">
-        <h3>TODO.md and DONE.md</h3>
-        <p>The work coming up, and the work that has shipped. Nothing in progress is lost
-          between one session and the next.</p>
-      </div>
-      <div class="card">
-        <h3>ROADMAP.md</h3>
-        <p>Where the project is heading, stated plainly, so a new contributor, human or
-          assistant, can orient in a minute.</p>
-      </div>
-      <div class="card">
-        <h3>One shared source of truth</h3>
-        <p>These files help you and your development assistant equally. The assistant reads
-          them to pick up context and updates them as it works, so the two of you are never
-          out of sync.</p>
-      </div>
+    <p class="eyebrow">What it creates</p>
+    <h2>The directory it sets up, file by file</h2>
+    <p class="lead">AIQT works inside your project's <code>.working/</code> directory, and the
+      tree below is everything it creates. Your project-practice files sit in
+      <code>.working/</code> itself; AIQT's own configuration and the single directory its
+      updater maintains sit under <code>.working/aiqt/</code>.</p>
+    <div class="tree">
+<pre>your-project/
+&#9500;&#9472;&#9472; <span class="dir">.working/</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">CHANGELOG.md</span>      <span class="note">what changed, and when</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">TODO.md</span>           <span class="note">the work coming up</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">DONE.md</span>           <span class="note">what has shipped</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="yours">ROADMAP.md</span>        <span class="note">where the project is heading</span>
+&#9474;   &#9500;&#9472;&#9472; <span class="note">...</span>               <span class="note">other project-practice files</span>
+&#9474;   &#9492;&#9472;&#9472; <span class="dir">aiqt/</span>
+&#9474;       &#9500;&#9472;&#9472; <span class="yours">config.md</span>     <span class="note">yours: own it, edit it, commit it</span>
+&#9474;       &#9492;&#9472;&#9472; <span class="updater">core/</span>         <span class="note">the updater's only write location</span>
+&#9500;&#9472;&#9472; src/                      <span class="note">untouched</span>
+&#9492;&#9472;&#9472; ...                       <span class="note">untouched</span></pre>
     </div>
-    <p style="margin-top:1.2rem">None of this is imposed. AIQT sets up only what you allow,
-      and every file it creates is yours to keep, edit, or remove. The point is not ceremony:
-      good development practice, kept consistently, is exactly what lets a person and an
-      assistant hand work back and forth without dropping it.</p>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">CHANGELOG.md</b>: what changed and when, so the project's
+        history is a record you can read rather than a git-archaeology exercise.</li>
+      <li><b style="color:var(--ink)">TODO.md</b> and <b style="color:var(--ink)">DONE.md</b>:
+        the work coming up, and the work that has shipped, so nothing in progress is lost between
+        one session and the next.</li>
+      <li><b style="color:var(--ink)">ROADMAP.md</b>: where the project is heading, stated
+        plainly, so a new contributor, human or assistant, can orient in a minute.</li>
+      <li><b style="color:var(--ink)">config.md</b>: your configuration, including which
+        guardrails are active and the sharing setting. It is yours to own, edit, and commit, and
+        updates never rewrite it. The next section covers it in full.</li>
+      <li><b style="color:var(--ink)">core/</b>: the one directory AIQT's updater writes to. A
+        guard refuses every write outside it, so a diff after any update shows changes in exactly
+        one place, and nothing else in your repository changes without your say-so.</li>
+    </ul>
+    <p style="margin-top:1.2rem">With your permission, AIQT scaffolds the practice files that
+      good teams keep anyway, and every one is yours to keep, edit, or remove. They help you and
+      your development assistant equally: the assistant reads them to pick up context and updates
+      them as it works, so the two of you are never out of sync. Good practice, kept
+      consistently, is what lets a person and an assistant hand work back and forth without
+      dropping it.</p>
+    <p>A tool that updates itself inside your repository earns a hard question: what else can it
+      touch? With AIQT you can check the answer yourself, because the updater writes only inside
+      <code>.working/aiqt/core/</code>, and reviewing an update takes the same shape as reviewing
+      any other change: read the diff, and the diff is small and contained.</p>
   </div>
 </section>
 

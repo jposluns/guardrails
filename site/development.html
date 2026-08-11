@@ -40,7 +40,6 @@
     </div>
     <div class="cta">
       <a class="btn primary" href="https://github.com/jposluns/guardrails">Read the pack on GitHub</a>
-      <a class="btn ghost" href="#directory">See what it creates</a>
       <a class="btn ghost" href="/tech-details">Technical details</a>
     </div>
 </div>
@@ -129,43 +128,6 @@
     <p>Everything it learns stays yours by default. A new guardrail is created and runs locally
       the moment the gap is found; sharing it back to every other developer is a separate,
       opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
-  </div>
-</section>
-
-<section id="directory">
-  <div class="wrap">
-    <p class="eyebrow">Write guard</p>
-    <h2>One directory, one write guard</h2>
-    <p class="lead">AIQT works inside your project's <code>.working/</code> directory. The
-      project-practice files it sets up (a changelog, a to-do list, and more) sit in
-      <code>.working/</code> itself; AIQT's own configuration and the single directory its
-      updater maintains sit under <code>.working/aiqt/</code>.</p>
-    <div class="tree">
-<pre>your-project/
-&#9500;&#9472;&#9472; <span class="dir">.working/</span>
-&#9474;   &#9500;&#9472;&#9472; <span class="yours">CHANGELOG.md</span>      <span class="note">what changed, and when</span>
-&#9474;   &#9500;&#9472;&#9472; <span class="yours">TODO.md</span>           <span class="note">the work coming up</span>
-&#9474;   &#9500;&#9472;&#9472; <span class="yours">DONE.md</span>           <span class="note">what has shipped</span>
-&#9474;   &#9500;&#9472;&#9472; <span class="yours">ROADMAP.md</span>        <span class="note">where the project is heading</span>
-&#9474;   &#9500;&#9472;&#9472; <span class="note">...</span>               <span class="note">other project-practice files</span>
-&#9474;   &#9492;&#9472;&#9472; <span class="dir">aiqt/</span>
-&#9474;       &#9500;&#9472;&#9472; <span class="yours">config.md</span>     <span class="note">yours: own it, edit it, commit it</span>
-&#9474;       &#9492;&#9472;&#9472; <span class="updater">core/</span>         <span class="note">the updater's only write location</span>
-&#9500;&#9472;&#9472; src/                      <span class="note">untouched</span>
-&#9492;&#9472;&#9472; ...                       <span class="note">untouched</span></pre>
-    </div>
-    <p><b style="color:var(--ink)"><code>config.md</code> is yours.</b> It holds your
-      choices, and you edit it like any other file you own. Updates never rewrite it.</p>
-    <p><b style="color:var(--ink)"><code>core/</code> belongs to the updater.</b> It is the
-      updater's only write location, and a guard enforces that: any attempted write outside
-      <code>.working/aiqt/core/</code> is refused. Nothing else in your repository changes
-      without your say-so.</p>
-    <p>A tool that updates itself inside your repository earns a
-      hard question: what else can it touch? With AIQT you can check the answer yourself.
-      The updater writes only inside <code>.working/aiqt/core/</code>, the guard refuses
-      every write outside it, and a diff after any update shows changes in exactly one place.
-      Reviewing an AIQT update takes the same shape as reviewing any other change: read the
-      diff, and the diff is small and contained.</p>
   </div>
 </section>
 
