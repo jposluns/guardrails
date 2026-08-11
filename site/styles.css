@@ -42,7 +42,7 @@ a{color:var(--accent); text-decoration:none}
 a:hover{text-decoration:underline}
 .wrap{max-width:1040px; margin:0 auto; padding:0 1.5rem}
 
-section{padding:2.5rem 0}
+section{padding:1.25rem 0}
 h1,h2,h3{line-height:1.12; letter-spacing:-.025em; font-weight:750}
 h1{font-size:clamp(2.1rem,4vw,3.2rem)}
 h2{font-size:clamp(1.85rem,3.2vw,2.75rem); margin:0 0 1.15rem}
