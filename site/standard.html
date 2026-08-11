@@ -110,9 +110,38 @@
       against each other, the higher one wins, every time. That call is made once, up front, so
       nobody re-argues it under a deadline, and Progress, Speed, and Cost never buy their way
       past accuracy or craft: verification is never the thing that gets cut.</p>
-    <div class="cta" style="justify-content:flex-start; margin-top:1.4rem">
-      <a class="btn primary" href="/roadmap">Where AIQT is now, and what is next</a>
-      <a class="btn ghost" href="/examples">See the ordering decide</a>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="wrap">
+    <p class="eyebrow">The five rules</p>
+    <h2>The five rules: the standard in practice</h2>
+    <p class="lead">The ordering is what AIQT holds to; the five rules are how an assistant applies
+      it, moment to moment. They ship in the chat skill you install today, and each one produces
+      something you can see. (The first two echo a famous pair on purpose.)</p>
+    <ol class="rules">
+      <li><b>Every catch is announced.</b>
+        <p>When a guardrail catches something (it blocks, flags, or refuses), the assistant tells
+          you which guardrail and what it caught. Silent passes stay quiet, so what reaches you is
+          signal, not noise.</p></li>
+      <li><b>The standard is re-anchored, visibly.</b>
+        <p>The assistant reminds itself that it must always follow AIQT, a short "AIQT check" it
+          states out loud, so that the standard was applied is itself something you can see.</p></li>
+      <li><b>Problems in scope are fixed before it calls the work done.</b>
+        <p>An issue the current work turns up, within what it is doing now, is fixed before the
+          assistant declares that piece finished.</p></li>
+      <li><b>Problems out of scope are fixed next, not dropped.</b>
+        <p>An issue it turns up but outside the current scope is carried to the next step rather
+          than forgotten (the piece in hand finishes first).</p></li>
+      <li><b>Underlying gaps become new guardrails.</b>
+        <p>When a gap let an issue through, the assistant does not just fix the one instance; it
+          adds a guardrail so that shape of issue is caught from then on. In a project that new
+          guardrail can be shared back, with your permission, so everyone's assistant improves.
+          This is how AIQT self-learns.</p></li>
+    </ol>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.6rem">
+      <a class="btn primary" href="/examples">See the ordering decide: the examples</a>
     </div>
   </div>
 </section>
