@@ -88,9 +88,8 @@ header.hero .lead{max-width:62ch; margin:0 auto 1.7rem}
 .btn.ghost:hover{text-decoration:none; background:var(--accent); color:var(--on-accent); border-color:transparent}
 
 /* internal page header (install, roadmap, developers, teams) */
-.pagehead{padding:3.75rem 0 1.25rem}
+.pagehead{padding-top:3.75rem; padding-bottom:1.25rem}
 .pagehead h1{max-width:22ch; margin:.2rem 0 1.15rem}
-.pagehead .lead{max-width:64ch}
 
 /* generic two-column grid of cards */
 .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1.1rem}
