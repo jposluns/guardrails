@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Add AIQT to your assistant</title>
-<meta name="description" content="Add AIQT to your chat assistant. Pick the AI you use and follow a few simple steps. No command line, no developer account, no GitHub knowledge needed. Claude, ChatGPT, and Copilot are among them.">
+<meta name="description" content="Add AIQT to your chat assistant. Pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, and follow a short guide for that platform. No command line, no developer account, no GitHub knowledge needed.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811s">
+<link rel="stylesheet" href="/styles.css?v=20260811t">
 <script src="/theme.js"></script>
 <link rel="canonical" href="https://aiqt.ai/install">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Add AIQT to your assistant">
-<meta property="og:description" content="Add AIQT to your chat assistant. Pick the AI you use and follow a few simple steps. No command line, no developer account, no GitHub knowledge needed. Claude, ChatGPT, and Copilot are among them.">
+<meta property="og:description" content="Add AIQT to your chat assistant. Pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, and follow a short guide for that platform. No command line, no developer account, no GitHub knowledge needed.">
 <meta property="og:url" content="https://aiqt.ai/install">
 <meta name="twitter:card" content="summary">
 </head>
@@ -32,158 +32,39 @@
 </div></nav>
 
 <main id="main">
-
 <div class="wrap pagehead">
   <p class="eyebrow">You and your chat assistant</p>
   <h1>Add AIQT to your assistant.</h1>
-  <p class="lead">Your assistant sounds just as confident when it is guessing as when it
-    knows. AIQT 1.0.0 holds it to a stated standard, and it is available now. Pick the AI you use below. You do
-    not need a command line, a developer account, or any knowledge of GitHub.</p>
+  <p class="lead">Your assistant sounds just as confident when it is guessing as when it knows.
+    AIQT 1.0.0 holds it to a stated standard, and it is available now. Pick the AI you use below and
+    follow a short, focused guide. You do not need a command line, a developer account, or any
+    knowledge of GitHub.</p>
 </div>
 
 <section id="pick">
   <div class="wrap">
     <p class="eyebrow">Pick your assistant</p>
     <h2>Choose the AI you use</h2>
-    <p class="lead">One skill file serves every assistant. Platforms differ in how they load it and in how closely their models follow instructions, so pick yours below for the exact steps.</p>
+    <p class="lead">One standard serves every assistant. Each guide is a single page with just the
+      steps for that platform, so you are not reading past the parts that do not apply to you.</p>
     <div class="platform-actions">
-      <a class="platform-button" href="#claude"><span class="platform-icon claude">C</span>
-        <span><strong>Set up in Claude</strong><small>Download and add the Skill</small></span></a>
-      <a class="platform-button" href="#chatgpt"><span class="platform-icon chatgpt">O</span>
-        <span><strong>Set up in ChatGPT</strong><small>Add it as your instructions</small></span></a>
-      <a class="platform-button" href="#copilot"><span class="platform-icon copilot">Co</span>
-        <span><strong>Set up in Copilot</strong><small>Add it to your assistant</small></span></a>
-      <a class="platform-button wide" href="#other"><span class="platform-icon guide">+</span>
+      <a class="platform-button" href="/install-claude"><span class="platform-icon claude">C</span>
+        <span><strong>Set up in Claude</strong><small>Upload the Skill</small></span></a>
+      <a class="platform-button" href="/install-chatgpt"><span class="platform-icon chatgpt">O</span>
+        <span><strong>Set up in ChatGPT</strong><small>Upload the Skill</small></span></a>
+      <a class="platform-button" href="/install-gemini"><span class="platform-icon gemini">G</span>
+        <span><strong>Set up in Gemini</strong><small>Create a Gem</small></span></a>
+      <a class="platform-button" href="/install-copilot"><span class="platform-icon copilot">Co</span>
+        <span><strong>Set up in Copilot</strong><small>Create an agent</small></span></a>
+      <a class="platform-button wide" href="/install-other"><span class="platform-icon guide">+</span>
         <span><strong>Any other assistant</strong><small>Use the portable instruction file</small></span></a>
       <a class="platform-button wide" href="https://github.com/jposluns/guardrails"><span class="platform-icon source">&lt;/&gt;</span>
         <span><strong>View the source on GitHub</strong><small>Read every rule and the licence</small></span></a>
     </div>
-  </div>
-</section>
-
-<section id="download">
-  <div class="wrap">
-    <p class="eyebrow">Step one</p>
-    <h2>Download the AIQT Skill</h2>
-    <p class="lead">Everything is in one file. Download it and keep it as it is.</p>
-    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
-      <a class="btn primary" href="/downloads/aiqt-skill.zip" download>Download the Skill (.zip)</a>
-    </div>
-    <p style="margin-top:1.2rem">Your browser saves a file named <code>aiqt-skill.zip</code>.
-      Do not unzip it. The Skill is prose instructions and reference material only: it contains
-      no executable code and makes no network calls. What it changes is how your assistant behaves in conversation, nothing else, and you can switch it off in your Skills list at any time.</p>
-    <p style="margin-top:.9rem">AIQT is a standard your assistant is required to follow, not a
-      guarantee the model is perfect: results still depend on the platform and model, and you
-      stay in charge. What it changes is what you can demand and check.</p>
-  </div>
-</section>
-
-<section id="claude">
-  <div class="wrap">
-    <p class="eyebrow">Claude</p>
-    <h2>Set up in Claude</h2>
-    <p class="lead">The recommended method. You need the <code>aiqt-skill.zip</code> from the
-      download step above.</p>
-    <ol class="steps">
-      <li><b>Turn on code execution first.</b> The Skills section does not appear without it. On the
-        Free, Pro, and Max plans, open Settings, then Capabilities, and enable code execution and
-        file creation. This is Claude's requirement for using any Skill; AIQT itself contains no
-        code to execute. Install from a desktop browser; the mobile apps are not documented to
-        support Skill upload.</li>
-      <li><b>Open Claude Skills.</b> Go to your Skills page, click the + button, then choose
-        + Create skill.</li>
-      <li><b>Click "Upload a skill".</b></li>
-      <li><b>Select the file.</b> Choose the <code>aiqt-skill.zip</code> you just downloaded.</li>
-      <li><b>Switch it on.</b> Make sure AIQT is switched on in your Skills list. To keep it on
-        for every turn, add the always-on instruction in the next step; you can switch the Skill off
-        at any time.</li>
-    </ol>
-    <p class="evidence-label" style="margin-top:1.4rem">If Skills are turned off: the Projects fallback</p>
-    <p>If your plan or organization has Skills disabled, use a Project instead. Download the
-      <a href="/downloads/aiqt-instructions.txt" download>portable instruction file</a>, create a
-      new Project named AIQT, upload the file to the Project's knowledge, and set the Project
-      instructions to apply AIQT to every response.</p>
-    <p style="margin-top:.9rem"><b>For a team on Claude:</b> an organization owner can enable code
-      execution and Skills in the Organization settings and upload the Skill once for the
-      organization. That is a Claude platform feature; AIQT adds no central deployment tooling of
-      its own yet (see the <a href="/teams">Teams &amp; Enterprise</a> path).</p>
-  </div>
-</section>
-
-<section id="chatgpt">
-  <div class="wrap">
-    <p class="eyebrow">ChatGPT</p>
-    <h2>Set up in ChatGPT</h2>
-    <p class="evidence-label">Tested steps: pending</p>
-    <p>We have not yet published a step-by-step tested path for ChatGPT. Both files below work
-      wherever the platform accepts them: add the Skill to a custom GPT or a project as its
-      instructions, or open the portable instruction file, copy it, and paste it in as your
-      assistant's instructions.</p>
-    <div class="installlinks">
-      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
-      <a href="/downloads/aiqt-skill.zip" download>The Skill (.zip)</a>
-    </div>
-  </div>
-</section>
-
-<section id="copilot">
-  <div class="wrap">
-    <p class="eyebrow">Copilot</p>
-    <h2>Set up in Copilot</h2>
-    <p class="evidence-label">Tested steps: pending</p>
-    <p>We have not yet published a step-by-step tested path for Copilot. Add the Skill or the
-      portable instruction file wherever Copilot lets you set its instructions or create an
-      agent; both carry the same standard.</p>
-    <div class="installlinks">
-      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
-      <a href="/downloads/aiqt-skill.zip" download>The Skill (.zip)</a>
-    </div>
-  </div>
-</section>
-
-<section id="other">
-  <div class="wrap">
-    <p class="eyebrow">Any other assistant</p>
-    <h2>Any assistant that accepts instructions</h2>
-    <p>Use the portable instruction file: open it, copy it, and paste it in wherever your
-      assistant lets you set its instructions.</p>
-    <div class="installlinks">
-      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
-      <a href="https://github.com/jposluns/guardrails">View the source on GitHub</a>
-    </div>
-  </div>
-</section>
-
-<section id="always-on">
-  <div class="wrap">
-    <p class="eyebrow">One more step, and it matters</p>
-    <h2>Tell your assistant to always use it</h2>
-    <p class="lead">A Skill is loaded when your assistant judges it relevant to the task. AIQT is
-      not task-specific: it is a standing standard you want applied to everything. So add one line
-      to your assistant's always-on instructions telling it to apply AIQT to every response.</p>
-    <ul class="clean">
-      <li><b>In Claude:</b> open Settings, then your personal preferences, and add a line such as
-        <i>"Always apply the AIQT skill to every response."</i> For a specific Project, add the same
-        line to that Project's instructions.</li>
-      <li><b>In ChatGPT or Copilot:</b> add the same line to your custom instructions, and to a
-        project or agent's instructions where you want it applied there.</li>
-    </ul>
-    <p style="margin-top:.9rem">Without this line, your assistant may apply AIQT only when it
-      happens to judge it relevant. With it, AIQT is on for every turn, which is what a standard is
-      for.</p>
-  </div>
-</section>
-
-<section id="verify">
-  <div class="wrap">
-    <p class="eyebrow">Confirm and control</p>
-    <h2>Check it is on, and switch it off</h2>
-    <p class="lead">To confirm AIQT is active, ask your assistant whether it is following AIQT
-      and which version.</p>
-    <p class="evidence-label">The exact confirming response: pending</p>
-    <p>To turn it off, remove or disable the Skill, or clear the instructions, in the same place
-      you added it. Removing it restores your assistant's default behaviour, and nothing else is
-      left behind.</p>
+    <p style="margin-top:1.3rem">AIQT is a standard your assistant is required to follow, not a
+      guarantee the model is perfect: results still depend on the platform and model, and you stay
+      in charge. What it changes is what you can demand and check. Both files it ships as are prose
+      instructions and reference material only, with no executable code and no network calls.</p>
   </div>
 </section>
 
@@ -195,23 +76,24 @@
     <div class="grid">
       <div class="card">
         <h3>No more confident bluffing</h3>
-        <p>Your assistant is required to back a factual claim with its source, or say when it cannot, and when a guardrail
-          catches something, it names the guardrail and what it caught.</p>
+        <p>Your assistant is required to back a factual claim with its source, or say when it
+          cannot, and when a guardrail catches something, it names the guardrail and what it
+          caught.</p>
       </div>
       <div class="card">
         <h3>No more guessing to please you</h3>
-        <p>When your assistant does not know, it says so. When a decision is yours, it
-          pauses and asks, instead of filling the gap with a plausible invention.</p>
+        <p>When your assistant does not know, it says so. When a decision is yours, it pauses and
+          asks, instead of filling the gap with a plausible invention.</p>
       </div>
       <div class="card">
         <h3>No more "done" that was not</h3>
-        <p>A "done" rests on a check that actually ran, so every finished claim comes with
-          a check you can point to.</p>
+        <p>A "done" rests on a check that actually ran, so every finished claim comes with a check
+          you can point to.</p>
       </div>
       <div class="card">
         <h3>No more quiet changes</h3>
-        <p>No weakened checks, no half-built work dressed up as finished, no invented names
-          or citations. Failures are surfaced to you first.</p>
+        <p>No weakened checks, no half-built work dressed up as finished, no invented names or
+          citations. Failures are surfaced to you first.</p>
       </div>
     </div>
   </div>
@@ -219,7 +101,7 @@
 
 <section id="cleanlanguage">
   <div class="wrap">
-    <p class="eyebrow">Once you are set up</p>
+    <p class="eyebrow">Also recommended</p>
     <h2>We also recommend Clean Language</h2>
     <p class="lead">AIQT keeps your assistant honest. <a href="https://cleanlanguage.ai">Clean
       Language</a> keeps its writing clean: a free editorial standard, from the same family, that
@@ -234,14 +116,13 @@
   <div class="wrap">
     <p class="eyebrow">Beyond chat</p>
     <h2>Writing code?</h2>
-    <p class="lead">The <a href="/development">development assistant (1.1.0, in
-      development)</a> brings the same standard into your repository: you give your coding
-      assistant a short setup prompt, it fetches the pack from GitHub, and a wizard walks you
-      through the rest. A team can also share one standard across every assistant it uses, on
-      the <a href="/teams">Teams &amp; Enterprise</a> path.</p>
+    <p class="lead">The <a href="/development">development assistant (1.1.0, in development)</a>
+      brings the same standard into your repository: you give your coding assistant a short setup
+      prompt, it fetches the pack from GitHub, and a wizard walks you through the rest. A team can
+      also share one standard across every assistant it uses, on the
+      <a href="/teams">Teams &amp; Enterprise</a> path.</p>
   </div>
 </section>
-
 </main>
 
 <footer><div class="wrap">

@@ -197,6 +197,7 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 .platform-icon.copilot{background:linear-gradient(135deg,#0a6ed1,#2ec6c2)}
 .platform-icon.guide{background:var(--accent)}
 .platform-icon.source{background:#4a5568; font-size:.92rem}
+.platform-icon.gemini{background:linear-gradient(135deg,#4285f4,#9b72cb)}
 
 /* secondary content-tab bar (row 2, cleanlanguage-style pills) */
 .subnav{border-bottom:1px solid var(--line); padding:.3rem 0 .7rem}
