@@ -6,7 +6,7 @@
 <title>AIQT: hold your AI assistant to a standard</title>
 <meta name="description" content="Tired of an AI assistant that sounds confident while wrong? AIQT is one skill you add to it, so it is required to check its work before calling anything done, admit what it does not know, and never change anything quietly. Open source, CC BY-SA 4.0.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811k">
+<link rel="stylesheet" href="/styles.css?v=20260811l">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -65,6 +65,7 @@
         <h3>You and your chat assistant</h3>
         <p>One copy and paste into Claude, ChatGPT, or Copilot. From then on, every
           conversation is held to the standard.</p>
+        <p style="color:var(--faint); font-size:.95rem; margin:.1rem 0 .2rem">Choose this if you use Claude, ChatGPT, or Copilot for everyday work.</p>
         <a class="btn primary" href="/install">Install AIQT</a>
       </div>
       <div class="path">
@@ -72,6 +73,7 @@
         <h3>Developers &amp; Coding</h3>
         <p>Install the governance core into your project. It sets itself up, generates the
           file each coding agent expects, and writes only inside its own directory.</p>
+        <p style="color:var(--faint); font-size:.95rem; margin:.1rem 0 .2rem">Choose this if you write code and want the standard in your repository.</p>
         <a class="btn primary" href="/development">For developers</a>
       </div>
       <div class="path">
@@ -79,6 +81,7 @@
         <h3>Teams &amp; Enterprise</h3>
         <p>One shared standard across every assistant your team uses, with central policy
           and reporting when an organization needs it.</p>
+        <p style="color:var(--faint); font-size:.95rem; margin:.1rem 0 .2rem">Choose this if you are evaluating AIQT for a team or organization.</p>
         <a class="btn primary" href="/teams">For teams</a>
       </div>
     </div>
@@ -123,6 +126,26 @@
   </div>
 </section>
 
+<section id="proof">
+  <div class="wrap">
+    <p class="eyebrow">See it in one moment</p>
+    <h2>The same everyday moment, both ways</h2>
+    <div class="example">
+      <h3>Drafting an email that quietly drops a point</h3>
+      <div class="compare">
+        <div class="col without"><p class="lbl">Without AIQT</p>
+          <p>You ask for a message that covers three things, and the draft reads beautifully. One
+            of the three is missing. You only find out after you have sent it.</p></div>
+        <div class="col with"><p class="lbl">With AIQT</p>
+          <p>Before calling the draft done, the assistant checks it against everything you asked
+            for. If a point will not fit, it says so and asks how you want to handle it.</p></div>
+      </div>
+    </div>
+    <p style="margin-top:1rem">Twelve more, for chat, coding, and the project's own history, are on
+      the <a href="/examples">examples page</a>.</p>
+  </div>
+</section>
+
 <section id="boundary">
   <div class="wrap">
     <p class="eyebrow">The honest boundary</p>
@@ -144,6 +167,15 @@
     <h2>The standard, in plain terms</h2>
     <p class="lead">Four things you can expect from an assistant that follows AIQT. Together
       they are the top tier of the ordering, and they always come first.</p>
+<ul class="clean">
+      <li><b style="color:var(--ink)">Accuracy:</b> claims match their sources, and "done" means a check actually ran.</li>
+      <li><b style="color:var(--ink)">Integrity:</b> nothing is faked, weakened, or changed silently.</li>
+      <li><b style="color:var(--ink)">Quality:</b> correct, consistent, and complete across every surface a change touches.</li>
+      <li><b style="color:var(--ink)">Trust:</b> earned by the record and granted by you, one evidenced claim at a time.</li>
+    </ul>
+    <details class="more">
+      <summary>The four facets, in full</summary>
+      <div class="inner">
     <div class="grid">
       <div class="card">
         <h3>Accuracy</h3>
@@ -169,13 +201,15 @@
           it, and failures are reported honestly.</p>
       </div>
     </div>
+      </div>
+    </details>
     <div style="margin-top:1.9rem; text-align:center">
       <div class="ordering">
         (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
       </div>
     </div>
     <p style="margin-top:1.5rem"><b style="color:var(--ink)">How decisions are made.</b> The
-      four facets above are the top tier, co-equal, with no ranking among them. Below them, in
+      four facets are the top tier, co-equal, with no ranking among them. Below them, in
       order, come three more: <b style="color:var(--ink)">Progress</b> (decide and act when the
       answer is already clear), <b style="color:var(--ink)">Speed</b> (do it with fewer wasted
       steps), and <b style="color:var(--ink)">Cost</b> (do it cheaply). When two of these pull

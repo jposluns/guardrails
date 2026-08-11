@@ -229,3 +229,11 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 .skip{position:absolute; left:-9999px; top:0; z-index:100; background:var(--accent); color:var(--on-accent);
   padding:.6rem 1rem; border-radius:0 0 8px 0; font-weight:700}
 .skip:focus{left:0; text-decoration:none}
+
+/* progressive-disclosure expander */
+details.more{border:1px solid var(--line); border-radius:12px; background:var(--panel-2); margin:1.3rem 0}
+details.more>summary{cursor:pointer; padding:1rem 1.2rem; font-weight:700; color:var(--ink); list-style:none}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::after{content:" \25B8"; color:var(--accent); font-weight:700}
+details.more[open]>summary::after{content:" \25BE"}
+details.more .inner{padding:0 1.2rem 1.2rem}
