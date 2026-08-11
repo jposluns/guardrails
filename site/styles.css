@@ -293,3 +293,42 @@ a:focus-visible,button:focus-visible,summary:focus-visible,.navtab:focus-visible
 }
 
 @media (prefers-reduced-motion: no-preference){ html{scroll-behavior:smooth} }
+
+/* ================= visual refresh (UI/UX review) ================= */
+:root, :root[data-theme="dark"]{ --warn:#f2a35c; --warn-tint:rgba(242,163,92,.07); --warn-line:rgba(242,163,92,.30); }
+:root[data-theme="light"]{ --warn:#b45309; --warn-tint:rgba(180,83,9,.06); --warn-line:rgba(180,83,9,.28); }
+@media (prefers-color-scheme: light){ :root:not([data-theme]){ --warn:#b45309; --warn-tint:rgba(180,83,9,.06); --warn-line:rgba(180,83,9,.28); } }
+
+/* gradient brand text (hero payoff line) */
+.grad{background:linear-gradient(90deg,var(--accent) 10%,var(--accent-2) 90%); -webkit-background-clip:text; background-clip:text; color:transparent}
+
+/* hero: bigger type + two-colour atmosphere + faint graph-paper grid (no mask; grid is scoped to the hero) */
+header.hero h1{font-size:clamp(2.6rem,5.4vw,4.4rem); font-weight:800; letter-spacing:-.03em; line-height:1.06}
+header.hero{ padding:5.5rem 0 4rem;
+  background:
+    radial-gradient(900px 380px at 22% -8%, rgba(94,176,239,.16), transparent 70%),
+    radial-gradient(900px 380px at 78% -8%, rgba(126,224,200,.12), transparent 70%),
+    repeating-linear-gradient(90deg, rgba(159,176,195,.05) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(0deg,  rgba(159,176,195,.05) 0 1px, transparent 1px 72px); }
+:root[data-theme="light"] header.hero{
+  background:
+    radial-gradient(900px 380px at 22% -8%, rgba(29,111,208,.10), transparent 70%),
+    radial-gradient(900px 380px at 78% -8%, rgba(15,118,110,.08), transparent 70%),
+    repeating-linear-gradient(90deg, rgba(65,80,106,.05) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(0deg,  rgba(65,80,106,.05) 0 1px, transparent 1px 72px); }
+
+/* warm 'Without AIQT' columns (one change transforms every compare pair) */
+.compare .without{ background:var(--warn-tint); border-color:var(--warn-line) }
+.compare .without .lbl{ color:var(--warn) }
+
+/* card hover life + section rhythm */
+.card,.path,.platform{transition:border-color .18s ease, transform .18s ease, box-shadow .18s ease}
+.card:hover,.path:hover,.platform:hover{border-color:var(--accent); transform:translateY(-2px); box-shadow:0 10px 28px rgba(0,0,0,.18)}
+:root[data-theme="light"] .card:hover,:root[data-theme="light"] .path:hover,:root[data-theme="light"] .platform:hover{box-shadow:0 10px 28px rgba(16,24,40,.08)}
+@media (prefers-reduced-motion: reduce){ .card,.path,.platform,.platform-button{transition:none} .card:hover,.path:hover,.platform:hover,.platform-button:hover{transform:none} }
+section{padding:3.25rem 0}
+.section-alt{background:var(--panel-2); border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
+
+/* sharper eyebrow (main engine of the repetition) + readable measure */
+.eyebrow{font-size:.84rem; letter-spacing:.16em}
+.lead{max-width:74ch}
