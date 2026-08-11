@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AIQT Development Assistant: governance that installs into your project</title>
-<meta name="description" content="AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. It writes only inside .working/aiqt/, so nothing else in your repository changes without your say-so.">
+<title>AIQT Development Assistant (1.1.0, in development): governance that installs into your project</title>
+<meta name="description" content="In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .working/aiqt/, so nothing else in your repository changes without your say-so.">
 <style>
   :root{
     --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
@@ -14,7 +14,7 @@
   @media (prefers-color-scheme: light){
     :root{
       --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
-      --ink:#101828; --muted:#41506a; --faint:#6b7d94;
+      --ink:#101828; --muted:#41506a; --faint:#54637a;
       --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
     }
   }
@@ -91,8 +91,8 @@
     flex-wrap:wrap; gap:.6rem 1rem}
   .brand{font-weight:700; color:var(--ink); letter-spacing:.02em}
   .brand:hover{text-decoration:none}
-  .navlinks{display:flex; flex-wrap:wrap; gap:.2rem .4rem}
-  .navlinks a{color:var(--muted); padding:.25rem .6rem; border-radius:7px}
+  .navlinks{display:flex; flex-wrap:wrap; gap:1.2rem}
+  .navlinks a{color:var(--muted); font-size:.95rem}
   .navlinks a:hover{color:var(--ink); text-decoration:none}
 
   /* page-specific: directory tree */
@@ -199,12 +199,15 @@
       updater's only write location, and a guard enforces that: any attempted write outside
       <code>.working/aiqt/core/</code> is refused. Nothing else in your repository changes
       without your say-so.</p>
-    <p>That boundary is the point. A tool that updates itself inside your repository earns a
-      hard question: what else can it touch? With AIQT you can check the answer yourself. The write surface is one directory, the guard refuses everything outside it,
-      and a diff after any update shows changes in exactly one place. Your source, your
-      dependencies, your CI configuration, and your own <code>config.md</code> sit outside
-      the write surface entirely. Reviewing an AIQT update takes the same shape as reviewing
-      any other change: read the diff, and the diff is small and contained.</p>
+    <p>A tool that updates itself inside your repository earns a
+      hard question: what else can it touch? With AIQT you can check the answer yourself.
+      The updater writes only inside <code>.working/aiqt/core/</code>, the guard refuses
+      every write outside it, and a diff after any update shows changes in exactly one
+      place. The agent files are created at setup, where each tool reads them, and setup
+      shows you what it creates. Your source, your dependencies, your CI configuration, and
+      your own <code>config.md</code> sit outside the updater's write surface entirely.
+      Reviewing an AIQT update takes the same shape as reviewing any other change: read the
+      diff, and the diff is small and contained.</p>
   </div>
 </section>
 
@@ -214,16 +217,11 @@
     <p class="lead">Two commands own the lifecycle: a wizard that sets the project up, and a
       doctor that verifies the install.</p>
     <ol class="steps">
-      <li><b>The wizard sets it up.</b> It creates <code>.working/aiqt/</code>, walks you
-        through <code>config.md</code>, and generates the agent files from the governance
-        core and your choices. Setup is a conversation with defaults, and every choice lands
-        in a file you can read.</li>
-      <li><b>The doctor verifies it.</b> It checks that the install is present, complete,
-        and consistent: the directory is intact, the generated files match the core they
-        derive from, and the guard is in place. This is the ordering applied to the tool
-        itself: "installed" means a check actually ran, and the doctor is that check. Run it
-        any time; a clean bill of health is an observation, and a failure is reported
-        plainly with what to fix.</li>
+      <li><b>The wizard sets it up.</b> It sets the project up, creating
+        <code>.working/aiqt/</code> and the agent files.</li>
+      <li><b>The doctor verifies it.</b> It verifies that the install is present and
+        consistent. This is the ordering applied to the tool itself: "installed" means a
+        check actually ran, and the doctor is that check.</li>
     </ol>
   </div>
 </section>
@@ -261,8 +259,8 @@
       apply to it. For each source you see the facts a decision needs: what it covers, its
       licence, when it was last reviewed, and the gaps it leaves. Then you choose, taking
       all that apply or deciding one by one. AIQT lists a source and shows the facts so you
-      can decide, and it credits and links out to the people who do that work. Discovery,
-      not endorsement.</p>
+      can decide, and it credits and links out to the people who do that work. You discover
+      the sources and you decide whether to use them.</p>
     <ul class="clean">
       <li><b style="color:var(--ink)">Coverage:</b> what the source addresses in your stack.</li>
       <li><b style="color:var(--ink)">Licence:</b> the terms it is published under.</li>
@@ -280,7 +278,7 @@
       <span class="pill now">Available now</span>
       <h3>The governance core, and the chat assistant</h3>
       <p>Everything 1.1.0 installs already exists as the pack: the ordering, the
-        disciplines, the universal skill, and the thin security baselines. The
+        disciplines, and the universal skill. The
         <a href="/draft">chat assistant (1.0.0)</a> runs this core today, so the standard
         your project will adopt is the one you can hold a chat assistant to right now, and
         the pack is open to read in full.</p>
