@@ -94,9 +94,9 @@
         + Create skill.</li>
       <li><b>Click "Upload a skill".</b></li>
       <li><b>Select the file.</b> Choose the <code>aiqt-skill.zip</code> you just downloaded.</li>
-      <li><b>Switch it on.</b> Make sure AIQT is switched on in your Skills list. That is it: start
-        a chat and every conversation is held to the standard, and you can switch the Skill off at
-        any time.</li>
+      <li><b>Switch it on.</b> Make sure AIQT is switched on in your Skills list. To keep it on
+        for every turn, add the always-on instruction in the next step; you can switch the Skill off
+        at any time.</li>
     </ol>
     <p class="evidence-label" style="margin-top:1.4rem">If Skills are turned off: the Projects fallback</p>
     <p>If your plan or organization has Skills disabled, use a Project instead. Download the
@@ -151,6 +151,26 @@
       <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file</a>
       <a href="https://github.com/jposluns/guardrails">View the source on GitHub</a>
     </div>
+  </div>
+</section>
+
+<section id="always-on">
+  <div class="wrap">
+    <p class="eyebrow">One more step, and it matters</p>
+    <h2>Tell your assistant to always use it</h2>
+    <p class="lead">A Skill is loaded when your assistant judges it relevant to the task. AIQT is
+      not task-specific: it is a standing standard you want applied to everything. So add one line
+      to your assistant's always-on instructions telling it to apply AIQT to every response.</p>
+    <ul class="clean">
+      <li><b>In Claude:</b> open Settings, then your personal preferences, and add a line such as
+        <i>"Always apply the AIQT skill to every response."</i> For a specific Project, add the same
+        line to that Project's instructions.</li>
+      <li><b>In ChatGPT or Copilot:</b> add the same line to your custom instructions, and to a
+        project or agent's instructions where you want it applied there.</li>
+    </ul>
+    <p style="margin-top:.9rem">Without this line, your assistant may apply AIQT only when it
+      happens to judge it relevant. With it, AIQT is on for every turn, which is what a standard is
+      for.</p>
   </div>
 </section>
 
