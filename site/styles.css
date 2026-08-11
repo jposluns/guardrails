@@ -1,0 +1,145 @@
+/* AIQT site — shared stylesheet.
+   AIQT palette (dark default + light) with a cleanlanguage.ai-scale type system:
+   Inter + system fallback, large headings, wide hero, generous whitespace, and a
+   teal "eyebrow" kicker above every section. */
+
+:root{
+  --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
+  --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
+  --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
+    --ink:#101828; --muted:#41506a; --faint:#54637a;
+    --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0d9488;
+  }
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  margin:0; background:var(--bg); color:var(--ink);
+  font-size:1.06rem; line-height:1.62; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent); text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1040px; margin:0 auto; padding:0 1.5rem}
+
+section{padding:4.75rem 0}
+h1,h2,h3{line-height:1.12; letter-spacing:-.025em; font-weight:750}
+h1{font-size:clamp(2.1rem,4vw,3.2rem)}
+h2{font-size:clamp(1.85rem,3.2vw,2.75rem); margin:0 0 1.15rem}
+h3{font-size:1.3rem; margin:0 0 .5rem}
+p{color:var(--muted); margin:0 0 1.05rem}
+.lead{font-size:clamp(1.1rem,1.5vw,1.3rem); color:var(--ink); line-height:1.55}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
+
+/* the teal kicker above every section */
+.eyebrow{color:var(--accent-2); font-weight:800; letter-spacing:.12em;
+  text-transform:uppercase; font-size:.9rem; margin:0 0 .95rem}
+
+/* top navigation */
+.topnav{border-bottom:1px solid var(--line); padding:1rem 0}
+.navrow{display:flex; justify-content:space-between; align-items:center;
+  flex-wrap:wrap; gap:.7rem}
+.brand{font-weight:800; font-size:1.15rem; color:var(--ink); letter-spacing:.02em}
+.brand:hover{text-decoration:none}
+.navlinks{display:flex; flex-wrap:wrap; gap:.7rem; align-items:center}
+.navlinks a{color:var(--muted); font-size:.96rem}
+.navlinks a.plain:hover{color:var(--ink); text-decoration:none}
+/* the two divergent-path links rendered as buttons */
+.navlinks a.navbtn{color:var(--ink); font-weight:650; padding:.45rem 1rem;
+  border:1px solid var(--line); border-radius:999px; background:var(--panel)}
+.navlinks a.navbtn:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
+
+/* hero */
+header.hero{padding:6rem 0 4.5rem; text-align:center; background:
+  radial-gradient(1200px 420px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
+header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem; max-width:680px}
+header.hero .lead{max-width:62ch; margin:0 auto 1.7rem}
+.ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:.8rem 1.15rem; color:var(--ink); font-size:1.02rem; margin-top:.4rem}
+.ordering .tier{color:var(--accent-2); font-weight:700}
+.orderingnote{font-size:.9rem; color:var(--faint); margin-top:.7rem}
+.cta{margin-top:2.1rem; display:flex; gap:.85rem; justify-content:center; flex-wrap:wrap}
+.btn{display:inline-block; padding:.8rem 1.5rem; border-radius:10px; font-weight:650;
+  border:1px solid var(--line); font-size:1.02rem}
+.btn.primary{background:var(--accent); color:#08111f; border-color:transparent}
+.btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
+.btn.ghost{background:transparent; color:var(--ink)}
+.btn.ghost:hover{text-decoration:none; border-color:var(--accent); color:var(--accent)}
+
+/* internal page header (install, roadmap, developers, teams) */
+.pagehead{padding:3.75rem 0 1.25rem}
+.pagehead h1{max-width:22ch; margin:.2rem 0 1.15rem}
+.pagehead .lead{max-width:64ch}
+
+/* generic two-column grid of cards */
+.grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1.1rem}
+@media (max-width:640px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1.5rem 1.6rem}
+.card h3{color:var(--ink)}
+.card p{margin:0}
+
+/* three divergent paths */
+.paths{display:grid; grid-template-columns:repeat(3,1fr); gap:1.1rem}
+@media (max-width:760px){.paths{grid-template-columns:1fr}}
+.path{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1.5rem 1.6rem; display:flex; flex-direction:column; gap:.6rem}
+.path h3{margin:0}
+.path p{margin:0; flex:1}
+.path .btn{align-self:flex-start; margin-top:.3rem; padding:.6rem 1.2rem; font-size:.96rem}
+
+/* platform quick-start (install page) */
+.platforms{display:grid; grid-template-columns:repeat(3,1fr); gap:1.1rem}
+@media (max-width:760px){.platforms{grid-template-columns:1fr}}
+.platform{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1.5rem 1.6rem; display:flex; flex-direction:column; gap:.7rem}
+.platform h3{margin:0}
+.platform p{margin:0; flex:1}
+.platform .btn{align-self:flex-start; padding:.55rem 1.1rem; font-size:.94rem}
+.installlinks{margin-top:1.4rem; display:flex; gap:1.8rem; flex-wrap:wrap}
+.installlinks a{font-weight:650}
+
+/* numbered lists: rules and setup steps */
+ol.rules,ol.steps{counter-reset:r; list-style:none; padding:0; margin:0}
+ol.rules li,ol.steps li{background:var(--panel-2); border:1px solid var(--line);
+  border-radius:12px; padding:1.1rem 1.2rem 1.1rem 3.5rem; position:relative; margin:.75rem 0}
+ol.rules li::before,ol.steps li::before{counter-increment:r; content:counter(r);
+  position:absolute; left:1.05rem; top:1.05rem; width:1.7rem; height:1.7rem; border-radius:50%;
+  color:#08111f; font-weight:700; font-size:.92rem; display:flex; align-items:center;
+  justify-content:center}
+ol.rules li::before{background:var(--accent)}
+ol.steps li::before{background:var(--accent-2)}
+ol.rules b,ol.steps b{color:var(--ink)}
+ol.rules p,ol.steps li{color:var(--muted)}
+ol.rules p{margin:.3rem 0 0}
+
+ul.clean{margin:.5rem 0 0; padding-left:1.2rem}
+ul.clean li{margin:.35rem 0; color:var(--muted)}
+
+/* directory tree (development page) */
+.tree{background:var(--panel-2); border:1px solid var(--line); border-radius:14px;
+  padding:1.3rem 1.5rem; overflow-x:auto; margin:1.5rem 0 1rem}
+.tree pre{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.94rem; line-height:1.8; color:var(--muted)}
+.tree .dir{color:var(--ink); font-weight:600}
+.tree .yours{color:var(--accent-2); font-weight:600}
+.tree .updater{color:var(--accent); font-weight:600}
+.tree .note{color:var(--faint)}
+
+/* status pills */
+.pill{display:inline-block; font-size:.76rem; font-weight:700; letter-spacing:.04em;
+  text-transform:uppercase; padding:.24rem .7rem; border-radius:999px; margin-bottom:.2rem;
+  align-self:flex-start}
+.pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
+.pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
+.pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
+.idea-note{font-size:.9rem; color:var(--faint)}
+
+footer{border-top:1px solid var(--line); padding:2.6rem 0 3.2rem; text-align:center; margin-top:2rem}
+footer p{color:var(--faint); font-size:.92rem; margin:.35rem 0}
