@@ -6,7 +6,7 @@
 <title>AIQT Development Assistant (1.1.0, in development): governance that installs into your project</title>
 <meta name="description" content="In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811p">
+<link rel="stylesheet" href="/styles.css?v=20260811q">
 <script src="/theme.js"></script>
 </head>
 <body>
@@ -99,23 +99,24 @@
       five rules are how the assistant applies the ordering, change by change, in the 1.1.0
       design, and each one produces something you can see in the console. They are scoped to
       issues the active work detects or causes, not to your whole backlog, so following them
-      never turns one change into a cleanup crusade.</p>
+      never turns one change into a cleanup crusade. The first two rules echo a famous pair on
+      purpose: you talk about AIQT.</p>
     <ol class="rules">
-      <li><b>The first rule of AIQT is: you talk about AIQT.</b>
+      <li><b>Every catch is announced.</b>
         <p>When a guardrail catches something (it blocks, flags, or refuses an action), the
           assistant surfaces it in the console: which guardrail, and what it caught. Silent
           passes are not surfaced, so the console carries signal, not a firehose.</p></li>
-      <li><b>The second rule of AIQT is: you talk about AIQT.</b>
+      <li><b>The standard is visibly re-anchored.</b>
         <p>The assistant reminds itself that it must always follow AIQT: a short "AIQT check"
           self-reminder, at least once per change, self-acknowledged, so that the standard was
           applied is itself something you can see.</p></li>
-      <li><b>The third rule of AIQT is: fix issues.</b>
+      <li><b>Issues in scope are fixed before the change ships.</b>
         <p>An issue detected or caused by the active work, and within the current change's
           scope, is fixed before that change merges.</p></li>
-      <li><b>The fourth rule of AIQT is: fix other issues.</b>
+      <li><b>Issues out of scope are fixed next.</b>
         <p>An issue detected or caused by the active work but outside the current change's
           scope is fixed in the next change (the current change finishes first).</p></li>
-      <li><b>The fifth and final rule of AIQT is: fix underlying issues, and share the fix.</b>
+      <li><b>Underlying gaps become guardrails, and the fix can be shared.</b>
         <p>When the assistant caused the issue through a guardrail gap, it also creates or fixes
           a guardrail so it should not recur, additive to rules three and four: the instance is
           still fixed. Then, if your configuration permits and with your permission, the new
