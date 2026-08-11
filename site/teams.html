@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIQT for Teams &amp; Enterprise: one governance standard your whole team shares</title>
 <meta name="description" content="AIQT gives a team one shared governance standard for AI-assisted work, portable across tools, with claims that trace to evidence and overrides that are logged. Plus the ideas we are considering for organizations.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 
@@ -17,17 +19,18 @@
     <a class="navbtn" href="/teams">Teams &amp; Enterprise</a>
     <a class="plain" href="/roadmap">Roadmap</a>
     <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
   </div>
 </div></nav>
 
 <div class="wrap pagehead">
     <p class="eyebrow">For teams and organizations</p>
     <h1>One standard, shared by every assistant your team uses.</h1>
-    <p class="lead">AIQT gives your team a single governance standard for AI-assisted work.
-      The same skill loads separately into Claude, ChatGPT, or Copilot, so the same rules
-      apply whichever assistant a colleague uses. And because the pack is published under
-      CC BY-SA, a fix one team contributes can be reused by every other team under the same
-      licence.</p>
+    <p class="lead">Right now, the quality of your team's AI-assisted work depends on who did
+      it and which tool they used. AIQT replaces that with a single governance standard: the
+      same skill loads into Claude, ChatGPT, or Copilot, so the same rules apply whichever
+      assistant a colleague uses. And because the pack is published under CC BY-SA, a fix one
+      team contributes can be reused by every other team under the same licence.</p>
     <div class="ordering">
       (<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost
     </div>
@@ -36,6 +39,41 @@
       <a class="btn ghost" href="#ideas">Ideas we are considering</a>
     </div>
 </div>
+
+<section id="value">
+  <div class="wrap">
+    <p class="eyebrow">The value proposition</p>
+    <h2>What adopting AIQT across a team actually gets you</h2>
+    <p class="lead">One definition of "done", applied by every assistant, with a record behind
+      it. That is the whole proposition, and here is what it changes.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Consistency you did not have to police</h3>
+        <p>Every assistant on the team works to the same ordering, decided once, in advance.
+          A lead stops re-arguing quality versus speed on every deadline, because the call
+          is already made and every assistant already follows it.</p>
+      </div>
+      <div class="card">
+        <h3>Sign-off backed by evidence</h3>
+        <p>Claims trace to sources, catches are named, overrides are logged with a way to
+          revert them. Whoever approves AI-assisted work approves something they can check,
+          not something they have to take on faith.</p>
+      </div>
+      <div class="card">
+        <h3>A standard that survives tool changes</h3>
+        <p>The standard is portable across assistants and toolchains. Swap Claude for
+          ChatGPT, or add Copilot, and the rules travel; your team's definition of "done"
+          is not locked to any vendor.</p>
+      </div>
+      <div class="card">
+        <h3>Quality that compounds</h3>
+        <p>When a gap lets an issue through, the guardrail is fixed so it should not recur,
+          and teams that opt in can share the fix back. Under the ShareAlike licence, one
+          team's lesson becomes every team's guardrail.</p>
+      </div>
+    </div>
+  </div>
+</section>
 
 <section id="today">
   <div class="wrap">
@@ -50,7 +88,7 @@
         <h3>One standard across people and tools</h3>
         <p>AIQT 1.0.0 is one skill anyone on the team loads into a chat assistant that
           accepts one. From then on, every assistant is held to the same stated standard:
-          claims match their sources, checks are kept at full strength, and work is finished only once a check confirms it. A team can include the skill in its onboarding, so a new joiner works to the same standard from day one.</p>
+          claims match their sources, checks are kept at full strength, and work is finished only once a check confirms it. Put the skill in your onboarding and a new joiner works to the same standard from day one.</p>
       </div>
       <div class="card">
         <h3>Work you can audit</h3>
@@ -61,7 +99,7 @@
       </div>
       <div class="card">
         <h3>A record you can rely on</h3>
-        <p>Trust is warranted by the record and granted by a person. Since the record shows
+        <p>Trust is granted by a person, and earned by the record. Because the record shows
           what was verified, what was overridden, and what failed, a manager signing off on
           AI-assisted work is signing off on evidence they can check.</p>
       </div>
