@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Add AIQT to your assistant</title>
-<meta name="description" content="Add AIQT to your chat assistant in a few simple steps: get the skill, copy it, give it to your assistant as its instructions. One skill, the same everywhere. Claude, ChatGPT, and Copilot are among them.">
+<meta name="description" content="Install AIQT in your chat assistant in a few clicks: download the Skill, upload it, switch it on. No command line, no developer account, no GitHub knowledge needed. Claude, ChatGPT, and Copilot are among them.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css">
 <script src="/theme.js"></script>
@@ -25,67 +25,56 @@
 
 <div class="wrap pagehead">
   <p class="eyebrow">You and your chat assistant</p>
-  <h1>Add AIQT to your assistant. It is one copy and paste.</h1>
+  <h1>Add AIQT to your assistant. It is a few clicks.</h1>
   <p class="lead">Your assistant sounds just as confident when it is guessing as when it
-    knows. AIQT 1.0.0 fixes that, and it is available now. The whole thing is one skill: a
-    single file of plain, readable text. If you can copy and paste, you can do this.</p>
+    knows. AIQT 1.0.0 fixes that, and it is available now. You download one file and add it to
+    your assistant. You do not need a command line, a developer account, or any knowledge of
+    GitHub.</p>
 </div>
 
-<section id="steps">
+<section id="download">
   <div class="wrap">
-    <p class="eyebrow">Here is what you are about to do</p>
-    <h2>A few steps, none of them technical</h2>
-    <p class="lead">You are going to get one file, copy it, and hand it to your assistant as
-      its instructions. That is the entire install. There is nothing to download and run,
-      nothing to configure, and no account to create.</p>
-    <ol class="steps">
-      <li><b>Get the skill.</b> It lives in the guardrails repository as one file of plain
-        text. Open it. You can read every word of what you are about to give your
-        assistant, and we would encourage you to.</li>
-      <li><b>Copy it.</b> Select the whole file and copy it, exactly the way you copy
-        anything else.</li>
-      <li><b>Give it to your assistant.</b> Paste it in as your assistant's instructions
-        (some assistants call this a skill). Wherever your assistant lets you set its
-        instructions, that is where this goes.</li>
-      <li><b>That is it.</b> Nothing else to set up. From then on, every conversation is
-        held to the standard, and you can remove the skill at any time.</li>
-    </ol>
-    <p style="margin-top:1.2rem">Worried about breaking something? You cannot. The skill is
-      text, not software: it does not install anything, change anything, or run anything.
-      It simply tells your assistant the standard it is now held to.</p>
+    <p class="eyebrow">Step one</p>
+    <h2>Download the AIQT Skill</h2>
+    <p class="lead">Everything is in one file. Download it and keep it as it is.</p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
+      <a class="btn primary" href="/downloads/aiqt-skill.zip" download>Download the Skill (.zip)</a>
+    </div>
+    <p style="margin-top:1.2rem">Your browser saves a file named <code>aiqt-skill.zip</code>.
+      Do not unzip it. The Skill is prose instructions and reference material only: it contains
+      no executable code and makes no network calls. You cannot break anything with it.</p>
   </div>
 </section>
 
-<section id="platforms">
+<section id="add">
   <div class="wrap">
-    <p class="eyebrow">Pick your assistant</p>
-    <h2>One skill, whichever assistant you use</h2>
-    <p class="lead">There is no special version to hunt for. The same skill works the same
-      way in every chat assistant that accepts one. Claude, ChatGPT, and Copilot are among
-      them.</p>
-    <div class="platforms">
-      <div class="platform">
-        <h3>Claude</h3>
-        <p>Give Claude the skill as its instructions and carry on chatting. Every
-          conversation after that is held to the standard.</p>
-        <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
-      </div>
-      <div class="platform">
-        <h3>ChatGPT</h3>
-        <p>Give ChatGPT the same skill as its working instructions. The same standard,
-          stated the same way.</p>
-        <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
-      </div>
-      <div class="platform">
-        <h3>Copilot</h3>
-        <p>Give Copilot the skill as its instructions. The standard travels with your
-          conversations, in chat and alongside your code.</p>
-        <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
-      </div>
-    </div>
+    <p class="eyebrow">Step two</p>
+    <h2>Add it to your assistant</h2>
+    <p class="lead">Pick the assistant you use. The same Skill works the same way in every
+      assistant that accepts one. Claude, ChatGPT, and Copilot are among them.</p>
+
+    <h3 style="margin-top:1.6rem">Claude (the recommended method)</h3>
+    <ol class="steps">
+      <li><b>Turn on code execution first.</b> The Skills section does not appear without it.
+        In Claude, open Settings, then Capabilities, and enable code execution and file
+        creation. Install from a desktop browser; the mobile apps are not documented to
+        support Skill upload.</li>
+      <li><b>Open your Skills, and create one.</b> Go to Claude's Skills page, choose to
+        create a new Skill, and pick "upload".</li>
+      <li><b>Upload the file.</b> Select the <code>aiqt-skill.zip</code> you just downloaded,
+        then make sure AIQT is switched on in your Skills list.</li>
+      <li><b>That is it.</b> Start a chat and every conversation is held to the standard. You
+        can switch the Skill off at any time.</li>
+    </ol>
+
+    <h3 style="margin-top:1.8rem">ChatGPT, Copilot, and other assistants</h3>
+    <p>For an assistant that supports its own Skills or a custom agent, add the downloaded
+      Skill the same way that assistant adds any other. For anything else, use the portable
+      instruction file below: open it, copy it, and paste it in wherever your assistant lets
+      you set its instructions.</p>
     <div class="installlinks">
-      <a href="https://github.com/jposluns/guardrails">General instructions for any assistant</a>
-      <a href="https://github.com/jposluns/guardrails">View on GitHub</a>
+      <a href="/downloads/aiqt-instructions.txt" download>Portable instruction file (any assistant)</a>
+      <a href="https://github.com/jposluns/guardrails">View the source on GitHub</a>
     </div>
   </div>
 </section>
@@ -125,10 +114,10 @@
     <p class="eyebrow">Beyond chat</p>
     <h2>Writing code?</h2>
     <p class="lead">The <a href="/development">development assistant (1.1.0, in
-      development)</a> brings the same standard into your repository: it generates the file
-      each coding agent reads and writes only inside its own directory. And a team can share
-      one standard across every assistant it uses, on the <a href="/teams">Teams &amp;
-      Enterprise</a> path.</p>
+      development)</a> brings the same standard into your repository: you give your coding
+      assistant a short setup prompt, it fetches the pack from GitHub, and a wizard walks you
+      through the rest. A team can also share one standard across every assistant it uses, on
+      the <a href="/teams">Teams &amp; Enterprise</a> path.</p>
   </div>
 </section>
 
