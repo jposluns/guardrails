@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Add AIQT to your assistant</title>
-<meta name="description" content="Install AIQT into your chat assistant. AIQT 1.0.0 is one skill for chat assistants; the install is the same everywhere. Claude, ChatGPT, and Copilot are among them.">
+<meta name="description" content="Add AIQT to your chat assistant in a few simple steps: get the skill, copy it, give it to your assistant as its instructions. One skill, the same everywhere. Claude, ChatGPT, and Copilot are among them.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css">
 <script src="/theme.js"></script>
@@ -25,34 +25,60 @@
 
 <div class="wrap pagehead">
   <p class="eyebrow">You and your chat assistant</p>
-  <h1>Add AIQT to your assistant.</h1>
-  <p class="lead">Your assistant will sound just as confident when it is guessing as when it
-    knows. AIQT 1.0.0 fixes that, and it is available now as one skill for chat assistants. The
-    install is the same everywhere: get the skill from the guardrails repository and add it to
-    any assistant that can take one. Claude, ChatGPT, and Copilot are among them. From then on,
-    every conversation is held to the standard.</p>
+  <h1>Add AIQT to your assistant. It is one copy and paste.</h1>
+  <p class="lead">Your assistant sounds just as confident when it is guessing as when it
+    knows. AIQT 1.0.0 fixes that, and it is available now. The whole thing is one skill: a
+    single file of plain, readable text. If you can copy and paste, you can do this.</p>
 </div>
+
+<section id="steps">
+  <div class="wrap">
+    <p class="eyebrow">Here is what you are about to do</p>
+    <h2>A few steps, none of them technical</h2>
+    <p class="lead">You are going to get one file, copy it, and hand it to your assistant as
+      its instructions. That is the entire install. There is nothing to download and run,
+      nothing to configure, and no account to create.</p>
+    <ol class="steps">
+      <li><b>Get the skill.</b> It lives in the guardrails repository as one file of plain
+        text. Open it. You can read every word of what you are about to give your
+        assistant, and we would encourage you to.</li>
+      <li><b>Copy it.</b> Select the whole file and copy it, exactly the way you copy
+        anything else.</li>
+      <li><b>Give it to your assistant.</b> Paste it in as your assistant's instructions
+        (some assistants call this a skill). Wherever your assistant lets you set its
+        instructions, that is where this goes.</li>
+      <li><b>That is it.</b> Nothing else to set up. From then on, every conversation is
+        held to the standard, and you can remove the skill at any time.</li>
+    </ol>
+    <p style="margin-top:1.2rem">Worried about breaking something? You cannot. The skill is
+      text, not software: it does not install anything, change anything, or run anything.
+      It simply tells your assistant the standard it is now held to.</p>
+  </div>
+</section>
 
 <section id="platforms">
   <div class="wrap">
     <p class="eyebrow">Pick your assistant</p>
-    <h2>Three quick starts</h2>
+    <h2>One skill, whichever assistant you use</h2>
+    <p class="lead">There is no special version to hunt for. The same skill works the same
+      way in every chat assistant that accepts one. Claude, ChatGPT, and Copilot are among
+      them.</p>
     <div class="platforms">
       <div class="platform">
         <h3>Claude</h3>
-        <p>Get the AIQT skill from the repository and add it to Claude. From then on, every
-          conversation is held to the standard.</p>
+        <p>Give Claude the skill as its instructions and carry on chatting. Every
+          conversation after that is held to the standard.</p>
         <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
       </div>
       <div class="platform">
         <h3>ChatGPT</h3>
-        <p>Get the same skill and give it to ChatGPT as its working instructions. It follows
-          the same standard, stated the same way.</p>
+        <p>Give ChatGPT the same skill as its working instructions. The same standard,
+          stated the same way.</p>
         <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
       </div>
       <div class="platform">
         <h3>Copilot</h3>
-        <p>Get the skill and load it into Copilot. The standard travels with your
+        <p>Give Copilot the skill as its instructions. The standard travels with your
           conversations, in chat and alongside your code.</p>
         <a class="btn ghost" href="https://github.com/jposluns/guardrails">Get the skill</a>
       </div>
@@ -68,42 +94,40 @@
   <div class="wrap">
     <p class="eyebrow">What you get</p>
     <h2>What changes once it is on</h2>
+    <p class="lead">The irritations that brought you to this page are exactly what stops.</p>
     <div class="grid">
       <div class="card">
-        <h3>It shows its work</h3>
+        <h3>No more confident bluffing</h3>
         <p>Every factual claim points back to a source, and when a guardrail catches
           something, your assistant names the guardrail and what it caught.</p>
       </div>
       <div class="card">
-        <h3>It stops and asks</h3>
+        <h3>No more guessing to please you</h3>
         <p>When your assistant does not know, it says so. When a decision is yours, it
           pauses and asks, instead of filling the gap with a plausible invention.</p>
       </div>
       <div class="card">
-        <h3>"Done" is verified</h3>
-        <p>A "done" rests on a check that actually ran, so every finished claim comes with a
-          check you can point to.</p>
+        <h3>No more "done" that was not</h3>
+        <p>A "done" rests on a check that actually ran, so every finished claim comes with
+          a check you can point to.</p>
       </div>
       <div class="card">
-        <h3>Nothing changes silently</h3>
+        <h3>No more quiet changes</h3>
         <p>No weakened checks, no half-built work dressed up as finished, no invented names
-          or citations. Failures are surfaced first.</p>
+          or citations. Failures are surfaced to you first.</p>
       </div>
     </div>
-    <p style="margin-top:1.5rem">For the platforms we test, we publish a conformance report:
-      how that platform performed under the standard, so you can see the results before you
-      rely on it.</p>
   </div>
 </section>
 
 <section id="next">
   <div class="wrap">
     <p class="eyebrow">Beyond chat</p>
-    <h2>Working in a codebase?</h2>
-    <p class="lead">Writing code? The <a href="/development">development assistant (1.1.0, in
+    <h2>Writing code?</h2>
+    <p class="lead">The <a href="/development">development assistant (1.1.0, in
       development)</a> brings the same standard into your repository: it generates the file
-      each coding agent reads and writes only inside its own directory. Teams can share one
-      standard across every assistant they use, on the <a href="/teams">Teams &amp;
+      each coding agent reads and writes only inside its own directory. And a team can share
+      one standard across every assistant it uses, on the <a href="/teams">Teams &amp;
       Enterprise</a> path.</p>
   </div>
 </section>
