@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIQT evidence and assurance: the proof behind the claims</title>
+<meta name="description" content="The evidence behind AIQT: the 1.0.0 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="/styles.css?v=20260811j">
+<script src="/theme.js"></script>
+</head>
+<body>
+
+<nav class="topnav"><div class="wrap navrow">
+  <a class="brand" href="/draft">AIQT</a>
+  <div class="navlinks">
+    <a class="plain" href="/roadmap">Roadmap</a>
+    <a class="plain" href="/about">About</a>
+    <a class="plain" href="https://github.com/jposluns/guardrails">GitHub</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
+  </div>
+</div></nav>
+<div class="subnav"><div class="wrap subrow">
+  <a href="/install">Chat assistant</a>
+  <a href="/development">Developers &amp; Coding</a>
+  <a href="/teams">Teams &amp; Enterprise</a>
+  <a href="/examples">Examples</a>
+</div></div>
+
+<div class="wrap pagehead">
+  <p class="eyebrow">Evidence and assurance</p>
+  <h1>The proof behind the claims.</h1>
+  <p class="lead">AIQT asks your assistant to back a claim with evidence, so this page holds AIQT
+    to the same rule. Here is what is available now, what has been tested, and what is
+    documented. Where a fact is not yet published, it is marked pending rather than implied.</p>
+</div>
+
+<section id="release">
+  <div class="wrap">
+    <p class="eyebrow">The release</p>
+    <h2>AIQT 1.0.0</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Version:</b> 1.0.0, the chat-assistant Skill.</li>
+      <li><b style="color:var(--ink)">The artefact:</b> <code>aiqt-skill.zip</code>, plus a
+        portable instruction file, both on the <a href="/install">install page</a>.</li>
+      <li><b style="color:var(--ink)">Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
+      <li><b style="color:var(--ink)">Checksum:</b> <span class="evidence-label">pending</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <p class="eyebrow">Known limitations</p>
+    <h2>What AIQT does not do</h2>
+    <p class="lead">AIQT is a behavioural standard your assistant is required to follow, not a
+      control that technically prevents a model from erring. Results still depend on the model,
+      the platform, competing instructions, and the tools available in the conversation. AIQT
+      does not make an AI infallible, and it does not replace your judgement, your organization's
+      policy, or the law.</p>
+  </div>
+</section>
+
+<section id="platform-tests">
+  <div class="wrap">
+    <p class="eyebrow">Platform test status</p>
+    <h2>What has been tested, and when</h2>
+    <div class="tablewrap"><table class="dtable">
+      <thead><tr><th>Platform</th><th>Install method</th><th>Last tested</th><th>Result</th><th>Known constraints</th></tr></thead>
+      <tbody>
+        <tr><td>Claude</td><td>Skill upload</td><td class="pending">pending</td><td class="pending">pending</td><td>Desktop browser; mobile Skill upload not documented</td></tr>
+        <tr><td>ChatGPT</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
+        <tr><td>Copilot</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
+      </tbody>
+    </table></div>
+    <p>An untested platform says so plainly. A tested one will carry its date and result here.</p>
+  </div>
+</section>
+
+<section id="cases">
+  <div class="wrap">
+    <p class="eyebrow">Documented cases</p>
+    <h2>Real calls from the GRC Library</h2>
+    <p class="lead">AIQT was built and tested on the GRC Library first. The
+      <a href="/examples">examples</a> narrate several real calls; each links here to its source
+      record when that record is public.</p>
+    <ul class="clean">
+      <li>A fixed retention baseline attributed to sources that prescribe no fixed interval, caught and corrected. <span class="evidence-label">Source record link: pending</span></li>
+      <li>A recycled backlog number that would have mis-resolved later citations, caught by a permanence check. <span class="evidence-label">Source record link: pending</span></li>
+      <li>A completeness check that read "the file exists" as "the delivery is complete", fixed at the class. <span class="evidence-label">Source record link: pending</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="history">
+  <div class="wrap">
+    <p class="eyebrow">Change history</p>
+    <h2>What changed, and when</h2>
+    <p class="lead">Every change to AIQT is recorded. <span class="evidence-label">Link to the
+      public change history: pending</span></p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails">View the source on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+  <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+</div></footer>
+
+</body>
+</html>
