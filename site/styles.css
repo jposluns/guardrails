@@ -262,26 +262,30 @@ details.more .inner{padding:0 1.2rem 1.2rem}
 a:focus-visible,button:focus-visible,summary:focus-visible,.navtab:focus-visible,.btn:focus-visible,input:focus-visible{outline:3px solid var(--accent); outline-offset:2px; border-radius:6px}
 
 /* ---- sidebar navigation ---- */
-.sidebar{position:fixed; top:0; left:0; width:250px; height:100vh; overflow-y:auto;
+.layout{display:flex; align-items:flex-start}
+.sidebar{position:sticky; top:0; height:100vh; overflow-y:auto; flex:0 0 auto; width:max-content;
   background:var(--panel); border-right:1px solid var(--line); padding:1.5rem 1rem 1.2rem;
-  display:flex; flex-direction:column; z-index:50}
+  display:flex; flex-direction:column}
 .sidebar .brand{font-size:1.35rem; font-weight:800; color:var(--ink); text-decoration:none;
   letter-spacing:.02em; margin:0 0 .4rem .2rem}
 .sidebar h4{font-size:.7rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
   color:var(--faint); margin:1.05rem 0 .3rem; padding:0 .6rem}
 .sidebar a.navlink{display:block; padding:.4rem .6rem; border-radius:8px; color:var(--muted);
-  text-decoration:none; font-size:1rem; line-height:1.3}
+  text-decoration:none; font-size:1rem; line-height:1.3; white-space:nowrap}
 .sidebar a.navlink:hover{background:var(--panel-2); color:var(--ink)}
 .sidebar a.navlink.active{background:var(--panel-2); color:var(--accent); font-weight:600;
   box-shadow:inset 3px 0 0 var(--accent)}
 .sidebar .sb-theme{margin-top:auto; align-self:flex-start}
-.content{margin-left:250px; min-width:0}
+.content{flex:1 1 auto; min-width:0}
+.whatis{color:var(--ink); font-size:1.05rem; line-height:1.55; margin:.2rem 0 0; max-width:880px}
 .navtoggle{display:none}
 .navbackdrop{display:none}
 @media (max-width:900px){
-  .sidebar{transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 40px rgba(0,0,0,.45)}
+  .layout{display:block}
+  .sidebar{position:fixed; top:0; left:0; width:max-content; min-width:13rem;
+    transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 40px rgba(0,0,0,.45); z-index:50}
   .sidebar.open{transform:none}
-  .content{margin-left:0; padding-top:3.3rem}
+  .content{padding-top:3.3rem}
   .navtoggle{display:inline-flex; align-items:center; gap:.4rem; position:fixed; top:.6rem; left:.6rem;
     z-index:60; background:var(--panel); color:var(--ink); border:1px solid var(--line);
     border-radius:8px; padding:.45rem .7rem; font-size:.95rem; cursor:pointer}
