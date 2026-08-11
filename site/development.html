@@ -244,14 +244,18 @@
   <div class="wrap">
     <p class="eyebrow">Setup</p>
     <h2>Setup and verification</h2>
-    <p class="lead">Two commands own the lifecycle: a wizard that sets the project up, and a
-      doctor that verifies the install.</p>
+    <p class="lead">Installing is a prompt, not a build. You give your coding assistant a
+      short setup prompt; it fetches the pack from GitHub and walks you through the rest.</p>
     <ol class="steps">
-      <li><b>The wizard sets it up.</b> It sets the project up, creating
-        <code>.working/aiqt/</code> and the agent files.</li>
-      <li><b>The doctor verifies it.</b> It verifies that the install is present and
-        consistent. This is the ordering applied to the tool itself: "installed" means a
-        check actually ran, and the doctor is that check.</li>
+      <li><b>Give your assistant the setup prompt.</b> Paste the AIQT setup prompt into your
+        coding assistant. It downloads the pack from the guardrails repository on GitHub, with
+        no manual clone or install to run yourself.</li>
+      <li><b>Follow the installation prompt.</b> A wizard walks you through setup, creating
+        <code>.working/aiqt/</code> and the file each coding agent expects, and asking the few
+        choices that are yours to make.</li>
+      <li><b>The doctor verifies it.</b> It confirms the install is present and consistent.
+        This is the ordering applied to the tool itself: "installed" means a check actually
+        ran, and the doctor is that check.</li>
     </ol>
   </div>
 </section>
