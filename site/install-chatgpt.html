@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add AIQT to ChatGPT</title>
+<meta name="description" content="Add AIQT to ChatGPT: upload the Skill, keep it enabled, and add one always-on line to your custom instructions so it applies to every response. Includes a paste-in fallback.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="/styles.css?v=20260811t">
+<script src="/theme.js"></script>
+<link rel="canonical" href="https://aiqt.ai/install-chatgpt">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Add AIQT to ChatGPT">
+<meta property="og:description" content="Add AIQT to ChatGPT: upload the Skill, keep it enabled, and add one always-on line to your custom instructions so it applies to every response. Includes a paste-in fallback.">
+<meta property="og:url" content="https://aiqt.ai/install-chatgpt">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<nav class="topnav"><div class="wrap navrow">
+  <a class="brand" href="/draft">AIQT</a>
+  <div class="navlinks">
+    <a class="navtab active" aria-current="page" href="/install">Chat assistant</a>
+    <a class="navtab" href="/development">Developers &amp; Coding</a>
+    <a class="navtab" href="/teams">Teams &amp; Enterprise</a>
+    <a class="navtab" href="/learn">Learn more</a>
+    <a class="navtab" href="/about">About</a>
+    <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
+  </div>
+</div></nav>
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Chat assistant &middot; ChatGPT</p>
+  <h1>Add AIQT to ChatGPT.</h1>
+  <p class="lead">A few short steps. You do not need a command line or a developer account.</p>
+</div>
+
+<section id="download">
+  <div class="wrap">
+    <p class="eyebrow">Step one</p>
+    <h2>Download the Skill</h2>
+    <div class="cta" style="justify-content:flex-start; margin-top:1rem">
+      <a class="btn primary" href="/downloads/aiqt-skill.zip" download>Download the Skill (.zip)</a>
+    </div>
+    <p style="margin-top:1.1rem">Your browser saves <code>aiqt-skill.zip</code>. Do not unzip it.
+      The Skill is prose instructions and reference material only: no executable code, no network
+      calls.</p>
+  </div>
+</section>
+
+<section id="steps">
+  <div class="wrap">
+    <p class="eyebrow">Add it to ChatGPT</p>
+    <h2>Upload the Skill</h2>
+    <ol class="steps">
+      <li><b>Open Skills.</b> In ChatGPT, open the Skills area (under the Plugins menu), choose
+        Create, then Upload from computer.</li>
+      <li><b>Upload the file.</b> Select <code>aiqt-skill.zip</code> and install it.</li>
+      <li><b>Leave it enabled.</b> Keep the Skill switched on, then add the always-on instruction
+        below.</li>
+    </ol>
+    <p class="evidence-label" style="margin-top:1.4rem">If Skills are turned off: the fallback</p>
+    <p>Open the <a href="/downloads/aiqt-instructions.txt" download>portable instruction file</a>,
+      copy it, and paste it into Settings, then Personalization, then Custom instructions; or attach
+      it to a chat and ask ChatGPT to follow it. In a workspace, an administrator may need to grant
+      permission to upload skills.</p>
+  </div>
+</section>
+
+<section id="always-on">
+  <div class="wrap">
+    <p class="eyebrow">One more step, and it matters</p>
+    <h2>Tell ChatGPT to always use it</h2>
+    <p class="lead">A Skill is loaded when ChatGPT judges it relevant. AIQT is a standing standard
+      you want applied to everything, so add one line to your always-on instructions.</p>
+    <ul class="clean">
+      <li><b>Everywhere:</b> open Settings, then Personalization, then Custom instructions, and add
+        <i>"Always apply the AIQT skill to every response."</i></li>
+      <li><b>In a specific project or custom GPT:</b> add the same line to its instructions.</li>
+    </ul>
+    <p style="margin-top:.9rem">Without this line, ChatGPT may apply AIQT only sometimes. With it,
+      AIQT is on for every turn.</p>
+  </div>
+</section>
+<section id="verify">
+  <div class="wrap">
+    <p class="eyebrow">Confirm and control</p>
+    <h2>Check it is on, and switch it off</h2>
+    <p class="lead">In a new chat, ask: <i>"Are you applying the AIQT standard? Which version, and
+      what does it require of you?"</i></p>
+    <p>A correctly set-up assistant confirms it is applying AIQT and summarizes the ordering:
+      Accuracy, Integrity, Quality, and Trust come first, then Progress, Speed, and Cost. If it does
+      not, check that the Skill is switched on and that your always-on instruction is in
+      place.</p>
+    <p style="margin-top:.9rem">To turn it off, remove or disable the Skill in the same place
+      you added it. Removing it restores your assistant's default behaviour, and nothing else is
+      left behind.</p>
+  </div>
+</section>
+
+<section id="more">
+  <div class="wrap">
+    <p class="eyebrow">Other options</p>
+    <h2>Using a different assistant?</h2>
+    <p class="lead">Every setup guide is one click away.</p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1rem">
+      <a class="btn primary" href="/install">All assistants</a>
+      <a class="btn ghost" href="/development">Writing code?</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer><div class="wrap">
+  <p>AIQT &middot; Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
+  <p><a href="https://github.com/jposluns/guardrails">View the source on GitHub</a></p>
+  <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+</div></footer>
+
+</body>
+</html>
