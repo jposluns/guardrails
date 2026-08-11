@@ -74,7 +74,7 @@ header.hero{padding:6rem 0 4.5rem; text-align:center; background:
   radial-gradient(1200px 420px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
 header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem; max-width:680px}
 header.hero .lead{max-width:62ch; margin:0 auto 1.7rem}
-.ordering{display:inline-block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+.ordering{display:inline-block; max-width:100%; overflow-x:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   background:var(--panel); border:1px solid var(--line); border-radius:12px;
   padding:.85rem 1.2rem; color:var(--ink); font-size:1.14rem; margin-top:.4rem}
 .ordering .tier{color:var(--accent-2); font-weight:700}
@@ -224,3 +224,8 @@ footer p{color:var(--faint); font-size:1.04rem; margin:.35rem 0}
 .dtable th,.dtable td{border:1px solid var(--line); padding:.6rem .8rem; text-align:left; vertical-align:top; color:var(--muted)}
 .dtable th{color:var(--ink); font-weight:700; background:var(--panel-2)}
 .dtable .pending{color:var(--faint); font-style:italic}
+
+/* skip-to-content link (visible on focus) */
+.skip{position:absolute; left:-9999px; top:0; z-index:100; background:var(--accent); color:var(--on-accent);
+  padding:.6rem 1rem; border-radius:0 0 8px 0; font-weight:700}
+.skip:focus{left:0; text-decoration:none}
