@@ -132,8 +132,7 @@ lookup.
   Context 2 the development-assistant pack (capability ships, data instantiated empty at setup),
   Context 3 the chat skill. The published CORE contains no private corpus content requiring
   rewriting; the only residue is publication-time handling of pre-publication version-history rows.
-- **Acceptance:** the signed matrix governs every later publish decision; the post-migration
-  a post-migration contamination scan confirms no Context-1 leakage.
+- **Acceptance:** the signed matrix governs every later publish decision; a post-migration contamination scan confirms no Context-1 leakage.
 
 ## 1.8.0 - Zip provenance, final manifest, frozen release snapshot
 **ORIGIN** 1.26.8 (subset) + 1.26.3 + 1.26.5-final · **Milestone** M1 · **Size** M
@@ -142,13 +141,15 @@ lookup.
   public release cut as SemVer **1.0.0**.
 - **Needs / requires:** the final publication manifest (1.26.5-final) and a passing conformance
   report (1.5.0). Sequence BEFORE the installer (1.11.0), which depends on release governance.
-- **Scope:** each release records the source revision, the manifest digest, and per-adapter
-  generated-output digests, with signed release metadata, a known-limitations statement, a rollback
-  path, an emergency-patch process, and deprecation windows. SemVer with the **minor digit = the
+- **Scope:** the launch SUBSET - each release records the source revision, the manifest digest, and
+  the release version identifier, and the pre-publication source snapshot is frozen. The FULL
+  release-governance layer (per-adapter digests, signed metadata, known-limitations, rollback,
+  emergency-patch, deprecation windows) is 2.20.0, not here. SemVer with the **minor digit = the
   capability generation** (1.0.0 chat-assistant, 1.1.0 development-assistant); one product whose
   capabilities accrete, not a family of separate products.
-- **Acceptance:** a reproducible, digested, signed frozen snapshot = release 1.0.0; the one-way
-  publication-lag and currency-burden risks are closed.
+- **Acceptance:** a reproducible, digested frozen snapshot cut as release 1.0.0; the full signing /
+  rollback / deprecation governance that closes the publication-lag and currency-burden risks follows
+  in 2.20.0.
 
 ## 1.9.0 - Initial repository-public and aiqt.ai launch
 **ORIGIN** 1.26.20 · **Milestone** M1 · **Size** L
