@@ -66,7 +66,7 @@ lookup.
 
 - **What it is:** the rule-quality half of "revisit every guardrail" - a prose-vs-mechanism audit
   of the governance rules, sharpening the rules the chat skill distills from.
-- **Needs / requires:** seed = the migrated `guardrail-inventory.md`. Unblocked at M1 (unlike the
+- **Needs / requires:** seed = the migrated guardrail inventory. Unblocked at M1 (unlike the
   hook/gate slice, it depends on neither a findings loop nor unbuilt hooks).
 - **Scope:** classify each rule MECHANICAL vs PROSE-ONLY; for each load-bearing prose rule, add a
   mechanical backstop or record it as model-sensitive; move toward the uniform
@@ -133,7 +133,7 @@ lookup.
   Context 3 the chat skill. The published CORE contains no private corpus content requiring
   rewriting; the only residue is publication-time handling of pre-publication version-history rows.
 - **Acceptance:** the signed matrix governs every later publish decision; the post-migration
-  `grep "_private"` control confirms no Context-1 contamination.
+  a post-migration contamination scan confirms no Context-1 leakage.
 
 ## 1.8.0 - Zip provenance, final manifest, frozen release snapshot
 **ORIGIN** 1.26.8 (subset) + 1.26.3 + 1.26.5-final · **Milestone** M1 · **Size** M
@@ -241,7 +241,7 @@ lookup.
 
 - **What it is:** the generator that produces the coding-agent adapters deterministically from the
   core, plus a network-independent `--check`.
-- **Needs / requires:** INPUT SET = the adapter-input bucket of the publication manifest (gate 83,
+- **Needs / requires:** INPUT SET = the adapter-input bucket of the publication manifest (
   classifying pack files into core / adapter-input / grc-only). Sequence BEFORE the freeze.
 - **Scope:** deterministic generation; the `--check` extends the byte-parity check to the generated
   adapters so drift, an unclassified core file, an unclassified adapter, or a hand-edited generated
@@ -358,7 +358,7 @@ lookup.
 
 - **What it is:** the hook/gate half of "revisit every guardrail" - an inventory of guardrails'
   OWN native hook/gate set.
-- **Needs / requires:** seeded BY the migrated `guardrail-inventory.md` (and its section-E
+- **Needs / requires:** seeded BY the migrated guardrail inventory (and its section-E
   prose-to-mechanized candidate set). Sequenced AFTER the guardrail-mechanization PRs.
 - **Scope:** the output is guardrails' own native set - NOT all 17 hooks and all 84 grc gates; the
   inventory already narrowed it to section E's four viable candidates. Everything else in the prose
@@ -370,7 +370,7 @@ lookup.
 
 - **What it is:** a Stop-hook that keeps a session from yielding on a stated-but-unkept intention -
   rebuilt guardrails-native.
-- **IMPORTANT:** the grc `#1471` vocabulary/regex approach was **RETIRED 2026-08-10 as fundamentally
+- **IMPORTANT:** the earlier vocabulary/regex approach was **RETIRED 2026-08-10 as fundamentally
   flawed** (unbounded natural-language trigger space; never fired). The rebuild is keyed on
   **OBSERVABLE runnable-work state**, not the vocabulary approach; the guardrails project owns
   designing it.
@@ -393,7 +393,7 @@ lookup.
 
 - **What it is:** the PR3 batch of attestation gates.
 - **Scope:** a worker-id/account anonymization lint, a dual-family attestation gate, the
-  ledger-attestation gate family (qa-metrics / qa-model-performance / credit-offload / compaction),
+  ledger-attestation gate family (over the project's QA, model-performance, cost, and session ledgers),
   and a contract-consistency / config-parity gate (the machine that would catch cross-doc
   contradictions).
 - **Acceptance:** the batch lands with regression fixtures.
@@ -597,7 +597,7 @@ lookup.
 
 # P3 - new guardrails intake
 
-No live migrated P3 row (after PR #1471 finishes/retires at M0). Two lanes: community-submitted
+No live migrated P3 row (after the waiting-word item finishes/retires at M0). Two lanes: community-submitted
 guardrails (PR per spec, once contribution conventions land and the repo is public) and grc_library
 guardrail packages via the shared drop (rule + incident provenance). Create one reference section
 per accepted package when its row is created; a genuine guard-defect package moves to P1 and, on
@@ -642,7 +642,7 @@ release, triggers the grc pin-bump (the sole freeze exception). Never preallocat
 - **What it is:** the full-model deep-QA panel at promotion events.
 - **Scope:** deep QA at major/minor version bumps or management-defined promotion events; the full
   panel including the developer's own model (a fresh-context adversarial pass), apples-to-apples;
-  bounded by trigger rarity; feeds the qa-model-performance baseline. Advisory.
+  bounded by trigger rarity; feeds the model-performance baseline. Advisory.
 - **Acceptance:** a defined promotion-trigger panel that feeds the QA baseline.
 
 ## 4.4.0 - Contribution-back lifecycle and community intake

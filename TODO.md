@@ -60,7 +60,7 @@ back to its originating grc_library P-TODO item; they are provenance only, never
 | 2.12.0 | AI incident response discipline | 1.26.17 |
 | 2.13.0 | CleanLanguage as a separately sourced AIQT module | 1.26.46 |
 | 2.14.0 | Guardrails-native hook and gate inventory, seeded by the migrated grc inventory | P-1.36 hook/gate slice |
-| 2.15.0 | Waiting-word Stop hook, native rebuild keyed on OBSERVABLE runnable-work state (NOT the retired vocabulary/regex approach; grc #1471 vocabulary hook was RETIRED 2026-08-10 as fundamentally flawed, replacement in design) | seed of 1.26.48 (vocabulary), superseded design |
+| 2.15.0 | Waiting-word Stop hook, native rebuild keyed on OBSERVABLE runnable-work state (NOT the retired vocabulary/regex approach; the earlier vocabulary hook was retired as fundamentally flawed, replacement in design) | seed of 1.26.48 (vocabulary), superseded design |
 | 2.16.0 | Guardrails operational hooks batch with regressions | 1.26.50 |
 | 2.17.0 | Guardrails attestation gates batch with regressions | 1.26.51 |
 | 2.18.0 | Activity and configuration parity gate | 1.26.42 |
@@ -85,7 +85,7 @@ back to its originating grc_library P-TODO item; they are provenance only, never
 
 ## P3, new guardrails intake
 
-No live migrated P3 row after PR #1471 finishes at M0. Two lanes: community-submitted guardrails
+No live migrated P3 row after the waiting-word item finishes at M0. Two lanes: community-submitted guardrails
 (PR per spec, once contribution conventions land and the repo is public) and grc_library guardrail
 packages via the shared drop (rule + incident provenance). Create one row per accepted package at
 the next sort position; close it with the guardrails PR. A genuine guard-defect package moves to P1
