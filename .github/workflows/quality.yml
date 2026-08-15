@@ -15,9 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Full history: the changelog gate needs a merge base against main.
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -51,8 +48,8 @@ jobs:
       - name: Internal links
         run: python3 tools/check_links.py
 
-      - name: Changelog entry
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          python3 tools/check_changelog.py "origin/${{ github.base_ref }}"
+      - name: Roadmap drift
+        run: python3 tools/gen_roadmap.py --check
+
+      - name: Changelog drift
+        run: python3 tools/gen_changelog.py --check
