@@ -1,0 +1,7 @@
+title = "Changelog: AIQT Guardrails"
+note = "The user-facing changes for each public release."
+
+[[release]]
+title = "Project created"
+date = "2026-08-12"
+items = ["The AIQT Guardrails project was started."]
