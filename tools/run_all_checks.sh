@@ -4,7 +4,6 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-BASE="${1:-origin/main}"
 failed=0
 notrun=0
 
@@ -36,7 +35,8 @@ fi
 echo
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
-run_gate "changelog" python3 tools/check_changelog.py "$BASE"
+run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
+run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 
 if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"

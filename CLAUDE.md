@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.1.0** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.1.1** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -70,8 +70,9 @@ stage; authority and seriality live in the apply stage.
 
 - **Records-first.** Every ruling and decision is recorded to the operational store the session it is
   given; the record, not the conversation, is the source of truth.
-- **Change tracking.** Every substantive change carries a `CHANGELOG.md` entry (what, when, why) with
-  its version bump. Backlog item numbers are permanent and never reused.
+- **Change tracking.** The public `CHANGELOG.md` carries user-facing release notes per release,
+  generated from `changelog.toml` and drift-gated; every change is recorded in detail in the
+  operational record (per records-first). Backlog item numbers are permanent and never reused.
 - **Session lifecycle.** Sessions RESUME from a durable handoff, WORK under a named operating mode, and
   CLOSE by landing working state on the protected branch as a green merge. A concurrency lease
   prevents a double-run. The default at every point is to continue; a wind-down needs a named,
@@ -89,7 +90,7 @@ stage; authority and seriality live in the apply stage.
 ## Gates and CI
 
 CI runs a `Quality` workflow of deterministic gates: a project secret scan plus gitleaks, an en/em
-dash check, an internal-link check, and a changelog-entry check on pull requests. `tools/run_all_checks.sh`
+dash check, an internal-link check, and roadmap and changelog drift checks (generated public files must match their sources). `tools/run_all_checks.sh`
 is the local mirror. Read CI status with `tools/ci-status.sh` (which reads `actions/runs`, needing only
 Actions: Read), never `gh pr checks` (a fine-grained token cannot read the Checks API) and never
 `commits/<sha>/status` (which always reads pending). The gate roster grows toward the full pack roster
