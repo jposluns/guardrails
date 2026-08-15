@@ -2,6 +2,18 @@
 
 Every substantive change carries an entry: what changed, when, and why, with the version bump.
 
+## 2026-08-15, Version 0.1.1
+
+### Changed
+- `CHANGELOG.md`: genericized an internal build-environment reference in the 0.1.0 entry (now "an
+  internal build custodian"), part of keeping internal names out of the public repository ahead of
+  launch.
+
+### Why
+Internal build-environment names do not belong in the public repository. The 0.1.0 scaffolding entry
+introduced one such reference; it is corrected here while the repository is still private, well before
+the public flip.
+
 ## 2026-08-15, Version 0.1.0
 
 Repository scaffolding established so the guardrails orchestrator can operate under the AIQT
@@ -20,7 +32,7 @@ disciplines from its first session.
 
 ### Why
 The orchestrator has visibility only into this repo and its local store, so it could not build its own
-scaffolding from the design sources it cannot see. The lab_infra custodian built this from those
+scaffolding from the design sources it cannot see. An internal build custodian built this from those
 sources so the orchestrator launches into an environment set up to succeed. Operational state and the
 maintainer's private governance live in a local-only store, never in this public repo.
 
