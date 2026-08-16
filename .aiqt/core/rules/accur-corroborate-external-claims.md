@@ -1,0 +1,14 @@
+---
+corpus-id: corrob
+origin: pack
+family: aiqt
+tier: 10
+facet: ACCUR
+slug: corroborate-external-claims
+map-owasp-llm: [LLM07]
+---
+
+# Corroborate external claims
+
+A claim about an external fact is corroborated against a source before it is relied on or presented as
+settled. The weaker the source, the more corroboration a load-bearing claim needs.
