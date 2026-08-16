@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Site-integrity gate: en/em dashes, internal link resolution, and anchor validation for site/*.html.
+"""Site-integrity gate for site/*.html: en/em dashes, link/anchor resolution, and basic HTML validity.
 
-Link classification uses urlsplit: an absolute URL on the site's own host (aiqt.ai) is treated as
-internal; every other scheme (http/https elsewhere, mailto, tel, ftp, javascript, data, ...) and
-protocol-relative //host links are external and skipped. An internal path resolves to an existing file
-under site/ by trying the path as-is, path + ".html", and path + "/index.html" (so /roadmap, /styles.css,
-and /section/ all work with no extension heuristic); "/" resolves to index.html; a path escaping site/
-(e.g. /../x) is broken. A fragment (#id) is validated against the target page's element ids; an
-anchor-only or query-only href is validated against the current page. Exit 0 clean, 1 on any finding.
+Link classification uses urlsplit: an absolute URL on the site's own host (aiqt.ai) is internal; every
+other scheme (http/https elsewhere, mailto, tel, ftp, javascript, data, ...) and protocol-relative
+//host links are external and skipped. An internal path resolves to an existing file under site/ by
+trying the path as-is, path + ".html", and path + "/index.html"; "/" resolves to index.html; a path
+escaping site/ (e.g. /../x) is broken. A fragment (#id) is validated against the target page's ids; an
+anchor-only or query-only href is validated against the current page.
+
+Basic HTML validity: a page must have a non-empty <title>, and must not reuse an id (a duplicate id is
+invalid and silently breaks in-page anchors). Deeper validation and download-artifact checksums are
+tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding.
 """
 import os
 import sys
@@ -22,17 +25,39 @@ SITE_HOSTS = {"aiqt.ai", "www.aiqt.ai"}
 class Page(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.links = []   # (value, line)
+        self.links = []       # (value, line)
         self.ids = set()
+        self.id_list = []     # (value, line) for duplicate detection
+        self.title_present = False
+        self.title_text = ""
+        self._in_title = False
+        self.svg_depth = 0
 
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
         for key in ("href", "src"):
             if d.get(key):
                 self.links.append((d[key], self.getpos()[0]))
-        for key in ("id", "name"):
-            if d.get(key):
-                self.ids.add(d[key])
+        if d.get("id"):
+            self.ids.add(d["id"])
+            self.id_list.append((d["id"], self.getpos()[0]))
+        if d.get("name"):
+            self.ids.add(d["name"])
+        if tag == "svg":
+            self.svg_depth += 1
+        if tag == "title" and self.svg_depth == 0:
+            self.title_present = True
+            self._in_title = True
+
+    def handle_endtag(self, tag):
+        if tag == "svg":
+            self.svg_depth = max(0, self.svg_depth - 1)
+        if tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title_text += data
 
 
 def _under(site_root, resolved):
@@ -40,7 +65,6 @@ def _under(site_root, resolved):
 
 
 def resolve_link(base, path, site_root):
-    """Return the existing site file a path points to, or None (broken / escapes site)."""
     p = path.rstrip("/")
     if p == "":
         candidates = [site_root / "index.html"]
@@ -55,13 +79,12 @@ def resolve_link(base, path, site_root):
 
 
 def classify(v):
-    """Return (pathpart, fragment) for an internal link, or None if external/skippable."""
     parts = urlsplit(v)
     if parts.scheme:
         if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in SITE_HOSTS:
             return parts.path, parts.fragment
-        return None                     # any other scheme is external
-    if parts.netloc:                    # protocol-relative //host
+        return None
+    if parts.netloc:
         return None
     return parts.path, parts.fragment
 
@@ -97,6 +120,15 @@ def main():
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
+        if not page.title_present or not page.title_text.strip():
+            findings.append("{}: missing or empty <title>".format(rel))
+        seen = {}
+        for value, line in page.id_list:
+            seen.setdefault(value, []).append(line)
+        for value, lines in seen.items():
+            if len(lines) > 1:
+                findings.append("{}:{}: duplicate id '{}' (repeated at line(s) {})".format(
+                    rel, lines[0], value, ", ".join(str(n) for n in lines[1:])))
         for value, line in page.links:
             v = value.strip()
             if not v:
@@ -105,7 +137,7 @@ def main():
             if classified is None:
                 continue
             pathpart, frag = classified
-            if pathpart == "":                        # anchor-only or query-only: the current page
+            if pathpart == "":
                 if not frag:
                     continue
                 anchor_key = str(f.resolve())
@@ -125,7 +157,7 @@ def main():
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: site dashes, internal links, and anchors all resolve")
+    print("PASS: site dashes, links, anchors, titles, and unique ids all check out")
     return 0
 
 
