@@ -7,6 +7,7 @@ secondary: [SECC]
 slug: key-management
 map-nist-80053: [IA-5(7), SC-12]
 map-nist-ssdf: [PW.5.1]
+map-atlas: [AML.T0012, AML.T0055]
 map-owasp-asvs: [V11]
 map-owasp-cheatsheet: [key-management]
 ---

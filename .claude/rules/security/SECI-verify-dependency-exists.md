@@ -7,6 +7,7 @@ secondary: [ACCUR]
 slug: verify-dependency-exists
 map-nist-airmf: [GOVERN 6.1, MANAGE 3.1]
 map-nist-ssdf: [PW.4.1]
+map-atlas: [AML.T0011.001]
 map-owasp-llm: [LLM04]
 ---
 

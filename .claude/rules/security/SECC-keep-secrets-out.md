@@ -8,6 +8,7 @@ slug: keep-secrets-out
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [IA-5(7)]
 map-nist-ssdf: [PW.5.1]
+map-atlas: [AML.T0055, AML.T0082, AML.T0083, AML.T0095.000, AML.T0098]
 map-owasp-llm: [LLM02]
 map-owasp-mcp: [MCP01]
 map-owasp-asvs: [V14]
