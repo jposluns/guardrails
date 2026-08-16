@@ -6,6 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [ACCUR]
 slug: high-assurance-verification
+map-nist-ssdf: [PW.2.1, PW.7.2]
 ---
 
 # High-assurance verification

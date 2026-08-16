@@ -4,6 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: dependency-provenance
+map-nist-ssdf: [PO.3.2, PW.4.1, PW.4.4]
 map-owasp-llm: [LLM04]
 map-owasp-asi: [ASI04]
 map-owasp-mcp: [MCP04, MCP09]

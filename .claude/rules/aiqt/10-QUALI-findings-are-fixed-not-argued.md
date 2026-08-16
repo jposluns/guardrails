@@ -6,6 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [INTEG, TRUST]
 slug: findings-are-fixed-not-argued
+map-nist-ssdf: [PO.4.1, PW.7.2]
 ---
 
 # A verification finding is fixed, not argued away
