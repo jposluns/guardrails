@@ -1,0 +1,247 @@
+# OWASP Cheat Sheet Series: id manifest for the AIQT standards crosswalk.
+# kind = "guidance", status = "snapshot": a rolling catalogue with no version tag, pinned to a repo
+# commit. The id is the document slug (filename stem, lowercased, "_Cheat_Sheet" dropped, "_"->"-").
+# 116 substantive sheets; 4 redirect/deprecation stubs are excluded and are NOT valid ids. README.md.
+map-key = "map-owasp-cheatsheet"
+name = "OWASP Cheat Sheet Series"
+publisher = "OWASP Foundation"
+edition = "commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)"
+kind = "guidance"
+status = "snapshot"
+citation-unit = "cheat sheet"
+id-pattern = "^[a-z0-9]+(-[a-z0-9]+)*$"
+source-artefact = "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "abuse-case"
+[[id]]
+code = "ai-agent-security"
+[[id]]
+code = "ajax-security"
+[[id]]
+code = "aml-sanctions-ai-agent-payments"
+[[id]]
+code = "attack-surface-analysis"
+[[id]]
+code = "authentication"
+[[id]]
+code = "authorization"
+[[id]]
+code = "authorization-regression-testing"
+[[id]]
+code = "authorization-testing-automation"
+[[id]]
+code = "automotive-security"
+[[id]]
+code = "bean-validation"
+[[id]]
+code = "bot-management-and-anti-automation"
+[[id]]
+code = "browser-extension-vulnerabilities"
+[[id]]
+code = "business-logic-security"
+[[id]]
+code = "c-based-toolchain-hardening"
+[[id]]
+code = "choosing-and-using-security-questions"
+[[id]]
+code = "ci-cd-security"
+[[id]]
+code = "clickjacking-defense"
+[[id]]
+code = "content-security-policy"
+[[id]]
+code = "cookie-theft-mitigation"
+[[id]]
+code = "credential-stuffing-prevention"
+[[id]]
+code = "cross-site-request-forgery-prevention"
+[[id]]
+code = "cross-site-scripting-prevention"
+[[id]]
+code = "cryptographic-storage"
+[[id]]
+code = "database-security"
+[[id]]
+code = "denial-of-service"
+[[id]]
+code = "dependency-graph-sbom"
+[[id]]
+code = "deserialization"
+[[id]]
+code = "django-rest-framework"
+[[id]]
+code = "django-security"
+[[id]]
+code = "docker-security"
+[[id]]
+code = "dom-based-xss-prevention"
+[[id]]
+code = "dom-clobbering-prevention"
+[[id]]
+code = "dotnet-security"
+[[id]]
+code = "drone-security"
+[[id]]
+code = "email-validation-and-verification"
+[[id]]
+code = "error-handling"
+[[id]]
+code = "file-upload"
+[[id]]
+code = "forgot-password"
+[[id]]
+code = "github-actions-security"
+[[id]]
+code = "graphql"
+[[id]]
+code = "grpc-security"
+[[id]]
+code = "html5-security"
+[[id]]
+code = "http-headers"
+[[id]]
+code = "http-strict-transport-security"
+[[id]]
+code = "infrastructure-as-code-security"
+[[id]]
+code = "injection-prevention"
+[[id]]
+code = "input-validation"
+[[id]]
+code = "insecure-direct-object-reference-prevention"
+[[id]]
+code = "jaas"
+[[id]]
+code = "java-security"
+[[id]]
+code = "json-web-token"
+[[id]]
+code = "key-management"
+[[id]]
+code = "kubernetes-security"
+[[id]]
+code = "laravel"
+[[id]]
+code = "ldap-injection-prevention"
+[[id]]
+code = "legacy-application-management"
+[[id]]
+code = "llm-prompt-injection-prevention"
+[[id]]
+code = "logging"
+[[id]]
+code = "logging-vocabulary"
+[[id]]
+code = "mass-assignment"
+[[id]]
+code = "mcp-security"
+[[id]]
+code = "microservices-based-security-arch-doc"
+[[id]]
+code = "microservices-security"
+[[id]]
+code = "mobile-application-security"
+[[id]]
+code = "multi-tenant-security"
+[[id]]
+code = "multifactor-authentication"
+[[id]]
+code = "network-segmentation"
+[[id]]
+code = "nodejs-docker"
+[[id]]
+code = "nodejs-security"
+[[id]]
+code = "nosql-security"
+[[id]]
+code = "npm-security"
+[[id]]
+code = "oauth2"
+[[id]]
+code = "os-command-injection-defense"
+[[id]]
+code = "password-storage"
+[[id]]
+code = "php-configuration"
+[[id]]
+code = "pinning"
+[[id]]
+code = "prototype-pollution-prevention"
+[[id]]
+code = "query-parameterization"
+[[id]]
+code = "rag-security"
+[[id]]
+code = "rest-assessment"
+[[id]]
+code = "rest-security"
+[[id]]
+code = "ruby-on-rails"
+[[id]]
+code = "saml-security"
+[[id]]
+code = "secrets-management"
+[[id]]
+code = "secure-ai-model-ops"
+[[id]]
+code = "secure-cloud-architecture"
+[[id]]
+code = "secure-code-review"
+[[id]]
+code = "secure-coding-with-ai"
+[[id]]
+code = "secure-product-design"
+[[id]]
+code = "securing-cascading-style-sheets"
+[[id]]
+code = "security-terminology"
+[[id]]
+code = "server-side-request-forgery-prevention"
+[[id]]
+code = "serverless-faas-security"
+[[id]]
+code = "session-management"
+[[id]]
+code = "software-supply-chain-security"
+[[id]]
+code = "sql-injection-prevention"
+[[id]]
+code = "subdomain-takeover-prevention"
+[[id]]
+code = "symfony"
+[[id]]
+code = "third-party-javascript-management"
+[[id]]
+code = "third-party-payment-gateway-integration"
+[[id]]
+code = "threat-modeling"
+[[id]]
+code = "transaction-authorization"
+[[id]]
+code = "transport-layer-security"
+[[id]]
+code = "unvalidated-redirects-and-forwards"
+[[id]]
+code = "user-privacy-protection"
+[[id]]
+code = "virtual-patching"
+[[id]]
+code = "vulnerability-disclosure"
+[[id]]
+code = "vulnerable-dependency-management"
+[[id]]
+code = "web-service-security"
+[[id]]
+code = "websocket-security"
+[[id]]
+code = "xml-external-entity-prevention"
+[[id]]
+code = "xml-security"
+[[id]]
+code = "xs-leaks"
+[[id]]
+code = "xss-filter-evasion"
+[[id]]
+code = "zero-trust-architecture"

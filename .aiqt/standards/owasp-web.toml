@@ -1,0 +1,43 @@
+# OWASP Top 10 (Web Application Security Risks): id manifest for the AIQT standards crosswalk.
+# See README.md for the vendoring rules.
+map-key = "map-owasp-web"
+name = "OWASP Top 10 (Web Application Security Risks)"
+publisher = "OWASP Foundation"
+edition = "2025"
+kind = "risk"
+status = "stable"
+citation-unit = "risk category"
+id-pattern = "^A(0[1-9]|10)$"
+source-artefact = "OWASP Top 10:2025 (Web Application Security Risks)"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "A01"
+title = "Broken Access Control"
+[[id]]
+code = "A02"
+title = "Security Misconfiguration"
+[[id]]
+code = "A03"
+title = "Software Supply Chain Failures"
+[[id]]
+code = "A04"
+title = "Cryptographic Failures"
+[[id]]
+code = "A05"
+title = "Injection"
+[[id]]
+code = "A06"
+title = "Insecure Design"
+[[id]]
+code = "A07"
+title = "Authentication Failures"
+[[id]]
+code = "A08"
+title = "Software or Data Integrity Failures"
+[[id]]
+code = "A09"
+title = "Security Logging & Alerting Failures"
+[[id]]
+code = "A10"
+title = "Mishandling of Exceptional Conditions"

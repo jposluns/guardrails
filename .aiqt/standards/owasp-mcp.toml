@@ -1,0 +1,44 @@
+# OWASP MCP Top 10: id manifest for the AIQT standards crosswalk.
+# status = "beta": the MCP Top 10 is a living, non-normative document (Phase 3 as of 2026); the id set
+# may shift. The public page surfaces this as a badge. See README.md for the vendoring rules.
+map-key = "map-owasp-mcp"
+name = "OWASP MCP Top 10"
+publisher = "OWASP Foundation"
+edition = "2025"
+kind = "risk"
+status = "beta"
+citation-unit = "risk category"
+id-pattern = "^MCP(0[1-9]|10)$"
+source-artefact = "OWASP MCP Top 10 (2025, Beta)"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "MCP01"
+title = "Token Mismanagement & Secret Exposure"
+[[id]]
+code = "MCP02"
+title = "Privilege Escalation via Scope Creep"
+[[id]]
+code = "MCP03"
+title = "Tool Poisoning"
+[[id]]
+code = "MCP04"
+title = "Software Supply Chain Attacks & Dependency Tampering"
+[[id]]
+code = "MCP05"
+title = "Command Injection & Execution"
+[[id]]
+code = "MCP06"
+title = "Intent Flow Subversion"
+[[id]]
+code = "MCP07"
+title = "Insufficient Authentication & Authorization"
+[[id]]
+code = "MCP08"
+title = "Lack of Audit and Telemetry"
+[[id]]
+code = "MCP09"
+title = "Shadow MCP Servers"
+[[id]]
+code = "MCP10"
+title = "Context Injection & Over-Sharing"

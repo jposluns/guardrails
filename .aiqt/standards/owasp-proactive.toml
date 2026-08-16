@@ -1,0 +1,44 @@
+# OWASP Top 10 Proactive Controls: id manifest for the AIQT standards crosswalk.
+# kind = "control": these are recommended controls, not a risk list. Tokens carry no leading zero
+# (C1..C10). See README.md for the vendoring rules.
+map-key = "map-owasp-proactive"
+name = "OWASP Top 10 Proactive Controls"
+publisher = "OWASP Foundation"
+edition = "4.0.0"
+kind = "control"
+status = "stable"
+citation-unit = "control"
+id-pattern = "^C([1-9]|10)$"
+source-artefact = "OWASP Top 10 Proactive Controls v4.0.0 (2024)"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "C1"
+title = "Implement Access Control"
+[[id]]
+code = "C2"
+title = "Use Cryptography to Protect Data"
+[[id]]
+code = "C3"
+title = "Validate all Input & Handle Exceptions"
+[[id]]
+code = "C4"
+title = "Address Security from the Start"
+[[id]]
+code = "C5"
+title = "Secure By Default Configurations"
+[[id]]
+code = "C6"
+title = "Keep your Components Secure"
+[[id]]
+code = "C7"
+title = "Secure Digital Identities"
+[[id]]
+code = "C8"
+title = "Leverage Browser Security Features"
+[[id]]
+code = "C9"
+title = "Implement Security Logging and Monitoring"
+[[id]]
+code = "C10"
+title = "Stop Server Side Request Forgery"

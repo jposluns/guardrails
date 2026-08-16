@@ -9,7 +9,7 @@ map-owasp-llm: [LLM10]
 map-owasp-asvs: [V1, V2]
 map-owasp-web: [A05]
 map-owasp-proactive: [C3]
-map-owasp-cheatsheet: [injection-prevention, cross-site-scripting-prevention]
+map-owasp-cheatsheet: [cross-site-scripting-prevention, injection-prevention]
 ---
 
 # Generated output is untrusted input

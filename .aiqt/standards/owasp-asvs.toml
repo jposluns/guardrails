@@ -1,0 +1,65 @@
+# OWASP Application Security Verification Standard (ASVS): id manifest for the AIQT standards crosswalk.
+# The citation unit is the CHAPTER (V1..V17). ASVS also has requirement-level ids (V1.1.1); migrating
+# the corpus to requirement-level is a later, separate decision. See README.md for the vendoring rules.
+map-key = "map-owasp-asvs"
+name = "OWASP Application Security Verification Standard"
+publisher = "OWASP Foundation"
+edition = "5.0.0"
+kind = "control"
+status = "stable"
+citation-unit = "chapter"
+id-pattern = "^V([1-9]|1[0-7])$"
+source-artefact = "OWASP Application Security Verification Standard (ASVS) 5.0.0 (tag v5.0.0_release)"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "V1"
+title = "Encoding and Sanitization"
+[[id]]
+code = "V2"
+title = "Validation and Business Logic"
+[[id]]
+code = "V3"
+title = "Web Frontend Security"
+[[id]]
+code = "V4"
+title = "API and Web Service"
+[[id]]
+code = "V5"
+title = "File Handling"
+[[id]]
+code = "V6"
+title = "Authentication"
+[[id]]
+code = "V7"
+title = "Session Management"
+[[id]]
+code = "V8"
+title = "Authorization"
+[[id]]
+code = "V9"
+title = "Self-contained Tokens"
+[[id]]
+code = "V10"
+title = "OAuth and OIDC"
+[[id]]
+code = "V11"
+title = "Cryptography"
+[[id]]
+code = "V12"
+title = "Secure Communication"
+[[id]]
+code = "V13"
+title = "Configuration"
+[[id]]
+code = "V14"
+title = "Data Protection"
+[[id]]
+code = "V15"
+title = "Secure Coding and Architecture"
+[[id]]
+code = "V16"
+title = "Security Logging and Error Handling"
+[[id]]
+code = "V17"
+title = "WebRTC"
