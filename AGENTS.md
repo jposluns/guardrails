@@ -56,19 +56,41 @@ When something is wrong and within reach to fix, fix it rather than explaining a
 The moment anything wrong is found, however small and whoever found it, finish the unit of work in hand,
 then fix it; nothing that is not the fix proceeds ahead of it. Severity is graded after the fix decision.
 
-## Artefact and branch discipline
+## Branch and merge only on green
 
-Develop on a feature branch, open a pull request, and merge only on green. The protected branch is never
-force-pushed or committed to directly. Commits carry the maintainer's identity with no AI author,
-committer, or co-author trailer. Every merged artefact is the reviewed, verified state, not a work in
-progress.
+Develop on a feature branch, open a pull request, and merge only when its checks pass. What lands on the
+shared branch is the reviewed, verified state, not a work in progress.
+
+## Commit identity
+
+Commits carry the maintainer's own identity, with no AI listed as author, committer, or co-author.
 
 ## Gate discipline
 
-Never weaken a gate to obtain a pass. Fix the artefact instead. No bypass flags, no piping a check to a
+Never weaken a gate to obtain a pass; fix the artefact instead. No bypass flags, no piping a check to a
 truncating sink, no `|| true`, no deleted tests, no lowered thresholds. A failing gate is signal;
-understand it before overriding. No stubbed, mocked, or simulated result is presented as finished; a
-failing state is surfaced, never concealed.
+understand why it failed before considering any override.
+
+## No concealed failure
+
+A failing state is surfaced, never concealed. No stubbed, mocked, or simulated result is presented as
+finished, and no error is hidden, swallowed, or downgraded to make a result look clean.
+
+## Protected-branch integrity
+
+The protected branch is never force-pushed or committed to directly; it changes only through a reviewed,
+merged pull request.
+
+## Validation is a gate on apply
+
+There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
+source. Trust is never a substitute for the gate.
+
+## Workers produce inert data
+
+Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and
+integrates them, and workers apply nothing themselves. Parallelism lives in the research stage; authority
+and seriality live in the apply stage.
 
 ## Assistant workflow disciplines
 
@@ -153,13 +175,6 @@ pending or unreadable signal; parallelism speeds the work, it never lowers the b
 Cost is the lowest priority. Never trade any AIQT facet, progress, or speed for cost. Optimize cost only
 after the higher tiers are satisfied. Frugality serves
 the work; it never overrides it.
-
-## Workers work, orchestrators orchestrate
-
-Parallelism lives in the research stage; authority and seriality live in the apply stage. Workers produce
-research and candidate diffs as inert data that one orchestrator re-reads, verifies, and integrates; they
-apply nothing. There is no trusted-worker fast path: validation is a gate on apply. This is how scale is
-bought without buying risk.
 
 ## Secrets
 
