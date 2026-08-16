@@ -97,6 +97,13 @@ Workers produce research and candidate diffs as inert data; one orchestrator re-
 integrates them, and workers apply nothing themselves. Parallelism lives in the research stage; authority
 and seriality live in the apply stage.
 
+## Use absolute paths, not relative
+
+A file path the assistant passes to a tool call, command, or file reference is absolute, not relative to
+an assumed working directory, because that directory can silently differ between tool calls, subprocesses,
+and sessions and send the action at the wrong target. A relative path is used only when the tool or format
+in use requires a path relative to a named fixed root, and that root is identified where the path appears.
+
 ## A verification finding is fixed, not argued away
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
