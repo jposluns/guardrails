@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [ACCUR]
 slug: verify-dependency-exists
+map-nist-ssdf: [PW.4.1]
 map-owasp-llm: [LLM04]
 ---
 

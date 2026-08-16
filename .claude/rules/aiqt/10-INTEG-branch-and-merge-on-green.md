@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: branch-and-merge-on-green
+map-nist-ssdf: [PS.1.1, PW.7.1]
 ---
 
 # Branch and merge only on green

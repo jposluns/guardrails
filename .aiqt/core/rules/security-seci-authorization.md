@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: authorization
+map-nist-ssdf: [PW.5.1]
 map-owasp-asvs: [V8]
 map-owasp-web: [A01]
 map-owasp-api: [API1, API5]

@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: cryptography
+map-nist-ssdf: [PW.5.1]
 map-owasp-web: [A04]
 map-owasp-asvs: [V11]
 map-owasp-proactive: [C2]

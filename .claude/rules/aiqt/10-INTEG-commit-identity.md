@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [TRUST]
 slug: commit-identity
+map-nist-ssdf: [PS.1.1]
 ---
 
 # Commit identity

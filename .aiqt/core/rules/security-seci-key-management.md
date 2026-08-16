@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: key-management
+map-nist-ssdf: [PW.5.1]
 map-owasp-asvs: [V11]
 map-owasp-cheatsheet: [key-management]
 ---
