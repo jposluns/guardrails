@@ -66,14 +66,18 @@ def _check_keys(fm, allowed, name):
         raise ValueError("{}: unknown or forbidden key(s): {}".format(name, ", ".join(sorted(extra))))
 
 
-def derive(fm, name):
+def derive(fm, name, allowed_origins=("pack",)):
+    # allowed_origins defaults to pack-only so the generator (which sources only pack rules from
+    # .aiqt/core/) stays strict; the placement gate passes ("pack", "adopter") because it must accept
+    # correctly-placed adopter-authored rules too (spec sections 3 and 4). Origin does not affect the
+    # derived path, only which origins are valid.
     for req in ("corpus-id", "origin", "family", "slug"):
         if req not in fm:
             raise ValueError("{}: missing required key '{}'".format(name, req))
     if not CID_RE.match(str(fm["corpus-id"])):
         raise ValueError("{}: corpus-id must match ^[a-z0-9]{{6,}}$".format(name))
-    if fm["origin"] != "pack":
-        raise ValueError("{}: origin must be 'pack'".format(name))
+    if fm["origin"] not in allowed_origins:
+        raise ValueError("{}: origin must be one of {}".format(name, "/".join(allowed_origins)))
     if not SLUG_RE.match(str(fm["slug"])):
         raise ValueError("{}: slug must be kebab-case".format(name))
     family = fm["family"]
