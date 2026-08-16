@@ -58,8 +58,8 @@ then fix it; nothing that is not the fix proceeds ahead of it. Severity is grade
 
 ## Branch and merge only on green
 
-Develop a change in isolation from the shared line of development, put it through a review gate, and
-integrate it only when its checks pass. What lands on the shared line is the reviewed, verified state,
+Develop a change in isolation from the protected line of development, put it through a review gate, and
+integrate it only when its checks pass. What lands on the protected line is the reviewed, verified state,
 never a work in progress. On git the usual form is a feature branch and a pull request merged on green;
 the mechanism varies, the gate does not.
 
@@ -106,11 +106,7 @@ explicitly reclassifies it with a recorded rationale.
 ## High-assurance verification
 
 Every substantive change is verified before it integrates by an independent adversarial pass, briefed to
-refute rather than confirm. Run it across two model families wherever a second family is available,
-because different families surface systematically different failure classes; where only one vendor is
-reachable, run two independent, differently-primed passes in separate clean contexts, which is the
-accepted fallback and not the equal of two families. A third family, or a further independent pass, is
-reserved for critical changes.
+refute rather than confirm. The pass runs on the change before it lands, never after.
 
 ## Isolate verifiers and judge by their result signal
 
@@ -133,6 +129,15 @@ refactoring, broadening scope, or adding polish beyond what the task calls for.
 When an instruction, followed literally, would defeat its own purpose, surface the conflict before executing
 it rather than silently complying or silently substituting your own judgment. State the conflict in one
 sentence, name the concrete downside, propose a better path, and let the maintainer decide.
+
+## Verifier diversity
+
+Diversify the verifiers so they surface different failure classes: run the adversarial pass across two
+model families, and a second family from any vendor counts. Only where no second model family is available
+may this fall back to two independent, differently-primed passes in separate clean contexts, which is the
+accepted fallback and not the equal of two families; record the reduction and run the two-family pass once
+a second family becomes available. A third family is reserved for critical changes; where only one vendor
+is reachable, a further independent pass takes its place.
 
 ## Assess and advise are discussion only
 
@@ -197,7 +202,7 @@ Classify a decision before enacting it: is it yours to make (ACT), the maintaine
 
 ## Background work during CI waits
 
-A wait is a resource. While a check run or another long operation is in flight, advance independent,
+A wait is a resource. While a check or another long operation is in flight, advance independent,
 non-conflicting work rather than idling, without ever gating the outcome on an unread or pending result.
 Never integrate on a pending or unreadable signal; parallelism speeds the work, it never lowers the bar.
 

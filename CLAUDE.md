@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.1.6** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.1.7** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -50,14 +50,17 @@ hand, then fix it. Nothing that is not the fix proceeds ahead of it. Severity is
 decision. Every confirmed defect gets a row in the operational `open-findings` register the moment it
 is confirmed, and leaves only via FIXED, ROUTED, REFUTED, or ACCEPTED.
 
-## Quality assurance: dual-family verification
+## Quality assurance: multi-family verification
 
-Every substantive change is verified before it merges by an INDEPENDENT adversarial pass, briefed to
-refute rather than confirm, run across TWO model families (a Claude-family and a GPT/Codex-family
-verifier) because the families surface systematically different failure classes. Reserve a third
-super-high-assurance family for critical changes. The only sanctioned reduction is token unavailability
-on a family, noted and re-run when the tokens return. Quick, purely-bookkeeping changes need no
-standing verifier; the mechanical gates suffice.
+Every substantive change is verified before it integrates by an INDEPENDENT adversarial pass, briefed to
+refute rather than confirm. Diversify the verifiers so they surface different failure classes: run across
+model families, a second family from any vendor counting; where no second family is available, fall back to
+independent, differently-primed passes, recorded and re-run once a second family becomes reachable. This
+repo's standing floor is now TRIPLE-family (a Claude-family, a GPT/Codex-family, and a Gemini-family
+verifier), for interoperability and platform neutrality; the only sanctioned reduction is a family's
+token/quota unavailability, noted and re-run when it returns. A further family or independent pass is
+reserved for critical changes. Quick, purely-bookkeeping changes need no standing verifier; the mechanical
+gates suffice.
 
 ## Workers and orchestration
 
