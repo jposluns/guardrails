@@ -19,7 +19,14 @@ run_gate "secrets"   python3 tools/check_secrets.py
 # gitleaks is a second, independent secret gate. If it is not installed locally it is
 # reported NOT RUN rather than skipped silently: a gate that quietly does not run is
 # indistinguishable from one that passed, which is the failure this wording prevents.
+# A no-root user install (the recommended non-root path) lands in ~/.local/bin, which a
+# non-login shell may not carry on PATH; fall back to it ONLY when the normal lookup fails,
+# and append rather than prepend, so an on-PATH gitleaks keeps precedence and a user-local
+# binary can never shadow it (nor shift resolution of the later gates).
 echo "--- secrets (gitleaks) ---"
+if ! command -v gitleaks >/dev/null 2>&1 && [ -n "${HOME:-}" ] && [ -x "$HOME/.local/bin/gitleaks" ]; then
+  PATH="$PATH:$HOME/.local/bin"
+fi
 if command -v gitleaks >/dev/null 2>&1; then
   if gitleaks dir . --no-banner --redact --exit-code 1; then
     echo "PASS: gitleaks found no leaks"
