@@ -4,7 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: ACCUR
-secondary: [QUALI]
+secondary: [QUALI, INTEG]
 slug: guard-input-soundness
 ---
 

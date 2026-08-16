@@ -3,6 +3,7 @@ corpus-id: sectcs
 origin: pack
 family: security
 facet: SECI
+secondary: [SECA]
 slug: tool-command-safety
 map-owasp-asi: [ASI05]
 map-owasp-mcp: [MCP05]
