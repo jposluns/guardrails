@@ -7,6 +7,7 @@ secondary: [TRUST]
 slug: human-authorization
 map-nist-airmf: [GOVERN 3.2, MAP 3.5]
 map-nist-80053: [CM-3, CM-5]
+map-atlas: [AML.T0053, AML.T0081, AML.T0086, AML.T0101]
 map-owasp-llm: [LLM03]
 map-owasp-asi: [ASI01]
 ---

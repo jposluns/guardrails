@@ -7,6 +7,7 @@ secondary: [SECC]
 slug: session-token-management
 map-nist-80053: [IA-5, SC-23, SC-23(1)]
 map-nist-ssdf: [PW.5.1]
+map-atlas: [AML.T0055, AML.T0091.000, AML.T0091.001, AML.T0113]
 map-owasp-asvs: [V7, V9]
 map-owasp-cheatsheet: [session-management]
 ---
