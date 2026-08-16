@@ -18,16 +18,42 @@ from _gen_common import repo_root  # noqa: E402
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
 CIA_FACETS = {"CONFI", "INTEG", "AVAIL", "PRIV"}
-BASE_KEYS = {"corpus-id", "origin", "family", "slug", "secondary"}
+# Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
+# allows it only on aiqt-non-apex and security, so it is added to those allow-sets individually.
+BASE_KEYS = {"corpus-id", "origin", "family", "slug"}
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 CID_RE = re.compile(r'^[a-z0-9]{6,}$')
 
 
+def _unquote(tok):
+    """A single scalar STRING element: strip matching quotes, else the bare token. Fail-closed."""
+    if tok and tok[0] in "\"'":
+        if len(tok) >= 2 and tok[-1] == tok[0]:
+            return tok[1:-1]
+        raise ValueError("malformed quoted value {!r}".format(tok))
+    return tok
+
+
 def _value(v):
     if v and v[0] in "\"'":
-        if len(v) >= 2 and v[-1] == v[0]:
-            return v[1:-1]
-        raise ValueError("malformed quoted value {!r}".format(v))
+        return _unquote(v)
+    # Flow sequence of strings, e.g. [INTEG, QUALI] (spec section 4). Elements are strings; a bare
+    # element is not coerced to int/bool. Malformed (unclosed, or an empty element) is fail-closed.
+    if v.startswith("["):
+        if not v.endswith("]"):
+            raise ValueError("malformed flow sequence {!r} (unterminated)".format(v))
+        inner = v[1:-1].strip()
+        if inner == "":
+            return []
+        if "[" in inner or "]" in inner:
+            raise ValueError("nested flow sequence not allowed in {!r} (strings only)".format(v))
+        elems = []
+        for part in inner.split(","):
+            part = part.strip()
+            if part == "":
+                raise ValueError("empty element in flow sequence {!r}".format(v))
+            elems.append(_unquote(part))
+        return elems
     if v in ("true", "false"):
         return v == "true"
     if re.fullmatch(r'-?\d+', v):
@@ -80,6 +106,8 @@ def derive(fm, name, allowed_origins=("pack",)):
         raise ValueError("{}: origin must be one of {}".format(name, "/".join(allowed_origins)))
     if not SLUG_RE.match(str(fm["slug"])):
         raise ValueError("{}: slug must be kebab-case".format(name))
+    if "secondary" in fm and not isinstance(fm["secondary"], list):
+        raise ValueError("{}: secondary must be a flow sequence of facet codes".format(name))
     family = fm["family"]
     if family == "aiqt":
         if fm.get("apex") is True:
@@ -87,7 +115,7 @@ def derive(fm, name, allowed_origins=("pack",)):
             if fm["slug"] != "project-integrity":
                 raise ValueError("{}: apex slug must be 'project-integrity'".format(name))
             return "aiqt/00-project-integrity.md"
-        _check_keys(fm, BASE_KEYS | {"tier", "facet"}, name)
+        _check_keys(fm, BASE_KEYS | {"tier", "facet", "secondary"}, name)
         tier = str(fm.get("tier", ""))
         facet = fm.get("facet", "")
         if tier not in TIER_FACETS:
@@ -96,7 +124,7 @@ def derive(fm, name, allowed_origins=("pack",)):
             raise ValueError("{}: facet '{}' invalid for tier {}".format(name, facet, tier))
         return "aiqt/{}-{}-{}.md".format(tier, facet, fm["slug"])
     if family == "security":
-        _check_keys(fm, BASE_KEYS | {"facet"}, name)
+        _check_keys(fm, BASE_KEYS | {"facet", "secondary"}, name)
         facet = fm.get("facet", "")
         if facet not in CIA_FACETS:
             raise ValueError("{}: security facet must be CONFI/INTEG/AVAIL/PRIV".format(name))
