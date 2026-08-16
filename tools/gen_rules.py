@@ -100,23 +100,33 @@ def derive(fm, name):
     raise ValueError("{}: unknown family '{}'".format(name, family))
 
 
+def load_corpus(src_dir):
+    """Parse and fully validate every source (schema + unique corpus-id + unique derived path); raise
+    ValueError on any malformed or duplicate. Returns [(path, frontmatter, derived_rel_path)]."""
+    seen_ids, seen_paths, out = {}, {}, []
+    for src in sorted(src_dir.rglob("*.md")):
+        fm = parse_source(src)
+        rel = derive(fm, src.name)
+        cid = str(fm["corpus-id"])
+        if cid in seen_ids:
+            raise ValueError("{}: corpus-id {} already used by {}".format(src.name, cid, seen_ids[cid]))
+        if rel in seen_paths:
+            raise ValueError("{}: derives to {} already produced by {}".format(src.name, rel, seen_paths[rel]))
+        seen_ids[cid] = src.name
+        seen_paths[rel] = src.name
+        out.append((src, fm, rel))
+    return out
+
+
 def main():
     check = "--check" in sys.argv[1:]
     root = repo_root()
     src_dir = root / ".aiqt" / "core" / "rules"
     out_dir = root / ".claude" / "rules"
-    desired, seen_ids = {}, {}
+    desired = {}
     if src_dir.is_dir():
         try:
-            for src in sorted(src_dir.rglob("*.md")):
-                fm = parse_source(src)
-                rel = derive(fm, src.name)
-                cid = str(fm["corpus-id"])
-                if cid in seen_ids:
-                    raise ValueError("{}: corpus-id {} already used by {}".format(src.name, cid, seen_ids[cid]))
-                if rel in desired:
-                    raise ValueError("{}: derives to {} which already exists".format(src.name, rel))
-                seen_ids[cid] = src.name
+            for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
         except (ValueError, OSError) as exc:
             print("error: {}".format(exc))
