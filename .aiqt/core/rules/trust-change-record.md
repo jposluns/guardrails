@@ -9,6 +9,7 @@ slug: change-record
 map-nist-airmf: [MANAGE 4.1]
 map-nist-80053: [CM-3]
 map-nist-ssdf: [PO.3.3]
+map-iso-42001: [7.5.2, 7.5.3]
 ---
 
 # Change record
