@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: session-token-management
+map-nist-80053: [IA-5, SC-23, SC-23(1)]
 map-nist-ssdf: [PW.5.1]
 map-owasp-asvs: [V7, V9]
 map-owasp-cheatsheet: [session-management]

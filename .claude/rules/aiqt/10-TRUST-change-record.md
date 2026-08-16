@@ -6,6 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: change-record
+map-nist-80053: [CM-3]
 map-nist-ssdf: [PO.3.3]
 ---
 

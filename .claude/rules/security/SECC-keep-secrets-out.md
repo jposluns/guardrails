@@ -5,6 +5,7 @@ family: security
 facet: SECC
 secondary: [SECI]
 slug: keep-secrets-out
+map-nist-80053: [IA-5(7)]
 map-nist-ssdf: [PW.5.1]
 map-owasp-llm: [LLM02]
 map-owasp-mcp: [MCP01]
