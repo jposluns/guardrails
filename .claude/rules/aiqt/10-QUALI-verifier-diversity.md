@@ -13,6 +13,6 @@ Diversify the verification so it surfaces different failure classes: run it acro
 a second family from any vendor counts. Only where no second model family is available may this fall back to
 two independent, differently-primed passes in separate clean contexts, which is the accepted fallback and
 not the equal of two families; record the reduction and run the two-family pass once a second family
-becomes available. A third family is reserved for critical changes; only where no third family is available
+becomes available. A critical change adds a third family; only where no third family is available
 may a further independent, differently-primed pass take its place, recorded and re-run once a third family
 becomes available. Unavailable means unreachable, not merely unbudgeted: cost never buys the reduction.

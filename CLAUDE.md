@@ -59,7 +59,8 @@ two independent, differently-primed passes in separate clean contexts, recorded 
 family becomes reachable. This
 repo's standing floor is now TRIPLE-family (a Claude-family, a GPT/Codex-family, and a Gemini-family
 verifier), for interoperability and platform neutrality; the only sanctioned reduction is a family's
-token/quota unavailability, noted and re-run when it returns. A further family or independent pass is
+genuine unavailability (an outage or an exhausted rate limit, not merely a budget choice), noted and
+re-run when it returns. A further family or independent pass is
 reserved for critical changes. Quick, purely-bookkeeping changes need no standing verifier; the mechanical
 gates suffice.
 
