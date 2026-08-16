@@ -7,6 +7,7 @@ facet: ACCUR
 secondary: [INTEG, TRUST]
 slug: evidence-grounded-completion
 map-nist-airmf: [GOVERN 4.1]
+map-iso-23894: [A.12]
 ---
 
 # Evidence-grounded completion

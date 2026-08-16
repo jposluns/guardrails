@@ -9,6 +9,7 @@ slug: records-first
 map-nist-airmf: [GOVERN 1.4]
 map-nist-ssdf: [PW.1.2]
 map-iso-42001: [7.5.2, 7.5.3]
+map-iso-23894: [6.7]
 ---
 
 # Records first

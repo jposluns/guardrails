@@ -7,6 +7,7 @@ facet: TRUST
 slug: express-authorization-before-execution
 map-nist-airmf: [GOVERN 3.2, MAP 3.5]
 map-iso-42001: [A.9.2]
+map-iso-23894: [A.2, B.4]
 ---
 
 # Express authorization before execution

@@ -9,6 +9,7 @@ slug: commit-identity
 map-nist-airmf: [GOVERN 2.1]
 map-nist-ssdf: [PS.1.1]
 map-iso-42001: [A.3.2]
+map-iso-23894: [A.2]
 ---
 
 # Commit identity

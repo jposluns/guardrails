@@ -8,6 +8,7 @@ slug: secure-configuration
 map-nist-80053: [CM-6, CM-7, SI-11]
 map-nist-ssdf: [PW.9.1, PW.9.2]
 map-atlas: [AML.T0049, AML.T0063]
+map-iso-23894: [A.11]
 map-owasp-web: [A02]
 map-owasp-api: [API8]
 map-owasp-asvs: [V13]
