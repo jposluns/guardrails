@@ -10,6 +10,7 @@ map-nist-airmf: [MANAGE 4.1]
 map-nist-80053: [CM-3, CM-3(2), SA-10]
 map-nist-ssdf: [PS.1.1, PW.7.1]
 map-iso-42001: [A.6.1.3]
+map-iso-23894: [A.7, B.7]
 ---
 
 # Branch and merge only on green

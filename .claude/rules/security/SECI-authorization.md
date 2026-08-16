@@ -8,6 +8,7 @@ slug: authorization
 map-nist-80053: [AC-3, AC-6]
 map-nist-ssdf: [PW.5.1]
 map-atlas: [AML.T0053, AML.T0082, AML.T0085]
+map-iso-23894: [A.11]
 map-owasp-asvs: [V8]
 map-owasp-web: [A01]
 map-owasp-api: [API1, API5]

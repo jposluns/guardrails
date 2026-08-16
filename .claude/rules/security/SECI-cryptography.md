@@ -7,6 +7,7 @@ secondary: [SECC]
 slug: cryptography
 map-nist-80053: [SC-8, SC-13, SC-28]
 map-nist-ssdf: [PW.5.1]
+map-iso-23894: [A.8, A.11]
 map-owasp-web: [A04]
 map-owasp-asvs: [V11]
 map-owasp-proactive: [C2]

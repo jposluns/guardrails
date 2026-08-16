@@ -8,6 +8,7 @@ secondary: [TRUST]
 slug: surface-counterproductive-instructions
 map-nist-airmf: [GOVERN 3.2, GOVERN 4.1]
 map-iso-42001: [A.3.3]
+map-iso-23894: [6.2, A.2]
 ---
 
 # Surface a counterproductive instruction before executing it

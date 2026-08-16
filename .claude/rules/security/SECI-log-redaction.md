@@ -10,6 +10,7 @@ map-nist-80053: [AU-3(3)]
 map-nist-ssdf: [PW.5.1]
 map-atlas: [AML.T0055, AML.T0063]
 map-iso-42001: [A.6.2.8]
+map-iso-23894: [A.8, A.11]
 map-owasp-asvs: [V16]
 ---
 

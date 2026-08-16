@@ -8,6 +8,7 @@ slug: no-cross-context-bleed
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [AC-4, SC-4]
 map-atlas: [AML.T0057, AML.T0080]
+map-iso-23894: [A.8, A.11]
 map-owasp-mcp: [MCP10]
 ---
 

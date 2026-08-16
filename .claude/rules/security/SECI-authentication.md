@@ -8,6 +8,7 @@ slug: authentication
 map-nist-80053: [IA-2, IA-5(5), IA-5(7)]
 map-nist-ssdf: [PW.1.3, PW.5.1]
 map-atlas: [AML.T0012, AML.T0055]
+map-iso-23894: [A.11]
 map-owasp-asvs: [V6]
 map-owasp-web: [A07]
 map-owasp-api: [API2]
