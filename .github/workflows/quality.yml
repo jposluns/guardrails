@@ -62,3 +62,6 @@ jobs:
 
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
+
+      - name: Agents drift
+        run: python3 tools/gen_agents.py --check

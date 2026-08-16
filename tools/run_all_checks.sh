@@ -40,6 +40,7 @@ run_gate "site"      python3 tools/check_site.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
+run_gate "agents-drift"    python3 tools/gen_agents.py --check
 
 if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"
