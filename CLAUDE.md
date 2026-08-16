@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.1.3** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.1.4** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -90,7 +90,7 @@ stage; authority and seriality live in the apply stage.
 ## Gates and CI
 
 CI runs a `Quality` workflow of deterministic gates: a project secret scan plus gitleaks, a
-leak-denylist check, an en/em dash check, an internal-link check, a site-integrity check, and roadmap and changelog drift checks (generated public files must match their sources). `tools/run_all_checks.sh`
+leak-denylist check, an en/em dash check, an internal-link check, a site-integrity check, and roadmap, changelog, and rules drift checks (generated files must match their sources). `tools/run_all_checks.sh`
 is the local mirror. Read CI status with `tools/ci-status.sh` (which reads `actions/runs`, needing only
 Actions: Read), never `gh pr checks` (a fine-grained token cannot read the Checks API) and never
 `commits/<sha>/status` (which always reads pending). The gate roster grows toward the full pack roster
