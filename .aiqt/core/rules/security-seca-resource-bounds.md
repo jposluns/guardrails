@@ -8,6 +8,7 @@ slug: resource-bounds
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [SC-5, SC-6]
 map-atlas: [AML.T0029, AML.T0034.000, AML.T0034.001, AML.T0034.002, AML.T0046]
+map-iso-42001: [A.6.2.6]
 map-owasp-llm: [LLM06]
 map-owasp-asi: [ASI08]
 map-owasp-api: [API4]
