@@ -14,7 +14,7 @@ from _gen_common import repo_root  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3}
-CIA_FACET_ORDER = {"CONFI": 0, "INTEG": 1, "AVAIL": 2, "PRIV": 3}
+CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
 
 
 def sort_key(fm):

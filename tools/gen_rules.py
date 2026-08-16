@@ -17,9 +17,10 @@ from _gen_common import repo_root  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
-CIA_FACETS = {"CONFI", "INTEG", "AVAIL", "PRIV"}
+CIA_FACETS = {"SECC", "SECI", "SECA", "SECP"}
 # The global known-facet set: any rule may carry ANY of these as a `secondary` tag, cross-family
-# (an aiqt rule may tag a CIA facet and vice versa), per the settled secondary semantics (spec section 4).
+# (an aiqt rule may tag a security facet and vice versa), per the settled secondary semantics (spec
+# section 4). Security codes are namespaced (SEC*) so none collides with an AIQT facet (e.g. SECI vs INTEG).
 KNOWN_FACETS = set().union(*TIER_FACETS.values()) | CIA_FACETS
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
 # allows it only on aiqt-non-apex and security, so it is added to those allow-sets individually.
@@ -158,7 +159,7 @@ def derive(fm, name, allowed_origins=("pack",)):
         _check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)
         facet = fm.get("facet", "")
         if facet not in CIA_FACETS:
-            raise ValueError("{}: security facet must be CONFI/INTEG/AVAIL/PRIV".format(name))
+            raise ValueError("{}: security facet must be SECC/SECI/SECA/SECP".format(name))
         _check_secondary(fm, facet, name)
         return "security/{}-{}.md".format(facet, fm["slug"])
     raise ValueError("{}: unknown family '{}'".format(name, family))

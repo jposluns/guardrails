@@ -34,7 +34,7 @@ _SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 # lexically well-formed (tier/facet consistency is checked separately as tier-code-mismatch).
 AIQT_NONAPEX_RE = re.compile(r"^(10|20|30|40)-(ACCUR|INTEG|QUALI|TRUST|PROGR|SPEED|COST)-" + _SLUG + r"\.md$")
 # security derivation shape <facet>-<slug>.md.
-SECURITY_RE = re.compile(r"^(CONFI|INTEG|AVAIL|PRIV)-" + _SLUG + r"\.md$")
+SECURITY_RE = re.compile(r"^(SECC|SECI|SECA|SECP)-" + _SLUG + r"\.md$")
 
 
 def repo_root_default():

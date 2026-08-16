@@ -17,7 +17,7 @@ Cloud with Enterprise Managed Users, or GHES with Secret Protection, for a priva
 repository owned by a personal account. This gate plus gitleaks in CI is the
 compensating control, not a second-best version of a control we could have had.
 
-See `.claude/rules/security/CONFI-secrets.md`: a secret that reaches a remote is treated as
+See `.claude/rules/security/SECC-secrets.md`: a secret that reaches a remote is treated as
 compromised and rotated, whatever any scanner said.
 """
 import re
@@ -35,7 +35,7 @@ SKIP_NAMES = {"check_secrets.py"}
 # not be caught here, which is one more reason GitHub secret scanning with push
 # protection is the control this gate only supplements.
 EXEMPT_PATHS = {
-    ".claude/rules/security/CONFI-secrets.md",  # verbatim guardrails pack copy; its body IS the pattern list
+    ".claude/rules/security/SECC-secrets.md",  # verbatim guardrails pack copy; its body IS the pattern list
 }
 TEXT_SUFFIXES = {
     ".md", ".py", ".sh", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg",
