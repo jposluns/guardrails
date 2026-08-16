@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+from _standards import map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -29,13 +30,11 @@ KNOWN_FACETS = set().union(*TIER_FACETS.values()) | CIA_FACETS
 BASE_KEYS = {"corpus-id", "origin", "family", "slug"}
 # Optional standards-mapping keys, allowed on security and aiqt-non-apex rules. Each value is a flow
 # sequence of external control/subcategory IDs, for the public /mappings crosswalk. Adding a mapping key
-# never affects a rule's derived path.
-MAP_KEYS = {
-    "map-owasp-llm", "map-owasp-asi", "map-owasp-mcp", "map-owasp-asvs", "map-owasp-proactive",
-    "map-owasp-web", "map-owasp-api", "map-owasp-scvs", "map-owasp-cheatsheet",
-    "map-nist-airmf", "map-nist-ssdf", "map-nist-80053", "map-iso-42001", "map-iso-23894",
-    "map-ccm", "map-aicm", "map-atlas", "map-saif",
-}
+# never affects a rule's derived path. The set is DERIVED from the vendored manifests under
+# .aiqt/standards/ (one key per manifest): a mapping key is valid only if its framework's pinned id
+# manifest exists, so a rule can never cite an unsourced framework. check_mappings then validates each
+# cited id against that manifest's enumerated set.
+MAP_KEYS = map_keys(repo_root())
 # Keys whose value, when present, must be a flow sequence (a list): secondary and every mapping key.
 SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
