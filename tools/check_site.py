@@ -9,8 +9,16 @@ escaping site/ (e.g. /../x) is broken. A fragment (#id) is validated against the
 anchor-only or query-only href is validated against the current page.
 
 Basic HTML validity: a page must have a non-empty <title>, and must not reuse an id (a duplicate id is
-invalid and silently breaks in-page anchors). Deeper validation and download-artifact checksums are
-tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding.
+invalid and silently breaks in-page anchors).
+
+Tag structure: open/close balance and nesting, with void elements, self-closing tags (a trailing slash
+is honoured on void and foreign svg/math elements, ignored on non-void HTML so <div/> stays open), and
+HTML5 optional-close tables. The subtree of svg/math and of <textarea> (and of <script>/<style> via
+parser CDATA) is NOT structurally validated, so embedded content never false-positives; the root's own
+open/close balance IS checked, so an unclosed one is caught, and links/ids inside such a subtree are not
+validated (a deferred coverage gap). NOT yet detected (slice-2): invalid nesting of non-nestable
+elements such as <form>/<a>/<button>. Deeper validation and download-artifact checksums are tracked
+separately (they need a final content baseline). Exit 0 clean, 1 on any finding.
 """
 import os
 import sys
@@ -20,6 +28,42 @@ from urllib.parse import urlsplit
 
 EN, EM = "–", "—"
 SITE_HOSTS = {"aiqt.ai", "www.aiqt.ai"}
+
+# Tags that never take an end tag; never pushed on the open-tag stack.
+VOID_ELEMENTS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+# Roots whose SUBTREE is not structurally validated in this slice: svg/math (foreign, XML-ish, with
+# different self-closing rules) and textarea (raw text, not markup). Structure INSIDE them is a slice-2
+# non-goal; the root's own open/close balance IS still checked, so an unclosed one is caught.
+SUSPEND_ROOTS = {"svg", "math", "textarea"}
+# HTML5 elements whose end tag may be legally omitted (left open or auto-closed);
+# an implicit close of one of these is not a structural finding.
+OPTIONAL_END_TAGS = {
+    "html", "head", "body", "li", "p", "dt", "dd",
+    "option", "optgroup", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "rt", "rp", "colgroup",
+}
+# Sibling start tags that auto-close an open optional-end-tag element
+# (WHATWG tree construction, simplified to the common cases).
+AUTOCLOSERS = {
+    "li": {"li"},
+    "p": {"address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset",
+          "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+          "header", "hgroup", "hr", "main", "menu", "nav", "ol", "p", "pre", "section",
+          "summary", "table", "ul"},
+    "option": {"option", "optgroup"},
+    "optgroup": {"optgroup"},
+    "tr": {"tr"},
+    "td": {"td", "th", "tr"},
+    "th": {"td", "th", "tr"},
+    "thead": {"tbody", "tfoot"},
+    "tbody": {"tbody", "tfoot"},
+    "tfoot": {"tbody"},
+    "dt": {"dt", "dd"},
+    "dd": {"dt", "dd"},
+}
 
 
 class Page(HTMLParser):
@@ -31,9 +75,16 @@ class Page(HTMLParser):
         self.title_present = False
         self.title_text = ""
         self._in_title = False
-        self.svg_depth = 0
+        self.stack = []           # open non-void tags: (tag, line)
+        self.tag_findings = []    # (line, msg) structural findings
+        self.suspend_tag = None   # SUSPEND_ROOT we are inside (subtree not checked), or None
+        self.suspend_count = 0    # nesting of that same root, so the matching close ends suspension
 
     def handle_starttag(self, tag, attrs):
+        if self.suspend_tag is not None:
+            if tag == self.suspend_tag:
+                self.suspend_count += 1
+            return
         d = dict(attrs)
         for key in ("href", "src"):
             if d.get(key):
@@ -43,17 +94,67 @@ class Page(HTMLParser):
             self.id_list.append((d["id"], self.getpos()[0]))
         if d.get("name"):
             self.ids.add(d["name"])
-        if tag == "svg":
-            self.svg_depth += 1
-        if tag == "title" and self.svg_depth == 0:
+        if tag == "title":
             self.title_present = True
             self._in_title = True
+        while self.stack and tag in AUTOCLOSERS.get(self.stack[-1][0], ()):
+            self.stack.pop()
+        if tag not in VOID_ELEMENTS:
+            self.stack.append((tag, self.getpos()[0]))
+            if tag in SUSPEND_ROOTS:
+                self.suspend_tag = tag       # enter suspension; the root stays at the top of the stack
+                self.suspend_count = 1
+
+    def handle_startendtag(self, tag, attrs):
+        if self.suspend_tag is not None:
+            return
+        if tag in VOID_ELEMENTS:
+            self.handle_starttag(tag, attrs)   # extract href/src/id; void is not pushed on the stack
+            return
+        if tag in SUSPEND_ROOTS:
+            d = dict(attrs)                    # <svg id=.. />: register id/name, but do not enter suspension
+            if d.get("id"):
+                self.ids.add(d["id"])
+                self.id_list.append((d["id"], self.getpos()[0]))
+            if d.get("name"):
+                self.ids.add(d["name"])
+            return
+        # a non-void HTML element with a trailing slash is NOT self-closed (the parser ignores the
+        # slash), so <div/> is an open <div> that must be closed later.
+        self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
-        if tag == "svg":
-            self.svg_depth = max(0, self.svg_depth - 1)
         if tag == "title":
             self._in_title = False
+        if self.suspend_tag is not None:
+            if tag == self.suspend_tag:
+                self.suspend_count -= 1
+                if self.suspend_count == 0:
+                    self.stack.pop()          # the suspend root is at the top; nothing pushed inside
+                    self.suspend_tag = None
+            return
+        if tag in VOID_ELEMENTS:
+            self.tag_findings.append(
+                (self.getpos()[0], "end tag </{}> for a void element (invalid HTML)".format(tag)))
+            return
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                for t, line in self.stack[i + 1:]:
+                    if t not in OPTIONAL_END_TAGS:
+                        self.tag_findings.append(
+                            (line, "<{}> opened but never closed (implicitly closed by </{}> at line {})".format(
+                                t, tag, self.getpos()[0])))
+                del self.stack[i:]
+                return
+        self.tag_findings.append(
+            (self.getpos()[0], "end tag </{}> has no matching open tag".format(tag)))
+
+    def finalize(self):
+        for tag, line in self.stack:
+            if tag not in OPTIONAL_END_TAGS:
+                self.tag_findings.append(
+                    (line, "<{}> opened but never closed before end of document".format(tag)))
+        self.stack = []
 
     def handle_data(self, data):
         if self._in_title:
@@ -107,6 +208,7 @@ def main():
         page = Page()
         try:
             page.feed(text)
+            page.finalize()
         except (ValueError, AssertionError):
             page = None
         docs.append((f, rel, text, page))
@@ -120,6 +222,8 @@ def main():
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
+        for line, msg in page.tag_findings:
+            findings.append("{}:{}: {}".format(rel, line, msg))
         if not page.title_present or not page.title_text.strip():
             findings.append("{}: missing or empty <title>".format(rel))
         seen = {}
@@ -157,7 +261,7 @@ def main():
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: site dashes, links, anchors, titles, and unique ids all check out")
+    print("PASS: site dashes, links, anchors, titles, unique ids, and tag structure all check out")
     return 0
 
 
