@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Fail on en dashes and em dashes in Markdown prose.
+"""Fail on en dashes and em dashes in Markdown prose and the standards id-manifests.
 
 The project's writing style forbids both; hyphens, commas, colons, semicolons,
-and parentheses are the sanctioned substitutes. Only Markdown is scanned, so
-this file may name the characters in its own source without flagging itself.
+and parentheses are the sanctioned substitutes. Markdown and the crosswalk
+manifests under .aiqt/standards/ are scanned (the manifest titles are public
+crosswalk text); this Python file is not, so it may name the characters in its
+own source without flagging itself.
 """
 import sys
 from pathlib import Path
@@ -16,7 +18,11 @@ SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     findings = []
-    for path in sorted(root.rglob("*.md")):
+    paths = sorted(root.rglob("*.md"))
+    std_dir = root / ".aiqt" / "standards"
+    if std_dir.is_dir():
+        paths += sorted(std_dir.glob("*.toml"))
+    for path in paths:
         if any(part in SKIP_DIRS for part in path.parts):
             continue
         try:
@@ -36,7 +42,7 @@ def main() -> int:
         for finding in findings:
             print(f"  {finding}")
         return 1
-    print("PASS: no en dashes or em dashes in Markdown")
+    print("PASS: no en dashes or em dashes in Markdown or standards manifests")
     return 0
 
 

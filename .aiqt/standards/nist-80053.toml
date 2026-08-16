@@ -1,5 +1,6 @@
 # NIST SP 800-53 Rev 5 (Security and Privacy Controls): id manifest for the AIQT standards crosswalk.
-# Ids are the NIST published form (AC-1, AC-2(1)). US Government work (public domain). See README.md.
+# Ids are the NIST published form (AC-1, AC-2(1)). Titles carry the NIST control names with en/em
+# dashes normalized to hyphens per house style. US Government public domain. See README.md.
 map-key = "map-nist-80053"
 name = "NIST SP 800-53 Security and Privacy Controls"
 publisher = "NIST"
@@ -294,7 +295,7 @@ code = "AC-12(3)"
 title = "Timeout Warning Message"
 [[id]]
 code = "AC-13"
-title = "Supervision and Review — Access Control"
+title = "Supervision and Review - Access Control"
 [[id]]
 code = "AC-14"
 title = "Permitted Actions Without Identification or Authentication"
@@ -333,7 +334,7 @@ code = "AC-16(8)"
 title = "Association Techniques and Technologies"
 [[id]]
 code = "AC-16(9)"
-title = "Attribute Reassignment — Regrading Mechanisms"
+title = "Attribute Reassignment - Regrading Mechanisms"
 [[id]]
 code = "AC-16(10)"
 title = "Attribute Configuration by Authorized Individuals"
@@ -414,16 +415,16 @@ code = "AC-20(1)"
 title = "Limits on Authorized Use"
 [[id]]
 code = "AC-20(2)"
-title = "Portable Storage Devices — Restricted Use"
+title = "Portable Storage Devices - Restricted Use"
 [[id]]
 code = "AC-20(3)"
-title = "Non-organizationally Owned Systems — Restricted Use"
+title = "Non-organizationally Owned Systems - Restricted Use"
 [[id]]
 code = "AC-20(4)"
-title = "Network Accessible Storage Devices — Prohibited Use"
+title = "Network Accessible Storage Devices - Prohibited Use"
 [[id]]
 code = "AC-20(5)"
-title = "Portable Storage Devices — Prohibited Use"
+title = "Portable Storage Devices - Prohibited Use"
 [[id]]
 code = "AC-21"
 title = "Information Sharing"
@@ -762,10 +763,10 @@ code = "CA-6"
 title = "Authorization"
 [[id]]
 code = "CA-6(1)"
-title = "Joint Authorization — Intra-organization"
+title = "Joint Authorization - Intra-organization"
 [[id]]
 code = "CA-6(2)"
-title = "Joint Authorization — Inter-organization"
+title = "Joint Authorization - Inter-organization"
 [[id]]
 code = "CA-7"
 title = "Continuous Monitoring"
@@ -921,10 +922,10 @@ code = "CM-7(3)"
 title = "Registration Compliance"
 [[id]]
 code = "CM-7(4)"
-title = "Unauthorized Software — Deny-by-exception"
+title = "Unauthorized Software - Deny-by-exception"
 [[id]]
 code = "CM-7(5)"
-title = "Authorized Software — Allow-by-exception"
+title = "Authorized Software - Allow-by-exception"
 [[id]]
 code = "CM-7(6)"
 title = "Confined Environments with Limited Privileges"
@@ -1194,22 +1195,22 @@ code = "IA-2(5)"
 title = "Individual Authentication with Group Authentication"
 [[id]]
 code = "IA-2(6)"
-title = "Access to Accounts —separate Device"
+title = "Access to Accounts - separate Device"
 [[id]]
 code = "IA-2(7)"
-title = "Network Access to Non-privileged Accounts — Separate Device"
+title = "Network Access to Non-privileged Accounts - Separate Device"
 [[id]]
 code = "IA-2(8)"
-title = "Access to Accounts — Replay Resistant"
+title = "Access to Accounts - Replay Resistant"
 [[id]]
 code = "IA-2(9)"
-title = "Network Access to Non-privileged Accounts — Replay Resistant"
+title = "Network Access to Non-privileged Accounts - Replay Resistant"
 [[id]]
 code = "IA-2(10)"
 title = "Single Sign-on"
 [[id]]
 code = "IA-2(11)"
-title = "Remote Access — Separate Device"
+title = "Remote Access - Separate Device"
 [[id]]
 code = "IA-2(12)"
 title = "Acceptance of PIV Credentials"
@@ -1443,7 +1444,7 @@ code = "IR-4(6)"
 title = "Insider Threats"
 [[id]]
 code = "IR-4(7)"
-title = "Insider Threats — Intra-organization Coordination"
+title = "Insider Threats - Intra-organization Coordination"
 [[id]]
 code = "IR-4(8)"
 title = "Correlation with External Organizations"
@@ -1806,10 +1807,10 @@ code = "PE-11"
 title = "Emergency Power"
 [[id]]
 code = "PE-11(1)"
-title = "Alternate Power Supply — Minimal Operational Capability"
+title = "Alternate Power Supply - Minimal Operational Capability"
 [[id]]
 code = "PE-11(2)"
-title = "Alternate Power Supply — Self-contained"
+title = "Alternate Power Supply - Self-contained"
 [[id]]
 code = "PE-12"
 title = "Emergency Lighting"
@@ -1821,10 +1822,10 @@ code = "PE-13"
 title = "Fire Protection"
 [[id]]
 code = "PE-13(1)"
-title = "Detection Systems — Automatic Activation and Notification"
+title = "Detection Systems - Automatic Activation and Notification"
 [[id]]
 code = "PE-13(2)"
-title = "Suppression Systems — Automatic Activation and Notification"
+title = "Suppression Systems - Automatic Activation and Notification"
 [[id]]
 code = "PE-13(3)"
 title = "Automatic Fire Suppression"
@@ -2274,7 +2275,7 @@ code = "SA-4(6)"
 title = "Use of Information Assurance Products"
 [[id]]
 code = "SA-4(7)"
-title = "NIAP-approved Protection Profiles "
+title = "NIAP-approved Protection Profiles"
 [[id]]
 code = "SA-4(8)"
 title = "Continuous Monitoring Plan for Controls"
@@ -2442,7 +2443,7 @@ code = "SA-9(7)"
 title = "Organization-controlled Integrity Checking"
 [[id]]
 code = "SA-9(8)"
-title = "Processing and Storage Location — U.S. Jurisdiction"
+title = "Processing and Storage Location - U.S. Jurisdiction"
 [[id]]
 code = "SA-10"
 title = "Developer Configuration Management"
@@ -2745,7 +2746,7 @@ code = "SC-7(4)"
 title = "External Telecommunications Services"
 [[id]]
 code = "SC-7(5)"
-title = "Deny by Default — Allow by Exception"
+title = "Deny by Default - Allow by Exception"
 [[id]]
 code = "SC-7(6)"
 title = "Response to Recognized Failures"
@@ -3552,7 +3553,7 @@ code = "SR-4(3)"
 title = "Validate as Genuine and Not Altered"
 [[id]]
 code = "SR-4(4)"
-title = "Supply Chain Integrity — Pedigree"
+title = "Supply Chain Integrity - Pedigree"
 [[id]]
 code = "SR-5"
 title = "Acquisition Strategies, Tools, and Methods"
