@@ -48,11 +48,13 @@ with the public NOTICE, because this file's job is to make an id verifiable, not
 4. On an edition bump, any rule citing a removed id fails the gate on the same change, so an orphaned
    mapping cannot pass silently: fix the rule in the same change.
 
-Frameworks with a manifest and enabled key: the 8 OWASP families, NIST SSDF, NIST SP 800-53 Rev 5, and
-MITRE ATLAS. Their manifests are present but no rule maps to them yet; the mappings land in follow-on,
-verified PRs. Machine-readable sources (NIST OSCAL catalogs, the ATLAS techniques CSV) are extracted
-deterministically, which is why those id sets carry no transcription risk.
+Frameworks with a manifest and enabled key: the 8 OWASP families, NIST SSDF, NIST SP 800-53 Rev 5, MITRE
+ATLAS, NIST AI RMF, ISO/IEC 42001, and ISO/IEC 23894. Their manifests are present but no rule maps to them
+yet; the mappings land in follow-on, verified PRs. The machine-readable sources (NIST OSCAL catalogs, the
+ATLAS techniques CSV) are extracted deterministically; the AI RMF and ISO id sets are read from the
+published documents. The two ISO manifests carry the id plus the short clause/Annex TITLE only (a
+navigational pointer to a licensed copy), never the clause body text.
 
-Not yet vendored (their keys stay inert until a manifest lands): NIST AI RMF, ISO/IEC 42001, ISO/IEC 23894
-(all first-cut, coming next), CSA CCM / AICM and Google SAIF (deferred pending a licence determination),
-OWASP SCVS (no authoritative source). Each returns atomically with its manifest.
+Not yet vendored (their keys stay inert until a manifest lands): CSA CCM / AICM and Google SAIF (deferred
+pending a licence determination), OWASP SCVS (no authoritative source). Each returns atomically with its
+manifest.
