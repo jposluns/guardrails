@@ -62,7 +62,9 @@ class Manifest:
                 path.name, self.map_key, expected))
         self.name = _req_str(data, "name", path)
         self.publisher = _req_str(data, "publisher", path)
-        self.edition = _req_str(data, "edition", path)
+        # edition and retrieved are display metadata: coerce a TOML scalar (a bare version int like 2026
+        # or a native date) to str rather than require a quoted string, so a natural manifest is accepted.
+        self.edition = str(data["edition"])
         self.kind = _req_str(data, "kind", path)
         if self.kind not in KINDS:
             raise ManifestError("{}: kind '{}' must be one of {}".format(
@@ -73,7 +75,7 @@ class Manifest:
                 path.name, self.status, "/".join(sorted(STATUSES))))
         self.citation_unit = _req_str(data, "citation-unit", path)
         self.source_artefact = _req_str(data, "source-artefact", path)
-        self.retrieved = _req_str(data, "retrieved", path)
+        self.retrieved = str(data["retrieved"])
         try:
             self.id_pattern = re.compile(_req_str(data, "id-pattern", path))
         except re.error as exc:
