@@ -13,4 +13,5 @@ Never claim completion without evidence. Before "done", "fixed", "green", or "ve
 files in scope, quote the lines that support the claim, search for contradictions, and state every
 remaining unverified item. A stated intention is a claim; do not end a turn asserting work is proceeding
 unless it is. Every claim matches its source; every state assertion rests on an observation, not an
-inference. If a fact is unknown, say so.
+inference. If a fact is unknown, say so. Read before characterizing: never assert what a file
+contains, lacks, or requires without reading it.
