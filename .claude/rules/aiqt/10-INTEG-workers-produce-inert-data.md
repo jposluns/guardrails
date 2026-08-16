@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI, SECI]
 slug: workers-produce-inert-data
+map-nist-ssdf: [PS.1.1, PW.7.2]
 ---
 
 # Workers produce inert data

@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC, SECP]
 slug: log-redaction
+map-nist-ssdf: [PW.5.1]
 map-owasp-asvs: [V16]
 ---
 

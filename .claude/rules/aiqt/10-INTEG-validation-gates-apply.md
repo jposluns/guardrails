@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: validation-gates-apply
+map-nist-ssdf: [PW.7.1, PW.8.1]
 ---
 
 # Validation is a gate on apply

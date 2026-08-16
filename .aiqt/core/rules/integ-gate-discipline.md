@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: gate-discipline
+map-nist-ssdf: [PO.4.1, PW.8.2]
 ---
 
 # Gate discipline
