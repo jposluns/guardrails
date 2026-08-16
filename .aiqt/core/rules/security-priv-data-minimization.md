@@ -8,9 +8,8 @@ map-owasp-llm: [LLM02]
 map-owasp-asvs: [V14]
 ---
 
-# Minimize and protect personal and sensitive data
+# Minimize personal data sent to AI services
 
-Only the personal and sensitive data a task genuinely needs is sent to or retained by an AI service, and it
-is redacted or pseudonymized before it leaves the trust boundary wherever practical. Data residency,
-retention limits, and deletion requests are honoured, and raw prompts, tool arguments, and results carrying
-personal data are not written to logs. Minimizing what is exposed is preferred to controlling exposure after.
+Only the personal and sensitive data a task genuinely needs is sent to or retained by an AI service, and
+minimizing what is exposed is preferred to controlling exposure after the fact. What is sent is redacted or
+pseudonymized before it leaves the trust boundary wherever practical.
