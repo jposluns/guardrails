@@ -9,7 +9,7 @@ kind = "guidance"
 status = "stable"
 citation-unit = "clause or annex objective"
 id-pattern = "^([AB]\\.\\d+|\\d+\\.\\d+(\\.\\d+){0,2})$"
-source-artefact = "ISO/IEC 23894:2023, clauses 4-6 and Annexes A-B (headings only)"
+source-artefact = "ISO/IEC 23894:2023, clauses 5-6 and Annexes A-B (headings only)"
 retrieved = "2026-08-16"
 [[id]]
 code = "5.1"
