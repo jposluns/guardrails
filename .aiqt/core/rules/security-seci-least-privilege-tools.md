@@ -7,6 +7,7 @@ secondary: [SECC, TRUST]
 slug: least-privilege-tools
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [AC-6, CM-7]
+map-atlas: [AML.T0053, AML.T0086, AML.T0098, AML.T0101, AML.T0112.000]
 map-owasp-llm: [LLM03]
 map-owasp-asi: [ASI02]
 map-owasp-mcp: [MCP02]

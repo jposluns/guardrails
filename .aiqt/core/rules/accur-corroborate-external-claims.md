@@ -7,6 +7,7 @@ facet: ACCUR
 secondary: [INTEG]
 slug: corroborate-external-claims
 map-nist-airmf: [GOVERN 4.1, MEASURE 2.9]
+map-atlas: [AML.T0067.000]
 map-owasp-llm: [LLM07]
 ---
 

@@ -7,6 +7,7 @@ secondary: [SECC]
 slug: data-minimization
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [SI-12(1), SI-19]
+map-atlas: [AML.T0024.000, AML.T0024.001, AML.T0057]
 map-owasp-llm: [LLM02]
 map-owasp-asvs: [V14]
 ---

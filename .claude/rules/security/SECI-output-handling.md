@@ -8,6 +8,7 @@ slug: output-handling
 map-nist-airmf: [GOVERN 4.1, MAP 4.2, MEASURE 2.9]
 map-nist-80053: [SA-11, SI-10(6), SI-15]
 map-nist-ssdf: [PW.5.1, PW.7.1, PW.8.1]
+map-atlas: [AML.T0050, AML.T0077, AML.T0102]
 map-owasp-llm: [LLM10]
 map-owasp-asvs: [V1, V2]
 map-owasp-web: [A05]

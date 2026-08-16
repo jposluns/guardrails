@@ -6,6 +6,7 @@ facet: SECI
 slug: output-encoding
 map-nist-80053: [SI-10(6)]
 map-nist-ssdf: [PW.5.1]
+map-atlas: [AML.T0050, AML.T0077, AML.T0113]
 map-owasp-asvs: [V1]
 map-owasp-cheatsheet: [cross-site-scripting-prevention]
 ---
