@@ -3,6 +3,7 @@ corpus-id: secres
 origin: pack
 family: security
 facet: SECA
+secondary: [COST]
 slug: resource-bounds
 map-owasp-llm: [LLM06]
 map-owasp-asi: [ASI08]

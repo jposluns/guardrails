@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: TRUST
+secondary: [SECI]
 slug: human-oversight-and-autonomy-threshold
 ---
 

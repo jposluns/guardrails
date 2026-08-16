@@ -3,6 +3,7 @@ corpus-id: secncb
 origin: pack
 family: security
 facet: SECC
+secondary: [SECP]
 slug: no-cross-context-bleed
 map-owasp-mcp: [MCP10]
 ---

@@ -3,6 +3,7 @@ corpus-id: secau1
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC]
 slug: authentication
 map-owasp-asvs: [V6]
 map-owasp-web: [A07]

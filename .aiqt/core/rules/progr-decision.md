@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 20
 facet: PROGR
+secondary: [TRUST]
 slug: decision-classification-before-enacting
 ---
 

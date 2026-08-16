@@ -3,6 +3,7 @@ corpus-id: seclog
 origin: pack
 family: security
 facet: SECI
+secondary: [TRUST]
 slug: security-logging
 map-owasp-web: [A09]
 map-owasp-asvs: [V16]

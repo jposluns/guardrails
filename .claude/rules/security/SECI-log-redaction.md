@@ -3,6 +3,7 @@ corpus-id: secred
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC, SECP]
 slug: log-redaction
 map-owasp-asvs: [V16]
 ---

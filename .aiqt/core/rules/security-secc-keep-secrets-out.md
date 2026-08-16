@@ -3,6 +3,7 @@ corpus-id: secsec
 origin: pack
 family: security
 facet: SECC
+secondary: [SECI]
 slug: keep-secrets-out
 map-owasp-llm: [LLM02]
 map-owasp-mcp: [MCP01]

@@ -3,6 +3,7 @@ corpus-id: seclpr
 origin: pack
 family: security
 facet: SECC
+secondary: [SECI]
 slug: least-privilege-retrieval
 map-owasp-mcp: [MCP07]
 map-owasp-asi: [ASI03]

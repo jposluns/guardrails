@@ -3,6 +3,7 @@ corpus-id: secpsn
 origin: pack
 family: security
 facet: SECI
+secondary: [ACCUR]
 slug: poisoning-resistance
 map-owasp-llm: [LLM05, LLM09]
 map-owasp-asi: [ASI06]

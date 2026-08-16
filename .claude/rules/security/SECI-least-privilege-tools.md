@@ -3,6 +3,7 @@ corpus-id: seclpt
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC, TRUST]
 slug: least-privilege-tools
 map-owasp-llm: [LLM03]
 map-owasp-asi: [ASI02]

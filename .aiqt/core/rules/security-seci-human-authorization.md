@@ -3,6 +3,7 @@ corpus-id: sechau
 origin: pack
 family: security
 facet: SECI
+secondary: [TRUST]
 slug: human-authorization
 map-owasp-llm: [LLM03]
 map-owasp-asi: [ASI01]

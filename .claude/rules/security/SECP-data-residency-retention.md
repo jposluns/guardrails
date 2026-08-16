@@ -3,6 +3,7 @@ corpus-id: secdrr
 origin: pack
 family: security
 facet: SECP
+secondary: [SECC]
 slug: data-residency-retention
 map-owasp-asvs: [V14]
 ---
