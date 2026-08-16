@@ -33,6 +33,7 @@ else
   notrun=1
 fi
 echo
+run_gate "leaks"     python3 tools/check_leaks.py
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check

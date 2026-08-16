@@ -42,6 +42,9 @@ jobs:
           tar -xzf gitleaks.tar.gz gitleaks
           ./gitleaks dir . --no-banner --redact --exit-code 1
 
+      - name: Leak denylist
+        run: python3 tools/check_leaks.py
+
       - name: Dashes
         run: python3 tools/check_no_dashes.py
 
