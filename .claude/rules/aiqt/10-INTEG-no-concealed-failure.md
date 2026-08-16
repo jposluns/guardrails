@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [ACCUR, TRUST]
 slug: no-concealed-failure
+map-nist-80053: [SA-11]
 ---
 
 # No concealed failure

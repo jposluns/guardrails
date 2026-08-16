@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: security-logging
+map-nist-80053: [AU-2, AU-3, AU-12]
 map-nist-ssdf: [PW.5.1]
 map-owasp-web: [A09]
 map-owasp-asvs: [V16]

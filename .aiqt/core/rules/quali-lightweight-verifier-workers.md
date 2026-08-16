@@ -6,6 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [ACCUR, SECI]
 slug: lightweight-verifier-workers
+map-nist-80053: [SA-11(3)]
 ---
 
 # Isolate verifiers and judge by their result signal

@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [TRUST]
 slug: protected-branch-integrity
+map-nist-80053: [CM-3, CM-5]
 map-nist-ssdf: [PS.1.1, PW.7.1]
 ---
 

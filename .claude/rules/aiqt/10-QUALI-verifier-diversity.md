@@ -5,6 +5,7 @@ family: aiqt
 tier: 10
 facet: QUALI
 slug: verifier-diversity
+map-nist-80053: [SA-11(3)]
 map-nist-ssdf: [PW.7.1]
 ---
 

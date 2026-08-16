@@ -5,6 +5,7 @@ family: security
 facet: SECC
 secondary: [SECI]
 slug: least-privilege-retrieval
+map-nist-80053: [AC-3, AC-6]
 map-owasp-mcp: [MCP07]
 map-owasp-asi: [ASI03]
 ---
