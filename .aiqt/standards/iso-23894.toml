@@ -1,0 +1,196 @@
+# ISO/IEC 23894:2023 (AI guidance on risk management): id manifest for the AIQT standards crosswalk.
+# Ids are dotted clause subclauses (6.4.2), Annex A objectives (A.10) and Annex B risk sources
+# (B.3), with the short heading as a navigational pointer only; NO body text is reproduced. README.md.
+map-key = "map-iso-23894"
+name = "ISO/IEC 23894:2023 AI guidance on risk management"
+publisher = "ISO/IEC"
+edition = "2023"
+kind = "guidance"
+status = "stable"
+citation-unit = "clause or annex objective"
+id-pattern = "^([AB]\\.\\d+|\\d+\\.\\d+(\\.\\d+){0,2})$"
+source-artefact = "ISO/IEC 23894:2023, clauses 4-6 and Annexes A-B (headings only)"
+retrieved = "2026-08-16"
+[[id]]
+code = "5.1"
+title = "General"
+[[id]]
+code = "5.2"
+title = "Leadership and commitment"
+[[id]]
+code = "5.3"
+title = "Integration"
+[[id]]
+code = "5.4"
+title = "Design"
+[[id]]
+code = "5.4.1"
+title = "Understanding the organization and its context"
+[[id]]
+code = "5.4.2"
+title = "Articulating risk management commitment"
+[[id]]
+code = "5.4.3"
+title = "Assigning organizational roles, authorities, responsibilities and accountabilities"
+[[id]]
+code = "5.4.4"
+title = "Allocating resources"
+[[id]]
+code = "5.4.5"
+title = "Establishing communication and consultation"
+[[id]]
+code = "5.5"
+title = "Implementation"
+[[id]]
+code = "5.6"
+title = "Evaluation"
+[[id]]
+code = "5.7"
+title = "Improvement"
+[[id]]
+code = "5.7.1"
+title = "Adapting"
+[[id]]
+code = "5.7.2"
+title = "Continually improving"
+[[id]]
+code = "6.1"
+title = "General"
+[[id]]
+code = "6.2"
+title = "Communication and consultation"
+[[id]]
+code = "6.3"
+title = "Scope, context and criteria"
+[[id]]
+code = "6.3.1"
+title = "General"
+[[id]]
+code = "6.3.2"
+title = "Defining the scope"
+[[id]]
+code = "6.3.3"
+title = "External and internal context"
+[[id]]
+code = "6.3.4"
+title = "Defining risk criteria"
+[[id]]
+code = "6.4"
+title = "Risk assessment"
+[[id]]
+code = "6.4.1"
+title = "General"
+[[id]]
+code = "6.4.2"
+title = "Risk identification"
+[[id]]
+code = "6.4.2.1"
+title = "General"
+[[id]]
+code = "6.4.2.2"
+title = "Identification of assets and their value"
+[[id]]
+code = "6.4.2.3"
+title = "Identification of risk sources"
+[[id]]
+code = "6.4.2.4"
+title = "Identification of potential events and outcomes"
+[[id]]
+code = "6.4.2.5"
+title = "Identification of controls"
+[[id]]
+code = "6.4.2.6"
+title = "Identification of consequences"
+[[id]]
+code = "6.4.3"
+title = "Risk analysis"
+[[id]]
+code = "6.4.3.1"
+title = "General"
+[[id]]
+code = "6.4.3.2"
+title = "Assessment of consequences"
+[[id]]
+code = "6.4.3.3"
+title = "Assessment of likelihood"
+[[id]]
+code = "6.4.4"
+title = "Risk evaluation"
+[[id]]
+code = "6.5"
+title = "Risk treatment"
+[[id]]
+code = "6.5.1"
+title = "General"
+[[id]]
+code = "6.5.2"
+title = "Selection of risk treatment options"
+[[id]]
+code = "6.5.3"
+title = "Preparing and implementing risk treatment plans"
+[[id]]
+code = "6.6"
+title = "Monitoring and review"
+[[id]]
+code = "6.7"
+title = "Recording and reporting"
+[[id]]
+code = "A.1"
+title = "General"
+[[id]]
+code = "A.2"
+title = "Accountability"
+[[id]]
+code = "A.3"
+title = "AI expertise"
+[[id]]
+code = "A.4"
+title = "Availability and quality of training and test data"
+[[id]]
+code = "A.5"
+title = "Environmental impact"
+[[id]]
+code = "A.6"
+title = "Fairness"
+[[id]]
+code = "A.7"
+title = "Maintainability"
+[[id]]
+code = "A.8"
+title = "Privacy"
+[[id]]
+code = "A.9"
+title = "Robustness"
+[[id]]
+code = "A.10"
+title = "Safety"
+[[id]]
+code = "A.11"
+title = "Security"
+[[id]]
+code = "A.12"
+title = "Transparency and explainability"
+[[id]]
+code = "B.1"
+title = "General"
+[[id]]
+code = "B.2"
+title = "Complexity of environment"
+[[id]]
+code = "B.3"
+title = "Lack of transparency and explainability"
+[[id]]
+code = "B.4"
+title = "Level of automation"
+[[id]]
+code = "B.5"
+title = "Risk sources related to machine learning"
+[[id]]
+code = "B.6"
+title = "System hardware issues"
+[[id]]
+code = "B.7"
+title = "System life cycle issues"
+[[id]]
+code = "B.8"
+title = "Technology readiness"
