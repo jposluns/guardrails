@@ -21,7 +21,7 @@ CIA_FACETS = {"CONFI", "INTEG", "AVAIL", "PRIV"}
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
 # allows it only on aiqt-non-apex and security, so it is added to those allow-sets individually.
 BASE_KEYS = {"corpus-id", "origin", "family", "slug"}
-# Optional standards-mapping keys, allowed on security rules only. Each value is a flow
+# Optional standards-mapping keys, allowed on security and aiqt-non-apex rules. Each value is a flow
 # sequence of external control/subcategory IDs, for the public /mappings crosswalk. Adding a mapping key
 # never affects a rule's derived path.
 MAP_KEYS = {
@@ -127,7 +127,7 @@ def derive(fm, name, allowed_origins=("pack",)):
             if fm["slug"] != "project-integrity":
                 raise ValueError("{}: apex slug must be 'project-integrity'".format(name))
             return "aiqt/00-project-integrity.md"
-        _check_keys(fm, BASE_KEYS | {"tier", "facet", "secondary"}, name)
+        _check_keys(fm, BASE_KEYS | {"tier", "facet", "secondary"} | MAP_KEYS, name)
         tier = str(fm.get("tier", ""))
         facet = fm.get("facet", "")
         if tier not in TIER_FACETS:
