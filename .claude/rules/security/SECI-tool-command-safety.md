@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECA]
 slug: tool-command-safety
+map-nist-airmf: [MAP 4.2]
 map-nist-80053: [AC-6, SC-39, SI-10, SI-10(6)]
 map-owasp-asi: [ASI05]
 map-owasp-mcp: [MCP05]

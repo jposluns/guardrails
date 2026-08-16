@@ -5,6 +5,7 @@ family: aiqt
 tier: 40
 facet: COST
 slug: cost-tier
+map-nist-airmf: [GOVERN 1.3, MAP 1.5]
 ---
 
 # Cost tier

@@ -6,6 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: records-first
+map-nist-airmf: [GOVERN 1.4]
 map-nist-ssdf: [PW.1.2]
 ---
 

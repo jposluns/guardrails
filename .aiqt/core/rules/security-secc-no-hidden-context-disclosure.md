@@ -5,6 +5,7 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: no-hidden-context-disclosure
+map-nist-airmf: [MAP 4.2]
 map-nist-80053: [AC-4]
 map-owasp-llm: [LLM02, LLM08]
 ---

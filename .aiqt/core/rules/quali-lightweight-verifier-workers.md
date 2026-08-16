@@ -6,6 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [ACCUR, SECI]
 slug: lightweight-verifier-workers
+map-nist-airmf: [MEASURE 1.3, MEASURE 2.13]
 map-nist-80053: [SA-11(3)]
 ---
 

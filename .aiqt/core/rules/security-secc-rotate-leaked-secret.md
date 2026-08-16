@@ -5,6 +5,7 @@ family: security
 facet: SECC
 secondary: [SECI]
 slug: rotate-leaked-secret
+map-nist-airmf: [MANAGE 2.3, MANAGE 4.3]
 map-nist-80053: [IA-5, IR-4]
 map-owasp-mcp: [MCP01]
 map-owasp-cheatsheet: [secrets-management]

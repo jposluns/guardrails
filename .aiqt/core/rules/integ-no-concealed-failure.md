@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [ACCUR, TRUST]
 slug: no-concealed-failure
+map-nist-airmf: [GOVERN 4.3, MANAGE 4.3]
 map-nist-80053: [SA-11]
 ---
 

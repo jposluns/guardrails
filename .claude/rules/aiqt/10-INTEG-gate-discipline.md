@@ -6,6 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: gate-discipline
+map-nist-airmf: [GOVERN 4.1]
 map-nist-80053: [CM-3(2), SA-11]
 map-nist-ssdf: [PO.4.1, PW.8.2]
 ---

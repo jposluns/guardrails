@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [ACCUR]
 slug: poisoning-resistance
+map-nist-airmf: [MANAGE 3.1, MAP 4.2]
 map-nist-80053: [SI-7, SI-10(5)]
 map-owasp-llm: [LLM05, LLM09]
 map-owasp-asi: [ASI06]

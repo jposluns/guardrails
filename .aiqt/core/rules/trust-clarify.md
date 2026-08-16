@@ -6,6 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [ACCUR]
 slug: clarify-before-acting
+map-nist-airmf: [GOVERN 4.1, MAP 1.6]
 ---
 
 # Clarify before acting
