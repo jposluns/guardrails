@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: INTEG
+secondary: [ACCUR, TRUST]
 slug: no-concealed-failure
 ---
 

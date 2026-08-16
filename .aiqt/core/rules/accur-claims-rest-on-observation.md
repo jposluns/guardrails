@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: ACCUR
+secondary: [INTEG]
 slug: claims-rest-on-observation
 ---
 

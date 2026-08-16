@@ -3,6 +3,7 @@ corpus-id: secmin
 origin: pack
 family: security
 facet: SECP
+secondary: [SECC]
 slug: data-minimization
 map-owasp-llm: [LLM02]
 map-owasp-asvs: [V14]

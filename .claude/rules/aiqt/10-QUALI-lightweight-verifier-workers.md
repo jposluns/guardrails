@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: QUALI
+secondary: [ACCUR, SECI]
 slug: lightweight-verifier-workers
 ---
 

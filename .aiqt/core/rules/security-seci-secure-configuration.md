@@ -3,6 +3,7 @@ corpus-id: seccfg
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC]
 slug: secure-configuration
 map-owasp-web: [A02]
 map-owasp-api: [API8]

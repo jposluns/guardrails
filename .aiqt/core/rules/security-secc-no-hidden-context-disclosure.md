@@ -3,6 +3,7 @@ corpus-id: secndc
 origin: pack
 family: security
 facet: SECC
+secondary: [SECP]
 slug: no-hidden-context-disclosure
 map-owasp-llm: [LLM02, LLM08]
 ---

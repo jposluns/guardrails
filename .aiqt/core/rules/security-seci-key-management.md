@@ -3,6 +3,7 @@ corpus-id: seckey
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC]
 slug: key-management
 map-owasp-asvs: [V11]
 map-owasp-cheatsheet: [key-management]

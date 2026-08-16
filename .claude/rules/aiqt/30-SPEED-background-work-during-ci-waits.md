@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 30
 facet: SPEED
+secondary: [INTEG, PROGR]
 slug: background-work-during-ci-waits
 ---
 

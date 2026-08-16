@@ -3,6 +3,7 @@ corpus-id: secvde
 origin: pack
 family: security
 facet: SECI
+secondary: [ACCUR]
 slug: verify-dependency-exists
 map-owasp-llm: [LLM04]
 ---

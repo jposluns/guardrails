@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: TRUST
+secondary: [ACCUR]
 slug: clarify-before-acting
 ---
 

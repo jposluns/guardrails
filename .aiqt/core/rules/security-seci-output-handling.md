@@ -3,6 +3,7 @@ corpus-id: secout
 origin: pack
 family: security
 facet: SECI
+secondary: [QUALI]
 slug: output-handling
 map-owasp-llm: [LLM10]
 map-owasp-asvs: [V1, V2]
