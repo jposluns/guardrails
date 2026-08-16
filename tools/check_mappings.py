@@ -25,8 +25,14 @@ def main():
     except ManifestError as exc:
         print("error: {}".format(exc))
         return 2
+    src_dir = root / ".aiqt" / "core" / "rules"
+    if not src_dir.is_dir():
+        # Fail closed: an absent corpus must not read as "0 mappings, all clean". rglob on a missing
+        # dir yields nothing, which would otherwise pass; make the anomaly explicit.
+        print("error: rule corpus not found at {}".format(src_dir))
+        return 2
     try:
-        corpus = gen_rules.load_corpus(root / ".aiqt" / "core" / "rules")
+        corpus = gen_rules.load_corpus(src_dir)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2

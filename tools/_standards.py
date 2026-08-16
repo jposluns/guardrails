@@ -30,6 +30,16 @@ class ManifestError(ValueError):
     """A malformed standards manifest. check_mappings maps this to exit 2 (fail-closed)."""
 
 
+def _req_str(data, key, path):
+    """A required non-empty string field. Fail-closed so a non-string TOML value (int, list, date,
+    bool) raises ManifestError here rather than a raw TypeError deeper in (e.g. at re.compile or a set
+    membership test)."""
+    value = data[key]
+    if not isinstance(value, str) or not value:
+        raise ManifestError("{}: field '{}' must be a non-empty string".format(path.name, key))
+    return value
+
+
 def natkey(text):
     """Sort key that orders embedded numbers numerically (LLM2 before LLM10, V2 before V14)."""
     return [int(tok) if tok.isdigit() else tok for tok in re.split(r'(\d+)', text)]
@@ -45,27 +55,27 @@ class Manifest:
         for key in REQUIRED:
             if key not in data:
                 raise ManifestError("{}: missing required field '{}'".format(path.name, key))
-        self.map_key = data["map-key"]
+        self.map_key = _req_str(data, "map-key", path)
         expected = "map-" + path.stem
         if self.map_key != expected:
             raise ManifestError("{}: map-key '{}' must equal 'map-<filename>' ('{}')".format(
                 path.name, self.map_key, expected))
-        self.name = data["name"]
-        self.publisher = data["publisher"]
-        self.edition = str(data["edition"])
-        self.kind = data["kind"]
+        self.name = _req_str(data, "name", path)
+        self.publisher = _req_str(data, "publisher", path)
+        self.edition = _req_str(data, "edition", path)
+        self.kind = _req_str(data, "kind", path)
         if self.kind not in KINDS:
             raise ManifestError("{}: kind '{}' must be one of {}".format(
                 path.name, self.kind, "/".join(sorted(KINDS))))
-        self.status = data["status"]
+        self.status = _req_str(data, "status", path)
         if self.status not in STATUSES:
             raise ManifestError("{}: status '{}' must be one of {}".format(
                 path.name, self.status, "/".join(sorted(STATUSES))))
-        self.citation_unit = data["citation-unit"]
-        self.source_artefact = data["source-artefact"]
-        self.retrieved = str(data["retrieved"])
+        self.citation_unit = _req_str(data, "citation-unit", path)
+        self.source_artefact = _req_str(data, "source-artefact", path)
+        self.retrieved = _req_str(data, "retrieved", path)
         try:
-            self.id_pattern = re.compile(data["id-pattern"])
+            self.id_pattern = re.compile(_req_str(data, "id-pattern", path))
         except re.error as exc:
             raise ManifestError("{}: id-pattern is not a valid regex: {}".format(path.name, exc))
         rows = data.get("id")
