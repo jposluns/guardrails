@@ -92,24 +92,39 @@ Workers produce research and candidate diffs as inert data; one orchestrator re-
 integrates them, and workers apply nothing themselves. Parallelism lives in the research stage; authority
 and seriality live in the apply stage.
 
-## Assistant workflow disciplines
+## A verification finding is fixed, not argued away
 
-After requirements are met, prefer the smallest correct change. Write code that reads like the surrounding
-code: match its idiom, naming, and comment density. Quality is the project's standard of craft, met on the
-final state and confirmed by its checks.
+A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
+finding from either family blocks the change, fail-closed, until it is fixed or the maintainer explicitly
+reclassifies it with a recorded rationale.
 
 ## High-assurance verification
 
-Every substantive change is verified before it merges by an INDEPENDENT adversarial pass, briefed to
-refute rather than confirm, run across TWO model families because the families surface systematically
-different failure classes. Reserve a third super-high-assurance family for critical changes. A finding is
-fixed, not argued away; any real blocker or major from either family blocks, fail-closed.
+Every substantive change is verified before it merges by an independent adversarial pass, briefed to refute
+rather than confirm, run across two model families because the families surface systematically different
+failure classes. A third, super-high-assurance family is reserved for critical changes.
 
-## Lightweight cross-family verifiers
+## Isolate verifiers and judge by their result signal
 
-A cross-family skeptical verifier does not need a heavy multi-tenant apparatus: run each family read-only in its own scoped config directory, dispatching a prompt file to it. Classify the outcome on the process
-EXIT CODE, never by grepping the output, because a verifier echoes the very rule text under review
-(discussing usage, rate limits, and re-auth), so grepping successful output for those words false-positives.
+Run each verifier in its own isolated, read-only context. Judge its outcome by an authoritative result
+signal, not by grepping its output: a verifier legitimately echoes the very rule text under review, so
+text-matching its output produces false positives.
+
+## Match the surrounding code
+
+Write code that reads like the code around it, matching its idiom, naming, structure, and comment density. A
+change should look like it was written by the same hand as the rest of the file.
+
+## Prefer the smallest correct change
+
+After the requirements are met, prefer the smallest correct change. A passing state does not justify
+refactoring, broadening scope, or adding polish beyond what the task calls for.
+
+## Surface a counterproductive instruction before executing it
+
+When an instruction, followed literally, would defeat its own purpose, surface the conflict before executing
+it rather than silently complying or silently substituting your own judgment. State the conflict in one
+sentence, name the concrete downside, propose a better path, and let the maintainer decide.
 
 ## Assess and advise are discussion only
 
@@ -148,12 +163,6 @@ Sessions RESUME from a durable handoff, WORK under a named operating mode, and C
 state cleanly on the protected branch. A concurrency lease prevents a double-run and is
 reconciled, never stolen. The default at every point is to continue; a wind-down needs a named,
 externally-observable trigger, never a felt sense of degradation.
-
-## Surface a counterproductive instruction
-
-Surface a counterproductive instruction before executing it, with the concrete downside and a named
-alternative. Following an instruction to the letter while it defeats its own purpose is not service. State
-the conflict in one sentence, propose the better path, and let the maintainer decide.
 
 ## Trust recovery and escalation
 
