@@ -1,0 +1,3600 @@
+# NIST SP 800-53 Rev 5 (Security and Privacy Controls): id manifest for the AIQT standards crosswalk.
+# Ids are the NIST published form (AC-1, AC-2(1)). US Government work (public domain). See README.md.
+map-key = "map-nist-80053"
+name = "NIST SP 800-53 Security and Privacy Controls"
+publisher = "NIST"
+edition = "Rev 5 (catalog 5.2.0)"
+kind = "control"
+status = "stable"
+citation-unit = "control"
+id-pattern = "^[A-Z]{2}-\\d+(\\(\\d+\\))?$"
+source-artefact = "NIST SP 800-53 Rev 5, OSCAL catalog"
+retrieved = "2026-08-16"
+[[id]]
+code = "AC-1"
+title = "Policy and Procedures"
+[[id]]
+code = "AC-2"
+title = "Account Management"
+[[id]]
+code = "AC-2(1)"
+title = "Automated System Account Management"
+[[id]]
+code = "AC-2(2)"
+title = "Automated Temporary and Emergency Account Management"
+[[id]]
+code = "AC-2(3)"
+title = "Disable Accounts"
+[[id]]
+code = "AC-2(4)"
+title = "Automated Audit Actions"
+[[id]]
+code = "AC-2(5)"
+title = "Inactivity Logout"
+[[id]]
+code = "AC-2(6)"
+title = "Dynamic Privilege Management"
+[[id]]
+code = "AC-2(7)"
+title = "Privileged User Accounts"
+[[id]]
+code = "AC-2(8)"
+title = "Dynamic Account Management"
+[[id]]
+code = "AC-2(9)"
+title = "Restrictions on Use of Shared and Group Accounts"
+[[id]]
+code = "AC-2(10)"
+title = "Shared and Group Account Credential Change"
+[[id]]
+code = "AC-2(11)"
+title = "Usage Conditions"
+[[id]]
+code = "AC-2(12)"
+title = "Account Monitoring for Atypical Usage"
+[[id]]
+code = "AC-2(13)"
+title = "Disable Accounts for High-risk Individuals"
+[[id]]
+code = "AC-3"
+title = "Access Enforcement"
+[[id]]
+code = "AC-3(1)"
+title = "Restricted Access to Privileged Functions"
+[[id]]
+code = "AC-3(2)"
+title = "Dual Authorization"
+[[id]]
+code = "AC-3(3)"
+title = "Mandatory Access Control"
+[[id]]
+code = "AC-3(4)"
+title = "Discretionary Access Control"
+[[id]]
+code = "AC-3(5)"
+title = "Security-relevant Information"
+[[id]]
+code = "AC-3(6)"
+title = "Protection of User and System Information"
+[[id]]
+code = "AC-3(7)"
+title = "Role-based Access Control"
+[[id]]
+code = "AC-3(8)"
+title = "Revocation of Access Authorizations"
+[[id]]
+code = "AC-3(9)"
+title = "Controlled Release"
+[[id]]
+code = "AC-3(10)"
+title = "Audited Override of Access Control Mechanisms"
+[[id]]
+code = "AC-3(11)"
+title = "Restrict Access to Specific Information Types"
+[[id]]
+code = "AC-3(12)"
+title = "Assert and Enforce Application Access"
+[[id]]
+code = "AC-3(13)"
+title = "Attribute-based Access Control"
+[[id]]
+code = "AC-3(14)"
+title = "Individual Access"
+[[id]]
+code = "AC-3(15)"
+title = "Discretionary and Mandatory Access Control"
+[[id]]
+code = "AC-4"
+title = "Information Flow Enforcement"
+[[id]]
+code = "AC-4(1)"
+title = "Object Security and Privacy Attributes"
+[[id]]
+code = "AC-4(2)"
+title = "Processing Domains"
+[[id]]
+code = "AC-4(3)"
+title = "Dynamic Information Flow Control"
+[[id]]
+code = "AC-4(4)"
+title = "Flow Control of Encrypted Information"
+[[id]]
+code = "AC-4(5)"
+title = "Embedded Data Types"
+[[id]]
+code = "AC-4(6)"
+title = "Metadata"
+[[id]]
+code = "AC-4(7)"
+title = "One-way Flow Mechanisms"
+[[id]]
+code = "AC-4(8)"
+title = "Security and Privacy Policy Filters"
+[[id]]
+code = "AC-4(9)"
+title = "Human Reviews"
+[[id]]
+code = "AC-4(10)"
+title = "Enable and Disable Security or Privacy Policy Filters"
+[[id]]
+code = "AC-4(11)"
+title = "Configuration of Security or Privacy Policy Filters"
+[[id]]
+code = "AC-4(12)"
+title = "Data Type Identifiers"
+[[id]]
+code = "AC-4(13)"
+title = "Decomposition into Policy-relevant Subcomponents"
+[[id]]
+code = "AC-4(14)"
+title = "Security or Privacy Policy Filter Constraints"
+[[id]]
+code = "AC-4(15)"
+title = "Detection of Unsanctioned Information"
+[[id]]
+code = "AC-4(16)"
+title = "Information Transfers on Interconnected Systems"
+[[id]]
+code = "AC-4(17)"
+title = "Domain Authentication"
+[[id]]
+code = "AC-4(18)"
+title = "Security Attribute Binding"
+[[id]]
+code = "AC-4(19)"
+title = "Validation of Metadata"
+[[id]]
+code = "AC-4(20)"
+title = "Approved Solutions"
+[[id]]
+code = "AC-4(21)"
+title = "Physical or Logical Separation of Information Flows"
+[[id]]
+code = "AC-4(22)"
+title = "Access Only"
+[[id]]
+code = "AC-4(23)"
+title = "Modify Non-releasable Information"
+[[id]]
+code = "AC-4(24)"
+title = "Internal Normalized Format"
+[[id]]
+code = "AC-4(25)"
+title = "Data Sanitization"
+[[id]]
+code = "AC-4(26)"
+title = "Audit Filtering Actions"
+[[id]]
+code = "AC-4(27)"
+title = "Redundant/Independent Filtering Mechanisms"
+[[id]]
+code = "AC-4(28)"
+title = "Linear Filter Pipelines"
+[[id]]
+code = "AC-4(29)"
+title = "Filter Orchestration Engines"
+[[id]]
+code = "AC-4(30)"
+title = "Filter Mechanisms Using Multiple Processes"
+[[id]]
+code = "AC-4(31)"
+title = "Failed Content Transfer Prevention"
+[[id]]
+code = "AC-4(32)"
+title = "Process Requirements for Information Transfer"
+[[id]]
+code = "AC-5"
+title = "Separation of Duties"
+[[id]]
+code = "AC-6"
+title = "Least Privilege"
+[[id]]
+code = "AC-6(1)"
+title = "Authorize Access to Security Functions"
+[[id]]
+code = "AC-6(2)"
+title = "Non-privileged Access for Nonsecurity Functions"
+[[id]]
+code = "AC-6(3)"
+title = "Network Access to Privileged Commands"
+[[id]]
+code = "AC-6(4)"
+title = "Separate Processing Domains"
+[[id]]
+code = "AC-6(5)"
+title = "Privileged Accounts"
+[[id]]
+code = "AC-6(6)"
+title = "Privileged Access by Non-organizational Users"
+[[id]]
+code = "AC-6(7)"
+title = "Review of User Privileges"
+[[id]]
+code = "AC-6(8)"
+title = "Privilege Levels for Code Execution"
+[[id]]
+code = "AC-6(9)"
+title = "Log Use of Privileged Functions"
+[[id]]
+code = "AC-6(10)"
+title = "Prohibit Non-privileged Users from Executing Privileged Functions"
+[[id]]
+code = "AC-7"
+title = "Unsuccessful Logon Attempts"
+[[id]]
+code = "AC-7(1)"
+title = "Automatic Account Lock"
+[[id]]
+code = "AC-7(2)"
+title = "Purge or Wipe Mobile Device"
+[[id]]
+code = "AC-7(3)"
+title = "Biometric Attempt Limiting"
+[[id]]
+code = "AC-7(4)"
+title = "Use of Alternate Authentication Factor"
+[[id]]
+code = "AC-8"
+title = "System Use Notification"
+[[id]]
+code = "AC-9"
+title = "Previous Logon Notification"
+[[id]]
+code = "AC-9(1)"
+title = "Unsuccessful Logons"
+[[id]]
+code = "AC-9(2)"
+title = "Successful and Unsuccessful Logons"
+[[id]]
+code = "AC-9(3)"
+title = "Notification of Account Changes"
+[[id]]
+code = "AC-9(4)"
+title = "Additional Logon Information"
+[[id]]
+code = "AC-10"
+title = "Concurrent Session Control"
+[[id]]
+code = "AC-11"
+title = "Device Lock"
+[[id]]
+code = "AC-11(1)"
+title = "Pattern-hiding Displays"
+[[id]]
+code = "AC-12"
+title = "Session Termination"
+[[id]]
+code = "AC-12(1)"
+title = "User-initiated Logouts"
+[[id]]
+code = "AC-12(2)"
+title = "Termination Message"
+[[id]]
+code = "AC-12(3)"
+title = "Timeout Warning Message"
+[[id]]
+code = "AC-13"
+title = "Supervision and Review — Access Control"
+[[id]]
+code = "AC-14"
+title = "Permitted Actions Without Identification or Authentication"
+[[id]]
+code = "AC-14(1)"
+title = "Necessary Uses"
+[[id]]
+code = "AC-15"
+title = "Automated Marking"
+[[id]]
+code = "AC-16"
+title = "Security and Privacy Attributes"
+[[id]]
+code = "AC-16(1)"
+title = "Dynamic Attribute Association"
+[[id]]
+code = "AC-16(2)"
+title = "Attribute Value Changes by Authorized Individuals"
+[[id]]
+code = "AC-16(3)"
+title = "Maintenance of Attribute Associations by System"
+[[id]]
+code = "AC-16(4)"
+title = "Association of Attributes by Authorized Individuals"
+[[id]]
+code = "AC-16(5)"
+title = "Attribute Displays on Objects to Be Output"
+[[id]]
+code = "AC-16(6)"
+title = "Maintenance of Attribute Association"
+[[id]]
+code = "AC-16(7)"
+title = "Consistent Attribute Interpretation"
+[[id]]
+code = "AC-16(8)"
+title = "Association Techniques and Technologies"
+[[id]]
+code = "AC-16(9)"
+title = "Attribute Reassignment — Regrading Mechanisms"
+[[id]]
+code = "AC-16(10)"
+title = "Attribute Configuration by Authorized Individuals"
+[[id]]
+code = "AC-17"
+title = "Remote Access"
+[[id]]
+code = "AC-17(1)"
+title = "Monitoring and Control"
+[[id]]
+code = "AC-17(2)"
+title = "Protection of Confidentiality and Integrity Using Encryption"
+[[id]]
+code = "AC-17(3)"
+title = "Managed Access Control Points"
+[[id]]
+code = "AC-17(4)"
+title = "Privileged Commands and Access"
+[[id]]
+code = "AC-17(5)"
+title = "Monitoring for Unauthorized Connections"
+[[id]]
+code = "AC-17(6)"
+title = "Protection of Mechanism Information"
+[[id]]
+code = "AC-17(7)"
+title = "Additional Protection for Security Function Access"
+[[id]]
+code = "AC-17(8)"
+title = "Disable Nonsecure Network Protocols"
+[[id]]
+code = "AC-17(9)"
+title = "Disconnect or Disable Access"
+[[id]]
+code = "AC-17(10)"
+title = "Authenticate Remote Commands"
+[[id]]
+code = "AC-18"
+title = "Wireless Access"
+[[id]]
+code = "AC-18(1)"
+title = "Authentication and Encryption"
+[[id]]
+code = "AC-18(2)"
+title = "Monitoring Unauthorized Connections"
+[[id]]
+code = "AC-18(3)"
+title = "Disable Wireless Networking"
+[[id]]
+code = "AC-18(4)"
+title = "Restrict Configurations by Users"
+[[id]]
+code = "AC-18(5)"
+title = "Antennas and Transmission Power Levels"
+[[id]]
+code = "AC-19"
+title = "Access Control for Mobile Devices"
+[[id]]
+code = "AC-19(1)"
+title = "Use of Writable and Portable Storage Devices"
+[[id]]
+code = "AC-19(2)"
+title = "Use of Personally Owned Portable Storage Devices"
+[[id]]
+code = "AC-19(3)"
+title = "Use of Portable Storage Devices with No Identifiable Owner"
+[[id]]
+code = "AC-19(4)"
+title = "Restrictions for Classified Information"
+[[id]]
+code = "AC-19(5)"
+title = "Full Device or Container-based Encryption"
+[[id]]
+code = "AC-20"
+title = "Use of External Systems"
+[[id]]
+code = "AC-20(1)"
+title = "Limits on Authorized Use"
+[[id]]
+code = "AC-20(2)"
+title = "Portable Storage Devices — Restricted Use"
+[[id]]
+code = "AC-20(3)"
+title = "Non-organizationally Owned Systems — Restricted Use"
+[[id]]
+code = "AC-20(4)"
+title = "Network Accessible Storage Devices — Prohibited Use"
+[[id]]
+code = "AC-20(5)"
+title = "Portable Storage Devices — Prohibited Use"
+[[id]]
+code = "AC-21"
+title = "Information Sharing"
+[[id]]
+code = "AC-21(1)"
+title = "Automated Decision Support"
+[[id]]
+code = "AC-21(2)"
+title = "Information Search and Retrieval"
+[[id]]
+code = "AC-22"
+title = "Publicly Accessible Content"
+[[id]]
+code = "AC-23"
+title = "Data Mining Protection"
+[[id]]
+code = "AC-24"
+title = "Access Control Decisions"
+[[id]]
+code = "AC-24(1)"
+title = "Transmit Access Authorization Information"
+[[id]]
+code = "AC-24(2)"
+title = "No User or Process Identity"
+[[id]]
+code = "AC-25"
+title = "Reference Monitor"
+[[id]]
+code = "AT-1"
+title = "Policy and Procedures"
+[[id]]
+code = "AT-2"
+title = "Literacy Training and Awareness"
+[[id]]
+code = "AT-2(1)"
+title = "Practical Exercises"
+[[id]]
+code = "AT-2(2)"
+title = "Insider Threat"
+[[id]]
+code = "AT-2(3)"
+title = "Social Engineering and Mining"
+[[id]]
+code = "AT-2(4)"
+title = "Suspicious Communications and Anomalous System Behavior"
+[[id]]
+code = "AT-2(5)"
+title = "Advanced Persistent Threat"
+[[id]]
+code = "AT-2(6)"
+title = "Cyber Threat Environment"
+[[id]]
+code = "AT-3"
+title = "Role-based Training"
+[[id]]
+code = "AT-3(1)"
+title = "Environmental Controls"
+[[id]]
+code = "AT-3(2)"
+title = "Physical Security Controls"
+[[id]]
+code = "AT-3(3)"
+title = "Practical Exercises"
+[[id]]
+code = "AT-3(4)"
+title = "Suspicious Communications and Anomalous System Behavior"
+[[id]]
+code = "AT-3(5)"
+title = "Processing Personally Identifiable Information"
+[[id]]
+code = "AT-4"
+title = "Training Records"
+[[id]]
+code = "AT-5"
+title = "Contacts with Security Groups and Associations"
+[[id]]
+code = "AT-6"
+title = "Training Feedback"
+[[id]]
+code = "AU-1"
+title = "Policy and Procedures"
+[[id]]
+code = "AU-2"
+title = "Event Logging"
+[[id]]
+code = "AU-2(1)"
+title = "Compilation of Audit Records from Multiple Sources"
+[[id]]
+code = "AU-2(2)"
+title = "Selection of Audit Events by Component"
+[[id]]
+code = "AU-2(3)"
+title = "Reviews and Updates"
+[[id]]
+code = "AU-2(4)"
+title = "Privileged Functions"
+[[id]]
+code = "AU-3"
+title = "Content of Audit Records"
+[[id]]
+code = "AU-3(1)"
+title = "Additional Audit Information"
+[[id]]
+code = "AU-3(2)"
+title = "Centralized Management of Planned Audit Record Content"
+[[id]]
+code = "AU-3(3)"
+title = "Limit Personally Identifiable Information Elements"
+[[id]]
+code = "AU-4"
+title = "Audit Log Storage Capacity"
+[[id]]
+code = "AU-4(1)"
+title = "Transfer to Alternate Storage"
+[[id]]
+code = "AU-5"
+title = "Response to Audit Logging Process Failures"
+[[id]]
+code = "AU-5(1)"
+title = "Storage Capacity Warning"
+[[id]]
+code = "AU-5(2)"
+title = "Real-time Alerts"
+[[id]]
+code = "AU-5(3)"
+title = "Configurable Traffic Volume Thresholds"
+[[id]]
+code = "AU-5(4)"
+title = "Shutdown on Failure"
+[[id]]
+code = "AU-5(5)"
+title = "Alternate Audit Logging Capability"
+[[id]]
+code = "AU-6"
+title = "Audit Record Review, Analysis, and Reporting"
+[[id]]
+code = "AU-6(1)"
+title = "Automated Process Integration"
+[[id]]
+code = "AU-6(2)"
+title = "Automated Security Alerts"
+[[id]]
+code = "AU-6(3)"
+title = "Correlate Audit Record Repositories"
+[[id]]
+code = "AU-6(4)"
+title = "Central Review and Analysis"
+[[id]]
+code = "AU-6(5)"
+title = "Integrated Analysis of Audit Records"
+[[id]]
+code = "AU-6(6)"
+title = "Correlation with Physical Monitoring"
+[[id]]
+code = "AU-6(7)"
+title = "Permitted Actions"
+[[id]]
+code = "AU-6(8)"
+title = "Full Text Analysis of Privileged Commands"
+[[id]]
+code = "AU-6(9)"
+title = "Correlation with Information from Nontechnical Sources"
+[[id]]
+code = "AU-6(10)"
+title = "Audit Level Adjustment"
+[[id]]
+code = "AU-7"
+title = "Audit Record Reduction and Report Generation"
+[[id]]
+code = "AU-7(1)"
+title = "Automatic Processing"
+[[id]]
+code = "AU-7(2)"
+title = "Automatic Sort and Search"
+[[id]]
+code = "AU-8"
+title = "Time Stamps"
+[[id]]
+code = "AU-8(1)"
+title = "Synchronization with Authoritative Time Source"
+[[id]]
+code = "AU-8(2)"
+title = "Secondary Authoritative Time Source"
+[[id]]
+code = "AU-9"
+title = "Protection of Audit Information"
+[[id]]
+code = "AU-9(1)"
+title = "Hardware Write-once Media"
+[[id]]
+code = "AU-9(2)"
+title = "Store on Separate Physical Systems or Components"
+[[id]]
+code = "AU-9(3)"
+title = "Cryptographic Protection"
+[[id]]
+code = "AU-9(4)"
+title = "Access by Subset of Privileged Users"
+[[id]]
+code = "AU-9(5)"
+title = "Dual Authorization"
+[[id]]
+code = "AU-9(6)"
+title = "Read-only Access"
+[[id]]
+code = "AU-9(7)"
+title = "Store on Component with Different Operating System"
+[[id]]
+code = "AU-10"
+title = "Non-repudiation"
+[[id]]
+code = "AU-10(1)"
+title = "Association of Identities"
+[[id]]
+code = "AU-10(2)"
+title = "Validate Binding of Information Producer Identity"
+[[id]]
+code = "AU-10(3)"
+title = "Chain of Custody"
+[[id]]
+code = "AU-10(4)"
+title = "Validate Binding of Information Reviewer Identity"
+[[id]]
+code = "AU-10(5)"
+title = "Digital Signatures"
+[[id]]
+code = "AU-11"
+title = "Audit Record Retention"
+[[id]]
+code = "AU-11(1)"
+title = "Long-term Retrieval Capability"
+[[id]]
+code = "AU-12"
+title = "Audit Record Generation"
+[[id]]
+code = "AU-12(1)"
+title = "System-wide and Time-correlated Audit Trail"
+[[id]]
+code = "AU-12(2)"
+title = "Standardized Formats"
+[[id]]
+code = "AU-12(3)"
+title = "Changes by Authorized Individuals"
+[[id]]
+code = "AU-12(4)"
+title = "Query Parameter Audits of Personally Identifiable Information"
+[[id]]
+code = "AU-13"
+title = "Monitoring for Information Disclosure"
+[[id]]
+code = "AU-13(1)"
+title = "Use of Automated Tools"
+[[id]]
+code = "AU-13(2)"
+title = "Review of Monitored Sites"
+[[id]]
+code = "AU-13(3)"
+title = "Unauthorized Replication of Information"
+[[id]]
+code = "AU-14"
+title = "Session Audit"
+[[id]]
+code = "AU-14(1)"
+title = "System Start-up"
+[[id]]
+code = "AU-14(2)"
+title = "Capture and Record Content"
+[[id]]
+code = "AU-14(3)"
+title = "Remote Viewing and Listening"
+[[id]]
+code = "AU-15"
+title = "Alternate Audit Logging Capability"
+[[id]]
+code = "AU-16"
+title = "Cross-organizational Audit Logging"
+[[id]]
+code = "AU-16(1)"
+title = "Identity Preservation"
+[[id]]
+code = "AU-16(2)"
+title = "Sharing of Audit Information"
+[[id]]
+code = "AU-16(3)"
+title = "Disassociability"
+[[id]]
+code = "CA-1"
+title = "Policy and Procedures"
+[[id]]
+code = "CA-2"
+title = "Control Assessments"
+[[id]]
+code = "CA-2(1)"
+title = "Independent Assessors"
+[[id]]
+code = "CA-2(2)"
+title = "Specialized Assessments"
+[[id]]
+code = "CA-2(3)"
+title = "Leveraging Results from External Organizations"
+[[id]]
+code = "CA-3"
+title = "Information Exchange"
+[[id]]
+code = "CA-3(1)"
+title = "Unclassified National Security System Connections"
+[[id]]
+code = "CA-3(2)"
+title = "Classified National Security System Connections"
+[[id]]
+code = "CA-3(3)"
+title = "Unclassified Non-national Security System Connections"
+[[id]]
+code = "CA-3(4)"
+title = "Connections to Public Networks"
+[[id]]
+code = "CA-3(5)"
+title = "Restrictions on External System Connections"
+[[id]]
+code = "CA-3(6)"
+title = "Transfer Authorizations"
+[[id]]
+code = "CA-3(7)"
+title = "Transitive Information Exchanges"
+[[id]]
+code = "CA-4"
+title = "Security Certification"
+[[id]]
+code = "CA-5"
+title = "Plan of Action and Milestones"
+[[id]]
+code = "CA-5(1)"
+title = "Automation Support for Accuracy and Currency"
+[[id]]
+code = "CA-6"
+title = "Authorization"
+[[id]]
+code = "CA-6(1)"
+title = "Joint Authorization — Intra-organization"
+[[id]]
+code = "CA-6(2)"
+title = "Joint Authorization — Inter-organization"
+[[id]]
+code = "CA-7"
+title = "Continuous Monitoring"
+[[id]]
+code = "CA-7(1)"
+title = "Independent Assessment"
+[[id]]
+code = "CA-7(2)"
+title = "Types of Assessments"
+[[id]]
+code = "CA-7(3)"
+title = "Trend Analyses"
+[[id]]
+code = "CA-7(4)"
+title = "Risk Monitoring"
+[[id]]
+code = "CA-7(5)"
+title = "Consistency Analysis"
+[[id]]
+code = "CA-7(6)"
+title = "Automation Support for Monitoring"
+[[id]]
+code = "CA-8"
+title = "Penetration Testing"
+[[id]]
+code = "CA-8(1)"
+title = "Independent Penetration Testing Agent or Team"
+[[id]]
+code = "CA-8(2)"
+title = "Red Team Exercises"
+[[id]]
+code = "CA-8(3)"
+title = "Facility Penetration Testing"
+[[id]]
+code = "CA-9"
+title = "Internal System Connections"
+[[id]]
+code = "CA-9(1)"
+title = "Compliance Checks"
+[[id]]
+code = "CM-1"
+title = "Policy and Procedures"
+[[id]]
+code = "CM-2"
+title = "Baseline Configuration"
+[[id]]
+code = "CM-2(1)"
+title = "Reviews and Updates"
+[[id]]
+code = "CM-2(2)"
+title = "Automation Support for Accuracy and Currency"
+[[id]]
+code = "CM-2(3)"
+title = "Retention of Previous Configurations"
+[[id]]
+code = "CM-2(4)"
+title = "Unauthorized Software"
+[[id]]
+code = "CM-2(5)"
+title = "Authorized Software"
+[[id]]
+code = "CM-2(6)"
+title = "Development and Test Environments"
+[[id]]
+code = "CM-2(7)"
+title = "Configure Systems and Components for High-risk Areas"
+[[id]]
+code = "CM-3"
+title = "Configuration Change Control"
+[[id]]
+code = "CM-3(1)"
+title = "Automated Documentation, Notification, and Prohibition of Changes"
+[[id]]
+code = "CM-3(2)"
+title = "Testing, Validation, and Documentation of Changes"
+[[id]]
+code = "CM-3(3)"
+title = "Automated Change Implementation"
+[[id]]
+code = "CM-3(4)"
+title = "Security and Privacy Representatives"
+[[id]]
+code = "CM-3(5)"
+title = "Automated Security Response"
+[[id]]
+code = "CM-3(6)"
+title = "Cryptography Management"
+[[id]]
+code = "CM-3(7)"
+title = "Review System Changes"
+[[id]]
+code = "CM-3(8)"
+title = "Prevent or Restrict Configuration Changes"
+[[id]]
+code = "CM-4"
+title = "Impact Analyses"
+[[id]]
+code = "CM-4(1)"
+title = "Separate Test Environments"
+[[id]]
+code = "CM-4(2)"
+title = "Verification of Controls"
+[[id]]
+code = "CM-5"
+title = "Access Restrictions for Change"
+[[id]]
+code = "CM-5(1)"
+title = "Automated Access Enforcement and Audit Records"
+[[id]]
+code = "CM-5(2)"
+title = "Review System Changes"
+[[id]]
+code = "CM-5(3)"
+title = "Signed Components"
+[[id]]
+code = "CM-5(4)"
+title = "Dual Authorization"
+[[id]]
+code = "CM-5(5)"
+title = "Privilege Limitation for Production and Operation"
+[[id]]
+code = "CM-5(6)"
+title = "Limit Library Privileges"
+[[id]]
+code = "CM-5(7)"
+title = "Automatic Implementation of Security Safeguards"
+[[id]]
+code = "CM-6"
+title = "Configuration Settings"
+[[id]]
+code = "CM-6(1)"
+title = "Automated Management, Application, and Verification"
+[[id]]
+code = "CM-6(2)"
+title = "Respond to Unauthorized Changes"
+[[id]]
+code = "CM-6(3)"
+title = "Unauthorized Change Detection"
+[[id]]
+code = "CM-6(4)"
+title = "Conformance Demonstration"
+[[id]]
+code = "CM-7"
+title = "Least Functionality"
+[[id]]
+code = "CM-7(1)"
+title = "Periodic Review"
+[[id]]
+code = "CM-7(2)"
+title = "Prevent Program Execution"
+[[id]]
+code = "CM-7(3)"
+title = "Registration Compliance"
+[[id]]
+code = "CM-7(4)"
+title = "Unauthorized Software — Deny-by-exception"
+[[id]]
+code = "CM-7(5)"
+title = "Authorized Software — Allow-by-exception"
+[[id]]
+code = "CM-7(6)"
+title = "Confined Environments with Limited Privileges"
+[[id]]
+code = "CM-7(7)"
+title = "Code Execution in Protected Environments"
+[[id]]
+code = "CM-7(8)"
+title = "Binary or Machine Executable Code"
+[[id]]
+code = "CM-7(9)"
+title = "Prohibiting The Use of Unauthorized Hardware"
+[[id]]
+code = "CM-8"
+title = "System Component Inventory"
+[[id]]
+code = "CM-8(1)"
+title = "Updates During Installation and Removal"
+[[id]]
+code = "CM-8(2)"
+title = "Automated Maintenance"
+[[id]]
+code = "CM-8(3)"
+title = "Automated Unauthorized Component Detection"
+[[id]]
+code = "CM-8(4)"
+title = "Accountability Information"
+[[id]]
+code = "CM-8(5)"
+title = "No Duplicate Accounting of Components"
+[[id]]
+code = "CM-8(6)"
+title = "Assessed Configurations and Approved Deviations"
+[[id]]
+code = "CM-8(7)"
+title = "Centralized Repository"
+[[id]]
+code = "CM-8(8)"
+title = "Automated Location Tracking"
+[[id]]
+code = "CM-8(9)"
+title = "Assignment of Components to Systems"
+[[id]]
+code = "CM-9"
+title = "Configuration Management Plan"
+[[id]]
+code = "CM-9(1)"
+title = "Assignment of Responsibility"
+[[id]]
+code = "CM-10"
+title = "Software Usage Restrictions"
+[[id]]
+code = "CM-10(1)"
+title = "Open-source Software"
+[[id]]
+code = "CM-11"
+title = "User-installed Software"
+[[id]]
+code = "CM-11(1)"
+title = "Alerts for Unauthorized Installations"
+[[id]]
+code = "CM-11(2)"
+title = "Software Installation with Privileged Status"
+[[id]]
+code = "CM-11(3)"
+title = "Automated Enforcement and Monitoring"
+[[id]]
+code = "CM-12"
+title = "Information Location"
+[[id]]
+code = "CM-12(1)"
+title = "Automated Tools to Support Information Location"
+[[id]]
+code = "CM-13"
+title = "Data Action Mapping"
+[[id]]
+code = "CM-14"
+title = "Signed Components"
+[[id]]
+code = "CP-1"
+title = "Policy and Procedures"
+[[id]]
+code = "CP-2"
+title = "Contingency Plan"
+[[id]]
+code = "CP-2(1)"
+title = "Coordinate with Related Plans"
+[[id]]
+code = "CP-2(2)"
+title = "Capacity Planning"
+[[id]]
+code = "CP-2(3)"
+title = "Resume Mission and Business Functions"
+[[id]]
+code = "CP-2(4)"
+title = "Resume All Mission and Business Functions"
+[[id]]
+code = "CP-2(5)"
+title = "Continue Mission and Business Functions"
+[[id]]
+code = "CP-2(6)"
+title = "Alternate Processing and Storage Sites"
+[[id]]
+code = "CP-2(7)"
+title = "Coordinate with External Service Providers"
+[[id]]
+code = "CP-2(8)"
+title = "Identify Critical Assets"
+[[id]]
+code = "CP-3"
+title = "Contingency Training"
+[[id]]
+code = "CP-3(1)"
+title = "Simulated Events"
+[[id]]
+code = "CP-3(2)"
+title = "Mechanisms Used in Training Environments"
+[[id]]
+code = "CP-4"
+title = "Contingency Plan Testing"
+[[id]]
+code = "CP-4(1)"
+title = "Coordinate with Related Plans"
+[[id]]
+code = "CP-4(2)"
+title = "Alternate Processing Site"
+[[id]]
+code = "CP-4(3)"
+title = "Automated Testing"
+[[id]]
+code = "CP-4(4)"
+title = "Full Recovery and Reconstitution"
+[[id]]
+code = "CP-4(5)"
+title = "Self-challenge"
+[[id]]
+code = "CP-5"
+title = "Contingency Plan Update"
+[[id]]
+code = "CP-6"
+title = "Alternate Storage Site"
+[[id]]
+code = "CP-6(1)"
+title = "Separation from Primary Site"
+[[id]]
+code = "CP-6(2)"
+title = "Recovery Time and Recovery Point Objectives"
+[[id]]
+code = "CP-6(3)"
+title = "Accessibility"
+[[id]]
+code = "CP-7"
+title = "Alternate Processing Site"
+[[id]]
+code = "CP-7(1)"
+title = "Separation from Primary Site"
+[[id]]
+code = "CP-7(2)"
+title = "Accessibility"
+[[id]]
+code = "CP-7(3)"
+title = "Priority of Service"
+[[id]]
+code = "CP-7(4)"
+title = "Preparation for Use"
+[[id]]
+code = "CP-7(5)"
+title = "Equivalent Information Security Safeguards"
+[[id]]
+code = "CP-7(6)"
+title = "Inability to Return to Primary Site"
+[[id]]
+code = "CP-8"
+title = "Telecommunications Services"
+[[id]]
+code = "CP-8(1)"
+title = "Priority of Service Provisions"
+[[id]]
+code = "CP-8(2)"
+title = "Single Points of Failure"
+[[id]]
+code = "CP-8(3)"
+title = "Separation of Primary and Alternate Providers"
+[[id]]
+code = "CP-8(4)"
+title = "Provider Contingency Plan"
+[[id]]
+code = "CP-8(5)"
+title = "Alternate Telecommunication Service Testing"
+[[id]]
+code = "CP-9"
+title = "System Backup"
+[[id]]
+code = "CP-9(1)"
+title = "Testing for Reliability and Integrity"
+[[id]]
+code = "CP-9(2)"
+title = "Test Restoration Using Sampling"
+[[id]]
+code = "CP-9(3)"
+title = "Separate Storage for Critical Information"
+[[id]]
+code = "CP-9(4)"
+title = "Protection from Unauthorized Modification"
+[[id]]
+code = "CP-9(5)"
+title = "Transfer to Alternate Storage Site"
+[[id]]
+code = "CP-9(6)"
+title = "Redundant Secondary System"
+[[id]]
+code = "CP-9(7)"
+title = "Dual Authorization for Deletion or Destruction"
+[[id]]
+code = "CP-9(8)"
+title = "Cryptographic Protection"
+[[id]]
+code = "CP-10"
+title = "System Recovery and Reconstitution"
+[[id]]
+code = "CP-10(1)"
+title = "Contingency Plan Testing"
+[[id]]
+code = "CP-10(2)"
+title = "Transaction Recovery"
+[[id]]
+code = "CP-10(3)"
+title = "Compensating Security Controls"
+[[id]]
+code = "CP-10(4)"
+title = "Restore Within Time Period"
+[[id]]
+code = "CP-10(5)"
+title = "Failover Capability"
+[[id]]
+code = "CP-10(6)"
+title = "Component Protection"
+[[id]]
+code = "CP-11"
+title = "Alternate Communications Protocols"
+[[id]]
+code = "CP-12"
+title = "Safe Mode"
+[[id]]
+code = "CP-13"
+title = "Alternative Security Mechanisms"
+[[id]]
+code = "IA-1"
+title = "Policy and Procedures"
+[[id]]
+code = "IA-2"
+title = "Identification and Authentication (Organizational Users)"
+[[id]]
+code = "IA-2(1)"
+title = "Multi-factor Authentication to Privileged Accounts"
+[[id]]
+code = "IA-2(2)"
+title = "Multi-factor Authentication to Non-privileged Accounts"
+[[id]]
+code = "IA-2(3)"
+title = "Local Access to Privileged Accounts"
+[[id]]
+code = "IA-2(4)"
+title = "Local Access to Non-privileged Accounts"
+[[id]]
+code = "IA-2(5)"
+title = "Individual Authentication with Group Authentication"
+[[id]]
+code = "IA-2(6)"
+title = "Access to Accounts —separate Device"
+[[id]]
+code = "IA-2(7)"
+title = "Network Access to Non-privileged Accounts — Separate Device"
+[[id]]
+code = "IA-2(8)"
+title = "Access to Accounts — Replay Resistant"
+[[id]]
+code = "IA-2(9)"
+title = "Network Access to Non-privileged Accounts — Replay Resistant"
+[[id]]
+code = "IA-2(10)"
+title = "Single Sign-on"
+[[id]]
+code = "IA-2(11)"
+title = "Remote Access — Separate Device"
+[[id]]
+code = "IA-2(12)"
+title = "Acceptance of PIV Credentials"
+[[id]]
+code = "IA-2(13)"
+title = "Out-of-band Authentication"
+[[id]]
+code = "IA-3"
+title = "Device Identification and Authentication"
+[[id]]
+code = "IA-3(1)"
+title = "Cryptographic Bidirectional Authentication"
+[[id]]
+code = "IA-3(2)"
+title = "Cryptographic Bidirectional Network Authentication"
+[[id]]
+code = "IA-3(3)"
+title = "Dynamic Address Allocation"
+[[id]]
+code = "IA-3(4)"
+title = "Device Attestation"
+[[id]]
+code = "IA-4"
+title = "Identifier Management"
+[[id]]
+code = "IA-4(1)"
+title = "Prohibit Account Identifiers as Public Identifiers"
+[[id]]
+code = "IA-4(2)"
+title = "Supervisor Authorization"
+[[id]]
+code = "IA-4(3)"
+title = "Multiple Forms of Certification"
+[[id]]
+code = "IA-4(4)"
+title = "Identify User Status"
+[[id]]
+code = "IA-4(5)"
+title = "Dynamic Management"
+[[id]]
+code = "IA-4(6)"
+title = "Cross-organization Management"
+[[id]]
+code = "IA-4(7)"
+title = "In-person Registration"
+[[id]]
+code = "IA-4(8)"
+title = "Pairwise Pseudonymous Identifiers"
+[[id]]
+code = "IA-4(9)"
+title = "Attribute Maintenance and Protection"
+[[id]]
+code = "IA-5"
+title = "Authenticator Management"
+[[id]]
+code = "IA-5(1)"
+title = "Password-based Authentication"
+[[id]]
+code = "IA-5(2)"
+title = "Public Key-based Authentication"
+[[id]]
+code = "IA-5(3)"
+title = "In-person or Trusted External Party Registration"
+[[id]]
+code = "IA-5(4)"
+title = "Automated Support for Password Strength Determination"
+[[id]]
+code = "IA-5(5)"
+title = "Change Authenticators Prior to Delivery"
+[[id]]
+code = "IA-5(6)"
+title = "Protection of Authenticators"
+[[id]]
+code = "IA-5(7)"
+title = "No Embedded Unencrypted Static Authenticators"
+[[id]]
+code = "IA-5(8)"
+title = "Multiple System Accounts"
+[[id]]
+code = "IA-5(9)"
+title = "Federated Credential Management"
+[[id]]
+code = "IA-5(10)"
+title = "Dynamic Credential Binding"
+[[id]]
+code = "IA-5(11)"
+title = "Hardware Token-based Authentication"
+[[id]]
+code = "IA-5(12)"
+title = "Biometric Authentication Performance"
+[[id]]
+code = "IA-5(13)"
+title = "Expiration of Cached Authenticators"
+[[id]]
+code = "IA-5(14)"
+title = "Managing Content of PKI Trust Stores"
+[[id]]
+code = "IA-5(15)"
+title = "GSA-approved Products and Services"
+[[id]]
+code = "IA-5(16)"
+title = "In-person or Trusted External Party Authenticator Issuance"
+[[id]]
+code = "IA-5(17)"
+title = "Presentation Attack Detection for Biometric Authenticators"
+[[id]]
+code = "IA-5(18)"
+title = "Password Managers"
+[[id]]
+code = "IA-6"
+title = "Authentication Feedback"
+[[id]]
+code = "IA-7"
+title = "Cryptographic Module Authentication"
+[[id]]
+code = "IA-8"
+title = "Identification and Authentication (Non-organizational Users)"
+[[id]]
+code = "IA-8(1)"
+title = "Acceptance of PIV Credentials from Other Agencies"
+[[id]]
+code = "IA-8(2)"
+title = "Acceptance of External Authenticators"
+[[id]]
+code = "IA-8(3)"
+title = "Use of FICAM-approved Products"
+[[id]]
+code = "IA-8(4)"
+title = "Use of Defined Profiles"
+[[id]]
+code = "IA-8(5)"
+title = "Acceptance of PIV-I Credentials"
+[[id]]
+code = "IA-8(6)"
+title = "Disassociability"
+[[id]]
+code = "IA-9"
+title = "Service Identification and Authentication"
+[[id]]
+code = "IA-9(1)"
+title = "Information Exchange"
+[[id]]
+code = "IA-9(2)"
+title = "Transmission of Decisions"
+[[id]]
+code = "IA-10"
+title = "Adaptive Authentication"
+[[id]]
+code = "IA-11"
+title = "Re-authentication"
+[[id]]
+code = "IA-12"
+title = "Identity Proofing"
+[[id]]
+code = "IA-12(1)"
+title = "Supervisor Authorization"
+[[id]]
+code = "IA-12(2)"
+title = "Identity Evidence"
+[[id]]
+code = "IA-12(3)"
+title = "Identity Evidence Validation and Verification"
+[[id]]
+code = "IA-12(4)"
+title = "In-person Validation and Verification"
+[[id]]
+code = "IA-12(5)"
+title = "Address Confirmation"
+[[id]]
+code = "IA-12(6)"
+title = "Accept Externally-proofed Identities"
+[[id]]
+code = "IA-13"
+title = "Identity Providers and Authorization Servers"
+[[id]]
+code = "IA-13(1)"
+title = "Protection of Cryptographic Keys"
+[[id]]
+code = "IA-13(2)"
+title = "Verification of Identity Assertions and Access Tokens"
+[[id]]
+code = "IA-13(3)"
+title = "Token Management"
+[[id]]
+code = "IR-1"
+title = "Policy and Procedures"
+[[id]]
+code = "IR-2"
+title = "Incident Response Training"
+[[id]]
+code = "IR-2(1)"
+title = "Simulated Events"
+[[id]]
+code = "IR-2(2)"
+title = "Automated Training Environments"
+[[id]]
+code = "IR-2(3)"
+title = "Breach"
+[[id]]
+code = "IR-3"
+title = "Incident Response Testing"
+[[id]]
+code = "IR-3(1)"
+title = "Automated Testing"
+[[id]]
+code = "IR-3(2)"
+title = "Coordination with Related Plans"
+[[id]]
+code = "IR-3(3)"
+title = "Continuous Improvement"
+[[id]]
+code = "IR-4"
+title = "Incident Handling"
+[[id]]
+code = "IR-4(1)"
+title = "Automated Incident Handling Processes"
+[[id]]
+code = "IR-4(2)"
+title = "Dynamic Reconfiguration"
+[[id]]
+code = "IR-4(3)"
+title = "Continuity of Operations"
+[[id]]
+code = "IR-4(4)"
+title = "Information Correlation"
+[[id]]
+code = "IR-4(5)"
+title = "Automatic Disabling of System"
+[[id]]
+code = "IR-4(6)"
+title = "Insider Threats"
+[[id]]
+code = "IR-4(7)"
+title = "Insider Threats — Intra-organization Coordination"
+[[id]]
+code = "IR-4(8)"
+title = "Correlation with External Organizations"
+[[id]]
+code = "IR-4(9)"
+title = "Dynamic Response Capability"
+[[id]]
+code = "IR-4(10)"
+title = "Supply Chain Coordination"
+[[id]]
+code = "IR-4(11)"
+title = "Integrated Incident Response Team"
+[[id]]
+code = "IR-4(12)"
+title = "Malicious Code and Forensic Analysis"
+[[id]]
+code = "IR-4(13)"
+title = "Behavior Analysis"
+[[id]]
+code = "IR-4(14)"
+title = "Security Operations Center"
+[[id]]
+code = "IR-4(15)"
+title = "Public Relations and Reputation Repair"
+[[id]]
+code = "IR-5"
+title = "Incident Monitoring"
+[[id]]
+code = "IR-5(1)"
+title = "Automated Tracking, Data Collection, and Analysis"
+[[id]]
+code = "IR-6"
+title = "Incident Reporting"
+[[id]]
+code = "IR-6(1)"
+title = "Automated Reporting"
+[[id]]
+code = "IR-6(2)"
+title = "Vulnerabilities Related to Incidents"
+[[id]]
+code = "IR-6(3)"
+title = "Supply Chain Coordination"
+[[id]]
+code = "IR-7"
+title = "Incident Response Assistance"
+[[id]]
+code = "IR-7(1)"
+title = "Automation Support for Availability of Information and Support"
+[[id]]
+code = "IR-7(2)"
+title = "Coordination with External Providers"
+[[id]]
+code = "IR-8"
+title = "Incident Response Plan"
+[[id]]
+code = "IR-8(1)"
+title = "Breaches"
+[[id]]
+code = "IR-9"
+title = "Information Spillage Response"
+[[id]]
+code = "IR-9(1)"
+title = "Responsible Personnel"
+[[id]]
+code = "IR-9(2)"
+title = "Training"
+[[id]]
+code = "IR-9(3)"
+title = "Post-spill Operations"
+[[id]]
+code = "IR-9(4)"
+title = "Exposure to Unauthorized Personnel"
+[[id]]
+code = "IR-10"
+title = "Integrated Information Security Analysis Team"
+[[id]]
+code = "MA-1"
+title = "Policy and Procedures"
+[[id]]
+code = "MA-2"
+title = "Controlled Maintenance"
+[[id]]
+code = "MA-2(1)"
+title = "Record Content"
+[[id]]
+code = "MA-2(2)"
+title = "Automated Maintenance Activities"
+[[id]]
+code = "MA-3"
+title = "Maintenance Tools"
+[[id]]
+code = "MA-3(1)"
+title = "Inspect Tools"
+[[id]]
+code = "MA-3(2)"
+title = "Inspect Media"
+[[id]]
+code = "MA-3(3)"
+title = "Prevent Unauthorized Removal"
+[[id]]
+code = "MA-3(4)"
+title = "Restricted Tool Use"
+[[id]]
+code = "MA-3(5)"
+title = "Execution with Privilege"
+[[id]]
+code = "MA-3(6)"
+title = "Software Updates and Patches"
+[[id]]
+code = "MA-4"
+title = "Nonlocal Maintenance"
+[[id]]
+code = "MA-4(1)"
+title = "Logging and Review"
+[[id]]
+code = "MA-4(2)"
+title = "Document Nonlocal Maintenance"
+[[id]]
+code = "MA-4(3)"
+title = "Comparable Security and Sanitization"
+[[id]]
+code = "MA-4(4)"
+title = "Authentication and Separation of Maintenance Sessions"
+[[id]]
+code = "MA-4(5)"
+title = "Approvals and Notifications"
+[[id]]
+code = "MA-4(6)"
+title = "Cryptographic Protection"
+[[id]]
+code = "MA-4(7)"
+title = "Disconnect Verification"
+[[id]]
+code = "MA-5"
+title = "Maintenance Personnel"
+[[id]]
+code = "MA-5(1)"
+title = "Individuals Without Appropriate Access"
+[[id]]
+code = "MA-5(2)"
+title = "Security Clearances for Classified Systems"
+[[id]]
+code = "MA-5(3)"
+title = "Citizenship Requirements for Classified Systems"
+[[id]]
+code = "MA-5(4)"
+title = "Foreign Nationals"
+[[id]]
+code = "MA-5(5)"
+title = "Non-system Maintenance"
+[[id]]
+code = "MA-6"
+title = "Timely Maintenance"
+[[id]]
+code = "MA-6(1)"
+title = "Preventive Maintenance"
+[[id]]
+code = "MA-6(2)"
+title = "Predictive Maintenance"
+[[id]]
+code = "MA-6(3)"
+title = "Automated Support for Predictive Maintenance"
+[[id]]
+code = "MA-7"
+title = "Field Maintenance"
+[[id]]
+code = "MP-1"
+title = "Policy and Procedures"
+[[id]]
+code = "MP-2"
+title = "Media Access"
+[[id]]
+code = "MP-2(1)"
+title = "Automated Restricted Access"
+[[id]]
+code = "MP-2(2)"
+title = "Cryptographic Protection"
+[[id]]
+code = "MP-3"
+title = "Media Marking"
+[[id]]
+code = "MP-4"
+title = "Media Storage"
+[[id]]
+code = "MP-4(1)"
+title = "Cryptographic Protection"
+[[id]]
+code = "MP-4(2)"
+title = "Automated Restricted Access"
+[[id]]
+code = "MP-5"
+title = "Media Transport"
+[[id]]
+code = "MP-5(1)"
+title = "Protection Outside of Controlled Areas"
+[[id]]
+code = "MP-5(2)"
+title = "Documentation of Activities"
+[[id]]
+code = "MP-5(3)"
+title = "Custodians"
+[[id]]
+code = "MP-5(4)"
+title = "Cryptographic Protection"
+[[id]]
+code = "MP-6"
+title = "Media Sanitization"
+[[id]]
+code = "MP-6(1)"
+title = "Review, Approve, Track, Document, and Verify"
+[[id]]
+code = "MP-6(2)"
+title = "Equipment Testing"
+[[id]]
+code = "MP-6(3)"
+title = "Nondestructive Techniques"
+[[id]]
+code = "MP-6(4)"
+title = "Controlled Unclassified Information"
+[[id]]
+code = "MP-6(5)"
+title = "Classified Information"
+[[id]]
+code = "MP-6(6)"
+title = "Media Destruction"
+[[id]]
+code = "MP-6(7)"
+title = "Dual Authorization"
+[[id]]
+code = "MP-6(8)"
+title = "Remote Purging or Wiping of Information"
+[[id]]
+code = "MP-7"
+title = "Media Use"
+[[id]]
+code = "MP-7(1)"
+title = "Prohibit Use Without Owner"
+[[id]]
+code = "MP-7(2)"
+title = "Prohibit Use of Sanitization-resistant Media"
+[[id]]
+code = "MP-8"
+title = "Media Downgrading"
+[[id]]
+code = "MP-8(1)"
+title = "Documentation of Process"
+[[id]]
+code = "MP-8(2)"
+title = "Equipment Testing"
+[[id]]
+code = "MP-8(3)"
+title = "Controlled Unclassified Information"
+[[id]]
+code = "MP-8(4)"
+title = "Classified Information"
+[[id]]
+code = "PE-1"
+title = "Policy and Procedures"
+[[id]]
+code = "PE-2"
+title = "Physical Access Authorizations"
+[[id]]
+code = "PE-2(1)"
+title = "Access by Position or Role"
+[[id]]
+code = "PE-2(2)"
+title = "Two Forms of Identification"
+[[id]]
+code = "PE-2(3)"
+title = "Restrict Unescorted Access"
+[[id]]
+code = "PE-3"
+title = "Physical Access Control"
+[[id]]
+code = "PE-3(1)"
+title = "System Access"
+[[id]]
+code = "PE-3(2)"
+title = "Facility and Systems"
+[[id]]
+code = "PE-3(3)"
+title = "Continuous Guards"
+[[id]]
+code = "PE-3(4)"
+title = "Lockable Casings"
+[[id]]
+code = "PE-3(5)"
+title = "Tamper Protection"
+[[id]]
+code = "PE-3(6)"
+title = "Facility Penetration Testing"
+[[id]]
+code = "PE-3(7)"
+title = "Physical Barriers"
+[[id]]
+code = "PE-3(8)"
+title = "Access Control Vestibules"
+[[id]]
+code = "PE-4"
+title = "Access Control for Transmission"
+[[id]]
+code = "PE-5"
+title = "Access Control for Output Devices"
+[[id]]
+code = "PE-5(1)"
+title = "Access to Output by Authorized Individuals"
+[[id]]
+code = "PE-5(2)"
+title = "Link to Individual Identity"
+[[id]]
+code = "PE-5(3)"
+title = "Marking Output Devices"
+[[id]]
+code = "PE-6"
+title = "Monitoring Physical Access"
+[[id]]
+code = "PE-6(1)"
+title = "Intrusion Alarms and Surveillance Equipment"
+[[id]]
+code = "PE-6(2)"
+title = "Automated Intrusion Recognition and Responses"
+[[id]]
+code = "PE-6(3)"
+title = "Video Surveillance"
+[[id]]
+code = "PE-6(4)"
+title = "Monitoring Physical Access to Systems"
+[[id]]
+code = "PE-7"
+title = "Visitor Control"
+[[id]]
+code = "PE-8"
+title = "Visitor Access Records"
+[[id]]
+code = "PE-8(1)"
+title = "Automated Records Maintenance and Review"
+[[id]]
+code = "PE-8(2)"
+title = "Physical Access Records"
+[[id]]
+code = "PE-8(3)"
+title = "Limit Personally Identifiable Information Elements"
+[[id]]
+code = "PE-9"
+title = "Power Equipment and Cabling"
+[[id]]
+code = "PE-9(1)"
+title = "Redundant Cabling"
+[[id]]
+code = "PE-9(2)"
+title = "Automatic Voltage Controls"
+[[id]]
+code = "PE-10"
+title = "Emergency Shutoff"
+[[id]]
+code = "PE-10(1)"
+title = "Accidental and Unauthorized Activation"
+[[id]]
+code = "PE-11"
+title = "Emergency Power"
+[[id]]
+code = "PE-11(1)"
+title = "Alternate Power Supply — Minimal Operational Capability"
+[[id]]
+code = "PE-11(2)"
+title = "Alternate Power Supply — Self-contained"
+[[id]]
+code = "PE-12"
+title = "Emergency Lighting"
+[[id]]
+code = "PE-12(1)"
+title = "Essential Mission and Business Functions"
+[[id]]
+code = "PE-13"
+title = "Fire Protection"
+[[id]]
+code = "PE-13(1)"
+title = "Detection Systems — Automatic Activation and Notification"
+[[id]]
+code = "PE-13(2)"
+title = "Suppression Systems — Automatic Activation and Notification"
+[[id]]
+code = "PE-13(3)"
+title = "Automatic Fire Suppression"
+[[id]]
+code = "PE-13(4)"
+title = "Inspections"
+[[id]]
+code = "PE-14"
+title = "Environmental Controls"
+[[id]]
+code = "PE-14(1)"
+title = "Automatic Controls"
+[[id]]
+code = "PE-14(2)"
+title = "Monitoring with Alarms and Notifications"
+[[id]]
+code = "PE-15"
+title = "Water Damage Protection"
+[[id]]
+code = "PE-15(1)"
+title = "Automation Support"
+[[id]]
+code = "PE-16"
+title = "Delivery and Removal"
+[[id]]
+code = "PE-17"
+title = "Alternate Work Site"
+[[id]]
+code = "PE-18"
+title = "Location of System Components"
+[[id]]
+code = "PE-18(1)"
+title = "Facility Site"
+[[id]]
+code = "PE-19"
+title = "Information Leakage"
+[[id]]
+code = "PE-19(1)"
+title = "National Emissions Policies and Procedures"
+[[id]]
+code = "PE-20"
+title = "Asset Monitoring and Tracking"
+[[id]]
+code = "PE-21"
+title = "Electromagnetic Pulse Protection"
+[[id]]
+code = "PE-22"
+title = "Component Marking"
+[[id]]
+code = "PE-23"
+title = "Facility Location"
+[[id]]
+code = "PL-1"
+title = "Policy and Procedures"
+[[id]]
+code = "PL-2"
+title = "System Security and Privacy Plans"
+[[id]]
+code = "PL-2(1)"
+title = "Concept of Operations"
+[[id]]
+code = "PL-2(2)"
+title = "Functional Architecture"
+[[id]]
+code = "PL-2(3)"
+title = "Plan and Coordinate with Other Organizational Entities"
+[[id]]
+code = "PL-3"
+title = "System Security Plan Update"
+[[id]]
+code = "PL-4"
+title = "Rules of Behavior"
+[[id]]
+code = "PL-4(1)"
+title = "Social Media and External Site/Application Usage Restrictions"
+[[id]]
+code = "PL-5"
+title = "Privacy Impact Assessment"
+[[id]]
+code = "PL-6"
+title = "Security-related Activity Planning"
+[[id]]
+code = "PL-7"
+title = "Concept of Operations"
+[[id]]
+code = "PL-8"
+title = "Security and Privacy Architectures"
+[[id]]
+code = "PL-8(1)"
+title = "Defense in Depth"
+[[id]]
+code = "PL-8(2)"
+title = "Supplier Diversity"
+[[id]]
+code = "PL-9"
+title = "Central Management"
+[[id]]
+code = "PL-10"
+title = "Baseline Selection"
+[[id]]
+code = "PL-11"
+title = "Baseline Tailoring"
+[[id]]
+code = "PM-1"
+title = "Information Security Program Plan"
+[[id]]
+code = "PM-2"
+title = "Information Security Program Leadership Role"
+[[id]]
+code = "PM-3"
+title = "Information Security and Privacy Resources"
+[[id]]
+code = "PM-4"
+title = "Plan of Action and Milestones Process"
+[[id]]
+code = "PM-5"
+title = "System Inventory"
+[[id]]
+code = "PM-5(1)"
+title = "Inventory of Personally Identifiable Information"
+[[id]]
+code = "PM-6"
+title = "Measures of Performance"
+[[id]]
+code = "PM-7"
+title = "Enterprise Architecture"
+[[id]]
+code = "PM-7(1)"
+title = "Offloading"
+[[id]]
+code = "PM-8"
+title = "Critical Infrastructure Plan"
+[[id]]
+code = "PM-9"
+title = "Risk Management Strategy"
+[[id]]
+code = "PM-10"
+title = "Authorization Process"
+[[id]]
+code = "PM-11"
+title = "Mission and Business Process Definition"
+[[id]]
+code = "PM-12"
+title = "Insider Threat Program"
+[[id]]
+code = "PM-13"
+title = "Security and Privacy Workforce"
+[[id]]
+code = "PM-14"
+title = "Testing, Training, and Monitoring"
+[[id]]
+code = "PM-15"
+title = "Security and Privacy Groups and Associations"
+[[id]]
+code = "PM-16"
+title = "Threat Awareness Program"
+[[id]]
+code = "PM-16(1)"
+title = "Automated Means for Sharing Threat Intelligence"
+[[id]]
+code = "PM-17"
+title = "Protecting Controlled Unclassified Information on External Systems"
+[[id]]
+code = "PM-18"
+title = "Privacy Program Plan"
+[[id]]
+code = "PM-19"
+title = "Privacy Program Leadership Role"
+[[id]]
+code = "PM-20"
+title = "Dissemination of Privacy Program Information"
+[[id]]
+code = "PM-20(1)"
+title = "Privacy Policies on Websites, Applications, and Digital Services"
+[[id]]
+code = "PM-21"
+title = "Accounting of Disclosures"
+[[id]]
+code = "PM-22"
+title = "Personally Identifiable Information Quality Management"
+[[id]]
+code = "PM-23"
+title = "Data Governance Body"
+[[id]]
+code = "PM-24"
+title = "Data Integrity Board"
+[[id]]
+code = "PM-25"
+title = "Minimization of Personally Identifiable Information Used in Testing, Training, and Research"
+[[id]]
+code = "PM-26"
+title = "Complaint Management"
+[[id]]
+code = "PM-27"
+title = "Privacy Reporting"
+[[id]]
+code = "PM-28"
+title = "Risk Framing"
+[[id]]
+code = "PM-29"
+title = "Risk Management Program Leadership Roles"
+[[id]]
+code = "PM-30"
+title = "Supply Chain Risk Management Strategy"
+[[id]]
+code = "PM-30(1)"
+title = "Suppliers of Critical or Mission-essential Items"
+[[id]]
+code = "PM-31"
+title = "Continuous Monitoring Strategy"
+[[id]]
+code = "PM-32"
+title = "Purposing"
+[[id]]
+code = "PS-1"
+title = "Policy and Procedures"
+[[id]]
+code = "PS-2"
+title = "Position Risk Designation"
+[[id]]
+code = "PS-3"
+title = "Personnel Screening"
+[[id]]
+code = "PS-3(1)"
+title = "Classified Information"
+[[id]]
+code = "PS-3(2)"
+title = "Formal Indoctrination"
+[[id]]
+code = "PS-3(3)"
+title = "Information Requiring Special Protective Measures"
+[[id]]
+code = "PS-3(4)"
+title = "Citizenship Requirements"
+[[id]]
+code = "PS-4"
+title = "Personnel Termination"
+[[id]]
+code = "PS-4(1)"
+title = "Post-employment Requirements"
+[[id]]
+code = "PS-4(2)"
+title = "Automated Actions"
+[[id]]
+code = "PS-5"
+title = "Personnel Transfer"
+[[id]]
+code = "PS-6"
+title = "Access Agreements"
+[[id]]
+code = "PS-6(1)"
+title = "Information Requiring Special Protection"
+[[id]]
+code = "PS-6(2)"
+title = "Classified Information Requiring Special Protection"
+[[id]]
+code = "PS-6(3)"
+title = "Post-employment Requirements"
+[[id]]
+code = "PS-7"
+title = "External Personnel Security"
+[[id]]
+code = "PS-8"
+title = "Personnel Sanctions"
+[[id]]
+code = "PS-9"
+title = "Position Descriptions"
+[[id]]
+code = "PT-1"
+title = "Policy and Procedures"
+[[id]]
+code = "PT-2"
+title = "Authority to Process Personally Identifiable Information"
+[[id]]
+code = "PT-2(1)"
+title = "Data Tagging"
+[[id]]
+code = "PT-2(2)"
+title = "Automation"
+[[id]]
+code = "PT-3"
+title = "Personally Identifiable Information Processing Purposes"
+[[id]]
+code = "PT-3(1)"
+title = "Data Tagging"
+[[id]]
+code = "PT-3(2)"
+title = "Automation"
+[[id]]
+code = "PT-4"
+title = "Consent"
+[[id]]
+code = "PT-4(1)"
+title = "Tailored Consent"
+[[id]]
+code = "PT-4(2)"
+title = "Just-in-time Consent"
+[[id]]
+code = "PT-4(3)"
+title = "Revocation"
+[[id]]
+code = "PT-5"
+title = "Privacy Notice"
+[[id]]
+code = "PT-5(1)"
+title = "Just-in-time Notice"
+[[id]]
+code = "PT-5(2)"
+title = "Privacy Act Statements"
+[[id]]
+code = "PT-6"
+title = "System of Records Notice"
+[[id]]
+code = "PT-6(1)"
+title = "Routine Uses"
+[[id]]
+code = "PT-6(2)"
+title = "Exemption Rules"
+[[id]]
+code = "PT-7"
+title = "Specific Categories of Personally Identifiable Information"
+[[id]]
+code = "PT-7(1)"
+title = "Social Security Numbers"
+[[id]]
+code = "PT-7(2)"
+title = "First Amendment Information"
+[[id]]
+code = "PT-8"
+title = "Computer Matching Requirements"
+[[id]]
+code = "RA-1"
+title = "Policy and Procedures"
+[[id]]
+code = "RA-2"
+title = "Security Categorization"
+[[id]]
+code = "RA-2(1)"
+title = "Impact-level Prioritization"
+[[id]]
+code = "RA-3"
+title = "Risk Assessment"
+[[id]]
+code = "RA-3(1)"
+title = "Supply Chain Risk Assessment"
+[[id]]
+code = "RA-3(2)"
+title = "Use of All-source Intelligence"
+[[id]]
+code = "RA-3(3)"
+title = "Dynamic Threat Awareness"
+[[id]]
+code = "RA-3(4)"
+title = "Predictive Cyber Analytics"
+[[id]]
+code = "RA-4"
+title = "Risk Assessment Update"
+[[id]]
+code = "RA-5"
+title = "Vulnerability Monitoring and Scanning"
+[[id]]
+code = "RA-5(1)"
+title = "Update Tool Capability"
+[[id]]
+code = "RA-5(2)"
+title = "Update Vulnerabilities to Be Scanned"
+[[id]]
+code = "RA-5(3)"
+title = "Breadth and Depth of Coverage"
+[[id]]
+code = "RA-5(4)"
+title = "Discoverable Information"
+[[id]]
+code = "RA-5(5)"
+title = "Privileged Access"
+[[id]]
+code = "RA-5(6)"
+title = "Automated Trend Analyses"
+[[id]]
+code = "RA-5(7)"
+title = "Automated Detection and Notification of Unauthorized Components"
+[[id]]
+code = "RA-5(8)"
+title = "Review Historic Audit Logs"
+[[id]]
+code = "RA-5(9)"
+title = "Penetration Testing and Analyses"
+[[id]]
+code = "RA-5(10)"
+title = "Correlate Scanning Information"
+[[id]]
+code = "RA-5(11)"
+title = "Public Disclosure Program"
+[[id]]
+code = "RA-6"
+title = "Technical Surveillance Countermeasures Survey"
+[[id]]
+code = "RA-7"
+title = "Risk Response"
+[[id]]
+code = "RA-8"
+title = "Privacy Impact Assessments"
+[[id]]
+code = "RA-9"
+title = "Criticality Analysis"
+[[id]]
+code = "RA-10"
+title = "Threat Hunting"
+[[id]]
+code = "SA-1"
+title = "Policy and Procedures"
+[[id]]
+code = "SA-2"
+title = "Allocation of Resources"
+[[id]]
+code = "SA-3"
+title = "System Development Life Cycle"
+[[id]]
+code = "SA-3(1)"
+title = "Manage Preproduction Environment"
+[[id]]
+code = "SA-3(2)"
+title = "Use of Live or Operational Data"
+[[id]]
+code = "SA-3(3)"
+title = "Technology Refresh"
+[[id]]
+code = "SA-4"
+title = "Acquisition Process"
+[[id]]
+code = "SA-4(1)"
+title = "Functional Properties of Controls"
+[[id]]
+code = "SA-4(2)"
+title = "Design and Implementation Information for Controls"
+[[id]]
+code = "SA-4(3)"
+title = "Development Methods, Techniques, and Practices"
+[[id]]
+code = "SA-4(4)"
+title = "Assignment of Components to Systems"
+[[id]]
+code = "SA-4(5)"
+title = "System, Component, and Service Configurations"
+[[id]]
+code = "SA-4(6)"
+title = "Use of Information Assurance Products"
+[[id]]
+code = "SA-4(7)"
+title = "NIAP-approved Protection Profiles "
+[[id]]
+code = "SA-4(8)"
+title = "Continuous Monitoring Plan for Controls"
+[[id]]
+code = "SA-4(9)"
+title = "Functions, Ports, Protocols, and Services in Use"
+[[id]]
+code = "SA-4(10)"
+title = "Use of Approved PIV Products"
+[[id]]
+code = "SA-4(11)"
+title = "System of Records"
+[[id]]
+code = "SA-4(12)"
+title = "Data Ownership"
+[[id]]
+code = "SA-5"
+title = "System Documentation"
+[[id]]
+code = "SA-5(1)"
+title = "Functional Properties of Security Controls"
+[[id]]
+code = "SA-5(2)"
+title = "Security-relevant External System Interfaces"
+[[id]]
+code = "SA-5(3)"
+title = "High-level Design"
+[[id]]
+code = "SA-5(4)"
+title = "Low-level Design"
+[[id]]
+code = "SA-5(5)"
+title = "Source Code"
+[[id]]
+code = "SA-6"
+title = "Software Usage Restrictions"
+[[id]]
+code = "SA-7"
+title = "User-installed Software"
+[[id]]
+code = "SA-8"
+title = "Security and Privacy Engineering Principles"
+[[id]]
+code = "SA-8(1)"
+title = "Clear Abstractions"
+[[id]]
+code = "SA-8(2)"
+title = "Least Common Mechanism"
+[[id]]
+code = "SA-8(3)"
+title = "Modularity and Layering"
+[[id]]
+code = "SA-8(4)"
+title = "Partially Ordered Dependencies"
+[[id]]
+code = "SA-8(5)"
+title = "Efficiently Mediated Access"
+[[id]]
+code = "SA-8(6)"
+title = "Minimized Sharing"
+[[id]]
+code = "SA-8(7)"
+title = "Reduced Complexity"
+[[id]]
+code = "SA-8(8)"
+title = "Secure Evolvability"
+[[id]]
+code = "SA-8(9)"
+title = "Trusted Components"
+[[id]]
+code = "SA-8(10)"
+title = "Hierarchical Trust"
+[[id]]
+code = "SA-8(11)"
+title = "Inverse Modification Threshold"
+[[id]]
+code = "SA-8(12)"
+title = "Hierarchical Protection"
+[[id]]
+code = "SA-8(13)"
+title = "Minimized Security Elements"
+[[id]]
+code = "SA-8(14)"
+title = "Least Privilege"
+[[id]]
+code = "SA-8(15)"
+title = "Predicate Permission"
+[[id]]
+code = "SA-8(16)"
+title = "Self-reliant Trustworthiness"
+[[id]]
+code = "SA-8(17)"
+title = "Secure Distributed Composition"
+[[id]]
+code = "SA-8(18)"
+title = "Trusted Communications Channels"
+[[id]]
+code = "SA-8(19)"
+title = "Continuous Protection"
+[[id]]
+code = "SA-8(20)"
+title = "Secure Metadata Management"
+[[id]]
+code = "SA-8(21)"
+title = "Self-analysis"
+[[id]]
+code = "SA-8(22)"
+title = "Accountability and Traceability"
+[[id]]
+code = "SA-8(23)"
+title = "Secure Defaults"
+[[id]]
+code = "SA-8(24)"
+title = "Secure Failure and Recovery"
+[[id]]
+code = "SA-8(25)"
+title = "Economic Security"
+[[id]]
+code = "SA-8(26)"
+title = "Performance Security"
+[[id]]
+code = "SA-8(27)"
+title = "Human Factored Security"
+[[id]]
+code = "SA-8(28)"
+title = "Acceptable Security"
+[[id]]
+code = "SA-8(29)"
+title = "Repeatable and Documented Procedures"
+[[id]]
+code = "SA-8(30)"
+title = "Procedural Rigor"
+[[id]]
+code = "SA-8(31)"
+title = "Secure System Modification"
+[[id]]
+code = "SA-8(32)"
+title = "Sufficient Documentation"
+[[id]]
+code = "SA-8(33)"
+title = "Minimization"
+[[id]]
+code = "SA-9"
+title = "External System Services"
+[[id]]
+code = "SA-9(1)"
+title = "Risk Assessments and Organizational Approvals"
+[[id]]
+code = "SA-9(2)"
+title = "Identification of Functions, Ports, Protocols, and Services"
+[[id]]
+code = "SA-9(3)"
+title = "Establish and Maintain Trust Relationship with Providers"
+[[id]]
+code = "SA-9(4)"
+title = "Consistent Interests of Consumers and Providers"
+[[id]]
+code = "SA-9(5)"
+title = "Processing, Storage, and Service Location"
+[[id]]
+code = "SA-9(6)"
+title = "Organization-controlled Cryptographic Keys"
+[[id]]
+code = "SA-9(7)"
+title = "Organization-controlled Integrity Checking"
+[[id]]
+code = "SA-9(8)"
+title = "Processing and Storage Location — U.S. Jurisdiction"
+[[id]]
+code = "SA-10"
+title = "Developer Configuration Management"
+[[id]]
+code = "SA-10(1)"
+title = "Software and Firmware Integrity Verification"
+[[id]]
+code = "SA-10(2)"
+title = "Alternative Configuration Management Processes"
+[[id]]
+code = "SA-10(3)"
+title = "Hardware Integrity Verification"
+[[id]]
+code = "SA-10(4)"
+title = "Trusted Generation"
+[[id]]
+code = "SA-10(5)"
+title = "Mapping Integrity for Version Control"
+[[id]]
+code = "SA-10(6)"
+title = "Trusted Distribution"
+[[id]]
+code = "SA-10(7)"
+title = "Security and Privacy Representatives"
+[[id]]
+code = "SA-11"
+title = "Developer Testing and Evaluation"
+[[id]]
+code = "SA-11(1)"
+title = "Static Code Analysis"
+[[id]]
+code = "SA-11(2)"
+title = "Threat Modeling and Vulnerability Analyses"
+[[id]]
+code = "SA-11(3)"
+title = "Independent Verification of Assessment Plans and Evidence"
+[[id]]
+code = "SA-11(4)"
+title = "Manual Code Reviews"
+[[id]]
+code = "SA-11(5)"
+title = "Penetration Testing"
+[[id]]
+code = "SA-11(6)"
+title = "Attack Surface Reviews"
+[[id]]
+code = "SA-11(7)"
+title = "Verify Scope of Testing and Evaluation"
+[[id]]
+code = "SA-11(8)"
+title = "Dynamic Code Analysis"
+[[id]]
+code = "SA-11(9)"
+title = "Interactive Application Security Testing"
+[[id]]
+code = "SA-12"
+title = "Supply Chain Protection"
+[[id]]
+code = "SA-12(1)"
+title = "Acquisition Strategies / Tools / Methods"
+[[id]]
+code = "SA-12(2)"
+title = "Supplier Reviews"
+[[id]]
+code = "SA-12(3)"
+title = "Trusted Shipping and Warehousing"
+[[id]]
+code = "SA-12(4)"
+title = "Diversity of Suppliers"
+[[id]]
+code = "SA-12(5)"
+title = "Limitation of Harm"
+[[id]]
+code = "SA-12(6)"
+title = "Minimizing Procurement Time"
+[[id]]
+code = "SA-12(7)"
+title = "Assessments Prior to Selection / Acceptance / Update"
+[[id]]
+code = "SA-12(8)"
+title = "Use of All-source Intelligence"
+[[id]]
+code = "SA-12(9)"
+title = "Operations Security"
+[[id]]
+code = "SA-12(10)"
+title = "Validate as Genuine and Not Altered"
+[[id]]
+code = "SA-12(11)"
+title = "Penetration Testing / Analysis of Elements, Processes, and Actors"
+[[id]]
+code = "SA-12(12)"
+title = "Inter-organizational Agreements"
+[[id]]
+code = "SA-12(13)"
+title = "Critical Information System Components"
+[[id]]
+code = "SA-12(14)"
+title = "Identity and Traceability"
+[[id]]
+code = "SA-12(15)"
+title = "Processes to Address Weaknesses or Deficiencies"
+[[id]]
+code = "SA-13"
+title = "Trustworthiness"
+[[id]]
+code = "SA-14"
+title = "Criticality Analysis"
+[[id]]
+code = "SA-14(1)"
+title = "Critical Components with No Viable Alternative Sourcing"
+[[id]]
+code = "SA-15"
+title = "Development Process, Standards, and Tools"
+[[id]]
+code = "SA-15(1)"
+title = "Quality Metrics"
+[[id]]
+code = "SA-15(2)"
+title = "Security and Privacy Tracking Tools"
+[[id]]
+code = "SA-15(3)"
+title = "Criticality Analysis"
+[[id]]
+code = "SA-15(4)"
+title = "Threat Modeling and Vulnerability Analysis"
+[[id]]
+code = "SA-15(5)"
+title = "Attack Surface Reduction"
+[[id]]
+code = "SA-15(6)"
+title = "Continuous Improvement"
+[[id]]
+code = "SA-15(7)"
+title = "Automated Vulnerability Analysis"
+[[id]]
+code = "SA-15(8)"
+title = "Reuse of Threat and Vulnerability Information"
+[[id]]
+code = "SA-15(9)"
+title = "Use of Live Data"
+[[id]]
+code = "SA-15(10)"
+title = "Incident Response Plan"
+[[id]]
+code = "SA-15(11)"
+title = "Archive System or Component"
+[[id]]
+code = "SA-15(12)"
+title = "Minimize Personally Identifiable Information"
+[[id]]
+code = "SA-15(13)"
+title = "Logging Syntax"
+[[id]]
+code = "SA-16"
+title = "Developer-provided Training"
+[[id]]
+code = "SA-17"
+title = "Developer Security and Privacy Architecture and Design"
+[[id]]
+code = "SA-17(1)"
+title = "Formal Policy Model"
+[[id]]
+code = "SA-17(2)"
+title = "Security-relevant Components"
+[[id]]
+code = "SA-17(3)"
+title = "Formal Correspondence"
+[[id]]
+code = "SA-17(4)"
+title = "Informal Correspondence"
+[[id]]
+code = "SA-17(5)"
+title = "Conceptually Simple Design"
+[[id]]
+code = "SA-17(6)"
+title = "Structure for Testing"
+[[id]]
+code = "SA-17(7)"
+title = "Structure for Least Privilege"
+[[id]]
+code = "SA-17(8)"
+title = "Orchestration"
+[[id]]
+code = "SA-17(9)"
+title = "Design Diversity"
+[[id]]
+code = "SA-18"
+title = "Tamper Resistance and Detection"
+[[id]]
+code = "SA-18(1)"
+title = "Multiple Phases of System Development Life Cycle"
+[[id]]
+code = "SA-18(2)"
+title = "Inspection of Systems or Components"
+[[id]]
+code = "SA-19"
+title = "Component Authenticity"
+[[id]]
+code = "SA-19(1)"
+title = "Anti-counterfeit Training"
+[[id]]
+code = "SA-19(2)"
+title = "Configuration Control for Component Service and Repair"
+[[id]]
+code = "SA-19(3)"
+title = "Component Disposal"
+[[id]]
+code = "SA-19(4)"
+title = "Anti-counterfeit Scanning"
+[[id]]
+code = "SA-20"
+title = "Customized Development of Critical Components"
+[[id]]
+code = "SA-21"
+title = "Developer Screening"
+[[id]]
+code = "SA-21(1)"
+title = "Validation of Screening"
+[[id]]
+code = "SA-22"
+title = "Unsupported System Components"
+[[id]]
+code = "SA-22(1)"
+title = "Alternative Sources for Continued Support"
+[[id]]
+code = "SA-23"
+title = "Specialization"
+[[id]]
+code = "SA-24"
+title = "Design For Cyber Resiliency"
+[[id]]
+code = "SC-1"
+title = "Policy and Procedures"
+[[id]]
+code = "SC-2"
+title = "Separation of System and User Functionality"
+[[id]]
+code = "SC-2(1)"
+title = "Interfaces for Non-privileged Users"
+[[id]]
+code = "SC-2(2)"
+title = "Disassociability"
+[[id]]
+code = "SC-3"
+title = "Security Function Isolation"
+[[id]]
+code = "SC-3(1)"
+title = "Hardware Separation"
+[[id]]
+code = "SC-3(2)"
+title = "Access and Flow Control Functions"
+[[id]]
+code = "SC-3(3)"
+title = "Minimize Nonsecurity Functionality"
+[[id]]
+code = "SC-3(4)"
+title = "Module Coupling and Cohesiveness"
+[[id]]
+code = "SC-3(5)"
+title = "Layered Structures"
+[[id]]
+code = "SC-4"
+title = "Information in Shared System Resources"
+[[id]]
+code = "SC-4(1)"
+title = "Security Levels"
+[[id]]
+code = "SC-4(2)"
+title = "Multilevel or Periods Processing"
+[[id]]
+code = "SC-5"
+title = "Denial-of-service Protection"
+[[id]]
+code = "SC-5(1)"
+title = "Restrict Ability to Attack Other Systems"
+[[id]]
+code = "SC-5(2)"
+title = "Capacity, Bandwidth, and Redundancy"
+[[id]]
+code = "SC-5(3)"
+title = "Detection and Monitoring"
+[[id]]
+code = "SC-6"
+title = "Resource Availability"
+[[id]]
+code = "SC-7"
+title = "Boundary Protection"
+[[id]]
+code = "SC-7(1)"
+title = "Physically Separated Subnetworks"
+[[id]]
+code = "SC-7(2)"
+title = "Public Access"
+[[id]]
+code = "SC-7(3)"
+title = "Access Points"
+[[id]]
+code = "SC-7(4)"
+title = "External Telecommunications Services"
+[[id]]
+code = "SC-7(5)"
+title = "Deny by Default — Allow by Exception"
+[[id]]
+code = "SC-7(6)"
+title = "Response to Recognized Failures"
+[[id]]
+code = "SC-7(7)"
+title = "Split Tunneling for Remote Devices"
+[[id]]
+code = "SC-7(8)"
+title = "Route Traffic to Authenticated Proxy Servers"
+[[id]]
+code = "SC-7(9)"
+title = "Restrict Threatening Outgoing Communications Traffic"
+[[id]]
+code = "SC-7(10)"
+title = "Prevent Exfiltration"
+[[id]]
+code = "SC-7(11)"
+title = "Restrict Incoming Communications Traffic"
+[[id]]
+code = "SC-7(12)"
+title = "Host-based Protection"
+[[id]]
+code = "SC-7(13)"
+title = "Isolation of Security Tools, Mechanisms, and Support Components"
+[[id]]
+code = "SC-7(14)"
+title = "Protect Against Unauthorized Physical Connections"
+[[id]]
+code = "SC-7(15)"
+title = "Networked Privileged Accesses"
+[[id]]
+code = "SC-7(16)"
+title = "Prevent Discovery of System Components"
+[[id]]
+code = "SC-7(17)"
+title = "Automated Enforcement of Protocol Formats"
+[[id]]
+code = "SC-7(18)"
+title = "Fail Secure"
+[[id]]
+code = "SC-7(19)"
+title = "Block Communication from Non-organizationally Configured Hosts"
+[[id]]
+code = "SC-7(20)"
+title = "Dynamic Isolation and Segregation"
+[[id]]
+code = "SC-7(21)"
+title = "Isolation of System Components"
+[[id]]
+code = "SC-7(22)"
+title = "Separate Subnets for Connecting to Different Security Domains"
+[[id]]
+code = "SC-7(23)"
+title = "Disable Sender Feedback on Protocol Validation Failure"
+[[id]]
+code = "SC-7(24)"
+title = "Personally Identifiable Information"
+[[id]]
+code = "SC-7(25)"
+title = "Unclassified National Security System Connections"
+[[id]]
+code = "SC-7(26)"
+title = "Classified National Security System Connections"
+[[id]]
+code = "SC-7(27)"
+title = "Unclassified Non-national Security System Connections"
+[[id]]
+code = "SC-7(28)"
+title = "Connections to Public Networks"
+[[id]]
+code = "SC-7(29)"
+title = "Separate Subnets to Isolate Functions"
+[[id]]
+code = "SC-8"
+title = "Transmission Confidentiality and Integrity"
+[[id]]
+code = "SC-8(1)"
+title = "Cryptographic Protection"
+[[id]]
+code = "SC-8(2)"
+title = "Pre- and Post-transmission Handling"
+[[id]]
+code = "SC-8(3)"
+title = "Cryptographic Protection for Message Externals"
+[[id]]
+code = "SC-8(4)"
+title = "Conceal or Randomize Communications"
+[[id]]
+code = "SC-8(5)"
+title = "Protected Distribution System"
+[[id]]
+code = "SC-9"
+title = "Transmission Confidentiality"
+[[id]]
+code = "SC-10"
+title = "Network Disconnect"
+[[id]]
+code = "SC-11"
+title = "Trusted Path"
+[[id]]
+code = "SC-11(1)"
+title = "Irrefutable Communications Path"
+[[id]]
+code = "SC-12"
+title = "Cryptographic Key Establishment and Management"
+[[id]]
+code = "SC-12(1)"
+title = "Availability"
+[[id]]
+code = "SC-12(2)"
+title = "Symmetric Keys"
+[[id]]
+code = "SC-12(3)"
+title = "Asymmetric Keys"
+[[id]]
+code = "SC-12(4)"
+title = "PKI Certificates"
+[[id]]
+code = "SC-12(5)"
+title = "PKI Certificates / Hardware Tokens"
+[[id]]
+code = "SC-12(6)"
+title = "Physical Control of Keys"
+[[id]]
+code = "SC-13"
+title = "Cryptographic Protection"
+[[id]]
+code = "SC-13(1)"
+title = "FIPS-validated Cryptography"
+[[id]]
+code = "SC-13(2)"
+title = "NSA-approved Cryptography"
+[[id]]
+code = "SC-13(3)"
+title = "Individuals Without Formal Access Approvals"
+[[id]]
+code = "SC-13(4)"
+title = "Digital Signatures"
+[[id]]
+code = "SC-14"
+title = "Public Access Protections"
+[[id]]
+code = "SC-15"
+title = "Collaborative Computing Devices and Applications"
+[[id]]
+code = "SC-15(1)"
+title = "Physical or Logical Disconnect"
+[[id]]
+code = "SC-15(2)"
+title = "Blocking Inbound and Outbound Communications Traffic"
+[[id]]
+code = "SC-15(3)"
+title = "Disabling and Removal in Secure Work Areas"
+[[id]]
+code = "SC-15(4)"
+title = "Explicitly Indicate Current Participants"
+[[id]]
+code = "SC-16"
+title = "Transmission of Security and Privacy Attributes"
+[[id]]
+code = "SC-16(1)"
+title = "Integrity Verification"
+[[id]]
+code = "SC-16(2)"
+title = "Anti-spoofing Mechanisms"
+[[id]]
+code = "SC-16(3)"
+title = "Cryptographic Binding"
+[[id]]
+code = "SC-17"
+title = "Public Key Infrastructure Certificates"
+[[id]]
+code = "SC-18"
+title = "Mobile Code"
+[[id]]
+code = "SC-18(1)"
+title = "Identify Unacceptable Code and Take Corrective Actions"
+[[id]]
+code = "SC-18(2)"
+title = "Acquisition, Development, and Use"
+[[id]]
+code = "SC-18(3)"
+title = "Prevent Downloading and Execution"
+[[id]]
+code = "SC-18(4)"
+title = "Prevent Automatic Execution"
+[[id]]
+code = "SC-18(5)"
+title = "Allow Execution Only in Confined Environments"
+[[id]]
+code = "SC-19"
+title = "Voice Over Internet Protocol"
+[[id]]
+code = "SC-20"
+title = "Secure Name/Address Resolution Service (Authoritative Source)"
+[[id]]
+code = "SC-20(1)"
+title = "Child Subspaces"
+[[id]]
+code = "SC-20(2)"
+title = "Data Origin and Integrity"
+[[id]]
+code = "SC-21"
+title = "Secure Name/Address Resolution Service (Recursive or Caching Resolver)"
+[[id]]
+code = "SC-21(1)"
+title = "Data Origin and Integrity"
+[[id]]
+code = "SC-22"
+title = "Architecture and Provisioning for Name/Address Resolution Service"
+[[id]]
+code = "SC-23"
+title = "Session Authenticity"
+[[id]]
+code = "SC-23(1)"
+title = "Invalidate Session Identifiers at Logout"
+[[id]]
+code = "SC-23(2)"
+title = "User-initiated Logouts and Message Displays"
+[[id]]
+code = "SC-23(3)"
+title = "Unique System-generated Session Identifiers"
+[[id]]
+code = "SC-23(4)"
+title = "Unique Session Identifiers with Randomization"
+[[id]]
+code = "SC-23(5)"
+title = "Allowed Certificate Authorities"
+[[id]]
+code = "SC-24"
+title = "Fail in Known State"
+[[id]]
+code = "SC-25"
+title = "Thin Nodes"
+[[id]]
+code = "SC-26"
+title = "Decoys"
+[[id]]
+code = "SC-26(1)"
+title = "Detection of Malicious Code"
+[[id]]
+code = "SC-27"
+title = "Platform-independent Applications"
+[[id]]
+code = "SC-28"
+title = "Protection of Information at Rest"
+[[id]]
+code = "SC-28(1)"
+title = "Cryptographic Protection"
+[[id]]
+code = "SC-28(2)"
+title = "Offline Storage"
+[[id]]
+code = "SC-28(3)"
+title = "Cryptographic Keys"
+[[id]]
+code = "SC-29"
+title = "Heterogeneity"
+[[id]]
+code = "SC-29(1)"
+title = "Virtualization Techniques"
+[[id]]
+code = "SC-30"
+title = "Concealment and Misdirection"
+[[id]]
+code = "SC-30(1)"
+title = "Virtualization Techniques"
+[[id]]
+code = "SC-30(2)"
+title = "Randomness"
+[[id]]
+code = "SC-30(3)"
+title = "Change Processing and Storage Locations"
+[[id]]
+code = "SC-30(4)"
+title = "Misleading Information"
+[[id]]
+code = "SC-30(5)"
+title = "Concealment of System Components"
+[[id]]
+code = "SC-31"
+title = "Covert Channel Analysis"
+[[id]]
+code = "SC-31(1)"
+title = "Test Covert Channels for Exploitability"
+[[id]]
+code = "SC-31(2)"
+title = "Maximum Bandwidth"
+[[id]]
+code = "SC-31(3)"
+title = "Measure Bandwidth in Operational Environments"
+[[id]]
+code = "SC-32"
+title = "System Partitioning"
+[[id]]
+code = "SC-32(1)"
+title = "Separate Physical Domains for Privileged Functions"
+[[id]]
+code = "SC-33"
+title = "Transmission Preparation Integrity"
+[[id]]
+code = "SC-34"
+title = "Non-modifiable Executable Programs"
+[[id]]
+code = "SC-34(1)"
+title = "No Writable Storage"
+[[id]]
+code = "SC-34(2)"
+title = "Integrity Protection on Read-only Media"
+[[id]]
+code = "SC-34(3)"
+title = "Hardware-based Protection"
+[[id]]
+code = "SC-35"
+title = "External Malicious Code Identification"
+[[id]]
+code = "SC-36"
+title = "Distributed Processing and Storage"
+[[id]]
+code = "SC-36(1)"
+title = "Polling Techniques"
+[[id]]
+code = "SC-36(2)"
+title = "Synchronization"
+[[id]]
+code = "SC-37"
+title = "Out-of-band Channels"
+[[id]]
+code = "SC-37(1)"
+title = "Ensure Delivery and Transmission"
+[[id]]
+code = "SC-38"
+title = "Operations Security"
+[[id]]
+code = "SC-39"
+title = "Process Isolation"
+[[id]]
+code = "SC-39(1)"
+title = "Hardware Separation"
+[[id]]
+code = "SC-39(2)"
+title = "Separate Execution Domain Per Thread"
+[[id]]
+code = "SC-40"
+title = "Wireless Link Protection"
+[[id]]
+code = "SC-40(1)"
+title = "Electromagnetic Interference"
+[[id]]
+code = "SC-40(2)"
+title = "Reduce Detection Potential"
+[[id]]
+code = "SC-40(3)"
+title = "Imitative or Manipulative Communications Deception"
+[[id]]
+code = "SC-40(4)"
+title = "Signal Parameter Identification"
+[[id]]
+code = "SC-41"
+title = "Port and I/O Device Access"
+[[id]]
+code = "SC-42"
+title = "Sensor Capability and Data"
+[[id]]
+code = "SC-42(1)"
+title = "Reporting to Authorized Individuals or Roles"
+[[id]]
+code = "SC-42(2)"
+title = "Authorized Use"
+[[id]]
+code = "SC-42(3)"
+title = "Prohibit Use of Devices"
+[[id]]
+code = "SC-42(4)"
+title = "Notice of Collection"
+[[id]]
+code = "SC-42(5)"
+title = "Collection Minimization"
+[[id]]
+code = "SC-43"
+title = "Usage Restrictions"
+[[id]]
+code = "SC-44"
+title = "Detonation Chambers"
+[[id]]
+code = "SC-45"
+title = "System Time Synchronization"
+[[id]]
+code = "SC-45(1)"
+title = "Synchronization with Authoritative Time Source"
+[[id]]
+code = "SC-45(2)"
+title = "Secondary Authoritative Time Source"
+[[id]]
+code = "SC-46"
+title = "Cross Domain Policy Enforcement"
+[[id]]
+code = "SC-47"
+title = "Alternate Communications Paths"
+[[id]]
+code = "SC-48"
+title = "Sensor Relocation"
+[[id]]
+code = "SC-48(1)"
+title = "Dynamic Relocation of Sensors or Monitoring Capabilities"
+[[id]]
+code = "SC-49"
+title = "Hardware-enforced Separation and Policy Enforcement"
+[[id]]
+code = "SC-50"
+title = "Software-enforced Separation and Policy Enforcement"
+[[id]]
+code = "SC-51"
+title = "Hardware-based Protection"
+[[id]]
+code = "SI-1"
+title = "Policy and Procedures"
+[[id]]
+code = "SI-2"
+title = "Flaw Remediation"
+[[id]]
+code = "SI-2(1)"
+title = "Central Management"
+[[id]]
+code = "SI-2(2)"
+title = "Automated Flaw Remediation Status"
+[[id]]
+code = "SI-2(3)"
+title = "Time to Remediate Flaws and Benchmarks for Corrective Actions"
+[[id]]
+code = "SI-2(4)"
+title = "Automated Patch Management Tools"
+[[id]]
+code = "SI-2(5)"
+title = "Automatic Software and Firmware Updates"
+[[id]]
+code = "SI-2(6)"
+title = "Removal of Previous Versions of Software and Firmware"
+[[id]]
+code = "SI-2(7)"
+title = "Root Cause Analysis"
+[[id]]
+code = "SI-3"
+title = "Malicious Code Protection"
+[[id]]
+code = "SI-3(1)"
+title = "Central Management"
+[[id]]
+code = "SI-3(2)"
+title = "Automatic Updates"
+[[id]]
+code = "SI-3(3)"
+title = "Non-privileged Users"
+[[id]]
+code = "SI-3(4)"
+title = "Updates Only by Privileged Users"
+[[id]]
+code = "SI-3(5)"
+title = "Portable Storage Devices"
+[[id]]
+code = "SI-3(6)"
+title = "Testing and Verification"
+[[id]]
+code = "SI-3(7)"
+title = "Nonsignature-based Detection"
+[[id]]
+code = "SI-3(8)"
+title = "Detect Unauthorized Commands"
+[[id]]
+code = "SI-3(9)"
+title = "Authenticate Remote Commands"
+[[id]]
+code = "SI-3(10)"
+title = "Malicious Code Analysis"
+[[id]]
+code = "SI-4"
+title = "System Monitoring"
+[[id]]
+code = "SI-4(1)"
+title = "System-wide Intrusion Detection System"
+[[id]]
+code = "SI-4(2)"
+title = "Automated Tools and Mechanisms for Real-time Analysis"
+[[id]]
+code = "SI-4(3)"
+title = "Automated Tool and Mechanism Integration"
+[[id]]
+code = "SI-4(4)"
+title = "Inbound and Outbound Communications Traffic"
+[[id]]
+code = "SI-4(5)"
+title = "System-generated Alerts"
+[[id]]
+code = "SI-4(6)"
+title = "Restrict Non-privileged Users"
+[[id]]
+code = "SI-4(7)"
+title = "Automated Response to Suspicious Events"
+[[id]]
+code = "SI-4(8)"
+title = "Protection of Monitoring Information"
+[[id]]
+code = "SI-4(9)"
+title = "Testing of Monitoring Tools and Mechanisms"
+[[id]]
+code = "SI-4(10)"
+title = "Visibility of Encrypted Communications"
+[[id]]
+code = "SI-4(11)"
+title = "Analyze Communications Traffic Anomalies"
+[[id]]
+code = "SI-4(12)"
+title = "Automated Organization-generated Alerts"
+[[id]]
+code = "SI-4(13)"
+title = "Analyze Traffic and Event Patterns"
+[[id]]
+code = "SI-4(14)"
+title = "Wireless Intrusion Detection"
+[[id]]
+code = "SI-4(15)"
+title = "Wireless to Wireline Communications"
+[[id]]
+code = "SI-4(16)"
+title = "Correlate Monitoring Information"
+[[id]]
+code = "SI-4(17)"
+title = "Integrated Situational Awareness"
+[[id]]
+code = "SI-4(18)"
+title = "Analyze Traffic and Covert Exfiltration"
+[[id]]
+code = "SI-4(19)"
+title = "Risk for Individuals"
+[[id]]
+code = "SI-4(20)"
+title = "Privileged Users"
+[[id]]
+code = "SI-4(21)"
+title = "Probationary Periods"
+[[id]]
+code = "SI-4(22)"
+title = "Unauthorized Network Services"
+[[id]]
+code = "SI-4(23)"
+title = "Host-based Devices"
+[[id]]
+code = "SI-4(24)"
+title = "Indicators of Compromise"
+[[id]]
+code = "SI-4(25)"
+title = "Optimize Network Traffic Analysis"
+[[id]]
+code = "SI-5"
+title = "Security Alerts, Advisories, and Directives"
+[[id]]
+code = "SI-5(1)"
+title = "Automated Alerts and Advisories"
+[[id]]
+code = "SI-6"
+title = "Security and Privacy Function Verification"
+[[id]]
+code = "SI-6(1)"
+title = "Notification of Failed Security Tests"
+[[id]]
+code = "SI-6(2)"
+title = "Automation Support for Distributed Testing"
+[[id]]
+code = "SI-6(3)"
+title = "Report Verification Results"
+[[id]]
+code = "SI-7"
+title = "Software, Firmware, and Information Integrity"
+[[id]]
+code = "SI-7(1)"
+title = "Integrity Checks"
+[[id]]
+code = "SI-7(2)"
+title = "Automated Notifications of Integrity Violations"
+[[id]]
+code = "SI-7(3)"
+title = "Centrally Managed Integrity Tools"
+[[id]]
+code = "SI-7(4)"
+title = "Tamper-evident Packaging"
+[[id]]
+code = "SI-7(5)"
+title = "Automated Response to Integrity Violations"
+[[id]]
+code = "SI-7(6)"
+title = "Cryptographic Protection"
+[[id]]
+code = "SI-7(7)"
+title = "Integration of Detection and Response"
+[[id]]
+code = "SI-7(8)"
+title = "Auditing Capability for Significant Events"
+[[id]]
+code = "SI-7(9)"
+title = "Verify Boot Process"
+[[id]]
+code = "SI-7(10)"
+title = "Protection of Boot Firmware"
+[[id]]
+code = "SI-7(11)"
+title = "Confined Environments with Limited Privileges"
+[[id]]
+code = "SI-7(12)"
+title = "Integrity Verification"
+[[id]]
+code = "SI-7(13)"
+title = "Code Execution in Protected Environments"
+[[id]]
+code = "SI-7(14)"
+title = "Binary or Machine Executable Code"
+[[id]]
+code = "SI-7(15)"
+title = "Code Authentication"
+[[id]]
+code = "SI-7(16)"
+title = "Time Limit on Process Execution Without Supervision"
+[[id]]
+code = "SI-7(17)"
+title = "Runtime Application Self-protection"
+[[id]]
+code = "SI-8"
+title = "Spam Protection"
+[[id]]
+code = "SI-8(1)"
+title = "Central Management"
+[[id]]
+code = "SI-8(2)"
+title = "Automatic Updates"
+[[id]]
+code = "SI-8(3)"
+title = "Continuous Learning Capability"
+[[id]]
+code = "SI-9"
+title = "Information Input Restrictions"
+[[id]]
+code = "SI-10"
+title = "Information Input Validation"
+[[id]]
+code = "SI-10(1)"
+title = "Manual Override Capability"
+[[id]]
+code = "SI-10(2)"
+title = "Review and Resolve Errors"
+[[id]]
+code = "SI-10(3)"
+title = "Predictable Behavior"
+[[id]]
+code = "SI-10(4)"
+title = "Timing Interactions"
+[[id]]
+code = "SI-10(5)"
+title = "Restrict Inputs to Trusted Sources and Approved Formats"
+[[id]]
+code = "SI-10(6)"
+title = "Injection Prevention"
+[[id]]
+code = "SI-11"
+title = "Error Handling"
+[[id]]
+code = "SI-12"
+title = "Information Management and Retention"
+[[id]]
+code = "SI-12(1)"
+title = "Limit Personally Identifiable Information Elements"
+[[id]]
+code = "SI-12(2)"
+title = "Minimize Personally Identifiable Information in Testing, Training, and Research"
+[[id]]
+code = "SI-12(3)"
+title = "Information Disposal"
+[[id]]
+code = "SI-13"
+title = "Predictable Failure Prevention"
+[[id]]
+code = "SI-13(1)"
+title = "Transferring Component Responsibilities"
+[[id]]
+code = "SI-13(2)"
+title = "Time Limit on Process Execution Without Supervision"
+[[id]]
+code = "SI-13(3)"
+title = "Manual Transfer Between Components"
+[[id]]
+code = "SI-13(4)"
+title = "Standby Component Installation and Notification"
+[[id]]
+code = "SI-13(5)"
+title = "Failover Capability"
+[[id]]
+code = "SI-14"
+title = "Non-persistence"
+[[id]]
+code = "SI-14(1)"
+title = "Refresh from Trusted Sources"
+[[id]]
+code = "SI-14(2)"
+title = "Non-persistent Information"
+[[id]]
+code = "SI-14(3)"
+title = "Non-persistent Connectivity"
+[[id]]
+code = "SI-15"
+title = "Information Output Filtering"
+[[id]]
+code = "SI-16"
+title = "Memory Protection"
+[[id]]
+code = "SI-17"
+title = "Fail-safe Procedures"
+[[id]]
+code = "SI-18"
+title = "Personally Identifiable Information Quality Operations"
+[[id]]
+code = "SI-18(1)"
+title = "Automation Support"
+[[id]]
+code = "SI-18(2)"
+title = "Data Tags"
+[[id]]
+code = "SI-18(3)"
+title = "Collection"
+[[id]]
+code = "SI-18(4)"
+title = "Individual Requests"
+[[id]]
+code = "SI-18(5)"
+title = "Notice of Correction or Deletion"
+[[id]]
+code = "SI-19"
+title = "De-identification"
+[[id]]
+code = "SI-19(1)"
+title = "Collection"
+[[id]]
+code = "SI-19(2)"
+title = "Archiving"
+[[id]]
+code = "SI-19(3)"
+title = "Release"
+[[id]]
+code = "SI-19(4)"
+title = "Removal, Masking, Encryption, Hashing, or Replacement of Direct Identifiers"
+[[id]]
+code = "SI-19(5)"
+title = "Statistical Disclosure Control"
+[[id]]
+code = "SI-19(6)"
+title = "Differential Privacy"
+[[id]]
+code = "SI-19(7)"
+title = "Validated Algorithms and Software"
+[[id]]
+code = "SI-19(8)"
+title = "Motivated Intruder"
+[[id]]
+code = "SI-20"
+title = "Tainting"
+[[id]]
+code = "SI-21"
+title = "Information Refresh"
+[[id]]
+code = "SI-22"
+title = "Information Diversity"
+[[id]]
+code = "SI-23"
+title = "Information Fragmentation"
+[[id]]
+code = "SR-1"
+title = "Policy and Procedures"
+[[id]]
+code = "SR-2"
+title = "Supply Chain Risk Management Plan"
+[[id]]
+code = "SR-2(1)"
+title = "Establish SCRM Team"
+[[id]]
+code = "SR-3"
+title = "Supply Chain Controls and Processes"
+[[id]]
+code = "SR-3(1)"
+title = "Diverse Supply Base"
+[[id]]
+code = "SR-3(2)"
+title = "Limitation of Harm"
+[[id]]
+code = "SR-3(3)"
+title = "Sub-tier Flow Down"
+[[id]]
+code = "SR-4"
+title = "Provenance"
+[[id]]
+code = "SR-4(1)"
+title = "Identity"
+[[id]]
+code = "SR-4(2)"
+title = "Track and Trace"
+[[id]]
+code = "SR-4(3)"
+title = "Validate as Genuine and Not Altered"
+[[id]]
+code = "SR-4(4)"
+title = "Supply Chain Integrity — Pedigree"
+[[id]]
+code = "SR-5"
+title = "Acquisition Strategies, Tools, and Methods"
+[[id]]
+code = "SR-5(1)"
+title = "Adequate Supply"
+[[id]]
+code = "SR-5(2)"
+title = "Assessments Prior to Selection, Acceptance, Modification, or Update"
+[[id]]
+code = "SR-6"
+title = "Supplier Assessments and Reviews"
+[[id]]
+code = "SR-6(1)"
+title = "Testing and Analysis"
+[[id]]
+code = "SR-7"
+title = "Supply Chain Operations Security"
+[[id]]
+code = "SR-8"
+title = "Notification Agreements"
+[[id]]
+code = "SR-9"
+title = "Tamper Resistance and Detection"
+[[id]]
+code = "SR-9(1)"
+title = "Multiple Stages of System Development Life Cycle"
+[[id]]
+code = "SR-10"
+title = "Inspection of Systems or Components"
+[[id]]
+code = "SR-11"
+title = "Component Authenticity"
+[[id]]
+code = "SR-11(1)"
+title = "Anti-counterfeit Training"
+[[id]]
+code = "SR-11(2)"
+title = "Configuration Control for Component Service and Repair"
+[[id]]
+code = "SR-11(3)"
+title = "Anti-counterfeit Scanning"
+[[id]]
+code = "SR-12"
+title = "Component Disposal"
