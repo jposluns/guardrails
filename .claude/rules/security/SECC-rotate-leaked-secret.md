@@ -3,6 +3,7 @@ corpus-id: secrot
 origin: pack
 family: security
 facet: SECC
+secondary: [SECI]
 slug: rotate-leaked-secret
 map-owasp-mcp: [MCP01]
 map-owasp-cheatsheet: [secrets-management]

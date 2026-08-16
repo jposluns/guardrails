@@ -3,6 +3,7 @@ corpus-id: secagt
 origin: pack
 family: security
 facet: SECI
+secondary: [TRUST]
 slug: inter-agent-trust
 map-owasp-asi: [ASI03, ASI07, ASI10]
 map-owasp-mcp: [MCP07]

@@ -3,6 +3,7 @@ corpus-id: secunt
 origin: pack
 family: security
 facet: SECI
+secondary: [TRUST]
 slug: untrusted-content
 map-owasp-llm: [LLM01]
 map-owasp-mcp: [MCP06, MCP10]

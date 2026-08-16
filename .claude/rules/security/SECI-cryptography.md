@@ -3,6 +3,7 @@ corpus-id: seccry
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC]
 slug: cryptography
 map-owasp-web: [A04]
 map-owasp-asvs: [V11]

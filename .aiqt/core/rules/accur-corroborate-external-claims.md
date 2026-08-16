@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: ACCUR
+secondary: [INTEG]
 slug: corroborate-external-claims
 map-owasp-llm: [LLM07]
 ---

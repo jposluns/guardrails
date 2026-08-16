@@ -3,6 +3,7 @@ corpus-id: sectok
 origin: pack
 family: security
 facet: SECI
+secondary: [SECC]
 slug: session-token-management
 map-owasp-asvs: [V7, V9]
 map-owasp-cheatsheet: [session-management]

@@ -4,6 +4,7 @@ origin: pack
 family: aiqt
 tier: 10
 facet: INTEG
+secondary: [QUALI]
 slug: branch-and-merge-on-green
 ---
 
