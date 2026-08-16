@@ -1,0 +1,44 @@
+# OWASP Top 10 for LLM Applications: id manifest for the AIQT standards crosswalk.
+# The canonical id is the bare token (LLM01, not LLM01:2026); the edition is pinned here, never inline
+# in a rule mapping, so an edition bump touches one file. See README.md for the vendoring rules.
+map-key = "map-owasp-llm"
+name = "OWASP Top 10 for LLM Applications"
+publisher = "OWASP Foundation"
+edition = "2026"
+kind = "risk"
+status = "stable"
+citation-unit = "risk category"
+id-pattern = "^LLM(0[1-9]|10)$"
+source-artefact = "OWASP Top 10 for LLM Applications, Version 2026"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "LLM01"
+title = "Prompt Injection"
+[[id]]
+code = "LLM02"
+title = "Sensitive Information Disclosure"
+[[id]]
+code = "LLM03"
+title = "Excessive Agency"
+[[id]]
+code = "LLM04"
+title = "Supply Chain"
+[[id]]
+code = "LLM05"
+title = "Data and Model Poisoning"
+[[id]]
+code = "LLM06"
+title = "Unbounded Consumption"
+[[id]]
+code = "LLM07"
+title = "Misinformation"
+[[id]]
+code = "LLM08"
+title = "Hidden Context Exposure"
+[[id]]
+code = "LLM09"
+title = "Vector and Embedding Weaknesses"
+[[id]]
+code = "LLM10"
+title = "Improper Output Handling"

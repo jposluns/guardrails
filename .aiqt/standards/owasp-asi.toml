@@ -1,0 +1,43 @@
+# OWASP Top 10 for Agentic Applications (ASI): id manifest for the AIQT standards crosswalk.
+# See README.md for the vendoring rules.
+map-key = "map-owasp-asi"
+name = "OWASP Top 10 for Agentic Applications"
+publisher = "OWASP Foundation"
+edition = "2026"
+kind = "risk"
+status = "stable"
+citation-unit = "risk category"
+id-pattern = "^ASI(0[1-9]|10)$"
+source-artefact = "OWASP Top 10 for Agentic Applications, Version 2026 (December 2025)"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "ASI01"
+title = "Agent Goal Hijack"
+[[id]]
+code = "ASI02"
+title = "Tool Misuse and Exploitation"
+[[id]]
+code = "ASI03"
+title = "Identity and Privilege Abuse"
+[[id]]
+code = "ASI04"
+title = "Agentic Supply Chain Vulnerabilities"
+[[id]]
+code = "ASI05"
+title = "Unexpected Code Execution (RCE)"
+[[id]]
+code = "ASI06"
+title = "Memory & Context Poisoning"
+[[id]]
+code = "ASI07"
+title = "Insecure Inter-Agent Communication"
+[[id]]
+code = "ASI08"
+title = "Cascading Failures"
+[[id]]
+code = "ASI09"
+title = "Human-Agent Trust Exploitation"
+[[id]]
+code = "ASI10"
+title = "Rogue Agents"

@@ -1,0 +1,43 @@
+# OWASP API Security Top 10: id manifest for the AIQT standards crosswalk.
+# Tokens carry no leading zero (API1..API9, API10), matching the source. See README.md.
+map-key = "map-owasp-api"
+name = "OWASP API Security Top 10"
+publisher = "OWASP Foundation"
+edition = "2023"
+kind = "risk"
+status = "stable"
+citation-unit = "risk category"
+id-pattern = "^API([1-9]|10)$"
+source-artefact = "OWASP API Security Top 10 2023"
+retrieved = "2026-08-16"
+
+[[id]]
+code = "API1"
+title = "Broken Object Level Authorization"
+[[id]]
+code = "API2"
+title = "Broken Authentication"
+[[id]]
+code = "API3"
+title = "Broken Object Property Level Authorization"
+[[id]]
+code = "API4"
+title = "Unrestricted Resource Consumption"
+[[id]]
+code = "API5"
+title = "Broken Function Level Authorization"
+[[id]]
+code = "API6"
+title = "Unrestricted Access to Sensitive Business Flows"
+[[id]]
+code = "API7"
+title = "Server Side Request Forgery"
+[[id]]
+code = "API8"
+title = "Security Misconfiguration"
+[[id]]
+code = "API9"
+title = "Improper Inventory Management"
+[[id]]
+code = "API10"
+title = "Unsafe Consumption of APIs"
