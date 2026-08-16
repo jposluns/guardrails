@@ -7,6 +7,7 @@ secondary: [SECC]
 slug: data-residency-retention
 map-nist-airmf: [GOVERN 1.1]
 map-nist-80053: [SA-9(5), SI-12, SI-12(3)]
+map-iso-23894: [A.8]
 map-owasp-asvs: [V14]
 ---
 

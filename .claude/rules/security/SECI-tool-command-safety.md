@@ -8,6 +8,7 @@ slug: tool-command-safety
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [AC-6, SC-39, SI-10, SI-10(6)]
 map-atlas: [AML.T0050, AML.T0053, AML.T0102]
+map-iso-23894: [A.9, A.11]
 map-owasp-asi: [ASI05]
 map-owasp-mcp: [MCP05]
 map-owasp-web: [A05]

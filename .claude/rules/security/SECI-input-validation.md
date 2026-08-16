@@ -7,6 +7,7 @@ slug: input-validation
 map-nist-80053: [SI-10, SI-10(5), SI-10(6)]
 map-nist-ssdf: [PW.5.1]
 map-atlas: [AML.T0049, AML.T0050]
+map-iso-23894: [A.9, A.11]
 map-owasp-web: [A05]
 map-owasp-asvs: [V2]
 map-owasp-proactive: [C3]

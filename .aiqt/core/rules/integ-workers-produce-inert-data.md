@@ -11,6 +11,7 @@ map-nist-80053: [AC-6, CM-5]
 map-nist-ssdf: [PS.1.1, PW.7.2]
 map-atlas: [AML.T0053]
 map-iso-42001: [A.6.1.3]
+map-iso-23894: [A.2, B.4]
 ---
 
 # Workers produce inert data

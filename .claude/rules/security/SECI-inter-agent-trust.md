@@ -8,6 +8,7 @@ slug: inter-agent-trust
 map-nist-airmf: [MAP 4.2]
 map-nist-80053: [AC-3, AC-6, IA-9, SI-10]
 map-atlas: [AML.T0051.001, AML.T0053, AML.T0073]
+map-iso-23894: [A.11]
 map-owasp-asi: [ASI03, ASI07, ASI10]
 map-owasp-mcp: [MCP07]
 ---
