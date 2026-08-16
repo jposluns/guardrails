@@ -33,7 +33,8 @@ _SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 # aiqt non-apex derivation shape <tier>-<facet>-<slug>.md; any tier with any AIQT facet is
 # lexically well-formed (tier/facet consistency is checked separately as tier-code-mismatch).
 AIQT_NONAPEX_RE = re.compile(r"^(10|20|30|40)-(ACCUR|INTEG|QUALI|TRUST|PROGR|SPEED|COST)-" + _SLUG + r"\.md$")
-# security derivation shape <facet>-<slug>.md.
+# security derivation shape <facet>-<slug>.md. Codes SEC* per the design-of-record (supersedes the seed
+# corpus-management spec 6.5 CONFI/INTEG/AVAIL/PRIV set): SECC=Confidentiality SECI=Integrity SECA=Availability SECP=Privacy.
 SECURITY_RE = re.compile(r"^(SECC|SECI|SECA|SECP)-" + _SLUG + r"\.md$")
 
 

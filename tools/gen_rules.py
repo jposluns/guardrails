@@ -17,10 +17,12 @@ from _gen_common import repo_root  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
-CIA_FACETS = {"SECC", "SECI", "SECA", "SECP"}
-# The global known-facet set: any rule may carry ANY of these as a `secondary` tag, cross-family
-# (an aiqt rule may tag a security facet and vice versa), per the settled secondary semantics (spec
-# section 4). Security codes are namespaced (SEC*) so none collides with an AIQT facet (e.g. SECI vs INTEG).
+CIA_FACETS = {"SECC", "SECI", "SECA", "SECP"}  # SECC=Confidentiality SECI=Integrity SECA=Availability SECP=Privacy
+# The global known-facet set: any rule may carry ANY of these as a `secondary` tag, cross-family (an aiqt
+# rule may tag a security facet and vice versa). Security codes are namespaced (SEC*) so none collides with
+# an AIQT facet (e.g. SECI vs the AIQT INTEG). The secondary element rules (known-facet, differs-from-
+# primary, no-repeat) come from the Architect's recorded decision (design-of-record: secondary = any known
+# facet), NOT spec section 4, which only types `secondary` as a sequence of facet-code strings.
 KNOWN_FACETS = set().union(*TIER_FACETS.values()) | CIA_FACETS
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
 # allows it only on aiqt-non-apex and security, so it is added to those allow-sets individually.
