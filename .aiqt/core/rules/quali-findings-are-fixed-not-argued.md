@@ -9,6 +9,7 @@ slug: findings-are-fixed-not-argued
 map-nist-airmf: [GOVERN 4.1, MANAGE 2.3]
 map-nist-80053: [SA-11, SI-2]
 map-nist-ssdf: [PO.4.1, PW.7.2]
+map-iso-42001: [A.6.2.4]
 ---
 
 # A verification finding is fixed, not argued away

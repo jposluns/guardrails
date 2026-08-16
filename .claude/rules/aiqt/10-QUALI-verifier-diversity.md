@@ -8,6 +8,7 @@ slug: verifier-diversity
 map-nist-airmf: [MEASURE 1.3, MEASURE 2.1]
 map-nist-80053: [SA-11(3)]
 map-nist-ssdf: [PW.7.1]
+map-iso-42001: [A.6.2.4]
 ---
 
 # Verifier diversity

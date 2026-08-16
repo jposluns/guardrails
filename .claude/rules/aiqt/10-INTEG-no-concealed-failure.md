@@ -8,6 +8,7 @@ secondary: [ACCUR, TRUST]
 slug: no-concealed-failure
 map-nist-airmf: [GOVERN 4.3, MANAGE 4.3]
 map-nist-80053: [SA-11]
+map-iso-42001: [A.6.2.4]
 ---
 
 # No concealed failure

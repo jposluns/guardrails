@@ -6,6 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [INTEG, PROGR]
 slug: session-resume-work-close
+map-iso-42001: [8.1]
 ---
 
 # Resume, work, and close each session
