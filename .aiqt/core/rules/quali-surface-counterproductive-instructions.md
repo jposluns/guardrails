@@ -6,6 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [TRUST]
 slug: surface-counterproductive-instructions
+map-nist-airmf: [GOVERN 3.2, GOVERN 4.1]
 ---
 
 # Surface a counterproductive instruction before executing it

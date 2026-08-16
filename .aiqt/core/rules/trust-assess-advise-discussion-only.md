@@ -5,6 +5,7 @@ family: aiqt
 tier: 10
 facet: TRUST
 slug: assess-advise-discussion-only
+map-nist-airmf: [GOVERN 3.2, MAP 3.5]
 ---
 
 # Assess and advise are discussion only

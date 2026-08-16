@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: untrusted-content
+map-nist-airmf: [MAP 4.2]
 map-nist-80053: [SI-10(6)]
 map-owasp-llm: [LLM01]
 map-owasp-mcp: [MCP06, MCP10]

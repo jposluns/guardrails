@@ -4,6 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: dependency-provenance
+map-nist-airmf: [GOVERN 6.1, MANAGE 3.1, MAP 4.2]
 map-nist-80053: [SR-3, SR-4, SR-11]
 map-nist-ssdf: [PO.3.2, PW.4.1, PW.4.4]
 map-owasp-llm: [LLM04]

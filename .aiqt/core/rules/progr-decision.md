@@ -6,6 +6,7 @@ tier: 20
 facet: PROGR
 secondary: [TRUST]
 slug: decision-classification-before-enacting
+map-nist-airmf: [GOVERN 3.2, MAP 3.5]
 ---
 
 # Decision classification before enacting

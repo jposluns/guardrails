@@ -6,6 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [SECI]
 slug: human-oversight-and-autonomy-threshold
+map-nist-airmf: [GOVERN 3.2, MAP 3.5]
 ---
 
 # Human oversight and the autonomy threshold
