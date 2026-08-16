@@ -51,6 +51,9 @@ jobs:
       - name: Internal links
         run: python3 tools/check_links.py
 
+      - name: Site integrity
+        run: python3 tools/check_site.py
+
       - name: Roadmap drift
         run: python3 tools/gen_roadmap.py --check
 
