@@ -58,8 +58,8 @@ then fix it; nothing that is not the fix proceeds ahead of it. Severity is grade
 
 ## Branch and merge only on green
 
-Develop a change in isolation from the protected line of development, put it through a review gate, and
-integrate it only when its checks pass. What lands on the protected line is the reviewed, verified state,
+Develop a change in isolation from the shared line of development, put it through a review gate, and
+integrate it only when its checks pass. What lands on the shared line is the reviewed, verified state,
 never a work in progress. On git the usual form is a feature branch and a pull request merged on green;
 the mechanism varies, the gate does not.
 
@@ -106,7 +106,7 @@ explicitly reclassifies it with a recorded rationale.
 ## High-assurance verification
 
 Every substantive change is verified before it integrates by an independent adversarial pass, briefed to
-refute rather than confirm. The pass runs on the change before it lands, never after.
+refute rather than confirm.
 
 ## Isolate verifiers and judge by their result signal
 
@@ -132,12 +132,13 @@ sentence, name the concrete downside, propose a better path, and let the maintai
 
 ## Verifier diversity
 
-Diversify the verifiers so they surface different failure classes: run the adversarial pass across two
-model families, and a second family from any vendor counts. Only where no second model family is available
-may this fall back to two independent, differently-primed passes in separate clean contexts, which is the
-accepted fallback and not the equal of two families; record the reduction and run the two-family pass once
-a second family becomes available. A third family is reserved for critical changes; where only one vendor
-is reachable, a further independent pass takes its place.
+Diversify the verification so it surfaces different failure classes: run it across two model families, and
+a second family from any vendor counts. Only where no second model family is available may this fall back to
+two independent, differently-primed passes in separate clean contexts, which is the accepted fallback and
+not the equal of two families; record the reduction and run the two-family pass once a second family
+becomes available. A third family is reserved for critical changes; only where no third family is available
+may a further independent, differently-primed pass take its place, recorded and re-run once a third family
+becomes available. Unavailable means unreachable, not merely unbudgeted: cost never buys the reduction.
 
 ## Assess and advise are discussion only
 

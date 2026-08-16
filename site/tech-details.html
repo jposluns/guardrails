@@ -231,12 +231,12 @@
     <p class="eyebrow">Standardizing quality assurance</p>
     <h2>One QA standard, whichever model checks the work</h2>
     <p class="lead">A review by a single model shares that model's blind spots. AIQT
-      standardizes the check itself: for substantive work, two verifiers from different model
-      families (one Claude-family, one GPT/Codex-family) are given the same brief, each
-      instructed to refute the change rather than confirm it, and their verdicts are
-      reconciled. Different families miss systematically different things, so the cross-family
-      pair catches what either alone would let through. This is how AIQT itself is built and
-      reviewed; in the 1.1.0 design, the development assistant brings the same standard to your
+      standardizes the check itself: for substantive work, independent verifiers from different
+      model families are given the same brief, each instructed to refute the change rather than
+      confirm it, and their verdicts are reconciled. Different families miss systematically
+      different things, so cross-family review catches what any one alone would let through.
+      AIQT itself is built and reviewed this way, across three families (Claude, GPT/Codex, and
+      Gemini); in the 1.1.0 design, the development assistant brings the same standard to your
       project.</p>
     <ol class="steps">
       <li><b>Routine changes</b> run the ordinary gates. Most work needs nothing heavier, and

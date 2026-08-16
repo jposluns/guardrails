@@ -55,7 +55,8 @@ is confirmed, and leaves only via FIXED, ROUTED, REFUTED, or ACCEPTED.
 Every substantive change is verified before it integrates by an INDEPENDENT adversarial pass, briefed to
 refute rather than confirm. Diversify the verifiers so they surface different failure classes: run across
 model families, a second family from any vendor counting; where no second family is available, fall back to
-independent, differently-primed passes, recorded and re-run once a second family becomes reachable. This
+two independent, differently-primed passes in separate clean contexts, recorded and re-run once a second
+family becomes reachable. This
 repo's standing floor is now TRIPLE-family (a Claude-family, a GPT/Codex-family, and a Gemini-family
 verifier), for interoperability and platform neutrality; the only sanctioned reduction is a family's
 token/quota unavailability, noted and re-run when it returns. A further family or independent pass is
