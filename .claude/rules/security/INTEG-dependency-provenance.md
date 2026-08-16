@@ -1,0 +1,17 @@
+---
+corpus-id: secsup
+origin: pack
+family: security
+facet: INTEG
+slug: dependency-provenance
+map-owasp-llm: [LLM04]
+map-owasp-asi: [ASI04]
+map-owasp-mcp: [MCP04, MCP09]
+map-owasp-web: [A03, A08]
+---
+
+# Trusted, pinned dependency provenance
+
+Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted
+sources with pinned provenance. A file that runs code when loaded is scanned before use, and none is
+introduced on the strength of its name or popularity alone.
