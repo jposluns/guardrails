@@ -129,21 +129,31 @@ sentence, name the concrete downside, propose a better path, and let the maintai
 ## Assess and advise are discussion only
 
 When asked to assess, advise, consider, evaluate, review, compare, or weigh something, the request is for
-analysis, not execution. Produce the assessment and STOP; do not implement, create, or change anything
-until an explicit instruction to act. This holds even when the recommendation is clear: a clear
-recommendation is still discussion until the maintainer says go.
+analysis, not execution. Produce the assessment and stop; do not implement, create, or change anything until
+an explicit instruction to act, even when the recommendation is clear. This is a specific instance of
+requiring express authorization before execution.
 
-## Change tracking and records-first
+## Change record
 
-Every ruling and decision is recorded to the durable operational store the session it is given; the
-record, not the conversation, is the source of truth. Every substantive change carries a change record of
-what, when, and why with its version. Backlog item numbers are permanent and never reused.
+Every substantive change carries a record of what changed, when, and why, tied to the version it shipped in.
+Backlog item numbers are permanent and never reused, even when a change is later reverted or superseded.
 
 ## Clarify before acting
 
 When a request has more than one reasonable reading, or needs an external value it does not pin down,
 surface the ambiguity in one sentence and ask, rather than silently pick. A clarifying question asked
 early is cheaper than a confident wrong answer delivered late.
+
+## Hold a concurrency lease to prevent double runs
+
+A concurrency lease prevents two runs from acting on the same session at once. It is reconciled against the
+recorded state on resume or close, and never seized from a run that currently holds it.
+
+## Continue by default
+
+The default at every point is to continue the work. A wind-down happens only on a named, externally-
+observable trigger such as task completion, an explicit stop, or a hard resource limit, never on a felt
+sense of degradation.
 
 ## Express authorization before execution
 
@@ -157,12 +167,16 @@ authorization proportionate to the risk, and when in doubt the action HOLDS for 
 proceeding. A timeout or an ambiguous state never selects the risky path. The threshold is set by
 consequence and reversibility, not by confidence.
 
-## Session lifecycle
+## Records first
 
-Sessions RESUME from a durable handoff, WORK under a named operating mode, and CLOSE by landing working
-state cleanly on the protected branch. A concurrency lease prevents a double-run and is
-reconciled, never stolen. The default at every point is to continue; a wind-down needs a named,
-externally-observable trigger, never a felt sense of degradation.
+Every ruling and decision is recorded to the durable store the session it is made. The record, not the
+conversation, is the source of truth: a decision that is not recorded did not happen.
+
+## Resume, work, and close each session
+
+A session resumes from its durable handoff rather than starting cold, works under a single named operating
+mode, and closes by landing its working state cleanly as a merge onto the protected branch, with nothing
+left pending or half-integrated.
 
 ## Trust recovery and escalation
 
