@@ -10,5 +10,6 @@ slug: protected-branch-integrity
 
 # Protected-branch integrity
 
-The protected branch is never force-pushed or committed to directly; it changes only through a reviewed,
-merged pull request.
+The protected line of development is never rewritten, overwritten, or changed directly; it changes only
+through a reviewed, verified integration. On git that means no force-push and no direct commit to the
+protected branch, only a merged pull request.

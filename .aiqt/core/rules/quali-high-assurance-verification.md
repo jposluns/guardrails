@@ -10,6 +10,5 @@ slug: high-assurance-verification
 
 # High-assurance verification
 
-Every substantive change is verified before it merges by an independent adversarial pass, briefed to refute
-rather than confirm, run across two model families because the families surface systematically different
-failure classes. A third, super-high-assurance family is reserved for critical changes.
+Every substantive change is verified before it integrates by an independent adversarial pass, briefed to
+refute rather than confirm.

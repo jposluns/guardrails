@@ -10,4 +10,6 @@ slug: commit-identity
 
 # Commit identity
 
-Commits carry the maintainer's own identity, with no AI listed as author, committer, or co-author.
+A recorded change carries the human maintainer's own identity as its author, with no AI listed as author,
+committer, or co-author. This holds anywhere the record names a party, including commit metadata,
+co-author trailers, and change-log entries.
