@@ -18,6 +18,9 @@ from _gen_common import repo_root  # noqa: E402
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
 CIA_FACETS = {"CONFI", "INTEG", "AVAIL", "PRIV"}
+# The global known-facet set: any rule may carry ANY of these as a `secondary` tag, cross-family
+# (an aiqt rule may tag a CIA facet and vice versa), per the settled secondary semantics (spec section 4).
+KNOWN_FACETS = set().union(*TIER_FACETS.values()) | CIA_FACETS
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
 # allows it only on aiqt-non-apex and security, so it is added to those allow-sets individually.
 BASE_KEYS = {"corpus-id", "origin", "family", "slug"}
@@ -103,6 +106,21 @@ def _check_keys(fm, allowed, name):
         raise ValueError("{}: unknown or forbidden key(s): {}".format(name, ", ".join(sorted(extra))))
 
 
+def _check_secondary(fm, primary, name):
+    # `secondary` is optional; when present it is already validated as a list (SEQ_KEYS). Each element
+    # must be a known facet code, must differ from the primary facet (a facet is not its own secondary),
+    # and must not repeat. Fail-closed so a typo or a duplicate is caught at generation, not shipped.
+    seen = set()
+    for s in fm.get("secondary", []):
+        if s not in KNOWN_FACETS:
+            raise ValueError("{}: secondary facet '{}' is not a known facet code".format(name, s))
+        if s == primary:
+            raise ValueError("{}: secondary facet '{}' duplicates the primary facet".format(name, s))
+        if s in seen:
+            raise ValueError("{}: secondary facet '{}' listed more than once".format(name, s))
+        seen.add(s)
+
+
 def derive(fm, name, allowed_origins=("pack",)):
     # allowed_origins defaults to pack-only so the generator (which sources only pack rules from
     # .aiqt/core/) stays strict; the placement gate passes ("pack", "adopter") because it must accept
@@ -134,12 +152,14 @@ def derive(fm, name, allowed_origins=("pack",)):
             raise ValueError("{}: tier must be 10/20/30/40".format(name))
         if facet not in TIER_FACETS[tier]:
             raise ValueError("{}: facet '{}' invalid for tier {}".format(name, facet, tier))
+        _check_secondary(fm, facet, name)
         return "aiqt/{}-{}-{}.md".format(tier, facet, fm["slug"])
     if family == "security":
         _check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)
         facet = fm.get("facet", "")
         if facet not in CIA_FACETS:
             raise ValueError("{}: security facet must be CONFI/INTEG/AVAIL/PRIV".format(name))
+        _check_secondary(fm, facet, name)
         return "security/{}-{}.md".format(facet, fm["slug"])
     raise ValueError("{}: unknown family '{}'".format(name, family))
 
