@@ -21,6 +21,17 @@ CIA_FACETS = {"CONFI", "INTEG", "AVAIL", "PRIV"}
 # Keys allowed for EVERY rule family. secondary is NOT here: spec section 4 forbids it on the apex and
 # allows it only on aiqt-non-apex and security, so it is added to those allow-sets individually.
 BASE_KEYS = {"corpus-id", "origin", "family", "slug"}
+# Optional standards-mapping keys, allowed on security rules only. Each value is a flow
+# sequence of external control/subcategory IDs, for the public /mappings crosswalk. Adding a mapping key
+# never affects a rule's derived path.
+MAP_KEYS = {
+    "map-owasp-llm", "map-owasp-asi", "map-owasp-mcp", "map-owasp-asvs", "map-owasp-proactive",
+    "map-owasp-web", "map-owasp-api", "map-owasp-scvs", "map-owasp-cheatsheet",
+    "map-nist-airmf", "map-nist-ssdf", "map-nist-80053", "map-iso-42001", "map-iso-23894",
+    "map-ccm", "map-aicm", "map-atlas", "map-saif",
+}
+# Keys whose value, when present, must be a flow sequence (a list): secondary and every mapping key.
+SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 CID_RE = re.compile(r'^[a-z0-9]{6,}$')
 
@@ -106,8 +117,9 @@ def derive(fm, name, allowed_origins=("pack",)):
         raise ValueError("{}: origin must be one of {}".format(name, "/".join(allowed_origins)))
     if not SLUG_RE.match(str(fm["slug"])):
         raise ValueError("{}: slug must be kebab-case".format(name))
-    if "secondary" in fm and not isinstance(fm["secondary"], list):
-        raise ValueError("{}: secondary must be a flow sequence of facet codes".format(name))
+    for k in SEQ_KEYS:
+        if k in fm and not isinstance(fm[k], list):
+            raise ValueError("{}: {} must be a flow sequence".format(name, k))
     family = fm["family"]
     if family == "aiqt":
         if fm.get("apex") is True:
@@ -124,7 +136,7 @@ def derive(fm, name, allowed_origins=("pack",)):
             raise ValueError("{}: facet '{}' invalid for tier {}".format(name, facet, tier))
         return "aiqt/{}-{}-{}.md".format(tier, facet, fm["slug"])
     if family == "security":
-        _check_keys(fm, BASE_KEYS | {"facet", "secondary"}, name)
+        _check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)
         facet = fm.get("facet", "")
         if facet not in CIA_FACETS:
             raise ValueError("{}: security facet must be CONFI/INTEG/AVAIL/PRIV".format(name))
