@@ -58,12 +58,16 @@ then fix it; nothing that is not the fix proceeds ahead of it. Severity is grade
 
 ## Branch and merge only on green
 
-Develop on a feature branch, open a pull request, and merge only when its checks pass. What lands on the
-shared branch is the reviewed, verified state, not a work in progress.
+Develop a change in isolation from the protected line of development, put it through a review gate, and
+integrate it only when its checks pass. What lands on the protected line is the reviewed, verified state,
+never a work in progress. On git the usual form is a feature branch and a pull request merged on green;
+the mechanism varies, the gate does not.
 
 ## Commit identity
 
-Commits carry the maintainer's own identity, with no AI listed as author, committer, or co-author.
+A recorded change carries the human maintainer's own identity as its author, with no AI listed as author,
+committer, or co-author. This holds anywhere the record names a party, including commit metadata,
+co-author trailers, and change-log entries.
 
 ## Gate discipline
 
@@ -78,8 +82,9 @@ finished, and no error is hidden, swallowed, or downgraded to make a result look
 
 ## Protected-branch integrity
 
-The protected branch is never force-pushed or committed to directly; it changes only through a reviewed,
-merged pull request.
+The protected line of development is never rewritten, overwritten, or changed directly; it changes only
+through a reviewed, verified integration. On git that means no force-push and no direct commit to the
+protected branch, only a merged pull request.
 
 ## Validation is a gate on apply
 
@@ -95,14 +100,13 @@ and seriality live in the apply stage.
 ## A verification finding is fixed, not argued away
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
-finding from either family blocks the change, fail-closed, until it is fixed or the maintainer explicitly
-reclassifies it with a recorded rationale.
+finding from any independent verifier blocks the change, fail-closed, until it is fixed or the maintainer
+explicitly reclassifies it with a recorded rationale.
 
 ## High-assurance verification
 
-Every substantive change is verified before it merges by an independent adversarial pass, briefed to refute
-rather than confirm, run across two model families because the families surface systematically different
-failure classes. A third, super-high-assurance family is reserved for critical changes.
+Every substantive change is verified before it integrates by an independent adversarial pass, briefed to
+refute rather than confirm.
 
 ## Isolate verifiers and judge by their result signal
 
@@ -125,6 +129,16 @@ refactoring, broadening scope, or adding polish beyond what the task calls for.
 When an instruction, followed literally, would defeat its own purpose, surface the conflict before executing
 it rather than silently complying or silently substituting your own judgment. State the conflict in one
 sentence, name the concrete downside, propose a better path, and let the maintainer decide.
+
+## Verifier diversity
+
+Diversify the verification so it surfaces different failure classes: run it across two model families, and
+a second family from any vendor counts. Only where no second model family is available may this fall back to
+two independent, differently-primed passes in separate clean contexts, which is the accepted fallback and
+not the equal of two families; record the reduction and run the two-family pass once a second family
+becomes available. A critical change adds a third family; only where no third family is available
+may a further independent, differently-primed pass take its place, recorded and re-run once a third family
+becomes available. Unavailable means unreachable, not merely unbudgeted: cost never buys the reduction.
 
 ## Assess and advise are discussion only
 
@@ -175,8 +189,8 @@ conversation, is the source of truth: a decision that is not recorded did not ha
 ## Resume, work, and close each session
 
 A session resumes from its durable handoff rather than starting cold, works under a single named operating
-mode, and closes by landing its working state cleanly as a merge onto the protected branch, with nothing
-left pending or half-integrated.
+mode, and closes by landing its working state cleanly and verified on the protected line of development,
+with nothing left pending or half-integrated. On git that close is a green merge onto the protected branch.
 
 ## Trust recovery and escalation
 
@@ -189,9 +203,9 @@ Classify a decision before enacting it: is it yours to make (ACT), the maintaine
 
 ## Background work during CI waits
 
-A wait is a resource. While CI or another long operation runs, advance independent, non-conflicting work
-rather than idling, without ever gating the outcome on an unread or pending result. Never merge on a
-pending or unreadable signal; parallelism speeds the work, it never lowers the bar.
+A wait is a resource. While a check or another long operation is in flight, advance independent,
+non-conflicting work rather than idling, without ever gating the outcome on an unread or pending result.
+Never integrate on a pending or unreadable signal; parallelism speeds the work, it never lowers the bar.
 
 ## Cost tier
 
