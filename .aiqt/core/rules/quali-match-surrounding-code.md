@@ -1,0 +1,13 @@
+---
+corpus-id: mtchcd
+origin: pack
+family: aiqt
+tier: 10
+facet: QUALI
+slug: match-surrounding-code
+---
+
+# Match the surrounding code
+
+Write code that reads like the code around it, matching its idiom, naming, structure, and comment density. A
+change should look like it was written by the same hand as the rest of the file.
