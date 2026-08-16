@@ -6,6 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: trust-recovery-escalation
+map-nist-airmf: [MANAGE 4.3]
 ---
 
 # Trust recovery and escalation
