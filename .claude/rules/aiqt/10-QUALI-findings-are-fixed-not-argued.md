@@ -6,6 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [INTEG, TRUST]
 slug: findings-are-fixed-not-argued
+map-nist-80053: [SA-11, SI-2]
 map-nist-ssdf: [PO.4.1, PW.7.2]
 ---
 

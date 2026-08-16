@@ -5,6 +5,7 @@ family: security
 facet: SECA
 secondary: [COST]
 slug: resource-bounds
+map-nist-80053: [SC-5, SC-6]
 map-owasp-llm: [LLM06]
 map-owasp-asi: [ASI08]
 map-owasp-api: [API4]

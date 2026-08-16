@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: human-authorization
+map-nist-80053: [CM-3, CM-5]
 map-owasp-llm: [LLM03]
 map-owasp-asi: [ASI01]
 ---

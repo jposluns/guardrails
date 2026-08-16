@@ -4,6 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: input-validation
+map-nist-80053: [SI-10, SI-10(5), SI-10(6)]
 map-nist-ssdf: [PW.5.1]
 map-owasp-web: [A05]
 map-owasp-asvs: [V2]

@@ -5,6 +5,7 @@ family: security
 facet: SECP
 secondary: [SECC]
 slug: data-minimization
+map-nist-80053: [SI-12(1), SI-19]
 map-owasp-llm: [LLM02]
 map-owasp-asvs: [V14]
 ---

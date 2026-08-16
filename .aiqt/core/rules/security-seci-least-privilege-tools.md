@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC, TRUST]
 slug: least-privilege-tools
+map-nist-80053: [AC-6, CM-7]
 map-owasp-llm: [LLM03]
 map-owasp-asi: [ASI02]
 map-owasp-mcp: [MCP02]

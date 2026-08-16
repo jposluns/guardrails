@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: secure-configuration
+map-nist-80053: [CM-6, CM-7, SI-11]
 map-nist-ssdf: [PW.9.1, PW.9.2]
 map-owasp-web: [A02]
 map-owasp-api: [API8]

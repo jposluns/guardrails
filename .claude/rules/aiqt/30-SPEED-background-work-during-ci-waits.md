@@ -6,6 +6,7 @@ tier: 30
 facet: SPEED
 secondary: [INTEG, PROGR]
 slug: background-work-during-ci-waits
+map-nist-80053: [CM-3(2)]
 ---
 
 # Background work during CI waits

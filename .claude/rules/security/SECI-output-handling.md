@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [QUALI]
 slug: output-handling
+map-nist-80053: [SA-11, SI-10(6), SI-15]
 map-nist-ssdf: [PW.5.1, PW.7.1, PW.8.1]
 map-owasp-llm: [LLM10]
 map-owasp-asvs: [V1, V2]
