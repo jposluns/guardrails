@@ -236,7 +236,7 @@ def main():
                     target.write_text(content, encoding="utf-8")
         for family in ("aiqt", "security"):
             fam_dir = out_dir / family
-            if fam_dir.is_dir():
+            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed, not skip the orphan scan
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
                     for fn in sorted(f for f in filenames if f.endswith(".md")):
                         f = Path(dirpath) / fn

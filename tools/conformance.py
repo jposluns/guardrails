@@ -158,7 +158,7 @@ def _claude_drift(root, corpus):
                 drift.append(rel)
         for family in ("aiqt", "security"):
             fam_dir = claude_dir / family
-            if fam_dir.is_dir():
+            if dir_present(fam_dir):  # not is_dir: an unreadable .claude parent must fail closed (MALFORMED), not skip the orphan scan
                 # os.walk(onerror=raise), not rglob: rglob silently skips an unreadable dir at ANY depth
                 # (concealing an orphan); os.walk surfaces the read error, caught below as MALFORMED.
                 for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_walk_raise):
