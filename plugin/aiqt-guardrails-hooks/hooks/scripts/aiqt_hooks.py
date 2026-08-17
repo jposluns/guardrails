@@ -31,6 +31,12 @@ it does NOT hard-block. The wall has already rendered by Stop time, so blocking 
 because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop
 block could re-fire on the forced continuation and wedge the session. The hard PREVENTION for console
 diffs lives in the PreToolUse diff_source layer at the command source; the Stop layer only surfaces.
+
+This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
+class from HANDLER_EVENT (the argv mode, never the payload, which may be unreadable) and, for a
+Stop/SubagentStop handler, converts EVERY error path (unreadable/malformed stdin, JSON parse failure,
+non-dict payload, or a handler crash) into a non-blocking systemMessage warning on exit 0. No Stop
+invocation can reach exit 2 for any input; only a PreToolUse handler fails closed via exit 2.
 """
 import json
 import re
@@ -88,39 +94,67 @@ def _deny_missing_tool_name(rule):
 # caught, and a quoted/echoed occurrence whose command word is not git is skipped by the command-word
 # test. Best-effort: it does not defeat deliberate escaping or obfuscation (recorded in the manifest
 # residue).
-_SEGMENT_SEP_RE = re.compile(r"\|\||&&|[;|\n]")
+# Split on ; && || | and newlines, AND on the subshell/grouping parentheses ( and ). Splitting on the
+# parens turns '( git diff )' into a segment whose command word is git, so a subshell or brace-free
+# grouping can no longer hide the offending command word from the per-segment tests. Parens inside a
+# character class are literal.
+_SEGMENT_SEP_RE = re.compile(r"\|\||&&|[;|()\n]")
+# A leading run of grouping '(' plus surrounding whitespace, stripped before the command word is taken,
+# so a segment that still carries a leading '(' (belt-and-braces with the split above) resolves to its
+# real command word.
+_LEAD_GROUP_RE = re.compile(r"^[\s(]+")
 
 
 def _split_segments(command):
-    """Segments of a command string, split on ; && || | and newlines. Quoting is NOT honoured: a
-    separator inside a quoted string still splits. That can only OVER-split (extra harmless segments);
-    it never merges a bare offending segment into an allowed one, so the per-segment DENY stays sound."""
+    """Segments of a command string, split on ; && || | newlines and the grouping parens ( ). Quoting
+    is NOT honoured: a separator inside a quoted string still splits. That can only OVER-split (extra
+    harmless segments); it never merges a bare offending segment into an allowed one, so the per-segment
+    DENY stays sound. Splitting on ( and ) means '( git diff )' and '(git commit ...)' each yield a
+    segment whose command word is the real command, closing the subshell/grouping bypass."""
     return _SEGMENT_SEP_RE.split(command)
 
 
 def _command_word(segment):
     """The command word (first whitespace-delimited token) of a segment, basename only so an absolute
-    path to the tool still resolves (/usr/bin/git -> git). '' for an empty segment. An env-assignment
-    prefix (FOO=bar) is left as the token, so such a segment's command word is not 'git' and its
-    commit/diff subcommand checks do not fire; the any-segment identity-assignment check still covers
-    an inline GIT_AUTHOR_NAME=... git commit form."""
-    tokens = segment.split()
+    path to the tool still resolves (/usr/bin/git -> git). '' for an empty segment. A leading grouping
+    '(' and surrounding whitespace are stripped first, so '( git diff' resolves to 'git'. An
+    env-assignment prefix (FOO=bar) is left as the token, so such a segment's command word is not 'git'
+    and its commit/diff subcommand checks do not fire; the any-segment identity-assignment check still
+    covers an inline GIT_AUTHOR_NAME=... git commit form."""
+    tokens = _LEAD_GROUP_RE.sub("", segment).split()
     if not tokens:
         return ""
     return tokens[0].rsplit("/", 1)[-1]
 
 
+# git global options that CONSUME a following space-separated argument, so the option's value is never
+# mistaken for the subcommand: '-C DIR', '-c NAME=VALUE', and the long forms below. Their '--opt=value'
+# inline shape carries the value in the same token (an '=' is present), which consumes no separate arg;
+# that case is handled by the '=' test, so only the space-separated forms need to skip two tokens.
+_GIT_ARG_OPTS = frozenset((
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
+    "--config-env"))
+
+
 def _git_subcommand(segment):
     """The git subcommand of a segment whose command word is git: the first non-option token after the
-    command word, skipping git global options (-C DIR and -c NAME=VALUE each take an argument). None
-    when there is no subcommand token. Token-based (not a regex over the whole segment) so a git name
-    quoted inside an argument, e.g. --format='git commit', cannot be mistaken for the subcommand."""
-    tokens = segment.split()
+    command word, skipping git global options. An arg-consuming global option in its space-separated
+    form (-C DIR, --git-dir DIR, ...) skips two tokens so its value is not read as the subcommand; the
+    '--opt=value' form and any other leading '-' token skip one. None when there is no subcommand token.
+    A leading grouping '(' is stripped first so '(git commit' still resolves to the git subcommand.
+    Token-based (not a regex over the whole segment) so a git name quoted inside an argument, e.g.
+    --format='git commit', cannot be mistaken for the subcommand."""
+    tokens = _LEAD_GROUP_RE.sub("", segment).split()
     i = 1
     while i < len(tokens):
         token = tokens[i]
         if token.startswith("-"):
-            i += 2 if token in ("-C", "-c") else 1
+            # An '=' inline form carries its value in the same token: skip one. Otherwise a
+            # space-separated arg-consuming global option skips two; any other option skips one.
+            if "=" not in token and token in _GIT_ARG_OPTS:
+                i += 2
+            else:
+                i += 1
             continue
         return token
     return None
@@ -136,6 +170,18 @@ FENCE_MIN = 10      # a diff/patch fence with this many content lines is a dump,
 RUN_MIN = 8         # consecutive lines starting with + or - ...
 SIGN_MIN = 3        # ... containing at least this many of EACH sign (a bullet list is all "-")
 _FENCE_LANGS = ("diff", "patch", "udiff")
+# A leading Markdown blockquote marker: optional indentation, then one or more '>' each optionally
+# followed by a single space (a nested '> > ' quote is stripped whole).
+_BLOCKQUOTE_RE = re.compile(r"^\s*(?:>\s?)+")
+
+
+def _strip_quote_indent(line):
+    """Strip a leading Markdown blockquote marker ('> ', possibly repeated) and leading indentation from
+    a line, so a quoted or indented diff wall is still seen by the WARN-layer detectors. The blockquote
+    marker is removed first, then any remaining leading whitespace, so '> ~~~diff' becomes '~~~diff' and
+    a four-space-indented '    +added' becomes '+added'. WARN layer only (non-blocking); permissive
+    normalization here can only surface more walls, never block."""
+    return _BLOCKQUOTE_RE.sub("", line).lstrip()
 
 
 def _diff_fence_lines(lines):
@@ -189,13 +235,17 @@ def _plus_minus_run(lines):
 
 
 def detect_diff_wall(text):
-    """Return a human-readable description of the diff-wall shape found, or None."""
-    if GIT_HEADER_RE.search(text):
+    """Return a human-readable description of the diff-wall shape found, or None. Each line is first
+    normalized (leading blockquote marker and indentation stripped), so a diff wall quoted with '> ' or
+    indented four spaces is detected exactly as a bare one; the header/hunk regexes are '^'-anchored and
+    would otherwise miss a quoted or indented line."""
+    lines = [_strip_quote_indent(line) for line in text.splitlines()]
+    normalized = "\n".join(lines)
+    if GIT_HEADER_RE.search(normalized):
         return "a 'diff --git' patch header"
-    hunks = len(HUNK_RE.findall(text))
+    hunks = len(HUNK_RE.findall(normalized))
     if hunks >= HUNK_MIN:
         return "{} unified-diff @@ hunk headers".format(hunks)
-    lines = text.splitlines()
     fenced = _diff_fence_lines(lines)
     if fenced >= FENCE_MIN:
         return "a fenced diff block of {} lines".format(fenced)
@@ -241,6 +291,7 @@ def diff_wall_stop(data):
 # informational form (--help / -h) is not a diff dump. A diff piped to a pager still dumps, so a pipe
 # is NOT an escape.
 LOG_PATCH_RE = re.compile(r"(?:^|\s)(?:-p|-u|--patch)\b")
+STDOUT_RE = re.compile(r"(?:^|\s)--stdout\b")
 SUMMARY_RE = re.compile(r"(?:^|\s)--(?:stat|name-only|name-status|numstat|shortstat)\b")
 # An output redirection to a file: an optional fd (1 or 2), then '>' or '>>' that is not part of a
 # '2>&1'/'>&2' fd-dup (not followed by '&' or '|'), then the start of a filename token. '> /dev/null'
@@ -252,15 +303,23 @@ ALLOW_DIFF_MARKER = "# allow-diff"
 
 
 def _is_diff_producer(segment):
-    """True when a git segment runs a subcommand that renders a diff: diff, show, or log with a patch
-    flag. The caller has already confirmed the segment's command word is git. Judging the SUBCOMMAND
-    (not a bare 'diff' token) avoids a false positive on a commit message that mentions the word diff."""
+    """True when a git segment runs a subcommand that renders a diff to the console. The caller has
+    already confirmed the segment's command word is git. Judging the SUBCOMMAND (not a bare 'diff'
+    token) avoids a false positive on a commit message that mentions the word diff.
+
+    Always a diff dump: diff, show (they render a patch by default). Patch-flag gated: log, and the
+    plumbing producers diff-tree, diff-index, diff-files (they emit a raw listing by default and a patch
+    only with -p/-u/--patch). stdout gated: format-patch (writes numbered files by default and dumps to
+    the console only with --stdout). Gating the plumbing/format-patch forms on their flag keeps the
+    file-writing and name-only forms from a false positive, so only a genuine console dump denies."""
     sub = _git_subcommand(segment)
-    if sub not in ("diff", "show", "log"):
-        return False
-    if sub == "log":
+    if sub in ("diff", "show"):
+        return True
+    if sub in ("log", "diff-tree", "diff-index", "diff-files"):
         return bool(LOG_PATCH_RE.search(segment))
-    return True
+    if sub == "format-patch":
+        return bool(STDOUT_RE.search(segment))
+    return False
 
 
 def diff_source_pretool(data):
@@ -451,25 +510,64 @@ HANDLERS = {
     "absolute_paths": absolute_paths,
 }
 
+# Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
+# without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
+# design: a Stop/SubagentStop handler must NEVER exit 2, because a hard Stop block could re-fire on the
+# forced continuation and wedge the session (no stop_hook_active field, no documented loop bound), so on
+# ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it emits a
+# non-blocking systemMessage warning and exits 0. Only a PreToolUse handler fails closed via exit 2.
+HANDLER_EVENT = {
+    "diff_wall_stop": "Stop",
+    "diff_source_pretool": PRETOOL,
+    "commit_identity": PRETOOL,
+    "absolute_paths": PRETOOL,
+}
+
+
+def _dispatcher_stop_warn(detail):
+    """A Stop/SubagentStop dispatcher-level error, surfaced as a non-blocking WARN: {"systemMessage": ...}
+    on stdout, so main can print it and exit 0. Mirrors the handler's own _stop_warn posture so the Stop
+    layer is warn-only end to end, at the dispatcher as well as inside the handler."""
+    return {"systemMessage": (
+        "AIQT guardrail (rule cnsdif): the Stop diff-wall check could not run ({}); surfacing a warning "
+        "rather than blocking (non-blocking, so the session is never wedged).".format(detail))}
+
 
 def main(argv):
     if len(argv) != 1 or argv[0] not in HANDLERS:
         print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
               file=sys.stderr)
         return 2
+    handler_name = argv[0]
+    # The event class comes from the argv mode, not the payload (which may be unreadable). A Stop handler
+    # warns-and-exits-0 on every error path below; a PreToolUse handler fails closed (exit 2).
+    is_stop = HANDLER_EVENT[handler_name] in STOP_EVENTS
     try:
         data = json.loads(sys.stdin.read())
         if not isinstance(data, dict):
             raise ValueError("payload is not a JSON object")
     except (ValueError, UnicodeDecodeError, OSError) as exc:
-        # Fail CLOSED: a hook that cannot read its payload cannot clear the action, so it blocks. exit 2
-        # is the platform's blocking path; the diagnostic reaches Claude on stderr.
+        # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload.
+        if is_stop:
+            # A Stop handler NEVER exits 2: surface a non-blocking warning and exit 0, so no Stop
+            # payload (including a bare '{' or any garbage) can ever wedge the session.
+            print(json.dumps(_dispatcher_stop_warn("unreadable payload: {}".format(exc))))
+            return 0
+        # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+        # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
         print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(exc), file=sys.stderr)
         return 2
     try:
-        code, stdout_obj, stderr_text = HANDLERS[argv[0]](data)
-    except Exception as exc:  # a handler crash is an unreadable result: fail closed (block), not pass
-        print("aiqt_hooks: handler {} failed ({}); failing closed".format(argv[0], exc), file=sys.stderr)
+        code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
+    except Exception as exc:  # a handler crash is an unreadable result
+        if is_stop:
+            # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
+            # pathological message): WARN and exit 0, never exit 2.
+            print(json.dumps(_dispatcher_stop_warn("handler crash: {}".format(exc))))
+            return 0
+        # A PreToolUse handler crash fails closed (block), not pass.
+        print("aiqt_hooks: handler {} failed ({}); failing closed".format(handler_name, exc),
+              file=sys.stderr)
         return 2
     if stdout_obj is not None:
         print(json.dumps(stdout_obj))
