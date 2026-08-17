@@ -1,0 +1,636 @@
+# CSA Cloud Controls Matrix: id manifest for the AIQT standards crosswalk.
+# Source: Cloud Security Alliance, CSA Cloud Controls Matrix v4.1.0 (catalogue CSV, retrieved 2026-07-07).
+# Only the control IDs and short control TITLES (factual control labels) are vendored here, not
+# the control-specification prose. CSA attribution and terms are carried in the public NOTICE.
+map-key = "map-csa-ccm"
+name = "CSA Cloud Controls Matrix"
+publisher = "Cloud Security Alliance"
+edition = "4.1.0"
+kind = "control"
+status = "stable"
+citation-unit = "control"
+id-pattern = "^[A-Z&]+-[0-9]{2}$"
+source-artefact = "CSA Cloud Controls Matrix v4.1.0"
+retrieved = "2026-07-07"
+
+[[id]]
+code = "A&A-01"
+title = "Audit and Assurance Policy and Procedures"
+[[id]]
+code = "A&A-02"
+title = "Independent Assessments"
+[[id]]
+code = "A&A-03"
+title = "Risk Based Planning Assessment"
+[[id]]
+code = "A&A-04"
+title = "Requirements Compliance"
+[[id]]
+code = "A&A-05"
+title = "Audit Management Process"
+[[id]]
+code = "A&A-06"
+title = "Remediation"
+[[id]]
+code = "AIS-01"
+title = "Application and Interface Security Policy and Procedures"
+[[id]]
+code = "AIS-02"
+title = "Application Security Baseline Requirements"
+[[id]]
+code = "AIS-03"
+title = "Application Security Metrics"
+[[id]]
+code = "AIS-04"
+title = "Secure Application Development Lifecycle"
+[[id]]
+code = "AIS-05"
+title = "Application Security Testing"
+[[id]]
+code = "AIS-06"
+title = "Secure Application Deployment"
+[[id]]
+code = "AIS-07"
+title = "Application Vulnerability Remediation"
+[[id]]
+code = "AIS-08"
+title = "API Security"
+[[id]]
+code = "BCR-01"
+title = "Business Continuity Management Policy and Procedures"
+[[id]]
+code = "BCR-02"
+title = "Risk Assessment and Impact Analysis"
+[[id]]
+code = "BCR-03"
+title = "Business Continuity Strategy"
+[[id]]
+code = "BCR-04"
+title = "Business Continuity Planning"
+[[id]]
+code = "BCR-05"
+title = "Documentation"
+[[id]]
+code = "BCR-06"
+title = "Business Continuity Exercises"
+[[id]]
+code = "BCR-07"
+title = "Communication"
+[[id]]
+code = "BCR-08"
+title = "Backup"
+[[id]]
+code = "BCR-09"
+title = "Disaster Response Plan"
+[[id]]
+code = "BCR-10"
+title = "Response Plan Exercise"
+[[id]]
+code = "BCR-11"
+title = "Equipment Redundancy"
+[[id]]
+code = "CCC-01"
+title = "Change Management Policy and Procedures"
+[[id]]
+code = "CCC-02"
+title = "Quality Testing"
+[[id]]
+code = "CCC-03"
+title = "Change Management Technology"
+[[id]]
+code = "CCC-04"
+title = "Unauthorized Change Protection"
+[[id]]
+code = "CCC-05"
+title = "Change Agreements"
+[[id]]
+code = "CCC-06"
+title = "Change Management Baseline"
+[[id]]
+code = "CCC-07"
+title = "Detection of Baseline Deviation"
+[[id]]
+code = "CCC-08"
+title = "Exception Management"
+[[id]]
+code = "CCC-09"
+title = "Change Restoration"
+[[id]]
+code = "CEK-01"
+title = "Encryption and Key Management Policy and Procedures"
+[[id]]
+code = "CEK-02"
+title = "CEK Roles and Responsibilities"
+[[id]]
+code = "CEK-03"
+title = "Data Protection"
+[[id]]
+code = "CEK-04"
+title = "Encryption Algorithm"
+[[id]]
+code = "CEK-05"
+title = "Encryption Change Management"
+[[id]]
+code = "CEK-06"
+title = "Encryption Change Cost Benefit Analysis"
+[[id]]
+code = "CEK-07"
+title = "Encryption Risk Management"
+[[id]]
+code = "CEK-08"
+title = "Service Customer Key Management Capability"
+[[id]]
+code = "CEK-09"
+title = "Encryption and Key Management Audit"
+[[id]]
+code = "CEK-10"
+title = "Key Generation"
+[[id]]
+code = "CEK-11"
+title = "Key Purpose"
+[[id]]
+code = "CEK-12"
+title = "Key Rotation"
+[[id]]
+code = "CEK-13"
+title = "Key Revocation"
+[[id]]
+code = "CEK-14"
+title = "Key Destruction"
+[[id]]
+code = "CEK-15"
+title = "Key Activation"
+[[id]]
+code = "CEK-16"
+title = "Key Suspension"
+[[id]]
+code = "CEK-17"
+title = "Key Deactivation"
+[[id]]
+code = "CEK-18"
+title = "Key Archival"
+[[id]]
+code = "CEK-19"
+title = "Key Compromise"
+[[id]]
+code = "CEK-20"
+title = "Key Recovery"
+[[id]]
+code = "CEK-21"
+title = "Key Inventory Management"
+[[id]]
+code = "DCS-01"
+title = "Physical and Environmental Security Policy and Procedures"
+[[id]]
+code = "DCS-02"
+title = "Off-Site Equipment Disposal Policy and Procedures"
+[[id]]
+code = "DCS-03"
+title = "Off-Site Transfer Authorization Policy and Procedures"
+[[id]]
+code = "DCS-04"
+title = "Secure Area Policy and Procedures"
+[[id]]
+code = "DCS-05"
+title = "Secure Media Transportation Policy and Procedures"
+[[id]]
+code = "DCS-06"
+title = "Assets Classification"
+[[id]]
+code = "DCS-07"
+title = "Assets Cataloguing and Tracking"
+[[id]]
+code = "DCS-08"
+title = "Controlled Physical Access Points"
+[[id]]
+code = "DCS-09"
+title = "Equipment Identification"
+[[id]]
+code = "DCS-10"
+title = "Secure Area Authorization"
+[[id]]
+code = "DCS-11"
+title = "Surveillance System"
+[[id]]
+code = "DCS-12"
+title = "Adverse Event Response Training"
+[[id]]
+code = "DCS-13"
+title = "Cabling Security"
+[[id]]
+code = "DCS-14"
+title = "Environmental Systems"
+[[id]]
+code = "DCS-15"
+title = "Secure Utilities"
+[[id]]
+code = "DCS-16"
+title = "Equipment Location"
+[[id]]
+code = "DCS-17"
+title = "Datacenter Metrics"
+[[id]]
+code = "DCS-18"
+title = "Datacenter Operations Resilience"
+[[id]]
+code = "DSP-01"
+title = "Security and Privacy Policy and Procedures"
+[[id]]
+code = "DSP-02"
+title = "Secure Disposal"
+[[id]]
+code = "DSP-03"
+title = "Data Inventory"
+[[id]]
+code = "DSP-04"
+title = "Data Classification"
+[[id]]
+code = "DSP-05"
+title = "Data Flow Documentation"
+[[id]]
+code = "DSP-06"
+title = "Data Ownership and Stewardship"
+[[id]]
+code = "DSP-07"
+title = "Data Protection by Design and Default"
+[[id]]
+code = "DSP-08"
+title = "Data Privacy by Design and Default"
+[[id]]
+code = "DSP-09"
+title = "Data Protection Impact Assessment"
+[[id]]
+code = "DSP-10"
+title = "Sensitive Data Transfer"
+[[id]]
+code = "DSP-11"
+title = "Personal Data Access, Reversal, Rectification and Deletion"
+[[id]]
+code = "DSP-12"
+title = "Limitation of Purpose in Personal Data Processing"
+[[id]]
+code = "DSP-13"
+title = "Personal Data Sub-processing"
+[[id]]
+code = "DSP-14"
+title = "Disclosure of Data Sub-processors"
+[[id]]
+code = "DSP-15"
+title = "Limitation of Production Data Use"
+[[id]]
+code = "DSP-16"
+title = "Data Retention and Deletion"
+[[id]]
+code = "DSP-17"
+title = "Sensitive Data Protection"
+[[id]]
+code = "DSP-18"
+title = "Disclosure Notification"
+[[id]]
+code = "DSP-19"
+title = "Data Location"
+[[id]]
+code = "GRC-01"
+title = "Governance Program Policy and Procedures"
+[[id]]
+code = "GRC-02"
+title = "Risk Management Program"
+[[id]]
+code = "GRC-03"
+title = "Organizational Policy Reviews"
+[[id]]
+code = "GRC-04"
+title = "Policy Exception Process"
+[[id]]
+code = "GRC-05"
+title = "Information Security Program"
+[[id]]
+code = "GRC-06"
+title = "Governance Responsibility Model"
+[[id]]
+code = "GRC-07"
+title = "Information System Regulatory Mapping"
+[[id]]
+code = "GRC-08"
+title = "Special Interest Groups"
+[[id]]
+code = "HRS-01"
+title = "Background Screening Policy and Procedures"
+[[id]]
+code = "HRS-02"
+title = "Acceptable Use of Technology Policy and Procedures"
+[[id]]
+code = "HRS-03"
+title = "Clean Desk Policy and Procedures"
+[[id]]
+code = "HRS-04"
+title = "Remote and Home Working Policy and Procedures"
+[[id]]
+code = "HRS-05"
+title = "Asset returns"
+[[id]]
+code = "HRS-06"
+title = "Employment Termination"
+[[id]]
+code = "HRS-07"
+title = "Employment Agreement Process"
+[[id]]
+code = "HRS-08"
+title = "Employment Agreement Content"
+[[id]]
+code = "HRS-09"
+title = "Personnel Roles and Responsibilities"
+[[id]]
+code = "HRS-10"
+title = "Non-Disclosure Agreements"
+[[id]]
+code = "HRS-11"
+title = "Security Awareness Training"
+[[id]]
+code = "HRS-12"
+title = "Personal and Sensitive Data Awareness and Training"
+[[id]]
+code = "HRS-13"
+title = "Compliance User Responsibility"
+[[id]]
+code = "I&S-01"
+title = "Infrastructure and Virtualization Security Policy and Procedures"
+[[id]]
+code = "I&S-02"
+title = "Capacity and Resource Planning"
+[[id]]
+code = "I&S-03"
+title = "Network Security"
+[[id]]
+code = "I&S-04"
+title = "OS Hardening and Base Controls"
+[[id]]
+code = "I&S-05"
+title = "Production and Non-Production Environments"
+[[id]]
+code = "I&S-06"
+title = "Segmentation and Segregation"
+[[id]]
+code = "I&S-07"
+title = "Migration to Cloud Environments"
+[[id]]
+code = "I&S-08"
+title = "Network Architecture Documentation"
+[[id]]
+code = "I&S-09"
+title = "Network Defense"
+[[id]]
+code = "IAM-01"
+title = "Identity and Access Management Policy and Procedures"
+[[id]]
+code = "IAM-02"
+title = "Credentials Management Policy and Procedures"
+[[id]]
+code = "IAM-03"
+title = "Identity Inventory"
+[[id]]
+code = "IAM-04"
+title = "Separation of Duties"
+[[id]]
+code = "IAM-05"
+title = "Least Privilege"
+[[id]]
+code = "IAM-06"
+title = "Access Provisioning"
+[[id]]
+code = "IAM-07"
+title = "Access Changes and Revocation"
+[[id]]
+code = "IAM-08"
+title = "Access Review"
+[[id]]
+code = "IAM-09"
+title = "Segregation of Privileged Access Roles"
+[[id]]
+code = "IAM-10"
+title = "Management of Privileged Access Roles"
+[[id]]
+code = "IAM-11"
+title = "Service Customers Approval for Agreed Privileged Access Roles"
+[[id]]
+code = "IAM-12"
+title = "Unique Identities"
+[[id]]
+code = "IAM-13"
+title = "Strong Authentication"
+[[id]]
+code = "IAM-14"
+title = "Credentials Management"
+[[id]]
+code = "IAM-15"
+title = "Authorization Mechanisms"
+[[id]]
+code = "IPY-01"
+title = "Interoperability and Portability Policy and Procedures"
+[[id]]
+code = "IPY-02"
+title = "Application Interface Availability"
+[[id]]
+code = "IPY-03"
+title = "Secure Interoperability and Portability Management"
+[[id]]
+code = "IPY-04"
+title = "Data Portability Contractual Obligations"
+[[id]]
+code = "LOG-01"
+title = "Logging and Monitoring Policy and Procedures"
+[[id]]
+code = "LOG-02"
+title = "Audit Logs Protection"
+[[id]]
+code = "LOG-03"
+title = "Security Monitoring and Alerting"
+[[id]]
+code = "LOG-04"
+title = "Audit Logs Access and Accountability"
+[[id]]
+code = "LOG-05"
+title = "Audit Logs Monitoring and Response"
+[[id]]
+code = "LOG-06"
+title = "Clock Synchronization"
+[[id]]
+code = "LOG-07"
+title = "Logging Scope"
+[[id]]
+code = "LOG-08"
+title = "Audit Logs Sanitization"
+[[id]]
+code = "LOG-09"
+title = "Log Records"
+[[id]]
+code = "LOG-10"
+title = "Audit Records Protection"
+[[id]]
+code = "LOG-11"
+title = "Encryption Monitoring and Reporting"
+[[id]]
+code = "LOG-12"
+title = "Transaction/Activity Logging"
+[[id]]
+code = "LOG-13"
+title = "Access Control Logs"
+[[id]]
+code = "LOG-14"
+title = "Failures and Anomalies Reporting"
+[[id]]
+code = "SEF-01"
+title = "Security Incident Management Policy and Procedures"
+[[id]]
+code = "SEF-02"
+title = "Service Management Policy and Procedures"
+[[id]]
+code = "SEF-03"
+title = "Incident Response Plans"
+[[id]]
+code = "SEF-04"
+title = "Incident Response Testing"
+[[id]]
+code = "SEF-05"
+title = "Incident Response Metrics"
+[[id]]
+code = "SEF-06"
+title = "Event Triage Processes"
+[[id]]
+code = "SEF-07"
+title = "Incident Management and Response"
+[[id]]
+code = "SEF-08"
+title = "Security Breach Notification"
+[[id]]
+code = "SEF-09"
+title = "Incident Records Management"
+[[id]]
+code = "SEF-10"
+title = "Points of Contact Maintenance"
+[[id]]
+code = "STA-01"
+title = "Supply Chain Risk Management Policies and Procedures"
+[[id]]
+code = "STA-02"
+title = "SSRM Policy and Procedures"
+[[id]]
+code = "STA-03"
+title = "SSRM Supply Chain"
+[[id]]
+code = "STA-04"
+title = "SSRM Guidance"
+[[id]]
+code = "STA-05"
+title = "SSRM Control Ownership"
+[[id]]
+code = "STA-06"
+title = "SSRM Documentation Review"
+[[id]]
+code = "STA-07"
+title = "SSRM Control Implementation"
+[[id]]
+code = "STA-08"
+title = "Supply Chain Inventory"
+[[id]]
+code = "STA-09"
+title = "Service Bill of Material (BOM)"
+[[id]]
+code = "STA-10"
+title = "Supply Chain Risk Management"
+[[id]]
+code = "STA-11"
+title = "Primary Service and Contractual Agreement"
+[[id]]
+code = "STA-12"
+title = "Supply Chain Agreement Review"
+[[id]]
+code = "STA-13"
+title = "Supply Chain Compliance Assessment"
+[[id]]
+code = "STA-14"
+title = "Supply Chain Service Agreement Compliance"
+[[id]]
+code = "STA-15"
+title = "Supply Chain Governance Review"
+[[id]]
+code = "STA-16"
+title = "Supply Chain Data Security Assessment"
+[[id]]
+code = "TVM-01"
+title = "Threat and Vulnerability Management Policy and Procedures"
+[[id]]
+code = "TVM-02"
+title = "Malware and Malicious Instructions Protection Policy and Procedures"
+[[id]]
+code = "TVM-03"
+title = "Vulnerability Identification"
+[[id]]
+code = "TVM-04"
+title = "Threat Analysis and Modelling"
+[[id]]
+code = "TVM-05"
+title = "Detection Updates"
+[[id]]
+code = "TVM-06"
+title = "External Library Vulnerabilities"
+[[id]]
+code = "TVM-07"
+title = "Penetration Testing"
+[[id]]
+code = "TVM-08"
+title = "Vulnerability Remediation Schedule"
+[[id]]
+code = "TVM-09"
+title = "Vulnerability Prioritization"
+[[id]]
+code = "TVM-10"
+title = "Threat Response"
+[[id]]
+code = "TVM-11"
+title = "Vulnerability Management Reporting"
+[[id]]
+code = "TVM-12"
+title = "Vulnerability Management Metrics"
+[[id]]
+code = "UEM-01"
+title = "Endpoint Devices Policy and Procedures"
+[[id]]
+code = "UEM-02"
+title = "Application and Service Approval"
+[[id]]
+code = "UEM-03"
+title = "Compatibility"
+[[id]]
+code = "UEM-04"
+title = "Endpoint Inventory"
+[[id]]
+code = "UEM-05"
+title = "Endpoint Management"
+[[id]]
+code = "UEM-06"
+title = "Automatic Lock Screen"
+[[id]]
+code = "UEM-07"
+title = "Operating Systems"
+[[id]]
+code = "UEM-08"
+title = "Storage Encryption"
+[[id]]
+code = "UEM-09"
+title = "Anti-Malware Detection and Prevention"
+[[id]]
+code = "UEM-10"
+title = "Software Firewall"
+[[id]]
+code = "UEM-11"
+title = "Data Loss Prevention"
+[[id]]
+code = "UEM-12"
+title = "Remote Locate"
+[[id]]
+code = "UEM-13"
+title = "Remote Wipe"
+[[id]]
+code = "UEM-14"
+title = "Third-Party Endpoint Security Posture"
