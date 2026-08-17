@@ -19,7 +19,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
+from _standards import map_keys  # noqa: E402
 
 METADATA = {"PROVENANCE.md", "README.md"}
 BUILTIN_FAMILIES = {"aiqt", "security", "external"}
@@ -96,6 +98,16 @@ def main():
             print("usage: check_rule_placement.py [--root DIR]", file=sys.stderr)
             return 2
     root = (root or repo_root_default()).resolve()
+    # gen_rules binds MAP_KEYS/SEQ_KEYS at import from ITS OWN repo_root(); derive() (called by
+    # check_drift) validates a rule's map-* keys against them. Under --root against an adopter tree with
+    # its own .aiqt/standards/, rebind from that root so their map-keys are judged against their
+    # manifests, not this checker's. With no --root, root == repo_root() so this is a no-op.
+    try:
+        gen_rules.MAP_KEYS = map_keys(root)
+        gen_rules.SEQ_KEYS = {"secondary"} | gen_rules.MAP_KEYS
+    except OSError as exc:
+        print("cannot read {}: {}".format(root / ".aiqt" / "standards", exc), file=sys.stderr)
+        return 2
     rules = root / ".claude" / "rules"
     if not rules.is_dir():
         print("PASS: no .claude/rules/ tree")

@@ -32,6 +32,7 @@ Where an input an adopter lacks is absent, the check degrades to NOT APPLICABLE 
 nothing fakes a pass, and a check that validated nothing reports NOT APPLICABLE rather than a hollow
 PASS. Behaviour is never scored: it prints NOT PROVEN.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -168,9 +169,15 @@ def check_c2(root, cache):
     under --root rather than calling the repo-anchored gen_*.main(). No corpus -> NOT APPLICABLE."""
     if cache.get("corpus_error"):
         return Result("C2", "no-drift", SKIPPED, "corpus did not load (see C1)")
-    if not cache.get("corpus"):
+    # Gate on the core dir EXISTING, not on a non-empty corpus. An absent .aiqt/core/rules/ is a thin
+    # read-only install with no sources to regenerate from (NOT APPLICABLE, honestly coverage-qualified).
+    # But a PRESENT-yet-empty core with generated surfaces still on disk is a broken/partial install:
+    # reconcile against the empty corpus so orphaned .claude/rules files and a stale AGENTS.md are caught
+    # (an empty desired set makes every generated file an orphan), exactly as gen_rules.main() does. A
+    # bare `not corpus` guard would mask that empty-core case as NOT APPLICABLE.
+    if not _corpus_src(root).is_dir():
         return Result("C2", "no-drift", NA, "no .aiqt/core/rules/ to regenerate from")
-    corpus = cache["corpus"]
+    corpus = cache.get("corpus", [])
     cs, cd = _claude_drift(root, corpus)
     as_, ad = _agents_drift(root, corpus)
     # Aggregate the two surfaces: worst status wins, but NA of one surface does not mask a PASS/FAIL of
@@ -193,8 +200,9 @@ def check_c3(root):
     every adopter has. An absent tree trivially conforms."""
     rules = root / ".claude" / "rules"
     if not rules.is_dir():
-        return Result("C3", "placement", PASS, "no .claude/rules/ tree")
+        return Result("C3", "placement", NA, "no .claude/rules/ tree installed to validate")
     findings = []
+    evaluated = 0  # rule files / vendored sources actually checked; 0 means nothing was validated
 
     def report(path, code, detail):
         findings.append("{}: {}: {}".format(path.relative_to(root), code, detail))
@@ -213,6 +221,7 @@ def check_c3(root):
                 continue
             if family == "external":
                 for sub in sorted(p for p in item.iterdir() if p.is_dir()):
+                    evaluated += 1
                     if not (sub / "PROVENANCE.md").exists() or not (sub / "LICENSE").exists():
                         report(sub, "missing-provenance", "a vendored source lacks PROVENANCE.md or LICENSE")
                 continue
@@ -224,6 +233,7 @@ def check_c3(root):
                     continue
                 if entry.suffix != ".md":
                     continue
+                evaluated += 1
                 nc = crp.check_name(family, entry.name)
                 if nc:
                     report(entry, nc[0], nc[1])
@@ -236,7 +246,12 @@ def check_c3(root):
     if findings:
         return Result("C3", "placement", FAIL,
                       "{} violation(s): {}".format(len(findings), "; ".join(sorted(set(findings)))))
-    return Result("C3", "placement", PASS, "rule placement conforms to the taxonomy")
+    # A tree that exists but holds no rule files validated nothing: report NOT APPLICABLE, never a
+    # hollow PASS that the coverage line would count as "verified C3".
+    if evaluated == 0:
+        return Result("C3", "placement", NA, "no rule files under .claude/rules/ to validate")
+    return Result("C3", "placement", PASS,
+                  "rule placement conforms to the taxonomy ({} file(s) checked)".format(evaluated))
 
 
 # --- C4: mappings (best-effort) ---------------------------------------------------------------------
@@ -251,14 +266,17 @@ def check_c4(root, cache):
         return Result("C4", "mappings", SKIPPED, "corpus did not load (see C1)")
     src = _corpus_src(root)
     std = _standards_dir(root)
-    if not src.is_dir():
-        return Result("C4", "mappings", NA, "no .aiqt/core/rules/ installed")
     if not std.is_dir():
         return Result("C4", "mappings", NA, "no .aiqt/standards/ installed")
+    # Parse the standards FIRST, fail-closed, BEFORE the absent-corpus short-circuit: a malformed or
+    # unreadable manifest must surface as MALFORMED (exit 2), never hide behind an absent corpus and
+    # read as clean. Catch OSError too (an unreadable manifest file is a read error, not a clean skip).
     try:
         manifests = load_manifests(std)
-    except ManifestError as exc:
+    except (ManifestError, OSError) as exc:
         return Result("C4", "mappings", MALFORMED, str(exc))
+    if not src.is_dir():
+        return Result("C4", "mappings", NA, "no .aiqt/core/rules/ installed to cite mappings")
     corpus = cache.get("corpus")
     if corpus is None:
         try:
@@ -320,7 +338,18 @@ def run(root):
         print("conformance: --root path is not a directory: {}".format(root), file=sys.stderr)
         return 2
     root = root.resolve()
-    _rebind_map_keys(root)
+    # Fail-closed if the standards dir exists but cannot be listed. Path.glob (used by map_keys and
+    # load_manifests) SILENTLY yields nothing on an unreadable directory rather than raising, which would
+    # make an unreadable .aiqt/standards/ read as "empty standards" and pass clean. Force an os.scandir,
+    # which does raise, so an unlistable standards dir becomes a structured MALFORMED exit 2.
+    std_dir = _standards_dir(root)
+    try:
+        if std_dir.is_dir():
+            list(os.scandir(std_dir))
+        _rebind_map_keys(root)
+    except OSError as exc:
+        print("conformance: cannot read {}: {}".format(std_dir, exc), file=sys.stderr)
+        return 2
     cache = {}
     results = [
         check_c1(root, cache),
@@ -538,6 +567,10 @@ def self_test_main():
 
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-conformance-selftest-"))
     failures = []
+    # The fixtures rebind gen_rules.MAP_KEYS/SEQ_KEYS; restore them afterwards so a self-test invoked
+    # in-process (an import, a notebook, a long-lived runner) never leaves the module globals mutated.
+    saved_map_keys = gen_rules.MAP_KEYS
+    saved_seq_keys = gen_rules.SEQ_KEYS
     try:
         # 1. Conformant tree -> exit 0, all four checks verified.
         good = tmp / "good"
@@ -593,11 +626,61 @@ def self_test_main():
         if status_of(out, "C1") != PASS:
             failures.append("bad-mapping tree expected C1 PASS (rebind must admit the adopter map key):\n{}".format(out))
 
+        # 6. Present-but-empty core with generated surfaces still on disk -> C2 must catch the orphans
+        #    and FAIL (exit 1), not mask them as NOT APPLICABLE. (Regression guard for the empty-core hole.)
+        emptycore = tmp / "emptycore"
+        emptycore.mkdir()
+        _build_conformant(emptycore)
+        for md in (emptycore / ".aiqt" / "core" / "rules").rglob("*.md"):
+            md.unlink()  # empty the core but keep the dir; leave .claude/rules + AGENTS.md in place
+        code, out = run_capture(emptycore)
+        if code != 1:
+            failures.append("empty-core tree expected exit 1 (orphans), got {}\n{}".format(code, out))
+        if status_of(out, "C2") != FAIL:
+            failures.append("empty-core tree expected C2 no-drift FAIL (orphaned surfaces):\n{}".format(out))
+
+        # 7. No .claude/rules tree at all -> C3 must be NOT APPLICABLE, never a hollow PASS.
+        nosurface = tmp / "nosurface"
+        nosurface.mkdir()
+        _build_conformant(nosurface)
+        shutil.rmtree(nosurface / ".claude")
+        code, out = run_capture(nosurface)
+        if status_of(out, "C3") != NA:
+            failures.append("no-.claude/rules tree expected C3 NOT APPLICABLE, not a hollow PASS:\n{}".format(out))
+
+        # 8. A malformed manifest with NO corpus -> exit 2, C4 MALFORMED. It must fail closed even though
+        #    there is no corpus to cite it (the manifest is parsed before the absent-corpus short-circuit).
+        badmanifest = tmp / "badmanifest"
+        (badmanifest / ".aiqt" / "standards").mkdir(parents=True)
+        (badmanifest / ".aiqt" / "standards" / "selftest.toml").write_text(
+            "this is not valid TOML = = =\n", encoding="utf-8")
+        code, out = run_capture(badmanifest)
+        if code != 2:
+            failures.append("malformed-manifest-no-corpus tree expected exit 2, got {}\n{}".format(code, out))
+        if status_of(out, "C4") != MALFORMED:
+            failures.append("malformed-manifest-no-corpus tree expected C4 MALFORMED:\n{}".format(out))
+
+        # 9. An unreadable .aiqt/standards/ must fail closed (exit 2), not escape as a traceback. Skipped
+        #    where the process can still read the dir despite the chmod (e.g. running as root), so the
+        #    assertion stays deterministic across environments.
+        unreadable = tmp / "unreadable"
+        (unreadable / ".aiqt" / "standards").mkdir(parents=True)
+        (unreadable / ".claude" / "rules").mkdir(parents=True)
+        std_dir = unreadable / ".aiqt" / "standards"
+        os.chmod(std_dir, 0)
+        if not os.access(std_dir, os.R_OK):
+            code, out = run_capture(unreadable)
+            if code != 2:
+                failures.append("unreadable standards dir expected exit 2 (fail-closed), got {}".format(code))
+        os.chmod(std_dir, 0o755)  # restore so cleanup can remove it
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
             failures.append("nonexistent --root expected exit 2, got {}".format(code))
     finally:
+        gen_rules.MAP_KEYS = saved_map_keys
+        gen_rules.SEQ_KEYS = saved_seq_keys
         shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -605,8 +688,9 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: conformant passes, drift fails, missing input degrades to NOT APPLICABLE, "
-          "a fabricated mapping id fails, a bad --root fails closed")
+    print("SELF-TEST PASS: conformant passes; drift, empty-core orphans, and fabricated mapping ids "
+          "fail; absent input (corpus, .claude/rules) degrades to NOT APPLICABLE; malformed/unreadable "
+          "standards and a bad --root fail closed")
     return 0
 
 
