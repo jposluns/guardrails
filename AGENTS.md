@@ -331,7 +331,10 @@ to work around a connection error.
 
 Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted
 sources with pinned provenance. A file that runs code when loaded is scanned before use, and none is
-introduced on the strength of its name or popularity alone.
+introduced on the strength of its name or popularity alone. Before relying on a tool, MCP server,
+connector, or external server, the active surface is reconciled against the approved pinned inventory; an
+unrecognized, shadow, changed, or unpinned entry is treated as unavailable until it is reviewed and
+authorized.
 
 ## Fail closed in security-relevant paths
 
