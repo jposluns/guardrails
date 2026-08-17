@@ -325,8 +325,9 @@ def diff_wall_stop(data):
 # AFTER an allowed form, or grouped in a subshell '( git diff )', is still caught. A diff-producer
 # segment is ALLOWED (excluded from denial) in four cases, each judged PER DIFF SEGMENT on that
 # segment's own tokens (never a raw substring): (1) an INFO FLAG on the segment (--help or -h) is a help
-# invocation, not a diff; (2) a SUMMARY flag is a listing, not a raw diff; (3) a redirect of stdout to a
-# REAL non-console file diverts the diff off the review surface; (4) a PAGER PIPE, the segment piped
+# invocation, not a diff; (2) a SUMMARY flag (--stat etc.) with NO co-present patch flag (-p/-u/--patch*)
+# is a listing, not a raw diff; (3) the segment's LAST stdout redirect targets a REAL non-console file
+# (an ordinary path, not one under /dev/ or /proc/), diverting the diff off the review surface; (4) a PAGER PIPE, the segment piped
 # (an unquoted '|') into a known interactive pager (less/more/most/pager), is interactive review rather
 # than a console wall. Cases 1 and 4 were restored in GD-24 fix round 7 after fix round 6 over-corrected
 # them to DENY; a pipe to cat/tee/anything else still denies. No comment escape exists (GD-24 fix round 6
@@ -339,11 +340,11 @@ _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat
 _INFO_FLAGS = frozenset(("--help", "-h"))
 _PAGERS = frozenset(("less", "more", "most", "pager"))
 _REDIRECT_TOKENS = frozenset((">", ">>"))  # stdout to a file; a grouped '>&'/'&>' fd-dup is not here
-# Redirect targets that still land on a console/terminal or on stdout/stderr, so a diff sent there is not
-# actually diverted from the review surface: the named device files, plus any /dev/fd/N descriptor path.
-_CONSOLE_REDIRECT_TARGETS = frozenset(
-    ("/dev/tty", "/dev/stdout", "/dev/stderr", "/dev/console"))
-_DEV_FD_RE = re.compile(r"^/dev/fd/\d+$")
+# A redirect target UNDER /dev/ or /proc/ is never a real diff-output file: it lands on a console or
+# terminal (/dev/tty, /dev/pts/N, /dev/console), or on stdout/stderr (/dev/stdout, /dev/stderr,
+# /dev/fd/N, /proc/self/fd/1, /proc/PID/fd/N), so a diff sent there still reaches the review surface. A
+# real diff-output file is an ordinary path, never under one of these two trees.
+_DEV_PROC_TARGET_RE = re.compile(r"^/(?:dev|proc)/")
 # Fallback-only regexes over the RAW command string, used when shlex cannot parse the command (see
 # _diff_source_fallback). SUMMARY/REDIRECT mirror the token escapes; the producer regex is a loose
 # 'git ... diff|show|range-diff' probe. Conservative on a parse failure: deny a plausible producer.
@@ -353,9 +354,18 @@ _RAW_DIFF_PRODUCER_RE = re.compile(r"(?is)\bgit\b.*?\b(?:diff|show|range-diff)\b
 
 
 def _has_patch_flag(tokens):
-    """True when a segment carries a patch flag (-p, -u, or a --patch* form), the flag that turns a
-    listing/plumbing/stash producer into a console patch."""
+    """True when a segment carries a patch flag (-p, -u, or a --patch* form: --patch, --patch-with-stat,
+    --patch-with-raw), the flag that turns a listing/plumbing/stash producer into a console patch and
+    that also dumps the full diff alongside a summary flag (git diff --stat -p)."""
     return any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
+
+
+def _has_summary_flag(tokens):
+    """True when a segment carries a summary/listing flag (--stat, --name-only, --name-status, --numstat,
+    --shortstat), in either the bare or the '=value' shape. A summary flag is a listing rather than a raw
+    diff, but ONLY when no patch flag is also present (see the handler: --stat -p still dumps the full
+    diff), so the summary escape is gated on _has_patch_flag being false."""
+    return any(t.split("=", 1)[0] in _SUMMARY_FLAGS for t in tokens)
 
 
 def _is_diff_producer(tokens):
@@ -380,21 +390,39 @@ def _is_diff_producer(tokens):
     return False
 
 
+def _is_stdout_fd_dup(tokens, i):
+    """True when the token at index i is an fd-duplication that redirects STDOUT (to another descriptor
+    or a console), so it is never a real-file diff output: '&>' (redirects both streams), and '>&' (from
+    '>&1', '>&2', or a bare '>&') UNLESS an explicit non-stdout source fd precedes it (the '2' of a
+    '2>&1', which redirects stderr and leaves stdout untouched). Used by the last-redirect-wins scan so a
+    trailing stdout fd-dup after a real-file redirect flips the segment back to a console dump."""
+    tok = tokens[i]
+    if tok == "&>":
+        return True
+    if tok == ">&":
+        prev = tokens[i - 1] if i > 0 else ""
+        return not (prev.isdigit() and prev != "1")
+    return False
+
+
 def _redirects_to_real_file(tokens):
-    """True when a segment redirects stdout to a REAL, non-console file: a '>' or '>>' token immediately
-    followed by a target token that is not a console/terminal/stdout/stderr target. Judged on the
-    segment's OWN token stream (never a raw substring), so the redirect and its target are read on the
-    specific segment. The fd-duplication forms ('>&1', '>&2', '1>&2', '2>&1', '&>', '>&') tokenize as
-    their own '>&'/'&>' tokens, never as a '>'/'>>' token, so they are not real-file redirects and do not
-    escape; nor does a '>'/'>>' onto a console device (/dev/tty, /dev/stdout, /dev/stderr, /dev/console,
-    /dev/fd/N), because the diff still reaches the console there."""
+    """True when a segment's LAST stdout redirect sends stdout to a REAL, non-console file. Judged on the
+    segment's OWN token stream (never a raw substring), LAST-redirect-wins: a segment may carry more than
+    one stdout redirect and only the last one governs where stdout finally lands, so 'git diff >/dev/tty
+    >/tmp/x' diverts to a real file (allow) while 'git diff >/tmp/x >/dev/tty' ends on the console (deny).
+    A '>'/'>>' token whose target is an ordinary path is a real-file redirect; a target under /dev/ or
+    /proc/ (a console/terminal, /dev/stdout, /dev/stderr, /dev/fd/N, /proc/self/fd/1, ...) is NOT, because
+    the diff still reaches the console there. The fd-duplication forms ('>&1', '>&2', '1>&2', '2>&1', '&>',
+    '>&') tokenize as their own '>&'/'&>' tokens, never a '>'/'>>' token, and a stdout fd-dup as the last
+    redirect also lands on a console/descriptor, so it is not a real-file redirect either."""
+    last_is_real_file = False
     n = len(tokens)
     for i, tok in enumerate(tokens):
         if tok in _REDIRECT_TOKENS and i + 1 < n:
-            target = tokens[i + 1]
-            if target not in _CONSOLE_REDIRECT_TARGETS and not _DEV_FD_RE.match(target):
-                return True
-    return False
+            last_is_real_file = not _DEV_PROC_TARGET_RE.match(tokens[i + 1])
+        elif _is_stdout_fd_dup(tokens, i):
+            last_is_real_file = False
+    return last_is_real_file
 
 
 def _has_info_flag(tokens):
@@ -439,9 +467,9 @@ def _diff_source_fallback(command):
 def diff_source_pretool(data):
     """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash: deny a Bash command that dumps a bare
     console diff. A diff-producer segment is allowed only when, on its own tokens, it carries an info
-    flag (--help/-h, a help invocation), a summary flag, a redirect of its stdout to a real non-console
-    file, or is piped into a known interactive pager (less/more/most/pager). A diff segment matching none
-    of these is denied."""
+    flag (--help/-h, a help invocation), a summary flag with no co-present patch flag, its LAST stdout
+    redirect to a real non-console file, or is piped into a known interactive pager (less/more/most/pager).
+    A diff segment matching none of these is denied."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -470,7 +498,7 @@ def diff_source_pretool(data):
         # non-console file, or a pipe into a known interactive pager.
         if _has_info_flag(tokens):
             continue
-        if any(t.split("=", 1)[0] in _SUMMARY_FLAGS for t in tokens):
+        if _has_summary_flag(tokens) and not _has_patch_flag(tokens):
             continue
         if _redirects_to_real_file(tokens):
             continue
