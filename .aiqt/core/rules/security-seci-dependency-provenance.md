@@ -12,12 +12,17 @@ map-iso-42001: [A.4.4, A.10.3]
 map-iso-23894: [A.11, B.5]
 map-owasp-llm: [LLM04]
 map-owasp-asi: [ASI04]
+map-owasp-api: [API9]
 map-owasp-mcp: [MCP04, MCP09]
 map-owasp-web: [A03, A08]
+map-owasp-cheatsheet: [software-supply-chain-security]
 ---
 
 # Trusted, pinned dependency provenance
 
 Dependencies, tools, external servers, and any model or artefact file that executes on load come from trusted
 sources with pinned provenance. A file that runs code when loaded is scanned before use, and none is
-introduced on the strength of its name or popularity alone.
+introduced on the strength of its name or popularity alone. Before relying on a tool, MCP server,
+connector, or external server, the active surface is reconciled against the approved pinned inventory; an
+unrecognized, shadow, changed, or unpinned entry is treated as unavailable until it is reviewed and
+authorized.

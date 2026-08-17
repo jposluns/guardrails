@@ -13,7 +13,7 @@ map-owasp-asvs: [V8]
 map-owasp-web: [A01]
 map-owasp-api: [API1, API3, API5]
 map-owasp-proactive: [C1]
-map-owasp-cheatsheet: [mass-assignment]
+map-owasp-cheatsheet: [authorization, mass-assignment]
 ---
 
 # Least-privilege authorization

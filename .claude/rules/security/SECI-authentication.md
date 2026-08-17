@@ -11,6 +11,7 @@ map-atlas: [AML.T0012, AML.T0055]
 map-iso-23894: [A.11]
 map-owasp-asvs: [V6]
 map-owasp-web: [A07]
+map-owasp-cheatsheet: [authentication, multifactor-authentication]
 map-owasp-api: [API2]
 ---
 
