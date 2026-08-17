@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.1.9** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.0** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -145,13 +145,21 @@ what is particular to this repo (and has no source rule) lives here.
   generated from `changelog.toml` and drift-gated; every change is recorded in detail in the operational
   record.
 
+## Versioning and publication discipline
+
+The pack uses SemVer, single-sourced in `changelog.toml` (the `version` on the latest `[[release]]`); the
+root `VERSION` file is generated from it and drift-gated. The pack is currently pre-launch at `0.1.0`; the
+first public release is reserved for `1.0.0`. Releases are signed with minisign (DECIDED, DEFERRED until the
+offline signing key exists). The full discipline (bump rules, release process, signing) is held in the
+private design-of-record; this section is its slim public face.
+
 ## Gates and CI
 
 CI runs a `Quality` workflow of deterministic gates: a project secret scan plus gitleaks, a
 leak-denylist check, an en/em dash check, an internal-link check, a site-integrity check, roadmap,
 changelog, rules, agents, and CLAUDE.md drift checks (generated files must match their sources), a
-rule-placement check, a standards-mappings check, an adopter-conformance suite, and a standards-currency
-self-test. `tools/run_all_checks.sh` is the local mirror. Read CI status with `tools/ci-status.sh` (which
+version format and single-source check, a rule-placement check, a standards-mappings check, an
+adopter-conformance suite, and a standards-currency self-test. `tools/run_all_checks.sh` is the local mirror. Read CI status with `tools/ci-status.sh` (which
 reads `actions/runs`, needing only Actions: Read), never `gh pr checks` (a fine-grained token cannot read
 the Checks API) and never `commits/<sha>/status` (which always reads pending). The gate roster grows
 toward the full pack roster (portability, dogfood and adapter parity, version monotonicity).

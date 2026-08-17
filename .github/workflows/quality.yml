@@ -60,6 +60,9 @@ jobs:
       - name: Changelog drift
         run: python3 tools/gen_changelog.py --check
 
+      - name: Version format and single-source
+        run: python3 tools/check_versions.py
+
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
 
