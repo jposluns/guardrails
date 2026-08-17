@@ -6,8 +6,8 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: trust-recovery-escalation
-map-nist-airmf: [MANAGE 4.3]
-map-iso-23894: [A.2, A.12]
+map-nist-airmf-tight: [MANAGE 4.3]
+map-iso-23894-broad: [A.2, A.12]
 ---
 
 # Trust recovery and escalation

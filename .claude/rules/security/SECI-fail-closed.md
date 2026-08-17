@@ -4,8 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: fail-closed
-map-owasp-web: [A10]
-map-owasp-cheatsheet: [error-handling]
+map-owasp-web-tight: [A10]
+map-owasp-cheatsheet-broad: [error-handling]
 ---
 
 # Fail closed in security-relevant paths

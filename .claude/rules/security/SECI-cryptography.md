@@ -5,13 +5,15 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: cryptography
-map-nist-80053: [SC-8, SC-13, SC-28]
-map-nist-ssdf: [PW.5.1]
-map-iso-23894: [A.8, A.11]
-map-owasp-web: [A04]
-map-owasp-asvs: [V11, V12]
-map-owasp-proactive: [C2]
-map-owasp-cheatsheet: [cryptographic-storage, transport-layer-security]
+map-nist-80053-tight: [SC-13]
+map-nist-80053-broad: [SC-8, SC-28]
+map-nist-ssdf-broad: [PW.5.1]
+map-iso-23894-broad: [A.8, A.11]
+map-owasp-web-tight: [A04]
+map-owasp-asvs-tight: [V11]
+map-owasp-asvs-broad: [V12]
+map-owasp-proactive-tight: [C2]
+map-owasp-cheatsheet-tight: [cryptographic-storage, transport-layer-security]
 ---
 
 # Sound cryptography

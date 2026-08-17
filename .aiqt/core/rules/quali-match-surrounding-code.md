@@ -5,8 +5,8 @@ family: aiqt
 tier: 10
 facet: QUALI
 slug: match-surrounding-code
-map-nist-ssdf: [PW.5.1]
-map-iso-23894: [A.7]
+map-nist-ssdf-broad: [PW.5.1]
+map-iso-23894-broad: [A.7]
 ---
 
 # Match the surrounding code

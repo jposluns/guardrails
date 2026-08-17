@@ -5,9 +5,9 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: data-boundary
-map-nist-80053: [MP-3]
-map-owasp-asvs: [V14]
-map-owasp-llm: [LLM02]
+map-nist-80053-tight: [MP-3]
+map-owasp-asvs-broad: [V14]
+map-owasp-llm-broad: [LLM02]
 ---
 
 # Classify content by sensitivity tier

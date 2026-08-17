@@ -5,15 +5,16 @@ family: security
 facet: SECC
 secondary: [SECI]
 slug: keep-secrets-out
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [IA-5(7)]
-map-nist-ssdf: [PW.5.1]
-map-atlas: [AML.T0055, AML.T0082, AML.T0083, AML.T0095.000, AML.T0098]
-map-iso-23894: [A.11]
-map-owasp-llm: [LLM02]
-map-owasp-mcp: [MCP01]
-map-owasp-asvs: [V14]
-map-owasp-cheatsheet: [secrets-management]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-tight: [IA-5(7)]
+map-nist-ssdf-broad: [PW.5.1]
+map-atlas-tight: [AML.T0055, AML.T0095.000]
+map-atlas-broad: [AML.T0082, AML.T0083, AML.T0098]
+map-iso-23894-broad: [A.11]
+map-owasp-llm-broad: [LLM02]
+map-owasp-mcp-tight: [MCP01]
+map-owasp-asvs-broad: [V14]
+map-owasp-cheatsheet-tight: [secrets-management]
 ---
 
 # Keep secrets out

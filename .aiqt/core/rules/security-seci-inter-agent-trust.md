@@ -5,13 +5,16 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: inter-agent-trust
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [AC-3, AC-6, IA-9, SI-10]
-map-atlas: [AML.T0051.001, AML.T0053, AML.T0073]
-map-iso-23894: [A.11]
-map-owasp-asi: [ASI03, ASI07, ASI10]
-map-owasp-mcp: [MCP07]
-map-owasp-cheatsheet: [ai-agent-security, mcp-security]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-tight: [IA-9, SI-10]
+map-nist-80053-broad: [AC-3, AC-6]
+map-atlas-tight: [AML.T0073]
+map-atlas-broad: [AML.T0051.001, AML.T0053]
+map-iso-23894-broad: [A.11]
+map-owasp-asi-tight: [ASI03, ASI07]
+map-owasp-asi-broad: [ASI10]
+map-owasp-mcp-tight: [MCP07]
+map-owasp-cheatsheet-broad: [ai-agent-security, mcp-security]
 ---
 
 # Trust between agents is earned, not inherited

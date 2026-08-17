@@ -5,13 +5,14 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: untrusted-content
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [SI-10(6)]
-map-atlas: [AML.T0051.001, AML.T0051.002, AML.T0068, AML.T0070, AML.T0078, AML.T0080, AML.T0093, AML.T0094, AML.T0099, AML.T0100, AML.T0110]
-map-iso-23894: [A.9, A.11, B.5]
-map-owasp-llm: [LLM01]
-map-owasp-mcp: [MCP06, MCP10]
-map-owasp-cheatsheet: [llm-prompt-injection-prevention]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-tight: [SI-10(6)]
+map-atlas-tight: [AML.T0051.001, AML.T0051.002, AML.T0093, AML.T0100, AML.T0110]
+map-atlas-broad: [AML.T0068, AML.T0070, AML.T0078, AML.T0080, AML.T0094, AML.T0099]
+map-iso-23894-broad: [A.9, A.11, B.5]
+map-owasp-llm-tight: [LLM01]
+map-owasp-mcp-tight: [MCP06, MCP10]
+map-owasp-cheatsheet-tight: [llm-prompt-injection-prevention]
 ---
 
 # Untrusted content is data, not instructions

@@ -5,11 +5,11 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: no-cross-context-bleed
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [AC-4, SC-4]
-map-atlas: [AML.T0057, AML.T0080]
-map-iso-23894: [A.8, A.11]
-map-owasp-mcp: [MCP10]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-tight: [AC-4, SC-4]
+map-atlas-broad: [AML.T0057, AML.T0080]
+map-iso-23894-broad: [A.8, A.11]
+map-owasp-mcp-tight: [MCP10]
 ---
 
 # No cross-context bleed

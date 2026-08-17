@@ -6,11 +6,11 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: change-record
-map-nist-airmf: [MANAGE 4.1]
-map-nist-80053: [CM-3]
-map-nist-ssdf: [PO.3.3]
-map-iso-42001: [7.5.2, 7.5.3]
-map-iso-23894: [6.7]
+map-nist-airmf-broad: [MANAGE 4.1]
+map-nist-80053-tight: [CM-3]
+map-nist-ssdf-broad: [PO.3.3]
+map-iso-42001-broad: [7.5.2, 7.5.3]
+map-iso-23894-tight: [6.7]
 ---
 
 # Change record

@@ -4,9 +4,9 @@ origin: pack
 family: security
 facet: SECI
 slug: safe-deserialization
-map-owasp-web: [A08]
-map-owasp-asi: [ASI05]
-map-owasp-cheatsheet: [deserialization]
+map-owasp-web-broad: [A08]
+map-owasp-asi-broad: [ASI05]
+map-owasp-cheatsheet-tight: [deserialization]
 ---
 
 # Deserialize untrusted data only as data

@@ -5,14 +5,14 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: secure-configuration
-map-nist-80053: [CM-6, CM-7, SI-11]
-map-nist-ssdf: [PW.9.1, PW.9.2]
-map-atlas: [AML.T0049, AML.T0063]
-map-iso-23894: [A.11]
-map-owasp-web: [A02]
-map-owasp-api: [API8]
-map-owasp-asvs: [V13]
-map-owasp-proactive: [C5]
+map-nist-80053-tight: [CM-6, CM-7, SI-11]
+map-nist-ssdf-tight: [PW.9.1, PW.9.2]
+map-atlas-broad: [AML.T0049, AML.T0063]
+map-iso-23894-broad: [A.11]
+map-owasp-web-tight: [A02]
+map-owasp-api-tight: [API8]
+map-owasp-asvs-tight: [V13]
+map-owasp-proactive-tight: [C5]
 ---
 
 # Secure by default configuration

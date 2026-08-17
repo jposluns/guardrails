@@ -4,18 +4,20 @@ origin: pack
 family: security
 facet: SECI
 slug: dependency-provenance
-map-nist-airmf: [GOVERN 6.1, MANAGE 3.1, MAP 4.2]
-map-nist-80053: [SR-3, SR-4, SR-11]
-map-nist-ssdf: [PO.3.2, PW.4.1, PW.4.4]
-map-atlas: [AML.T0010.001, AML.T0010.003, AML.T0010.005, AML.T0011.000, AML.T0011.001, AML.T0011.002, AML.T0018.002, AML.T0104, AML.T0109, AML.T0111, AML.T0112.001]
-map-iso-42001: [A.4.4, A.10.3]
-map-iso-23894: [A.11, B.5]
-map-owasp-llm: [LLM04]
-map-owasp-asi: [ASI04]
-map-owasp-api: [API9]
-map-owasp-mcp: [MCP04, MCP09]
-map-owasp-web: [A03, A08]
-map-owasp-cheatsheet: [software-supply-chain-security]
+map-nist-airmf-broad: [GOVERN 6.1, MANAGE 3.1, MAP 4.2]
+map-nist-80053-tight: [SR-3, SR-4, SR-11]
+map-nist-ssdf-tight: [PW.4.1, PW.4.4]
+map-nist-ssdf-broad: [PO.3.2]
+map-atlas-tight: [AML.T0010.001, AML.T0010.003, AML.T0010.005, AML.T0011.000, AML.T0011.001, AML.T0011.002, AML.T0104, AML.T0109]
+map-atlas-broad: [AML.T0018.002, AML.T0111, AML.T0112.001]
+map-iso-42001-broad: [A.4.4, A.10.3]
+map-iso-23894-broad: [A.11, B.5]
+map-owasp-llm-tight: [LLM04]
+map-owasp-asi-tight: [ASI04]
+map-owasp-api-broad: [API9]
+map-owasp-mcp-tight: [MCP04, MCP09]
+map-owasp-web-tight: [A03, A08]
+map-owasp-cheatsheet-tight: [software-supply-chain-security]
 ---
 
 # Trusted, pinned dependency provenance

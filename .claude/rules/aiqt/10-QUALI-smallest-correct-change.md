@@ -5,7 +5,7 @@ family: aiqt
 tier: 10
 facet: QUALI
 slug: smallest-correct-change
-map-iso-23894: [A.7]
+map-iso-23894-broad: [A.7]
 ---
 
 # Prefer the smallest correct change
