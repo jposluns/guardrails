@@ -16,16 +16,19 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt/manifest.json   version, date, source-corpus hash, included corpus-ids
   site/downloads/aiqt/provenance.md   human-readable provenance for the same facts
   site/downloads/aiqt-instructions.txt  the same body wrapped in the no-Skills-feature preamble
+  site/downloads/aiqt-skill.zip       the public download, packed deterministically from that SKILL.md
 
   gen_skill.py            regenerate every output
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
   gen_skill.py --self-test  prove the gate fails on drift, on an unknown id, and on an orphan output
 """
 import hashlib
+import io
 import json
 import os
 import re
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,8 +46,16 @@ CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
 # Output locations, as relative parts joined under the repo root (or a --self-test temp root).
 RESERVED_PARTS = ("site", "downloads", "aiqt")            # 100% generated: orphan-scanned in full
 INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standalone named output
+ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
+
+# The public download is packed deterministically so its bytes never depend on the wall clock, the host
+# OS, or the zlib version: a fixed ZIP-epoch timestamp, members in sorted order, a fixed unix mode, and
+# STORED (uncompressed) entries. STORED also keeps the member text in the clear, so the leak gates read
+# the real SKILL.md rather than an opaque compressed blob, and --check can byte-compare the archive.
+ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+ZIP_MEMBER = "aiqt/SKILL.md"
 
 _SECTION = re.compile(r"^=== (\S+) ===$")
 _ENTRY = re.compile(r"^\[([a-z0-9]{6,})\]$")
@@ -243,6 +254,23 @@ def render_skill(data):
     return "\n\n".join(blocks) + "\n"
 
 
+def render_zip(data):
+    """The public aiqt-skill.zip, built in memory from the SAME SKILL.md the reserved subtree carries, so
+    the zip's aiqt/SKILL.md member is byte-identical to the tracked SKILL.md. Deterministic (see ZIP_EPOCH
+    note): fixed timestamp, sorted members, STORED compression, fixed unix mode, no wall-clock, so two
+    runs produce identical bytes and --check can byte-compare the archive."""
+    members = {ZIP_MEMBER: render_skill(data).encode("utf-8")}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in sorted(members):
+            info = zipfile.ZipInfo(name, date_time=ZIP_EPOCH)
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3            # unix, fixed so the byte layout never depends on the host OS
+            info.external_attr = 0o644 << 16  # -rw-r--r--, fixed rather than inherited from any real file
+            zf.writestr(info, members[name])
+    return buf.getvalue()
+
+
 def render_instructions(data):
     header = ("AIQT: a standard for your AI assistant\n"
               "Version {v} . Licensed under CC BY-SA 4.0 "
@@ -287,16 +315,17 @@ def render_provenance(data):
         "- Source corpus hash: {}".format(data["corpus_hash"]),
         "- Included rules (by corpus id): {}".format(", ".join(data["included_ids"])),
         "",
-        "The published aiqt-skill.zip checksum and the source tag are recorded on the evidence page "
-        "once the deterministic packaging step lands; this file records the text provenance only.",
+        "The published aiqt-skill.zip is packed deterministically from this same SKILL.md by the same "
+        "generator, so its aiqt/SKILL.md member is byte-identical to the text recorded here.",
     ]
     return "\n".join(lines) + "\n"
 
 
 def build_outputs(root):
     """Load the corpus and skill source under root and render every output. Returns
-    (reserved_map, standalone) where reserved_map is {filename: content} for the reserved
-    site/downloads/aiqt/ subtree and standalone is [(abs_path, content)] for named outputs beside it.
+    (reserved_map, standalone, binary): reserved_map is {filename: text} for the reserved
+    site/downloads/aiqt/ subtree, standalone is [(abs_path, text)] for named text outputs beside it, and
+    binary is [(abs_path, bytes)] for named binary outputs beside it (the deterministic download zip).
     Raises ValueError/OSError (an unknown id, a malformed or unreadable source): the caller fails closed.
     Parameterized on root so the conformance suite and the self-test can call it off the real tree."""
     corpus = load_corpus(root.joinpath(*CORPUS_PARTS))
@@ -308,7 +337,8 @@ def build_outputs(root):
         "provenance.md": render_provenance(data),
     }
     standalone = [(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
-    return reserved_map, standalone
+    binary = [(root.joinpath(*ZIP_PARTS), render_zip(data))]
+    return reserved_map, standalone, binary
 
 
 def run_gen(root, check):
@@ -327,9 +357,9 @@ def run_gen(root, check):
         # never concealed. A PRESENT corpus with a missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
         if dir_present(corpus_dir):
-            reserved_map, standalone = build_outputs(root)
+            reserved_map, standalone, binary = build_outputs(root)
         else:
-            reserved_map, standalone = {}, []
+            reserved_map, standalone, binary = {}, [], []
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -341,6 +371,15 @@ def run_gen(root, check):
                 if not check:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8")
+        # Named binary outputs (the download zip) reconcile on bytes, so a stale or hand-swapped archive
+        # is caught by the same drift gate as the text surfaces.
+        for path, content in binary:
+            current = path.read_bytes() if path.exists() else None
+            if current != content:
+                drift.append(path.relative_to(root).as_posix())
+                if not check:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
             current = target.read_text(encoding="utf-8") if target.exists() else None
