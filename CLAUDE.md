@@ -12,6 +12,10 @@ The portable rules this repo operates under are indexed below and carried in ful
 (generated from `.aiqt/core/rules/`), which loads into a Claude Code session automatically. The rest of
 this file is the repo-specific operating governance that sits on top of those rules.
 
+**Apex principle (highest precedence):** (Accuracy = Integrity = Quality = Trust) > Progress > Speed >
+Cost. The four facets are one non-negotiable top tier; a gain in progress, speed, or cost never justifies
+a loss on it. Its full rule is the first entry in the index below.
+
 <!-- RULES-INDEX:BEGIN (generated) -->
 ## AIQT rule index (generated from .aiqt/core/rules/; do not hand-edit this block)
 
