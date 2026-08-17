@@ -43,6 +43,7 @@ import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEY
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
+import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
 
@@ -415,6 +416,83 @@ def check_c4(root, cache):
                       mapped, tight, broad, len(manifests)))
 
 
+# --- C5: hooks-no-drift (the opt-in enforcement plugin) ---------------------------------------------
+
+def check_c5(root, cache):
+    """The installed hooks plugin surface matches regeneration from .aiqt/core/hooks/. Reuses
+    gen_hooks.build_desired (parameterized on root; never gen_hooks.run(), which reconciles and WRITES,
+    conformance only compares). NA-degrading, the opt-in-plugin analogue of C2's per-surface degrade:
+
+      source absent AND surface absent   -> NOT APPLICABLE (the enforcement plugin is not installed)
+      source present, surface absent     -> NOT APPLICABLE (the plugin is opt-in; the manifest alone
+                                            obliges nothing)
+      source absent, surface present     -> FAIL (an orphaned enforcement surface that can no longer be
+                                            regenerated is stale enforcement)
+      both present                       -> compare each generated file and orphan-scan the reserved
+                                            plugin hooks/ subtree; any mismatch/orphan -> FAIL, else PASS
+
+    Either tree unreadable -> MALFORMED (exit 2). corpus_error -> SKIPPED (build_desired needs the
+    corpus for id validation), mirroring C2/C4."""
+    if cache.get("corpus_error"):
+        return Result("C5", "hooks-no-drift", SKIPPED, "corpus did not load (see C1)")
+    src_dir = root / ".aiqt" / "core" / "hooks"
+    plugin_root = root.joinpath(*gen_hooks.PLUGIN_ROOT_PARTS)
+    src_present, src_err = _reachable(src_dir)
+    if src_err:
+        return Result("C5", "hooks-no-drift", MALFORMED, src_err)
+    surf_present, surf_err = _reachable(plugin_root)
+    if surf_err:
+        return Result("C5", "hooks-no-drift", MALFORMED, surf_err)
+    if not surf_present:
+        if src_present:
+            return Result("C5", "hooks-no-drift", NA,
+                          "hooks surface not installed; the enforcement plugin is opt-in")
+        return Result("C5", "hooks-no-drift", NA, "no hooks manifest or surface installed")
+    if not src_present:
+        return Result("C5", "hooks-no-drift", FAIL,
+                      "a hooks plugin surface is installed but no .aiqt/core/hooks/ source remains to "
+                      "regenerate it (orphaned, unmaintainable enforcement)")
+    try:
+        desired = gen_hooks.build_desired(root, src_dir)
+    except (ValueError, OSError) as exc:
+        return Result("C5", "hooks-no-drift", MALFORMED, str(exc))
+    drift = []
+    try:
+        for rel, content in sorted(desired.items()):
+            target = root / rel
+            try:
+                current = target.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                drift.append("missing " + rel)
+                continue
+            if current != content:
+                drift.append(rel)
+        # Orphan scan the RESERVED plugin hooks/ subtree only (100% generated); the plugin.json is in
+        # desired and compared above, and .claude-plugin/ is not otherwise walked.
+        hooks_dir = root.joinpath(*gen_hooks.HOOKS_SUBTREE_PARTS)
+        present, err = _reachable(hooks_dir)
+        if err:
+            return Result("C5", "hooks-no-drift", MALFORMED, err)
+        if present:
+            for dirpath, _dirs, filenames in os.walk(hooks_dir, onerror=_walk_raise):
+                for fn in sorted(filenames):
+                    f = Path(dirpath) / fn
+                    rel = f.relative_to(root).as_posix()
+                    if rel not in desired:
+                        drift.append("orphan " + rel)
+    except (OSError, ValueError) as exc:
+        # ValueError catches UnicodeDecodeError from read_text on a non-utf-8 generated file; fail
+        # closed as MALFORMED (exit 2), never a traceback.
+        return Result("C5", "hooks-no-drift", MALFORMED,
+                      "cannot read the hooks plugin surface: {}".format(exc))
+    if drift:
+        return Result("C5", "hooks-no-drift", FAIL,
+                      "{} hook surface file(s) drifted/orphaned: {}".format(
+                          len(set(drift)), "; ".join(sorted(set(drift)))))
+    return Result("C5", "hooks-no-drift", PASS,
+                  "{} hook surface file(s) match regeneration".format(len(desired)))
+
+
 # --- orchestration ----------------------------------------------------------------------------------
 
 def run(root):
@@ -445,6 +523,7 @@ def run(root):
         check_c2(root, cache),
         check_c3(root),
         check_c4(root, cache),
+        check_c5(root, cache),
     ]
 
     print("AIQT conformance: {}".format(root))
@@ -689,6 +768,47 @@ def _build_bare_key(base):
     _rebind_map_keys(base)
     (src / "aiqt" / "00-project-integrity.md").write_text(_APEX, encoding="utf-8")
     (src / "security" / "output-encoding.md").write_text(_BARE_KEY_RULE, encoding="utf-8")
+
+
+_HOOKS_SCRIPT = """#!/usr/bin/env python3
+# self-test hooks dispatcher stub
+def stub_handler(data):
+    return (0, None, None)
+"""
+
+_HOOKS_MANIFEST = """[plugin]
+name = "aiqt-guardrails-hooks"
+version = "0.1.0"
+description = "Self-test hooks plugin."
+author-name = "Self Test"
+author-email = "selftest@example.invalid"
+homepage = "https://example.invalid"
+
+[[hook]]
+id = "stub-control"
+rules = ["seci001"]
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Bash"
+handler = "stub_handler"
+default = "block"
+class = "b"
+residue = "A self-test control catches nothing real."
+"""
+
+
+def _build_hooks(base):
+    """Add a hooks source tree (manifest + stub script) to an existing conformant install under base
+    and generate its plugin surface via gen_hooks.build_desired, so C5 has both a source and a matching
+    surface to compare. The manifest cites seci001, a real corpus-id in the conformant fixture."""
+    hooks_src = base / ".aiqt" / "core" / "hooks"
+    (hooks_src / "scripts").mkdir(parents=True)
+    (hooks_src / "scripts" / gen_hooks.SCRIPT_NAME).write_text(_HOOKS_SCRIPT, encoding="utf-8")
+    (hooks_src / "manifest.toml").write_text(_HOOKS_MANIFEST, encoding="utf-8")
+    for rel, content in gen_hooks.build_desired(base, hooks_src).items():
+        target = base / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
 
 
 def self_test_main():
@@ -984,6 +1104,75 @@ def self_test_main():
                 failures.append("unreadable cursor subtree expected C2 MALFORMED:\n{}".format(out))
         os.chmod(cur_dir, 0o755)  # restore so cleanup can remove it
 
+        # 16. Conformant-with-hooks -> exit 0, C5 PASS. Also proves the no-hooks conformant fixtures
+        #     (all cases above) keep C5 NOT APPLICABLE, never a hollow pass (case 1 asserts exit 0 with
+        #     C5 absent from the FAIL set).
+        withhooks = tmp / "withhooks"
+        withhooks.mkdir()
+        _build_conformant(withhooks)
+        _build_hooks(withhooks)
+        code, out = run_capture(withhooks)
+        if code != 0 or status_of(out, "C5") != PASS:
+            failures.append("conformant-with-hooks tree expected exit 0 + C5 PASS:\n{}".format(out))
+
+        # 16b. Drifted hooks.json -> exit 1, C5 FAIL.
+        hdrift = tmp / "hooks-drift"
+        hdrift.mkdir()
+        _build_conformant(hdrift)
+        _build_hooks(hdrift)
+        hj = hdrift.joinpath(*gen_hooks.PLUGIN_ROOT_PARTS) / "hooks" / "hooks.json"
+        hj.write_text(hj.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        code, out = run_capture(hdrift)
+        if code != 1 or status_of(out, "C5") != FAIL:
+            failures.append("drifted hooks.json tree expected exit 1 + C5 FAIL:\n{}".format(out))
+
+        # 16c. Orphan file under the reserved plugin hooks/ subtree -> exit 1, C5 FAIL.
+        horphan = tmp / "hooks-orphan"
+        horphan.mkdir()
+        _build_conformant(horphan)
+        _build_hooks(horphan)
+        stray = horphan.joinpath(*gen_hooks.HOOKS_SUBTREE_PARTS) / "stray.txt"
+        stray.write_text("stray\n", encoding="utf-8")
+        code, out = run_capture(horphan)
+        if code != 1 or status_of(out, "C5") != FAIL:
+            failures.append("hooks orphan tree expected exit 1 + C5 FAIL:\n{}".format(out))
+
+        # 16d. Hooks source present, surface deleted -> exit 0, C5 NOT APPLICABLE (the plugin is opt-in).
+        hnosurface = tmp / "hooks-no-surface"
+        hnosurface.mkdir()
+        _build_conformant(hnosurface)
+        _build_hooks(hnosurface)
+        shutil.rmtree(hnosurface / "plugin")
+        code, out = run_capture(hnosurface)
+        if code != 0 or status_of(out, "C5") != NA:
+            failures.append("hooks-source-only tree expected exit 0 + C5 NOT APPLICABLE:\n{}".format(out))
+
+        # 16e. Surface present, hooks source deleted -> exit 1, C5 FAIL (orphaned enforcement surface).
+        hnosource = tmp / "hooks-no-source"
+        hnosource.mkdir()
+        _build_conformant(hnosource)
+        _build_hooks(hnosource)
+        shutil.rmtree(hnosource / ".aiqt" / "core" / "hooks")
+        code, out = run_capture(hnosource)
+        if code != 1 or status_of(out, "C5") != FAIL:
+            failures.append("hooks-surface-only tree expected exit 1 + C5 FAIL:\n{}".format(out))
+
+        # 16f. An unreadable plugin hooks/ subtree must fail closed via C5 (exit 2), not conceal an
+        #      orphan. Same root-vs-nonroot guard as cases 9-15.
+        hbad = tmp / "hooks-unreadable"
+        hbad.mkdir()
+        _build_conformant(hbad)
+        _build_hooks(hbad)
+        hooks_surface = hbad.joinpath(*gen_hooks.HOOKS_SUBTREE_PARTS)
+        os.chmod(hooks_surface, 0)
+        if _unreadable_or_skip(hooks_surface, "16f hooks-surface"):
+            code, out = run_capture(hbad)
+            if code != 2:
+                failures.append("unreadable plugin hooks/ expected exit 2 (fail-closed), got {}".format(code))
+            if status_of(out, "C5") != MALFORMED:
+                failures.append("unreadable plugin hooks/ expected C5 MALFORMED:\n{}".format(out))
+        os.chmod(hooks_surface, 0o755)  # restore so cleanup can remove it
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -999,15 +1188,18 @@ def self_test_main():
             print("  - " + f)
         return 1
     skip_note = ("" if not skipped_unreadable else
-                 " NOTE: {} unreadable-input-dir case(s) (9-14) were SKIPPED this run because the runner "
-                 "could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read bits are "
-                 "enforced to exercise them.".format(len(skipped_unreadable), ", ".join(skipped_unreadable)))
+                 " NOTE: {} unreadable-input-dir case(s) (9-15, 16f) were SKIPPED this run because the "
+                 "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
+                 "bits are enforced to exercise them.".format(
+                     len(skipped_unreadable), ", ".join(skipped_unreadable)))
     print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, and the GEMINI.md/copilot "
           "adapters), empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
-          "asserted both tight and broad fail; absent input (corpus, "
+          "asserted both tight and broad fail; the hooks plugin surface (C5) verifies when present, "
+          "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
+          "orphan, or an orphaned surface with no source; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
-          "(standards, core rules, generated families, and the .aiqt/.claude/.github parents), and a bad "
-          "--root fail closed" + skip_note)
+          "(standards, core rules, generated families, the .aiqt/.claude/.github parents, and the plugin "
+          "hooks subtree), and a bad --root fail closed" + skip_note)
     return 0
 
 

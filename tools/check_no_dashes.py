@@ -28,6 +28,14 @@ def main() -> int:
         std_dir = root / ".aiqt" / "standards"
         if dir_present(std_dir):  # raises on an unreadable .aiqt parent -> caught below as exit 2
             paths += sorted(walk_files(std_dir, suffixes={".toml"}))
+        # The shipped enforcement-hook files: the generated plugin surface and the .aiqt/core/hooks/
+        # source (its .py dispatcher, manifest .toml, and any .json). These are product/enforcement
+        # text, so the no-dash rule applies to them too. Present-guarded (absent -> skip), and
+        # fail-closed on an unreadable dir: dir_present raises on an unreadable parent and walk_files
+        # raises on an unlistable subtree, both caught below as exit 2.
+        for hook_dir in (root / "plugin", root / ".aiqt" / "core" / "hooks"):
+            if dir_present(hook_dir):
+                paths += sorted(walk_files(hook_dir, SKIP_DIRS, suffixes={".py", ".json", ".toml"}))
         # The generated root NOTICE and its attribution source are pack-authoring artefacts an adopter
         # may not vendor, so guard on existence: absent = skip, present = scan. os.stat raises EACCES on
         # an unreadable file (unlike exists()/is_file(), which swallow it), so a present-but-unreadable
