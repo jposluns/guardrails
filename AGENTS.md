@@ -72,6 +72,14 @@ integrate it only when its checks pass. What lands on the protected line is the 
 never a work in progress. On git the usual form is a feature branch and a pull request merged on green;
 the mechanism varies, the gate does not.
 
+## A check fails closed on input it cannot read
+
+A gate, validator, scan, or traversal that cannot access, read, or list an input it is meant to cover
+reports that as a failure, never as an absent, empty, or clean input. An operation that silently yields
+nothing on a permission or I/O error, a glob or a listing that returns empty, or an existence check that
+returns false, is made to surface the error, so an unreadable input can never read as nothing to check
+and pass.
+
 ## Commit identity
 
 A recorded change carries the human maintainer's own identity as its author, with no AI listed as author,
