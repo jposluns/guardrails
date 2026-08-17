@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# Least-privilege authorization
+
+Code the assistant writes and operations it performs enforce least-privilege authorization, checked at every
+access rather than inferred from an earlier step. Verification happens at the object, function, and property
+level on each request: a write binds only to an explicit allow-list of fields, so a caller can never reach
+data or actions, nor set a protected field through mass assignment, beyond what its own rights permit.

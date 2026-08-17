@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+
+# Validate an inferred premise before acting
+
+Validate an inferred premise before taking an action that depends on it.

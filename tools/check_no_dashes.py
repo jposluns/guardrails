@@ -23,7 +23,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     findings = []
     try:
-        paths = sorted(walk_files(root, SKIP_DIRS, suffixes={".md"}))
+        paths = sorted(walk_files(root, SKIP_DIRS, suffixes={".md", ".mdc"}))
         std_dir = root / ".aiqt" / "standards"
         if dir_present(std_dir):  # raises on an unreadable .aiqt parent -> caught below as exit 2
             paths += sorted(walk_files(std_dir, suffixes={".toml"}))

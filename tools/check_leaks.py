@@ -28,7 +28,7 @@ from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not 
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"leak-hashes.txt"}
-TEXT_SUFFIXES = {".md", ".py", ".sh", ".yml", ".yaml", ".toml", ".json", ".txt",
+TEXT_SUFFIXES = {".md", ".mdc", ".py", ".sh", ".yml", ".yaml", ".toml", ".json", ".txt",
                  ".html", ".css", ".js", ".cfg", ".ini", ".conf", ".svg"}
 
 _OCT = r'(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
