@@ -179,6 +179,12 @@ requiring express authorization before execution.
 Every substantive change carries a record of what changed, when, and why, tied to the version it shipped in.
 Backlog item numbers are permanent and never reused, even when a change is later reverted or superseded.
 
+## Change record has a curated public face
+
+A change record's public surface, produced only when the change is release-significant, is a slim
+derivative generated from the private record, never authored independently of it, so the two cannot drift
+apart. A change with no public significance surfaces nowhere but the private record.
+
 ## Clarify before acting
 
 When a request has more than one reasonable reading, or needs an external value it does not pin down,
