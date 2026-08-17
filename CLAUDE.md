@@ -34,6 +34,7 @@ and both are drift-gated in CI.
 - [Read before characterizing](.claude/rules/aiqt/10-ACCUR-read-before-characterizing.md)
 - [Capture the reference when the claim is made](.claude/rules/aiqt/10-ACCUR-reference-capture.md)
 - [Validate an inferred premise before acting](.claude/rules/aiqt/10-ACCUR-validate-inference-before-action.md)
+- [Verify a fix is in its commit](.claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md)
 
 **Integrity**
 - [Anything wrong is fixed first](.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md)
@@ -42,6 +43,7 @@ and both are drift-gated in CI.
 - [Commit identity](.claude/rules/aiqt/10-INTEG-commit-identity.md)
 - [Gate discipline](.claude/rules/aiqt/10-INTEG-gate-discipline.md)
 - [No concealed failure](.claude/rules/aiqt/10-INTEG-no-concealed-failure.md)
+- [Preserve uncommitted work](.claude/rules/aiqt/10-INTEG-preserve-uncommitted-work.md)
 - [Protected-branch integrity](.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md)
 - [Validation is a gate on apply](.claude/rules/aiqt/10-INTEG-validation-gates-apply.md)
 - [Workers produce inert data](.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md)

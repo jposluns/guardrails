@@ -55,6 +55,7 @@ run_gate "adapters-drift"  python3 tools/gen_adapters.py --check
 run_gate "cursor-drift"  python3 tools/gen_cursor.py --check
 run_gate "hooks-selftest" python3 tools/gen_hooks.py --self-test
 run_gate "hooks-drift"    python3 tools/gen_hooks.py --check
+run_gate "hooks-behaviour-selftest" python3 tools/selftest_aiqt_hooks.py
 run_gate "skill-drift"     python3 tools/gen_skill.py --check
 run_gate "skill-selftest"  python3 tools/gen_skill.py --self-test
 run_gate "placement"      python3 tools/check_rule_placement.py

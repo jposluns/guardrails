@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""AIQT Guardrails enforcement hooks for Claude Code. Stdlib only, offline.
+"""AIQT Guardrails enforcement hooks for Claude Code. Stdlib only. Offline: every control is a lexical
+scan, except git_discard, which runs one local, offline `git status` subprocess as its guard probe.
 
 SOURCE tree copy: this file lives at .aiqt/core/hooks/scripts/aiqt_hooks.py and is copied
 byte-identical into the generated plugin surface plugin/aiqt-guardrails-hooks/hooks/scripts/
@@ -10,6 +11,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
+  git_discard         PreToolUse  prsunc  block a git command that discards uncommitted tracked work
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -43,6 +45,7 @@ a bad invocation.
 import json
 import re
 import shlex
+import subprocess
 import sys
 
 PRETOOL = "PreToolUse"
@@ -712,12 +715,191 @@ def absolute_paths(data):
     return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
 
 
+# --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
+# DELIBERATELY FAIL-OPEN, UNLIKE the other PreToolUse controls (which fail closed): per its rule a guard
+# that traps the actor on its own doubt gets disabled, so this one blocks ONLY a git discard it can
+# confirm is lossy and ALLOWS on every doubt (an unreadable/unparseable command, an undeterminable repo,
+# any git-status error). It is a self-inflicted-fix-loss convenience guard, not a security control. It is
+# quote-aware segmented (the shared _segments) and matches three whole-file discard shapes on a git
+# segment: checkout with a '--' pathspec separator, restore that touches the worktree, and reset --hard.
+# Before blocking it runs a local, offline `git status --porcelain` and blocks only when a TRACKED
+# modification or staged change is reported for the target (an untracked '??'/ignored '!!' path never
+# blocks). An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment anywhere in the command opts out. It
+# does NOT assert anything is clean, so it does not contradict integ-check-fails-closed-on-unreadable
+# (which governs a coverage check that would otherwise pass an unreadable input as clean).
+_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.+)$")
+_DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
+
+
+def _has_discard_optout(segments):
+    """True when any token in any segment is a truthy GUARDRAIL_ALLOW_DISCARD assignment, the explicit
+    opt-out that leaves a trace in the command text. A value in {'', '0', 'false', 'no', 'off'}
+    (case-insensitive) is NOT truthy; a bare 'GUARDRAIL_ALLOW_DISCARD=' (no value) does not match at all."""
+    for tokens, _sep in segments:
+        for tok in tokens:
+            m = _DISCARD_OPTOUT_RE.match(tok)
+            if m and m.group(1).lower() not in _DISCARD_FALSY:
+                return True
+    return False
+
+
+def _git_sub_and_args(tokens):
+    """Like _git_subcommand but returns (sub, args): the git subcommand and the token list AFTER it, or
+    (None, []) when there is no subcommand. Reuses the _command_word_index skip of leading env
+    assignments and the _GIT_ARG_OPTS skip, so a '-C DIR' value is never mistaken for the subcommand."""
+    i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
+    n = len(tokens)
+    while i < n:
+        token = tokens[i]
+        if token.startswith("-"):
+            if "=" not in token and token in _GIT_ARG_OPTS:
+                i += 2
+            else:
+                i += 1
+            continue
+        return token, tokens[i + 1:]
+    return None, []
+
+
+def _discard_shape(tokens):
+    """The whole-file discard shape of a git segment (the caller has confirmed the command word is git),
+    as (kind, paths), or None when it is not a discard. checkout: a discard only with a '--' pathspec
+    separator ('git checkout -- <paths>', 'git checkout <ref> -- <paths>'); paths are the tokens after
+    the FIRST '--'. A 'git checkout <branch>' or '-b' (a branch switch/create) and a 'git checkout <path>'
+    with no '--' (ambiguous with a branch name) are NOT discards. restore: touches the worktree unless it
+    is staged-only ('--staged'/'-S' with no '--worktree'/'-W'), so 'git restore --staged <path>' (unstage
+    only) is NOT matched; paths are the non-option tokens. reset: a discard only with '--hard' (a reset
+    without it keeps the worktree); the whole tree is the target, so paths is None. git stash is out of
+    scope (recoverable)."""
+    sub, args = _git_sub_and_args(tokens)
+    if sub == "checkout":
+        if "--" in args:
+            return ("checkout", args[args.index("--") + 1:])
+        return None
+    if sub == "restore":
+        has_staged = "--staged" in args or "-S" in args
+        has_worktree = "--worktree" in args or "-W" in args
+        if (not has_staged) or has_worktree:
+            paths = [a for a in args if not a.startswith("-") and a != "--"]
+            return ("restore", paths)
+        return None
+    if sub == "reset":
+        if "--hard" in args:
+            return ("reset-hard", None)
+        return None
+    return None
+
+
+def _discard_repo_dir(tokens):
+    """The worktree the discard would act on: the value of the LAST '-C' global option (space form
+    '-C DIR' -> the next token; attached form '-C<dir>' -> the suffix), else '.' (the invocation cwd).
+    A '--git-dir' is the git dir, not the worktree, so it is ignored; only '-C' selects the worktree cwd.
+    Kept deliberately simple; the handler's fail-open probe covers any oddity."""
+    repo = "."
+    i = _command_word_index(tokens) + 1  # after the command word; global options precede the subcommand
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "-C" and i + 1 < n:
+            repo = tokens[i + 1]
+            i += 2
+            continue
+        if tok.startswith("-C") and len(tok) > 2:
+            repo = tok[2:]
+        i += 1
+    return repo
+
+
+def _discard_would_lose_work(repo, kind, paths):
+    """The tracked paths a discard would lose, or [] when it would lose nothing (or cannot be confirmed).
+    Runs a local, offline 'git -C <repo> status --porcelain' (for reset-hard, the whole tree) or the same
+    scoped to '-- <paths...>' (for checkout/restore). NEVER raises: every error path (a subprocess or repo
+    failure, a non-zero return, a checkout/restore with no named paths) returns [], the fail-open posture.
+    An untracked '??' or ignored '!!' line is skipped (these commands do not discard it); any other line
+    is a tracked staged/worktree change and its path is collected (a rename's post-'-> ' path)."""
+    try:
+        cmd = ["git", "-C", repo, "status", "--porcelain"]
+        if kind in ("checkout", "restore"):
+            if not paths:  # nothing named: fail open, do not probe the whole tree
+                return []
+            cmd.append("--")
+            cmd.extend(paths)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return []
+        lost = []
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            code = line[:2]
+            if code in ("??", "!!"):
+                continue
+            path = line[3:]
+            if " -> " in path:  # a rename 'R  old -> new': the surviving name is after the arrow
+                path = path.split(" -> ", 1)[1]
+            lost.append(path)
+        return lost
+    except Exception:
+        return []
+
+
+def git_discard(data):
+    """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. DELIBERATE fail-OPEN convenience guard,
+    UNLIKE the other PreToolUse controls (which fail closed): per its rule, a guard that traps the actor
+    on its own doubt gets disabled, so it blocks ONLY a discard it can confirm is lossy and allows on
+    every doubt. It is a self-inflicted-fix-loss integrity guard, not a security control, and it does not
+    assert anything is clean (so it does not contradict integ-check-fails-closed-on-unreadable, which
+    governs a coverage check that would otherwise pass an unreadable input as clean)."""
+    if data.get("hook_event_name") != PRETOOL:
+        # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
+        return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name != "Bash":
+        return _allow()  # missing/other tool: allow (fail open, unlike the siblings' fail-closed posture)
+    command = (data.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        return _allow()  # unreadable command: fail OPEN
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _allow()  # unparseable: fail OPEN, no raw-string discard scan
+    if _has_discard_optout(segments):
+        return _allow()  # GUARDRAIL_ALLOW_DISCARD truthy anywhere
+    for tokens, _sep in segments:
+        if _command_word(tokens) != "git":
+            continue
+        shape = _discard_shape(tokens)
+        if shape is None:
+            continue
+        kind, paths = shape
+        repo = _discard_repo_dir(tokens)
+        lost = _discard_would_lose_work(repo, kind, paths)  # a list of lost paths, or []; never raises
+        if lost:
+            files = "the working tree" if kind == "reset-hard" else ", ".join(sorted(set(lost)))
+            reason = (
+                "AIQT rule prsunc (preserve-uncommitted-work): this command discards uncommitted changes "
+                "in {}, which would also delete any fix you have applied but not yet committed (the "
+                "mutation-testing fix-loss: reverting a temporary change reverts the whole file and drops "
+                "the real fix with it). Do one of: (1) commit the fix first, then re-run this to revert "
+                "the mutation, so the revert restores the committed fix; (2) revert only the mutated lines "
+                "surgically, not the whole file; (3) git stash to shelve the fix, reset, then git stash "
+                "pop. After any commit that claims a fix landed, verify it with git show <sha> --stat plus "
+                "a grep of the committed content before writing 'fixed'. To override this guard for a "
+                "known-safe discard, prefix the command with GUARDRAIL_ALLOW_DISCARD=1.".format(files))
+            return _deny(reason,
+                         "AIQT guardrail: blocked a git command that would discard uncommitted work "
+                         "(rule prsunc). Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
+    return _allow()
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
     "diff_source_pretool": diff_source_pretool,
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
+    "git_discard": git_discard,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -731,6 +913,7 @@ HANDLER_EVENT = {
     "diff_source_pretool": PRETOOL,
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
+    "git_discard": PRETOOL,
 }
 
 

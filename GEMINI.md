@@ -59,6 +59,10 @@ unsourced, whatever confidence backs it.
 
 Validate an inferred premise before taking an action that depends on it.
 
+## Verify a fix is in its commit
+
+Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state. A commit message that asserts a fix, with no matching change in the commit, is an inaccurate record; verify the artefact before the claim.
+
 ## Anything wrong is fixed first
 
 When something is wrong and within reach to fix, fix it rather than explaining at length why it is wrong.
@@ -96,6 +100,10 @@ understand why it failed before considering any override.
 
 A failing state is surfaced, never concealed. No stubbed, mocked, or simulated result is presented as
 finished, and no error is hidden, swallowed, or downgraded to make a result look clean.
+
+## Preserve uncommitted work
+
+A command that reverts a file to its committed state discards every uncommitted change in it, including a real fix that has not been committed yet. When undoing a temporary or experimental change, revert only those specific lines, or commit the genuine change first; never blind-revert a whole file (git checkout -- <path>, git restore <path>, git reset --hard) whose uncommitted work you still need. A discard is safe only once the work you intend to keep is already committed or independently saved.
 
 ## Protected-branch integrity
 
