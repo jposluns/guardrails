@@ -11,7 +11,7 @@ map-iso-23894: [A.8, A.11]
 map-owasp-web: [A04]
 map-owasp-asvs: [V11, V12]
 map-owasp-proactive: [C2]
-map-owasp-cheatsheet: [transport-layer-security]
+map-owasp-cheatsheet: [cryptographic-storage, transport-layer-security]
 ---
 
 # Sound cryptography

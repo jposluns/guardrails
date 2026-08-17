@@ -11,7 +11,6 @@ map-atlas: [AML.T0053, AML.T0081, AML.T0086, AML.T0101]
 map-iso-42001: [A.9.2]
 map-iso-23894: [A.2, A.10, B.4]
 map-owasp-llm: [LLM03]
-map-owasp-asi: [ASI01]
 ---
 
 # Human authorization for consequential actions
