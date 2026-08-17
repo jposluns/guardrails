@@ -24,7 +24,7 @@ import os
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 EN, EM = "–", "—"
 SITE_HOSTS = {"aiqt.ai", "www.aiqt.ai"}
@@ -92,7 +92,9 @@ class Page(HTMLParser):
         if d.get("id"):
             self.ids.add(d["id"])
             self.id_list.append((d["id"], self.getpos()[0]))
-        if d.get("name"):
+        # Only <a name="..."> is a fragment-navigable anchor target; a `name` on any other element
+        # (input/meta/form/param/...) is not, so registering those would let a broken #anchor pass.
+        if tag == "a" and d.get("name"):
             self.ids.add(d["name"])
         if tag == "title":
             self.title_present = True
@@ -112,12 +114,10 @@ class Page(HTMLParser):
             self.handle_starttag(tag, attrs)   # extract href/src/id; void is not pushed on the stack
             return
         if tag in SUSPEND_ROOTS:
-            d = dict(attrs)                    # <svg id=.. />: register id/name, but do not enter suspension
-            if d.get("id"):
+            d = dict(attrs)                    # <svg id=.. />: register id, but do not enter suspension.
+            if d.get("id"):                    # (name on svg/math/textarea is not an <a> anchor target)
                 self.ids.add(d["id"])
                 self.id_list.append((d["id"], self.getpos()[0]))
-            if d.get("name"):
-                self.ids.add(d["name"])
             return
         # a non-void HTML element with a trailing slash is NOT self-closed (the parser ignores the
         # slash), so <div/> is an open <div> that must be closed later.
@@ -180,14 +180,18 @@ def resolve_link(base, path, site_root):
 
 
 def classify(v):
+    # urlsplit does not percent-decode. The PATH is unquoted so an encoded link (my%20page.html) resolves
+    # against the real file "my page.html". The FRAGMENT is returned RAW: HTML fragment navigation matches
+    # an id equal to the raw fragment FIRST, then the percent-decoded form, so the anchor check tries both
+    # (see main()). Unquoting the fragment here unconditionally would drop the raw-match case.
     parts = urlsplit(v)
     if parts.scheme:
         if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in SITE_HOSTS:
-            return parts.path, parts.fragment
+            return unquote(parts.path), parts.fragment
         return None
     if parts.netloc:
         return None
-    return parts.path, parts.fragment
+    return unquote(parts.path), parts.fragment
 
 
 def main():
@@ -254,7 +258,9 @@ def main():
                 anchor_key = str(target)
             if frag:
                 ids = ids_by_path.get(anchor_key)
-                if ids is not None and frag not in ids:
+                # Match the id against the RAW fragment first, then its percent-decoded form, mirroring
+                # HTML fragment navigation (raw match, else decoded match).
+                if ids is not None and frag not in ids and unquote(frag) not in ids:
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
     if findings:
         print("FAIL: {} site-integrity issue(s)".format(len(findings)))
