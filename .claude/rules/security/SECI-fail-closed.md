@@ -11,5 +11,5 @@ map-owasp-cheatsheet: [error-handling]
 # Fail closed in security-relevant paths
 
 An exception or error in an authentication, authorization, validation, or cryptographic check leaves the
-system in the deny or otherwise safe state. The error is surfaced for handling and investigation, never
-swallowed into a default-allow path or treated as if the check had passed.
+system in the deny or otherwise safe state. A failed, unavailable, or unreadable check is treated as not
+passed, never as a default-allow.
