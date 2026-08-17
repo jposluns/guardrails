@@ -103,7 +103,7 @@ finished, and no error is hidden, swallowed, or downgraded to make a result look
 
 ## Preserve uncommitted work
 
-A command that reverts a file to its committed state discards every uncommitted change in it, including a real fix that has not been committed yet. When undoing a temporary or experimental change, revert only those specific lines, or commit the genuine change first; never blind-revert a whole file (git checkout -- <path>, git restore <path>, git reset --hard) whose uncommitted work you still need. A discard is safe only once the work you intend to keep is already committed or independently saved.
+A command that reverts a file drops uncommitted changes in it. git checkout -- <path> and git restore <path> overwrite the working tree from the index or a commit, discarding your unstaged edits; git reset --hard drops both staged and unstaged changes. Any of them can throw away a real fix you have applied but not yet committed. When undoing a temporary or experimental change, revert only those specific lines, or commit the genuine change first; never blind-revert a whole file whose uncommitted work you still need. A discard is safe only once the work you intend to keep is committed or independently saved.
 
 ## Protected-branch integrity
 

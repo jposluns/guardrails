@@ -75,6 +75,9 @@ def main():
             tracked = repo / "file.txt"
             tracked.write_text("committed line\n", encoding="utf-8")
             _git(repo, "add", "file.txt")
+            # A second committed file that stays untouched, so a clean pathspec probe is deterministic.
+            (repo / "clean.txt").write_text("clean line\n", encoding="utf-8")
+            _git(repo, "add", "clean.txt")
             _git(repo, "commit", "-q", "-m", "seed", env_identity=True)
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the throwaway repo: {}".format(exc), file=sys.stderr)
@@ -104,6 +107,53 @@ def main():
         expect("(g) unparseable allows", 'git -C {} checkout -- "unbalanced'.format(rp), "allow")
         # (h) a non-git command ALLOWS.
         expect("(h) non-git allows", "ls -la {}".format(rp), "allow")
+
+        # --- FIX 1/2/3/4 regression cases ---------------------------------------------------------
+        # file.txt is currently worktree-dirty (unstaged). Confirm the worktree-only discard still
+        # BLOCKS, then stage the change and re-test the staged-only distinction.
+        expect("(ii) worktree-dirty checkout -- blocks",
+               "git -C {} checkout -- file.txt".format(rp), "deny")
+        _git(repo, "add", "file.txt")  # now staged-only: index differs, worktree matches index
+        # (i) FIX 4: a worktree-only discard (checkout -- with no ref) restores from the index and
+        # PRESERVES the staged change, so a staged-only change ALLOWS.
+        expect("(i) staged-only checkout -- allows",
+               "git -C {} checkout -- file.txt".format(rp), "allow")
+        # (iii) FIX 4: a ref-based checkout rewrites the index too, so a staged-only change BLOCKS.
+        expect("(iii) staged-only checkout <ref> -- blocks",
+               "git -C {} checkout HEAD -- file.txt".format(rp), "deny")
+
+        # (iv) FIX 3: --pathspec-from-file reads the pathspecs from the referenced file.
+        tracked.write_text("committed line\nuncommitted fix\nmore\n", encoding="utf-8")  # worktree-dirty
+        pff_dirty = tmp / "pff-dirty.txt"
+        pff_dirty.write_text("file.txt\n", encoding="utf-8")
+        expect("(iv) restore --pathspec-from-file dirty blocks",
+               "git -C {} restore --pathspec-from-file={}".format(rp, pff_dirty), "deny")
+        pff_clean = tmp / "pff-clean.txt"
+        pff_clean.write_text("clean.txt\n", encoding="utf-8")
+        expect("(iv) restore --pathspec-from-file clean allows",
+               "git -C {} restore --pathspec-from-file={}".format(rp, pff_clean), "allow")
+
+        # (v) FIX 1: a malformed tool_input (a string, not a dict) must ALLOW (fail OPEN), not crash.
+        malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
+        code, stdout_obj, _stderr = handler(malformed)
+        if not (code == 0 and stdout_obj is None):
+            failures.append("(v) malformed tool_input: expected allow, got code={!r}, stdout={!r}"
+                            .format(code, stdout_obj))
+
+        # (vi) FIX 2: chained '-C <outer> -C inner' resolves cumulatively to the inner repo; a dirty
+        # inner worktree BLOCKS.
+        outer = tmp / "outer"
+        inner = outer / "inner"
+        inner.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(inner)],
+                       check=True, capture_output=True, text=True, timeout=30)
+        inner_file = inner / "f.txt"
+        inner_file.write_text("base\n", encoding="utf-8")
+        _git(inner, "add", "f.txt")
+        _git(inner, "commit", "-q", "-m", "seed", env_identity=True)
+        inner_file.write_text("base\ndirty\n", encoding="utf-8")  # worktree-dirty inner repo
+        expect("(vi) chained -C inner dirty blocks",
+               "git -C {} -C inner checkout -- f.txt".format(str(outer)), "deny")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -113,8 +163,10 @@ def main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: git_discard blocks a confirmed-lossy checkout/restore/reset --hard, honours "
-          "the GUARDRAIL_ALLOW_DISCARD opt-out, and fails open on a branch switch, a staged-only restore, "
-          "an unparseable command, and a non-git command")
+          "the GUARDRAIL_ALLOW_DISCARD opt-out, distinguishes a staged-only change (worktree-only discard "
+          "allows, ref-based checkout blocks), reads a --pathspec-from-file source, resolves chained -C "
+          "cumulatively, and fails open on a branch switch, a staged-only restore, an unparseable "
+          "command, a malformed tool_input, and a non-git command")
     return 0
 
 

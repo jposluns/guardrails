@@ -11,7 +11,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
-  git_discard         PreToolUse  prsunc  block a git command that discards uncommitted tracked work
+  git_discard         PreToolUse  prsunc  block a git command that discards uncommitted tracked work (fail-OPEN)
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -26,6 +26,14 @@ to cover, or is invoked in a context it does not understand, DENIES rather than 
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
 string, or an unreadable required field all deny. A detected violation denies the same way. A clean
 pass emits NO decision and exits 0 silently.
+
+git_discard (prsunc) is a DELIBERATE, documented fail-OPEN exception to that PreToolUse posture (like
+the Stop-layer exception above, but for a different reason): it is a self-inflicted-fix-loss convenience
+guard, not a security control, so it BLOCKS only a discard it can confirm is lossy and ALLOWS on every
+doubt (a missing/other tool, an unreadable command, an unparseable command, an undeterminable repo, or
+any git-status error), because a guard that traps the actor on its own malfunction gets disabled. It
+never asserts an input is CLEAN, so it does not contradict integ-check-fails-closed-on-unreadable, which
+governs a coverage check that would otherwise pass an unreadable input as clean.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
@@ -43,6 +51,7 @@ exit 2, and only a genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable br
 a bad invocation.
 """
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -761,69 +770,159 @@ def _git_sub_and_args(tokens):
     return None, []
 
 
+def _pathspec_from_file(args):
+    """(pff, nul) for a checkout/restore arg list: pff is the value of '--pathspec-from-file=<f>' or its
+    space form '--pathspec-from-file <f>' (None when absent), and nul is True when '--pathspec-file-nul'
+    is present (the file is NUL-separated rather than newline-separated). When pff is set, git reads the
+    pathspecs from that file instead of the command line."""
+    pff = None
+    nul = False
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a == "--pathspec-file-nul":
+            nul = True
+        elif a.startswith("--pathspec-from-file="):
+            pff = a.split("=", 1)[1]
+        elif a == "--pathspec-from-file" and i + 1 < n:
+            pff = args[i + 1]
+            i += 2
+            continue
+        i += 1
+    return pff, nul
+
+
+def _checkout_affects_index(args):
+    """True when a checkout carries a ref before its pathspecs, so it rewrites the INDEX as well as the
+    worktree ('git checkout <ref> -- <paths>'); False for the index-preserving 'git checkout -- <paths>'.
+    A ref is a non-option token before the first '--' (or, in the pathspec-from-file form with no '--',
+    a non-option token that is not the space-form value of '--pathspec-from-file')."""
+    head = args[:args.index("--")] if "--" in args else args
+    i = 0
+    n = len(head)
+    while i < n:
+        a = head[i]
+        if a == "--pathspec-from-file" and i + 1 < n:
+            i += 2  # skip the option and its space-form value, which is not a ref
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        return True  # a bare token: a ref
+    return False
+
+
 def _discard_shape(tokens):
     """The whole-file discard shape of a git segment (the caller has confirmed the command word is git),
-    as (kind, paths), or None when it is not a discard. checkout: a discard only with a '--' pathspec
-    separator ('git checkout -- <paths>', 'git checkout <ref> -- <paths>'); paths are the tokens after
-    the FIRST '--'. A 'git checkout <branch>' or '-b' (a branch switch/create) and a 'git checkout <path>'
-    with no '--' (ambiguous with a branch name) are NOT discards. restore: touches the worktree unless it
-    is staged-only ('--staged'/'-S' with no '--worktree'/'-W'), so 'git restore --staged <path>' (unstage
-    only) is NOT matched; paths are the non-option tokens. reset: a discard only with '--hard' (a reset
-    without it keeps the worktree); the whole tree is the target, so paths is None. git stash is out of
-    scope (recoverable)."""
+    as a dict {"kind", "paths", "affects_index", "pff", "nul"}, or None when it is not a discard.
+    checkout: a discard with a '--' pathspec separator ('git checkout -- <paths>', 'git checkout <ref>
+    -- <paths>'; paths are the tokens after the FIRST '--') OR with a '--pathspec-from-file' source (the
+    paths then come from a file, so command-line paths are []). A 'git checkout <branch>' or '-b' (a
+    branch switch/create) and a 'git checkout <path>' with no '--' and no pathspec-from-file (ambiguous
+    with a branch name) are NOT discards. restore: touches the worktree unless it is staged-only
+    ('--staged'/'-S' with no '--worktree'/'-W'), so 'git restore --staged <path>' (unstage only) is NOT
+    matched; paths are the non-option tokens. reset: a discard only with '--hard' (a reset without it
+    keeps the worktree); the whole tree is the target, so paths is None. git stash is out of scope
+    (recoverable). affects_index says whether the form ALSO rewrites the index (see FIX 4): checkout with
+    a ref, restore --staged, and reset --hard do; a bare checkout '--' and a default/worktree restore do
+    not. pff/nul carry a '--pathspec-from-file' source so the probe can read the paths from that file."""
     sub, args = _git_sub_and_args(tokens)
     if sub == "checkout":
+        pff, nul = _pathspec_from_file(args)
         if "--" in args:
-            return ("checkout", args[args.index("--") + 1:])
+            return {"kind": "checkout", "paths": args[args.index("--") + 1:],
+                    "affects_index": _checkout_affects_index(args), "pff": pff, "nul": nul}
+        if pff is not None:  # pathspecs from a file, no '--': still a discard, paths come from the file
+            return {"kind": "checkout", "paths": [],
+                    "affects_index": _checkout_affects_index(args), "pff": pff, "nul": nul}
         return None
     if sub == "restore":
         has_staged = "--staged" in args or "-S" in args
         has_worktree = "--worktree" in args or "-W" in args
         if (not has_staged) or has_worktree:
+            pff, nul = _pathspec_from_file(args)
             paths = [a for a in args if not a.startswith("-") and a != "--"]
-            return ("restore", paths)
+            return {"kind": "restore", "paths": paths, "affects_index": has_staged,
+                    "pff": pff, "nul": nul}
         return None
     if sub == "reset":
         if "--hard" in args:
-            return ("reset-hard", None)
+            return {"kind": "reset-hard", "paths": None, "affects_index": True, "pff": None, "nul": False}
         return None
     return None
 
 
+def _join_repo(base, value):
+    """Combine a '-C' selector with the directory selected so far, the way git chains multiple -C: an
+    absolute value resets, a relative value is taken relative to the base selected up to this point."""
+    return value if os.path.isabs(value) else os.path.join(base, value)
+
+
 def _discard_repo_dir(tokens):
-    """The worktree the discard would act on: the value of the LAST '-C' global option (space form
-    '-C DIR' -> the next token; attached form '-C<dir>' -> the suffix), else '.' (the invocation cwd).
-    A '--git-dir' is the git dir, not the worktree, so it is ignored; only '-C' selects the worktree cwd.
-    Kept deliberately simple; the handler's fail-open probe covers any oddity."""
+    """The worktree the discard would act on, from the '-C' global options that PRECEDE the subcommand.
+    The scan runs only over the global-option region (it stops at the first non-option token, which is
+    the subcommand, and never reads a pathspec after it), and it accumulates multiple '-C' selectors
+    CUMULATIVELY as git does (each is relative to the directory selected so far; an absolute value
+    resets). Default '.' (the invocation cwd). A '--git-dir' is the git dir, not the worktree, so it is
+    ignored; only '-C' selects the worktree cwd. The handler's fail-open probe covers any oddity."""
     repo = "."
     i = _command_word_index(tokens) + 1  # after the command word; global options precede the subcommand
     n = len(tokens)
     while i < n:
         tok = tokens[i]
         if tok == "-C" and i + 1 < n:
-            repo = tokens[i + 1]
+            repo = _join_repo(repo, tokens[i + 1])
             i += 2
             continue
-        if tok.startswith("-C") and len(tok) > 2:
-            repo = tok[2:]
-        i += 1
+        if tok.startswith("-C") and len(tok) > 2:  # attached form '-C<dir>'
+            repo = _join_repo(repo, tok[2:])
+            i += 1
+            continue
+        if tok.startswith("-"):  # another global option: skip its value too if it consumes one
+            i += 2 if ("=" not in tok and tok in _GIT_ARG_OPTS) else 1
+            continue
+        break  # reached the subcommand; global options end here, never scan pathspecs after it
     return repo
 
 
-def _discard_would_lose_work(repo, kind, paths):
+def _discard_would_lose_work(repo, shape):
     """The tracked paths a discard would lose, or [] when it would lose nothing (or cannot be confirmed).
     Runs a local, offline 'git -C <repo> status --porcelain' (for reset-hard, the whole tree) or the same
     scoped to '-- <paths...>' (for checkout/restore). NEVER raises: every error path (a subprocess or repo
-    failure, a non-zero return, a checkout/restore with no named paths) returns [], the fail-open posture.
-    An untracked '??' or ignored '!!' line is skipped (these commands do not discard it); any other line
-    is a tracked staged/worktree change and its path is collected (a rename's post-'-> ' path)."""
+    failure, a non-zero return, a checkout/restore with no probe paths, an unreadable pathspec file)
+    returns [], the fail-open posture. An untracked '??' or ignored '!!' line is skipped (these commands
+    do not discard it). Whether a remaining line is a loss depends on which columns the form rewrites
+    (shape['affects_index'], set in _discard_shape): a form that rewrites the index too (a ref-based
+    checkout, a --staged --worktree restore, reset --hard) loses on EITHER porcelain column (X or Y), so a
+    staged-only change counts; a worktree-only form (a bare checkout '--', a default/worktree restore)
+    loses only when the WORKTREE column (Y) shows a change, so a staged-only change does NOT block. When a
+    '--pathspec-from-file' source is set, the probe paths are read from that file (git forbids combining
+    it with command-line pathspecs); '-' (stdin) or an unreadable file falls open. A rename's post-'-> '
+    path is the surviving name."""
+    kind = shape["kind"]
+    affects_index = shape["affects_index"]
+    pff = shape.get("pff")
+    nul = shape.get("nul", False)
     try:
+        probe_paths = shape["paths"]
+        if kind in ("checkout", "restore"):
+            if pff is not None:
+                if pff == "-":
+                    return []  # pathspecs from stdin: cannot read, fail OPEN
+                # git forbids combining --pathspec-from-file with command-line pathspecs, so the file is
+                # the sole source; read it relative to the process cwd (an unreadable file raises and the
+                # surrounding except fails OPEN).
+                with open(pff, "r", encoding="utf-8") as handle:
+                    raw = handle.read()
+                probe_paths = [p.strip() for p in raw.split("\0" if nul else "\n")]
+                probe_paths = [p for p in probe_paths if p]
+            if not probe_paths:  # nothing named: fail open, do not probe the whole tree
+                return []
         cmd = ["git", "-C", repo, "status", "--porcelain"]
         if kind in ("checkout", "restore"):
-            if not paths:  # nothing named: fail open, do not probe the whole tree
-                return []
             cmd.append("--")
-            cmd.extend(paths)
+            cmd.extend(probe_paths)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             return []
@@ -833,6 +932,10 @@ def _discard_would_lose_work(repo, kind, paths):
                 continue
             code = line[:2]
             if code in ("??", "!!"):
+                continue
+            x, y = code[0], code[1]
+            is_loss = (x != " " or y != " ") if affects_index else (y != " ")
+            if not is_loss:
                 continue
             path = line[3:]
             if " -> " in path:  # a rename 'R  old -> new': the surviving name is after the arrow
@@ -857,9 +960,10 @@ def git_discard(data):
     tool_name = data.get("tool_name")
     if tool_name != "Bash":
         return _allow()  # missing/other tool: allow (fail open, unlike the siblings' fail-closed posture)
-    command = (data.get("tool_input") or {}).get("command")
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
-        return _allow()  # unreadable command: fail OPEN
+        return _allow()  # unreadable/malformed command container: fail OPEN
     try:
         segments = _segments(command)
     except ValueError:
@@ -872,11 +976,10 @@ def git_discard(data):
         shape = _discard_shape(tokens)
         if shape is None:
             continue
-        kind, paths = shape
         repo = _discard_repo_dir(tokens)
-        lost = _discard_would_lose_work(repo, kind, paths)  # a list of lost paths, or []; never raises
+        lost = _discard_would_lose_work(repo, shape)  # a list of lost paths, or []; never raises
         if lost:
-            files = "the working tree" if kind == "reset-hard" else ", ".join(sorted(set(lost)))
+            files = "the working tree" if shape["kind"] == "reset-hard" else ", ".join(sorted(set(lost)))
             reason = (
                 "AIQT rule prsunc (preserve-uncommitted-work): this command discards uncommitted changes "
                 "in {}, which would also delete any fix you have applied but not yet committed (the "
