@@ -46,6 +46,7 @@ run_gate "links"     python3 tools/check_links.py
 run_gate "site"      python3 tools/check_site.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
+run_gate "versions"        python3 tools/check_versions.py
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
