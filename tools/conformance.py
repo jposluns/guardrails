@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
-from _standards import load_manifests, map_keys, natkey, ensure_listable, ManifestError  # noqa: E402
+from _standards import load_manifests, map_keys, natkey, ManifestError  # noqa: E402
 
 
 # Status constants for a single check's outcome.
@@ -64,6 +64,12 @@ class Result:
         self.label = label
         self.status = status
         self.detail = detail
+
+
+def _walk_raise(exc):
+    """os.walk onerror callback that re-raises, so an unreadable dir at any depth fails closed instead
+    of being silently skipped (os.walk, like rglob, ignores traversal errors by default)."""
+    raise exc
 
 
 def _corpus_src(root):
@@ -133,15 +139,16 @@ def _claude_drift(root, corpus):
         for family in ("aiqt", "security"):
             fam_dir = claude_dir / family
             if fam_dir.is_dir():
-                # Fail-closed on an unreadable generated family dir (rglob silently yields nothing on an
-                # unlistable dir); the OSError is caught below and reported as MALFORMED.
-                ensure_listable(fam_dir)
-                for f in sorted(fam_dir.rglob("*.md")):
-                    # as_posix(), not str(): derive() emits forward-slash rel paths, so a backslash
-                    # from str() on Windows would make every generated file read as an orphan.
-                    rel = f.relative_to(claude_dir).as_posix()
-                    if rel not in desired:
-                        drift.append("orphan " + rel)
+                # os.walk(onerror=raise), not rglob: rglob silently skips an unreadable dir at ANY depth
+                # (concealing an orphan); os.walk surfaces the read error, caught below as MALFORMED.
+                for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_walk_raise):
+                    for fn in sorted(f for f in filenames if f.endswith(".md")):
+                        f = Path(dirpath) / fn
+                        # as_posix(), not str(): derive() emits forward-slash rel paths, so a backslash
+                        # from str() on Windows would make every generated file read as an orphan.
+                        rel = f.relative_to(claude_dir).as_posix()
+                        if rel not in desired:
+                            drift.append("orphan " + rel)
     except OSError as exc:
         return (MALFORMED, "cannot read the .claude/rules/ tree: {}".format(exc))
     if drift:
@@ -344,7 +351,7 @@ def run(root):
         return 2
     root = root.resolve()
     # Fail-closed if the standards dir exists but cannot be listed. map_keys()/load_manifests() raise on
-    # an unlistable dir (via _standards._ensure_listable) rather than letting Path.glob read it as empty,
+    # an unlistable dir (via _standards.ensure_listable) rather than letting Path.glob read it as empty,
     # so an unreadable .aiqt/standards/ becomes a structured exit 2 here, not a traceback or false-clean.
     try:
         _rebind_map_keys(root)
@@ -696,6 +703,22 @@ def self_test_main():
             if status_of(out, "C1") != MALFORMED:
                 failures.append("unreadable core-rules dir expected C1 MALFORMED:\n{}".format(out))
         os.chmod(core_dir, 0o755)  # restore so cleanup can remove it
+
+        # 11. An unreadable GENERATED family dir (.claude/rules/aiqt) must fail closed via C2 (the orphan
+        #     scan walks it), not conceal an orphan. Build a conformant tree, then make a generated family
+        #     dir unreadable. Same root-vs-nonroot guard.
+        badgen = tmp / "badgen"
+        badgen.mkdir()
+        _build_conformant(badgen)
+        gen_fam = badgen / ".claude" / "rules" / "aiqt"
+        os.chmod(gen_fam, 0)
+        if not os.access(gen_fam, os.R_OK):
+            code, out = run_capture(badgen)
+            if code != 2:
+                failures.append("unreadable generated family dir expected exit 2 (fail-closed), got {}".format(code))
+            if status_of(out, "C2") != MALFORMED:
+                failures.append("unreadable generated family dir expected C2 MALFORMED:\n{}".format(out))
+        os.chmod(gen_fam, 0o755)  # restore so cleanup can remove it
 
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")

@@ -216,30 +216,35 @@ def main():
             print("error: {}".format(exc))
             return 2
     # Reconcile even when src_dir is absent (desired empty) so orphaned generated files are never concealed.
+    # The whole reconcile is fail-closed: an unreadable generated file (target.read_text) or an unreadable
+    # generated dir at ANY depth (os.walk(onerror=raise), not rglob, which silently skips an unlistable
+    # subdir) becomes a clean exit 2 rather than a traceback or a concealed orphan.
     drift = []
-    for rel, content in sorted(desired.items()):
-        target = out_dir / rel
-        current = target.read_text(encoding="utf-8") if target.exists() else None
-        if current != content:
-            drift.append(rel)
-            if not check:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+
+    def _raise(exc):
+        raise exc
     try:
+        for rel, content in sorted(desired.items()):
+            target = out_dir / rel
+            current = target.read_text(encoding="utf-8") if target.exists() else None
+            if current != content:
+                drift.append(rel)
+                if not check:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
         for family in ("aiqt", "security"):
             fam_dir = out_dir / family
             if fam_dir.is_dir():
-                # Fail-closed on an unreadable generated family dir: rglob silently yields nothing on an
-                # unlistable dir, so an orphaned generated file could be concealed and --check pass clean.
-                ensure_listable(fam_dir)
-                for f in sorted(fam_dir.rglob("*.md")):
-                    # as_posix(), not str(): desired keys are forward-slash derive() paths, so a backslash
-                    # from str() on Windows would flag every generated file as an orphan.
-                    rel = f.relative_to(out_dir).as_posix()
-                    if rel not in desired:
-                        drift.append("orphan " + rel)
-                        if not check:
-                            f.unlink()
+                for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
+                    for fn in sorted(f for f in filenames if f.endswith(".md")):
+                        f = Path(dirpath) / fn
+                        # as_posix(), not str(): desired keys are forward-slash derive() paths, so a
+                        # backslash from str() on Windows would flag every generated file as an orphan.
+                        rel = f.relative_to(out_dir).as_posix()
+                        if rel not in desired:
+                            drift.append("orphan " + rel)
+                            if not check:
+                                f.unlink()
     except OSError as exc:
         print("error: {}".format(exc))
         return 2
