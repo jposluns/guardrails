@@ -12,6 +12,9 @@ map-owasp-web-tight: [A05]
 map-owasp-cheatsheet-tight: [input-validation]
 map-owasp-asvs-tight: [V2]
 map-owasp-proactive-tight: [C3]
+map-csa-ccm-broad: [AIS-04]
+map-csa-aicm-tight: [AIS-09]
+map-csa-aicm-broad: [AIS-08]
 ---
 
 # Validate external input at the boundary

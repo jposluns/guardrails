@@ -12,6 +12,8 @@ map-iso-23894-broad: [A.11]
 map-owasp-asvs-tight: [V1]
 map-owasp-web-broad: [A05]
 map-owasp-cheatsheet-tight: [cross-site-scripting-prevention]
+map-csa-ccm-broad: [AIS-04]
+map-csa-aicm-broad: [AIS-10]
 ---
 
 # Encode output for its sink

@@ -15,6 +15,9 @@ map-owasp-asi-tight: [ASI03, ASI07]
 map-owasp-asi-broad: [ASI10]
 map-owasp-mcp-tight: [MCP07]
 map-owasp-cheatsheet-broad: [ai-agent-security, mcp-security]
+map-csa-ccm-broad: [IAM-05, IAM-12, IAM-13, IAM-15]
+map-csa-aicm-tight: [AIS-11, IAM-18]
+map-csa-aicm-broad: [IAM-05, IAM-13, IAM-15]
 ---
 
 # Trust between agents is earned, not inherited

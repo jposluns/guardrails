@@ -11,6 +11,9 @@ map-atlas-broad: [AML.T0053, AML.T0082, AML.T0085]
 map-iso-23894-broad: [A.8, A.11]
 map-owasp-mcp-tight: [MCP07]
 map-owasp-asi-tight: [ASI03]
+map-csa-ccm-tight: [IAM-05, IAM-15]
+map-csa-aicm-tight: [IAM-05, IAM-15, IAM-16]
+map-csa-aicm-broad: [IAM-18]
 ---
 
 # Retrieval enforces the requester's authorization

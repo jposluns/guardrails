@@ -12,6 +12,10 @@ map-atlas-broad: [AML.T0055, AML.T0091.000, AML.T0091.001, AML.T0113]
 map-iso-23894-broad: [A.11]
 map-owasp-asvs-tight: [V7, V9]
 map-owasp-cheatsheet-tight: [session-management]
+map-csa-ccm-tight: [IAM-14]
+map-csa-ccm-broad: [CEK-03, IAM-13]
+map-csa-aicm-tight: [IAM-14]
+map-csa-aicm-broad: [CEK-03, IAM-13]
 ---
 
 # Secure session and token handling

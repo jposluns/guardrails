@@ -18,6 +18,10 @@ map-owasp-api-broad: [API9]
 map-owasp-mcp-tight: [MCP04, MCP09]
 map-owasp-web-tight: [A03, A08]
 map-owasp-cheatsheet-tight: [software-supply-chain-security]
+map-csa-ccm-tight: [STA-01, STA-08, STA-09, STA-10]
+map-csa-ccm-broad: [TVM-06, UEM-02]
+map-csa-aicm-tight: [MDS-02, MDS-09, STA-01, STA-08, STA-09, STA-10]
+map-csa-aicm-broad: [MDS-12, TVM-06, UEM-02]
 ---
 
 # Trusted, pinned dependency provenance

@@ -14,6 +14,10 @@ map-owasp-asvs-tight: [V11]
 map-owasp-asvs-broad: [V12]
 map-owasp-proactive-tight: [C2]
 map-owasp-cheatsheet-tight: [cryptographic-storage, transport-layer-security]
+map-csa-ccm-tight: [CEK-04]
+map-csa-ccm-broad: [CEK-03]
+map-csa-aicm-tight: [CEK-04]
+map-csa-aicm-broad: [CEK-03]
 ---
 
 # Sound cryptography

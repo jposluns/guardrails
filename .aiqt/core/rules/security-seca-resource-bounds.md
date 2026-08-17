@@ -14,6 +14,8 @@ map-iso-23894-broad: [A.9, A.11, B.4]
 map-owasp-llm-tight: [LLM06]
 map-owasp-asi-broad: [ASI08]
 map-owasp-api-tight: [API4]
+map-csa-ccm-broad: [I&S-02]
+map-csa-aicm-broad: [AIS-13, MDS-11]
 ---
 
 # Bounded consumption and safe failure

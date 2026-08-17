@@ -7,6 +7,8 @@ slug: ssrf-prevention
 map-owasp-api-tight: [API7]
 map-owasp-proactive-tight: [C10]
 map-owasp-cheatsheet-tight: [server-side-request-forgery-prevention]
+map-csa-ccm-broad: [AIS-04, I&S-09]
+map-csa-aicm-broad: [AIS-09, I&S-09]
 ---
 
 # Validate server-initiated requests

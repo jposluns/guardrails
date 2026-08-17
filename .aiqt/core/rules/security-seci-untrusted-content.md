@@ -13,6 +13,9 @@ map-iso-23894-broad: [A.9, A.11, B.5]
 map-owasp-llm-tight: [LLM01]
 map-owasp-mcp-tight: [MCP06, MCP10]
 map-owasp-cheatsheet-tight: [llm-prompt-injection-prevention]
+map-csa-ccm-broad: [AIS-04, TVM-02]
+map-csa-aicm-tight: [AIS-15]
+map-csa-aicm-broad: [AIS-09, AIS-11, DSP-24, TVM-02, TVM-13]
 ---
 
 # Untrusted content is data, not instructions

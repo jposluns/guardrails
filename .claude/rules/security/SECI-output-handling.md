@@ -17,6 +17,9 @@ map-owasp-asvs-tight: [V1, V2]
 map-owasp-web-broad: [A05]
 map-owasp-proactive-tight: [C3]
 map-owasp-cheatsheet-tight: [cross-site-scripting-prevention, injection-prevention]
+map-csa-ccm-broad: [AIS-04, AIS-05]
+map-csa-aicm-tight: [AIS-10]
+map-csa-aicm-broad: [AIS-05, AIS-09, AIS-13, TVM-13]
 ---
 
 # Generated output is untrusted input
