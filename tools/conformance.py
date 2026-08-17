@@ -41,6 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
 import gen_agents           # noqa: E402  render, sort_key, body_of
+import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, natkey, ManifestError  # noqa: E402
 
@@ -194,6 +195,34 @@ def _agents_drift(root, corpus):
     return (PASS, "AGENTS.md matches regeneration")
 
 
+def _adapter_drift(root, corpus, adapter):
+    """Mirror gen_adapters for one adapter (GEMINI.md / .github/copilot-instructions.md), re-rooted at
+    root. Absent file -> NOT APPLICABLE (the adopter did not install that assistant's surface)."""
+    out = root.joinpath(*adapter["parts"])
+    label = adapter["label"]
+    parts = "/".join(adapter["parts"])
+    # Probe by READING, not Path.exists(): on Python 3.12 exists() returns False on EACCES (an unreadable
+    # .github/ parent for the nested copilot surface) rather than raising, which would mask a present-but-
+    # unreadable surface as a false NOT APPLICABLE. read_text distinguishes FileNotFoundError (the adopter
+    # did not install this surface -> NA) from any other OSError (present but unreadable -> MALFORMED,
+    # fail closed), independent of the Python version.
+    try:
+        current = out.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return (label, NA, "no {} surface installed".format(parts))
+    except (ValueError, OSError) as exc:
+        return (label, MALFORMED, "cannot read {}: {}".format(parts, exc))
+    try:
+        pairs = [(src, fm) for src, fm, _ in corpus]
+        pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
+        content = gen_adapters.render(pairs, adapter["header"])
+    except (ValueError, OSError) as exc:
+        return (label, MALFORMED, "cannot render {}: {}".format(parts, exc))
+    if current != content:
+        return (label, FAIL, "{} drift".format(parts))
+    return (label, PASS, "{} matches regeneration".format(parts))
+
+
 def check_c2(root, cache):
     """Each generated surface the adopter HAS matches regeneration from their .aiqt/core/rules/.
 
@@ -215,11 +244,14 @@ def check_c2(root, cache):
     corpus = cache.get("corpus", [])
     cs, cd = _claude_drift(root, corpus)
     as_, ad = _agents_drift(root, corpus)
-    # Aggregate the two surfaces: worst status wins, but NA of one surface does not mask a PASS/FAIL of
-    # the other. Precedence MALFORMED > FAIL > PASS > NA.
+    surfaces = [("claude", cs, cd), ("agents", as_, ad)]
+    for adapter in gen_adapters.ADAPTERS:
+        surfaces.append(_adapter_drift(root, corpus, adapter))
+    # Aggregate every surface: worst status wins, but NA of one surface does not mask a PASS/FAIL of
+    # another. Precedence MALFORMED > FAIL > PASS > NA.
     order = {MALFORMED: 3, FAIL: 2, PASS: 1, NA: 0}
-    worst = cs if order[cs] >= order[as_] else as_
-    detail = "claude: {} ({}); agents: {} ({})".format(cs, cd, as_, ad)
+    worst = max((st for _, st, _ in surfaces), key=lambda st: order[st])
+    detail = "; ".join("{}: {} ({})".format(name, st, dt) for name, st, dt in surfaces)
     if worst == NA:
         return Result("C2", "no-drift", NA, "no generated surface installed to check")
     return Result("C2", "no-drift", worst, detail)
@@ -554,6 +586,10 @@ def _build_conformant(base):
     pairs = [(s, fm) for s, fm, _ in corpus]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
     (base / "AGENTS.md").write_text(gen_agents.render(pairs), encoding="utf-8")
+    for adapter in gen_adapters.ADAPTERS:
+        out = base.joinpath(*adapter["parts"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(gen_adapters.render(pairs, adapter["header"]), encoding="utf-8")
     return corpus
 
 
@@ -639,6 +675,20 @@ def self_test_main():
             failures.append("drifted tree expected exit 1, got {}\n{}".format(code, out))
         if status_of(out, "C2") != FAIL:
             failures.append("drifted tree expected C2 no-drift FAIL:\n{}".format(out))
+
+        # 2b. Surface drift -> C2 FAIL, exercised for EACH non-.claude generated surface (AGENTS.md and
+        #     the two adapters GEMINI.md and the nested .github/copilot-instructions.md), so the pass
+        #     line's per-surface claim is honestly tested and no surface is silently trusted. (.claude
+        #     drift is case 2 above.)
+        for rel in ("AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md"):
+            adrift = tmp / ("adrift-" + rel.replace("/", "_"))
+            adrift.mkdir()
+            _build_conformant(adrift)
+            f = adrift / rel
+            f.write_text(f.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
+            code, out = run_capture(adrift)
+            if code != 1 or status_of(out, "C2") != FAIL:
+                failures.append("adapter-drift ({}) expected exit 1 + C2 FAIL:\n{}".format(rel, out))
 
         # 3. Missing input (.aiqt/core absent) -> NOT APPLICABLE, not a fake pass. Keep only the
         #    placement-valid .claude/rules/ tree from a conformant build.
@@ -783,6 +833,22 @@ def self_test_main():
                 failures.append("unreadable .claude parent expected C2 or C3 MALFORMED:\n{}".format(out))
         os.chmod(claude_dir, 0o755)  # restore so cleanup can remove it
 
+        # 14. An unreadable adapter parent dir (.github/, the copilot surface's nested parent) must fail
+        #     closed as C2 MALFORMED (exit 2), not escape as a traceback: _adapter_drift's read probe
+        #     is inside its fail-closed try. Same root-vs-nonroot guard as cases 9-13.
+        badgithub = tmp / "badgithub"
+        badgithub.mkdir()
+        _build_conformant(badgithub)
+        gh_dir = badgithub / ".github"
+        os.chmod(gh_dir, 0)
+        if not os.access(gh_dir, os.R_OK):
+            code, out = run_capture(badgithub)
+            if code != 2:
+                failures.append("unreadable .github dir expected exit 2 (fail-closed), got {}".format(code))
+            if status_of(out, "C2") != MALFORMED:
+                failures.append("unreadable .github dir expected C2 MALFORMED:\n{}".format(out))
+        os.chmod(gh_dir, 0o755)  # restore so cleanup can remove it
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -797,10 +863,11 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: conformant passes; drift, empty-core orphans, and fabricated mapping ids "
-          "fail; absent input (corpus, .claude/rules) degrades to NOT APPLICABLE; malformed manifests, "
-          "unreadable input dirs (standards, core rules, generated families, and the .aiqt/.claude "
-          "parents), and a bad --root fail closed")
+    print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, and the GEMINI.md/copilot "
+          "adapters), empty-core orphans, and fabricated mapping ids fail; absent input (corpus, "
+          ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
+          "(standards, core rules, generated families, and the .aiqt/.claude/.github parents), and a bad "
+          "--root fail closed")
     return 0
 
 
