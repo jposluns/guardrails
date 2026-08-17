@@ -9,7 +9,7 @@ one), so a manifest that cannot even be parsed is an exit-2 fail-closed, never a
 
   check_standards_currency.py [--std DIR]   audit the manifests (default .aiqt/standards under repo root)
   check_standards_currency.py --warn-only    never exit 1 on a stale finding; still exit 2 on malformed
-  check_standards_currency.py --self-test    deterministic policy self-test (no manifests, no clock)
+  check_standards_currency.py --self-test    deterministic self-test (fixed reference date, no wall clock)
 
 Exit convention (mirrors check_mappings.py):
   0  all manifests current enough (warnings may still print)
@@ -150,9 +150,12 @@ def run(std_dir, today, warn_only=False):
 
 
 # --- self-test --------------------------------------------------------------------------------------
-# Deterministic: it drives classify() with a fixed reference date and crafted (status, retrieved) pairs
-# across every threshold boundary, so it proves the policy without a manifest tree or the wall clock.
-# This is the only part of the tool wired into the PR gate.
+# Deterministic against a fixed reference date (no wall clock). It drives classify() with crafted
+# (status, retrieved) pairs across every threshold boundary, checks audit()'s precedence, and exercises
+# run() itself over synthetic manifest files written to a private tempdir (current->0, stale->1,
+# stale+--warn-only->0, malformed->2, malformed+--warn-only->2, absent->2). The run()-level cases need a
+# writable tempdir and are skipped (with a printed note, never a false pass) where none exists; CI always
+# has one. This is the only part of the tool wired into the PR gate.
 
 def self_test_main():
     today = date(2026, 8, 17)
@@ -229,6 +232,8 @@ def self_test_main():
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-currency-selftest-"))
     except OSError:
         tmp = None
+        print("SELF-TEST NOTE: no writable temp directory; run()-level cases SKIPPED "
+              "(classify()/audit() coverage above still ran)", file=sys.stderr)
     if tmp is not None:
         try:
             std = tmp / "standards"
