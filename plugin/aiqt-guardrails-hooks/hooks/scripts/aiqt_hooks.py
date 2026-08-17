@@ -34,12 +34,15 @@ diffs lives in the PreToolUse diff_source layer at the command source; the Stop 
 
 This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
 class from HANDLER_EVENT (the argv mode, never the payload, which may be unreadable) and, for a
-Stop/SubagentStop handler, converts EVERY error path (unreadable/malformed stdin, JSON parse failure,
-non-dict payload, or a handler crash) into a non-blocking systemMessage warning on exit 0. No Stop
-invocation can reach exit 2 for any input; only a PreToolUse handler fails closed via exit 2.
+Stop/SubagentStop handler, converts EVERY error path (a bad argv count, unreadable/malformed stdin, a
+JSON parse failure, a non-dict payload, or a handler crash) into a non-blocking systemMessage warning
+on exit 0. No Stop invocation can reach exit 2 for any input; only a PreToolUse handler fails closed via
+exit 2, and only a genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on
+a bad invocation.
 """
 import json
 import re
+import shlex
 import sys
 
 PRETOOL = "PreToolUse"
@@ -87,66 +90,79 @@ def _deny_missing_tool_name(rule):
                  .format(rule))
 
 
-# --- shell command segmentation ----------------------------------------------------------------------
-# Split a Bash command string into segments on the shell separators ; && || | and newlines. This is a
-# deliberately SIMPLE lexical split, not a shell parse (per the GD-24 fix brief): it lets each control
-# judge one command word at a time, so a bare offending segment chained after an allowed one is still
-# caught, and a quoted/echoed occurrence whose command word is not git is skipped by the command-word
-# test. Best-effort: it does not defeat deliberate escaping or obfuscation (recorded in the manifest
-# residue).
-# Split on ; && || | and newlines, AND on the subshell/grouping parentheses ( and ). Splitting on the
-# parens turns '( git diff )' into a segment whose command word is git, so a subshell or brace-free
-# grouping can no longer hide the offending command word from the per-segment tests. Parens inside a
-# character class are literal.
-_SEGMENT_SEP_RE = re.compile(r"\|\||&&|[;|()\n]")
-# A leading run of grouping '(' plus surrounding whitespace, stripped before the command word is taken,
-# so a segment that still carries a leading '(' (belt-and-braces with the split above) resolves to its
-# real command word.
-_LEAD_GROUP_RE = re.compile(r"^[\s(]+")
+# --- shell command segmentation (quote-aware) --------------------------------------------------------
+# Tokenize the Bash command with a shell lexer that RESPECTS quoting (GD-24 fix round 3: the naive
+# whitespace/separator split caused false-allows, because a ';' or '(' inside a quoted commit message,
+# or a quoted global-option value with a space, was split at the wrong place). shlex(posix=True,
+# punctuation_chars=True) with whitespace_split keeps a separator or space INSIDE a quoted string as
+# part of that one token (quotes stripped), and yields the shell operators ; | || && & ( ) as distinct
+# tokens ONLY when unquoted. We then group the token list into SEGMENTS on those operator tokens and on
+# newlines (each line is lexed on its own, so an unquoted newline is a hard separator), so each control
+# judges one command at a time on correctly-tokenized input. A parse error (unbalanced quotes) raises
+# ValueError; the callers fall back to a conservative raw-string scan rather than silent-allow.
+# Best-effort still: it does not defeat deliberate escaping/obfuscation (recorded in the manifest residue).
+_SEGMENT_OPERATORS = frozenset((";", "|", "||", "&&", "&", "(", ")"))
+_PAGERS = frozenset(("less", "more", "most"))  # a diff piped to one of these is interactive review
 
 
-def _split_segments(command):
-    """Segments of a command string, split on ; && || | newlines and the grouping parens ( ). Quoting
-    is NOT honoured: a separator inside a quoted string still splits. That can only OVER-split (extra
-    harmless segments); it never merges a bare offending segment into an allowed one, so the per-segment
-    DENY stays sound. Splitting on ( and ) means '( git diff )' and '(git commit ...)' each yield a
-    segment whose command word is the real command, closing the subshell/grouping bypass."""
-    return _SEGMENT_SEP_RE.split(command)
+def _lex_line(line):
+    """The quote-aware token list of one line. Quotes are stripped; a separator or space inside a quoted
+    string stays part of its one token; the shell operators are yielded as distinct unquoted tokens.
+    Raises ValueError on a shell parse error (e.g. an unbalanced quote), so the caller can fall back."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return list(lexer)
 
 
-def _command_word(segment):
-    """The command word (first whitespace-delimited token) of a segment, basename only so an absolute
-    path to the tool still resolves (/usr/bin/git -> git). '' for an empty segment. A leading grouping
-    '(' and surrounding whitespace are stripped first, so '( git diff' resolves to 'git'. An
-    env-assignment prefix (FOO=bar) is left as the token, so such a segment's command word is not 'git'
-    and its commit/diff subcommand checks do not fire; the any-segment identity-assignment check still
-    covers an inline GIT_AUTHOR_NAME=... git commit form."""
-    tokens = _LEAD_GROUP_RE.sub("", segment).split()
+def _segments(command):
+    """Group a command into SEGMENTS, quote-aware. Returns a list of (tokens, sep_after): tokens is the
+    quote-stripped token list of the segment (never containing an operator token), and sep_after is the
+    operator token that ended it (one of _SEGMENT_OPERATORS) or "" at a line end or the command end. The
+    command is split into segments on the shell operators ; | || && & ( ) and on newlines. '( git diff )'
+    yields a segment [git, diff] (the parens are separators), closing the subshell/grouping bypass.
+    Raises ValueError on a shell parse error so callers can fall back conservatively."""
+    result = []
+    for line in command.split("\n"):
+        current = []
+        for tok in _lex_line(line):
+            if tok in _SEGMENT_OPERATORS:
+                result.append((current, tok))
+                current = []
+            else:
+                current.append(tok)
+        result.append((current, ""))
+    return result
+
+
+def _command_word(tokens):
+    """The command word of a segment: the first token's basename, so an absolute path to the tool still
+    resolves (/usr/bin/git -> git). '' for an empty segment. An env-assignment prefix (FOO=bar) is left
+    as the first token, so such a segment's command word is not 'git' and its commit/diff subcommand
+    checks do not fire; the any-segment identity-assignment check still covers an inline
+    GIT_AUTHOR_NAME=... git commit form."""
     if not tokens:
         return ""
     return tokens[0].rsplit("/", 1)[-1]
 
 
-# git global options that CONSUME a following space-separated argument, so the option's value is never
-# mistaken for the subcommand: '-C DIR', '-c NAME=VALUE', and the long forms below. Their '--opt=value'
-# inline shape carries the value in the same token (an '=' is present), which consumes no separate arg;
-# that case is handled by the '=' test, so only the space-separated forms need to skip two tokens.
+# git global options that CONSUME a following space-separated argument, so the option's value (now its
+# own token) is never mistaken for the subcommand: '-C DIR', '-c NAME=VALUE', and the long forms below.
+# Their '--opt=value' inline shape carries the value in the same token (an '=' is present), consuming no
+# separate arg; that case is handled by the '=' test, so only the space-separated forms skip two tokens.
 _GIT_ARG_OPTS = frozenset((
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
     "--config-env"))
 
 
-def _git_subcommand(segment):
+def _git_subcommand(tokens):
     """The git subcommand of a segment whose command word is git: the first non-option token after the
     command word, skipping git global options. An arg-consuming global option in its space-separated
-    form (-C DIR, --git-dir DIR, ...) skips two tokens so its value is not read as the subcommand; the
-    '--opt=value' form and any other leading '-' token skip one. None when there is no subcommand token.
-    A leading grouping '(' is stripped first so '(git commit' still resolves to the git subcommand.
-    Token-based (not a regex over the whole segment) so a git name quoted inside an argument, e.g.
-    --format='git commit', cannot be mistaken for the subcommand."""
-    tokens = _LEAD_GROUP_RE.sub("", segment).split()
+    form (-C DIR, --git-dir DIR, ...) skips two tokens (its value is now its own token, per shlex) so
+    the value is not read as the subcommand; the '--opt=value' form and any other leading '-' token skip
+    one. None when there is no subcommand token."""
     i = 1
-    while i < len(tokens):
+    n = len(tokens)
+    while i < n:
         token = tokens[i]
         if token.startswith("-"):
             # An '=' inline form carries its value in the same token: skip one. Otherwise a
@@ -285,47 +301,78 @@ def diff_wall_stop(data):
 
 # --- cnsdif (PreToolUse): a bare console diff at the source -------------------------------------------
 # Layer A of the F-36 catch: deny a Bash command that renders a version-control diff to the console.
-# Segmented (split on ; && || | and newlines), so a bare 'git diff' chained AFTER an allowed form is
-# still caught. Per-segment escapes: an explicit summary flag or a redirection of stdout to a file (an
-# explicit fd is honoured). The '# allow-diff' token is honoured anywhere in the whole command. An
-# informational form (--help / -h) is not a diff dump. A diff piped to a pager still dumps, so a pipe
-# is NOT an escape.
-LOG_PATCH_RE = re.compile(r"(?:^|\s)(?:-p|-u|--patch)\b")
-STDOUT_RE = re.compile(r"(?:^|\s)--stdout\b")
-SUMMARY_RE = re.compile(r"(?:^|\s)--(?:stat|name-only|name-status|numstat|shortstat)\b")
-# An output redirection to a file: an optional fd (1 or 2), then '>' or '>>' that is not part of a
-# '2>&1'/'>&2' fd-dup (not followed by '&' or '|'), then the start of a filename token. '> /dev/null'
-# counts (the diff leaves the console). The optional leading fd is matched (not excluded by a lookbehind
-# on a digit), so '1>', '2>', '1>>' are recognized as redirections to a file.
-REDIRECT_TO_FILE_RE = re.compile(r"(?<![0-9&>])[12]?>>?\s*(?![&|])\S")
-INFO_FLAG_RE = re.compile(r"(?:^|\s)(?:--help|-h)(?:\s|$)")
+# Quote-aware segmented (shlex; split on ; && || | & ( ) and newlines), so a bare 'git diff' chained
+# AFTER an allowed form, or grouped in a subshell '( git diff )', is still caught. Per-segment escapes:
+# an explicit summary flag or a redirection of stdout to a file. The '# allow-diff' token is honoured
+# anywhere in the whole RAW command (shlex drops a '#' comment, so it is matched on the raw string). An
+# informational form (--help / -h) is not a diff dump. A diff piped to a KNOWN PAGER (less/more/most) is
+# legitimate interactive review and is allowed; a pipe to cat/tee/console still dumps and denies.
+_PATCH_FLAGS = frozenset(("-p", "-u"))
+_SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat", "--shortstat"))
+_INFO_FLAGS = frozenset(("--help", "-h"))
+_REDIRECT_TOKENS = frozenset((">", ">>"))  # stdout to a file; a grouped '>&'/'>|' fd-dup is not here
 ALLOW_DIFF_MARKER = "# allow-diff"
+# Fallback-only regexes over the RAW command string, used when shlex cannot parse the command (see
+# _diff_source_fallback). SUMMARY/INFO/REDIRECT mirror the token escapes; the producer regex is a loose
+# 'git ... diff|show|range-diff' probe. Conservative on a parse failure: deny a plausible producer.
+SUMMARY_RE = re.compile(r"(?:^|\s)--(?:stat|name-only|name-status|numstat|shortstat)\b")
+INFO_FLAG_RE = re.compile(r"(?:^|\s)(?:--help|-h)(?:\s|$)")
+REDIRECT_TO_FILE_RE = re.compile(r"(?<![0-9&>])[12]?>>?\s*(?![&|])\S")
+_RAW_DIFF_PRODUCER_RE = re.compile(r"(?is)\bgit\b.*?\b(?:diff|show|range-diff)\b")
 
 
-def _is_diff_producer(segment):
+def _has_patch_flag(tokens):
+    """True when a segment carries a patch flag (-p, -u, or a --patch* form), the flag that turns a
+    listing/plumbing/stash producer into a console patch."""
+    return any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
+
+
+def _is_diff_producer(tokens):
     """True when a git segment runs a subcommand that renders a diff to the console. The caller has
     already confirmed the segment's command word is git. Judging the SUBCOMMAND (not a bare 'diff'
     token) avoids a false positive on a commit message that mentions the word diff.
 
-    Always a diff dump: diff, show (they render a patch by default). Patch-flag gated: log, and the
-    plumbing producers diff-tree, diff-index, diff-files (they emit a raw listing by default and a patch
-    only with -p/-u/--patch). stdout gated: format-patch (writes numbered files by default and dumps to
-    the console only with --stdout). Gating the plumbing/format-patch forms on their flag keeps the
-    file-writing and name-only forms from a false positive, so only a genuine console dump denies."""
-    sub = _git_subcommand(segment)
-    if sub in ("diff", "show"):
+    Always a diff dump: diff, show, range-diff (they render a patch by default). Patch-flag gated: log,
+    the plumbing producers diff-tree, diff-index, diff-files, and stash 'show' (they emit a listing by
+    default and a patch only with -p/-u/--patch). stdout gated: format-patch (writes numbered files by
+    default and dumps to the console only with --stdout). Gating the plumbing/format-patch/stash forms
+    on their flag keeps the file-writing and name-only forms from a false positive."""
+    sub = _git_subcommand(tokens)
+    if sub in ("diff", "show", "range-diff"):
         return True
     if sub in ("log", "diff-tree", "diff-index", "diff-files"):
-        return bool(LOG_PATCH_RE.search(segment))
+        return _has_patch_flag(tokens)
     if sub == "format-patch":
-        return bool(STDOUT_RE.search(segment))
+        return "--stdout" in tokens
+    if sub == "stash":
+        return "show" in tokens and _has_patch_flag(tokens)
     return False
+
+
+def _diff_source_fallback(command, allow_marker):
+    """FAIL-SAFE conservative check when shlex cannot parse the command (unbalanced quotes): we cannot
+    segment safely, so scan the RAW string. If it invokes a git diff-producer with no summary, --help,
+    or redirect escape (and no '# allow-diff'), deny; never silent-allow a plausibly-violating command
+    on a parse failure. Documented as best-effort: a genuinely clean but unparseable command may deny."""
+    if allow_marker:
+        return _allow()
+    if _RAW_DIFF_PRODUCER_RE.search(command) and not (
+            SUMMARY_RE.search(command) or INFO_FLAG_RE.search(command)
+            or REDIRECT_TO_FILE_RE.search(command)):
+        return _deny(
+            "AIQT rule cnsdif (no-console-diff-dumps): the command could not be parsed by the shell "
+            "lexer (likely unbalanced quotes) and it appears to render a version-control diff to the "
+            "console with no summary/redirect/'# allow-diff' escape; failing closed. Re-issue with a "
+            "summary form, a redirect to a file, or the explicit '# allow-diff' token.",
+            "AIQT guardrail: denied an unparseable command that appears to dump a console diff (rule "
+            "cnsdif, fail-safe).")
+    return _allow()
 
 
 def diff_source_pretool(data):
     """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash: deny a Bash command that dumps a bare
-    console diff, allowing the per-segment summary and file-redirection escapes and the whole-command
-    '# allow-diff' escape."""
+    console diff, allowing the per-segment summary and file-redirection escapes, the pager-pipe escape,
+    and the whole-command '# allow-diff' escape."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -340,74 +387,140 @@ def diff_source_pretool(data):
             "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
             "string, so the diff-source check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
-    allow_marker = ALLOW_DIFF_MARKER in command  # honoured anywhere in the whole command
-    for segment in _split_segments(command):
-        if _command_word(segment) != "git":
+    allow_marker = ALLOW_DIFF_MARKER in command  # honoured anywhere in the whole raw command
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _diff_source_fallback(command, allow_marker)
+    for idx, (tokens, sep_after) in enumerate(segments):
+        if _command_word(tokens) != "git":
             continue
-        if not _is_diff_producer(segment):
+        if not _is_diff_producer(tokens):
             continue
-        if INFO_FLAG_RE.search(segment):
+        if any(t in _INFO_FLAGS for t in tokens):
             continue  # 'git diff --help' is informational, not a diff dump
-        if allow_marker or SUMMARY_RE.search(segment) or REDIRECT_TO_FILE_RE.search(segment):
+        if allow_marker:
+            continue
+        if any(t.split("=", 1)[0] in _SUMMARY_FLAGS for t in tokens):
+            continue
+        if any(t in _REDIRECT_TOKENS for t in tokens):
+            continue
+        # A diff piped to a known pager is interactive review, not a response wall (FIX 4).
+        if sep_after == "|" and idx + 1 < len(segments) \
+                and _command_word(segments[idx + 1][0]) in _PAGERS:
             continue
         reason = ("AIQT rule cnsdif (no-console-diff-dumps): this command renders a version-control "
                   "diff to the console, burying the review surface under a raw dump. Use a summary form "
-                  "(--stat, --name-only, --name-status, --numstat), redirect the diff to a file, or, if "
-                  "a console diff is genuinely intended, append the explicit '# allow-diff' token.")
+                  "(--stat, --name-only, --name-status, --numstat), redirect the diff to a file, pipe it "
+                  "to a pager (less/more/most), or, if a console diff is genuinely intended, append the "
+                  "explicit '# allow-diff' token.")
         return _deny(reason,
                      "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
     return _allow()
 
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
-# Segmented: the AI-identity check evaluates the commit-MESSAGE contexts (co-author trailer, --author=)
-# only on a segment whose command word is git and whose subcommand is a commit-creating verb, so a
-# read-side use of the same tokens (git log --author=Claude) never trips. Separately, an identity
-# ASSIGNMENT (a git-identity env var, or user.name/user.email config) is a violation in ANY segment,
-# to harden the common 'set the identity then commit' form.
+# Quote-aware and token-based. The commit-MESSAGE contexts (a Co-Authored-By trailer, an --author value)
+# are judged only on a segment whose command word is git and whose subcommand is a commit-creating verb,
+# so a read-side use of the same tokens (git log --author=Claude) never trips. Separately, an identity
+# ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
+# segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
+# a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
+# whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
+# on that token catches it.
 AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
-_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "commit-tree")
-# Commit-MESSAGE identity contexts: judged only on a git commit segment.
-COMMIT_CONTEXTS = (
-    # A co-author trailer's value runs to the end of the segment or the enclosing shell quote.
+# A Co-Authored-By trailer inside a single token; its value runs to the token end (the token IS the
+# quoted message, so no shell quote can appear within it).
+CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
+# Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
+# value in the '-c user.name=VALUE' inline shape.
+GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
+USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
+# Fallback-only raw-string contexts, used when shlex cannot parse the command (see
+# _commit_identity_fallback). A value runs to whitespace or a shell separator/quote.
+_VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
+_RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n\"']{1,160})"), "co-author trailer"),
-    (re.compile(r"--author[= ]\s*" + _VALUE), "--author value"),
-)
-# Identity ASSIGNMENT contexts: judged on EVERY segment (env var / git config), so setting an AI
-# identity in a separate segment before the commit is caught too.
-IDENTITY_ASSIGN_CONTEXTS = (
+    (re.compile(r"(?i)--author[= ]\s*" + _VALUE), "--author value"),
     (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
     (re.compile(r"(?i)\buser\.(?:name|email)\s*[= ]\s*" + _VALUE), "user.name/user.email value"),
 )
 
 
-def _match_ai(contexts, segment):
-    """Return '<label> <value>' for the first context in contexts whose value names an AI identity in
-    this segment, else None."""
-    for regex, label in contexts:
-        for match in regex.finditer(segment):
-            value = match.group(1)
+def _commit_message_and_author_ai(tokens):
+    """A hit label if this git commit segment names an AI identity in an --author value or in a
+    Co-Authored-By trailer (scanned as a substring of any token, so the trailer that lives inside the
+    single quoted -m message token is caught), else None. The bare message body is deliberately NOT
+    matched against the identity set: a legitimate message that merely mentions an AI product name
+    (e.g. -m 'fix claude adapter') is not a recorded AI identity, and denying it would be a false
+    positive; only a trailer or an --author value records identity."""
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        m = CO_AUTHOR_RE.search(tok)
+        if m and AI_IDENTITY_RE.search(m.group(1)):
+            return "co-author trailer {!r}".format(m.group(1).strip()[:80])
+        if tok.startswith("--author="):
+            value = tok[len("--author="):]
             if AI_IDENTITY_RE.search(value):
-                return "{} {!r}".format(label, value.strip()[:80])
+                return "--author value {!r}".format(value.strip()[:80])
+        elif tok == "--author" and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
+            return "--author value {!r}".format(tokens[i + 1].strip()[:80])
+    return None
+
+
+def _identity_assignment_ai(tokens):
+    """A hit label if any token of this segment ASSIGNS an AI identity: a git-identity env var
+    (GIT_AUTHOR_NAME=..., ...), a '-c user.name=VALUE' config inline value, or a 'config user.name VALUE'
+    /'config user.name=VALUE' pair. Judged on EVERY segment, so setting the identity in a prior segment
+    before the commit is caught too."""
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        m = GIT_ENV_RE.match(tok)
+        if m and AI_IDENTITY_RE.search(m.group(1)):
+            return "git identity variable {!r}".format(tok.strip()[:80])
+        m = USER_CONF_EQ_RE.match(tok)
+        if m and AI_IDENTITY_RE.search(m.group(1)):
+            return "user.name/user.email value {!r}".format(tok.strip()[:80])
+        if tok in ("user.name", "user.email") and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
+            return "user.name/user.email value {!r}".format(tokens[i + 1].strip()[:80])
     return None
 
 
 def find_ai_authorship(command):
     """Return '<context> <value>' when a segment sets an AI identity for a recorded change, else None:
-    an identity-assignment (env var / git config) in ANY segment, or a commit-message context (co-author
-    trailer, --author=) on a git commit segment."""
-    for segment in _split_segments(command):
-        hit = _match_ai(IDENTITY_ASSIGN_CONTEXTS, segment)
+    an identity-assignment (env var / git config) on ANY segment, or a commit-message context (co-author
+    trailer, --author value) on a git commit segment. Raises ValueError on a shell parse error (via
+    _segments), which the handler turns into the conservative fallback."""
+    for tokens, _sep in _segments(command):
+        hit = _identity_assignment_ai(tokens)
         if hit is not None:
             return hit
-        if _command_word(segment) == "git" and _git_subcommand(segment) in COMMIT_VERBS:
-            hit = _match_ai(COMMIT_CONTEXTS, segment)
+        if _command_word(tokens) == "git" and _git_subcommand(tokens) in COMMIT_VERBS:
+            hit = _commit_message_and_author_ai(tokens)
             if hit is not None:
                 return hit
     return None
+
+
+def _commit_identity_fallback(command):
+    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quotes): scan the RAW
+    string for an AI identity in a Co-Authored-By trailer, an --author value, a git-identity env var, or
+    a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command on a
+    parse failure."""
+    for regex, label in _RAW_IDENTITY_CONTEXTS:
+        for match in regex.finditer(command):
+            if AI_IDENTITY_RE.search(match.group(1)):
+                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+                reason = ("AIQT rule cmtidn (commit-identity): the command could not be parsed by the "
+                          "shell lexer (likely unbalanced quotes) and it appears to set an AI identity "
+                          "({}); failing closed. Remove it and commit as the maintainer.".format(hit))
+                return _deny(reason,
+                             "AIQT guardrail: denied an unparseable git command that appears to record "
+                             "an AI commit identity (rule cmtidn, fail-safe).")
+    return _allow()
 
 
 def commit_identity(data):
@@ -427,7 +540,10 @@ def commit_identity(data):
             "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
             "so the commit-identity check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
-    hit = find_ai_authorship(command)
+    try:
+        hit = find_ai_authorship(command)
+    except ValueError:
+        return _commit_identity_fallback(command)
     if hit is None:
         return _allow()
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
@@ -534,14 +650,28 @@ def _dispatcher_stop_warn(detail):
 
 
 def main(argv):
-    if len(argv) != 1 or argv[0] not in HANDLERS:
+    # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
+    # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
+    # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
+    # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
+    # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
+    # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
+    # still fails closed (exit 2).
+    mode = argv[0] if argv else None
+    if mode not in HANDLERS:
         print("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))),
               file=sys.stderr)
         return 2
-    handler_name = argv[0]
-    # The event class comes from the argv mode, not the payload (which may be unreadable). A Stop handler
-    # warns-and-exits-0 on every error path below; a PreToolUse handler fails closed (exit 2).
+    handler_name = mode
     is_stop = HANDLER_EVENT[handler_name] in STOP_EVENTS
+    if len(argv) != 1:
+        detail = "expected exactly one mode argument, got {}".format(len(argv))
+        if is_stop:
+            # A Stop handler NEVER exits 2, not even on a malformed invocation: WARN and exit 0.
+            print(json.dumps(_dispatcher_stop_warn("bad invocation: {}".format(detail))))
+            return 0
+        print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
+        return 2
     try:
         data = json.loads(sys.stdin.read())
         if not isinstance(data, dict):
