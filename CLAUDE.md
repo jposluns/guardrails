@@ -93,6 +93,7 @@ and both are drift-gated in CI.
 - [Sound cryptography](.claude/rules/security/SECI-cryptography.md)
 - [Trusted, pinned dependency provenance](.claude/rules/security/SECI-dependency-provenance.md)
 - [Fail closed in security-relevant paths](.claude/rules/security/SECI-fail-closed.md)
+- [Validate federated identity and token flows](.claude/rules/security/SECI-federated-identity-flow.md)
 - [Human authorization for consequential actions](.claude/rules/security/SECI-human-authorization.md)
 - [Validate external input at the boundary](.claude/rules/security/SECI-input-validation.md)
 - [Trust between agents is earned, not inherited](.claude/rules/security/SECI-inter-agent-trust.md)
