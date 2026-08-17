@@ -27,6 +27,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+
 EN, EM = "–", "—"
 SITE_HOSTS = {"aiqt.ai", "www.aiqt.ai"}
 
@@ -225,13 +228,23 @@ def main():
         return 0
     site_root = site.resolve()
     docs, ids_by_path, findings = [], {}, []
-    for f in sorted(site.rglob("*.html")):
+    try:
+        html_files = sorted(walk_files(site, suffixes={".html"}))
+    except OSError as exc:
+        # an unreadable directory under site/ is a read error, not a clean skip: fail closed (exit 2)
+        # so the site gate never reports clean without having scanned an unreadable subtree.
+        print("error: cannot scan site/ ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    for f in html_files:
         rel = f.relative_to(root)
         try:
             text = f.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except UnicodeDecodeError:
             findings.append("{}: could not read as UTF-8".format(rel))
             continue
+        except OSError as exc:
+            print("error: cannot read {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
+            return 2
         page = Page()
         try:
             page.feed(text)
