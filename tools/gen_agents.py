@@ -50,30 +50,30 @@ def main():
     root = repo_root()
     src_dir = root / ".aiqt" / "core" / "rules"
     out = root / "AGENTS.md"
-    if not src_dir.is_dir():
-        if out.exists():
-            if check:
-                print("drift: AGENTS.md exists with no sources")
-                return 1
-            out.unlink()
-        return 0
     try:
+        if not src_dir.is_dir():
+            if out.exists():
+                if check:
+                    print("drift: AGENTS.md exists with no sources")
+                    return 1
+                out.unlink()
+            return 0
         pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
         pairs.sort(key=lambda pf: sort_key(pf[1]))
-        # render() reads each source via body_of, and out.read_text reads AGENTS.md: keep both inside
-        # the fail-closed try so an unreadable source or AGENTS.md is a clean exit 2, not a traceback.
+        # render() reads each source via body_of, and out.read_text reads AGENTS.md: keep these, and the
+        # write/unlink, inside the fail-closed try so a read or write error is a clean exit 2, not a traceback.
         content = render(pairs)
         current = out.read_text(encoding="utf-8") if out.exists() else None
+        if current != content:
+            if check:
+                print("drift: AGENTS.md")
+                print("run tools/gen_agents.py to regenerate")
+                return 1
+            out.write_text(content, encoding="utf-8")
+        return 0
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
-    if current != content:
-        if check:
-            print("drift: AGENTS.md")
-            print("run tools/gen_agents.py to regenerate")
-            return 1
-        out.write_text(content, encoding="utf-8")
-    return 0
 
 
 if __name__ == "__main__":
