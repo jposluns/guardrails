@@ -480,7 +480,9 @@ def check_c5(root, cache):
                     rel = f.relative_to(root).as_posix()
                     if rel not in desired:
                         drift.append("orphan " + rel)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError catches UnicodeDecodeError from read_text on a non-utf-8 generated file; fail
+        # closed as MALFORMED (exit 2), never a traceback.
         return Result("C5", "hooks-no-drift", MALFORMED,
                       "cannot read the hooks plugin surface: {}".format(exc))
     if drift:

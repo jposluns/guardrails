@@ -274,7 +274,9 @@ def run(root, check):
             drift.append("orphan " + PLUGIN_JSON_REL)
             if not check:
                 plugin_json.unlink()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError catches UnicodeDecodeError from read_text on a non-utf-8 target during the drift
+        # comparison; fail closed (exit 2), never a traceback.
         print("error: {}".format(exc))
         return 2
     if check and drift:
@@ -298,7 +300,12 @@ def main():
 #   2. drift in hooks.json (and an orphan under the plugin hooks/) is caught (exit 1),
 #   3. an unknown corpus-id in the manifest fails closed (exit 2),
 #   4. an empty residue fails closed (exit 2),
-#   5. an unreadable .aiqt/core/hooks/ fails closed (exit 2), never an all-absent clean.
+#   5. an unreadable .aiqt/core/hooks/ fails closed (exit 2), never an all-absent clean,
+#   6. a bad/unknown event fails closed (exit 2),
+#   7. an uncompilable matcher regex fails closed (exit 2),
+#   8. a named handler not defined in the source script fails closed (exit 2),
+#   9. a missing handler script fails closed (exit 2),
+#  10. an unreadable manifest fails closed (exit 2).
 
 _APEX = """---
 corpus-id: apex01
@@ -380,6 +387,15 @@ def self_test_main():
         return 2
     failures = []
     skipped = []
+
+    def _mutate(root, old, new):
+        """Rewrite the built manifest in place to inject one fault, then the run must fail closed."""
+        mpath = root / ".aiqt" / "core" / "hooks" / "manifest.toml"
+        text = mpath.read_text(encoding="utf-8")
+        if old not in text:
+            failures.append("self-test setup: {!r} not found in manifest".format(old))
+        mpath.write_text(text.replace(old, new), encoding="utf-8")
+
     try:
         # 1. Conformant manifest: generate, then --check is drift-clean.
         good = tmp / "good"
@@ -433,6 +449,51 @@ def self_test_main():
             if run_quiet(unread, check=True) != 2:
                 failures.append("unreadable .aiqt/core/hooks/ expected exit 2 (fail-closed)")
         os.chmod(hooks_src, 0o755)  # restore so cleanup can remove it
+
+        # 6. A bad/unknown hook event fails closed (the event whitelist).
+        badevent = tmp / "badevent"
+        badevent.mkdir()
+        _build_tree(badevent)
+        _mutate(badevent, 'event = "PreToolUse"', 'event = "Nonesuch"')
+        if run_quiet(badevent, check=True) != 2:
+            failures.append("unknown event expected exit 2 (fail-closed)")
+
+        # 7. An uncompilable matcher regex fails closed.
+        badmatcher = tmp / "badmatcher"
+        badmatcher.mkdir()
+        _build_tree(badmatcher)
+        _mutate(badmatcher, 'matcher = "Bash"', 'matcher = "([unterminated"')
+        if run_quiet(badmatcher, check=True) != 2:
+            failures.append("uncompilable matcher expected exit 2 (fail-closed)")
+
+        # 8. A named handler not defined in the source script fails closed.
+        badhandler = tmp / "badhandler"
+        badhandler.mkdir()
+        _build_tree(badhandler)
+        _mutate(badhandler, 'handler = "test_handler"', 'handler = "missing_handler"')
+        if run_quiet(badhandler, check=True) != 2:
+            failures.append("missing handler expected exit 2 (fail-closed)")
+
+        # 9. A missing handler SCRIPT (the dispatcher file absent) fails closed.
+        noscript = tmp / "noscript"
+        noscript.mkdir()
+        _build_tree(noscript)
+        (noscript / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME).unlink()
+        if run_quiet(noscript, check=True) != 2:
+            failures.append("missing handler script expected exit 2 (fail-closed)")
+
+        # 10. An unreadable manifest fails closed. Skipped where the runner can still read the chmod-0
+        #     file (root/DAC-bypass), observed via os.access, as in case 5.
+        unreadman = tmp / "unreadman"
+        unreadman.mkdir()
+        _build_tree(unreadman)
+        manifest = unreadman / ".aiqt" / "core" / "hooks" / "manifest.toml"
+        os.chmod(manifest, 0)
+        if os.access(manifest, os.R_OK):
+            skipped.append("10 unreadable-manifest")
+        elif run_quiet(unreadman, check=True) != 2:
+            failures.append("unreadable manifest expected exit 2 (fail-closed)")
+        os.chmod(manifest, 0o644)  # restore so cleanup can remove it
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -446,7 +507,8 @@ def self_test_main():
             .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
-          "and an unreadable source tree fail closed" + note)
+          "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
+          "the script, a missing handler script, and an unreadable manifest all fail closed" + note)
     return 0
 
 

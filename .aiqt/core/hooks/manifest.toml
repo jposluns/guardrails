@@ -41,7 +41,7 @@ event = "Stop"
 handler = "diff_wall_stop"
 default = "block"
 class = "b"
-residue = "Catches only a unified-diff wall in the final assistant message of a turn: diff --git headers, paired @@ hunk headers, fenced diff or patch blocks of 10 or more lines, and mixed +/- runs of 8 or more lines. Does not catch a diff dumped mid-turn between tool calls, side-by-side or word-diff renderings, raw log or patch walls that carry none of those markers, or a repeat offence in the immediate continuation turn (the stop_hook_active loop guard scans once per turn chain)."
+residue = "This Stop layer is a NON-BLOCKING surfacing WARN (systemMessage, exit 0), not a hard block: by Stop time the wall has already rendered, and with no stop_hook_active field and no documented loop bound a hard block could wedge the session, so hard prevention lives in the PreToolUse diff-source layer instead. It catches only a unified-diff wall in the final assistant message of a turn: diff --git headers, paired @@ hunk headers, fenced diff/patch/udiff blocks (backtick or tilde) of 10 or more lines, and mixed +/- runs of 8 or more lines. It does not catch a diff dumped mid-turn between tool calls, side-by-side or word-diff renderings, or raw log or patch walls that carry none of those markers; a mixed +/- Markdown checklist can rarely trip the +/- run detector (accepted residual)."
 
 [[hook]]
 id = "diff-source"
@@ -52,7 +52,7 @@ matcher = "Bash"
 handler = "diff_source_pretool"
 default = "block"
 class = "b"
-residue = "Inspects only the command text of a Bash invocation that pipes a version-control diff to the console. Allows an explicit summary form (git show/diff/log with --stat, --name-only, or --name-status), any redirection of the diff to a file, and an explicit '# allow-diff' token; blocks a bare console diff. Does not catch a diff produced by a non-git tool, a diff assembled across separate commands, a diff already written to a file and then dumped with cat, or a diff emitted by a command outside the Bash tool."
+residue = 'A best-effort LEXICAL check over the Bash command string, segmented on the shell separators ; && || | and newlines: it denies a segment whose command word is git and whose subcommand renders a diff (diff, show, or log with a patch flag), even when chained after an allowed segment. Per-segment escapes: a summary flag (--stat, --name-only, --name-status, --numstat) or a redirection of stdout to a file (an explicit fd 1>/2>/1>> is honoured); the whole-command "# allow-diff" token; an informational --help/-h form. It does NOT defeat deliberate shell escaping (git \diff), obfuscation (printf, octal, aliases), a diff produced by a non-git tool or assembled across commands, a file written then dumped with cat, or a diff emitted outside the Bash tool. It targets the common/accidental case, not an adversary determined to evade it.'
 
 [[hook]]
 id = "commit-identity"
@@ -63,7 +63,7 @@ matcher = "Bash"
 handler = "commit_identity"
 default = "block"
 class = "b"
-residue = "Inspects only the command text of a git authoring invocation run through the Bash tool. Does not catch a trailer staged into a message file by an earlier command and committed with -F or -t, an AI identity persisted beforehand via git config in a separate command, a commit made outside the Bash tool or outside the session, or an AI product name outside the recognized identity set."
+residue = 'A best-effort LEXICAL check over the Bash command string, segmented on the shell separators ; && || | and newlines. On a git commit segment it flags a co-author trailer or an --author= value naming an AI; in ANY segment it flags a git-identity env var (GIT_AUTHOR_NAME/GIT_COMMITTER_NAME) or a user.name/user.email config value naming an AI, so setting the identity in a prior segment then committing is caught. It does NOT defeat deliberate shell escaping (git \commit) or obfuscation, an AI identity persisted in git config in a PRIOR TURN (not the same command), a trailer staged into a message file and committed with -F/-t, a commit made outside the Bash tool or the session, or an AI product name outside the recognized identity set. It targets the common/accidental case, not an adversary determined to evade it.'
 
 [[hook]]
 id = "abs-paths"
