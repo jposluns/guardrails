@@ -238,7 +238,7 @@ def _frontmatter(data):
 def _security_block(data):
     blocks = ["# Security", data["security_intro"]]
     blocks += data["uncond_texts"]
-    blocks.append("## If your platform exposes tools or browsing")
+    blocks.append("## If your platform exposes tools, browsing, retrieval, or persistent memory")
     blocks += data["cond_texts"]
     blocks.append(data["capability_note"])
     return "\n\n".join(blocks)
