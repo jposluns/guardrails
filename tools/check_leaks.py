@@ -69,8 +69,15 @@ def load_denylist(root):
     """Return (hashes, maxn, bad_lines). bad_lines names any non-hash entry (integrity failure)."""
     f = root / "tools" / "leak-hashes.txt"
     hashes, maxn, bad = set(), 3, []
-    if f.exists():
-        for number, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+    try:
+        content = f.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # An ABSENT denylist is intended (no extra terms -> empty set). An UNREADABLE denylist (or an
+        # unreadable parent) raises a non-FileNotFound OSError that propagates to main's fail-closed
+        # try (exit 2), so it can never read as an empty denylist and pass clean.
+        content = None
+    if content is not None:
+        for number, line in enumerate(content.splitlines(), 1):
             s = line.strip()
             if not s or s.startswith("#"):
                 if s.startswith("# maxn"):
@@ -114,10 +121,11 @@ def main():
                     if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
                         findings.append("{}: internal codename (hash match)".format(rel))
                         break
-    except OSError as exc:
-        # An unreadable directory or file is a read error, not a clean skip: fail closed (exit 2) so a
-        # leak gate never reports clean without having scanned an unreadable subtree.
-        print("error: cannot scan the tree ({}); fail-closed".format(exc), file=sys.stderr)
+    except (OSError, UnicodeDecodeError) as exc:
+        # An unreadable/corrupt denylist OR an unreadable directory/file is a read failure on a required
+        # input, not a clean skip: fail closed (exit 2) so a leak gate never reports clean without having
+        # read its denylist and scanned every subtree. UnicodeDecodeError covers a non-UTF-8 denylist.
+        print("error: cannot read a required input (denylist or tree) ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
     if findings:
         print("FAIL: {} possible leak(s) of internal host specifics or codenames".format(len(findings)))
