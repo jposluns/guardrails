@@ -38,6 +38,7 @@ and both are drift-gated in CI.
 **Integrity**
 - [Anything wrong is fixed first](.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md)
 - [Branch and merge only on green](.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md)
+- [A check fails closed on input it cannot read](.claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md)
 - [Commit identity](.claude/rules/aiqt/10-INTEG-commit-identity.md)
 - [Gate discipline](.claude/rules/aiqt/10-INTEG-gate-discipline.md)
 - [No concealed failure](.claude/rules/aiqt/10-INTEG-no-concealed-failure.md)
