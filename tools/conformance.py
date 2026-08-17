@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
+import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, natkey, ManifestError  # noqa: E402
 
@@ -223,6 +224,46 @@ def _adapter_drift(root, corpus, adapter):
     return (label, PASS, "{} matches regeneration".format(parts))
 
 
+def _cursor_drift(root, corpus):
+    """Mirror gen_cursor.main()'s reconciliation, re-rooted at root (never call that main()).
+
+    A directory surface like .claude/rules, so the detail reports counts and rel-paths, not one
+    file's status. Only the RESERVED subtree .cursor/rules/aiqt-guardrails/ is compared and orphan-
+    scanned; an adopter's own rules beside it are never read. Absent subtree -> NOT APPLICABLE (the
+    adopter did not install the Cursor surface)."""
+    cursor_dir = root.joinpath(*gen_cursor.OUT_PARTS)
+    present, err = _reachable(cursor_dir)
+    if err:
+        return (MALFORMED, err)
+    if not present:
+        return (NA, "no .cursor/rules/aiqt-guardrails/ surface installed")
+    desired = {}
+    try:
+        for src, _fm, rel in corpus:
+            desired[gen_cursor.cursor_rel(rel)] = gen_cursor.render_rule(src)
+    except (ValueError, OSError) as exc:
+        return (MALFORMED, "cannot render a Cursor rule: {}".format(exc))
+    drift = []
+    try:
+        for rel, content in sorted(desired.items()):
+            target = cursor_dir / rel
+            current = target.read_text(encoding="utf-8") if target.exists() else None
+            if current != content:
+                drift.append(rel)
+        for dirpath, _dirs, filenames in os.walk(cursor_dir, onerror=_walk_raise):
+            for fn in sorted(f for f in filenames if f.endswith(".mdc")):
+                f = Path(dirpath) / fn
+                rel = f.relative_to(cursor_dir).as_posix()
+                if rel not in desired:
+                    drift.append("orphan " + rel)
+    except OSError as exc:
+        return (MALFORMED, "cannot read the .cursor/rules/aiqt-guardrails/ tree: {}".format(exc))
+    if drift:
+        return (FAIL, "{} of {} Cursor rule(s) drifted/orphaned: {}".format(
+            len(set(drift)), len(desired), "; ".join(sorted(set(drift)))))
+    return (PASS, "{} Cursor rule(s) match regeneration".format(len(desired)))
+
+
 def check_c2(root, cache):
     """Each generated surface the adopter HAS matches regeneration from their .aiqt/core/rules/.
 
@@ -244,7 +285,8 @@ def check_c2(root, cache):
     corpus = cache.get("corpus", [])
     cs, cd = _claude_drift(root, corpus)
     as_, ad = _agents_drift(root, corpus)
-    surfaces = [("claude", cs, cd), ("agents", as_, ad)]
+    us, ud = _cursor_drift(root, corpus)
+    surfaces = [("claude", cs, cd), ("agents", as_, ad), ("cursor", us, ud)]
     for adapter in gen_adapters.ADAPTERS:
         surfaces.append(_adapter_drift(root, corpus, adapter))
     # Aggregate every surface: worst status wins, but NA of one surface does not mask a PASS/FAIL of
@@ -590,6 +632,11 @@ def _build_conformant(base):
         out = base.joinpath(*adapter["parts"])
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(gen_adapters.render(pairs, adapter["header"]), encoding="utf-8")
+    cursor = base.joinpath(*gen_cursor.OUT_PARTS)
+    for s_, _fm, rel in corpus:
+        target = cursor / gen_cursor.cursor_rel(rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(gen_cursor.render_rule(s_), encoding="utf-8")
     return corpus
 
 
@@ -691,7 +738,8 @@ def self_test_main():
         #     the two adapters GEMINI.md and the nested .github/copilot-instructions.md), so the pass
         #     line's per-surface claim is honestly tested and no surface is silently trusted. (.claude
         #     drift is case 2 above.)
-        for rel in ("AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md"):
+        for rel in ("AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md",
+                ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-read-before-characterizing.mdc"):
             adrift = tmp / ("adrift-" + rel.replace("/", "_"))
             adrift.mkdir()
             _build_conformant(adrift)
@@ -700,6 +748,16 @@ def self_test_main():
             code, out = run_capture(adrift)
             if code != 1 or status_of(out, "C2") != FAIL:
                 failures.append("adapter-drift ({}) expected exit 1 + C2 FAIL:\n{}".format(rel, out))
+
+        # 2c. An orphaned .mdc inside the reserved Cursor subtree (no source rule) -> C2 FAIL.
+        corphan = tmp / "cursor-orphan"
+        corphan.mkdir()
+        _build_conformant(corphan)
+        extra = corphan.joinpath(*gen_cursor.OUT_PARTS) / "aiqt" / "99-ORPHAN-extra.mdc"
+        extra.write_text("---\nalwaysApply: true\n---\n\n# Orphan\n", encoding="utf-8")
+        code, out = run_capture(corphan)
+        if code != 1 or status_of(out, "C2") != FAIL:
+            failures.append("cursor-orphan tree expected exit 1 + C2 FAIL:\n{}".format(out))
 
         # 3. Missing input (.aiqt/core absent) -> NOT APPLICABLE, not a fake pass. Keep only the
         #    placement-valid .claude/rules/ tree from a conformant build.
@@ -860,6 +918,21 @@ def self_test_main():
                 failures.append("unreadable .github dir expected C2 MALFORMED:\n{}".format(out))
         os.chmod(gh_dir, 0o755)  # restore so cleanup can remove it
 
+        # 15. An unreadable generated Cursor subtree must fail closed via C2 (the orphan scan walks it),
+        #     not conceal an orphan. Same root-vs-nonroot guard as cases 9-14.
+        badcursor = tmp / "badcursor"
+        badcursor.mkdir()
+        _build_conformant(badcursor)
+        cur_dir = badcursor.joinpath(*gen_cursor.OUT_PARTS)
+        os.chmod(cur_dir, 0)
+        if _unreadable_or_skip(cur_dir, "15 cursor-subtree"):
+            code, out = run_capture(badcursor)
+            if code != 2:
+                failures.append("unreadable cursor subtree expected exit 2 (fail-closed), got {}".format(code))
+            if status_of(out, "C2") != MALFORMED:
+                failures.append("unreadable cursor subtree expected C2 MALFORMED:\n{}".format(out))
+        os.chmod(cur_dir, 0o755)  # restore so cleanup can remove it
+
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
         if code != 2:
@@ -878,7 +951,7 @@ def self_test_main():
                  " NOTE: {} unreadable-input-dir case(s) (9-14) were SKIPPED this run because the runner "
                  "could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read bits are "
                  "enforced to exercise them.".format(len(skipped_unreadable), ", ".join(skipped_unreadable)))
-    print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, and the GEMINI.md/copilot "
+    print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, and the GEMINI.md/copilot "
           "adapters), empty-core orphans, and fabricated mapping ids fail; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, and the .aiqt/.claude/.github parents), and a bad "

@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Resume from the durable handoff
+
+A session resumes from its durable handoff rather than starting cold, and works under a single named
+operating mode.

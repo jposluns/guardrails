@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Security logging with traceable context
+
+Security-relevant events, including authentication, authorization, and privileged actions, are logged with
+enough context to investigate. The human, agent, and tool chain behind an action stays traceable end to end.

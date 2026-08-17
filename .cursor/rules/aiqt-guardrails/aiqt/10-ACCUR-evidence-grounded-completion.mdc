@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+# Evidence-grounded completion
+
+Never claim completion without evidence. Before "done", "fixed", "green", or "verified": re-read the files
+in scope, quote the lines that support the claim, search for contradictions, and state every remaining
+unverified item. A stated intention is a claim; do not end a turn asserting work is proceeding unless it is.

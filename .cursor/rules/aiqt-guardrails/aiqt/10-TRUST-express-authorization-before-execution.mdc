@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Express authorization before execution
+
+A planning discussion is not authorization. Execution of a plan-initiating unit of work begins only on an
+explicit, work-naming go.

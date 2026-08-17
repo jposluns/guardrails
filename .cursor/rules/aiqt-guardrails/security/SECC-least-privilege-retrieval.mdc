@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Retrieval enforces the requester's authorization
+
+Retrieval and tool access enforce the requester's own authorization, not the assistant's broader access, so a
+person can never reach through the assistant to data or systems they could not reach directly.
