@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.1.8** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.1.9** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -11,6 +11,10 @@ machine-local `CLAUDE.local.md` that is never committed here.
 The portable rules this repo operates under are indexed below and carried in full under `.claude/rules/`
 (generated from `.aiqt/core/rules/`), which loads into a Claude Code session automatically. The rest of
 this file is the repo-specific operating governance that sits on top of those rules.
+
+**Apex principle (highest precedence):** (Accuracy = Integrity = Quality = Trust) > Progress > Speed >
+Cost. The four facets are one non-negotiable top tier; a gain in progress, speed, or cost never justifies
+a loss on it. Its full rule is the first entry in the index below.
 
 <!-- RULES-INDEX:BEGIN (generated) -->
 ## AIQT rule index (generated from .aiqt/core/rules/; do not hand-edit this block)
