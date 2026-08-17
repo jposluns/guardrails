@@ -15,6 +15,10 @@ map-owasp-cheatsheet-tight: [logging]
 map-owasp-asvs-tight: [V16]
 map-owasp-proactive-tight: [C9]
 map-owasp-mcp-tight: [MCP08]
+map-csa-ccm-tight: [LOG-07, LOG-09, LOG-12, LOG-13]
+map-csa-ccm-broad: [LOG-01]
+map-csa-aicm-tight: [LOG-07, LOG-09, LOG-12, LOG-13]
+map-csa-aicm-broad: [LOG-01]
 ---
 
 # Security logging with traceable context

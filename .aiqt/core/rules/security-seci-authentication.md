@@ -14,6 +14,8 @@ map-owasp-asvs-tight: [V6]
 map-owasp-web-tight: [A07]
 map-owasp-cheatsheet-tight: [authentication, multifactor-authentication]
 map-owasp-api-tight: [API2]
+map-csa-ccm-tight: [IAM-13, IAM-14]
+map-csa-aicm-tight: [IAM-13, IAM-14]
 ---
 
 # Strong authentication

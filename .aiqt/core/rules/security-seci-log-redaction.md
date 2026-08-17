@@ -12,6 +12,10 @@ map-atlas-broad: [AML.T0055, AML.T0063]
 map-iso-42001-broad: [A.6.2.8]
 map-iso-23894-broad: [A.8, A.11]
 map-owasp-asvs-broad: [V16]
+map-csa-ccm-tight: [LOG-08, LOG-09]
+map-csa-ccm-broad: [DSP-08, DSP-17]
+map-csa-aicm-tight: [LOG-08, LOG-09]
+map-csa-aicm-broad: [DSP-17]
 ---
 
 # Redact sensitive content from logs

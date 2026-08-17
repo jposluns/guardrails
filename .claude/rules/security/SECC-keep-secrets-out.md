@@ -15,6 +15,10 @@ map-owasp-llm-broad: [LLM02]
 map-owasp-mcp-tight: [MCP01]
 map-owasp-asvs-broad: [V14]
 map-owasp-cheatsheet-tight: [secrets-management]
+map-csa-ccm-tight: [IAM-14]
+map-csa-ccm-broad: [DSP-17, LOG-08]
+map-csa-aicm-tight: [AIS-12, IAM-14]
+map-csa-aicm-broad: [DSP-17, LOG-08]
 ---
 
 # Keep secrets out

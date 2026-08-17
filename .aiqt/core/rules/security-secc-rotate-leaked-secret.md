@@ -12,6 +12,10 @@ map-atlas-broad: [AML.T0012, AML.T0091.000, AML.T0091.001]
 map-iso-23894-broad: [A.11]
 map-owasp-mcp-tight: [MCP01]
 map-owasp-cheatsheet-tight: [secrets-management]
+map-csa-ccm-tight: [CEK-12, CEK-19, IAM-14]
+map-csa-ccm-broad: [SEF-07]
+map-csa-aicm-tight: [CEK-12, CEK-19, IAM-14]
+map-csa-aicm-broad: [SEF-07]
 ---
 
 # Rotate a leaked secret

@@ -13,6 +13,10 @@ map-iso-42001-broad: [A.9.2]
 map-iso-23894-tight: [B.4]
 map-iso-23894-broad: [A.2, A.10]
 map-owasp-llm-tight: [LLM03]
+map-csa-ccm-tight: [CCC-04]
+map-csa-ccm-broad: [CCC-05]
+map-csa-aicm-tight: [CCC-04, GRC-15]
+map-csa-aicm-broad: [CCC-05]
 ---
 
 # Human authorization for consequential actions

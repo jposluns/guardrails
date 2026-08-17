@@ -14,6 +14,10 @@ map-iso-42001-broad: [A.7.6]
 map-iso-23894-broad: [A.8]
 map-owasp-llm-tight: [LLM02]
 map-owasp-asvs-broad: [V14]
+map-csa-ccm-tight: [DSP-08, DSP-12]
+map-csa-ccm-broad: [DSP-17]
+map-csa-aicm-tight: [DSP-08, DSP-12, DSP-22]
+map-csa-aicm-broad: [DSP-17]
 ---
 
 # Minimize personal data sent to AI services
