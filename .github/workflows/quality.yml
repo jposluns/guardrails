@@ -66,6 +66,9 @@ jobs:
       - name: Agents drift
         run: python3 tools/gen_agents.py --check
 
+      - name: NOTICE drift
+        run: python3 tools/gen_notice.py --check
+
       - name: CLAUDE.md drift
         run: python3 tools/gen_claude.py --check
 
