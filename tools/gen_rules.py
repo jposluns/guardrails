@@ -211,7 +211,9 @@ def main():
         fam_dir = out_dir / family
         if fam_dir.is_dir():
             for f in sorted(fam_dir.rglob("*.md")):
-                rel = str(f.relative_to(out_dir))
+                # as_posix(), not str(): desired keys are forward-slash derive() paths, so a backslash
+                # from str() on Windows would flag every generated file as an orphan.
+                rel = f.relative_to(out_dir).as_posix()
                 if rel not in desired:
                     drift.append("orphan " + rel)
                     if not check:

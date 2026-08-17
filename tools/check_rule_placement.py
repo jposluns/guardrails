@@ -14,6 +14,7 @@ violation line is `<relpath>: <code>: <detail>` per section 6.2. The adopter .co
 the not-yet-built adopter cleanup workflow and are deferred (recorded as GD-9); this gate runs fail-closed
 on the built-in aiqt/security/external families and accepts both pack- and adopter-origin rules.
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -81,7 +82,9 @@ def check_drift(f, rules):
         want = derive(fm, f.name, ("pack", "adopter"))
     except ValueError as exc:
         return ("frontmatter-drift", str(exc))
-    if str(f.relative_to(rules)) != want:
+    # as_posix(), not str(): derive() returns a forward-slash path, so a backslash from str() on
+    # Windows would make every correctly-placed rule read as frontmatter-drift.
+    if f.relative_to(rules).as_posix() != want:
         return ("frontmatter-drift", "derives {}".format(want))
     return None
 
@@ -102,11 +105,16 @@ def main():
     # check_drift) validates a rule's map-* keys against them. Under --root against an adopter tree with
     # its own .aiqt/standards/, rebind from that root so their map-keys are judged against their
     # manifests, not this checker's. With no --root, root == repo_root() so this is a no-op.
+    # Fail-closed if that dir exists but cannot be listed: map_keys() uses Path.glob, which SILENTLY
+    # yields nothing on an unreadable dir rather than raising, so force an os.scandir (which does raise).
+    std_dir = root / ".aiqt" / "standards"
     try:
+        if std_dir.is_dir():
+            list(os.scandir(std_dir))
         gen_rules.MAP_KEYS = map_keys(root)
         gen_rules.SEQ_KEYS = {"secondary"} | gen_rules.MAP_KEYS
     except OSError as exc:
-        print("cannot read {}: {}".format(root / ".aiqt" / "standards", exc), file=sys.stderr)
+        print("cannot read {}: {}".format(std_dir, exc), file=sys.stderr)
         return 2
     rules = root / ".claude" / "rules"
     if not rules.is_dir():

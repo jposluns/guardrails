@@ -134,7 +134,9 @@ def _claude_drift(root, corpus):
             fam_dir = claude_dir / family
             if fam_dir.is_dir():
                 for f in sorted(fam_dir.rglob("*.md")):
-                    rel = str(f.relative_to(claude_dir))
+                    # as_posix(), not str(): derive() emits forward-slash rel paths, so a backslash
+                    # from str() on Windows would make every generated file read as an orphan.
+                    rel = f.relative_to(claude_dir).as_posix()
                     if rel not in desired:
                         drift.append("orphan " + rel)
     except OSError as exc:
@@ -251,7 +253,7 @@ def check_c3(root):
     if evaluated == 0:
         return Result("C3", "placement", NA, "no rule files under .claude/rules/ to validate")
     return Result("C3", "placement", PASS,
-                  "rule placement conforms to the taxonomy ({} file(s) checked)".format(evaluated))
+                  "rule placement conforms to the taxonomy ({} item(s) checked)".format(evaluated))
 
 
 # --- C4: mappings (best-effort) ---------------------------------------------------------------------

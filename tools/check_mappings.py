@@ -9,6 +9,7 @@ gate checks the VALUES.
 
   check_mappings.py    exit 0 clean, 1 mapping finding, 2 malformed manifest or corpus (fail-closed)
 """
+import os
 import sys
 from pathlib import Path
 
@@ -20,9 +21,17 @@ import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus 
 
 def main():
     root = repo_root()
+    std_dir = root / ".aiqt" / "standards"
+    # Fail-closed if the standards dir exists but cannot be listed. load_manifests uses Path.glob,
+    # which SILENTLY yields nothing on an unreadable dir rather than raising, so an unlistable
+    # .aiqt/standards/ would read as "no manifests" and pass clean. Force an os.scandir, which raises.
     try:
-        manifests = load_manifests(root / ".aiqt" / "standards")
-    except ManifestError as exc:
+        if std_dir.is_dir():
+            list(os.scandir(std_dir))
+        manifests = load_manifests(std_dir)
+    except (ManifestError, OSError) as exc:
+        # OSError too: an unreadable manifest file/dir is a read error, not a clean skip. Fail closed
+        # (exit 2) rather than escape as a traceback, matching conformance.py's C4.
         print("error: {}".format(exc))
         return 2
     src_dir = root / ".aiqt" / "core" / "rules"
