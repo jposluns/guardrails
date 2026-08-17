@@ -23,7 +23,7 @@ locally in `--warn-only` mode. Only its deterministic `--self-test` is wired int
 CW-3 synthesis, sections 2 and 4.
 """
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -105,18 +105,22 @@ def run(std_dir, today, warn_only=False):
     """Audit the manifests under std_dir as of `today`; print a report; return the exit code."""
     try:
         manifests = load_manifests(std_dir)
-    except ManifestError as exc:
+    except (ManifestError, OSError) as exc:
+        # OSError too: an unreadable manifest file or an unlistable standards dir is a read error, not a
+        # clean skip. Fail closed (exit 2) rather than escape as a traceback.
         print("MALFORMED: {}".format(exc), file=sys.stderr)
         return 2
     if not manifests:
-        # No manifests at all is not a currency finding; there is simply nothing to audit.
-        print("check_standards_currency: no manifests under {}".format(std_dir))
-        return 0
+        # Fail-closed. The standards manifests are a committed source-of-truth; an absent or empty
+        # .aiqt/standards/ is an integrity anomaly (deleted or misplaced), not "nothing to audit", the
+        # same reasoning check_mappings.py applies to an absent corpus. Never a false clean.
+        print("MALFORMED: no standards manifests found under {} (source-of-truth missing)".format(
+            std_dir), file=sys.stderr)
+        return 2
 
     results, worst = audit(manifests, today)
     fails = [r for r in results if r[5] == FAIL]
     warns = [r for r in results if r[5] == WARN]
-    malformed = [r for r in results if r[5] == MALFORMED]
 
     for map_key, name, edition, status, retrieved, level, detail, fname in results:
         if level == OK:
@@ -124,18 +128,20 @@ def run(std_dir, today, warn_only=False):
         print("{}: .aiqt/standards/{}: {} {} ({}) retrieved {}: {}".format(
             level, fname, map_key, status, edition, retrieved, detail))
 
+    # Exit from audit()'s `worst` (the precedence the self-test exercises), so the shipped exit contract
+    # and the tested one are the same logic. --warn-only downgrades ONLY a FAIL (worst==1) to 0; it never
+    # masks a MALFORMED (worst==2), which stays a fail-closed read/parse error.
     n = len(results)
-    if malformed:
-        print("MALFORMED: {} manifest(s) could not be audited (fail-closed)".format(len(malformed)),
-              file=sys.stderr)
+    if worst == 2:
+        print("MALFORMED: at least one manifest could not be audited (fail-closed)", file=sys.stderr)
         return 2
-    if fails and not warn_only:
+    if worst == 1:
+        if warn_only:
+            print("WARN-ONLY: {} manifest(s) past their FAIL threshold (not failing under --warn-only); "
+                  "{} at WARN".format(len(fails), len(warns)))
+            return 0
         print("FAIL: {} stale standards manifest(s) of {} audited".format(len(fails), n))
         return 1
-    if fails and warn_only:
-        print("WARN-ONLY: {} manifest(s) are past their FAIL threshold (not failing under --warn-only); "
-              "{} at WARN".format(len(fails), len(warns)))
-        return 0
     if warns:
         print("PASS: {} manifest(s) current; {} at WARN (review-due, not failing)".format(n, len(warns)))
         return 0
@@ -198,6 +204,53 @@ def self_test_main():
     if worst != 0:
         failures.append("audit with only OK expected worst=0, got {}".format(worst))
 
+    # run()-level exit contract, against real manifest files: the actual CLI entry point, including the
+    # --warn-only masking behaviour (a FAIL downgrades to 0, a MALFORMED must NOT), absent-dir
+    # fail-closed, and current -> 0. Needs a writable tempdir; skipped (not failed) where none exists,
+    # since CI always has one and this is supplementary to the classify/audit coverage above.
+    import io
+    import shutil
+    import tempfile
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def _manifest(mk, status, retrieved):
+        return (
+            'map-key = "map-{k}"\nname = "Self-test {k}"\npublisher = "AIQT self-test"\n'
+            'edition = "2026"\nkind = "control"\nstatus = "{s}"\ncitation-unit = "control"\n'
+            'id-pattern = "ST[0-9]{{2}}"\nsource-artefact = "self-test fixture"\nretrieved = "{r}"\n'
+            '[[id]]\ncode = "ST01"\ntitle = "one"\n'
+        ).format(k=mk, s=status, r=retrieved)
+
+    def _run_quiet(sd, warn_only=False):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return run(sd, today, warn_only=warn_only)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-currency-selftest-"))
+    except OSError:
+        tmp = None
+    if tmp is not None:
+        try:
+            std = tmp / "standards"
+            std.mkdir()
+            (std / "cur.toml").write_text(_manifest("cur", "stable", days_ago(10)), encoding="utf-8")
+            if _run_quiet(std) != 0:
+                failures.append("run() with a current manifest expected exit 0")
+            (std / "old.toml").write_text(_manifest("old", "beta", days_ago(400)), encoding="utf-8")
+            if _run_quiet(std) != 1:
+                failures.append("run() with a stale manifest expected exit 1")
+            if _run_quiet(std, warn_only=True) != 0:
+                failures.append("run() stale under --warn-only expected exit 0")
+            (std / "bad.toml").write_text(_manifest("bad", "stable", "not-a-date"), encoding="utf-8")
+            if _run_quiet(std) != 2:
+                failures.append("run() with a malformed date expected exit 2")
+            if _run_quiet(std, warn_only=True) != 2:
+                failures.append("run() malformed under --warn-only MUST stay exit 2 (never masked)")
+            if _run_quiet(tmp / "does-not-exist") != 2:
+                failures.append("run() with an absent standards dir expected fail-closed exit 2")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -238,7 +291,10 @@ def main():
     if self_test:
         return self_test_main()
     std_dir = std if std is not None else (repo_root() / ".aiqt" / "standards")
-    return run(std_dir, date.today(), warn_only=warn_only)
+    # UTC, not date.today(): the `retrieved` dates and every project record are UTC, and a local-tz
+    # "today" could shift a boundary-day age by a day on a differently-zoned runner. Deterministic in UTC.
+    today = datetime.now(timezone.utc).date()
+    return run(std_dir, today, warn_only=warn_only)
 
 
 if __name__ == "__main__":
