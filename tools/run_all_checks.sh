@@ -50,6 +50,8 @@ run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "placement"      python3 tools/check_rule_placement.py
 run_gate "mappings"       python3 tools/check_mappings.py
+run_gate "conformance-selftest" python3 tools/conformance.py --self-test
+run_gate "conformance"    python3 tools/conformance.py --root .
 
 if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"
