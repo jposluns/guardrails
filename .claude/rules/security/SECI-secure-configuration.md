@@ -13,6 +13,10 @@ map-owasp-web-tight: [A02]
 map-owasp-api-tight: [API8]
 map-owasp-asvs-tight: [V13]
 map-owasp-proactive-tight: [C5]
+map-csa-ccm-tight: [AIS-02, I&S-04]
+map-csa-ccm-broad: [CCC-06, CCC-07]
+map-csa-aicm-tight: [AIS-02, I&S-04]
+map-csa-aicm-broad: [CCC-06, CCC-07]
 ---
 
 # Secure by default configuration

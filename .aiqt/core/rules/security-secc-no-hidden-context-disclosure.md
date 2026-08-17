@@ -11,6 +11,8 @@ map-atlas-tight: [AML.T0056, AML.T0057, AML.T0069, AML.T0084]
 map-atlas-broad: [AML.T0082, AML.T0098]
 map-iso-23894-broad: [A.8, A.11]
 map-owasp-llm-tight: [LLM02, LLM08]
+map-csa-ccm-broad: [DSP-17]
+map-csa-aicm-broad: [AIS-15, DSP-17, IAM-16, TVM-13]
 ---
 
 # No disclosure of secrets or hidden context

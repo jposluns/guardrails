@@ -15,6 +15,9 @@ map-owasp-api-tight: [API1, API3, API5]
 map-owasp-proactive-tight: [C1]
 map-owasp-cheatsheet-tight: [authorization]
 map-owasp-cheatsheet-broad: [mass-assignment]
+map-csa-ccm-tight: [IAM-05, IAM-15]
+map-csa-aicm-tight: [IAM-05, IAM-15]
+map-csa-aicm-broad: [IAM-16, IAM-17, IAM-18]
 ---
 
 # Least-privilege authorization

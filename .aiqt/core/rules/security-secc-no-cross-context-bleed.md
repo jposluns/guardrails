@@ -10,6 +10,9 @@ map-nist-80053-tight: [AC-4, SC-4]
 map-atlas-broad: [AML.T0057, AML.T0080]
 map-iso-23894-broad: [A.8, A.11]
 map-owasp-mcp-tight: [MCP10]
+map-csa-ccm-tight: [I&S-06]
+map-csa-aicm-tight: [AIS-11, I&S-06]
+map-csa-aicm-broad: [AIS-14, IAM-16]
 ---
 
 # No cross-context bleed

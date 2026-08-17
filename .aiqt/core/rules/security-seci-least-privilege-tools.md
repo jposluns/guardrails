@@ -13,6 +13,10 @@ map-iso-23894-broad: [A.11]
 map-owasp-llm-tight: [LLM03]
 map-owasp-asi-tight: [ASI02]
 map-owasp-mcp-tight: [MCP02]
+map-csa-ccm-tight: [IAM-05]
+map-csa-ccm-broad: [IAM-10, UEM-02]
+map-csa-aicm-tight: [IAM-05, IAM-18]
+map-csa-aicm-broad: [AIS-13, IAM-10, UEM-02]
 ---
 
 # Least-privilege tool and file access

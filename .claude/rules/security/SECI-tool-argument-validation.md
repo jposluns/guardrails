@@ -11,6 +11,8 @@ map-owasp-asi-broad: [ASI05]
 map-owasp-mcp-broad: [MCP05]
 map-owasp-web-broad: [A05]
 map-owasp-asvs-tight: [V2]
+map-csa-ccm-broad: [AIS-04]
+map-csa-aicm-tight: [AIS-09, AIS-11, AIS-13, IAM-18]
 ---
 
 # Validate tool arguments before use
