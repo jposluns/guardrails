@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import map_keys  # noqa: E402
+from _standards import map_keys, ensure_listable  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -170,6 +170,9 @@ def load_corpus(src_dir):
     """Parse and fully validate every source (schema + unique corpus-id + unique derived path); raise
     ValueError on any malformed or duplicate. Returns [(path, frontmatter, derived_rel_path)]."""
     seen_ids, seen_paths, out = {}, {}, []
+    # Fail-closed if the source dir exists but cannot be listed: rglob SILENTLY yields nothing on an
+    # unreadable dir, which would read as an empty corpus (a false clean) rather than a read error.
+    ensure_listable(src_dir)
     for src in sorted(src_dir.rglob("*.md")):
         fm = parse_source(src)
         rel = derive(fm, src.name)

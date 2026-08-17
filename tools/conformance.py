@@ -340,17 +340,13 @@ def run(root):
         print("conformance: --root path is not a directory: {}".format(root), file=sys.stderr)
         return 2
     root = root.resolve()
-    # Fail-closed if the standards dir exists but cannot be listed. Path.glob (used by map_keys and
-    # load_manifests) SILENTLY yields nothing on an unreadable directory rather than raising, which would
-    # make an unreadable .aiqt/standards/ read as "empty standards" and pass clean. Force an os.scandir,
-    # which does raise, so an unlistable standards dir becomes a structured MALFORMED exit 2.
-    std_dir = _standards_dir(root)
+    # Fail-closed if the standards dir exists but cannot be listed. map_keys()/load_manifests() raise on
+    # an unlistable dir (via _standards._ensure_listable) rather than letting Path.glob read it as empty,
+    # so an unreadable .aiqt/standards/ becomes a structured exit 2 here, not a traceback or false-clean.
     try:
-        if std_dir.is_dir():
-            list(os.scandir(std_dir))
         _rebind_map_keys(root)
     except OSError as exc:
-        print("conformance: cannot read {}: {}".format(std_dir, exc), file=sys.stderr)
+        print("conformance: cannot read {}: {}".format(_standards_dir(root), exc), file=sys.stderr)
         return 2
     cache = {}
     results = [
@@ -567,7 +563,13 @@ def self_test_main():
                 return head.split(None, 2)[2] if len(head.split(None, 2)) > 2 else ""
         return None
 
-    tmp = Path(tempfile.mkdtemp(prefix="aiqt-conformance-selftest-"))
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-conformance-selftest-"))
+    except OSError as exc:
+        # No writable temp dir (a locked-down sandbox): report cleanly and fail closed rather than
+        # escaping as a traceback. Real CI/local runs always have one; this only guards odd environments.
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
     failures = []
     # The fixtures rebind gen_rules.MAP_KEYS/SEQ_KEYS; restore them afterwards so a self-test invoked
     # in-process (an import, a notebook, a long-lived runner) never leaves the module globals mutated.
@@ -675,6 +677,22 @@ def self_test_main():
             if code != 2:
                 failures.append("unreadable standards dir expected exit 2 (fail-closed), got {}".format(code))
         os.chmod(std_dir, 0o755)  # restore so cleanup can remove it
+
+        # 10. An unreadable .aiqt/core/rules/ dir must fail closed (exit 2), not read as an empty corpus
+        #     (rglob silently yields nothing on an unlistable dir; load_corpus now probes it). Same
+        #     root-vs-nonroot guard as case 9.
+        badcore = tmp / "badcore"
+        (badcore / ".aiqt" / "core" / "rules" / "aiqt").mkdir(parents=True)
+        (badcore / ".claude" / "rules").mkdir(parents=True)
+        core_dir = badcore / ".aiqt" / "core" / "rules"
+        os.chmod(core_dir, 0)
+        if not os.access(core_dir, os.R_OK):
+            code, out = run_capture(badcore)
+            if code != 2:
+                failures.append("unreadable core-rules dir expected exit 2 (fail-closed), got {}".format(code))
+            if status_of(out, "C1") != MALFORMED:
+                failures.append("unreadable core-rules dir expected C1 MALFORMED:\n{}".format(out))
+        os.chmod(core_dir, 0o755)  # restore so cleanup can remove it
 
         # 5. A --root that does not exist fails closed (exit 2), never a hollow all-absent pass.
         code, out = run_capture(tmp / "does-not-exist")
