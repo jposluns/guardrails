@@ -13,7 +13,8 @@ from pathlib import Path
 
 def walk_files(root, skip_dirs=frozenset(), suffixes=None):
     """Yield files under root (Path objects), fail-closed. Directories whose name is in skip_dirs are
-    pruned (not descended). suffixes, if given, keeps only files with those extensions (e.g. {".md"}).
+    pruned (not descended), and a FILE whose name is in skip_dirs is skipped too (a git worktree's `.git`
+    is a file, not a dir). suffixes, if given, keeps only files with those extensions (e.g. {".md"}).
     Raises OSError if a directory that must be walked cannot be listed (caller converts to exit 2)."""
     def _raise(exc):
         raise exc
