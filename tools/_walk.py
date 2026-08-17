@@ -21,6 +21,10 @@ def walk_files(root, skip_dirs=frozenset(), suffixes=None):
     for dirpath, dirnames, filenames in os.walk(root, onerror=_raise):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for fn in filenames:
+            # Also skip a FILE whose name is in skip_dirs: in a git worktree `.git` is a file (a pointer),
+            # not a directory, and it is tool metadata that must not be scanned, exactly like the .git dir.
+            if fn in skip_dirs:
+                continue
             p = Path(dirpath) / fn
             if suffixes is None or p.suffix in suffixes:
                 yield p

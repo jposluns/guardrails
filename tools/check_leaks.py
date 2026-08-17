@@ -16,7 +16,7 @@ any salt would also be public). Deliberate obfuscation (mid-word splits, HTML en
 can evade the hash layer; binary/archive contents (e.g. a .zip) are not unpacked; the structural path
 patterns are scoped to this host's Linux layout. The dual-family verifiers and the private plaintext check
 are the compensating layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
-Exit 0 clean, 1 on any finding or a malformed hashes file.
+Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (unreadable dir/file, fail-closed).
 """
 import hashlib
 import re
@@ -88,9 +88,11 @@ def load_denylist(root):
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    hashes, maxn, findings = load_denylist(root)
-    findings = list(findings)
     try:
+        # load_denylist reads a required file (the leak-hash denylist); keep it inside the fail-closed
+        # try so an unreadable denylist is a clean exit 2, not a traceback.
+        hashes, maxn, findings = load_denylist(root)
+        findings = list(findings)
         for path in sorted(walk_files(root, SKIP_DIRS)):
             if path.name in SKIP_NAMES:
                 continue
