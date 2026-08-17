@@ -1,0 +1,77 @@
+# .aiqt/core/hooks/manifest.toml: the mechanical-enforcement manifest (GD-24).
+#
+# One [[hook]] per shipped control. `id` is a stable, unique control identifier (a kebab-case slug);
+# `rules` names the corpus-id(s) the control enforces, and every `rules` element must resolve to a real
+# corpus-id in .aiqt/core/rules/ (validated by tools/gen_hooks.py against gen_rules.load_corpus, the
+# same no-orphan pattern check_mappings uses for standards ids). A rule may back more than one control
+# (cnsdif has both a Stop layer and a PreToolUse diff-source layer), so the control key is `id`, not the
+# corpus-id, and `rules` carries the corpus linkage. tools/gen_hooks.py renders this manifest into the
+# shipped Claude Code plugin surface under plugin/aiqt-guardrails-hooks/ (hooks/hooks.json,
+# hooks/scripts/aiqt_hooks.py, .claude-plugin/plugin.json) and drift-gates it in CI; this file and the
+# scripts/ tree beside it are the single edit point, the generated surface is never hand-edited.
+#
+# Fields per [[hook]]:
+#   id       a stable, unique control identifier (kebab-case slug)
+#   rules    the corpus-id(s) this control enforces (a list: a control may enforce more than one rule,
+#            and a rule may back more than one control)
+#   platform "claude-code" (the only renderer so far; a neutrality dimension, not an abstraction)
+#   event    a known Claude Code hook event (Stop, PreToolUse, ...); whitelisted by the generator
+#   matcher  the tool-name pattern for tool events; OMITTED for non-tool events such as Stop
+#   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control)
+#   default  "block" (hard deny / exit 2) or "ask"; slice-1 controls are lexical and zero-intent,
+#            so they ship at block
+#   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
+#            d judgement), carried through so the surface traces to its enforceability claim
+#   residue  REQUIRED, never empty: what this control does NOT catch, so the shipped surface stays
+#            honest about heuristic coverage
+
+[plugin]
+name = "aiqt-guardrails-hooks"
+version = "0.1.0"
+description = "Mechanical enforcement of AIQT Guardrails rules for Claude Code, generated from the rule corpus."
+author-name = "Jeff Posluns"
+author-email = "jeff@posluns.ca"
+homepage = "https://aiqt.ai"
+
+[[hook]]
+id = "diff-wall-stop"
+rules = ["cnsdif"]  # trust / no-console-diff-dumps
+platform = "claude-code"
+event = "Stop"
+handler = "diff_wall_stop"
+default = "block"
+class = "b"
+residue = "Catches only a unified-diff wall in the final assistant message of a turn: diff --git headers, paired @@ hunk headers, fenced diff or patch blocks of 10 or more lines, and mixed +/- runs of 8 or more lines. Does not catch a diff dumped mid-turn between tool calls, side-by-side or word-diff renderings, raw log or patch walls that carry none of those markers, or a repeat offence in the immediate continuation turn (the stop_hook_active loop guard scans once per turn chain)."
+
+[[hook]]
+id = "diff-source"
+rules = ["cnsdif"]  # trust / no-console-diff-dumps (PreToolUse layer A)
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Bash"
+handler = "diff_source_pretool"
+default = "block"
+class = "b"
+residue = "Inspects only the command text of a Bash invocation that pipes a version-control diff to the console. Allows an explicit summary form (git show/diff/log with --stat, --name-only, or --name-status), any redirection of the diff to a file, and an explicit '# allow-diff' token; blocks a bare console diff. Does not catch a diff produced by a non-git tool, a diff assembled across separate commands, a diff already written to a file and then dumped with cat, or a diff emitted by a command outside the Bash tool."
+
+[[hook]]
+id = "commit-identity"
+rules = ["cmtidn"]  # integ / commit-identity
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Bash"
+handler = "commit_identity"
+default = "block"
+class = "b"
+residue = "Inspects only the command text of a git authoring invocation run through the Bash tool. Does not catch a trailer staged into a message file by an earlier command and committed with -F or -t, an AI identity persisted beforehand via git config in a separate command, a commit made outside the Bash tool or outside the session, or an AI product name outside the recognized identity set."
+
+[[hook]]
+id = "abs-paths"
+rules = ["abspth"]  # quali / absolute-paths
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Read|Write|Edit|Glob"
+handler = "absolute_paths"
+default = "block"
+class = "b"
+residue = "Covers the file_path argument of Read, Write, and Edit (absolute by tool contract, so the relative-to-a-named-root carve-out never applies there) and the optional search-root path of Glob (which should be absolute). Honours the carve-out: a Glob pattern is legitimately relative to its named root and is never judged, and a Glob call with no path (the current directory as the named root) is allowed. Does not judge paths inside Bash command text, other path-bearing tools or parameters, or whether an absolute path points at the intended target."
