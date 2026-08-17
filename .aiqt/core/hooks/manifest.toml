@@ -1,0 +1,77 @@
+# .aiqt/core/hooks/manifest.toml: the mechanical-enforcement manifest (GD-24).
+#
+# One [[hook]] per shipped control. `id` is a stable, unique control identifier (a kebab-case slug);
+# `rules` names the corpus-id(s) the control enforces, and every `rules` element must resolve to a real
+# corpus-id in .aiqt/core/rules/ (validated by tools/gen_hooks.py against gen_rules.load_corpus, the
+# same no-orphan pattern check_mappings uses for standards ids). A rule may back more than one control
+# (cnsdif has both a Stop layer and a PreToolUse diff-source layer), so the control key is `id`, not the
+# corpus-id, and `rules` carries the corpus linkage. tools/gen_hooks.py renders this manifest into the
+# shipped Claude Code plugin surface under plugin/aiqt-guardrails-hooks/ (hooks/hooks.json,
+# hooks/scripts/aiqt_hooks.py, .claude-plugin/plugin.json) and drift-gates it in CI; this file and the
+# scripts/ tree beside it are the single edit point, the generated surface is never hand-edited.
+#
+# Fields per [[hook]]:
+#   id       a stable, unique control identifier (kebab-case slug)
+#   rules    the corpus-id(s) this control enforces (a list: a control may enforce more than one rule,
+#            and a rule may back more than one control)
+#   platform "claude-code" (the only renderer so far; a neutrality dimension, not an abstraction)
+#   event    a known Claude Code hook event (Stop, PreToolUse, ...); whitelisted by the generator
+#   matcher  the tool-name pattern for tool events; OMITTED for non-tool events such as Stop
+#   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control)
+#   default  "block" (hard deny / exit 2) or "ask"; slice-1 controls are lexical and zero-intent,
+#            so they ship at block
+#   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
+#            d judgement), carried through so the surface traces to its enforceability claim
+#   residue  REQUIRED, never empty: what this control does NOT catch, so the shipped surface stays
+#            honest about heuristic coverage
+
+[plugin]
+name = "aiqt-guardrails-hooks"
+version = "0.1.0"
+description = "Mechanical enforcement of AIQT Guardrails rules for Claude Code, generated from the rule corpus."
+author-name = "Jeff Posluns"
+author-email = "jeff@posluns.ca"
+homepage = "https://aiqt.ai"
+
+[[hook]]
+id = "diff-wall-stop"
+rules = ["cnsdif"]  # trust / no-console-diff-dumps
+platform = "claude-code"
+event = "Stop"
+handler = "diff_wall_stop"
+default = "block"
+class = "b"
+residue = "This Stop layer is a NON-BLOCKING surfacing WARN (systemMessage, exit 0), not a hard block: by Stop time the wall has already rendered, and with no stop_hook_active field and no documented loop bound a hard block could wedge the session, so hard prevention lives in the PreToolUse diff-source layer instead. It catches only a unified-diff wall in the final assistant message of a turn: diff --git headers, paired @@ hunk headers, fenced diff/patch/udiff blocks (backtick or tilde) of 10 or more lines, and mixed +/- runs of 8 or more lines. It does not catch a diff dumped mid-turn between tool calls, side-by-side or word-diff renderings, or raw log or patch walls that carry none of those markers; a mixed +/- Markdown checklist can rarely trip the +/- run detector (accepted residual)."
+
+[[hook]]
+id = "diff-source"
+rules = ["cnsdif"]  # trust / no-console-diff-dumps (PreToolUse layer A)
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Bash"
+handler = "diff_source_pretool"
+default = "block"
+class = "b"
+residue = 'A best-effort QUOTE-AWARE LEXICAL check over the Bash command string: it is tokenized with a shell lexer (shlex, posix, punctuation-aware) that respects quotes and yields the shell operators ; | || && & ( ) as distinct tokens only when unquoted, then grouped into segments on those operators and on newlines, so a bare or subshell-grouped diff (git diff, ( git diff )) is caught even when chained after an allowed segment, and a separator inside a quoted argument no longer mis-splits. On a segment whose command word is git it denies a diff-producing subcommand: diff, show, and range-diff always; log, diff-tree, diff-index, diff-files with a patch flag (-p/-u/--patch); format-patch with --stdout; stash with a show subcommand and a patch flag. git global options that take an argument (-C, -c, --git-dir, --work-tree, --namespace, --exec-path, --super-prefix, --config-env), whose value is now its own token, are skipped so the value is not misread as the subcommand, and a leading inline env-assignment prefix (GIT_PAGER=cat git diff) is skipped so the command word still resolves to git. A diff-producer segment is ALLOWED in FOUR cases, each judged PER DIFF SEGMENT on that segment own tokens: (1) an INFO FLAG on the segment (--help or -h) is a help invocation, not a diff; (2) a SUMMARY flag (--stat, --name-only, --name-status, --numstat, --shortstat) with NO co-present patch flag (-p, -u, --patch, --patch-with-stat, --patch-with-raw), so a listing form escapes but git diff --stat -p (which still dumps the full diff) DENIES; (3) the segment LAST stdout redirect targets a REAL non-console file (a > or >> token whose target is an ordinary path). Last-redirect-wins: a segment may carry more than one stdout redirect and only the last one governs where stdout finally lands, so git diff >/dev/tty >/tmp/x diverts to a real file (allow) while git diff >/tmp/x >/dev/tty ends on the console (deny). (4) a PAGER PIPE, the segment piped by an unquoted | into a known interactive pager (less, more, most, pager), is interactive review, not a console wall. Cases 1 and 4 (--help/-h and the pager pipe) were restored in GD-24 fix round 7 after fix round 6 over-corrected them to DENY; a pipe to cat, tee, or anything else is NOT a pager pipe and still denies. A redirect whose winning target lands on a console/terminal or on stdout/stderr is NOT an escape, because the diff still reaches the console: ANY target under /dev/ (/dev/tty, /dev/pts/N, /dev/console, /dev/stdout, /dev/stderr, any /dev/fd/N) or under /proc/ (/proc/self/fd/1, any /proc/PID/fd/N), and the fd-duplication forms (>&1, >&2, 1>&2, 2>&1, &>, >&), which tokenize as their own >&/&> tokens and are never a stdout-to-file redirect (a stdout fd-dup as the last redirect also keeps the segment a console dump). There is NO comment escape: the fragile # allow-diff quote-parsing was removed in GD-24 fix round 6 and stays removed (an opt-in anti-diff-dump hook blocks console diffs, and the summary and file-redirect escapes cover the legitimate want-the-diff-not-as-a-wall case). On a shell parse error (unbalanced quotes) it fails SAFE: a conservative raw-string scan denies an apparent git diff-producer with no summary or redirect-to-file escape, never a silent-allow. It does NOT defeat deliberate shell escaping (git \diff), obfuscation or indirection (printf, octal, eval, base64), an alias or function that renames the tool, persistent shell/env/config state or a prior-state (a pager or config set in an EARLIER turn), the env VAR=x git ... command form (the literal env command) or the command git ... builtin, a diff produced by a non-git tool or assembled across commands, a file written then dumped with cat, or a diff emitted outside the Bash tool. Two exotic escapes are ACCEPTED, not fixed (neither is reachable by accidental assistant behaviour): a pathspec LITERALLY named --help after a -- separator (git diff -- --help dumps a file named --help, but the info-flag escape matches the --help token without distinguishing option position from pathspec position, so it allows); and a pager whose OWN output is piped onward (the pager-pipe escape confirms the next command word is a pager but does not follow what happens after it, so a pager feeding a further console dump still escapes). It is BEST-EFFORT: it targets the common/accidental case (the assistant own accidental violation), not an adversary determined to evade it.'
+
+[[hook]]
+id = "commit-identity"
+rules = ["cmtidn"]  # integ / commit-identity
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Bash"
+handler = "commit_identity"
+default = "block"
+class = "b"
+residue = 'A best-effort QUOTE-AWARE LEXICAL check over the Bash command string: tokenized with a shell lexer (shlex, posix, punctuation-aware) that respects quotes and grouped into segments on the unquoted shell operators ; | || && & ( ) and newlines, so a subshell-grouped commit (( git commit --author=... )) is judged too, and a trailer hiding inside a quoted -m message (-m "fix; Co-authored-by: Claude", which the old whitespace split broke at the ;) now lives intact in the single message token and is caught by a substring scan on that token. On a git commit-family segment (commit, merge, cherry-pick, am, rebase, revert, commit-tree) it flags a Co-Authored-By trailer inside any token or an --author value (--author=X or --author X) naming an AI; in ANY segment it flags a git-identity env var (GIT_AUTHOR_NAME/GIT_COMMITTER_NAME) or a user.name/user.email value (a -c user.name=X inline or a config user.name X pair) naming an AI, so setting the identity in a prior segment then committing is caught. git global options that take an argument (-C, -c, --git-dir, --work-tree, --namespace, --exec-path, --super-prefix, --config-env), whose value is now its own token, are skipped so the value is not misread as the subcommand. The BARE message body is deliberately NOT matched against the identity set: a legitimate message that merely mentions an AI product name (-m "fix claude adapter") records no AI identity, and denying it would be a false positive; only a trailer or an --author value records identity. On a shell parse error (unbalanced quotes) it fails SAFE: a conservative raw-string scan denies an apparent AI trailer/--author/env/config assignment, never a silent-allow. It is BEST-EFFORT: it targets the common/accidental case (the assistant own accidental violation), not an adversary determined to evade it. It does NOT defeat deliberate shell escaping (git \commit), obfuscation, an alias or function that renames the tool, or persistent shell/env/config state such as an AI identity persisted in git config in a PRIOR TURN (not the same command), a trailer staged into a message file and committed with -F/-t, a commit made outside the Bash tool or the session, or an AI product name outside the recognized identity set.'
+
+[[hook]]
+id = "abs-paths"
+rules = ["abspth"]  # quali / absolute-paths
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Read|Write|Edit|Glob"
+handler = "absolute_paths"
+default = "block"
+class = "b"
+residue = "Covers the file_path argument of Read, Write, and Edit (absolute by tool contract, so the relative-to-a-named-root carve-out never applies there) and the optional search-root path of Glob (which should be absolute). Honours the carve-out: a Glob pattern is legitimately relative to its named root and is never judged, and a Glob call with no path (the current directory as the named root) is allowed. Does not judge paths inside Bash command text, other path-bearing tools or parameters, or whether an absolute path points at the intended target."
