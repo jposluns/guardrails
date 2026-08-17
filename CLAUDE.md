@@ -129,11 +129,10 @@ what is particular to this repo (and has no source rule) lives here.
   merely a budget choice), noted and re-run when it returns. A further family or independent pass is
   reserved for critical changes. Quick, purely-bookkeeping changes need no standing verifier; the
   mechanical gates suffice.
-- **Sole orchestrator.** ONE orchestrator is the sole writer and merge authority for this repo. Workers
-  produce inert data; validation is a gate on apply (the portable rules for this are indexed above).
+- **Sole orchestrator.** ONE orchestrator is the sole writer and merge authority for this repo.
 - **Change tracking.** The public `CHANGELOG.md` carries user-facing release notes per release,
   generated from `changelog.toml` and drift-gated; every change is recorded in detail in the operational
-  record (per records-first). Backlog item numbers are permanent and never reused.
+  record.
 
 ## Gates and CI
 
