@@ -44,6 +44,7 @@ import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
+import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
 
@@ -265,6 +266,52 @@ def _cursor_drift(root, corpus):
     return (PASS, "{} Cursor rule(s) match regeneration".format(len(desired)))
 
 
+def _skill_drift(root, corpus):
+    """Mirror gen_skill's reconciliation, re-rooted at root (never call run_gen, which WRITES). Compare
+    the installed chat-skill surface (site/downloads/aiqt/ plus the standalone aiqt-instructions.txt)
+    against regeneration from .aiqt/core/skill/skill-source.md and the corpus. Absent surface -> NOT
+    APPLICABLE (the adopter did not install the chat skill). A present surface with a missing/unreadable
+    source, or an unknown cited corpus-id, is a broken install -> MALFORMED (fail closed), so the same
+    anti-fabrication gate that guards the generator also guards an installed skill."""
+    reserved_dir = root.joinpath(*gen_skill.RESERVED_PARTS)
+    present, err = _reachable(reserved_dir)
+    if err:
+        return (MALFORMED, err)
+    if not present:
+        return (NA, "no site/downloads/aiqt/ chat-skill surface installed")
+    try:
+        reserved_map, standalone, binary = gen_skill.build_outputs(root)
+    except (ValueError, OSError) as exc:
+        return (MALFORMED, "cannot regenerate the chat skill: {}".format(exc))
+    drift = []
+    try:
+        for path, content in standalone:
+            current = path.read_text(encoding="utf-8") if path.exists() else None
+            if current != content:
+                drift.append(path.relative_to(root).as_posix())
+        for path, content in binary:
+            current = path.read_bytes() if path.exists() else None
+            if current != content:
+                drift.append(path.relative_to(root).as_posix())
+        for name, content in sorted(reserved_map.items()):
+            target = reserved_dir / name
+            current = target.read_text(encoding="utf-8") if target.exists() else None
+            if current != content:
+                drift.append((reserved_dir / name).relative_to(root).as_posix())
+        # Orphan scan over the reserved subtree (100% generated); os.walk(onerror=raise), not rglob.
+        for dirpath, _dirs, filenames in os.walk(reserved_dir, onerror=_walk_raise):
+            for fn in sorted(filenames):
+                f = Path(dirpath) / fn
+                rel = f.relative_to(reserved_dir).as_posix()
+                if rel not in reserved_map:
+                    drift.append("orphan " + (reserved_dir / rel).relative_to(root).as_posix())
+    except OSError as exc:
+        return (MALFORMED, "cannot read the chat-skill surface: {}".format(exc))
+    if drift:
+        return (FAIL, "chat-skill drift: " + "; ".join(sorted(set(drift))))
+    return (PASS, "chat skill matches regeneration")
+
+
 def check_c2(root, cache):
     """Each generated surface the adopter HAS matches regeneration from their .aiqt/core/rules/.
 
@@ -287,7 +334,8 @@ def check_c2(root, cache):
     cs, cd = _claude_drift(root, corpus)
     as_, ad = _agents_drift(root, corpus)
     us, ud = _cursor_drift(root, corpus)
-    surfaces = [("claude", cs, cd), ("agents", as_, ad), ("cursor", us, ud)]
+    ks, kd = _skill_drift(root, corpus)
+    surfaces = [("claude", cs, cd), ("agents", as_, ad), ("cursor", us, ud), ("skill", ks, kd)]
     for adapter in gen_adapters.ADAPTERS:
         surfaces.append(_adapter_drift(root, corpus, adapter))
     # Aggregate every surface: worst status wins, but NA of one surface does not mask a PASS/FAIL of
@@ -603,6 +651,7 @@ slug: project-integrity
 # Project integrity
 
 The apex rule for the self-test corpus.
+(Accuracy = Integrity = Quality = Trust) > Progress > Speed > Cost.
 """
 
 _ACCUR = """---
@@ -691,6 +740,66 @@ map-selftest-broad: [ST01]
 
 A self-test rule asserting one id as both tight and broad, which mutual exclusivity forbids.
 """
+
+
+# A fixture chat-skill source citing the conformant tree's own corpus ids (apex01, plus seci001 and
+# accur01 for the two security groups), so gen_skill.build_outputs resolves cleanly against it. Used to
+# install a VALID chat-skill surface and then drift it, exercising the C2 skill fold for real.
+_SKILL_SRC_FIXTURE = """=== meta ===
+name: aiqt
+version: 9.9.9
+license: CC-BY-SA-4.0
+date: 2026-01-01
+apex-id: apex01
+
+=== description ===
+A conformance self-test skill description line.
+
+=== instructions-preamble ===
+HOW TO USE THIS FILE
+Self-test preamble.
+
+=== body-aiqt ===
+Self-test AIQT body.
+
+=== body-rules ===
+Self-test rules body.
+
+=== security-intro ===
+Self-test security intro.
+
+=== security-unconditional ===
+[seci001]
+**Self-test unconditional entry.** Body text.
+
+=== security-conditional ===
+[accur01]
+**Self-test conditional entry.** Body text.
+
+=== security-capability-note ===
+Self-test capability note.
+"""
+
+
+def _add_skill_surface(base):
+    """Install a VALID generated chat-skill surface onto a tree already built by _build_conformant: the
+    reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the deterministic
+    aiqt-skill.zip, all from _SKILL_SRC_FIXTURE. Because regeneration then succeeds, a later hand-edit of
+    any installed output (SKILL.md or the zip) reads as drift (C2 skill FAIL), not MALFORMED."""
+    src = base.joinpath(*gen_skill.SKILL_SRC_PARTS)
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(_SKILL_SRC_FIXTURE, encoding="utf-8")
+    reserved_map, standalone, binary = gen_skill.build_outputs(base)
+    reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
+    reserved_dir.mkdir(parents=True, exist_ok=True)
+    for name, content in reserved_map.items():
+        (reserved_dir / name).write_text(content, encoding="utf-8")
+    for path, content in standalone:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    for path, content in binary:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
 
 
 def _build_conformant(base):
@@ -905,6 +1014,25 @@ def self_test_main():
         code, out = run_capture(corphan)
         if code != 1 or status_of(out, "C2") != FAIL:
             failures.append("cursor-orphan tree expected exit 1 + C2 FAIL:\n{}".format(out))
+
+        # 2d. The chat-skill C2 fold: install a VALID generated skill surface, then drift it. Exercised for
+        #     BOTH a text output (SKILL.md) and the binary download zip, so neither fold is silently
+        #     trusted. Each must read as C2 skill FAIL (exit 1), never MALFORMED or a masked pass.
+        skill_md_target = Path(*gen_skill.RESERVED_PARTS) / "SKILL.md"
+        for label, rel, drifter in (
+                ("skill-md", skill_md_target, lambda f: f.write_text(
+                    f.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")),
+                ("skill-zip", Path(*gen_skill.ZIP_PARTS), lambda f: f.write_bytes(
+                    f.read_bytes() + b"\n")),
+        ):
+            sdrift = tmp / ("skilldrift-" + label)
+            sdrift.mkdir()
+            _build_conformant(sdrift)
+            _add_skill_surface(sdrift)
+            drifter(sdrift / rel)
+            code, out = run_capture(sdrift)
+            if code != 1 or status_of(out, "C2") != FAIL:
+                failures.append("skill-drift ({}) expected exit 1 + C2 FAIL:\n{}".format(label, out))
 
         # 3. Missing input (.aiqt/core absent) -> NOT APPLICABLE, not a fake pass. Keep only the
         #    placement-valid .claude/rules/ tree from a conformant build.
@@ -1192,8 +1320,9 @@ def self_test_main():
                  "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
                  "bits are enforced to exercise them.".format(
                      len(skipped_unreadable), ", ".join(skipped_unreadable)))
-    print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, and the GEMINI.md/copilot "
-          "adapters), empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
+    print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
+          "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
+          "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
           "asserted both tight and broad fail; the hooks plugin surface (C5) verifies when present, "
           "degrades to NOT APPLICABLE when the opt-in plugin is absent, and fails on drift, a hooks "
           "orphan, or an orphaned surface with no source; absent input (corpus, "
