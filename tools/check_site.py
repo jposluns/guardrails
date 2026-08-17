@@ -106,17 +106,24 @@ class Page(HTMLParser):
             self._in_title = True
         while self.stack and tag in AUTOCLOSERS.get(self.stack[-1][0], ()):
             self.stack.pop()
-        # Non-nestable check: an illegal ancestor is flagged before this tag is pushed. A <form> inside a
-        # <form>, or an interactive element inside another interactive element, is invalid nesting.
+        # Non-nestable check, before this tag is pushed. A <form> may not be nested in a <form>. For the
+        # interactive family two distinct HTML rules apply: (1) any <a> forbids an <a> descendant (nested
+        # anchors, regardless of href), and (2) <a>/<button> forbid an INTERACTIVE descendant, where <a>
+        # is interactive only WITH an href (a bare <a> is legal phrasing content, e.g. inside a <button>)
+        # and <button> is always interactive.
         if tag == "form":
             if any(t == "form" for t, _ in self.stack):
                 self.tag_findings.append(
                     (self.getpos()[0], "<form> must not be nested inside another <form>"))
         elif tag in INTERACTIVE:
-            bad = next((t for t, _ in reversed(self.stack) if t in INTERACTIVE), None)
-            if bad is not None:
-                self.tag_findings.append((self.getpos()[0],
-                    "<{}> (interactive content) must not be nested inside <{}>".format(tag, bad)))
+            if tag == "a" and any(t == "a" for t, _ in self.stack):
+                self.tag_findings.append(
+                    (self.getpos()[0], "<a> must not be nested inside another <a>"))
+            elif tag == "button" or "href" in d:
+                bad = next((t for t, _ in reversed(self.stack) if t in INTERACTIVE), None)
+                if bad is not None:
+                    self.tag_findings.append((self.getpos()[0],
+                        "<{}> (interactive content) must not be nested inside <{}>".format(tag, bad)))
         if tag not in VOID_ELEMENTS:
             self.stack.append((tag, self.getpos()[0]))
             if tag in SUSPEND_ROOTS:
