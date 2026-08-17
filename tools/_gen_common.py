@@ -41,10 +41,17 @@ def replace_block(html_text, name, inner):
 
 
 def reconcile(path, new_text, check):
-    """Write new_text to path, or (check mode) return True if it would change."""
+    """Write new_text to path, or (check mode) return True if it would change. Fail-closed: an OSError
+    reading the current file or writing the new one exits 2 with a message rather than a raw traceback,
+    so a drift gate or a regeneration never dies unhandled on a read-only fs, a permission error, or a
+    full disk."""
     path = Path(path)
-    current = path.read_text(encoding="utf-8") if path.exists() else None
-    if check:
-        return current != new_text
-    path.write_text(new_text, encoding="utf-8")
-    return False
+    try:
+        current = path.read_text(encoding="utf-8") if path.exists() else None
+        if check:
+            return current != new_text
+        path.write_text(new_text, encoding="utf-8")
+        return False
+    except OSError as exc:
+        print("error: cannot access {} ({}); fail-closed".format(path, exc), file=sys.stderr)
+        raise SystemExit(2)
