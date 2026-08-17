@@ -180,17 +180,18 @@ def resolve_link(base, path, site_root):
 
 
 def classify(v):
-    # urlsplit does not percent-decode; unquote the path and fragment so an encoded link
-    # (e.g. my%20page.html#sec%20one) resolves against the real file "my page.html" / id "sec one"
-    # instead of being falsely reported broken.
+    # urlsplit does not percent-decode. The PATH is unquoted so an encoded link (my%20page.html) resolves
+    # against the real file "my page.html". The FRAGMENT is returned RAW: HTML fragment navigation matches
+    # an id equal to the raw fragment FIRST, then the percent-decoded form, so the anchor check tries both
+    # (see main()). Unquoting the fragment here unconditionally would drop the raw-match case.
     parts = urlsplit(v)
     if parts.scheme:
         if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in SITE_HOSTS:
-            return unquote(parts.path), unquote(parts.fragment)
+            return unquote(parts.path), parts.fragment
         return None
     if parts.netloc:
         return None
-    return unquote(parts.path), unquote(parts.fragment)
+    return unquote(parts.path), parts.fragment
 
 
 def main():
@@ -257,7 +258,9 @@ def main():
                 anchor_key = str(target)
             if frag:
                 ids = ids_by_path.get(anchor_key)
-                if ids is not None and frag not in ids:
+                # Match the id against the RAW fragment first, then its percent-decoded form, mirroring
+                # HTML fragment navigation (raw match, else decoded match).
+                if ids is not None and frag not in ids and unquote(frag) not in ids:
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
     if findings:
         print("FAIL: {} site-integrity issue(s)".format(len(findings)))
