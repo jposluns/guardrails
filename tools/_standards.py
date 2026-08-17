@@ -8,6 +8,7 @@ them. An id that is not in its manifest cannot ship, so a fabricated mapping is 
 
 Requires Python 3.11+ for tomllib (CI pins 3.12).
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -105,13 +106,25 @@ class Manifest:
         self.id_set = set(self.ids)
 
 
+def ensure_listable(directory):
+    """Fail-closed on a directory that EXISTS but cannot be listed. Path.glob/rglob SILENTLY yield
+    nothing on an unreadable directory rather than raising, so an unlistable input dir would read as
+    "empty" and pass clean. os.scandir does raise, so force it. An absent dir is fine (callers treat
+    absent as an empty, transition-safe set); only an existing-but-unlistable dir raises OSError.
+    Shared so every tool that scans a required dir with glob/rglob fails closed the same way."""
+    if directory.is_dir():
+        list(os.scandir(directory))
+
+
 def load_manifests(std_dir):
     """Return {map_key: Manifest} for every *.toml under std_dir, fully validated. Raise ManifestError
-    on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe)."""
+    on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe); an
+    existing dir that cannot be listed raises OSError (fail-closed), never a false-clean empty."""
     std_dir = Path(std_dir)
     out = {}
     if not std_dir.is_dir():
         return out
+    ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):
         with open(path, "rb") as handle:
             try:
@@ -133,4 +146,5 @@ def map_keys(root):
     std_dir = Path(root) / ".aiqt" / "standards"
     if not std_dir.is_dir():
         return set()
+    ensure_listable(std_dir)
     return {"map-" + path.stem for path in std_dir.glob("*.toml")}

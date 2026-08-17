@@ -60,11 +60,13 @@ def main():
     try:
         pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
         pairs.sort(key=lambda pf: sort_key(pf[1]))
+        # render() reads each source via body_of, and out.read_text reads AGENTS.md: keep both inside
+        # the fail-closed try so an unreadable source or AGENTS.md is a clean exit 2, not a traceback.
+        content = render(pairs)
+        current = out.read_text(encoding="utf-8") if out.exists() else None
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
-    content = render(pairs)
-    current = out.read_text(encoding="utf-8") if out.exists() else None
     if current != content:
         if check:
             print("drift: AGENTS.md")

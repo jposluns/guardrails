@@ -22,7 +22,10 @@ def main():
     root = repo_root()
     try:
         manifests = load_manifests(root / ".aiqt" / "standards")
-    except ManifestError as exc:
+    except (ManifestError, OSError) as exc:
+        # OSError too: an unreadable manifest file, or an existing-but-unlistable standards dir
+        # (load_manifests raises rather than reading it as empty), is a read error, not a clean skip.
+        # Fail closed (exit 2) rather than escape as a traceback, matching conformance.py's C4.
         print("error: {}".format(exc))
         return 2
     src_dir = root / ".aiqt" / "core" / "rules"
