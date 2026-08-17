@@ -1,0 +1,38 @@
+name: Standards currency
+
+# A scheduled gate-on-main, deliberately SEPARATE from the Quality workflow. The staleness audit's
+# result depends on wall-clock time, not on the diff under review, so it must never be a pull-request
+# gate (that would make the PR gate non-deterministic with respect to the change). It runs monthly and
+# on manual dispatch; a stale manifest turns this scheduled run red in the Actions tab (the intended
+# durable signal) without ever blocking a PR. See the CW-3 synthesis, sections 2 and 4.
+#
+# Smallest-first slice: the offline audit only. The networked source-link checker and its single
+# durable tracking issue are deferred (they are blocked on the URL-source decision) and will add a
+# second, independent job here with job-scoped `issues: write`; this job stays offline and read-only.
+
+on:
+  schedule:
+    # 09:17 UTC on the 4th of each month. Off the 1st to avoid the start-of-month scheduler herd; an
+    # odd minute so it does not land on the top of the hour with everything else.
+    - cron: '17 9 4 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staleness:
+    name: Offline staleness audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Real audit against today's date: exit 1 (a manifest past its FAIL threshold) or exit 2 (a
+      # malformed manifest / unparseable date) paints this scheduled run red. It ships green today
+      # because every manifest was retrieved recently; it begins to speak only as real time passes.
+      - name: Standards staleness
+        run: python3 tools/check_standards_currency.py

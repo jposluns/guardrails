@@ -77,3 +77,8 @@ jobs:
 
       - name: Conformance suite (reference install)
         run: python3 tools/conformance.py --root .
+
+      # Only the deterministic self-test runs here; the real time-dependent staleness audit lives in
+      # the scheduled currency.yml, never on the PR path (see that workflow's header).
+      - name: Standards currency self-test
+        run: python3 tools/check_standards_currency.py --self-test
