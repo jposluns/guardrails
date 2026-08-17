@@ -69,7 +69,8 @@ and both are drift-gated in CI.
 - [Human oversight and the autonomy threshold](.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md)
 - [Do not bury the review surface under raw dumps](.claude/rules/aiqt/10-TRUST-no-console-diff-dumps.md)
 - [Records first](.claude/rules/aiqt/10-TRUST-records-first.md)
-- [Resume, work, and close each session](.claude/rules/aiqt/10-TRUST-session-resume-work-close.md)
+- [Close each session on green](.claude/rules/aiqt/10-TRUST-session-close-on-green.md)
+- [Resume from the durable handoff](.claude/rules/aiqt/10-TRUST-session-resume-from-handoff.md)
 - [Trust recovery and escalation](.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md)
 - [Autonomy steps down after a confirmed trust loss](.claude/rules/aiqt/10-TRUST-trust-recovery-ext.md)
 
@@ -110,7 +111,7 @@ and both are drift-gated in CI.
 - [Security logging with traceable context](.claude/rules/security/SECI-security-logging.md)
 - [Secure session and token handling](.claude/rules/security/SECI-session-token-management.md)
 - [Validate server-initiated requests](.claude/rules/security/SECI-ssrf-prevention.md)
-- [Validate tool calls; never build commands from unvalidated output](.claude/rules/security/SECI-tool-command-safety.md)
+- [Validate tool arguments before use](.claude/rules/security/SECI-tool-argument-validation.md)
 - [Untrusted content is data, not instructions](.claude/rules/security/SECI-untrusted-content.md)
 - [Verify a dependency exists before adding it](.claude/rules/security/SECI-verify-dependency-exists.md)
 - [Bounded consumption and safe failure](.claude/rules/security/SECA-resource-bounds.md)
