@@ -79,7 +79,8 @@ def main():
         return 2
     try:
         new_html = replace_block(site.read_text(encoding="utf-8"), "ROADMAP", site_inner)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        # OSError too: an unreadable site/roadmap.html is a read error, fail-closed exit 2, not a traceback.
         print("error: {}".format(exc))
         return 2
     if reconcile(site, new_html, check):
