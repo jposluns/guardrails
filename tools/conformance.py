@@ -649,6 +649,17 @@ def self_test_main():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
+    # The 6 unreadable-input-dir cases (9-14) deny reads via chmod 0; a runner that can STILL read the
+    # dir (root/DAC-bypass, or a filesystem that ignores POSIX bits) cannot exercise them. OBSERVE the
+    # actual skip via os.access at each case rather than infer it from geteuid(), so the PASS summary's
+    # coverage claim rests on what happened, not a proxy (claims-rest-on-observation).
+    skipped_unreadable = []
+
+    def _unreadable_or_skip(d, label):
+        if os.access(d, os.R_OK):  # runner can read the chmod-0 dir: this case cannot run
+            skipped_unreadable.append(label)
+            return False
+        return True
     # The fixtures rebind gen_rules.MAP_KEYS/SEQ_KEYS; restore them afterwards so a self-test invoked
     # in-process (an import, a notebook, a long-lived runner) never leaves the module globals mutated.
     saved_map_keys = gen_rules.MAP_KEYS
@@ -764,7 +775,7 @@ def self_test_main():
         (unreadable / ".claude" / "rules").mkdir(parents=True)
         std_dir = unreadable / ".aiqt" / "standards"
         os.chmod(std_dir, 0)
-        if not os.access(std_dir, os.R_OK):
+        if _unreadable_or_skip(std_dir, "9 standards"):
             code, out = run_capture(unreadable)
             if code != 2:
                 failures.append("unreadable standards dir expected exit 2 (fail-closed), got {}".format(code))
@@ -778,7 +789,7 @@ def self_test_main():
         (badcore / ".claude" / "rules").mkdir(parents=True)
         core_dir = badcore / ".aiqt" / "core" / "rules"
         os.chmod(core_dir, 0)
-        if not os.access(core_dir, os.R_OK):
+        if _unreadable_or_skip(core_dir, "10 core-rules"):
             code, out = run_capture(badcore)
             if code != 2:
                 failures.append("unreadable core-rules dir expected exit 2 (fail-closed), got {}".format(code))
@@ -794,7 +805,7 @@ def self_test_main():
         _build_conformant(badgen)
         gen_fam = badgen / ".claude" / "rules" / "aiqt"
         os.chmod(gen_fam, 0)
-        if not os.access(gen_fam, os.R_OK):
+        if _unreadable_or_skip(gen_fam, "11 generated-family"):
             code, out = run_capture(badgen)
             if code != 2:
                 failures.append("unreadable generated family dir expected exit 2 (fail-closed), got {}".format(code))
@@ -811,7 +822,7 @@ def self_test_main():
         _build_conformant(badparent)
         aiqt_dir = badparent / ".aiqt"
         os.chmod(aiqt_dir, 0)
-        if not os.access(aiqt_dir, os.R_OK):
+        if _unreadable_or_skip(aiqt_dir, "12 .aiqt-parent"):
             code, out = run_capture(badparent)
             if code != 2:
                 failures.append("unreadable .aiqt parent expected exit 2 (fail-closed), got {}\n{}".format(code, out))
@@ -825,7 +836,7 @@ def self_test_main():
         _build_conformant(badclaude)
         claude_dir = badclaude / ".claude"
         os.chmod(claude_dir, 0)
-        if not os.access(claude_dir, os.R_OK):
+        if _unreadable_or_skip(claude_dir, "13 .claude-parent"):
             code, out = run_capture(badclaude)
             if code != 2:
                 failures.append("unreadable .claude parent expected exit 2 (fail-closed), got {}\n{}".format(code, out))
@@ -841,7 +852,7 @@ def self_test_main():
         _build_conformant(badgithub)
         gh_dir = badgithub / ".github"
         os.chmod(gh_dir, 0)
-        if not os.access(gh_dir, os.R_OK):
+        if _unreadable_or_skip(gh_dir, "14 adapter-parent"):
             code, out = run_capture(badgithub)
             if code != 2:
                 failures.append("unreadable .github dir expected exit 2 (fail-closed), got {}".format(code))
@@ -863,11 +874,15 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
+    skip_note = ("" if not skipped_unreadable else
+                 " NOTE: {} unreadable-input-dir case(s) (9-14) were SKIPPED this run because the runner "
+                 "could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read bits are "
+                 "enforced to exercise them.".format(len(skipped_unreadable), ", ".join(skipped_unreadable)))
     print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, and the GEMINI.md/copilot "
           "adapters), empty-core orphans, and fabricated mapping ids fail; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, and the .aiqt/.claude/.github parents), and a bad "
-          "--root fail closed")
+          "--root fail closed" + skip_note)
     return 0
 
 
