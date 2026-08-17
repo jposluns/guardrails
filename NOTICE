@@ -1,0 +1,149 @@
+AIQT Guardrails: third-party attribution NOTICE
+
+This pack is published under the Creative Commons Attribution-ShareAlike 4.0 International License
+(CC BY-SA 4.0); see the LICENSE file. That licence covers the pack's own content, including its
+crosswalk mappings.
+
+The crosswalk mappings reference third-party security and AI-governance frameworks. Only control,
+clause, and risk IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No
+specification prose, requirement text, control or clause bodies, figures, or tables from any
+framework are reproduced. Each framework's identifiers and titles remain the property of their
+respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is
+affiliated with this pack.
+
+==================================================================================================
+
+Cloud Security Alliance
+-----------------------
+
+Frameworks referenced:
+  - CSA AI Controls Matrix (edition 1.1.0)
+      Required CSA attribution: attribute the portions to the Cloud Security Alliance AI Controls
+      Matrix Version 1.1.0.
+  - CSA Cloud Controls Matrix (edition 4.1.0)
+      Required CSA attribution: attribute the portions to the Cloud Security Alliance Cloud
+      Controls Matrix Version 4.1.0.
+
+Licence: Proprietary CSA copyright licence (non-commercial, no-redistribution reference use)
+(https://cloudsecurityalliance.org/artifacts/ccm-aicm-licensing-faq)
+
+The CSA matrices are copyright the Cloud Security Alliance under a non-commercial,
+no-redistribution, no-modification reference licence. This pack reproduces only control
+identifiers and short titles as uncopyrightable factual pointers, with CSA attributed; it does NOT
+redistribute or relicense the CSA matrices, and reproduces no control-specification text. This
+pack's CC BY-SA 4.0 covers its own mappings, not the CSA catalogue.
+
+Attribution: Control identifiers and short titles are Copyright the Cloud Security Alliance, used
+as factual references with attribution.
+
+CCM, AICM, and Cloud Security Alliance are works and marks of the Cloud Security Alliance.
+
+The Cloud Security Alliance does not endorse and is not affiliated with this pack; CSA marks are
+not used to imply endorsement.
+
+==================================================================================================
+
+ISO/IEC
+-------
+
+Frameworks referenced:
+  - ISO/IEC 23894:2023 AI guidance on risk management (edition 2023)
+  - ISO/IEC 42001:2023 AI management system (edition 2023)
+
+Licence: Proprietary International Standard (Copyright ISO/IEC)
+(https://www.iso.org/copyright.html)
+
+Copyright-protected International Standards. Only clause and Annex control NUMBERS and SHORT
+HEADINGS are reproduced, as navigational references for interoperability; NO clause, Annex, or
+requirement body text is reproduced. The full standards are available for purchase from ISO
+(https://www.iso.org). Referenced under fair use; this reuse is not affirmatively cleared by ISO
+and is made at the maintainer's discretion.
+
+Attribution: Clause and control identifiers and short headings from ISO/IEC 42001:2023 and ISO/IEC
+23894:2023 are Copyright ISO/IEC, referenced as navigational pointers only.
+
+ISO and IEC are protected marks of the International Organization for Standardization and the
+International Electrotechnical Commission.
+
+ISO/IEC does not endorse, license, or affiliate with this pack. This pack is not an ISO/IEC
+publication.
+
+==================================================================================================
+
+The MITRE Corporation
+---------------------
+
+Frameworks referenced:
+  - MITRE ATLAS (edition 2026.06)
+
+Licence: Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+
+ATLAS data is licensed under the Apache License, Version 2.0. Identifiers and short titles are
+reproduced as navigational pointers with the required copyright notice retained (Apache-2.0
+section 4).
+
+Attribution: MITRE ATLAS identifiers and titles: Copyright 2021-2026 The MITRE Corporation,
+licensed under the Apache License, Version 2.0. Approved for Public Release; Distribution
+Unlimited. Case Number 21-2363.
+
+MITRE ATLAS and MITRE ATT&CK are a trademark and registered trademark of The MITRE Corporation.
+
+The MITRE Corporation does not endorse and is not affiliated with this pack; MITRE marks and logos
+are not used.
+
+==================================================================================================
+
+National Institute of Standards and Technology
+----------------------------------------------
+
+Frameworks referenced:
+  - NIST AI Risk Management Framework (edition 1.0 (NIST AI 100-1))
+  - NIST SP 800-53 Security and Privacy Controls (edition Rev 5 (catalog 5.2.0))
+  - NIST Secure Software Development Framework (edition 1.1 (SP 800-218))
+
+Licence: U.S. Government work, public domain (17 U.S.C. 105)
+(https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications)
+
+U.S. Government works, not subject to copyright in the United States (17 U.S.C. 105). Reproduced
+from the published Special Publications; attribution is appreciated by NIST, not legally required.
+
+Attribution: Republished courtesy of the National Institute of Standards and Technology.
+
+NIST does not endorse and is not affiliated with this pack; the NIST name and logo are not used to
+imply endorsement.
+
+==================================================================================================
+
+OWASP Foundation, Inc.
+----------------------
+
+Frameworks referenced:
+  - OWASP API Security Top 10 (edition 2023)
+  - OWASP Application Security Verification Standard (edition 5.0.0)
+  - OWASP Cheat Sheet Series (edition commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04))
+  - OWASP MCP Top 10 (edition 2025) [licensed CC BY-NC-SA 4.0]
+      The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial), which is not compatible
+      with this pack's CC BY-SA 4.0. Its risk identifiers and short titles are reproduced only as
+      uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is
+      reproduced.
+  - OWASP Top 10 (Web Application Security Risks) (edition 2025)
+  - OWASP Top 10 Proactive Controls (edition 4.0.0)
+  - OWASP Top 10 for Agentic Applications (edition 2026)
+  - OWASP Top 10 for LLM Applications (edition 2026)
+
+Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/) (per-framework exceptions
+noted above)
+
+Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own
+CC BY-SA 4.0 satisfies ShareAlike. Only control/risk identifiers and short titles are reproduced
+as navigational pointers; the mappings are the pack's own work.
+
+Attribution: Framework identifiers and short titles are Copyright the OWASP Foundation, Inc.,
+reused under CC BY-SA 4.0.
+
+OWASP is a registered trademark of the OWASP Foundation, Inc.
+
+The OWASP Foundation does not endorse and is not affiliated with this pack; the OWASP name and
+marks are not used to imply endorsement.
+
+==================================================================================================
