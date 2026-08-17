@@ -134,15 +134,35 @@ def _segments(command):
     return result
 
 
+# A leading inline shell env-var assignment (FOO=bar) that PREFIXES a command, e.g. the GIT_PAGER=cat in
+# 'GIT_PAGER=cat git diff'. Such assignments are SKIPPED when resolving a segment's command word and its
+# git subcommand, so that form resolves to command word 'git' / subcommand 'diff' and is judged like a
+# bare 'git diff' rather than slipping through as a non-git command word. The any-segment
+# identity-assignment scan still inspects these same tokens for an AI name (GIT_AUTHOR_NAME=Claude ...).
+# Best-effort, per the manifest residue: the 'env VAR=x git ...' command form and the 'command git ...'
+# builtin remain out of scope.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_word_index(tokens):
+    """Index of the segment's command word: the first token that is NOT a leading shell env-var
+    assignment (FOO=bar). Returns len(tokens) for an empty segment or one that is all assignments."""
+    i = 0
+    n = len(tokens)
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    return i
+
+
 def _command_word(tokens):
-    """The command word of a segment: the first token's basename, so an absolute path to the tool still
-    resolves (/usr/bin/git -> git). '' for an empty segment. An env-assignment prefix (FOO=bar) is left
-    as the first token, so such a segment's command word is not 'git' and its commit/diff subcommand
-    checks do not fire; the any-segment identity-assignment check still covers an inline
-    GIT_AUTHOR_NAME=... git commit form."""
-    if not tokens:
+    """The command word of a segment: the basename of the first non-assignment token, so an absolute
+    path to the tool still resolves (/usr/bin/git -> git) and a leading env-assignment prefix (FOO=bar,
+    e.g. GIT_PAGER=cat git diff) is skipped so the command word is still 'git'. '' for an empty segment
+    or one that is all assignments."""
+    idx = _command_word_index(tokens)
+    if idx >= len(tokens):
         return ""
-    return tokens[0].rsplit("/", 1)[-1]
+    return tokens[idx].rsplit("/", 1)[-1]
 
 
 # git global options that CONSUME a following space-separated argument, so the option's value (now its
@@ -156,11 +176,12 @@ _GIT_ARG_OPTS = frozenset((
 
 def _git_subcommand(tokens):
     """The git subcommand of a segment whose command word is git: the first non-option token after the
-    command word, skipping git global options. An arg-consuming global option in its space-separated
-    form (-C DIR, --git-dir DIR, ...) skips two tokens (its value is now its own token, per shlex) so
-    the value is not read as the subcommand; the '--opt=value' form and any other leading '-' token skip
-    one. None when there is no subcommand token."""
-    i = 1
+    command word, skipping any leading env-assignment prefix and the git global options. An
+    arg-consuming global option in its space-separated form (-C DIR, --git-dir DIR, ...) skips two tokens
+    (its value is now its own token, per shlex) so the value is not read as the subcommand; the
+    '--opt=value' form and any other leading '-' token skip one. None when there is no subcommand
+    token."""
+    i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
     n = len(tokens)
     while i < n:
         token = tokens[i]
@@ -304,7 +325,7 @@ def diff_wall_stop(data):
 # Quote-aware segmented (shlex; split on ; && || | & ( ) and newlines), so a bare 'git diff' chained
 # AFTER an allowed form, or grouped in a subshell '( git diff )', is still caught. Per-segment escapes:
 # an explicit summary flag or a redirection of stdout to a file. The '# allow-diff' token is honoured
-# anywhere in the whole RAW command (shlex drops a '#' comment, so it is matched on the raw string). An
+# ONLY as a genuine UNQUOTED trailing shell comment (not the literal buried in a quoted argument). An
 # informational form (--help / -h) is not a diff dump. A diff piped to a KNOWN PAGER (less/more/most) is
 # legitimate interactive review and is allowed; a pipe to cat/tee/console still dumps and denies.
 _PATCH_FLAGS = frozenset(("-p", "-u"))
@@ -312,6 +333,51 @@ _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat
 _INFO_FLAGS = frozenset(("--help", "-h"))
 _REDIRECT_TOKENS = frozenset((">", ">>"))  # stdout to a file; a grouped '>&'/'>|' fd-dup is not here
 ALLOW_DIFF_MARKER = "# allow-diff"
+
+
+def _find_unquoted_comment(line):
+    """The trailing shell-comment text of one line (everything after the '#'), or None when the line has
+    no genuine comment. A '#' begins a comment ONLY when it is unquoted and at a word boundary (the start
+    of the line or preceded by whitespace); a '#' inside a single- or double-quoted string, or joined to
+    a word (foo#bar), is not a comment. Quote and backslash state are tracked so a '#' buried in a quoted
+    argument is never mistaken for a comment."""
+    quote = None       # the open quote char (' or ") or None outside a quote
+    escaped = False     # the previous char was an unquoted backslash
+    prev_ws = True      # start of line counts as a word boundary
+    for idx, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            prev_ws = False
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+            prev_ws = False
+            continue
+        if ch == "\\":
+            escaped = True
+            prev_ws = False
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            prev_ws = False
+            continue
+        if ch == "#" and prev_ws:
+            return line[idx + 1:]
+        prev_ws = ch.isspace()
+    return None
+
+
+def _has_allow_diff_comment(command):
+    """True when the command carries the '# allow-diff' escape as a GENUINE unquoted trailing shell
+    comment, not as the literal string buried inside a quoted argument (GD-24 fix round 4: the old raw
+    substring match wrongly honoured a '# allow-diff' inside a quoted commit message). Each line is
+    scanned for an unquoted comment; the marker is honoured only when it opens that comment."""
+    for line in command.split("\n"):
+        comment = _find_unquoted_comment(line)
+        if comment is not None and ALLOW_DIFF_MARKER in ("#" + comment):
+            return True
+    return False
 # Fallback-only regexes over the RAW command string, used when shlex cannot parse the command (see
 # _diff_source_fallback). SUMMARY/INFO/REDIRECT mirror the token escapes; the producer regex is a loose
 # 'git ... diff|show|range-diff' probe. Conservative on a parse failure: deny a plausible producer.
@@ -372,7 +438,7 @@ def _diff_source_fallback(command, allow_marker):
 def diff_source_pretool(data):
     """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash: deny a Bash command that dumps a bare
     console diff, allowing the per-segment summary and file-redirection escapes, the pager-pipe escape,
-    and the whole-command '# allow-diff' escape."""
+    and the genuine unquoted trailing '# allow-diff' comment escape."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -387,7 +453,7 @@ def diff_source_pretool(data):
             "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
             "string, so the diff-source check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
-    allow_marker = ALLOW_DIFF_MARKER in command  # honoured anywhere in the whole raw command
+    allow_marker = _has_allow_diff_comment(command)  # only a genuine unquoted trailing '# allow-diff'
     try:
         segments = _segments(command)
     except ValueError:
