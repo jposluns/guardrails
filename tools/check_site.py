@@ -16,9 +16,10 @@ is honoured on void and foreign svg/math elements, ignored on non-void HTML so <
 HTML5 optional-close tables. The subtree of svg/math and of <textarea> (and of <script>/<style> via
 parser CDATA) is NOT structurally validated, so embedded content never false-positives; the root's own
 open/close balance IS checked, so an unclosed one is caught, and links/ids inside such a subtree are not
-validated (a deferred coverage gap). NOT yet detected (slice-2): invalid nesting of non-nestable
-elements such as <form>/<a>/<button>. Deeper validation and download-artifact checksums are tracked
-separately (they need a final content baseline). Exit 0 clean, 1 on any finding.
+validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2): a <form> inside a
+<form>, and an interactive element (<a>/<button>) inside another interactive element, both of which the
+parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
+tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding.
 """
 import os
 import sys
@@ -64,6 +65,10 @@ AUTOCLOSERS = {
     "dt": {"dt", "dd"},
     "dd": {"dt", "dd"},
 }
+# Non-nestable content models (WHATWG), the slice-2 subset: a <form> may not contain another <form>, and
+# an interactive element (<a>/<button>) may not contain another interactive element. These nest silently
+# in the parser (well-balanced) but break rendering/behaviour, so open/close balance never catches them.
+INTERACTIVE = {"a", "button"}
 
 
 class Page(HTMLParser):
@@ -101,6 +106,24 @@ class Page(HTMLParser):
             self._in_title = True
         while self.stack and tag in AUTOCLOSERS.get(self.stack[-1][0], ()):
             self.stack.pop()
+        # Non-nestable check, before this tag is pushed. A <form> may not be nested in a <form>. For the
+        # interactive family two distinct HTML rules apply: (1) any <a> forbids an <a> descendant (nested
+        # anchors, regardless of href), and (2) <a>/<button> forbid an INTERACTIVE descendant, where <a>
+        # is interactive only WITH an href (a bare <a> is legal phrasing content, e.g. inside a <button>)
+        # and <button> is always interactive.
+        if tag == "form":
+            if any(t == "form" for t, _ in self.stack):
+                self.tag_findings.append(
+                    (self.getpos()[0], "<form> must not be nested inside another <form>"))
+        elif tag in INTERACTIVE:
+            if tag == "a" and any(t == "a" for t, _ in self.stack):
+                self.tag_findings.append(
+                    (self.getpos()[0], "<a> must not be nested inside another <a>"))
+            elif tag == "button" or "href" in d:
+                bad = next((t for t, _ in reversed(self.stack) if t in INTERACTIVE), None)
+                if bad is not None:
+                    self.tag_findings.append((self.getpos()[0],
+                        "<{}> (interactive content) must not be nested inside <{}>".format(tag, bad)))
         if tag not in VOID_ELEMENTS:
             self.stack.append((tag, self.getpos()[0]))
             if tag in SUSPEND_ROOTS:
