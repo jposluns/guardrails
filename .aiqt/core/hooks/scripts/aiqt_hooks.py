@@ -132,6 +132,11 @@ def _segments(command):
     command is split into segments on the shell operators ; | || && & ( ) and on newlines. '( git diff )'
     yields a segment [git, diff] (the parens are separators), closing the subshell/grouping bypass.
     Raises ValueError on a shell parse error so callers can fall back conservatively."""
+    # Splice bash line-continuations (a backslash immediately before a newline joins the continued line)
+    # BEFORE splitting on newlines, so a continued command lexes as one line instead of raising. Residual:
+    # a backslash-newline inside single quotes is a literal in bash and is over-spliced by this naive
+    # replace (an accepted, astronomically-rare edge).
+    command = command.replace("\\\n", "")
     result = []
     for line in command.split("\n"):
         current = []
@@ -771,38 +776,27 @@ def _git_sub_and_args(tokens):
 
 
 def _pathspec_from_file(args):
-    """(pff, nul) for a checkout/restore arg list: pff is the value of '--pathspec-from-file=<f>' or its
-    space form '--pathspec-from-file <f>' (None when absent), and nul is True when '--pathspec-file-nul'
-    is present (the file is NUL-separated rather than newline-separated). When pff is set, git reads the
-    pathspecs from that file instead of the command line."""
-    pff = None
-    nul = False
-    i = 0
-    n = len(args)
-    while i < n:
-        a = args[i]
-        if a == "--pathspec-file-nul":
-            nul = True
-        elif a.startswith("--pathspec-from-file="):
-            pff = a.split("=", 1)[1]
-        elif a == "--pathspec-from-file" and i + 1 < n:
-            pff = args[i + 1]
-            i += 2
-            continue
-        i += 1
-    return pff, nul
+    """True when a checkout/restore sources its pathspecs from a file or stdin: a '--pathspec-from-file'
+    (inline '=' or bare space form) OR a '--pathspec-file-nul' appears in the arg region given. The caller
+    passes the PRE-'--' region only (see _discard_shape), so a literal pathspec named '--pathspec-from-file'
+    after the '--' separator is not misread as an option. When True the command-line paths are not the
+    source, so the probe cannot enumerate them and the handler fails OPEN (seed-sanctioned)."""
+    for a in args:
+        if a == "--pathspec-file-nul" or a == "--pathspec-from-file" or a.startswith("--pathspec-from-file="):
+            return True
+    return False
 
 
-def _checkout_affects_index(args):
+def _checkout_affects_index(pre):
     """True when a checkout carries a ref before its pathspecs, so it rewrites the INDEX as well as the
     worktree ('git checkout <ref> -- <paths>'); False for the index-preserving 'git checkout -- <paths>'.
-    A ref is a non-option token before the first '--' (or, in the pathspec-from-file form with no '--',
-    a non-option token that is not the space-form value of '--pathspec-from-file')."""
-    head = args[:args.index("--")] if "--" in args else args
+    It receives the PRE-'--' region (post-'--' tokens are all pathspecs, never a ref), and walks it
+    skipping the value-taking checkout option '--pathspec-from-file' with its space-form value and any
+    other '-'-leading option token; a remaining bare token is a ref."""
     i = 0
-    n = len(head)
+    n = len(pre)
     while i < n:
-        a = head[i]
+        a = pre[i]
         if a == "--pathspec-from-file" and i + 1 < n:
             i += 2  # skip the option and its space-form value, which is not a ref
             continue
@@ -815,40 +809,60 @@ def _checkout_affects_index(args):
 
 def _discard_shape(tokens):
     """The whole-file discard shape of a git segment (the caller has confirmed the command word is git),
-    as a dict {"kind", "paths", "affects_index", "pff", "nul"}, or None when it is not a discard.
+    as a dict {"kind", "paths", "affects_index", "from_file"}, or None when it is not a discard. Option
+    parsing is SCOPED to the region before the first '--' (pre); every token after it (post) is a pathspec
+    verbatim, even a '-'-leading one, and the value-taking option values (checkout/restore
+    '--pathspec-from-file', restore '--source'/'-s') are skipped so they are not enumerated as paths.
     checkout: a discard with a '--' pathspec separator ('git checkout -- <paths>', 'git checkout <ref>
-    -- <paths>'; paths are the tokens after the FIRST '--') OR with a '--pathspec-from-file' source (the
-    paths then come from a file, so command-line paths are []). A 'git checkout <branch>' or '-b' (a
-    branch switch/create) and a 'git checkout <path>' with no '--' and no pathspec-from-file (ambiguous
-    with a branch name) are NOT discards. restore: touches the worktree unless it is staged-only
-    ('--staged'/'-S' with no '--worktree'/'-W'), so 'git restore --staged <path>' (unstage only) is NOT
-    matched; paths are the non-option tokens. reset: a discard only with '--hard' (a reset without it
-    keeps the worktree); the whole tree is the target, so paths is None. git stash is out of scope
-    (recoverable). affects_index says whether the form ALSO rewrites the index (see FIX 4): checkout with
-    a ref, restore --staged, and reset --hard do; a bare checkout '--' and a default/worktree restore do
-    not. pff/nul carry a '--pathspec-from-file' source so the probe can read the paths from that file."""
+    -- <paths>'; paths are the post tokens) OR with a '--pathspec-from-file' source (the paths then come
+    from a file, not enumerated). A 'git checkout <branch>' or '-b' (a branch switch/create) and a
+    'git checkout <path>' with no '--' and no pathspec-from-file (ambiguous with a branch name) are NOT
+    discards. restore: touches the worktree unless it is staged-only ('--staged'/'-S' with no
+    '--worktree'/'-W'), so 'git restore --staged <path>' (unstage only) is NOT matched; paths are the post
+    tokens plus the bare pre tokens (skipping the space-form values of value-taking options). reset: a
+    discard only with '--hard' (a reset without it keeps the worktree); the whole tree is the target, so
+    paths is None. git stash is out of scope (recoverable). affects_index says whether the form ALSO
+    rewrites the index (see FIX 4): checkout with a ref, restore --staged, and reset --hard do; a bare
+    checkout '--' and a default/worktree restore do not. from_file is True when the paths are sourced from
+    a file or stdin ('--pathspec-from-file'/'--pathspec-file-nul'); the probe cannot enumerate them, so the
+    handler fails OPEN (seed-sanctioned)."""
     sub, args = _git_sub_and_args(tokens)
+    if "--" in args:
+        idx = args.index("--")
+        pre, post = args[:idx], args[idx + 1:]
+    else:
+        pre, post = args, []
     if sub == "checkout":
-        pff, nul = _pathspec_from_file(args)
-        if "--" in args:
-            return {"kind": "checkout", "paths": args[args.index("--") + 1:],
-                    "affects_index": _checkout_affects_index(args), "pff": pff, "nul": nul}
-        if pff is not None:  # pathspecs from a file, no '--': still a discard, paths come from the file
-            return {"kind": "checkout", "paths": [],
-                    "affects_index": _checkout_affects_index(args), "pff": pff, "nul": nul}
-        return None
+        from_file = _pathspec_from_file(pre)
+        is_discard = ("--" in args) or from_file
+        if not is_discard:
+            return None
+        return {"kind": "checkout", "paths": post,
+                "affects_index": _checkout_affects_index(pre), "from_file": from_file}
     if sub == "restore":
-        has_staged = "--staged" in args or "-S" in args
-        has_worktree = "--worktree" in args or "-W" in args
-        if (not has_staged) or has_worktree:
-            pff, nul = _pathspec_from_file(args)
-            paths = [a for a in args if not a.startswith("-") and a != "--"]
-            return {"kind": "restore", "paths": paths, "affects_index": has_staged,
-                    "pff": pff, "nul": nul}
-        return None
+        has_staged = "--staged" in pre or "-S" in pre
+        has_worktree = "--worktree" in pre or "-W" in pre
+        if not ((not has_staged) or has_worktree):
+            return None
+        from_file = _pathspec_from_file(pre)
+        # enumerate paths: all post tokens, plus bare pre tokens, skipping the space-form values of the
+        # value-taking options ('--source'/'-s'/'--pathspec-from-file').
+        paths = list(post)
+        i = 0
+        while i < len(pre):
+            a = pre[i]
+            if a in ("--source", "-s", "--pathspec-from-file") and i + 1 < len(pre):
+                i += 2  # skip the option and its value
+                continue
+            if a.startswith("-"):
+                i += 1  # any other option (including inline --source=.../-Sfoo) takes no separate token
+                continue
+            paths.append(a)  # a bare token is a pathspec
+            i += 1
+        return {"kind": "restore", "paths": paths, "affects_index": has_staged, "from_file": from_file}
     if sub == "reset":
         if "--hard" in args:
-            return {"kind": "reset-hard", "paths": None, "affects_index": True, "pff": None, "nul": False}
+            return {"kind": "reset-hard", "paths": None, "affects_index": True, "from_file": False}
         return None
     return None
 
@@ -897,26 +911,16 @@ def _discard_would_lose_work(repo, shape):
     checkout, a --staged --worktree restore, reset --hard) loses on EITHER porcelain column (X or Y), so a
     staged-only change counts; a worktree-only form (a bare checkout '--', a default/worktree restore)
     loses only when the WORKTREE column (Y) shows a change, so a staged-only change does NOT block. When a
-    '--pathspec-from-file' source is set, the probe paths are read from that file (git forbids combining
-    it with command-line pathspecs); '-' (stdin) or an unreadable file falls open. A rename's post-'-> '
-    path is the surviving name."""
+    '--pathspec-from-file'/'--pathspec-file-nul' source is set (shape['from_file']), the paths come from a
+    file or stdin and are not enumerated here, so the probe fails OPEN (seed-sanctioned). A rename's
+    post-'-> ' path is the surviving name."""
     kind = shape["kind"]
     affects_index = shape["affects_index"]
-    pff = shape.get("pff")
-    nul = shape.get("nul", False)
     try:
         probe_paths = shape["paths"]
         if kind in ("checkout", "restore"):
-            if pff is not None:
-                if pff == "-":
-                    return []  # pathspecs from stdin: cannot read, fail OPEN
-                # git forbids combining --pathspec-from-file with command-line pathspecs, so the file is
-                # the sole source; read it relative to the process cwd (an unreadable file raises and the
-                # surrounding except fails OPEN).
-                with open(pff, "r", encoding="utf-8") as handle:
-                    raw = handle.read()
-                probe_paths = [p.strip() for p in raw.split("\0" if nul else "\n")]
-                probe_paths = [p for p in probe_paths if p]
+            if shape.get("from_file"):
+                return []  # pathspecs sourced from a file or stdin: not enumerated, fail OPEN (seed-sanctioned)
             if not probe_paths:  # nothing named: fail open, do not probe the whole tree
                 return []
         cmd = ["git", "-C", repo, "status", "--porcelain"]

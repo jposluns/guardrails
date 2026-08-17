@@ -122,16 +122,37 @@ def main():
         expect("(iii) staged-only checkout <ref> -- blocks",
                "git -C {} checkout HEAD -- file.txt".format(rp), "deny")
 
-        # (iv) FIX 3: --pathspec-from-file reads the pathspecs from the referenced file.
+        # (iv) FIX B: a --pathspec-from-file source is NOT enumerated (the file reader was removed), so
+        # even a path that would lose work falls OPEN (allow), a deliberate seed-sanctioned residual. The
+        # inline '=' form, the bare space form, and the NUL variant all fail open.
         tracked.write_text("committed line\nuncommitted fix\nmore\n", encoding="utf-8")  # worktree-dirty
-        pff_dirty = tmp / "pff-dirty.txt"
-        pff_dirty.write_text("file.txt\n", encoding="utf-8")
-        expect("(iv) restore --pathspec-from-file dirty blocks",
-               "git -C {} restore --pathspec-from-file={}".format(rp, pff_dirty), "deny")
-        pff_clean = tmp / "pff-clean.txt"
-        pff_clean.write_text("clean.txt\n", encoding="utf-8")
-        expect("(iv) restore --pathspec-from-file clean allows",
-               "git -C {} restore --pathspec-from-file={}".format(rp, pff_clean), "allow")
+        expect("(iv) inline pathspec-from-file allows (fail-open)",
+               "git -C {} restore --pathspec-from-file=paths.txt".format(rp), "allow")
+        expect("(iv) space-form pathspec-from-file allows (fail-open)",
+               "git -C {} restore --pathspec-from-file paths.txt".format(rp), "allow")
+
+        # (vii) FIX A: a backslash-newline line continuation is spliced before segmentation, so a
+        # continued discard still lexes and BLOCKS on a worktree-dirty path (file.txt is worktree-dirty).
+        expect("(vii) line-continuation checkout -- blocks",
+               "git -C {} checkout \\\n  -- file.txt".format(rp), "deny")
+
+        # (viii) FIX C: 'restore --source HEAD <path>' skips the -s/--source value, so it probes file.txt
+        # (not HEAD); a worktree-dirty path BLOCKS. affects_index is False for a worktree-only restore, so
+        # once the change is staged (worktree clean) the same command ALLOWS.
+        expect("(viii) restore --source HEAD worktree-dirty blocks",
+               "git -C {} restore --source HEAD file.txt".format(rp), "deny")
+        _git(repo, "add", "file.txt")  # worktree now matches index (staged-only): worktree column clean
+        expect("(viii) restore --source HEAD staged-only allows",
+               "git -C {} restore --source HEAD file.txt".format(rp), "allow")
+
+        # (ix) FIX C: option parsing is scoped before '--', so a literal pathspec named
+        # '--pathspec-from-file=foo' AFTER '--' is a path, not an option: from_file is False and it is
+        # enumerated. A unit assertion on the shape (a live-repo case for this name is awkward).
+        shape = aiqt_hooks._discard_shape(["git", "checkout", "--", "--pathspec-from-file=foo"])
+        if not (shape and shape.get("from_file") is False
+                and shape.get("paths") == ["--pathspec-from-file=foo"]):
+            failures.append("(ix) post-'--' literal pathspec: expected from_file=False, "
+                            "paths=['--pathspec-from-file=foo'], got {!r}".format(shape))
 
         # (v) FIX 1: a malformed tool_input (a string, not a dict) must ALLOW (fail OPEN), not crash.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
@@ -164,9 +185,12 @@ def main():
         return 1
     print("SELF-TEST PASS: git_discard blocks a confirmed-lossy checkout/restore/reset --hard, honours "
           "the GUARDRAIL_ALLOW_DISCARD opt-out, distinguishes a staged-only change (worktree-only discard "
-          "allows, ref-based checkout blocks), reads a --pathspec-from-file source, resolves chained -C "
-          "cumulatively, and fails open on a branch switch, a staged-only restore, an unparseable "
-          "command, a malformed tool_input, and a non-git command")
+          "allows, ref-based checkout blocks), splices backslash-newline line continuations before "
+          "segmentation, skips the --source/-s value so it probes the path (not the ref), scopes option "
+          "parsing before '--' (a post-'--' literal '--pathspec-from-file=foo' is a path, not an option), "
+          "resolves chained -C cumulatively, and fails open on a --pathspec-from-file source, a branch "
+          "switch, a staged-only restore, an unparseable command, a malformed tool_input, and a non-git "
+          "command")
     return 0
 
 
