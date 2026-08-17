@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+from _standards import dir_present  # noqa: E402  fail-closed absence probe (raises on an unreadable parent)
 
 EN_DASH = "–"
 EM_DASH = "—"
@@ -24,7 +25,7 @@ def main() -> int:
     try:
         paths = sorted(walk_files(root, SKIP_DIRS, suffixes={".md"}))
         std_dir = root / ".aiqt" / "standards"
-        if std_dir.is_dir():
+        if dir_present(std_dir):  # raises on an unreadable .aiqt parent -> caught below as exit 2
             paths += sorted(walk_files(std_dir, suffixes={".toml"}))
         for path in paths:
             try:

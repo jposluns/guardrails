@@ -10,6 +10,7 @@ Requires Python 3.11+ for tomllib (CI pins 3.12).
 """
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -106,6 +107,22 @@ class Manifest:
         self.id_set = set(self.ids)
 
 
+def dir_present(path):
+    """Fail-closed directory-absence probe. Return True if path is a directory, False if it does not
+    exist. RAISE OSError if it exists but cannot be reached (an unreadable path, or an unreadable
+    ancestor such as a `chmod 0` .aiqt/ parent): the caller must fail closed rather than mistake
+    'cannot tell' for 'absent'. Path.is_dir()/exists() SWALLOW EACCES and return False, so an
+    unreadable input dir would read as an absent (transition-safe) input and pass clean; os.stat raises
+    on EACCES, so we use it. A non-directory returns False (callers treat it as absent, as is_dir did).
+    Pairs with ensure_listable: dir_present catches an unreachable dir, ensure_listable catches a
+    reachable-but-unlistable one."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISDIR(st.st_mode)
+
+
 def ensure_listable(directory):
     """Fail-closed on a directory that EXISTS but cannot be listed. Path.glob/rglob SILENTLY yield
     nothing on an unreadable directory rather than raising, so an unlistable input dir would read as
@@ -122,7 +139,7 @@ def load_manifests(std_dir):
     existing dir that cannot be listed raises OSError (fail-closed), never a false-clean empty."""
     std_dir = Path(std_dir)
     out = {}
-    if not std_dir.is_dir():
+    if not dir_present(std_dir):
         return out
     ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):
@@ -144,7 +161,7 @@ def map_keys(root):
     .aiqt/standards/. Cheap (no parse) so gen_rules can build MAP_KEYS at import; check_mappings does
     the full parse/validation via load_manifests."""
     std_dir = Path(root) / ".aiqt" / "standards"
-    if not std_dir.is_dir():
+    if not dir_present(std_dir):
         return set()
     ensure_listable(std_dir)
     return {"map-" + path.stem for path in std_dir.glob("*.toml")}

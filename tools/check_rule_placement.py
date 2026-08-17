@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
 from gen_rules import parse_source, derive  # noqa: E402
-from _standards import map_keys  # noqa: E402
+from _standards import dir_present, map_keys  # noqa: E402
 
 METADATA = {"PROVENANCE.md", "README.md"}
 BUILTIN_FAMILIES = {"aiqt", "security", "external"}
@@ -113,7 +113,14 @@ def main():
         print("cannot read {}: {}".format(root / ".aiqt" / "standards", exc), file=sys.stderr)
         return 2
     rules = root / ".claude" / "rules"
-    if not rules.is_dir():
+    # dir_present (not is_dir): an unreadable .claude/ parent must fail closed (exit 2), not read as an
+    # absent tree and PASS.
+    try:
+        present = dir_present(rules)
+    except OSError as exc:
+        print("cannot read {}: {}".format(rules, exc), file=sys.stderr)
+        return 2
+    if not present:
         print("PASS: no .claude/rules/ tree")
         return 0
     findings = []

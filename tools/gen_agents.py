@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3}
@@ -51,7 +52,9 @@ def main():
     src_dir = root / ".aiqt" / "core" / "rules"
     out = root / "AGENTS.md"
     try:
-        if not src_dir.is_dir():
+        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent fails closed as exit 2,
+        # not as an absent corpus (which would delete AGENTS.md as an orphan).
+        if not dir_present(src_dir):
             if out.exists():
                 if check:
                     print("drift: AGENTS.md exists with no sources")
