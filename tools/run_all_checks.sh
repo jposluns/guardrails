@@ -52,6 +52,7 @@ run_gate "placement"      python3 tools/check_rule_placement.py
 run_gate "mappings"       python3 tools/check_mappings.py
 run_gate "conformance-selftest" python3 tools/conformance.py --self-test
 run_gate "conformance"    python3 tools/conformance.py --root .
+run_gate "currency-selftest" python3 tools/check_standards_currency.py --self-test
 
 if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"
