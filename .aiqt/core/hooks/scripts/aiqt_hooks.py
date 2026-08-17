@@ -102,7 +102,6 @@ def _deny_missing_tool_name(rule):
 # ValueError; the callers fall back to a conservative raw-string scan rather than silent-allow.
 # Best-effort still: it does not defeat deliberate escaping/obfuscation (recorded in the manifest residue).
 _SEGMENT_OPERATORS = frozenset((";", "|", "||", "&&", "&", "(", ")"))
-_PAGERS = frozenset(("less", "more", "most"))  # a diff piped to one of these is interactive review
 
 
 def _lex_line(line):
@@ -323,66 +322,32 @@ def diff_wall_stop(data):
 # --- cnsdif (PreToolUse): a bare console diff at the source -------------------------------------------
 # Layer A of the F-36 catch: deny a Bash command that renders a version-control diff to the console.
 # Quote-aware segmented (shlex; split on ; && || | & ( ) and newlines), so a bare 'git diff' chained
-# AFTER an allowed form, or grouped in a subshell '( git diff )', is still caught. Per-segment escapes:
-# an explicit summary flag or a redirection of stdout to a file. The '# allow-diff' token is honoured
-# ONLY as a genuine UNQUOTED trailing shell comment (not the literal buried in a quoted argument). An
-# informational form (--help / -h) is not a diff dump. A diff piped to a KNOWN PAGER (less/more/most) is
-# legitimate interactive review and is allowed; a pipe to cat/tee/console still dumps and denies.
+# AFTER an allowed form, or grouped in a subshell '( git diff )', is still caught. A diff-producer
+# segment is ALLOWED (excluded from denial) in four cases, each judged PER DIFF SEGMENT on that
+# segment's own tokens (never a raw substring): (1) an INFO FLAG on the segment (--help or -h) is a help
+# invocation, not a diff; (2) a SUMMARY flag is a listing, not a raw diff; (3) a redirect of stdout to a
+# REAL non-console file diverts the diff off the review surface; (4) a PAGER PIPE, the segment piped
+# (an unquoted '|') into a known interactive pager (less/more/most/pager), is interactive review rather
+# than a console wall. Cases 1 and 4 were restored in GD-24 fix round 7 after fix round 6 over-corrected
+# them to DENY; a pipe to cat/tee/anything else still denies. No comment escape exists (GD-24 fix round 6
+# dropped the fragile '# allow-diff' quote-parsing bug surface, and it stays removed): an opt-in
+# anti-diff-dump hook blocks console diffs, and these allows cover the legitimate non-wall cases.
 _PATCH_FLAGS = frozenset(("-p", "-u"))
 _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat", "--shortstat"))
+# An info flag turns a diff subcommand into a help invocation, not a diff dump. A pager pipe sends the
+# diff into an interactive reader, not a console wall; cat/tee/anything else is not a pager.
 _INFO_FLAGS = frozenset(("--help", "-h"))
-_REDIRECT_TOKENS = frozenset((">", ">>"))  # stdout to a file; a grouped '>&'/'>|' fd-dup is not here
-ALLOW_DIFF_MARKER = "# allow-diff"
-
-
-def _find_unquoted_comment(line):
-    """The trailing shell-comment text of one line (everything after the '#'), or None when the line has
-    no genuine comment. A '#' begins a comment ONLY when it is unquoted and at a word boundary (the start
-    of the line or preceded by whitespace); a '#' inside a single- or double-quoted string, or joined to
-    a word (foo#bar), is not a comment. Quote and backslash state are tracked so a '#' buried in a quoted
-    argument is never mistaken for a comment."""
-    quote = None       # the open quote char (' or ") or None outside a quote
-    escaped = False     # the previous char was an unquoted backslash
-    prev_ws = True      # start of line counts as a word boundary
-    for idx, ch in enumerate(line):
-        if escaped:
-            escaped = False
-            prev_ws = False
-            continue
-        if quote:
-            if ch == quote:
-                quote = None
-            prev_ws = False
-            continue
-        if ch == "\\":
-            escaped = True
-            prev_ws = False
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            prev_ws = False
-            continue
-        if ch == "#" and prev_ws:
-            return line[idx + 1:]
-        prev_ws = ch.isspace()
-    return None
-
-
-def _has_allow_diff_comment(command):
-    """True when the command carries the '# allow-diff' escape as a GENUINE unquoted trailing shell
-    comment, not as the literal string buried inside a quoted argument (GD-24 fix round 4: the old raw
-    substring match wrongly honoured a '# allow-diff' inside a quoted commit message). Each line is
-    scanned for an unquoted comment; the marker is honoured only when it opens that comment."""
-    for line in command.split("\n"):
-        comment = _find_unquoted_comment(line)
-        if comment is not None and ALLOW_DIFF_MARKER in ("#" + comment):
-            return True
-    return False
+_PAGERS = frozenset(("less", "more", "most", "pager"))
+_REDIRECT_TOKENS = frozenset((">", ">>"))  # stdout to a file; a grouped '>&'/'&>' fd-dup is not here
+# Redirect targets that still land on a console/terminal or on stdout/stderr, so a diff sent there is not
+# actually diverted from the review surface: the named device files, plus any /dev/fd/N descriptor path.
+_CONSOLE_REDIRECT_TARGETS = frozenset(
+    ("/dev/tty", "/dev/stdout", "/dev/stderr", "/dev/console"))
+_DEV_FD_RE = re.compile(r"^/dev/fd/\d+$")
 # Fallback-only regexes over the RAW command string, used when shlex cannot parse the command (see
-# _diff_source_fallback). SUMMARY/INFO/REDIRECT mirror the token escapes; the producer regex is a loose
+# _diff_source_fallback). SUMMARY/REDIRECT mirror the token escapes; the producer regex is a loose
 # 'git ... diff|show|range-diff' probe. Conservative on a parse failure: deny a plausible producer.
 SUMMARY_RE = re.compile(r"(?:^|\s)--(?:stat|name-only|name-status|numstat|shortstat)\b")
-INFO_FLAG_RE = re.compile(r"(?:^|\s)(?:--help|-h)(?:\s|$)")
 REDIRECT_TO_FILE_RE = re.compile(r"(?<![0-9&>])[12]?>>?\s*(?![&|])\S")
 _RAW_DIFF_PRODUCER_RE = re.compile(r"(?is)\bgit\b.*?\b(?:diff|show|range-diff)\b")
 
@@ -415,21 +380,57 @@ def _is_diff_producer(tokens):
     return False
 
 
-def _diff_source_fallback(command, allow_marker):
+def _redirects_to_real_file(tokens):
+    """True when a segment redirects stdout to a REAL, non-console file: a '>' or '>>' token immediately
+    followed by a target token that is not a console/terminal/stdout/stderr target. Judged on the
+    segment's OWN token stream (never a raw substring), so the redirect and its target are read on the
+    specific segment. The fd-duplication forms ('>&1', '>&2', '1>&2', '2>&1', '&>', '>&') tokenize as
+    their own '>&'/'&>' tokens, never as a '>'/'>>' token, so they are not real-file redirects and do not
+    escape; nor does a '>'/'>>' onto a console device (/dev/tty, /dev/stdout, /dev/stderr, /dev/console,
+    /dev/fd/N), because the diff still reaches the console there."""
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        if tok in _REDIRECT_TOKENS and i + 1 < n:
+            target = tokens[i + 1]
+            if target not in _CONSOLE_REDIRECT_TARGETS and not _DEV_FD_RE.match(target):
+                return True
+    return False
+
+
+def _has_info_flag(tokens):
+    """True when a segment carries an info flag (--help or -h) as its own token: the segment is invoking
+    the subcommand's help text, not rendering a diff, so it is not a console diff dump. Judged on the
+    segment's own token stream (never a raw substring)."""
+    return any(t in _INFO_FLAGS for t in tokens)
+
+
+def _piped_to_pager(segments, index):
+    """True when the diff-producer segment at `index` is piped (an unquoted '|' separator token) directly
+    into a known interactive pager (less, more, most, pager): interactive review, not a console wall.
+    Judged on the segment's sep_after and the NEXT segment's command word, both from the quote-aware
+    token stream. A pipe to cat, tee, or anything else is NOT a pager pipe and still denies; a non-'|'
+    separator (a ';', '&&', ...) is not a pipe and never qualifies."""
+    _tokens, sep_after = segments[index]
+    if sep_after != "|":
+        return False
+    nxt = index + 1
+    if nxt >= len(segments):
+        return False
+    return _command_word(segments[nxt][0]) in _PAGERS
+
+
+def _diff_source_fallback(command):
     """FAIL-SAFE conservative check when shlex cannot parse the command (unbalanced quotes): we cannot
-    segment safely, so scan the RAW string. If it invokes a git diff-producer with no summary, --help,
-    or redirect escape (and no '# allow-diff'), deny; never silent-allow a plausibly-violating command
-    on a parse failure. Documented as best-effort: a genuinely clean but unparseable command may deny."""
-    if allow_marker:
-        return _allow()
+    segment safely, so scan the RAW string. If it invokes a git diff-producer with no summary flag and no
+    redirect-to-file escape, deny; never silent-allow a plausibly-violating command on a parse failure.
+    Documented as best-effort: a genuinely clean but unparseable command may deny."""
     if _RAW_DIFF_PRODUCER_RE.search(command) and not (
-            SUMMARY_RE.search(command) or INFO_FLAG_RE.search(command)
-            or REDIRECT_TO_FILE_RE.search(command)):
+            SUMMARY_RE.search(command) or REDIRECT_TO_FILE_RE.search(command)):
         return _deny(
             "AIQT rule cnsdif (no-console-diff-dumps): the command could not be parsed by the shell "
             "lexer (likely unbalanced quotes) and it appears to render a version-control diff to the "
-            "console with no summary/redirect/'# allow-diff' escape; failing closed. Re-issue with a "
-            "summary form, a redirect to a file, or the explicit '# allow-diff' token.",
+            "console with no summary or redirect-to-file escape; failing closed. Re-issue with a "
+            "summary form or a redirect to a real file.",
             "AIQT guardrail: denied an unparseable command that appears to dump a console diff (rule "
             "cnsdif, fail-safe).")
     return _allow()
@@ -437,8 +438,10 @@ def _diff_source_fallback(command, allow_marker):
 
 def diff_source_pretool(data):
     """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash: deny a Bash command that dumps a bare
-    console diff, allowing the per-segment summary and file-redirection escapes, the pager-pipe escape,
-    and the genuine unquoted trailing '# allow-diff' comment escape."""
+    console diff. A diff-producer segment is allowed only when, on its own tokens, it carries an info
+    flag (--help/-h, a help invocation), a summary flag, a redirect of its stdout to a real non-console
+    file, or is piped into a known interactive pager (less/more/most/pager). A diff segment matching none
+    of these is denied."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -453,33 +456,30 @@ def diff_source_pretool(data):
             "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
             "string, so the diff-source check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
-    allow_marker = _has_allow_diff_comment(command)  # only a genuine unquoted trailing '# allow-diff'
     try:
         segments = _segments(command)
     except ValueError:
-        return _diff_source_fallback(command, allow_marker)
-    for idx, (tokens, sep_after) in enumerate(segments):
+        return _diff_source_fallback(command)
+    for index, (tokens, _sep) in enumerate(segments):
         if _command_word(tokens) != "git":
             continue
         if not _is_diff_producer(tokens):
             continue
-        if any(t in _INFO_FLAGS for t in tokens):
-            continue  # 'git diff --help' is informational, not a diff dump
-        if allow_marker:
+        # Allowed cases, each judged on THIS segment's own tokens (never a raw substring): an info flag
+        # (--help/-h, a help invocation, not a diff), a summary flag, a redirect of stdout to a real
+        # non-console file, or a pipe into a known interactive pager.
+        if _has_info_flag(tokens):
             continue
         if any(t.split("=", 1)[0] in _SUMMARY_FLAGS for t in tokens):
             continue
-        if any(t in _REDIRECT_TOKENS for t in tokens):
+        if _redirects_to_real_file(tokens):
             continue
-        # A diff piped to a known pager is interactive review, not a response wall (FIX 4).
-        if sep_after == "|" and idx + 1 < len(segments) \
-                and _command_word(segments[idx + 1][0]) in _PAGERS:
+        if _piped_to_pager(segments, index):
             continue
         reason = ("AIQT rule cnsdif (no-console-diff-dumps): this command renders a version-control "
                   "diff to the console, burying the review surface under a raw dump. Use a summary form "
-                  "(--stat, --name-only, --name-status, --numstat), redirect the diff to a file, pipe it "
-                  "to a pager (less/more/most), or, if a console diff is genuinely intended, append the "
-                  "explicit '# allow-diff' token.")
+                  "(--stat, --name-only, --name-status, --numstat), redirect the diff to a real file "
+                  "(> file), or pipe it into a pager (| less), not the console.")
         return _deny(reason,
                      "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
     return _allow()
