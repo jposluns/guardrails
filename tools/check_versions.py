@@ -59,6 +59,10 @@ def main():
     # 1 + 2: every release version is well-formed, and the sequence strictly increases in array order.
     parsed = []
     for idx, rel in enumerate(releases):
+        if not isinstance(rel, dict):
+            print("error: release #{} is not a table ({!r}); fail-closed".format(
+                idx + 1, rel), file=sys.stderr)
+            return 2
         version = rel.get("version")
         if not isinstance(version, str):
             print("error: release #{} ({}) has no string `version`; fail-closed".format(

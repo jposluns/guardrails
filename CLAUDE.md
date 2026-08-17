@@ -148,8 +148,8 @@ what is particular to this repo (and has no source rule) lives here.
 ## Versioning and publication discipline
 
 The pack uses SemVer, single-sourced in `changelog.toml` (the `version` on the latest `[[release]]`); the
-root `VERSION` file is generated from it and drift-gated. The pack is currently pre-launch at `0.1.0`; the
-first public release is reserved for `1.0.0`. Releases are signed with minisign (DECIDED, DEFERRED until the
+root `VERSION` file is generated from it and drift-gated. The pack is at `1.0.0`, its first public release
+(the chat-assistant skill). Releases are signed with minisign (DECIDED, DEFERRED until the
 offline signing key exists). The full discipline (bump rules, release process, signing) is held in the
 private design-of-record; this section is its slim public face.
 
