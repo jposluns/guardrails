@@ -5,13 +5,15 @@ family: security
 facet: SECP
 secondary: [SECC]
 slug: data-minimization
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [SI-12(1), SI-19]
-map-atlas: [AML.T0024.000, AML.T0024.001, AML.T0057]
-map-iso-42001: [A.7.6]
-map-iso-23894: [A.8]
-map-owasp-llm: [LLM02]
-map-owasp-asvs: [V14]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-tight: [SI-12(1)]
+map-nist-80053-broad: [SI-19]
+map-atlas-tight: [AML.T0057]
+map-atlas-broad: [AML.T0024.000, AML.T0024.001]
+map-iso-42001-broad: [A.7.6]
+map-iso-23894-broad: [A.8]
+map-owasp-llm-tight: [LLM02]
+map-owasp-asvs-broad: [V14]
 ---
 
 # Minimize personal data sent to AI services

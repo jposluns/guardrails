@@ -4,13 +4,13 @@ origin: pack
 family: security
 facet: SECI
 slug: tool-argument-validation
-map-nist-80053: [SI-10, SI-10(6)]
-map-atlas: [AML.T0050, AML.T0102]
-map-iso-23894: [A.11]
-map-owasp-asi: [ASI05]
-map-owasp-mcp: [MCP05]
-map-owasp-web: [A05]
-map-owasp-asvs: [V2]
+map-nist-80053-tight: [SI-10, SI-10(6)]
+map-atlas-broad: [AML.T0050, AML.T0102]
+map-iso-23894-broad: [A.11]
+map-owasp-asi-broad: [ASI05]
+map-owasp-mcp-broad: [MCP05]
+map-owasp-web-broad: [A05]
+map-owasp-asvs-tight: [V2]
 ---
 
 # Validate tool arguments before use

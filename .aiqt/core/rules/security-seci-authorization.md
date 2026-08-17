@@ -5,15 +5,16 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: authorization
-map-nist-80053: [AC-3, AC-6]
-map-nist-ssdf: [PW.5.1]
-map-atlas: [AML.T0053, AML.T0082, AML.T0085]
-map-iso-23894: [A.11]
-map-owasp-asvs: [V8]
-map-owasp-web: [A01]
-map-owasp-api: [API1, API3, API5]
-map-owasp-proactive: [C1]
-map-owasp-cheatsheet: [authorization, mass-assignment]
+map-nist-80053-tight: [AC-3, AC-6]
+map-nist-ssdf-broad: [PW.5.1]
+map-atlas-broad: [AML.T0053, AML.T0082, AML.T0085]
+map-iso-23894-broad: [A.11]
+map-owasp-asvs-tight: [V8]
+map-owasp-web-tight: [A01]
+map-owasp-api-tight: [API1, API3, API5]
+map-owasp-proactive-tight: [C1]
+map-owasp-cheatsheet-tight: [authorization]
+map-owasp-cheatsheet-broad: [mass-assignment]
 ---
 
 # Least-privilege authorization

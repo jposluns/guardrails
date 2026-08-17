@@ -133,6 +133,18 @@ def ensure_listable(directory):
         list(os.scandir(directory))
 
 
+def _check_stem(path):
+    """Reject a manifest whose filename stem ends in the reserved fit suffix. A `foo-broad.toml` would
+    derive the key `map-foo-broad`, colliding with `foo.toml`'s broad fit key `map-foo-broad`; forbid
+    the stem so the fit suffix stays unambiguous. Called on BOTH read paths (map_keys per path, before
+    deriving keys, and load_manifests before parsing), because map_keys deliberately does not parse a
+    manifest, so a guard only in Manifest.__init__ would let a colliding stem poison MAP_KEYS at
+    gen_rules import before load_manifests ever runs."""
+    if path.stem.endswith(("-tight", "-broad")):
+        raise ManifestError(
+            "{}: manifest stem may not end in -tight/-broad (reserved fit suffix)".format(path.name))
+
+
 def load_manifests(std_dir):
     """Return {map_key: Manifest} for every *.toml under std_dir, fully validated. Raise ManifestError
     on any malformed manifest or duplicate map-key. An absent/empty dir returns {} (transition-safe); an
@@ -143,6 +155,7 @@ def load_manifests(std_dir):
         return out
     ensure_listable(std_dir)
     for path in sorted(std_dir.glob("*.toml")):
+        _check_stem(path)
         with open(path, "rb") as handle:
             try:
                 data = tomllib.load(handle)
@@ -157,11 +170,82 @@ def load_manifests(std_dir):
 
 
 def map_keys(root):
-    """The derived set of valid `map-<key>` frontmatter keys: one per manifest filename under
-    .aiqt/standards/. Cheap (no parse) so gen_rules can build MAP_KEYS at import; check_mappings does
-    the full parse/validation via load_manifests."""
+    """The derived set of valid `map-<key>` frontmatter keys: the two fit-qualified keys
+    `map-<stem>-tight` and `map-<stem>-broad` per manifest filename under .aiqt/standards/, and nothing
+    else. A bare `map-<stem>` (no fit) or a bad suffix (`map-<stem>-medium`) is therefore not a legal
+    frontmatter key, rejected fail-closed by gen_rules._check_keys with no extra gate code. Cheap (no
+    parse) so gen_rules can build MAP_KEYS at import; check_mappings does the full parse/validation via
+    load_manifests."""
     std_dir = Path(root) / ".aiqt" / "standards"
     if not dir_present(std_dir):
         return set()
     ensure_listable(std_dir)
-    return {"map-" + path.stem for path in std_dir.glob("*.toml")}
+    keys = set()
+    for path in std_dir.glob("*.toml"):
+        _check_stem(path)
+        keys.add("map-" + path.stem + "-tight")
+        keys.add("map-" + path.stem + "-broad")
+    return keys
+
+
+def validate_mappings(corpus, manifests):
+    """Shared C4 / check_mappings id-validation loop. Returns (findings, mapped, tight, broad).
+
+    Each rule's `map-<fw>-tight` / `map-<fw>-broad` frontmatter list is validated against its
+    fit-stripped BASE manifest (`map-<fw>`): id-pattern match, membership in the pinned id set,
+    per-list duplicate, and per-list natural-sort. Two fit-notation checks sit on top of the bare-key
+    loop this replaces:
+      - a map key must carry a `-tight`/`-broad` fit suffix (a bare or bad-suffix key is a finding,
+        defence in depth for a hand-edited tree, mirroring the no-manifest guard);
+      - MUTUAL EXCLUSIVITY: per rule+framework, an id may not be asserted both tight and broad.
+    tight and broad ids are tallied separately so a caller can report the fit split."""
+    findings = []
+    mapped = tight = broad = 0
+    for src, fm, _rel in corpus:
+        # base map-key -> {"tight": [...], "broad": [...]} for this rule's mutual-exclusivity check.
+        per_base = {}
+        for key in sorted(k for k in fm if k.startswith("map-")):
+            ids = fm[key]
+            if not isinstance(ids, list):
+                findings.append("{}: {}: value must be a flow sequence".format(src.name, key))
+                continue
+            mapped += len(ids)
+            if not key.endswith(("-tight", "-broad")):
+                # Unreachable while MAP_KEYS emits only fit-suffixed keys (load_corpus would reject a
+                # bare key first); kept as a guard against a hand-edited or out-of-sync tree.
+                findings.append("{}: {}: map key must carry a -tight/-broad fit suffix".format(
+                    src.name, key))
+                continue
+            base = key[:-6]                # strip the 6-char fit suffix ("-tight"/"-broad")
+            fit = key[-5:]                 # "tight" or "broad"
+            if fit == "tight":
+                tight += len(ids)
+            else:
+                broad += len(ids)
+            per_base.setdefault(base, {"tight": [], "broad": []})[fit] = ids
+            manifest = manifests.get(base)
+            if manifest is None:
+                # Unreachable while MAP_KEYS is derived from the same manifests; kept as a guard
+                # against a hand-edited or out-of-sync tree.
+                findings.append("{}: {}: no manifest under .aiqt/standards/ for this key".format(
+                    src.name, key))
+                continue
+            if len(ids) != len(set(ids)):
+                dupes = sorted({c for c in ids if ids.count(c) > 1})
+                findings.append("{}: {}: duplicate id(s): {}".format(src.name, key, ", ".join(dupes)))
+            if ids != sorted(ids, key=natkey):
+                findings.append("{}: {}: ids must be natural-sorted; got [{}]".format(
+                    src.name, key, ", ".join(ids)))
+            for cid in ids:
+                if not manifest.id_pattern.fullmatch(cid):
+                    findings.append("{}: {}: id '{}' is malformed for {} ({})".format(
+                        src.name, key, cid, manifest.name, manifest.edition))
+                elif cid not in manifest.id_set:
+                    findings.append("{}: {}: id '{}' is not in {} {}".format(
+                        src.name, key, cid, manifest.name, manifest.edition))
+        for base, lists in per_base.items():
+            both = set(lists["tight"]) & set(lists["broad"])
+            if both:
+                findings.append("{}: {}: id(s) asserted both tight and broad: {}".format(
+                    src.name, base, ", ".join(sorted(both, key=natkey))))
+    return findings, mapped, tight, broad

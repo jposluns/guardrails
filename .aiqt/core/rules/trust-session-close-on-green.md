@@ -6,7 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: session-close-on-green
-map-iso-42001: [8.1]
+map-iso-42001-broad: [8.1]
 ---
 
 # Close each session on green

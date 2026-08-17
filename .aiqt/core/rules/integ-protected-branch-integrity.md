@@ -6,11 +6,12 @@ tier: 10
 facet: INTEG
 secondary: [TRUST]
 slug: protected-branch-integrity
-map-nist-airmf: [MANAGE 4.1]
-map-nist-80053: [CM-3, CM-5]
-map-nist-ssdf: [PS.1.1, PW.7.1]
-map-iso-42001: [A.6.1.3]
-map-iso-23894: [A.7, B.7]
+map-nist-airmf-broad: [MANAGE 4.1]
+map-nist-80053-tight: [CM-3, CM-5]
+map-nist-ssdf-tight: [PS.1.1]
+map-nist-ssdf-broad: [PW.7.1]
+map-iso-42001-broad: [A.6.1.3]
+map-iso-23894-broad: [A.7, B.7]
 ---
 
 # Protected-branch integrity

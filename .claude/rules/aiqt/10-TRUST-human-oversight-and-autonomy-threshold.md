@@ -6,10 +6,11 @@ tier: 10
 facet: TRUST
 secondary: [SECI]
 slug: human-oversight-and-autonomy-threshold
-map-nist-airmf: [GOVERN 3.2, MAP 3.5]
-map-atlas: [AML.T0053, AML.T0086, AML.T0101]
-map-iso-42001: [A.3.2, A.9.2]
-map-iso-23894: [A.2, A.10, B.4]
+map-nist-airmf-tight: [GOVERN 3.2, MAP 3.5]
+map-atlas-broad: [AML.T0053, AML.T0086, AML.T0101]
+map-iso-42001-broad: [A.3.2, A.9.2]
+map-iso-23894-tight: [B.4]
+map-iso-23894-broad: [A.2, A.10]
 ---
 
 # Human oversight and the autonomy threshold

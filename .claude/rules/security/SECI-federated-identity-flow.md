@@ -4,9 +4,9 @@ origin: pack
 family: security
 facet: SECI
 slug: federated-identity-flow
-map-owasp-asvs: [V9, V10]
-map-owasp-proactive: [C7]
-map-owasp-cheatsheet: [json-web-token, oauth2]
+map-owasp-asvs-tight: [V9, V10]
+map-owasp-proactive-broad: [C7]
+map-owasp-cheatsheet-tight: [json-web-token, oauth2]
 ---
 
 # Validate federated identity and token flows

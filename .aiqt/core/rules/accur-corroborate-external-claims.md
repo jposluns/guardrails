@@ -6,9 +6,9 @@ tier: 10
 facet: ACCUR
 secondary: [INTEG]
 slug: corroborate-external-claims
-map-nist-airmf: [GOVERN 4.1, MEASURE 2.9]
-map-atlas: [AML.T0067.000]
-map-owasp-llm: [LLM07]
+map-nist-airmf-broad: [GOVERN 4.1, MEASURE 2.9]
+map-atlas-tight: [AML.T0067.000]
+map-owasp-llm-tight: [LLM07]
 ---
 
 # Corroborate external claims

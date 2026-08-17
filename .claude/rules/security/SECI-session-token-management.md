@@ -5,12 +5,13 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: session-token-management
-map-nist-80053: [IA-5, SC-23, SC-23(1)]
-map-nist-ssdf: [PW.5.1]
-map-atlas: [AML.T0055, AML.T0091.000, AML.T0091.001, AML.T0113]
-map-iso-23894: [A.11]
-map-owasp-asvs: [V7, V9]
-map-owasp-cheatsheet: [session-management]
+map-nist-80053-tight: [SC-23, SC-23(1)]
+map-nist-80053-broad: [IA-5]
+map-nist-ssdf-broad: [PW.5.1]
+map-atlas-broad: [AML.T0055, AML.T0091.000, AML.T0091.001, AML.T0113]
+map-iso-23894-broad: [A.11]
+map-owasp-asvs-tight: [V7, V9]
+map-owasp-cheatsheet-tight: [session-management]
 ---
 
 # Secure session and token handling

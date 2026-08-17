@@ -4,13 +4,14 @@ origin: pack
 family: security
 facet: SECI
 slug: output-encoding
-map-nist-80053: [SI-10(6)]
-map-nist-ssdf: [PW.5.1]
-map-atlas: [AML.T0050, AML.T0077, AML.T0113]
-map-iso-23894: [A.11]
-map-owasp-asvs: [V1]
-map-owasp-web: [A05]
-map-owasp-cheatsheet: [cross-site-scripting-prevention]
+map-nist-80053-tight: [SI-10(6)]
+map-nist-ssdf-broad: [PW.5.1]
+map-atlas-tight: [AML.T0077]
+map-atlas-broad: [AML.T0050, AML.T0113]
+map-iso-23894-broad: [A.11]
+map-owasp-asvs-tight: [V1]
+map-owasp-web-broad: [A05]
+map-owasp-cheatsheet-tight: [cross-site-scripting-prevention]
 ---
 
 # Encode output for its sink

@@ -6,9 +6,9 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: ai-toolchain-register
-map-nist-airmf: [GOVERN 1.6]
-map-nist-80053: [CM-8]
-map-iso-42001: [A.4.4]
+map-nist-airmf-tight: [GOVERN 1.6]
+map-nist-80053-tight: [CM-8]
+map-iso-42001-tight: [A.4.4]
 ---
 
 # Maintain an AI toolchain register

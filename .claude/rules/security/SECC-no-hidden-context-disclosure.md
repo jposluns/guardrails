@@ -5,11 +5,12 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: no-hidden-context-disclosure
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [AC-4]
-map-atlas: [AML.T0056, AML.T0057, AML.T0069, AML.T0082, AML.T0084, AML.T0098]
-map-iso-23894: [A.8, A.11]
-map-owasp-llm: [LLM02, LLM08]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-broad: [AC-4]
+map-atlas-tight: [AML.T0056, AML.T0057, AML.T0069, AML.T0084]
+map-atlas-broad: [AML.T0082, AML.T0098]
+map-iso-23894-broad: [A.8, A.11]
+map-owasp-llm-tight: [LLM02, LLM08]
 ---
 
 # No disclosure of secrets or hidden context

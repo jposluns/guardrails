@@ -6,10 +6,11 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: gate-discipline
-map-nist-airmf: [GOVERN 4.1]
-map-nist-80053: [CM-3(2), SA-11]
-map-nist-ssdf: [PO.4.1, PW.8.2]
-map-iso-42001: [A.6.2.4]
+map-nist-airmf-broad: [GOVERN 4.1]
+map-nist-80053-broad: [CM-3(2), SA-11]
+map-nist-ssdf-tight: [PW.8.2]
+map-nist-ssdf-broad: [PO.4.1]
+map-iso-42001-broad: [A.6.2.4]
 ---
 
 # Gate discipline
