@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Key management
+
+Keys and other secret material are generated, stored, rotated, and retired properly, and are never hardcoded.
+A key is never reused across contexts that are meant to stay isolated from one another.

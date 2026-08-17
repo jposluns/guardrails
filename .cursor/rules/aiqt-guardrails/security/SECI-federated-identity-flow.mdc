@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# Validate federated identity and token flows
+
+Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full
+protocol flow before granting access: the token issuer, audience, signature, and expiry; the state and
+nonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact
+relying party requested. A token is trusted only after every one of these checks passes.

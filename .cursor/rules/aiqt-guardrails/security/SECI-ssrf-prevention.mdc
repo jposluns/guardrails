@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# Validate server-initiated requests
+
+Code the assistant writes that makes a server-initiated request to an externally-influenced URL validates
+the destination before the request is made, preferring an allow-list over a deny-list. Internal,
+loopback, link-local, and cloud-metadata address ranges are denied, and a redirect is not followed to a
+target outside the allowed set.

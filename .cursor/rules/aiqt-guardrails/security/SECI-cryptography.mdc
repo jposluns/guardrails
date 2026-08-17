@@ -1,0 +1,11 @@
+---
+alwaysApply: true
+---
+
+# Sound cryptography
+
+Cryptography uses current, approved algorithms and correct parameters, with no weak, deprecated, or
+home-grown schemes. Data is protected in transit and at rest to the strength its sensitivity requires.
+Protection in transit is never defeated by disabling its verification: certificate and hostname validation
+stay on, and code never disables TLS peer verification or accepts a self-signed or mismatched certificate
+to work around a connection error.

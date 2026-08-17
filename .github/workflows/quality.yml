@@ -71,6 +71,8 @@ jobs:
 
       - name: Adapters drift
         run: python3 tools/gen_adapters.py --check
+      - name: Cursor drift
+        run: python3 tools/gen_cursor.py --check
 
       - name: Rule placement
         run: python3 tools/check_rule_placement.py

@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+# Strong authentication
+
+Code the assistant writes and operations it performs enforce strong authentication before granting access to
+a protected resource or action. Credentials are never hardcoded, defaulted, or bypassable, and authentication
+uses vetted, current mechanisms rather than a scheme invented ad hoc.

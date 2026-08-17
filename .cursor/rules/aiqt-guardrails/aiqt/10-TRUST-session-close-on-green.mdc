@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Close each session on green
+
+A session closes by landing its working state cleanly and verified on the protected line of development,
+with nothing left pending or half-integrated. On git that close is a green merge onto the protected branch.

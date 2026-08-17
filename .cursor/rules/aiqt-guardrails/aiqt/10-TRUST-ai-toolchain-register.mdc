@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+# Maintain an AI toolchain register
+
+Every AI tool, model, and server in active use is entered in a register naming what it is, why it is
+authorized, and who approved it, before it is relied on for project work. The register is reconciled
+against what is actually in use, not assumed current from when it was last checked.
