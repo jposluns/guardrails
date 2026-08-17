@@ -5,13 +5,14 @@ family: security
 facet: SECI
 secondary: [SECC, TRUST]
 slug: least-privilege-tools
-map-nist-airmf: [MAP 4.2]
-map-nist-80053: [AC-6, CM-7, SC-39]
-map-atlas: [AML.T0053, AML.T0086, AML.T0098, AML.T0101, AML.T0112.000]
-map-iso-23894: [A.11]
-map-owasp-llm: [LLM03]
-map-owasp-asi: [ASI02]
-map-owasp-mcp: [MCP02]
+map-nist-airmf-broad: [MAP 4.2]
+map-nist-80053-tight: [AC-6, CM-7]
+map-nist-80053-broad: [SC-39]
+map-atlas-broad: [AML.T0053, AML.T0086, AML.T0098, AML.T0101, AML.T0112.000]
+map-iso-23894-broad: [A.11]
+map-owasp-llm-tight: [LLM03]
+map-owasp-asi-tight: [ASI02]
+map-owasp-mcp-tight: [MCP02]
 ---
 
 # Least-privilege tool and file access

@@ -6,8 +6,9 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: trust-recovery-ext
-map-nist-airmf: [GOVERN 3.2, MANAGE 4.3]
-map-iso-23894: [A.2]
+map-nist-airmf-tight: [MANAGE 4.3]
+map-nist-airmf-broad: [GOVERN 3.2]
+map-iso-23894-broad: [A.2]
 ---
 
 # Autonomy steps down after a confirmed trust loss

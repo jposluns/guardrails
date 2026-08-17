@@ -5,14 +5,15 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: authentication
-map-nist-80053: [IA-2, IA-5(5), IA-5(7)]
-map-nist-ssdf: [PW.1.3, PW.5.1]
-map-atlas: [AML.T0012, AML.T0055]
-map-iso-23894: [A.11]
-map-owasp-asvs: [V6]
-map-owasp-web: [A07]
-map-owasp-cheatsheet: [authentication, multifactor-authentication]
-map-owasp-api: [API2]
+map-nist-80053-tight: [IA-2]
+map-nist-80053-broad: [IA-5(5), IA-5(7)]
+map-nist-ssdf-broad: [PW.1.3, PW.5.1]
+map-atlas-broad: [AML.T0012, AML.T0055]
+map-iso-23894-broad: [A.11]
+map-owasp-asvs-tight: [V6]
+map-owasp-web-tight: [A07]
+map-owasp-cheatsheet-tight: [authentication, multifactor-authentication]
+map-owasp-api-tight: [API2]
 ---
 
 # Strong authentication

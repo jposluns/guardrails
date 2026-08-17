@@ -4,9 +4,9 @@ origin: pack
 family: security
 facet: SECI
 slug: ssrf-prevention
-map-owasp-api: [API7]
-map-owasp-proactive: [C10]
-map-owasp-cheatsheet: [server-side-request-forgery-prevention]
+map-owasp-api-tight: [API7]
+map-owasp-proactive-tight: [C10]
+map-owasp-cheatsheet-tight: [server-side-request-forgery-prevention]
 ---
 
 # Validate server-initiated requests

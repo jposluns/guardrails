@@ -44,7 +44,7 @@ import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
-from _standards import dir_present, load_manifests, map_keys, natkey, ManifestError  # noqa: E402
+from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
 
 
 # Status constants for a single check's outcome.
@@ -402,33 +402,7 @@ def check_c4(root, cache):
         except (ValueError, OSError) as exc:
             return Result("C4", "mappings", MALFORMED, str(exc))
 
-    findings = []
-    mapped = 0
-    for src_path, fm, _rel in corpus:
-        for key in sorted(k for k in fm if k.startswith("map-")):
-            ids = fm[key]
-            if not isinstance(ids, list):
-                findings.append("{}: {}: value must be a flow sequence".format(src_path.name, key))
-                continue
-            mapped += len(ids)
-            manifest = manifests.get(key)
-            if manifest is None:
-                findings.append("{}: {}: no manifest under .aiqt/standards/ for this key".format(
-                    src_path.name, key))
-                continue
-            if len(ids) != len(set(ids)):
-                dupes = sorted({c for c in ids if ids.count(c) > 1})
-                findings.append("{}: {}: duplicate id(s): {}".format(src_path.name, key, ", ".join(dupes)))
-            if ids != sorted(ids, key=natkey):
-                findings.append("{}: {}: ids must be natural-sorted; got [{}]".format(
-                    src_path.name, key, ", ".join(ids)))
-            for cid in ids:
-                if not manifest.id_pattern.fullmatch(cid):
-                    findings.append("{}: {}: id '{}' is malformed for {} ({})".format(
-                        src_path.name, key, cid, manifest.name, manifest.edition))
-                elif cid not in manifest.id_set:
-                    findings.append("{}: {}: id '{}' is not in {} {}".format(
-                        src_path.name, key, cid, manifest.name, manifest.edition))
+    findings, mapped, tight, broad = validate_mappings(corpus, manifests)
     if findings:
         return Result("C4", "mappings", FAIL,
                       "{} issue(s): {}".format(len(findings), "; ".join(sorted(findings))))
@@ -437,7 +411,8 @@ def check_c4(root, cache):
                       "no rule cites a mapping id to validate ({} manifest(s) installed)".format(
                           len(manifests)))
     return Result("C4", "mappings", PASS,
-                  "{} mapping id(s) validate against {} manifest(s)".format(mapped, len(manifests)))
+                  "{} mapping id(s): {} tight, {} broad, validate against {} manifest(s)".format(
+                      mapped, tight, broad, len(manifests)))
 
 
 # --- orchestration ----------------------------------------------------------------------------------
@@ -599,11 +574,43 @@ origin: pack
 family: security
 facet: SECI
 slug: output-encoding
-map-selftest: [ST99]
+map-selftest-tight: [ST99]
 ---
 # Encode output
 
 A self-test rule citing a fabricated standards id.
+"""
+
+# A BARE (fit-less) map key: after the rebind, map-selftest-tight/-broad are legal but map-selftest is
+# not, so the generator rejects this rule as carrying an unknown key and the corpus fails to load (C1
+# MALFORMED). Proves the enforcement lever behind the whole notation.
+_BARE_KEY_RULE = """---
+corpus-id: seci003
+origin: pack
+family: security
+facet: SECI
+slug: output-encoding
+map-selftest: [ST01]
+---
+# Encode output
+
+A self-test rule citing a real id under a BARE (fit-less) map key, no longer legal.
+"""
+
+# The same real id asserted BOTH tight and broad for one rule+framework: mutual exclusivity must reject
+# it at C4 (a real finding, exit 1), proving that check is actually wired.
+_BOTH_FITS_RULE = """---
+corpus-id: seci004
+origin: pack
+family: security
+facet: SECI
+slug: output-encoding
+map-selftest-tight: [ST01]
+map-selftest-broad: [ST01]
+---
+# Encode output
+
+A self-test rule asserting one id as both tight and broad, which mutual exclusivity forbids.
 """
 
 
@@ -640,9 +647,12 @@ def _build_conformant(base):
     return corpus
 
 
-def _build_bad_mapping(base):
-    """Write a minimal install whose one mapped rule cites a fabricated standards id, plus the
-    manifest that id fails against. C4 must FAIL (exit 1); the rest stays conformant."""
+def _build_mapped_tree(base, rule_text):
+    """Write a minimal install: the apex rule, one mapped security rule (rule_text), and the selftest
+    manifest declaring exactly ST01. Generates the .claude/rules + AGENTS.md surfaces so only the
+    intended mapping check trips and the rest stays conformant. Shared by the C4 mapping fixture cases
+    (fabricated id, both-fits). The rule_text must load (a rule whose key is illegal cannot be built
+    this way, since load_corpus below would raise; see _build_bare_key)."""
     src = base / ".aiqt" / "core" / "rules"
     (src / "aiqt").mkdir(parents=True)
     (src / "security").mkdir(parents=True)
@@ -651,7 +661,7 @@ def _build_bad_mapping(base):
     (std / "selftest.toml").write_text(_STD_MANIFEST, encoding="utf-8")
     _rebind_map_keys(base)
     (src / "aiqt" / "00-project-integrity.md").write_text(_APEX, encoding="utf-8")
-    (src / "security" / "output-encoding.md").write_text(_MAPPED_RULE, encoding="utf-8")
+    (src / "security" / "output-encoding.md").write_text(rule_text, encoding="utf-8")
 
     corpus = gen_rules.load_corpus(src)
     claude = base / ".claude" / "rules"
@@ -662,6 +672,23 @@ def _build_bad_mapping(base):
     pairs = [(s, fm) for s, fm, _ in corpus]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
     (base / "AGENTS.md").write_text(gen_agents.render(pairs), encoding="utf-8")
+
+
+def _build_bare_key(base):
+    """Write a minimal install whose one mapped rule uses a BARE (fit-less) map-selftest key, with the
+    manifest present so map-selftest-tight/-broad ARE legal. After the rebind the generator rejects the
+    bare key as unknown, so the corpus fails to load: C1 MALFORMED, exit 2. Cannot go through
+    _build_mapped_tree (its load_corpus would raise on the illegal key), so no surfaces are generated;
+    the run's own C1 load is what must fail closed."""
+    src = base / ".aiqt" / "core" / "rules"
+    (src / "aiqt").mkdir(parents=True)
+    (src / "security").mkdir(parents=True)
+    std = base / ".aiqt" / "standards"
+    std.mkdir(parents=True)
+    (std / "selftest.toml").write_text(_STD_MANIFEST, encoding="utf-8")
+    _rebind_map_keys(base)
+    (src / "aiqt" / "00-project-integrity.md").write_text(_APEX, encoding="utf-8")
+    (src / "security" / "output-encoding.md").write_text(_BARE_KEY_RULE, encoding="utf-8")
 
 
 def self_test_main():
@@ -782,7 +809,7 @@ def self_test_main():
         #    (not in the checker's own MAP_KEYS) and this would fail at C1 rather than surface at C4.
         badmap = tmp / "badmap"
         badmap.mkdir()
-        _build_bad_mapping(badmap)
+        _build_mapped_tree(badmap, _MAPPED_RULE)
         code, out = run_capture(badmap)
         if code != 1:
             failures.append("bad-mapping tree expected exit 1, got {}\n{}".format(code, out))
@@ -790,6 +817,30 @@ def self_test_main():
             failures.append("bad-mapping tree expected C4 mappings FAIL:\n{}".format(out))
         if status_of(out, "C1") != PASS:
             failures.append("bad-mapping tree expected C1 PASS (rebind must admit the adopter map key):\n{}".format(out))
+
+        # 4b. A BARE (fit-less) map key is no longer legal after the rebind: map-selftest-tight/-broad
+        #     ARE legal (the manifest is present) but map-selftest is not, so the generator rejects the
+        #     rule and the corpus fails to load: C1 MALFORMED, exit 2. This is the enforcement lever
+        #     behind the whole fit notation, so it is exercised, not just asserted in prose.
+        barekey = tmp / "barekey"
+        barekey.mkdir()
+        _build_bare_key(barekey)
+        code, out = run_capture(barekey)
+        if code != 2:
+            failures.append("bare-key tree expected exit 2 (bare map key rejected), got {}\n{}".format(code, out))
+        if status_of(out, "C1") != MALFORMED:
+            failures.append("bare-key tree expected C1 MALFORMED (unknown map key):\n{}".format(out))
+
+        # 4c. The same id asserted BOTH tight and broad for one rule+framework must FAIL C4 (exit 1):
+        #     mutual exclusivity. Proves that check is actually wired, not merely present.
+        bothfits = tmp / "bothfits"
+        bothfits.mkdir()
+        _build_mapped_tree(bothfits, _BOTH_FITS_RULE)
+        code, out = run_capture(bothfits)
+        if code != 1:
+            failures.append("both-fits tree expected exit 1 (mutual exclusivity), got {}\n{}".format(code, out))
+        if status_of(out, "C4") != FAIL:
+            failures.append("both-fits tree expected C4 mappings FAIL (id both tight and broad):\n{}".format(out))
 
         # 6. Present-but-empty core with generated surfaces still on disk -> C2 must catch the orphans
         #    and FAIL (exit 1), not mask them as NOT APPLICABLE. (Regression guard for the empty-core hole.)
@@ -952,7 +1003,8 @@ def self_test_main():
                  "could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read bits are "
                  "enforced to exercise them.".format(len(skipped_unreadable), ", ".join(skipped_unreadable)))
     print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, and the GEMINI.md/copilot "
-          "adapters), empty-core orphans, and fabricated mapping ids fail; absent input (corpus, "
+          "adapters), empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
+          "asserted both tight and broad fail; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
           "(standards, core rules, generated families, and the .aiqt/.claude/.github parents), and a bad "
           "--root fail closed" + skip_note)

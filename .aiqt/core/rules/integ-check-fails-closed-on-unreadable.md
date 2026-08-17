@@ -6,8 +6,8 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: check-fails-closed-on-unreadable
-map-nist-80053: [SI-17]
-map-owasp-cheatsheet: [error-handling]
+map-nist-80053-tight: [SI-17]
+map-owasp-cheatsheet-broad: [error-handling]
 ---
 
 # A check fails closed on input it cannot read

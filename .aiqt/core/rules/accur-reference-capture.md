@@ -6,7 +6,7 @@ tier: 10
 facet: ACCUR
 secondary: [TRUST]
 slug: reference-capture
-map-iso-42001: [A.7.5]
+map-iso-42001-tight: [A.7.5]
 ---
 
 # Capture the reference when the claim is made

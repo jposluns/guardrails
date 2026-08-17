@@ -7,14 +7,17 @@ citation to an unsourced framework, or to an id that does not exist in the pinne
 
 ## How it is enforced
 
-- `tools/gen_rules.py` DERIVES its `MAP_KEYS` from this directory: one key per manifest, named
-  `map-<filename>` (so `owasp-llm.toml` enables `map-owasp-llm`). A `map-*` key with no manifest is
-  rejected as an unknown frontmatter key.
+- `tools/gen_rules.py` DERIVES its `MAP_KEYS` from this directory: the two fit-qualified keys
+  `map-<filename>-tight` and `map-<filename>-broad` per manifest (so `owasp-llm.toml` enables
+  `map-owasp-llm-tight` and `map-owasp-llm-broad`). Every mapping carries its fit: `-tight` for a direct,
+  one-to-one correspondence, `-broad` for a looser thematic relation. A bare `map-<filename>` with no fit
+  suffix, a bad suffix, or a `map-*` key with no manifest is rejected as an unknown frontmatter key.
 - `tools/check_mappings.py` (a CI gate, and part of `run_all_checks.sh`) validates every mapped id in
   the corpus against its manifest: the id must match the manifest `id-pattern` and appear verbatim in
-  the manifest's id set. It also enforces per-list hygiene (no duplicates, natural-sorted order). A
-  malformed manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the
-  network or the private source catalogues.
+  the manifest's id set. It also enforces per-list hygiene (no duplicates, natural-sorted order) and
+  mutual exclusivity (an id is not asserted both tight and broad for one rule+framework). A malformed
+  manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
+  private source catalogues.
 
 ## Manifest schema
 

@@ -6,8 +6,8 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: anything-wrong-fixed-first
-map-nist-airmf: [MANAGE 4.3]
-map-nist-80053: [SI-2]
+map-nist-airmf-broad: [MANAGE 4.3]
+map-nist-80053-tight: [SI-2]
 ---
 
 # Anything wrong is fixed first

@@ -6,8 +6,8 @@ tier: 10
 facet: ACCUR
 secondary: [INTEG, TRUST]
 slug: evidence-grounded-completion
-map-nist-airmf: [GOVERN 4.1]
-map-iso-23894: [A.12]
+map-nist-airmf-broad: [GOVERN 4.1]
+map-iso-23894-broad: [A.12]
 ---
 
 # Evidence-grounded completion

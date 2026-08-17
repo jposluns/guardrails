@@ -6,7 +6,7 @@ tier: 10
 facet: ACCUR
 secondary: [INTEG]
 slug: read-before-characterizing
-map-nist-airmf: [GOVERN 4.1, MEASURE 2.9]
+map-nist-airmf-broad: [GOVERN 4.1, MEASURE 2.9]
 ---
 
 # Read before characterizing

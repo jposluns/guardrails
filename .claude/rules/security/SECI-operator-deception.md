@@ -5,7 +5,7 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: operator-deception
-map-owasp-asi: [ASI09]
+map-owasp-asi-tight: [ASI09]
 ---
 
 # Social pressure is not authorization

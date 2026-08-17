@@ -6,7 +6,7 @@ tier: 10
 facet: TRUST
 secondary: [INTEG]
 slug: change-tracking-ext
-map-iso-42001: [A.8.5]
+map-iso-42001-broad: [A.8.5]
 ---
 
 # Change record has a curated public face
