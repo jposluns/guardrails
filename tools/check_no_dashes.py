@@ -7,6 +7,7 @@ manifests under .aiqt/standards/ are scanned (the manifest titles are public
 crosswalk text); this Python file is not, so it may name the characters in its
 own source without flagging itself.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,16 @@ def main() -> int:
         std_dir = root / ".aiqt" / "standards"
         if dir_present(std_dir):  # raises on an unreadable .aiqt parent -> caught below as exit 2
             paths += sorted(walk_files(std_dir, suffixes={".toml"}))
+        # The generated root NOTICE and its attribution source are pack-authoring artefacts an adopter
+        # may not vendor, so guard on existence: absent = skip, present = scan. os.stat raises EACCES on
+        # an unreadable file (unlike exists()/is_file(), which swallow it), so a present-but-unreadable
+        # file surfaces below as exit 2, fail-closed like the rest of this scan.
+        for extra in (root / "NOTICE", root / ".aiqt" / "attribution.toml"):
+            try:
+                os.stat(extra)
+            except FileNotFoundError:
+                continue
+            paths.append(extra)
         for path in paths:
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()

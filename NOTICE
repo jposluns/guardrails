@@ -24,7 +24,8 @@ Frameworks referenced:
       Required CSA attribution: attribute the portions to the Cloud Security Alliance Cloud
       Controls Matrix Version 4.1.0.
 
-Licence: Proprietary CSA copyright licence (non-commercial, no-redistribution reference use) (https://cloudsecurityalliance.org/artifacts/ccm-aicm-licensing-faq)
+Licence: Proprietary CSA copyright licence (non-commercial, no-redistribution reference use)
+(https://cloudsecurityalliance.org/artifacts/ccm-aicm-licensing-faq)
 
 The CSA matrices are copyright the Cloud Security Alliance under a non-commercial,
 no-redistribution, no-modification reference licence. This pack reproduces only control
@@ -49,7 +50,8 @@ Frameworks referenced:
   - ISO/IEC 23894:2023 AI guidance on risk management (edition 2023)
   - ISO/IEC 42001:2023 AI management system (edition 2023)
 
-Licence: Proprietary International Standard (Copyright ISO/IEC) (https://www.iso.org/copyright.html)
+Licence: Proprietary International Standard (Copyright ISO/IEC)
+(https://www.iso.org/copyright.html)
 
 Copyright-protected International Standards. Only clause and Annex control NUMBERS and SHORT
 HEADINGS are reproduced, as navigational references for interoperability; NO clause, Annex, or
@@ -99,7 +101,8 @@ Frameworks referenced:
   - NIST SP 800-53 Security and Privacy Controls (edition Rev 5 (catalog 5.2.0))
   - NIST Secure Software Development Framework (edition 1.1 (SP 800-218))
 
-Licence: U.S. Government work, public domain (17 U.S.C. 105) (https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications)
+Licence: U.S. Government work, public domain (17 U.S.C. 105)
+(https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications)
 
 U.S. Government works, not subject to copyright in the United States (17 U.S.C. 105). Reproduced
 from the published Special Publications; attribution is appreciated by NIST, not legally required.
@@ -118,7 +121,7 @@ Frameworks referenced:
   - OWASP API Security Top 10 (edition 2023)
   - OWASP Application Security Verification Standard (edition 5.0.0)
   - OWASP Cheat Sheet Series (edition commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04))
-  - OWASP MCP Top 10 (edition 2025)
+  - OWASP MCP Top 10 (edition 2025) [licensed CC BY-NC-SA 4.0]
       The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial), which is not compatible
       with this pack's CC BY-SA 4.0. Its risk identifiers and short titles are reproduced only as
       uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is
@@ -128,7 +131,8 @@ Frameworks referenced:
   - OWASP Top 10 for Agentic Applications (edition 2026)
   - OWASP Top 10 for LLM Applications (edition 2026)
 
-Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
+Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/) (per-framework exceptions
+noted above)
 
 Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own
 CC BY-SA 4.0 satisfies ShareAlike. Only control/risk identifiers and short titles are reproduced

@@ -97,13 +97,26 @@ def build(root):
         lines.append("")
         lines.append("Frameworks referenced:")
         for manifest in sorted(groups[pub], key=lambda m: natkey(m.name)):
-            lines.append("  - {} (edition {})".format(manifest.name, manifest.edition))
             stem = manifest.path.stem
             mblock = per_manifest.get(stem)
+            line = "  - {} (edition {})".format(manifest.name, manifest.edition)
+            if mblock and mblock.get("licence"):
+                # This manifest's own licence differs from its publisher default; state it on the line
+                # so the group "Licence:" heading below is never read as covering this framework too.
+                line += " [licensed {}]".format(mblock["licence"])
+            lines.append(line)
             if mblock and mblock.get("note"):
                 lines.append(_wrap(mblock["note"], indent="      "))
         lines.append("")
-        lines.append("Licence: {} ({})".format(block["licence"], block["licence-url"]))
+        # If any manifest in this group carries its own licence (rendered above), flag the default
+        # heading as not covering those exceptions. Wrapped like the other prose so a long licence URL
+        # (CSA, ISO/IEC) stays within WRAP.
+        group_has_licence_override = any(
+            (per_manifest.get(m.path.stem) or {}).get("licence") for m in groups[pub])
+        heading = "Licence: {} ({})".format(block["licence"], block["licence-url"])
+        if group_has_licence_override:
+            heading += " (per-framework exceptions noted above)"
+        lines.append(_wrap(heading))
         lines.append("")
         lines.append(_wrap(block["basis"]))
         lines.append("")
