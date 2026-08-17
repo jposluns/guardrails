@@ -8,6 +8,7 @@ silently drift (including orphaned generated files with no source). Vendored `ex
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -34,7 +35,15 @@ BASE_KEYS = {"corpus-id", "origin", "family", "slug"}
 # .aiqt/standards/ (one key per manifest): a mapping key is valid only if its framework's pinned id
 # manifest exists, so a rule can never cite an unsourced framework. check_mappings then validates each
 # cited id against that manifest's enumerated set.
-MAP_KEYS = map_keys(repo_root())
+try:
+    MAP_KEYS = map_keys(repo_root())
+except OSError as _exc:
+    # map_keys fails closed on an existing-but-unlistable .aiqt/standards/. This binding runs at import,
+    # so convert that read error into a clean exit 2 with a message rather than a bare traceback; every
+    # tool that imports gen_rules (against its OWN broken standards dir) then fails closed uniformly.
+    print("error: cannot read {}/.aiqt/standards/ (fail-closed): {}".format(repo_root(), _exc),
+          file=sys.stderr)
+    raise SystemExit(2)
 # Keys whose value, when present, must be a flow sequence (a list): secondary and every mapping key.
 SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
@@ -170,10 +179,16 @@ def load_corpus(src_dir):
     """Parse and fully validate every source (schema + unique corpus-id + unique derived path); raise
     ValueError on any malformed or duplicate. Returns [(path, frontmatter, derived_rel_path)]."""
     seen_ids, seen_paths, out = {}, {}, []
-    # Fail-closed if the source dir exists but cannot be listed: rglob SILENTLY yields nothing on an
-    # unreadable dir, which would read as an empty corpus (a false clean) rather than a read error.
-    ensure_listable(src_dir)
-    for src in sorted(src_dir.rglob("*.md")):
+    # Collect *.md via os.walk with a raising onerror, NOT rglob: rglob (and a top-level-only
+    # ensure_listable) SILENTLY skips an unreadable dir at ANY depth, so an unlistable family subdir
+    # (e.g. .aiqt/core/rules/aiqt/) would read as an empty corpus (a false clean). os.walk(onerror=)
+    # surfaces the read error at every level, so an unreadable dir fails closed as an OSError.
+    def _raise(exc):
+        raise exc
+    md_files = []
+    for dirpath, _dirs, filenames in os.walk(src_dir, onerror=_raise):
+        md_files.extend(Path(dirpath) / fn for fn in filenames if fn.endswith(".md"))
+    for src in sorted(md_files):
         fm = parse_source(src)
         rel = derive(fm, src.name)
         cid = str(fm["corpus-id"])
@@ -210,17 +225,24 @@ def main():
             if not check:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
-    for family in ("aiqt", "security"):
-        fam_dir = out_dir / family
-        if fam_dir.is_dir():
-            for f in sorted(fam_dir.rglob("*.md")):
-                # as_posix(), not str(): desired keys are forward-slash derive() paths, so a backslash
-                # from str() on Windows would flag every generated file as an orphan.
-                rel = f.relative_to(out_dir).as_posix()
-                if rel not in desired:
-                    drift.append("orphan " + rel)
-                    if not check:
-                        f.unlink()
+    try:
+        for family in ("aiqt", "security"):
+            fam_dir = out_dir / family
+            if fam_dir.is_dir():
+                # Fail-closed on an unreadable generated family dir: rglob silently yields nothing on an
+                # unlistable dir, so an orphaned generated file could be concealed and --check pass clean.
+                ensure_listable(fam_dir)
+                for f in sorted(fam_dir.rglob("*.md")):
+                    # as_posix(), not str(): desired keys are forward-slash derive() paths, so a backslash
+                    # from str() on Windows would flag every generated file as an orphan.
+                    rel = f.relative_to(out_dir).as_posix()
+                    if rel not in desired:
+                        drift.append("orphan " + rel)
+                        if not check:
+                            f.unlink()
+    except OSError as exc:
+        print("error: {}".format(exc))
+        return 2
     if check and drift:
         print("drift: " + "; ".join(drift))
         print("run tools/gen_rules.py to regenerate")

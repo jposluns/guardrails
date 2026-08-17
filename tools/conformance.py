@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
-from _standards import load_manifests, map_keys, natkey, ManifestError  # noqa: E402
+from _standards import load_manifests, map_keys, natkey, ensure_listable, ManifestError  # noqa: E402
 
 
 # Status constants for a single check's outcome.
@@ -133,6 +133,9 @@ def _claude_drift(root, corpus):
         for family in ("aiqt", "security"):
             fam_dir = claude_dir / family
             if fam_dir.is_dir():
+                # Fail-closed on an unreadable generated family dir (rglob silently yields nothing on an
+                # unlistable dir); the OSError is caught below and reported as MALFORMED.
+                ensure_listable(fam_dir)
                 for f in sorted(fam_dir.rglob("*.md")):
                     # as_posix(), not str(): derive() emits forward-slash rel paths, so a backslash
                     # from str() on Windows would make every generated file read as an orphan.
