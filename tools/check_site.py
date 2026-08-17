@@ -19,13 +19,16 @@ open/close balance IS checked, so an unclosed one is caught, and links/ids insid
 validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2): a <form> inside a
 <form>, and an interactive element (<a>/<button>) inside another interactive element, both of which the
 parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
-tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding.
+tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
 """
 import os
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 EN, EM = "–", "—"
 SITE_HOSTS = {"aiqt.ai", "www.aiqt.ai"}
@@ -225,13 +228,23 @@ def main():
         return 0
     site_root = site.resolve()
     docs, ids_by_path, findings = [], {}, []
-    for f in sorted(site.rglob("*.html")):
+    try:
+        html_files = sorted(walk_files(site, suffixes={".html"}))
+    except OSError as exc:
+        # an unreadable directory under site/ is a read error, not a clean skip: fail closed (exit 2)
+        # so the site gate never reports clean without having scanned an unreadable subtree.
+        print("error: cannot scan site/ ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    for f in html_files:
         rel = f.relative_to(root)
         try:
             text = f.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except UnicodeDecodeError:
             findings.append("{}: could not read as UTF-8".format(rel))
             continue
+        except OSError as exc:
+            print("error: cannot read {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
+            return 2
         page = Page()
         try:
             page.feed(text)
