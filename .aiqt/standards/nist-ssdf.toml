@@ -1,6 +1,6 @@
 # NIST Secure Software Development Framework (SSDF): id manifest for the AIQT standards crosswalk.
-# Citation unit is the task (PO.1.1). Titles are omitted: the OSCAL task-level title field just
-# repeats the id (the task description lives in the statement part). US Government public domain.
+# Citation unit is the task (PO.1.1). Each id carries a title: a short descriptor condensed from the
+# task's verbatim "Task:" statement in SP 800-218 v1.1 Table 1. US Government public domain.
 map-key = "map-nist-ssdf"
 name = "NIST Secure Software Development Framework"
 publisher = "NIST"
@@ -13,85 +13,127 @@ source-artefact = "NIST SP 800-218 v1.1 SSDF, OSCAL catalog"
 retrieved = "2026-08-16"
 [[id]]
 code = "PO.1.1"
+title = "Security requirements for development infrastructure"
 [[id]]
 code = "PO.1.2"
+title = "Security requirements for organization-developed software"
 [[id]]
 code = "PO.1.3"
+title = "Communicate requirements to third-party suppliers"
 [[id]]
 code = "PO.2.1"
+title = "Define SDLC security roles and responsibilities"
 [[id]]
 code = "PO.2.2"
+title = "Role-based secure development training"
 [[id]]
 code = "PO.2.3"
+title = "Management commitment to secure development"
 [[id]]
 code = "PO.3.1"
+title = "Specify security tools for the toolchain"
 [[id]]
 code = "PO.3.2"
+title = "Securely deploy and maintain toolchains"
 [[id]]
 code = "PO.3.3"
+title = "Generate artifacts from security tools"
 [[id]]
 code = "PO.4.1"
+title = "Define software security check criteria"
 [[id]]
 code = "PO.4.2"
+title = "Gather and safeguard security-check information"
 [[id]]
 code = "PO.5.1"
+title = "Separate and protect development environments"
 [[id]]
 code = "PO.5.2"
+title = "Secure and harden development endpoints"
 [[id]]
 code = "PS.1.1"
+title = "Protect stored code with least privilege"
 [[id]]
 code = "PS.2.1"
+title = "Provide software integrity verification information"
 [[id]]
 code = "PS.3.1"
+title = "Securely archive each software release"
 [[id]]
 code = "PS.3.2"
+title = "Maintain provenance data (SBOM) per release"
 [[id]]
 code = "PW.1.1"
+title = "Use risk modeling to assess software risk"
 [[id]]
 code = "PW.1.2"
+title = "Track security requirements and design decisions"
 [[id]]
 code = "PW.1.3"
+title = "Use standardized security features and services"
 [[id]]
 code = "PW.2.1"
+title = "Review software design against security requirements"
 [[id]]
 code = "PW.4.1"
+title = "Acquire well-secured third-party components"
 [[id]]
 code = "PW.4.2"
+title = "Create well-secured in-house components"
 [[id]]
 code = "PW.4.4"
+title = "Verify third-party components meet requirements"
 [[id]]
 code = "PW.5.1"
+title = "Follow secure coding practices"
 [[id]]
 code = "PW.6.1"
+title = "Use security-enhancing build tools"
 [[id]]
 code = "PW.6.2"
+title = "Configure build tools for secure output"
 [[id]]
 code = "PW.7.1"
+title = "Decide on code review and analysis"
 [[id]]
 code = "PW.7.2"
+title = "Perform code review and analysis"
 [[id]]
 code = "PW.8.1"
+title = "Decide on executable code testing"
 [[id]]
 code = "PW.8.2"
+title = "Perform and document code testing"
 [[id]]
 code = "PW.9.1"
+title = "Define a secure default configuration baseline"
 [[id]]
 code = "PW.9.2"
+title = "Implement and document secure default settings"
 [[id]]
 code = "RV.1.1"
+title = "Gather vulnerability information from all sources"
 [[id]]
 code = "RV.1.2"
+title = "Test code to confirm new vulnerabilities"
 [[id]]
 code = "RV.1.3"
+title = "Vulnerability disclosure and remediation policy"
 [[id]]
 code = "RV.2.1"
+title = "Analyze vulnerability risk for remediation"
 [[id]]
 code = "RV.2.2"
+title = "Plan and implement vulnerability risk responses"
 [[id]]
 code = "RV.3.1"
+title = "Determine vulnerability root causes"
 [[id]]
 code = "RV.3.2"
+title = "Identify root-cause patterns over time"
 [[id]]
 code = "RV.3.3"
+title = "Eradicate classes of similar vulnerabilities"
 [[id]]
 code = "RV.3.4"
+title = "Review and update the SDLC process"
