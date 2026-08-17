@@ -3,5 +3,6 @@ note = "The user-facing changes for each public release."
 
 [[release]]
 title = "Project created"
+version = "1.0.0"
 date = "2026-08-12"
 items = ["The AIQT Guardrails project was started."]
