@@ -16,12 +16,15 @@ any salt would also be public). Deliberate obfuscation (mid-word splits, HTML en
 can evade the hash layer; binary/archive contents (e.g. a .zip) are not unpacked; the structural path
 patterns are scoped to this host's Linux layout. The dual-family verifiers and the private plaintext check
 are the compensating layers. A line carrying a `leak-allow` marker is exempt from the STRUCTURAL layer.
-Exit 0 clean, 1 on any finding or a malformed hashes file.
+Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (unreadable dir/file, fail-closed).
 """
 import hashlib
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"leak-hashes.txt"}
@@ -85,31 +88,37 @@ def load_denylist(root):
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    hashes, maxn, findings = load_denylist(root)
-    findings = list(findings)
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if any(p in SKIP_DIRS for p in path.parts) or path.name in SKIP_NAMES:
-            continue
-        if path.suffix and path.suffix not in TEXT_SUFFIXES:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        rel = path.relative_to(root)
-        for number, line in enumerate(text.splitlines(), 1):
-            if "leak-allow" in line:
+    try:
+        # load_denylist reads a required file (the leak-hash denylist); keep it inside the fail-closed
+        # try so an unreadable denylist is a clean exit 2, not a traceback.
+        hashes, maxn, findings = load_denylist(root)
+        findings = list(findings)
+        for path in sorted(walk_files(root, SKIP_DIRS)):
+            if path.name in SKIP_NAMES:
                 continue
-            for pattern, label in STRUCTURAL:
-                if pattern.search(line):
-                    findings.append("{}:{}: {}".format(rel, number, label))
-        if hashes:
-            for gram in ngram_forms(text, maxn):
-                if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
-                    findings.append("{}: internal codename (hash match)".format(rel))
-                    break
+            if path.suffix and path.suffix not in TEXT_SUFFIXES:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue  # binary / non-utf8: a text scanner skips it (gitleaks scans binaries)
+            rel = path.relative_to(root)
+            for number, line in enumerate(text.splitlines(), 1):
+                if "leak-allow" in line:
+                    continue
+                for pattern, label in STRUCTURAL:
+                    if pattern.search(line):
+                        findings.append("{}:{}: {}".format(rel, number, label))
+            if hashes:
+                for gram in ngram_forms(text, maxn):
+                    if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
+                        findings.append("{}: internal codename (hash match)".format(rel))
+                        break
+    except OSError as exc:
+        # An unreadable directory or file is a read error, not a clean skip: fail closed (exit 2) so a
+        # leak gate never reports clean without having scanned an unreadable subtree.
+        print("error: cannot scan the tree ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
     if findings:
         print("FAIL: {} possible leak(s) of internal host specifics or codenames".format(len(findings)))
         for finding in sorted(set(findings)):

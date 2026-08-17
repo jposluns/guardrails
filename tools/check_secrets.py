@@ -24,6 +24,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".working"}
 SKIP_NAMES = {"check_secrets.py"}
 
@@ -88,39 +91,44 @@ PLACEHOLDER = re.compile(
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     findings = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if any(part in SKIP_DIRS for part in path.parts) or path.name in SKIP_NAMES:
-            continue
-        if path.relative_to(root).as_posix() in EXEMPT_PATHS:
-            continue
-        if path.suffix not in TEXT_SUFFIXES:
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (UnicodeDecodeError, OSError):
-            print(f"SKIP (unreadable as utf-8): {path.relative_to(root)}")
-            continue
-        for number, line in enumerate(lines, 1):
-            rel = path.relative_to(root)
-            for pattern, label in PREFIXES:
-                if pattern.search(line):
-                    findings.append(f"{rel}:{number}: {label}")
-            match = ASSIGN.search(line)
-            if match:
-                value = match.group("qvalue") or match.group("value") or ""
-                value = value.strip()
-                # An UNQUOTED value must additionally look like a credential (letters AND
-                # digits), because an unquoted match is far likelier to be ordinary prose
-                # or code than a quoted one. Quoted values keep the looser bar.
-                if value and match.group("qvalue") is None:
-                    if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
-                        value = ""
-                if value and not PLACEHOLDER.match(value):
-                    findings.append(
-                        f"{rel}:{number}: credential-named variable assigned a literal"
-                    )
+    try:
+        for path in sorted(walk_files(root, SKIP_DIRS)):
+            if path.name in SKIP_NAMES:
+                continue
+            if path.relative_to(root).as_posix() in EXEMPT_PATHS:
+                continue
+            if path.suffix not in TEXT_SUFFIXES:
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                # binary / non-utf8: a text secret-scanner skips it (gitleaks scans binaries)
+                print(f"SKIP (not utf-8 text): {path.relative_to(root)}")
+                continue
+            for number, line in enumerate(lines, 1):
+                rel = path.relative_to(root)
+                for pattern, label in PREFIXES:
+                    if pattern.search(line):
+                        findings.append(f"{rel}:{number}: {label}")
+                match = ASSIGN.search(line)
+                if match:
+                    value = match.group("qvalue") or match.group("value") or ""
+                    value = value.strip()
+                    # An UNQUOTED value must additionally look like a credential (letters AND
+                    # digits), because an unquoted match is far likelier to be ordinary prose
+                    # or code than a quoted one. Quoted values keep the looser bar.
+                    if value and match.group("qvalue") is None:
+                        if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
+                            value = ""
+                    if value and not PLACEHOLDER.match(value):
+                        findings.append(
+                            f"{rel}:{number}: credential-named variable assigned a literal"
+                        )
+    except OSError as exc:
+        # An unreadable directory or file is a read error, not a clean skip: fail closed (exit 2) so the
+        # secret gate never reports clean without having scanned an unreadable subtree.
+        print(f"error: cannot scan the tree ({exc}); fail-closed", file=sys.stderr)
+        return 2
     if findings:
         print(f"FAIL: {len(findings)} possible hardcoded secret(s)")
         for finding in sorted(set(findings)):
