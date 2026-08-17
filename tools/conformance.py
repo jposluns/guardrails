@@ -43,6 +43,7 @@ import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEY
 import gen_agents           # noqa: E402  render, sort_key, body_of
 import gen_adapters         # noqa: E402  ADAPTERS, render (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
+import gen_skill            # noqa: E402  build_outputs, RESERVED_PARTS (the generated chat-skill surface)
 import check_rule_placement as crp  # noqa: E402  check_name, check_drift, METADATA, BUILTIN_FAMILIES
 from _standards import dir_present, load_manifests, map_keys, validate_mappings, ManifestError  # noqa: E402
 
@@ -264,6 +265,48 @@ def _cursor_drift(root, corpus):
     return (PASS, "{} Cursor rule(s) match regeneration".format(len(desired)))
 
 
+def _skill_drift(root, corpus):
+    """Mirror gen_skill's reconciliation, re-rooted at root (never call run_gen, which WRITES). Compare
+    the installed chat-skill surface (site/downloads/aiqt/ plus the standalone aiqt-instructions.txt)
+    against regeneration from .aiqt/core/skill/skill-source.md and the corpus. Absent surface -> NOT
+    APPLICABLE (the adopter did not install the chat skill). A present surface with a missing/unreadable
+    source, or an unknown cited corpus-id, is a broken install -> MALFORMED (fail closed), so the same
+    anti-fabrication gate that guards the generator also guards an installed skill."""
+    reserved_dir = root.joinpath(*gen_skill.RESERVED_PARTS)
+    present, err = _reachable(reserved_dir)
+    if err:
+        return (MALFORMED, err)
+    if not present:
+        return (NA, "no site/downloads/aiqt/ chat-skill surface installed")
+    try:
+        reserved_map, standalone = gen_skill.build_outputs(root)
+    except (ValueError, OSError) as exc:
+        return (MALFORMED, "cannot regenerate the chat skill: {}".format(exc))
+    drift = []
+    try:
+        for path, content in standalone:
+            current = path.read_text(encoding="utf-8") if path.exists() else None
+            if current != content:
+                drift.append(path.relative_to(root).as_posix())
+        for name, content in sorted(reserved_map.items()):
+            target = reserved_dir / name
+            current = target.read_text(encoding="utf-8") if target.exists() else None
+            if current != content:
+                drift.append((reserved_dir / name).relative_to(root).as_posix())
+        # Orphan scan over the reserved subtree (100% generated); os.walk(onerror=raise), not rglob.
+        for dirpath, _dirs, filenames in os.walk(reserved_dir, onerror=_walk_raise):
+            for fn in sorted(filenames):
+                f = Path(dirpath) / fn
+                rel = f.relative_to(reserved_dir).as_posix()
+                if rel not in reserved_map:
+                    drift.append("orphan " + (reserved_dir / rel).relative_to(root).as_posix())
+    except OSError as exc:
+        return (MALFORMED, "cannot read the chat-skill surface: {}".format(exc))
+    if drift:
+        return (FAIL, "chat-skill drift: " + "; ".join(sorted(set(drift))))
+    return (PASS, "chat skill matches regeneration")
+
+
 def check_c2(root, cache):
     """Each generated surface the adopter HAS matches regeneration from their .aiqt/core/rules/.
 
@@ -286,7 +329,8 @@ def check_c2(root, cache):
     cs, cd = _claude_drift(root, corpus)
     as_, ad = _agents_drift(root, corpus)
     us, ud = _cursor_drift(root, corpus)
-    surfaces = [("claude", cs, cd), ("agents", as_, ad), ("cursor", us, ud)]
+    ks, kd = _skill_drift(root, corpus)
+    surfaces = [("claude", cs, cd), ("agents", as_, ad), ("cursor", us, ud), ("skill", ks, kd)]
     for adapter in gen_adapters.ADAPTERS:
         surfaces.append(_adapter_drift(root, corpus, adapter))
     # Aggregate every surface: worst status wins, but NA of one surface does not mask a PASS/FAIL of

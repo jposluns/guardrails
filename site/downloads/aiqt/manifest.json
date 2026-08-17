@@ -1,0 +1,18 @@
+{
+  "date": "2026-08-17",
+  "generator": "tools/gen_skill.py",
+  "generator-version": "1",
+  "included-rule-ids": [
+    "prjint1",
+    "seclpr",
+    "secmin",
+    "secndc",
+    "secres",
+    "secsec",
+    "secunt"
+  ],
+  "license": "CC-BY-SA-4.0",
+  "name": "aiqt",
+  "source-corpus-hash": "sha256:cc438e4cf5339fe204d6f04439cd2ab8010a328b1706170532ed60fb3519945d",
+  "version": "1.0.0"
+}
