@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import map_keys  # noqa: E402
+from _standards import dir_present, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -208,13 +208,15 @@ def main():
     src_dir = root / ".aiqt" / "core" / "rules"
     out_dir = root / ".claude" / "rules"
     desired = {}
-    if src_dir.is_dir():
-        try:
+    try:
+        # dir_present (not is_dir) inside the try: an unreadable .aiqt/ parent must fail closed as exit 2,
+        # not read as an absent corpus (which would delete every generated file as an orphan below).
+        if dir_present(src_dir):
             for src, _fm, rel in load_corpus(src_dir):
                 desired[rel] = src.read_text(encoding="utf-8")
-        except (ValueError, OSError) as exc:
-            print("error: {}".format(exc))
-            return 2
+    except (ValueError, OSError) as exc:
+        print("error: {}".format(exc))
+        return 2
     # Reconcile even when src_dir is absent (desired empty) so orphaned generated files are never concealed.
     # The whole reconcile is fail-closed: an unreadable generated file (target.read_text) or an unreadable
     # generated dir at ANY depth (os.walk(onerror=raise), not rglob, which silently skips an unlistable
