@@ -28,9 +28,8 @@ def render_md(data):
         lines.append("## {}: {}".format(stage["pill_label"], stage["heading"]))
         lines.append("")
         body = stage["body"]
-        if stage.get("link_text"):
-            body += " [{}]({}{})".format(
-                stage["link_text"], base, stage["link_href"])
+        for link in stage.get("links", []):
+            body += " [{}]({}{})".format(link["text"], base, link["href"])
         lines.append(body)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -42,9 +41,9 @@ def render_site(data):
     for idx, stage in enumerate(data["stage"]):
         style = ' style="margin-bottom:1.1rem"' if idx < last else ""
         para = _text(stage["body"])
-        if stage.get("link_text"):
+        for link in stage.get("links", []):
             para += ' <a href="{}">{}</a>'.format(
-                _attr(stage["link_href"]), _text(stage["link_text"]))
+                _attr(link["href"]), _text(link["text"]))
         cards.append(
             '      <div class="card"{}>\n'
             '        <span class="pill {}">{}</span>\n'

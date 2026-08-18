@@ -4,7 +4,7 @@ What you can use today, what is being built, and what is only an idea, each labe
 
 ## Available now: The chat assistant
 
-You can have this today. AIQT 1.0.0 is one skill you load into a chat assistant that accepts one (Claude, ChatGPT, and Copilot among them). It holds that assistant to a stated standard: claims match their sources, checks keep their full strength, and "finished" has been verified before it is said. [Add it to your assistant.](https://aiqt.ai/install)
+You can have this today. AIQT 1.0.0 packages the governance core for a chat assistant: a Skill you upload to Claude, or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides that assistant toward a stated standard: claims matched to their sources, checks kept at full strength, and "finished" verified before it is said. [See what has been tested on each platform.](https://aiqt.ai/evidence) [Add it to your assistant.](https://aiqt.ai/install)
 
 ## In development: The development assistant
 
