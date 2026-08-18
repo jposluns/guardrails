@@ -14,7 +14,8 @@ snapshot's OWN git operations change no working state (the ref is not a branch, 
 working tree, and is invisible to plain `git status`, `git branch`, and `git log`, though reachable via `git
 log --all`, `git for-each-ref refs/aiqt-recovery`, and `git show-ref` as the real ref it is), so it keeps
 the inert posture. That inert guarantee is bounded, not categorical: git may additionally run a
-repo-configured clean/process filter, fsmonitor, or reference-transaction hook while the snapshot is taken,
+git-configured (repo, global, system, or command-scope) clean/process filter, fsmonitor, or
+reference-transaction hook while the snapshot is taken,
 and a clean filter can transform the captured bytes, so the snapshot is not guaranteed byte-exact. The
 exception is limited to recovery snapshots written for the actor's own protection; it is not a general
 licence to mutate repository metadata.

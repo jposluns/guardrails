@@ -934,13 +934,19 @@ def _has_long_prefix(tokens, full):
 
 # The ambient git discovery-env vars that could redirect a real-state git call (the clean probe, the
 # recovery snapshot) to a DECOY repository: any of these, if inherited from the environment, can point git
-# at a different index, object store, work tree, or ref namespace than the one at `-C <repo>`, producing a
-# false "provably clean", a false recovery point, or a dirty-tree ALLOW left unchanged. Every real-state
-# call pops ALL of them before applying its own env, so it always observes the ACTUAL repo; a snapshot
+# at a different index, object store, work tree, ref namespace, discovery boundary, or ambient-config set
+# than the one at `-C <repo>`, producing a false "provably clean", a false recovery point, or a dirty-tree
+# ALLOW left unchanged. Every real-state call pops ALL of them before applying its own env, so after the pop
+# a real-state call observes the ACTUAL repo at `-C <repo>` rather than an ambient-env decoy; a snapshot
 # call's own GIT_INDEX_FILE (supplied via env_extra) still wins because env_extra is applied AFTER this pop.
+# This is BOUNDED, not categorical: popping the family closes the ambient-env vectors, but on-disk git config
+# (repo, global, and system) still applies and can influence git behaviour - a disclosed residual, not
+# neutralized here.
 _GIT_ISOLATE_ENV = ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
                     "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-                    "GIT_CEILING_DIRECTORIES", "GIT_QUARANTINE_PATH")
+                    "GIT_CEILING_DIRECTORIES", "GIT_QUARANTINE_PATH",
+                    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL",
+                    "GIT_CONFIG_SYSTEM")
 
 
 def _tree_is_clean(repo):
@@ -1284,11 +1290,13 @@ def _pristine_single_bare_git(command, segments):
 # rather than clobbering a prior recovery ref) protects it from GC.
 #
 # The BOUND on "inert" (honest framing): the snapshot's OWN git operations write only git objects and one
-# private ref (plus a reflog entry for that ref when core.logAllRefUpdates is on) and do NOT themselves
+# private ref (plus a reflog entry for that ref when core.logAllRefUpdates=always, or when a reflog already
+# exists for the ref) and do NOT themselves
 # modify the real index, worktree, HEAD, or any branch; the ref is invisible to plain `git status`, `git
 # branch`, and `git log`, THOUGH reachable via `git log --all` / `git for-each-ref refs/aiqt-recovery` /
 # `git show-ref` (a real ref, not hidden). The selftest asserts the real status/index/HEAD, index bytes,
-# config, and stash list are unchanged. BUT git may ADDITIONALLY run any repo-configured program during the
+# config, and stash list are unchanged. BUT git may ADDITIONALLY run any git-configured (repo, global,
+# system, or command-scope) program during the
 # snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
 # categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
 # smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, a
@@ -1324,12 +1332,15 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). The WHOLE ambient git
     discovery-env family (_GIT_ISOLATE_ENV: GIT_INDEX_FILE, GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
     GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES,
-    GIT_QUARANTINE_PATH) is ALWAYS neutralized so a call meant to observe the REAL repo state (the status
+    GIT_QUARANTINE_PATH, GIT_DISCOVERY_ACROSS_FILESYSTEM, GIT_CONFIG_COUNT, GIT_CONFIG_GLOBAL,
+    GIT_CONFIG_SYSTEM) is ALWAYS neutralized so a call meant to observe the REAL repo state (the status
     probe, `rev-parse --show-toplevel`/`--git-path index`) and the snapshot itself cannot be redirected to a
     foreign preset repo (a decoy that would win a false clean, a false recovery point, or leak into the
     snapshot); a snapshot call overrides GIT_INDEX_FILE with its own temp index through env_extra, applied
-    AFTER the pop. Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller
-    treats as a snapshot failure. offline, bounded by `timeout`."""
+    AFTER the pop. This neutralization is BOUNDED to the ambient ENV family: on-disk git config (repo, global,
+    and system) still applies and can influence git behaviour, a disclosed residual, not neutralized here.
+    Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
+    snapshot failure. offline, bounded by `timeout`."""
     cmd = ["git", "-C", repo] + list(args)
     env = dict(os.environ)
     for _var in _GIT_ISOLATE_ENV:
@@ -1536,14 +1547,21 @@ def _record_recovery(repo, verb):
     provably clean, so a snapshot is genuinely warranted. Resolves the repo TOPLEVEL ONCE (via _recovery_git,
     so it inherits the discovery-env neutralization) and threads it to both the snapshot and the ledger, so
     the size estimate and the inside-the-repo containment checks anchor on the toplevel, not the (possibly
-    deeper) session cwd. An unresolvable toplevel (a bare or broken git dir) is itself a snapshot fail."""
-    top = _recovery_toplevel(repo)
-    if not top:
-        return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
-    result = _take_snapshot(repo, top, verb)
-    if result[0] == "ok":
-        _write_recovery_ledger(repo, top, verb, result[1])
-    return result
+    deeper) session cwd. An unresolvable toplevel (a bare or broken git dir) is itself a snapshot fail. ANY
+    unexpected error anywhere in the recovery path (a non-UTF-8 repo/toplevel path, an embedded-NUL cwd, or
+    any future recovery-layer fault) is caught and downgraded to a snapshot failure (a graceful fail-to-ASK),
+    so no recovery-layer exception can propagate to the dispatcher and crash the guard."""
+    try:
+        top = _recovery_toplevel(repo)
+        if not top:
+            return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
+        result = _take_snapshot(repo, top, verb)
+        if result[0] == "ok":
+            _write_recovery_ledger(repo, top, verb, result[1])
+        return result
+    except Exception as exc:  # never let a recovery-layer failure crash the guard -> graceful ASK
+        return ("fail", "the recovery snapshot could not be taken ({}: {})".format(
+            type(exc).__name__, exc))
 
 
 def _recovery_pointer(info):
@@ -1605,8 +1623,9 @@ def git_discard(data):
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
     resolve to the session cwd AND whose tree is NOT provably clean, it takes an INERT recovery snapshot of
     the uncommitted work (a private refs/aiqt-recovery/<utc-ts>-<pid> ref over a temp-index tree, git objects
-    + one ref only) and appends one line to an EXTERNAL per-user ledger, on the ALLOW and ASK paths alike (the
-    hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
+    + one ref only) and BEST-EFFORT appends a line to an EXTERNAL per-user ledger (normally one per snapshot;
+    skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
+    the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
     could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
     NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
@@ -1674,9 +1693,11 @@ def git_discard(data):
             _s, _ = _git_sub_and_args(_toks)
             if _s is not None:
                 np_subs.add(_s)
-        # Snapshottable when a visible lossy verb is snapshottable, OR raw_lossy is set (a verb hidden by a
-        # wrapper/metacharacter the segment scan could not see): treat that conservatively as snapshottable.
-        np_snappable = raw_lossy or bool(np_subs & _SNAPSHOTTABLE_VERBS)
+        # Snapshottable when a VISIBLE lossy sub is snapshottable, OR raw_lossy is set AND no visible sub was
+        # identified (a verb hidden by a wrapper/metacharacter the segment scan could not see): treat that
+        # fully-hidden case conservatively as snapshottable. When the visible subs hold ONLY non-snappable
+        # verbs (stash/branch), do NOT snapshot - a worktree snapshot cannot capture their asset.
+        np_snappable = bool(np_subs & _SNAPSHOTTABLE_VERBS) or (raw_lossy and not np_subs)
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
         np_snap = None

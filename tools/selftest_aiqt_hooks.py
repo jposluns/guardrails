@@ -996,6 +996,124 @@ def main():
         if not _recovery_refs(rec_fdw):
             failures.append("(rec-fd-wrap-snap) expected a recovery ref on a wrapped in-scope ASK of a dirty "
                             "tree (F-D EXPAND, raw_lossy path)")
+
+        # (rec-fd-nonsnap) C6 (item 3): a NON-PRISTINE in-scope command whose ONLY visible lossy sub is a
+        # non-snappable verb (stash drop / branch -D) does NOT take a snapshot (a worktree snapshot cannot
+        # capture a stash entry or a branch commit), so NO recovery ref is created even on a dirty tree; the
+        # decision still ASKS. Under the old predicate raw_lossy alone would have forced a spurious snapshot.
+        # The complementary fully-hidden case (raw_lossy, no visible sub, still snapshots) is proven by
+        # rec-fd-wrap above.
+        rec_ns = _init_repo(tmp / "rec-fd-nonsnap")
+        (rec_ns / "file.txt").write_text("committed line\nnonsnap\n", encoding="utf-8")
+        expect("(rec-fd-nonsnap-stash) compound stash drop on dirty tree asks",
+               "git stash drop && echo done", "ask", cwd=str(rec_ns))
+        expect("(rec-fd-nonsnap-branch) compound branch -D on dirty tree asks",
+               "git branch -D other && echo done", "ask", cwd=str(rec_ns))
+        if _recovery_refs(rec_ns):
+            failures.append("(rec-fd-nonsnap-snap) expected NO recovery ref for a non-pristine command whose "
+                            "only visible lossy sub is stash/branch (not snappable)")
+
+        # (rec-cfgcount) C5: ambient GIT_CONFIG_COUNT/KEY_0/VALUE_0 injecting core.worktree at a CLEAN decoy,
+        # plus GIT_DISCOVERY_ACROSS_FILESYSTEM, must NOT redirect the probe or the snapshot away from the REAL
+        # dirty session-cwd repo. These four vars are in _GIT_ISOLATE_ENV, so popping the family disables the
+        # KEY/VALUE config injection and the discovery-boundary override: the real (dirty) repo is read (reset
+        # --hard DENIES, not a false ALLOW), the recovery ref lands on the REAL repo, and the real
+        # index/HEAD/worktree are untouched.
+        rec_cfg = _init_repo(tmp / "rec-cfgcount")
+        (rec_cfg / "file.txt").write_text("committed line\nreal cfg work\n", encoding="utf-8")
+        cfg_decoy = _init_repo(tmp / "rec-cfgcount-clean")  # a CLEAN worktree the injected config points at
+        cfg_head = subprocess.run(["git", "-C", str(rec_cfg), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, timeout=30).stdout.strip()
+        cfg_idx_bytes = (rec_cfg / ".git" / "index").read_bytes()
+        cfg_wt_bytes = (rec_cfg / "file.txt").read_bytes()
+        cfg_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+                   "GIT_CONFIG_VALUE_0": str(cfg_decoy), "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1"}
+        for _k, _v in cfg_env.items():
+            os.environ[_k] = _v
+        try:
+            probe_cfg = aiqt_hooks._tree_is_clean(str(rec_cfg))
+            got_cfg = _decision(handler, "git reset --hard", cwd=str(rec_cfg))
+        finally:
+            for _k in cfg_env:
+                os.environ.pop(_k, None)
+        if probe_cfg is not False:
+            failures.append("(rec-cfgcount-probe) with GIT_CONFIG_COUNT injecting core.worktree at a clean "
+                            "decoy, the probe must still read the REAL dirty repo (False), got {}"
+                            .format(probe_cfg))
+        if got_cfg != "deny":
+            failures.append("(rec-cfgcount) reset --hard on the REAL dirty repo must DENY despite an injected "
+                            "core.worktree decoy via GIT_CONFIG_COUNT, got {}".format(got_cfg))
+        if not _recovery_refs(rec_cfg):
+            failures.append("(rec-cfgcount-snap) expected a recovery ref on the REAL repo")
+        if _recovery_refs(cfg_decoy):
+            failures.append("(rec-cfgcount-wrongwrite) a recovery ref was written to the DECOY (an injected "
+                            "core.worktree leaked into the snapshot)")
+        if (rec_cfg / ".git" / "index").read_bytes() != cfg_idx_bytes:
+            failures.append("(rec-cfgcount-index) the real index changed under an injected GIT_CONFIG_COUNT")
+        if (rec_cfg / "file.txt").read_bytes() != cfg_wt_bytes:
+            failures.append("(rec-cfgcount-worktree) the real worktree changed under an injected "
+                            "GIT_CONFIG_COUNT")
+        cfg_head_after = subprocess.run(["git", "-C", str(rec_cfg), "rev-parse", "HEAD"],
+                                        capture_output=True, text=True, timeout=30).stdout.strip()
+        if cfg_head_after != cfg_head:
+            failures.append("(rec-cfgcount-head) the real HEAD changed under an injected GIT_CONFIG_COUNT")
+
+        # (rec-sizecap-subdir) C2: the size-cap estimate anchors on the resolved TOPLEVEL, not the (deeper)
+        # session cwd. cwd is a SUBDIR while the only dirty file lives at the toplevel; status paths are
+        # toplevel-relative, so a correct estimate joins them onto the toplevel and SEES the dirty file. With
+        # the cap forced below that file's size the would-be ALLOW (reset --soft) downgrades to ASK. Were the
+        # estimate anchored on the subdir, the join would miss the toplevel file (size 0), stay under the cap,
+        # and wrongly ALLOW.
+        rec_capsub = _init_repo(tmp / "rec-sizecap-subdir")
+        (rec_capsub / "file.txt").write_text("committed line\n" + "x" * 4096 + "\n", encoding="utf-8")
+        capsub_dir = rec_capsub / "sub" / "deep"
+        capsub_dir.mkdir(parents=True, exist_ok=True)
+        _orig_cap = aiqt_hooks._RECOVERY_SIZE_CAP
+        aiqt_hooks._RECOVERY_SIZE_CAP = 64  # below the toplevel file size, above an empty (subdir) estimate
+        try:
+            got_capsub = _decision(handler, "git reset --soft", cwd=str(capsub_dir))
+        finally:
+            aiqt_hooks._RECOVERY_SIZE_CAP = _orig_cap
+        if got_capsub != "ask":
+            failures.append("(rec-sizecap-subdir) the size estimate must anchor on the toplevel (not the "
+                            "subdir cwd), downgrading a would-be ALLOW to ASK when the toplevel file exceeds "
+                            "the cap, got {}".format(got_capsub))
+        if _recovery_refs(rec_capsub):
+            failures.append("(rec-sizecap-subdir-snap) expected NO recovery ref when the toplevel-anchored "
+                            "estimate exceeds the size cap")
+
+        # (rec-record-boundary) C3/item-2: _record_recovery wraps its whole body so ANY unexpected error is
+        # downgraded to a graceful ('fail', reason), never propagated (an uncaught exception would exit-2
+        # HARD-BLOCK even a would-ALLOW command). An embedded-NUL repo path makes the underlying subprocess
+        # call raise, and a non-UTF-8 path is likewise unresolvable; both must come back as a 'fail' tuple.
+        for _label, _badrepo in (("embedded-nul", str(repo) + "\x00bad"),
+                                  ("non-utf8", str(repo) + "/\udcff\udcfe-bad")):
+            try:
+                _res = aiqt_hooks._record_recovery(_badrepo, "reset")
+            except Exception as _exc:  # the whole point: nothing may propagate to the dispatcher
+                _res = ("CRASH", "{}: {}".format(type(_exc).__name__, _exc))
+            if not (isinstance(_res, tuple) and _res[0] == "fail"):
+                failures.append("(rec-record-boundary-{}) _record_recovery on a bad repo path must return a "
+                                "graceful ('fail', ...), got {!r}".format(_label, _res))
+        # End-to-end: a snapshottable discard whose session cwd carries an embedded NUL must fail-to-ASK
+        # gracefully (the recovery boundary turns the ValueError into a snapshot fail), never crash the guard.
+        rec_nul = _init_repo(tmp / "rec-nulcwd")
+        (rec_nul / "file.txt").write_text("committed line\nnul cwd\n", encoding="utf-8")
+        try:
+            got_nul = _decision(handler, "git reset --soft", cwd=str(rec_nul) + "\x00sub")
+        except Exception as _exc:
+            got_nul = "CRASH ({}: {})".format(type(_exc).__name__, _exc)
+        if got_nul != "ask":
+            failures.append("(rec-nulcwd) an embedded-NUL session cwd must fail-to-ASK gracefully, got {}"
+                            .format(got_nul))
+
+        # (rec-path-within-root) G1: _path_is_within treats a real subpath of the filesystem root '/' as
+        # INSIDE '/' (the earlier base+os.sep test made '/' into '//', so every candidate read as OUTSIDE and
+        # the containment guard was silently bypassed). Root itself is within root; a real subpath is too.
+        if aiqt_hooks._path_is_within("/", "/") is not True:
+            failures.append("(rec-path-within-root-self) '/' must be judged within '/'")
+        if aiqt_hooks._path_is_within(str(repo), "/") is not True:
+            failures.append("(rec-path-within-root-sub) a real subpath must be judged within the root '/'")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
