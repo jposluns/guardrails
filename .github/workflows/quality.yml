@@ -73,8 +73,11 @@ jobs:
         run: python3 tools/check_version_monotonicity.py --self-test
 
       # The baseline differs by trigger: a pull_request compares against its target branch
-      # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name), a push compares against HEAD^.
-      # The gate's root-commit NOT APPLICABLE guards the degenerate HEAD^ case on a first push.
+      # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name); a push probes HEAD^ first and
+      # passes it as --base when it resolves, otherwise invokes the gate with no --base so the gate's
+      # own root detection decides (a genuine root: NOT APPLICABLE; a shallow or broken-parent
+      # history: fail-closed). The rev-parse probe is an if-guard, so its nonzero exit on a first
+      # push (no HEAD^) does not abort the step under set -e.
       - name: Version monotonicity
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -82,8 +85,10 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             python3 tools/check_version_monotonicity.py --base "origin/${GITHUB_BASE_REF}"
-          else
+          elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
             python3 tools/check_version_monotonicity.py --base "HEAD^"
+          else
+            python3 tools/check_version_monotonicity.py
           fi
 
       - name: Rules drift
