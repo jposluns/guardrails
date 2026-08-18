@@ -1223,26 +1223,59 @@ def _discard_deny(kind):
 
 # --- worktree-certainty (coarse; replaces the removed dir modelling) ---------------------------------
 
-# The ambient env vars that REDIRECT git's target away from the session cwd: they point the command at a
-# different git dir, work tree, common dir, index, object store, or ref namespace. The clean probe scrubs
-# EVERY ambient GIT_* before it runs (so the PROBE reads the REAL cwd repo), but the guard cannot scrub the
-# operator's shell env from the ACTUAL command git will run: with an ambient GIT_DIR at a dirty repo and a
-# clean cwd, the probe reads clean and would ALLOW while the real command clobbers the redirected dir; with
-# an ambient GIT_INDEX_FILE the probe reads the default (clean) index while the command discards the custom
-# one. So ANY of these present means the guard cannot prove the command's target IS the session cwd.
-_AMBIENT_TARGET_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                                 "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE")
+# FAIL-SAFE repository-view check. An ambient GIT_*-prefixed var in the process env can point git at a
+# different git dir, work tree, common dir, index, object store, ref namespace, replace/reference view, or
+# config/attribute source than the session cwd. The clean probe scrubs EVERY ambient GIT_* before it runs
+# (so the PROBE reads the REAL cwd repo), but the guard cannot scrub the operator's shell env from the
+# ACTUAL command git will run: with an ambient GIT_DIR at a dirty repo and a clean cwd, the probe reads
+# clean and would ALLOW while the real command clobbers the redirected dir; with an ambient GIT_INDEX_FILE
+# the probe reads the default (clean) index while the command discards the custom one. Enumerating the
+# redirecting vars proved a whack-a-mole (round after round found new members: GIT_NO_REPLACE_OBJECTS,
+# GIT_REPLACE_REF_BASE, GIT_REFERENCE_BACKEND, and more will exist), so this FLIPS to fail-safe: ANY
+# ambient GIT_* var forces ASK EXCEPT a small COSMETIC allowlist proven not to change the discard target,
+# the object/ref view, the index, or dirtiness detection - only UI/editor/pager/prompt/lock/trace/identity
+# concerns. An unknown or new GIT_* var ASKS rather than silently allowing.
+_COSMETIC_GIT_VARS = frozenset((
+    "GIT_PAGER",             # selects the pager UI; no effect on target/view/index/dirtiness
+    "GIT_EDITOR",            # selects the commit-message editor; UI only
+    "GIT_SEQUENCE_EDITOR",   # editor for the rebase todo list; UI only
+    "GIT_ASKPASS",           # credential-prompt helper; auth UI only
+    "GIT_TERMINAL_PROMPT",   # whether git prompts on the terminal; interactivity only
+    "GIT_OPTIONAL_LOCKS",    # whether to take optional locks; performance, not target/dirtiness
+    "GIT_NO_LAZY_FETCH",     # whether to lazy-fetch missing objects; network posture, not the view
+    "GIT_ADVICE",            # whether to print advice hints; output UI only
+    "GIT_FLUSH",             # output buffering/flushing; I/O behaviour only
+    "GIT_MERGE_AUTOEDIT",    # whether merge auto-opens the editor; UI only
+    "GIT_AUTHOR_NAME",       # author identity stamped on new commits; not the working-tree view
+    "GIT_AUTHOR_EMAIL",      # author identity; not the view
+    "GIT_AUTHOR_DATE",       # author date; not the view
+    "GIT_COMMITTER_NAME",    # committer identity; not the view
+    "GIT_COMMITTER_EMAIL",   # committer identity; not the view
+    "GIT_COMMITTER_DATE",    # committer date; not the view
+))
 
 
-def _ambient_target_redirect():
-    """True when the ambient process environment carries ANY git target-redirect var (GIT_DIR,
-    GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_NAMESPACE). The clean probe
-    scrubs these before it runs, so IT reads the real cwd repo, but the guard cannot scrub them from the
-    ACTUAL command the shell runs: that command still inherits them and may act on a DIFFERENT git dir or
-    index than the one probed. When any is present the guard cannot prove the command's target == the
-    session cwd, so a lossy pristine form ASKS rather than trust a clean cwd probe (clean becomes
-    not-provably-clean -> ASK, never a silent ALLOW)."""
-    return any(v in os.environ for v in _AMBIENT_TARGET_REDIRECT_VARS)
+def _ambient_repo_view_override():
+    """FAIL-SAFE: True when the ambient process environment carries ANY GIT_*-prefixed variable that is
+    NOT in the small cosmetic allowlist (and not a GIT_TRACE* var). Such a variable can point git at a
+    different git dir, work tree, index, object/ref view, replace/reference view, or config/attribute
+    source than the session cwd. The clean probe scrubs these before it runs, so IT reads the real cwd
+    repo, but the guard cannot scrub them from the ACTUAL command the shell runs: that command still
+    inherits them and may act on a DIFFERENT repository view than the one probed. Enumerating the
+    redirecting vars was a whack-a-mole (new members kept appearing: GIT_NO_REPLACE_OBJECTS,
+    GIT_REPLACE_REF_BASE, GIT_REFERENCE_BACKEND), so this asks whenever it cannot PROVE the scrubbed
+    cwd-probe matches the command's actual repository view: an unknown or new GIT_* var ASKS rather than
+    silently allowing (clean becomes not-provably-clean -> ASK, never a silent ALLOW). Only clearly
+    cosmetic UI/editor/pager/prompt/lock/trace/identity vars, which cannot change the discard target, the
+    object/ref view, the index, or dirtiness detection, are allowed through (a GIT_TRACE* var is cosmetic:
+    it only changes debug output, never the repository view)."""
+    for key in os.environ:
+        if not key.startswith("GIT_"):
+            continue
+        if key in _COSMETIC_GIT_VARS or key.startswith("GIT_TRACE"):
+            continue
+        return True
+    return False
 
 
 def _segment_dir_simple(tokens):
@@ -1816,12 +1849,13 @@ def git_discard(data):
 
     # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. When it
     # cannot be resolved to the session cwd (no cwd, or a -C/--git-dir/--work-tree/-c global option or a
-    # GIT_DIR/GIT_WORK_TREE env assignment on the command could redirect it, OR an AMBIENT git target-redirect
-    # var is set - the probe scrubs it but the real command still inherits it, so the guard cannot prove the
-    # command's target IS the session cwd), no snapshot is possible and a lossy form ASKS.
+    # GIT_DIR/GIT_WORK_TREE env assignment on the command could redirect it, OR any NON-COSMETIC AMBIENT
+    # GIT_* var is set - the probe scrubs it but the real command still inherits it, so the guard cannot
+    # prove the command's repository view IS the session cwd; the check is fail-safe, so an unknown or new
+    # GIT_* var also blocks resolution), no snapshot is possible and a lossy form ASKS.
     cwd = data.get("cwd")
     base = cwd if isinstance(cwd, str) and cwd else None
-    resolvable = base is not None and _segment_dir_simple(pristine) and not _ambient_target_redirect()
+    resolvable = base is not None and _segment_dir_simple(pristine) and not _ambient_repo_view_override()
     snapshottable = sub in _SNAPSHOTTABLE_VERBS
 
     # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content

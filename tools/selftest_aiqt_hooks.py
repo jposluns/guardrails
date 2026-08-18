@@ -111,6 +111,12 @@ def main():
     # Redirect the recovery ledger into the throwaway tree so the EN-6 recovery layer, which fires on every
     # dirty-tree in-scope case below, never writes to the real user's $XDG_STATE_HOME/~/.local/state.
     os.environ["XDG_STATE_HOME"] = str(tmp / "xdgstate")
+    # Make the fail-safe repository-view check (git_discard) deterministic: scrub any ambient GIT_* the
+    # gate's own runner happens to carry (a shell may export GIT_EDITOR, CI may export others), so each case
+    # below is judged ONLY against the GIT_* vars it explicitly sets. Production still reads the real
+    # os.environ; this scrub is a test-harness isolation, not a change to the control.
+    for _amb in [k for k in os.environ if k.startswith("GIT_")]:
+        os.environ.pop(_amb, None)
     failures = []
 
     def expect(label, command, want, cwd=None):
@@ -854,6 +860,51 @@ def main():
         if real_head_after != real_head:
             failures.append("(rec-decoy-head) the real HEAD changed under an ambient GIT_DIR/GIT_WORK_TREE")
 
+        # (rec-viewoverride) FAIL-SAFE repository-view check (round-9): the guard no longer enumerates a
+        # FIXED list of redirecting GIT_* vars (a whack-a-mole - Codex round-8 found GIT_NO_REPLACE_OBJECTS,
+        # GIT_REPLACE_REF_BASE, and GIT_REFERENCE_BACKEND all missed by it). It now ASKS whenever ANY ambient
+        # GIT_*-prefixed var is set EXCEPT a small cosmetic allowlist, so an unknown or new var fails safe to
+        # ASK. Each case runs a clean-tree PRISTINE discard that would otherwise ALLOW, so a flip to ASK is
+        # attributable to the ambient var alone.
+        rec_view = _init_repo(tmp / "rec-viewoverride")
+        # control: with no ambient GIT_* override the clean-tree pristine discard ALLOWs.
+        expect("(rec-viewoverride-base) clean pristine discard allows with no ambient GIT_* override",
+               "git checkout -- file.txt", "allow", cwd=str(rec_view))
+        # the three vars the old fixed list missed, plus an arbitrary UNKNOWN var: each MUST now force ASK
+        # (fail-safe), even though the tree is clean and the form is a pristine discard.
+        for _newvar in ("GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_REFERENCE_BACKEND",
+                        "GIT_FUTURE_THING"):
+            os.environ[_newvar] = "1"
+            try:
+                got_view = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
+            finally:
+                os.environ.pop(_newvar, None)
+            if got_view != "ask":
+                failures.append("(rec-viewoverride-{}) an ambient non-cosmetic {} must fail-safe to ASK, got "
+                                "{}".format(_newvar, _newvar, got_view))
+        # the ORIGINAL six target-redirect vars still ASK under the fail-safe check.
+        for _redir in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                       "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE"):
+            os.environ[_redir] = "1"
+            try:
+                got_redir = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
+            finally:
+                os.environ.pop(_redir, None)
+            if got_redir != "ask":
+                failures.append("(rec-viewoverride-{}) the redirect var {} must still ASK, got {}"
+                                .format(_redir, _redir, got_redir))
+        # a COSMETIC ambient var (GIT_PAGER, GIT_EDITOR) does NOT force ASK: the clean-tree pristine discard
+        # still ALLOWs, so the allowlist genuinely lets the harmless UI/identity vars through.
+        for _cos, _cosval in (("GIT_PAGER", "cat"), ("GIT_EDITOR", "true")):
+            os.environ[_cos] = _cosval
+            try:
+                got_cos = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
+            finally:
+                os.environ.pop(_cos, None)
+            if got_cos != "allow":
+                failures.append("(rec-viewoverride-cosmetic-{}) a cosmetic ambient {} must NOT force ASK on a "
+                                "clean pristine discard, got {}".format(_cos, _cos, got_cos))
+
         # (rec-heredoc) C: a Bash-valid but shlex-UNPARSEABLE discard (an unbalanced quote inside a quoted
         # heredoc) reaches the raw-lossy fallback. It must ASK and, on a dirty tree, take a best-effort
         # recovery snapshot FIRST - before the fix the ValueError path returned ASK with NO recovery ref.
@@ -1026,12 +1077,15 @@ def main():
             failures.append("(rec-fd-nonsnap-snap) expected a recovery ref for a non-pristine in-scope "
                             "command on a dirty tree (accepted over-snapshot of a stash/branch form)")
 
-        # (rec-cfgcount) C5: ambient GIT_CONFIG_COUNT/KEY_0/VALUE_0 injecting core.worktree at a CLEAN decoy,
-        # plus GIT_DISCOVERY_ACROSS_FILESYSTEM, must NOT redirect the probe or the snapshot away from the REAL
-        # dirty session-cwd repo. These are all ambient GIT_* vars, so the allowlist scrub drops them,
-        # disabling the KEY/VALUE config injection and the discovery-boundary override: the real (dirty) repo is read (reset
-        # --hard DENIES, not a false ALLOW), the recovery ref lands on the REAL repo, and the real
-        # index/HEAD/worktree are untouched.
+        # (rec-cfgcount) C5 (round-9 fail-safe): ambient GIT_CONFIG_COUNT/KEY_0/VALUE_0 injecting core.worktree
+        # at a CLEAN decoy, plus GIT_DISCOVERY_ACROSS_FILESYSTEM, are all NON-COSMETIC ambient GIT_* vars, so
+        # the fail-safe repository-view check makes the target UNRESOLVABLE: the guard cannot prove the ACTUAL
+        # command (which still carries the injected core.worktree) targets the session cwd, so reset --hard
+        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW) and takes NO
+        # snapshot, exactly like an ambient GIT_DIR/GIT_INDEX_FILE (see rec-decoy/rec-idxfile). Separately,
+        # the PROBE still scrubs every ambient GIT_* (the allowlist scrub disables the KEY/VALUE injection and
+        # the discovery-boundary override), so it reads the REAL dirty repo (False); nothing is written to the
+        # decoy and the real index/HEAD/worktree are untouched.
         rec_cfg = _init_repo(tmp / "rec-cfgcount")
         (rec_cfg / "file.txt").write_text("committed line\nreal cfg work\n", encoding="utf-8")
         cfg_decoy = _init_repo(tmp / "rec-cfgcount-clean")  # a CLEAN worktree the injected config points at
@@ -1053,11 +1107,13 @@ def main():
             failures.append("(rec-cfgcount-probe) with GIT_CONFIG_COUNT injecting core.worktree at a clean "
                             "decoy, the probe must still read the REAL dirty repo (False), got {}"
                             .format(probe_cfg))
-        if got_cfg != "deny":
-            failures.append("(rec-cfgcount) reset --hard on the REAL dirty repo must DENY despite an injected "
-                            "core.worktree decoy via GIT_CONFIG_COUNT, got {}".format(got_cfg))
-        if not _recovery_refs(rec_cfg):
-            failures.append("(rec-cfgcount-snap) expected a recovery ref on the REAL repo")
+        if got_cfg != "ask":
+            failures.append("(rec-cfgcount) reset --hard under an injected core.worktree decoy via a "
+                            "non-cosmetic ambient GIT_CONFIG_COUNT must ASK (unresolvable target, fail-safe), "
+                            "got {}".format(got_cfg))
+        if _recovery_refs(rec_cfg):
+            failures.append("(rec-cfgcount-nosnap) an unresolvable-target ASK must take NO recovery snapshot "
+                            "on the REAL repo")
         if _recovery_refs(cfg_decoy):
             failures.append("(rec-cfgcount-wrongwrite) a recovery ref was written to the DECOY (an injected "
                             "core.worktree leaked into the snapshot)")
