@@ -808,24 +808,31 @@ def _checkout_affects_index(pre):
 
 
 def _restore_flags(pre):
-    """Return (has_staged, has_worktree) for a restore command's pre-'--' tokens, decoding clustered short
-    flags: git reads '-SW' as '-S -W'. The value-taking '-s'/'--source' consumes the rest of its cluster
-    (or the next token) as the source ref, so any letters after an 's' in a cluster are that value, not
-    flags. The long '--staged'/'--worktree' forms are handled directly."""
+    """Return (has_staged, has_worktree) for a restore command's pre-'--' tokens. Decodes clustered short
+    flags (git reads '-SW' as '-S -W') and resolves git's unambiguous long-option abbreviations, so
+    '--stag'/'--worktr' count as '--staged'/'--worktree'. Boolean flags are last-wins and honour '--no-*'
+    negation. The value-taking '-s'/'--source' (and its abbreviations) consumes the rest of its cluster or
+    the next token as the source ref, so those characters/tokens are not flags."""
     has_staged = has_worktree = False
     skip_next = False
     for tok in pre:
         if skip_next:
             skip_next = False
             continue
-        if tok == "--staged":
-            has_staged = True
-        elif tok == "--worktree":
-            has_worktree = True
-        elif tok in ("--source", "-s"):
-            skip_next = True  # the ref is the next token (space form)
-        elif tok.startswith("--"):
-            continue  # some other long option; no space-form value consumed here
+        if tok.startswith("--"):
+            name = tok[2:].split("=", 1)[0]
+            neg = name.startswith("no-")
+            if neg:
+                name = name[3:]
+            kind = _restore_long_kind(name)
+            if kind == "staged":
+                has_staged = not neg  # last-wins: a later --no-staged clears it
+            elif kind == "worktree":
+                has_worktree = not neg
+            elif kind == "source" and not neg and "=" not in tok:
+                skip_next = True  # space form: the ref is the next token
+        elif tok == "-s":
+            skip_next = True  # short --source space form
         elif tok.startswith("-") and len(tok) > 1:
             for ch in tok[1:]:  # decode the short-flag cluster
                 if ch == "S":
@@ -837,12 +844,38 @@ def _restore_flags(pre):
     return has_staged, has_worktree
 
 
+def _restore_long_kind(name):
+    """Resolve a restore long-option name (no leading '--', no '=value') to 'staged', 'worktree', or
+    'source' by git's unambiguous-prefix rule, else None. Only these three loss-relevant options are
+    considered; an empty or ambiguous prefix (bare 's' is shared by staged and source) resolves to None,
+    matching git rejecting it as ambiguous, so no discard occurs."""
+    if not name:
+        return None
+    cands = [w for w in ("staged", "worktree", "source") if w.startswith(name)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _reset_is_hard(args):
+    """True if a reset requests '--hard' (whole-tree index+worktree discard), resolving git's unambiguous
+    -prefix abbreviations ('--har' == '--hard'; 'hard' is the only reset long option starting with 'h').
+    Only the pre-'--' region is scanned: a token after '--' is a pathspec (a file literally named
+    '--hard'), not the flag."""
+    pre = args[:args.index("--")] if "--" in args else args
+    for a in pre:
+        if a.startswith("--"):
+            name = a[2:].split("=", 1)[0]
+            if name and "hard".startswith(name):
+                return True
+    return False
+
+
 def _discard_shape(tokens):
     """The whole-file discard shape of a git segment (the caller has confirmed the command word is git),
     as a dict {"kind", "paths", "affects_index", "from_file"}, or None when it is not a discard. Option
     parsing is SCOPED to the region before the first '--' (pre); every token after it (post) is a pathspec
     verbatim, even a '-'-leading one, and the value-taking option values (checkout/restore
-    '--pathspec-from-file', restore '--source'/'-s') are skipped so they are not enumerated as paths.
+    '--pathspec-from-file', restore '--source'/'-s', including a cluster-ending '-s' like '-Ws' whose next
+    token is the source ref) are skipped so they are not enumerated as paths.
     checkout: a discard with a '--' pathspec separator ('git checkout -- <paths>', 'git checkout <ref>
     -- <paths>'; paths are the post tokens) OR with a '--pathspec-from-file' source (the paths then come
     from a file, not enumerated). A 'git checkout <branch>' or '-b' (a branch switch/create) and a
@@ -875,13 +908,18 @@ def _discard_shape(tokens):
             return None
         from_file = _pathspec_from_file(pre)
         # enumerate paths: all post tokens, plus bare pre tokens, skipping the space-form values of the
-        # value-taking options ('--source'/'-s'/'--pathspec-from-file').
+        # value-taking options ('--source'/'-s'/'--pathspec-from-file'). A short-flag cluster ending in
+        # 's' (e.g. '-Ws', '-s') also consumes the next token as the --source value, so skip it too.
         paths = list(post)
         i = 0
         while i < len(pre):
             a = pre[i]
             if a in ("--source", "-s", "--pathspec-from-file") and i + 1 < len(pre):
                 i += 2  # skip the option and its value
+                continue
+            if (a.startswith("-") and not a.startswith("--") and len(a) > 1
+                    and a.endswith("s") and i + 1 < len(pre)):
+                i += 2  # a cluster-ending '-s' consumes the next token as the source ref
                 continue
             if a.startswith("-"):
                 i += 1  # any other option (including inline --source=.../-Sfoo) takes no separate token
@@ -890,7 +928,7 @@ def _discard_shape(tokens):
             i += 1
         return {"kind": "restore", "paths": paths, "affects_index": has_staged, "from_file": from_file}
     if sub == "reset":
-        if "--hard" in args:
+        if _reset_is_hard(args):
             return {"kind": "reset-hard", "paths": None, "affects_index": True, "from_file": False}
         return None
     return None

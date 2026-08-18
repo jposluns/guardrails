@@ -154,6 +154,27 @@ def main():
         expect("(x) restore --staged --worktree staged-only blocks",
                "git -C {} restore --staged --worktree file.txt".format(rp), "deny")
 
+        # (xi) round-4: git's unambiguous long-option abbreviations. '--stag'/'--work' resolve to
+        # '--staged'/'--worktree', which rewrites the index too, so on the staged-only state it BLOCKS.
+        _git(repo, "add", "file.txt")  # re-assert staged-only
+        expect("(xi) restore --stag --work abbreviated staged-only blocks",
+               "git -C {} restore --stag --work file.txt".format(rp), "deny")
+        # (xii) round-4: '--no-*' negation. '-SW --no-worktree' leaves staged-only (index-only unstage,
+        # the worktree is preserved), which is not a discard, so it ALLOWS.
+        _git(repo, "add", "file.txt")  # re-assert staged-only
+        expect("(xii) restore -SW --no-worktree staged-only allows",
+               "git -C {} restore -SW --no-worktree file.txt".format(rp), "allow")
+        # (xiii) round-4: abbreviated reset. '--har' resolves to '--hard' (whole-tree index+worktree
+        # discard), so on the staged-only lossy state it BLOCKS.
+        _git(repo, "add", "file.txt")  # re-assert staged-only (a lossy state for reset --hard)
+        expect("(xiii) reset --har abbreviated lossy blocks",
+               "git -C {} reset --har HEAD".format(rp), "deny")
+        # (xiv) round-4: a reset with a pathspec after '--' is a mixed reset (worktree preserved); the
+        # '--hard' detection is scoped before '--', so a clean tracked pathspec ALLOWS (locks in the
+        # pre-'--' scoping). clean.txt is a clean tracked path.
+        expect("(xiv) reset -- clean pathspec allows",
+               "git -C {} reset -- clean.txt".format(rp), "allow")
+
         # (ix) FIX C: option parsing is scoped before '--', so a literal pathspec named
         # '--pathspec-from-file=foo' AFTER '--' is a path, not an option: from_file is False and it is
         # enumerated. A unit assertion on the shape (a live-repo case for this name is awkward).
