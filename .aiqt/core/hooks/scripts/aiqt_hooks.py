@@ -823,7 +823,7 @@ _WRAPPER_WORDS = frozenset((
 # also covers &&/||/|&, every redirection form, and command/process substitution) or a shell reserved word.
 # The gate NEVER parses the grammar; this lexical scan stands in for it, so only a metacharacter-free
 # 'git <verb> <plain args>' ever reaches the clean probe. Everything else in scope ASKS.
-_SHELL_META_RE = re.compile(r"[;|&<>(){}$`\\!\n\r]")
+_SHELL_META_RE = re.compile(r"[;|&<>(){}$`\\!*?\[\n\r]")  # includes glob chars *?[ (bash filename expansion)
 _SHELL_RESERVED_WORDS = frozenset((
     "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
@@ -935,9 +935,10 @@ def _tree_is_clean(repo):
     --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
     file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
     override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
-    carrying both keeps the intent legible. Only an ignored '!!' entry is treated as clean (git never touches
-    an ignored file on these verbs, and porcelain does not emit '!!' without --ignored anyway); ignored files
-    are deliberately left as clean, since every non-dry-run clean already ASKS unconditionally regardless.
+    carrying both keeps the intent legible. An ignored '!!' entry is treated as clean (porcelain does not emit
+    '!!' without --ignored anyway). A forced checkout or 'clean -x' CAN overwrite/remove an ignored file, but
+    probing --ignored would ASK on every repo carrying build artifacts, so ignored-file loss on those forms is
+    a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo."""
     try:
@@ -978,7 +979,7 @@ def _checkout_role(args):
     disambiguated by a rev-parse probe) -> scoped. A bare 'git checkout' with no operands has no worktree
     effect -> allow."""
     pre, post, _had_sep = _split_pre_post(args)
-    if any(a == "--pathspec-from-file" or a.startswith("--pathspec-from-file=") for a in pre):
+    if _has_long_prefix(pre, "pathspec-from-file"):  # prefix-matched: '--pathspec-from-f' too
         return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
     force = "-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
     branch_create = (_has_short(pre, "b") or _has_short(pre, "B") or _has_long_prefix(pre, "orphan"))
@@ -991,7 +992,9 @@ def _checkout_role(args):
         return ("clobber", "git checkout -f (a forced branch switch that overwrites the worktree)")
     if has_paths:
         return ("scoped", "git checkout (a worktree revert; a forced or branch-create form can discard)")
-    return ("allow", None)  # no operand, no worktree effect
+    if pre:  # options present but none recognized as safe (an abbreviated/exotic option) -> do not trust
+        return ("scoped", "git checkout (an option this guard cannot prove non-destructive)")
+    return ("allow", None)  # a truly bare 'git checkout': no options, no operand, no worktree effect
 
 
 def _switch_role(args):

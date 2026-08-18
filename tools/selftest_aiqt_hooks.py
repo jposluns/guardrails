@@ -401,6 +401,15 @@ def main():
         # An inline git alias that expands to a work-losing verb cannot be resolved -> ASK.
         expect("(alias-inline) git -c alias.x=reset x --hard asks", "git -c alias.x=reset x --hard", "ask",
                cwd=rp)
+        # A glob char (*?[) can bash-expand an option name (in a dir with a file named --hard, '--h*' becomes
+        # '--hard'), so any lossy command carrying one is not pristine -> ASK.
+        expect("(glob-opt) reset --soft --h* asks (glob defeats the pristine gate)", "git reset --soft --h*",
+               "ask", cwd=rp)
+        # An abbreviated --pathspec-from-f and any unrecognized option-only checkout must not default to allow.
+        expect("(pfr-abbrev) checkout --pathspec-from-f=paths asks", "git checkout --pathspec-from-f=paths",
+               "ask", cwd=rp)
+        expect("(co-unknown) checkout with an unrecognized option asks", "git checkout --some-exotic-opt",
+               "ask", cwd=rp)
 
         # === config-proof probe: status.showUntrackedFiles=no cannot hide an untracked file (fix 1) ===
         # A repo configured to omit untracked files from status must NOT let a force discard read the tree as
