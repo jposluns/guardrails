@@ -949,12 +949,17 @@ def _tree_is_clean(repo):
     probing --ignored would ASK on every repo carrying build artifacts, so ignored-file loss on those forms is
     a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
-    Offline, read-only, 5s timeout; the guard never mutates the repo."""
+    Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
+    from refreshing/writing the real `.git/index`, and an ambient GIT_INDEX_FILE is neutralized so the probe
+    reads the REAL index rather than a foreign preset one."""
     try:
+        env = dict(os.environ)
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        env.pop("GIT_INDEX_FILE", None)
         result = subprocess.run(
             ["git", "-C", repo, "-c", "status.showUntrackedFiles=all",
              "status", "--porcelain", "--untracked-files=all"],
-            capture_output=True, text=True, timeout=5)
+            capture_output=True, text=True, timeout=5, env=env)
         if result.returncode != 0:
             return None
         for line in result.stdout.splitlines():
@@ -1249,40 +1254,55 @@ def _pristine_single_bare_git(command, segments):
 # when the command is not in scope, and for stash/branch (a worktree snapshot cannot capture stash entries
 # or branch commits; ref-pinning for those is a separate, deferred mechanism).
 #
-# Mechanism (all stdlib/subprocess, offline, READ-ONLY to working state): a TEMPORARY GIT_INDEX_FILE in a
-# throwaway dir OUTSIDE the repo, seeded by COPYING the real index (so staged content is the baseline);
-# `git add --all` into that temp index overlays tracked-modified and UNTRACKED content (ignored excluded);
-# `git write-tree` (temp index) -> a tree; `git commit-tree <tree> [-p HEAD]` -> a snapshot commit; then
-# `git update-ref refs/aiqt-recovery/<utc-ts>-<pid> <sha>` protects it from GC. This writes ONLY git objects
-# and one private ref: it NEVER touches the real index, worktree, HEAD, or any branch, and the ref is
-# invisible to status/branch/log (the selftest asserts the real status/index/HEAD are unchanged). One JSONL
-# line per snapshot is appended to a per-user ledger OUTSIDE the repo (so a `git clean` inside the repo can
-# never destroy it). FAIL POSTURE: when a snapshot is warranted but cannot be made (probe/write error, over
-# the size cap, corrupt/detached repo) the recovery layer NEVER lets that become a silent allow of a
-# not-provably-clean discard - a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is
-# left as-is with the failure surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what
-# the probe cannot see (content hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore),
-# nor ignored files (git add --all excludes them), so a discard of that content is not recoverable here.
+# Mechanism (all stdlib/subprocess, offline, READ-ONLY to working state IN A NORMAL REPO): a TEMPORARY
+# GIT_INDEX_FILE in a throwaway dir normally OUTSIDE the repo (best-effort and guarded: the snapshot FAILS
+# rather than write inside the repo when TMPDIR resolves within the working tree), seeded by COPYING the real
+# index (so staged content is the baseline); `git add --all` into that temp index overlays tracked-modified
+# and UNTRACKED content (ignored excluded); `git write-tree` (temp index) -> a tree; `git commit-tree <tree>
+# [-p HEAD]` -> a snapshot commit; then `git update-ref refs/aiqt-recovery/<utc-ts>-<pid> <sha>` protects it
+# from GC. This is INERT TO WORKING STATE - it NEVER touches the real index, worktree, HEAD, or any branch -
+# and in a NORMAL repo writes only git objects and one private ref; the ref is invisible to plain `git
+# status`, `git branch`, and `git log` (the working HEAD, index, and branches are untouched), THOUGH
+# reachable via `git log --all` / `git for-each-ref refs/aiqt-recovery` / `git show-ref` (a real ref, not
+# hidden). The selftest asserts the real status/index/HEAD are unchanged. RESIDUAL (the honest bound on
+# "inert"): on a repo configured with clean/smudge/process filters, an fsmonitor hook, or a
+# reference-transaction hook, the snapshot's `git add --all` runs the filters, its `git status` probe runs
+# fsmonitor, and its `git update-ref` runs the reference-transaction hook - repo-configured programs that
+# execute during the snapshot; and a single overlaid tree cannot capture dirty content inside a SUBMODULE or
+# an untracked EMBEDDED git repo (it stores only the gitlink), and it flattens staged-vs-unstaged into ONE
+# tree. One JSONL line per snapshot is appended to a per-user ledger normally OUTSIDE the repo (so a `git
+# clean` inside the repo cannot destroy it); the write is best-effort and guarded: skipped if it would land
+# inside the repo (a misconfigured XDG_STATE_HOME/HOME). FAIL POSTURE: when a snapshot is warranted but
+# cannot be made (probe/write error, over the size cap, a bare or broken git dir, or a temp dir resolving
+# inside the repo) the recovery layer NEVER lets that become a silent allow of a not-provably-clean discard -
+# a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is left as-is with the failure
+# surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what the probe cannot see (content
+# hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore), nor ignored files (git add
+# --all excludes them), so a discard of that content is not recoverable here.
 _SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
 _RECOVERY_REF_NS = "refs/aiqt-recovery"
 # Skip (and fail to ASK) rather than snapshot an enormous working tree: a changed+untracked estimate over
 # this many bytes is treated as a snapshot failure, so the guard never tries to seal a multi-gigabyte tree.
 _RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
-# The per-user ledger path components under the XDG state dir. ALWAYS outside any repo.
+# The per-user ledger path components under the XDG state dir. Normally outside any repo; the write is
+# guarded (skipped if the resolved path would land inside the repo).
 _RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
 
 
 def _recovery_git(repo, args, env_extra=None, timeout=10):
-    """Run a git subcommand against repo and return the CompletedProcess. The recovery layer is READ-ONLY
-    to working state: across all of its git calls it writes ONLY objects and one private ref, never the
-    real index (it uses a TEMP GIT_INDEX_FILE), the worktree, HEAD, or a branch. Raises
-    subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
-    snapshot failure. offline, bounded by `timeout`."""
+    """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
+    of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
+    env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
+    (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). An ambient GIT_INDEX_FILE
+    is ALWAYS neutralized so a call meant to observe the REAL repo state (the status probe, `rev-parse
+    --git-path index`) cannot read a foreign preset index and cannot leak into the snapshot; a snapshot call
+    overrides it with its own temp index through env_extra. Raises subprocess.SubprocessError / OSError on a
+    spawn or timeout failure, which the caller treats as a snapshot failure. offline, bounded by `timeout`."""
     cmd = ["git", "-C", repo] + list(args)
-    env = None
+    env = dict(os.environ)
+    env.pop("GIT_INDEX_FILE", None)  # real-state calls must see the real index, not an ambient preset one
     if env_extra:
-        env = dict(os.environ)
-        env.update(env_extra)
+        env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, overriding the neutralize
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
 
@@ -1294,7 +1314,7 @@ def _recovery_status_entries(repo):
     field of a rename/copy record. Raises subprocess.SubprocessError / OSError on a probe failure."""
     result = _recovery_git(
         repo, ["-c", "status.showUntrackedFiles=all", "status", "--porcelain",
-               "--untracked-files=all", "-z"], timeout=5)
+               "--untracked-files=all", "-z"], env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=5)
     if result.returncode != 0:
         raise subprocess.SubprocessError("status probe returned {}".format(result.returncode))
     classes = set()
@@ -1325,11 +1345,25 @@ def _recovery_status_entries(repo):
     return classes, total
 
 
+def _path_is_within(candidate, parent):
+    """True when the realpath of candidate is parent itself or lies under it, tested with a path-separator
+    boundary so a sibling like '/repo-x' is not judged inside '/repo'. Used to refuse writing recovery data
+    inside the repo it protects (a misconfigured TMPDIR/XDG_STATE_HOME/HOME); on any error, err toward True
+    (unsafe -> refuse) rather than risk writing inside the tree."""
+    try:
+        cand = os.path.realpath(candidate)
+        base = os.path.realpath(parent)
+    except OSError:
+        return True
+    return cand == base or cand.startswith(base + os.sep)
+
+
 def _take_snapshot(repo, verb):
     """Take an INERT git-DB snapshot of the working tree (tracked-modified + staged + untracked; ignored
-    excluded) via a TEMPORARY GIT_INDEX_FILE outside the repo, protected by a private
-    refs/aiqt-recovery/<utc-ts>-<pid> ref. Writes ONLY git objects and that one ref; the real index,
-    worktree, HEAD, and every branch are untouched. Returns ('ok', info) with info =
+    excluded) via a TEMPORARY GIT_INDEX_FILE normally outside the repo, protected by a private
+    refs/aiqt-recovery/<utc-ts>-<pid> ref. In a NORMAL repo writes only git objects and that one ref; the
+    real index, worktree, HEAD, and every branch are untouched (see the block comment above
+    _SNAPSHOTTABLE_VERBS for the repo-config residual). Returns ('ok', info) with info =
     {ref, sha, classes, restore}, or ('fail', reason)."""
     try:
         classes, total = _recovery_status_entries(repo)
@@ -1340,7 +1374,12 @@ def _take_snapshot(repo, verb):
                         .format(_RECOVERY_SIZE_CAP // (1024 * 1024)))
     tmpdir = None
     try:
-        tmpdir = tempfile.mkdtemp(prefix="aiqt-recovery-")  # OUTSIDE the repo, in the system temp dir
+        tmpdir = tempfile.mkdtemp(prefix="aiqt-recovery-")  # normally OUTSIDE the repo, in the system temp dir
+        if _path_is_within(tmpdir, repo):
+            # A TMPDIR misconfigured to resolve inside the repo would seal recovery data where a `git clean`
+            # could destroy it; refuse rather than write inside the tree the snapshot protects.
+            return ("fail", "the temp snapshot dir resolved inside the repo (TMPDIR misconfigured), so no "
+                            "recovery snapshot was written inside the tree it protects")
         tmp_index = os.path.join(tmpdir, "index")
         # Seed the temp index from the REAL index (so staged content is the baseline). git add --all then
         # overlays the worktree (tracked-modified) and untracked files; ignored files are excluded.
@@ -1382,9 +1421,11 @@ def _take_snapshot(repo, verb):
 
 
 def _recovery_ledger_path():
-    """The per-user ledger path OUTSIDE any repo: $XDG_STATE_HOME/aiqt-guardrails/recovery.jsonl, or
+    """The per-user ledger path, normally OUTSIDE any repo: $XDG_STATE_HOME/aiqt-guardrails/recovery.jsonl, or
     ~/.local/state/aiqt-guardrails/recovery.jsonl when XDG_STATE_HOME is unset. None when neither
-    XDG_STATE_HOME nor HOME resolves (no per-user location to write to)."""
+    XDG_STATE_HOME nor HOME resolves (no per-user location to write to). The write itself is guarded in
+    _write_recovery_ledger: it is skipped if this path would resolve inside the repo (a misconfigured
+    XDG_STATE_HOME/HOME)."""
     base = os.environ.get("XDG_STATE_HOME")
     if not base:
         home = os.environ.get("HOME")
@@ -1403,6 +1444,8 @@ def _write_recovery_ledger(repo, verb, info):
     path = _recovery_ledger_path()
     if not path:
         return False
+    if _path_is_within(path, repo):
+        return False  # a misconfigured XDG_STATE_HOME/HOME pointing inside the repo: skip (best-effort)
     record = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "repo": repo, "verb": verb, "ref": info["ref"], "sha": info["sha"],
               "classes": info["classes"], "restore": info["restore"]}
@@ -1538,6 +1581,8 @@ def git_discard(data):
                   "that is not literally 'git'), so this guard will not trust a clean probe on it"))
 
     # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
+    # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
+    # operator has explicitly taken responsibility for having saved the work.
     if _segment_has_optout(pristine):
         return _allow()
 

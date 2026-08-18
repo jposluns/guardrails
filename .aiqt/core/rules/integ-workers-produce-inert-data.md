@@ -24,5 +24,6 @@ and seriality live in the apply stage.
 Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be
 undone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to). This
 changes no working state (it is not a branch, HEAD, the index, or the working tree, and is invisible to
-status, branch, and log), so it keeps the inert posture. The exception is limited to recovery snapshots
+plain `git status`, `git branch`, and `git log`, though reachable via `git log --all`, `git for-each-ref
+refs/aiqt-recovery`, and `git show-ref` as the real ref it is), so it keeps the inert posture. The exception is limited to recovery snapshots
 written for the actor's own protection; it is not a general licence to mutate repository metadata.

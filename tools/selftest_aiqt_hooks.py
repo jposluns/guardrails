@@ -75,9 +75,14 @@ def _git(repo, *args, env_identity=False):
 
 def _recovery_refs(repo):
     """The list of refs under refs/aiqt-recovery/ in repo (the private snapshot namespace the EN-6 recovery
-    layer writes). Empty when no snapshot has been taken."""
+    layer writes). Empty when no snapshot has been taken. RAISES on a non-zero for-each-ref return so an
+    unreadable ref list can never be mistaken for an empty one (a broken listing must not falsely 'prove'
+    that no snapshot was made)."""
     out = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname)",
                           "refs/aiqt-recovery/"], capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        raise RuntimeError("for-each-ref refs/aiqt-recovery/ failed in {} (rc={}): {}"
+                           .format(repo, out.returncode, out.stderr.strip()))
     return [r for r in out.stdout.splitlines() if r.strip()]
 
 
@@ -545,12 +550,24 @@ def main():
         (rec_inv / "untr.txt").write_text("junk\n", encoding="utf-8")
 
         def _snap(*a):
-            return subprocess.run(["git", "-C", str(rec_inv), *a], capture_output=True, text=True,
-                                  timeout=30).stdout.strip()
-        before = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"))
+            # CHECK the return code: a git probe that errors must surface as a harness failure, not be
+            # swallowed into an empty string that then matches "before" and falsely proves invariance.
+            r = subprocess.run(["git", "-C", str(rec_inv), *a], capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                failures.append("(rec-inv-probe) git {} failed in the invariant probe (rc={}): {}"
+                                .format(" ".join(a), r.returncode, r.stderr.strip()))
+            return r.stdout.strip()
+        real_idx = rec_inv / ".git" / "index"
+        # Compare the WRITE-TREE (index content), the raw index BYTES, git config, and the stash list, on top
+        # of status/HEAD, before and after a snapshot: the snapshot must leave every one of them untouched.
+        before = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"),
+                  _snap("config", "--list"), _snap("stash", "list"))
+        before_idx = real_idx.read_bytes()
         expect("(rec-inv) checkout -- on dirty invariant tree asks", "git checkout -- file.txt", "ask",
                cwd=str(rec_inv))
-        after = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"))
+        after = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"),
+                 _snap("config", "--list"), _snap("stash", "list"))
+        after_idx = real_idx.read_bytes()
         if not _recovery_refs(rec_inv):
             failures.append("(rec-inv-snap) expected a recovery ref on the invariant repo")
         if before[0] != after[0]:
@@ -559,6 +576,12 @@ def main():
             failures.append("(rec-inv-head) HEAD changed after a snapshot")
         if before[2] != after[2]:
             failures.append("(rec-inv-index) the real index tree changed after a snapshot")
+        if before_idx != after_idx:
+            failures.append("(rec-inv-index-bytes) the real .git/index bytes changed after a snapshot")
+        if before[3] != after[3]:
+            failures.append("(rec-inv-config) the real git config changed after a snapshot")
+        if before[4] != after[4]:
+            failures.append("(rec-inv-stash) the real stash list changed after a snapshot")
 
         # (rec-restore) the snapshot ref actually RESTORES the work: dirty (tracked + untracked), snapshot
         # via a clean discard, wipe the tree, then `git checkout <ref> -- :/` recovers both.
@@ -623,6 +646,164 @@ def main():
                                     .format(rec.get("verb")))
                 if rec.get("ref", "") not in rec.get("restore", ""):
                     failures.append("(rec-ledger-restore) the restore command should reference the ref")
+
+        # (rec-idxfile) B3: with an ambient GIT_INDEX_FILE preset in the environment, taking a snapshot does
+        # NOT mutate the REAL index; the real-state calls neutralize the ambient index (so they read the REAL
+        # working tree), the snapshot uses its own temp index, and the bogus ambient path is never written.
+        rec_idx = _init_repo(tmp / "rec-idxfile")
+        (rec_idx / "file.txt").write_text("committed line\nidx staged\n", encoding="utf-8")
+        _git(rec_idx, "add", "file.txt")  # staged content in the REAL index
+        (rec_idx / "untr.txt").write_text("junk\n", encoding="utf-8")
+        real_index = rec_idx / ".git" / "index"
+        idx_before = real_index.read_bytes()
+        ambient = tmp / "ambient-index"  # a bogus preset index OUTSIDE the repo, must stay untouched
+        os.environ["GIT_INDEX_FILE"] = str(ambient)
+        try:
+            got_idx = _decision(handler, "git checkout -- file.txt", cwd=str(rec_idx))
+        finally:
+            os.environ.pop("GIT_INDEX_FILE", None)
+        if got_idx != "ask":
+            failures.append("(rec-idxfile) dirty-tree ASK with an ambient GIT_INDEX_FILE: expected ask, got "
+                            "{}".format(got_idx))
+        if real_index.read_bytes() != idx_before:
+            failures.append("(rec-idxfile-index) the REAL .git/index changed after a snapshot taken with an "
+                            "ambient GIT_INDEX_FILE (B3 neutralization failed)")
+        if ambient.exists():
+            failures.append("(rec-idxfile-ambient) the ambient GIT_INDEX_FILE path was written; a real-state "
+                            "call did not neutralize it")
+        idx_refs = _recovery_refs(rec_idx)
+        if not idx_refs:
+            failures.append("(rec-idxfile-snap) expected a recovery ref even with an ambient GIT_INDEX_FILE")
+        else:
+            listing = subprocess.run(["git", "-C", str(rec_idx), "ls-tree", "-r", "--name-only", idx_refs[0]],
+                                     capture_output=True, text=True, timeout=30)
+            if listing.returncode != 0 or "untr.txt" not in listing.stdout:
+                failures.append("(rec-idxfile-content) the snapshot did not capture the real working tree "
+                                "(untracked file missing) with an ambient GIT_INDEX_FILE set")
+
+        # (rec-ambient) an assortment of ambient GIT_* env vars does not break the decision or the snapshot
+        # isolation: a dirty-tree ASK still ASKS, a snapshot ref is created, and the real index/HEAD are
+        # unchanged.
+        rec_amb = _init_repo(tmp / "rec-ambient")
+        (rec_amb / "file.txt").write_text("committed line\nambient env\n", encoding="utf-8")
+        amb_index = rec_amb / ".git" / "index"
+        amb_idx_before = amb_index.read_bytes()
+        amb_head_before = subprocess.run(["git", "-C", str(rec_amb), "rev-parse", "HEAD"],
+                                         capture_output=True, text=True, timeout=30).stdout.strip()
+        amb_env = {"GIT_AUTHOR_NAME": "Ambient", "GIT_AUTHOR_EMAIL": "a@example.invalid",
+                   "GIT_COMMITTER_NAME": "Ambient", "GIT_COMMITTER_EMAIL": "a@example.invalid",
+                   "GIT_PAGER": "cat", "GIT_INDEX_FILE": str(tmp / "ambient2-index")}
+        for _k, _v in amb_env.items():
+            os.environ[_k] = _v
+        try:
+            got_amb = _decision(handler, "git checkout -- file.txt", cwd=str(rec_amb))
+        finally:
+            for _k in amb_env:
+                os.environ.pop(_k, None)
+        if got_amb != "ask":
+            failures.append("(rec-ambient) dirty-tree ASK with ambient GIT_* env: expected ask, got {}"
+                            .format(got_amb))
+        if not _recovery_refs(rec_amb):
+            failures.append("(rec-ambient-snap) expected a recovery ref with ambient GIT_* env present")
+        if amb_index.read_bytes() != amb_idx_before:
+            failures.append("(rec-ambient-index) the real index changed with ambient GIT_* env present")
+        amb_head_after = subprocess.run(["git", "-C", str(rec_amb), "rev-parse", "HEAD"],
+                                        capture_output=True, text=True, timeout=30).stdout.strip()
+        if amb_head_after != amb_head_before:
+            failures.append("(rec-ambient-head) HEAD changed with ambient GIT_* env present")
+
+        # (rec-skip) stash and branch verbs are SKIPPED by the snapshot layer (a worktree snapshot cannot
+        # capture stash entries or branch commits), so NO recovery ref is created even on a dirty tree.
+        rec_skip = _init_repo(tmp / "rec-skip")
+        (rec_skip / "file.txt").write_text("committed line\ndirty\n", encoding="utf-8")
+        expect("(rec-skip-stash) stash drop on dirty tree asks", "git stash drop", "ask", cwd=str(rec_skip))
+        expect("(rec-skip-branch) branch -D on dirty tree asks", "git branch -D other", "ask",
+               cwd=str(rec_skip))
+        if _recovery_refs(rec_skip):
+            failures.append("(rec-skip-snap) expected NO recovery ref for stash/branch (not snapshottable)")
+
+        # (rec-sizecap) a snapshot that exceeds the size cap FAILS, so a would-be ALLOW (reset --soft) on a
+        # dirty tree is downgraded to ASK (never a silent allow with no recovery point), and no ref is made.
+        rec_cap = _init_repo(tmp / "rec-cap")
+        (rec_cap / "file.txt").write_text("committed line\nbig change\n", encoding="utf-8")
+        _orig_cap = aiqt_hooks._RECOVERY_SIZE_CAP
+        aiqt_hooks._RECOVERY_SIZE_CAP = 1  # any changed content now exceeds the cap -> snapshot fail
+        try:
+            got_cap = _decision(handler, "git reset --soft", cwd=str(rec_cap))
+        finally:
+            aiqt_hooks._RECOVERY_SIZE_CAP = _orig_cap
+        if got_cap != "ask":
+            failures.append("(rec-sizecap) an over-cap snapshot must downgrade a would-be ALLOW to ASK, got "
+                            "{}".format(got_cap))
+        if _recovery_refs(rec_cap):
+            failures.append("(rec-sizecap-snap) expected NO recovery ref when the size cap fails the snapshot")
+
+        # (rec-probeuncertain) when the clean probe is UNCERTAIN (returns None) a scoped discard ASKS, and
+        # when the snapshot also fails the ASK reason SURFACES the snapshot failure (never a silent allow).
+        rec_unc = _init_repo(tmp / "rec-unc")
+        (rec_unc / "file.txt").write_text("committed line\nuncertain\n", encoding="utf-8")
+        _orig_clean = aiqt_hooks._tree_is_clean
+        _orig_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._tree_is_clean = lambda repo: None
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced probe-uncertain failure (self-test)")
+        try:
+            data_unc = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                        "tool_input": {"command": "git restore file.txt"}, "cwd": str(rec_unc)}
+            code_unc, obj_unc, _ = handler(data_unc)
+        finally:
+            aiqt_hooks._tree_is_clean = _orig_clean
+            aiqt_hooks._record_recovery = _orig_rec
+        dec_unc = obj_unc.get("hookSpecificOutput", {}).get("permissionDecision") \
+            if isinstance(obj_unc, dict) else None
+        reason_unc = obj_unc.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
+            if isinstance(obj_unc, dict) else ""
+        if not (code_unc == 0 and dec_unc == "ask"):
+            failures.append("(rec-probeuncertain) probe-uncertain scoped discard: expected ask, got code={!r}"
+                            " dec={!r}".format(code_unc, dec_unc))
+        if "no pre-command recovery snapshot could be created" not in reason_unc:
+            failures.append("(rec-probeuncertain-reason) the ASK reason must surface the snapshot failure")
+
+        # (rec-b2-tmp) B2 guard: a temp snapshot dir resolving INSIDE the repo makes the snapshot FAIL
+        # (refusing to write recovery data inside the tree it protects), so a would-be ALLOW (reset --soft)
+        # on a dirty tree downgrades to ASK and no ref is created.
+        rec_b2t = _init_repo(tmp / "rec-b2-tmp")
+        (rec_b2t / "file.txt").write_text("committed line\ninside tmp\n", encoding="utf-8")
+        inside_tmp = rec_b2t / "insidetmp"
+        inside_tmp.mkdir()
+        _orig_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(inside_tmp)  # force mkdtemp to create the temp dir inside the repo
+        try:
+            got_b2t = _decision(handler, "git reset --soft", cwd=str(rec_b2t))
+        finally:
+            tempfile.tempdir = _orig_tempdir
+        if got_b2t != "ask":
+            failures.append("(rec-b2-tmp) a temp dir inside the repo must fail-to-ASK a would-be ALLOW, got "
+                            "{}".format(got_b2t))
+        if _recovery_refs(rec_b2t):
+            failures.append("(rec-b2-tmp-snap) expected NO recovery ref when the temp dir resolves inside the "
+                            "repo")
+
+        # (rec-b2-ledger) B2 guard: a ledger path resolving INSIDE the repo is SKIPPED (best-effort), but the
+        # snapshot ref is still taken and the decision is unaffected.
+        rec_b2l = _init_repo(tmp / "rec-b2-ledger")
+        (rec_b2l / "file.txt").write_text("committed line\ninside ledger\n", encoding="utf-8")
+        inside_ledger = rec_b2l / "insidexdg"
+        _orig_xdg = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(inside_ledger)
+        try:
+            got_b2l = _decision(handler, "git checkout -- file.txt", cwd=str(rec_b2l))
+        finally:
+            if _orig_xdg is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = _orig_xdg
+        if got_b2l != "ask":
+            failures.append("(rec-b2-ledger) ledger-inside-repo: the decision must be unaffected (ask), got "
+                            "{}".format(got_b2l))
+        if not _recovery_refs(rec_b2l):
+            failures.append("(rec-b2-ledger-snap) expected a recovery ref even when the ledger write is skipped")
+        if (inside_ledger / "aiqt-guardrails" / "recovery.jsonl").exists():
+            failures.append("(rec-b2-ledger-skip) the ledger must NOT be written inside the repo")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
