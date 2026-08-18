@@ -817,7 +817,11 @@ _RAW_BRANCH_DELETE_RE = re.compile(r"(?:(?<![\w-])-[A-Za-z]*D)|(?:--delete\b)")
 # The opt-out is honoured only as a LEADING assignment on the command (GD-41 blocker 4): anchored to the
 # start of the (unparseable) command string, so the same token buried later (echo GUARDRAIL_ALLOW_DISCARD=1
 # ; git reset --hard) does NOT disable the guard, agreeing with the manifest's "leading, not buried" claim.
-_RAW_OPTOUT_RE = re.compile(r"(?i)^\s*GUARDRAIL_ALLOW_DISCARD=(\S+)")
+# CASE-SENSITIVE (bash env-var names are), so it matches GUARDRAIL_ALLOW_DISCARD exactly and a lowercase
+# guardrail_allow_discard=1 is NOT the opt-out. When the leading region repeats the assignment, bash
+# last-wins applies: the capture takes the LAST leading assignment's value (GUARDRAIL_ALLOW_DISCARD=1
+# GUARDRAIL_ALLOW_DISCARD=0 git ... evaluates 0, not 1, so it does NOT opt out).
+_RAW_OPTOUT_RE = re.compile(r"^\s*(?:GUARDRAIL_ALLOW_DISCARD=\S+\s+)*GUARDRAIL_ALLOW_DISCARD=(\S+)")
 # Shell wrappers/prefixes that stand IN FRONT of the git command so 'git <lossy>' is not the invocation
 # actually being classified. The EN-6 ultra-conservative pass widens the GD-41 set (command/exec/builtin/
 # env/xargs/time/!) with the privilege/scheduling/interpreter prefixes sudo/nice/timeout/nohup/sh/bash: when
@@ -851,12 +855,15 @@ def _segment_has_optout(tokens):
     buried in an argument does NOT count. The caller consults this ONLY on a segment whose command word is
     git (GD-41 blocker 4), so an opt-out leading a NON-git command ('GUARDRAIL_ALLOW_DISCARD=1 true; git
     reset --hard') never disables the guard on the later git command. A value in {'', '0', 'false', 'no',
-    'off'} (case-insensitive) is NOT truthy."""
+    'off'} (case-insensitive) is NOT truthy. When the leading region repeats the assignment, bash last-wins
+    applies: only the LAST GUARDRAIL_ALLOW_DISCARD assignment's value is evaluated (=1 then =0 does NOT opt
+    out)."""
+    last = None
     for tok in tokens[:_command_word_index(tokens)]:
         m = _DISCARD_OPTOUT_RE.match(tok)
-        if m and m.group(1).lower() not in _DISCARD_FALSY:
-            return True
-    return False
+        if m:
+            last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value, evaluate only it
+    return last is not None and last.lower() not in _DISCARD_FALSY
 
 
 def _raw_has_lossy_git(command):
@@ -1848,17 +1855,19 @@ def git_discard(data):
     sub, args = _git_sub_and_args(pristine)
     role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
 
-    # FAIL-SAFE (EN-6, structural completion): a NON-COSMETIC ambient GIT_* var means the command's
-    # repository view cannot be proven to be the session cwd (the probe scrubs the var, but the ACTUAL
-    # command still inherits it and may act on a redirected git dir, work tree, index, or object/ref view).
-    # So ANY in-scope pristine form ASKS here - a destructive form OR a genuinely non-destructive allow form
-    # (reset --soft, plain switch, clean -n, checkout -b) - BEFORE the role/allow logic below that would
-    # otherwise let an allow form through and bypass the fail-safe. Only the explicit leading opt-out
-    # (short-circuited above) bypasses it. A best-effort snapshot of the SESSION CWD is still taken on a
-    # not-provably-clean snappable tree (the cwd is known even when the target is not): it is inert and
-    # provides recovery IF the command acts on the cwd (the common benign non-redirecting case), but may NOT
-    # capture a redirected tree.
-    if _ambient_repo_view_override():
+    # FAIL-SAFE (EN-6, structural completion): the command's repository view cannot be proven to be the
+    # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
+    # but the ACTUAL command still inherits it and may act on a redirected git dir, work tree, index, or
+    # object/ref view. (2) A COMMAND-LOCAL redirect that _segment_dir_simple flags: a -C/--git-dir/--work-
+    # tree global option or an inline GIT_DIR=/GIT_WORK_TREE= leading assignment ON the command can point it
+    # at a different worktree or config. In EITHER case ANY in-scope pristine form ASKS here - a destructive
+    # form OR a genuinely non-destructive allow form (reset --soft, plain switch, clean -n, checkout -b) -
+    # BEFORE the role/allow logic below that would otherwise let an allow form through and bypass the fail-
+    # safe. Only the explicit leading opt-out (short-circuited above) bypasses it. A best-effort snapshot of
+    # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
+    # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
+    # non-redirecting case), but may NOT capture a redirected tree.
+    if _ambient_repo_view_override() or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
         ao_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
         ao_snap = None
@@ -1866,10 +1875,12 @@ def git_discard(data):
             ao_snap = _record_recovery(ao_base, sub)
         return _ask_with_recovery(
             kind or "a git work-losing verb",
-            "runs under a non-cosmetic ambient GIT_* variable, so this guard cannot prove the command's "
-            "repository view is the session directory (the probe scrubs the var, but the actual command "
-            "still inherits it); any recovery snapshot is best-effort against the session cwd and may not "
-            "capture a redirected tree", ao_snap)
+            "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
+            "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment), so this guard "
+            "cannot prove the command's repository view is the session directory (the probe scrubs an "
+            "ambient var, but the actual command still inherits it, and a command-local redirect points "
+            "elsewhere); any recovery snapshot is best-effort against the session cwd and may not capture "
+            "a redirected tree", ao_snap)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _ask(*_discard_ask_reason(
@@ -1877,10 +1888,11 @@ def git_discard(data):
             "may expand to a work-losing verb this guard cannot resolve"))
 
     # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. A non-cosmetic
-    # ambient GIT_* override was already handled ABOVE (it ASKS with a best-effort cwd snapshot, which may
-    # not capture a redirected tree), so it never reaches here. When the worktree still cannot be resolved to
-    # the session cwd (no cwd, or a -C/--git-dir/--work-tree/-c global option or a GIT_DIR/GIT_WORK_TREE env
-    # assignment ON THE COMMAND could redirect it), no snapshot is possible and a lossy form ASKS.
+    # ambient GIT_* override AND a command-local redirect (a -C/--git-dir/--work-tree/-c global option or a
+    # GIT_DIR/GIT_WORK_TREE env assignment ON THE COMMAND, both flagged by _segment_dir_simple) were already
+    # handled ABOVE (each ASKS with a best-effort cwd snapshot, which may not capture a redirected tree), so
+    # neither reaches here. The _segment_dir_simple guard is kept in `resolvable` as a defensive backstop;
+    # when the worktree cannot be resolved to the session cwd, no snapshot is possible and a lossy form ASKS.
     cwd = data.get("cwd")
     base = cwd if isinstance(cwd, str) and cwd else None
     resolvable = base is not None and _segment_dir_simple(pristine)

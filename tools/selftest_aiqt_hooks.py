@@ -287,6 +287,35 @@ def main():
         expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix opts out",
                "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", cwd=rp)
 
+        # === EN-6 round-13: opt-out is case-sensitive and last-wins; redirects ASK all forms ==
+        # Fix 1: bash env-var names are case-sensitive, so a LOWERCASE guardrail_allow_discard=1 is NOT the
+        # opt-out. On an unparseable heredoc discard the raw fallback must NOT honour it -> ASK (the buggy
+        # (?i) match silently ALLOWed it). The uppercase form on the same unparseable command still ALLOWs
+        # (bound-b3 covers that contrast).
+        expect("(r13-1) lowercase optout on unparseable heredoc discard does not opt out -> ASK",
+               "guardrail_allow_discard=1 git reset --hard <<'EOF'\n'\nEOF", "ask", cwd=rp)
+        # Fix 2: bash last-wins on a duplicate leading assignment - =1 then =0 evaluates to 0 (NOT truthy),
+        # so it does NOT opt out (the buggy first-wins saw =1 and ALLOWed). With no resolvable cwd the
+        # un-opted-out reset --hard ASKS ("cannot resolve to the session directory"); had it opted out it
+        # would have short-circuited to ALLOW before the resolvability check.
+        expect("(r13-2) =1 =0 last-wins evaluates 0, does not opt out -> ASK",
+               "GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD=0 git reset --hard", "ask")
+        # Fix 3: a command-local redirect (-C/--git-dir/--work-tree/inline GIT_DIR=) means the repository
+        # view cannot be proven to be the session cwd, so the early view-uncertainty gate ASKS for ALL forms
+        # BEFORE the role logic - including genuinely non-destructive ALLOW forms (reset --soft, plain switch)
+        # that previously slipped through to a silent ALLOW.
+        expect("(r13-3a) inline GIT_DIR= on reset --soft (allow form) now asks",
+               "GIT_DIR=/tmp git reset --soft", "ask", cwd=rp)
+        expect("(r13-3b) -C on a plain switch (allow form) now asks",
+               "git -C /tmp switch other", "ask", cwd=rp)
+        expect("(r13-3c) --git-dir= on reset --hard asks",
+               "git --git-dir=/x reset --hard", "ask", cwd=rp)
+        # No regression: a plain non-destructive form with NO redirect and NO opt-out still ALLOWs on a dirty
+        # tree (recovery-snapshot-backed), exactly as before Fix 3.
+        expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow",
+               cwd=rp)
+        expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow", cwd=rp)
+
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file asks on dirty tree",
                "git restore --pathspec-from-file=paths.txt", "ask", cwd=rp)
