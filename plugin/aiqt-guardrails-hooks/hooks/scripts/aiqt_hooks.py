@@ -808,12 +808,16 @@ def _checkout_affects_index(pre):
 
 
 def _restore_flags(pre):
-    """Return (has_staged, has_worktree) for a restore command's pre-'--' tokens. Decodes clustered short
-    flags (git reads '-SW' as '-S -W') and resolves git's unambiguous long-option abbreviations, so
-    '--stag'/'--worktr' count as '--staged'/'--worktree'. Boolean flags are last-wins and honour '--no-*'
-    negation. The value-taking '-s'/'--source' (and its abbreviations) consumes the rest of its cluster or
-    the next token as the source ref, so those characters/tokens are not flags."""
-    has_staged = has_worktree = False
+    """Resolve a restore command's pre-'--' tokens to (has_staged, has_worktree, valid) with git's
+    semantics. Location flags are last-wins and honour '--no-*'; clustered short flags ('-SW' == '-S -W')
+    and unambiguous long-option abbreviations ('--stag'/'--worktr') are decoded; the value-taking '-s'/
+    '--source' (and abbreviations) consume the next token or the rest of the cluster as the ref. git's
+    rule: if neither location is mentioned, the worktree is restored (a discard); '--staged' alone is a
+    pure unstage (no worktree effect); an explicit negation or an ambiguous prefix (bare '--s') that leaves
+    NO location is a git error, reported as valid=False so the caller treats it as not-a-discard (fail-open,
+    matching git rejecting it)."""
+    staged = worktree = None  # None = not mentioned
+    ambiguous = False
     skip_next = False
     for tok in pre:
         if skip_next:
@@ -826,47 +830,72 @@ def _restore_flags(pre):
                 name = name[3:]
             kind = _restore_long_kind(name)
             if kind == "staged":
-                has_staged = not neg  # last-wins: a later --no-staged clears it
+                staged = not neg
             elif kind == "worktree":
-                has_worktree = not neg
-            elif kind == "source" and not neg and "=" not in tok:
-                skip_next = True  # space form: the ref is the next token
+                worktree = not neg
+            elif kind == "source":
+                if not neg and "=" not in tok:
+                    skip_next = True  # space form: the ref is the next token
+            elif kind == "ambiguous":
+                ambiguous = True
         elif tok == "-s":
-            skip_next = True  # short --source space form
+            skip_next = True
         elif tok.startswith("-") and len(tok) > 1:
-            for ch in tok[1:]:  # decode the short-flag cluster
+            for ch in tok[1:]:
                 if ch == "S":
-                    has_staged = True
+                    staged = True
                 elif ch == "W":
-                    has_worktree = True
+                    worktree = True
                 elif ch == "s":
                     break  # the rest of the cluster is the --source value
-    return has_staged, has_worktree
+    has_staged = staged is True
+    if worktree is not None:
+        has_worktree = worktree
+    elif staged is None:
+        has_worktree = True   # git default: restore the worktree
+    else:
+        has_worktree = False  # staged mentioned, worktree not: staged-scoped
+    valid = not ambiguous and (has_staged or has_worktree)
+    return has_staged, has_worktree, valid
 
 
 def _restore_long_kind(name):
-    """Resolve a restore long-option name (no leading '--', no '=value') to 'staged', 'worktree', or
-    'source' by git's unambiguous-prefix rule, else None. Only these three loss-relevant options are
-    considered; an empty or ambiguous prefix (bare 's' is shared by staged and source) resolves to None,
-    matching git rejecting it as ambiguous, so no discard occurs."""
+    """Resolve a restore long-option name (no leading '--', no '=value') to 'staged', 'worktree',
+    'source', 'ambiguous' (an unambiguous-prefix collision among these, which git also rejects), or None.
+    Only these three loss-relevant options are considered."""
     if not name:
         return None
     cands = [w for w in ("staged", "worktree", "source") if w.startswith(name)]
-    return cands[0] if len(cands) == 1 else None
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) >= 2:
+        return "ambiguous"
+    return None
+
+
+def _reset_mode(args):
+    """Return the EFFECTIVE reset mode from the pre-'--' region, honouring git's last-option-wins and
+    unambiguous-prefix abbreviations ('--har' == '--hard'), or None if no mode flag is given (git defaults
+    to --mixed). A '--mode=value' form is invalid for these valueless flags (git errors), so it is ignored;
+    an ambiguous prefix (bare '--m' shared by mixed/merge) is ignored (git also rejects it)."""
+    modes = ("hard", "soft", "mixed", "merge", "keep")
+    pre = args[:args.index("--")] if "--" in args else args
+    mode = None
+    for a in pre:
+        if not a.startswith("--") or "=" in a:
+            continue
+        name = a[2:]
+        cands = [m for m in modes if m.startswith(name)]
+        if len(cands) == 1:
+            mode = cands[0]  # last-wins
+    return mode
 
 
 def _reset_is_hard(args):
-    """True if a reset requests '--hard' (whole-tree index+worktree discard), resolving git's unambiguous
-    -prefix abbreviations ('--har' == '--hard'; 'hard' is the only reset long option starting with 'h').
-    Only the pre-'--' region is scanned: a token after '--' is a pathspec (a file literally named
-    '--hard'), not the flag."""
-    pre = args[:args.index("--")] if "--" in args else args
-    for a in pre:
-        if a.startswith("--"):
-            name = a[2:].split("=", 1)[0]
-            if name and "hard".startswith(name):
-                return True
-    return False
+    """True only if the effective (last-wins) reset mode is --hard, the mode that discards both index and
+    worktree. --mixed/--soft/--keep preserve the worktree; --merge can lose but is out of this control's
+    documented --hard scope."""
+    return _reset_mode(args) == "hard"
 
 
 def _discard_shape(tokens):
@@ -903,8 +932,8 @@ def _discard_shape(tokens):
         return {"kind": "checkout", "paths": post,
                 "affects_index": _checkout_affects_index(pre), "from_file": from_file}
     if sub == "restore":
-        has_staged, has_worktree = _restore_flags(pre)
-        if not ((not has_staged) or has_worktree):
+        has_staged, has_worktree, valid = _restore_flags(pre)
+        if not valid or not has_worktree:
             return None
         from_file = _pathspec_from_file(pre)
         # enumerate paths: all post tokens, plus bare pre tokens, skipping the space-form values of the

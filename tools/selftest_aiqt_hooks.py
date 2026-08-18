@@ -175,6 +175,29 @@ def main():
         expect("(xiv) reset -- clean pathspec allows",
                "git -C {} reset -- clean.txt".format(rp), "allow")
 
+        # (xv) round-5 over-block fix: reset mode is LAST-OPTION-WINS. On the staged-only lossy state,
+        # '--har --soft' resolves to --soft (soft wins), which preserves the staged change, so it ALLOWS;
+        # '--soft --hard' resolves to --hard (hard wins), a whole-tree discard, so it BLOCKS.
+        _git(repo, "add", "file.txt")  # re-assert staged-only (a lossy state for reset --hard)
+        expect("(xv) reset --har --soft last-wins-soft allows",
+               "git -C {} reset --har --soft HEAD".format(rp), "allow")
+        expect("(xv) reset --soft --hard last-wins-hard blocks",
+               "git -C {} reset --soft --hard HEAD".format(rp), "deny")
+
+        # (xvi) round-5 over-block fix: restore forms git ERRORS on (so it preserves the file) are not
+        # discards and must ALLOW. On a worktree-dirty path: '-S --no-staged' (both locations end up off),
+        # the ambiguous '--s' prefix, and a bare '--no-staged' each leave git with no location and it
+        # errors; the default 'restore <path>' (worktree restore) still BLOCKS as the regression guard.
+        tracked.write_text("committed line\nuncommitted fix\n", encoding="utf-8")  # worktree-dirty again
+        expect("(xvi) restore -S --no-staged errors, allows",
+               "git -C {} restore -S --no-staged file.txt".format(rp), "allow")
+        expect("(xvi) restore --s ambiguous errors, allows",
+               "git -C {} restore --s file.txt".format(rp), "allow")
+        expect("(xvi) restore --no-staged errors, allows",
+               "git -C {} restore --no-staged file.txt".format(rp), "allow")
+        expect("(xvi) restore default worktree restore blocks",
+               "git -C {} restore file.txt".format(rp), "deny")
+
         # (ix) FIX C: option parsing is scoped before '--', so a literal pathspec named
         # '--pathspec-from-file=foo' AFTER '--' is a path, not an option: from_file is False and it is
         # enumerated. A unit assertion on the shape (a live-repo case for this name is awkward).
