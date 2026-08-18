@@ -2,7 +2,10 @@ title = "Changelog: AIQT Guardrails"
 note = "The user-facing changes for each public release."
 
 [[release]]
-title = "Project created"
+title = "The chat-assistant skill"
 version = "1.0.0"
 date = "2026-08-12"
-items = ["The AIQT Guardrails project was started."]
+items = [
+  "AIQT 1.0.0 ships the chat-assistant skill: one skill you load into a chat assistant (Claude, ChatGPT, and Copilot among them) that holds it to the AIQT standard, so claims match their sources, checks keep their full strength, and \"finished\" is verified before it is said.",
+  "Includes the portable AIQT governance core and a curated security-rule subset for chat use.",
+]
