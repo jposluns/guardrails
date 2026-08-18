@@ -51,6 +51,15 @@ jobs:
       - name: Leak denylist
         run: python3 tools/check_leaks.py
 
+      # Portability is DISTINCT from the leak gate: the leak gate answers a confidentiality question
+      # repo-wide, this answers whether the shippable surface can land on a stranger's machine unchanged
+      # (no operator identity outside its attribution, no repo-operational vocabulary, no exemption
+      # markers, no unscannable file classes off the allow-list). See the gate header.
+      - name: Portability self-test
+        run: python3 tools/check_portability.py --self-test
+      - name: Portability
+        run: python3 tools/check_portability.py
+
       - name: Dashes
         run: python3 tools/check_no_dashes.py
 

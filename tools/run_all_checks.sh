@@ -41,6 +41,8 @@ else
 fi
 echo
 run_gate "leaks"     python3 tools/check_leaks.py
+run_gate "portability-selftest" python3 tools/check_portability.py --self-test
+run_gate "portability" python3 tools/check_portability.py
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
 run_gate "site"      python3 tools/check_site.py
