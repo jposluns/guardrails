@@ -41,7 +41,10 @@ Baseline resolution (Layer A), in precedence order:
   3. if no baseline resolves, exit 2 with a remediation message (never a silent "nothing to compare, pass").
 Two distinguishable NON-error states are each printed explicitly and contribute exit 0:
   - the baseline ref resolves but changelog.toml is absent there (introduced since base);
-  - HEAD is the root commit (no parent).
+  - HEAD is the root commit (no parent) AND no explicit --base was given. An explicit --base is always
+    resolved and compared, even on a root HEAD, so an unresolvable explicit base fails closed (exit 2);
+    a HEAD^ that fails for any reason other than a genuine root (a shallow clone, a broken-parent history)
+    is a fail-closed error, never a silent root.
 Everything else that prevents the comparison (an unresolvable ref, a git failure, unparseable TOML on either
 side) is exit 2; every git return code is checked and a nonzero exit is never treated as an empty result.
 
@@ -86,11 +89,23 @@ def _git(root, args):
 
 
 def _is_root_commit(root):
-    """True if HEAD has no parent (the degenerate CI push case). Raises if HEAD itself does not resolve."""
-    if _git(root, ["rev-parse", "--verify", "--quiet", "HEAD"]).returncode != 0:
-        raise GateError("cannot resolve HEAD")
-    # A root commit has no HEAD^; --verify --quiet returns nonzero cleanly rather than erroring.
-    return _git(root, ["rev-parse", "--verify", "--quiet", "HEAD^"]).returncode != 0
+    """True only if HEAD is a genuine root commit (its own commit object carries no `parent` header). The
+    object is read directly, so this is not fooled by a HEAD^ that merely fails to resolve: a shallow clone
+    or a broken-parent history names a parent whose object is absent, and that is raised as a GateError
+    (fail-closed), never silently reported as a root. Raises if HEAD itself does not resolve."""
+    head = _git(root, ["cat-file", "-p", "HEAD^{commit}"])
+    if head.returncode != 0:
+        raise GateError("cannot resolve HEAD: {}".format(head.stderr.strip()))
+    # A commit object's headers precede the first blank line; a root commit has no `parent ` line.
+    header = head.stdout.split("\n\n", 1)[0]
+    parents = [line.split()[1] for line in header.splitlines() if line.startswith("parent ")]
+    if not parents:
+        return True
+    for parent in parents:
+        if _git(root, ["rev-parse", "--verify", "--quiet", parent + "^{commit}"]).returncode != 0:
+            raise GateError("HEAD names parent {} which does not resolve (a shallow clone or a broken-parent "
+                            "history); fetch the full history or pass an explicit --base".format(parent))
+    return False
 
 
 def _resolve_commit(root, ref):
@@ -229,10 +244,13 @@ def _parse_base_releases(text):
 def layer_a(root, base, head_releases):
     """Changelog-history append-only. Prints its own status; returns a list of finding strings. Raises
     GateError on any fail-closed condition."""
-    if _is_root_commit(root):
-        print("changelog-history: NOT APPLICABLE (HEAD is the root commit; no baseline to compare)")
-        return []
     if base is None:
+        # No explicit base: a genuine root HEAD has nothing to compare against (the honest NOT APPLICABLE);
+        # otherwise resolve the default merge-base. An explicit --base is always resolved below, even on a
+        # root HEAD, so an unresolvable explicit base fails closed rather than passing as NOT APPLICABLE.
+        if _is_root_commit(root):
+            print("changelog-history: NOT APPLICABLE (HEAD is the root commit; no baseline to compare)")
+            return []
         base = _default_base(root)
     base_commit = _resolve_commit(root, base)
     if not _path_in_commit(root, base_commit, "changelog.toml"):
@@ -361,6 +379,7 @@ def self_test_main():
     import shutil
     import tempfile
 
+    git_ran = False
     git_ok = True
     try:
         if subprocess.run(["git", "--version"], capture_output=True, text=True).returncode != 0:
@@ -376,6 +395,8 @@ def self_test_main():
         print("SELF-TEST NOTE: git or a writable temp directory is unavailable; git-level cases SKIPPED "
               "(the pure prefix/no-decrease/tag coverage above still ran)", file=sys.stderr)
     else:
+        git_ran = True
+
         def _init(path):
             path.mkdir(parents=True, exist_ok=True)
             for args in (["init", "-q"], ["config", "user.name", "AIQT Self-Test"],
@@ -422,13 +443,17 @@ def self_test_main():
             if _run_quiet(r2, "HEAD~1") != 0:
                 failures.append("git case: changelog absent at base expected NOT APPLICABLE exit 0")
 
-            # (3b) a true root-commit HEAD yields the printed NOT APPLICABLE (exit 0).
+            # (3b) a true root-commit HEAD with NO base yields the printed NOT APPLICABLE (exit 0); the
+            # same root HEAD with an explicit but unresolvable --base fails closed (exit 2), because an
+            # explicit base is resolved even on a root and NOT APPLICABLE is reserved for the no-base case.
             r2b = base_tmp / "rootcommit"
             _init(r2b)
             _write(r2b, _changelog_text(["1.0.0"]))
             _commit(r2b, "sole commit")
-            if _run_quiet(r2b, "HEAD") != 0:
-                failures.append("git case: a root-commit HEAD expected NOT APPLICABLE exit 0")
+            if _run_quiet(r2b, None) != 0:
+                failures.append("git case: a root-commit HEAD with no base expected NOT APPLICABLE exit 0")
+            if _run_quiet(r2b, "no-such-ref-xyz") != 2:
+                failures.append("git case: a root-commit HEAD with an unresolvable --base expected exit 2")
 
             # (5) a recorded tag with no tag object is exit 2; (6) creating the tag makes it pass.
             r3 = base_tmp / "tagged"
@@ -443,6 +468,22 @@ def self_test_main():
                            check=True, capture_output=True, text=True)
             if _run_quiet(r3, "HEAD") != 0:
                 failures.append("git case: creating the recorded tag expected exit 0")
+
+            # (7) a broken-parent history: HEAD names a parent whose object is absent (as a shallow clone
+            # leaves it). The old check read any failing HEAD^ as a root and passed NOT APPLICABLE; the fix
+            # reads HEAD's own object, sees the parent, and fails closed (exit 2) when it cannot resolve.
+            r4 = base_tmp / "brokenparent"
+            _init(r4)
+            _write(r4, _changelog_text(["1.0.0"]))
+            _commit(r4, "seed 1.0.0")
+            _write(r4, _changelog_text(["1.0.0", "1.1.0"]))
+            _commit(r4, "append 1.1.0")
+            parent_sha = subprocess.run(["git", "-C", str(r4), "rev-parse", "HEAD^"],
+                                        check=True, capture_output=True, text=True).stdout.strip()
+            (r4 / ".git" / "objects" / parent_sha[:2] / parent_sha[2:]).unlink()
+            if _run_quiet(r4, None) != 2:
+                failures.append("git case: a broken-parent history (unresolvable HEAD^) expected "
+                                "fail-closed exit 2")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -451,8 +492,13 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, and the "
-          "git-level history and tag cases all hold")
+    if git_ran:
+        print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, and the "
+              "git-level history and tag cases all hold")
+    else:
+        print("SELF-TEST PASS (PARTIAL): prefix identity (M1), no-decrease (M2), and tag name/ceiling "
+              "logic hold; the git-level history and tag cases were SKIPPED (git or a writable temp "
+              "directory was unavailable), so those invariants are UNVERIFIED this run")
     return 0
 
 
