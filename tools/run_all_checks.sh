@@ -49,6 +49,7 @@ run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
+run_gate "mappings-page-drift" python3 tools/gen_mappings.py --check
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
 run_gate "claude-drift"    python3 tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 tools/gen_adapters.py --check
