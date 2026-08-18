@@ -388,6 +388,19 @@ def main():
         expect("(cle-c) clean -n alone still allows (dry run)", "git clean -n", "allow", cwd=rp)
         expect("(cle-d) clean -n --no-dry-run -f asks (boolean negation disables the dry run)",
                "git clean -n --no-dry-run -f", "ask", cwd=rp)
+        expect("(cle-e) clean -f -en asks (attached -e value, '-n' is the exclude pattern)",
+               "git clean -f -en", "ask", cwd=rp)
+        expect("(cle-f) clean -n --no-dry-r -f asks (abbreviated negation prefix)",
+               "git clean -n --no-dry-r -f", "ask", cwd=rp)
+        # --pathspec-from-file reads pathspecs from a file, so its NEXT token is a filename, not a flag:
+        # checkout/reset must treat it as path-scoped and ASK, not misread the filename as -b/--soft.
+        expect("(pfr-checkout) checkout --pathspec-from-file -b asks (-b is the file, not branch-create)",
+               "git checkout --pathspec-from-file -b", "ask", cwd=rp)
+        expect("(pfr-reset) reset --pathspec-from-file --soft asks (--soft is the file, not the mode)",
+               "git reset --pathspec-from-file --soft", "ask", cwd=rp)
+        # An inline git alias that expands to a work-losing verb cannot be resolved -> ASK.
+        expect("(alias-inline) git -c alias.x=reset x --hard asks", "git -c alias.x=reset x --hard", "ask",
+               cwd=rp)
 
         # === config-proof probe: status.showUntrackedFiles=no cannot hide an untracked file (fix 1) ===
         # A repo configured to omit untracked files from status must NOT let a force discard read the tree as

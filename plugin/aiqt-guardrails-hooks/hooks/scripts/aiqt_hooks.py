@@ -978,6 +978,8 @@ def _checkout_role(args):
     disambiguated by a rev-parse probe) -> scoped. A bare 'git checkout' with no operands has no worktree
     effect -> allow."""
     pre, post, _had_sep = _split_pre_post(args)
+    if any(a == "--pathspec-from-file" or a.startswith("--pathspec-from-file=") for a in pre):
+        return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
     force = "-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
     branch_create = (_has_short(pre, "b") or _has_short(pre, "B") or _has_long_prefix(pre, "orphan"))
     if branch_create and not force:
@@ -1039,6 +1041,8 @@ def _reset_role(args):
     scoped either way; option parsing stops at the first '--'/'--end-of-options' so a mode-looking operand
     past it is a pathspec, not a mode."""
     pre, _post, _had_sep = _split_pre_post(args)
+    if any(a == "--pathspec-from-file" or a.startswith("--pathspec-from-file=") for a in pre):
+        return ("scoped", "git reset --pathspec-from-file (a path-scoped reset from a file)")
     mode = None  # "clobber" / "soft" / "scoped"
     for a in pre:
         if not (a.startswith("--") and "=" not in a):
@@ -1071,10 +1075,13 @@ def _clean_is_dry_run(pre):
     looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
     pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
     A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
-    if any(t in _CLEAN_ARG_OPTS or t.startswith("--exclude=") for t in pre):
-        return False  # an arg-consuming option is present: do not trust '-n' -> not a provable dry run
-    if "--no-dry-run" in pre:
-        return False  # boolean negation (git parses --[no-]dry-run last-wins) disables the dry run
+    for t in pre:
+        if t in _CLEAN_ARG_OPTS or t.startswith("--exclude="):
+            return False  # a separate/inline arg-consuming exclude: do not trust '-n'
+        if t.startswith("-") and not t.startswith("--") and "e" in t[1:]:
+            return False  # an ATTACHED short exclude ('-en' is '-e' with value 'n'): '-n' not trustworthy
+    if _has_long_prefix(pre, "no-dry-run"):
+        return False  # the negation (prefix-matched, e.g. '--no-dry-r') turns the dry run back on
     return "--dry-run" in pre or _has_short(pre, "n")
 
 
@@ -1291,6 +1298,10 @@ def git_discard(data):
     # Re-derive the verb form from the sole pristine git command.
     sub, args = _git_sub_and_args(pristine)
     role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+    if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
+        return _ask(*_discard_ask_reason(
+            "a git inline alias ('-c alias.<name>=...')",
+            "may expand to a work-losing verb this guard cannot resolve"))
     if role == "allow":
         return _allow()  # a genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, ...)
     if role == "ask":
