@@ -26,11 +26,14 @@ undone may write a private recovery ref under `refs/aiqt-recovery/` (and the obj
 snapshot's OWN git operations change no working state (the ref is not a branch, HEAD, the index, or the
 working tree, and is invisible to plain `git status`, `git branch`, and `git log`, though reachable via `git
 log --all`, `git for-each-ref refs/aiqt-recovery`, and `git show-ref` as the real ref it is), so it keeps
-the inert posture. To hold that posture the snapshot scrubs the ambient git discovery, config, and trace
-environment before each real-state call, so an inherited environment cannot redirect the call to a decoy
-repository, inject configuration into it, or (through an absolute `GIT_TRACE` path that git appends trace
-output to) make a read-only call write a trace file; the only residual is on-disk git config (repository,
-global, or system) that git reads by design. That inert guarantee is bounded, not categorical: git may additionally run a
+the inert posture. To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient
+`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited
+environment cannot redirect the call to a decoy repository, inject configuration into it, redirect its
+attribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a
+read-only call write a trace file; the call re-applies only the few variables it sets itself after the
+scrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent
+allow. The only residual is on-disk git configuration and attributes (repository, global, or system
+`.gitconfig` and `.gitattributes`) that git reads by design. That inert guarantee is bounded, not categorical: git may additionally run a
 git-configured (repo, global, system, or command-scope) clean/process filter, fsmonitor, or
 reference-transaction hook while the snapshot is taken,
 and a clean filter can transform the captured bytes, so the snapshot is not guaranteed byte-exact. The

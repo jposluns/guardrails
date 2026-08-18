@@ -812,7 +812,6 @@ _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insen
 # commit_identity fall back to a conservative raw scan on a parse failure. A truthy opt-out still ALLOWs.
 _RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
 _RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
-_RAW_SNAPPABLE_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm)\b")
 _RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
 _RAW_BRANCH_DELETE_RE = re.compile(r"(?:(?<![\w-])-[A-Za-z]*D)|(?:--delete\b)")
 # The opt-out is honoured only as a LEADING assignment on the command (GD-41 blocker 4): anchored to the
@@ -869,14 +868,6 @@ def _raw_has_lossy_git(command):
         return False
     return bool(_RAW_LOSSY_VERB_RE.search(command) or
                 (_RAW_BRANCH_RE.search(command) and _RAW_BRANCH_DELETE_RE.search(command)))
-
-
-def _raw_has_snappable_git(command):
-    """True when the raw command string names git AND a SNAPSHOTTABLE lossy verb (checkout/switch/
-    restore/reset/clean/rm, NOT stash/branch, which a worktree snapshot cannot capture). Mirror of
-    _raw_has_lossy_git narrowed to the snappable subset, so a snappable verb hidden behind a wrapper/
-    quote/eval still routes to a recovery snapshot."""
-    return bool(_RAW_GIT_RE.search(command)) and bool(_RAW_SNAPPABLE_VERB_RE.search(command))
 
 
 def _git_sub_and_args(tokens):
@@ -941,39 +932,39 @@ def _has_long_prefix(tokens, full):
 
 # --- the one probe kept: the coarse whole-tree clean signal ------------------------------------------
 
-# The ambient git discovery/config/trace-env vars that could redirect a real-state git call (the clean
-# probe, the recovery snapshot) to a DECOY repository, inject config into it, or make a "read-only" call
-# WRITE a trace file: any of these, if inherited from the environment, can point git at a different index,
-# object store, work tree, ref namespace, discovery boundary, or ambient-config set than the one at
-# `-C <repo>` (producing a false "provably clean", a false recovery point, or a dirty-tree ALLOW left
-# unchanged), propagate config through the `git -c` GIT_CONFIG_PARAMETERS channel (independent of
-# GIT_CONFIG_COUNT, and able to hide untracked content via core.excludesFile or inject a filter.*.clean that
-# runs during the snapshot `git add --all`), or suppress system config via GIT_CONFIG_NOSYSTEM. A
-# GIT_TRACE-family var is scrubbed too: git treats an absolute GIT_TRACE value as a FILE PATH and APPENDS
-# trace output to it, so even the read-only status probe and the recovery git calls could WRITE a file
-# (possibly inside the protected worktree), violating the read-only/inert posture. Every real-state call
-# scrubs ALL of them via _isolate_git_env before applying its own env, so after the scrub a real-state call
-# observes the ACTUAL repo at `-C <repo>` rather than an ambient-env decoy and writes no trace file; a
-# snapshot call's own GIT_INDEX_FILE (supplied via env_extra) still wins because env_extra is applied AFTER
-# the scrub. This is BOUNDED, not categorical: scrubbing the config AND trace families closes the ambient-env
-# vectors, but on-disk git config (repo, global, and system) that git reads by design still applies and can
-# influence git behaviour - the only disclosed residual, not neutralized here.
-_GIT_ISOLATE_ENV = ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
-                    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-                    "GIT_CEILING_DIRECTORIES", "GIT_QUARANTINE_PATH",
-                    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL",
-                    "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM")
+# The ambient git environment could redirect a real-state git call (the clean probe, the recovery
+# snapshot) to a DECOY repository, inject config into it, hide content from it, or make a "read-only" call
+# WRITE a trace file: an inherited GIT_* var can point git at a different index, object store, work tree,
+# ref namespace, or discovery boundary than the one at `-C <repo>` (producing a false "provably clean", a
+# false recovery point, or a dirty-tree ALLOW left unchanged), propagate config through the `git -c`
+# GIT_CONFIG_PARAMETERS channel (able to hide untracked content via core.excludesFile or inject a
+# filter.*.clean that runs during the snapshot `git add --all`), suppress system config via
+# GIT_CONFIG_NOSYSTEM, redirect attribute lookup through GIT_ATTR_SOURCE, or (git treats an absolute
+# GIT_TRACE value as a FILE PATH and APPENDS trace output to it) make even the read-only status probe and
+# the recovery git calls WRITE a file, possibly inside the protected worktree, violating the read-only/inert
+# posture. Rather than ENUMERATE this family (rounds 4-5 kept finding new members: GIT_CONFIG_*, then
+# GIT_TRACE*, then GIT_ATTR_SOURCE), every real-state call takes an ALLOWLIST posture: _isolate_git_env
+# scrubs EVERY ambient GIT_*-prefixed var before the caller applies its own env, so after the scrub a
+# real-state call observes the ACTUAL repo at `-C <repo>` rather than an ambient-env decoy and writes no
+# trace file; a snapshot call's own GIT_INDEX_FILE (supplied via env_extra) still wins because env_extra is
+# applied AFTER the scrub. This is BOUNDED, not categorical: the allowlist scrub closes the whole ambient-env
+# class at once, but on-disk git configuration AND attributes (repo/global/system .gitconfig and
+# .gitattributes) that git reads by design still apply and can influence git behaviour - the only disclosed
+# residual, not neutralized here.
 
 
 def _isolate_git_env(env):
-    """Remove the ambient git discovery/config/trace family from env IN PLACE and return it, so a
-    real-state git call observes the ACTUAL repo and writes no trace file. Pops the exact-name vars in
-    _GIT_ISOLATE_ENV plus any GIT_TRACE-prefixed var (git appends trace output to an absolute GIT_TRACE
-    path, which would violate the read-only posture). On-disk git config (repo/global/system) that git
-    reads by design is NOT removed here; it is the disclosed residual."""
-    for _var in _GIT_ISOLATE_ENV:
-        env.pop(_var, None)
-    for _k in [k for k in env if k.startswith("GIT_TRACE")]:
+    """Scrub EVERY ambient GIT_*-prefixed var from env in place and return it (allowlist posture: no
+    ambient git env is trusted). A real-state git call is fully specified by `-C <repo>` plus the few
+    vars the caller re-applies AFTER this scrub (GIT_OPTIONAL_LOCKS for the read-only probe; a temp
+    GIT_INDEX_FILE via env_extra for a snapshot), so it observes the ACTUAL on-disk repo and writes no
+    trace file. Over-scrubbing fails SAFE: any GIT_* the call genuinely needed makes it error, and the
+    caller treats that as a probe/snapshot FAILURE (None / SubprocessError) -> fail-to-ASK, never a
+    silent allow. This closes the whole ambient-env class at once (GIT_CONFIG_*, GIT_CONFIG_PARAMETERS,
+    GIT_TRACE*, GIT_ATTR_SOURCE, GIT_DIR/GIT_WORK_TREE, ...) instead of enumerating it. The ONLY residual
+    is on-disk git CONFIGURATION and ATTRIBUTES that git reads by design (repo/global/system .gitconfig
+    and .gitattributes)."""
+    for _k in [k for k in env if k.startswith("GIT_")]:
         env.pop(_k, None)
     return env
 
@@ -996,10 +987,10 @@ def _tree_is_clean(repo):
     a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
-    from refreshing/writing the real `.git/index`, and the whole ambient git discovery/config/trace family
-    (_GIT_ISOLATE_ENV plus any GIT_TRACE-prefixed var) is scrubbed via _isolate_git_env so the probe reads
-    the REAL repo at `-C <repo>` rather than a foreign preset that could redirect it to a decoy clean repo
-    and win a false ALLOW, and writes no ambient GIT_TRACE file."""
+    from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
+    _isolate_git_env (the allowlist posture, re-applying only GIT_OPTIONAL_LOCKS after the scrub) so the
+    probe reads the REAL repo at `-C <repo>` rather than a foreign preset that could redirect it to a decoy
+    clean repo and win a false ALLOW, and writes no ambient GIT_TRACE file."""
     try:
         env = _isolate_git_env(dict(os.environ))
         env["GIT_OPTIONAL_LOCKS"] = "0"
@@ -1322,10 +1313,10 @@ def _pristine_single_bare_git(command, segments):
 # modify the real index, worktree, HEAD, or any branch; the ref is invisible to plain `git status`, `git
 # branch`, and `git log`, THOUGH reachable via `git log --all` / `git for-each-ref refs/aiqt-recovery` /
 # `git show-ref` (a real ref, not hidden). The selftest asserts the real status/index/HEAD, index bytes,
-# config, and stash list are unchanged. Every real-state call in this layer scrubs the ambient git
-# discovery/config/trace family (_isolate_git_env), so an ambient GIT_CONFIG_PARAMETERS injection or a
-# GIT_TRACE file-write vector cannot reach these calls; the only residual is on-disk git config
-# (repo/global/system) that git reads by design. BUT git may ADDITIONALLY run any git-configured (repo, global,
+# config, and stash list are unchanged. Every real-state call in this layer scrubs EVERY ambient GIT_*-prefixed
+# var (_isolate_git_env, the allowlist posture), so an ambient GIT_CONFIG_PARAMETERS injection, a
+# GIT_ATTR_SOURCE redirect, or a GIT_TRACE file-write vector cannot reach these calls; the only residual is
+# on-disk git configuration AND attributes (repo/global/system) that git reads by design. BUT git may ADDITIONALLY run any git-configured (repo, global,
 # system, or command-scope) program during the
 # snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
 # categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
@@ -1359,18 +1350,17 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
     of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
     env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
-    (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). The WHOLE ambient git
-    discovery/config/trace family (_GIT_ISOLATE_ENV: GIT_INDEX_FILE, GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
-    GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES,
-    GIT_QUARANTINE_PATH, GIT_DISCOVERY_ACROSS_FILESYSTEM, GIT_CONFIG_COUNT, GIT_CONFIG_GLOBAL,
-    GIT_CONFIG_SYSTEM, GIT_CONFIG_PARAMETERS, GIT_CONFIG_NOSYSTEM, plus any GIT_TRACE-prefixed var) is ALWAYS
-    scrubbed via _isolate_git_env so a call meant to observe the REAL repo state (the status probe,
+    (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). EVERY ambient
+    GIT_*-prefixed var is ALWAYS scrubbed via _isolate_git_env (the allowlist posture: no ambient git env is
+    trusted, so GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_*/GIT_TRACE*/GIT_ATTR_SOURCE and any future GIT_* go at
+    once) so a call meant to observe the REAL repo state (the status probe,
     `rev-parse --show-toplevel`/`--git-path index`) and the snapshot itself cannot be redirected to a
     foreign preset repo (a decoy that would win a false clean, a false recovery point, or leak into the
     snapshot) and cannot be made to WRITE a trace file through an ambient GIT_TRACE path; a snapshot call
     overrides GIT_INDEX_FILE with its own temp index through env_extra, applied AFTER the scrub. This scrub
-    is BOUNDED to the ambient ENV families: on-disk git config (repo, global, and system) that git reads by
-    design still applies and can influence git behaviour, the only disclosed residual, not neutralized here.
+    is BOUNDED to the ambient ENV: on-disk git configuration AND attributes (repo, global, and system) that
+    git reads by design still apply and can influence git behaviour, the only disclosed residual, not
+    neutralized here.
     Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
     snapshot failure. offline, bounded by `timeout`."""
     cmd = ["git", "-C", repo] + list(args)
@@ -1715,28 +1705,30 @@ def git_discard(data):
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but a
-        # SNAPSHOTTABLE one now gets a BEST-EFFORT recovery point first, so an asked-then-approved
-        # compound/wrapped discard is recoverable (the hook fires once, with no post-approval callback). This
-        # is BEST-EFFORT against the SESSION CWD repo only: we do NOT parse a non-pristine command's
-        # redirected dir, so a command that changes into a DIFFERENT repo may be snapshotted at the session
-        # repo rather than the target (a same-repo cd is still captured by the whole-tree add --all). The
-        # snapshot is decision-INDEPENDENT (same _record_recovery path) and fires only when the tree is NOT
-        # provably clean; on snapshot fail the decision stays ASK with the failure surfaced (never allow).
+        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but now gets a
+        # BEST-EFFORT recovery point first, so an asked-then-approved compound/wrapped discard is recoverable
+        # (the hook fires once, with no post-approval callback). This is BEST-EFFORT against the SESSION CWD
+        # repo only: we do NOT parse a non-pristine command's redirected dir, so a command that changes into a
+        # DIFFERENT repo may be snapshotted at the session repo rather than the target (a same-repo cd is
+        # still captured by the whole-tree add --all). The snapshot is decision-INDEPENDENT (same
+        # _record_recovery path); on snapshot fail the decision stays ASK with the failure surfaced (never
+        # allow).
         np_subs = set()
         for _role, _kind, _toks in lossy:
             _s, _ = _git_sub_and_args(_toks)
             if _s is not None:
                 np_subs.add(_s)
-        # Snapshottable when a VISIBLE lossy sub is snapshottable OR the RAW command contains a snappable
-        # verb (a hidden snappable verb - behind a wrapper/quote/eval the segment scan could not see - still
-        # snapshots). A command whose only lossy content is stash/branch with NO snappable verb in the raw
-        # string correctly does NOT snapshot: a worktree snapshot cannot capture their asset.
-        np_snappable = bool(np_subs & _SNAPSHOTTABLE_VERBS) or _raw_has_snappable_git(command)
+        # A non-pristine command may HIDE a snappable verb behind shell quoting/eval that no lexical scan can
+        # reliably see (`eval git re'set' --hard` assembles `reset` at runtime; the raw string has no
+        # contiguous `reset`), so we do NOT gate on a lexical snappable-detection here: whenever the base
+        # resolves and the tree is NOT provably clean, take the inert best-effort snapshot regardless of which
+        # verb is (or is not) visible. Over-snapshotting a pure stash/branch non-pristine command is an
+        # accepted inert cost (a worktree snapshot cannot capture their asset, but it is never an
+        # under-protection). The np_verb label is best-effort from any visible snappable sub.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
         np_snap = None
-        if np_snappable and np_base is not None and _tree_is_clean(np_base) is not True:
+        if np_base is not None and _tree_is_clean(np_base) is not True:
             np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
             np_snap = _record_recovery(np_base, np_verb)
         return _ask_with_recovery(

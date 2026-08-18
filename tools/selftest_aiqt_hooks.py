@@ -997,26 +997,27 @@ def main():
             failures.append("(rec-fd-wrap-snap) expected a recovery ref on a wrapped in-scope ASK of a dirty "
                             "tree (F-D EXPAND, raw_lossy path)")
 
-        # (rec-fd-nonsnap) C6 (item 3): a NON-PRISTINE in-scope command whose ONLY visible lossy sub is a
-        # non-snappable verb (stash drop / branch -D) does NOT take a snapshot (a worktree snapshot cannot
-        # capture a stash entry or a branch commit), so NO recovery ref is created even on a dirty tree; the
-        # decision still ASKS. Under the old predicate raw_lossy alone would have forced a spurious snapshot.
-        # The complementary fully-hidden case (raw_lossy, no visible sub, still snapshots) is proven by
-        # rec-fd-wrap above.
+        # (rec-fd-nonsnap) C6 (structural): a NON-PRISTINE in-scope command whose ONLY visible lossy sub is a
+        # non-snappable verb (stash drop / branch -D) now ALSO takes a best-effort snapshot on a dirty tree.
+        # A non-pristine command can hide a snappable verb behind shell quoting/eval that no lexical scan can
+        # reliably see, so the guard no longer gates the snapshot on a visible/raw snappable verb: it
+        # snapshots whenever the tree is not provably clean. Over-snapshotting a pure stash/branch form is an
+        # accepted inert cost (a worktree snapshot cannot capture their asset), never an under-protection; the
+        # decision still ASKS.
         rec_ns = _init_repo(tmp / "rec-fd-nonsnap")
         (rec_ns / "file.txt").write_text("committed line\nnonsnap\n", encoding="utf-8")
         expect("(rec-fd-nonsnap-stash) compound stash drop on dirty tree asks",
                "git stash drop && echo done", "ask", cwd=str(rec_ns))
         expect("(rec-fd-nonsnap-branch) compound branch -D on dirty tree asks",
                "git branch -D other && echo done", "ask", cwd=str(rec_ns))
-        if _recovery_refs(rec_ns):
-            failures.append("(rec-fd-nonsnap-snap) expected NO recovery ref for a non-pristine command whose "
-                            "only visible lossy sub is stash/branch (not snappable)")
+        if not _recovery_refs(rec_ns):
+            failures.append("(rec-fd-nonsnap-snap) expected a recovery ref for a non-pristine in-scope "
+                            "command on a dirty tree (accepted over-snapshot of a stash/branch form)")
 
         # (rec-cfgcount) C5: ambient GIT_CONFIG_COUNT/KEY_0/VALUE_0 injecting core.worktree at a CLEAN decoy,
         # plus GIT_DISCOVERY_ACROSS_FILESYSTEM, must NOT redirect the probe or the snapshot away from the REAL
-        # dirty session-cwd repo. These four vars are in _GIT_ISOLATE_ENV, so popping the family disables the
-        # KEY/VALUE config injection and the discovery-boundary override: the real (dirty) repo is read (reset
+        # dirty session-cwd repo. These are all ambient GIT_* vars, so the allowlist scrub drops them,
+        # disabling the KEY/VALUE config injection and the discovery-boundary override: the real (dirty) repo is read (reset
         # --hard DENIES, not a false ALLOW), the recovery ref lands on the REAL repo, and the real
         # index/HEAD/worktree are untouched.
         rec_cfg = _init_repo(tmp / "rec-cfgcount")
@@ -1117,8 +1118,8 @@ def main():
 
         # (rec-cfgparams) Fix A: an ambient GIT_CONFIG_PARAMETERS (the `git -c` propagation channel,
         # independent of GIT_CONFIG_COUNT) injecting core.excludesFile at a file that lists the untracked
-        # name must NOT fool the probe into reading the dirty tree as clean. GIT_CONFIG_PARAMETERS is in
-        # _GIT_ISOLATE_ENV, so the scrub drops it and the untracked file still reads dirty (False).
+        # name must NOT fool the probe into reading the dirty tree as clean. GIT_CONFIG_PARAMETERS is an
+        # ambient GIT_* var, so the allowlist scrub drops it and the untracked file still reads dirty (False).
         rec_cp = _init_repo(tmp / "rec-cfgparams")
         (rec_cp / "untracked.txt").write_text("junk\n", encoding="utf-8")
         excludes_file = tmp / "cp-excludes"
@@ -1158,6 +1159,38 @@ def main():
         if not _recovery_refs(rec_tr):
             failures.append("(rec-gittrace-snap) expected a recovery ref on the dirty tree ASK")
 
+        # (rec-scrub-allowlist) Fix 1: _isolate_git_env takes an ALLOWLIST posture - it scrubs EVERY ambient
+        # GIT_*-prefixed var, not an enumerated family, so a random GIT_FOO and the round-5 GIT_ATTR_SOURCE
+        # both go while non-GIT vars stay. This is the structural guarantee that closes the whole ambient-env
+        # class at once (rounds 4-5 kept finding new members: GIT_CONFIG_*, GIT_TRACE*, GIT_ATTR_SOURCE).
+        scrub_in = {"GIT_FOO": "bar", "GIT_ATTR_SOURCE": "HEAD", "GIT_DIR": "decoy",
+                    "GIT_CONFIG_PARAMETERS": "'x=y'", "GIT_TRACE": "on", "LANG": "C",
+                    "TERM": "dumb"}
+        scrub_out = aiqt_hooks._isolate_git_env(dict(scrub_in))
+        _leaked = sorted(k for k in scrub_out if k.startswith("GIT_"))
+        if _leaked:
+            failures.append("(rec-scrub-allowlist) _isolate_git_env must scrub EVERY ambient GIT_* var; "
+                            "these survived the allowlist scrub: {}".format(_leaked))
+        if scrub_out.get("LANG") != "C" or scrub_out.get("TERM") != "dumb":
+            failures.append("(rec-scrub-allowlist-keep) _isolate_git_env must leave non-GIT vars intact")
+
+        # (rec-attrsource) Fix 1: an ambient GIT_ATTR_SOURCE (round-5's newest ambient-GIT_* vector, which
+        # points git's attribute lookup at a chosen treeish) does NOT survive the allowlist scrub. Set to an
+        # unresolvable ref it would make an UN-scrubbed status probe FAIL (git: 'bad --attr-source or
+        # GIT_ATTR_SOURCE', a non-zero return -> None); with the scrub it is gone, so the probe reads the REAL
+        # dirty repo (False) rather than being steered or made to error by the ambient value.
+        rec_as = _init_repo(tmp / "rec-attrsource")
+        (rec_as / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        os.environ["GIT_ATTR_SOURCE"] = "refs/nonexistent-attr-source"
+        try:
+            probe_as = aiqt_hooks._tree_is_clean(str(rec_as))
+        finally:
+            os.environ.pop("GIT_ATTR_SOURCE", None)
+        if probe_as is not False:
+            failures.append("(rec-attrsource) with an ambient GIT_ATTR_SOURCE set to an unresolvable ref, "
+                            "the allowlist scrub must drop it so the probe reads the REAL dirty repo (False), "
+                            "got {}".format(probe_as))
+
         # (rec-ledger-nonfatal) Fix B: the best-effort ledger must NEVER flip a SUCCESSFUL snapshot to a
         # failure. Monkeypatch _write_recovery_ledger to raise a non-OSError (a ValueError) AFTER the
         # snapshot succeeds; _record_recovery must still return ('ok', info) with the ref present (the ledger
@@ -1182,33 +1215,46 @@ def main():
             failures.append("(rec-ledger-nonfatal-snap) the successful snapshot ref must be present despite a "
                             "ledger fault")
 
-        # (rec-c6-subst/rec-c6-wrap) Fix C: a command with a VISIBLE non-snappable verb (stash drop) AND a
-        # HIDDEN snappable verb (checkout -f / reset --hard) in the raw string must take a recovery snapshot,
-        # so an approved hidden reset/checkout still has a recovery point. The predicate now snapshots when
-        # the RAW command contains a snappable verb, not only when a visible sub is snappable.
+        # (rec-c6-subst/rec-c6-wrap/rec-c6-eval) C6 (structural): a non-pristine in-scope command can hide a
+        # snappable verb behind shell substitution ($(...)), a wrapper (sudo), or split-quoting/eval that no
+        # lexical scan can reliably see. The guard no longer gates the snapshot on detecting a snappable verb:
+        # any non-pristine in-scope command on a not-provably-clean tree is snapshot-backed, so an approved
+        # hidden reset/checkout always has a recovery point. Each dirty-tree ASK below must create a ref.
         rec_c6a = _init_repo(tmp / "rec-c6-subst")
         (rec_c6a / "file.txt").write_text("committed line\nc6 subst\n", encoding="utf-8")
         expect("(rec-c6-subst) stash drop + hidden checkout -f asks",
                "git stash drop && $(echo git checkout -f)", "ask", cwd=str(rec_c6a))
         if not _recovery_refs(rec_c6a):
             failures.append("(rec-c6-subst-snap) expected a recovery ref: a hidden snappable verb (checkout "
-                            "-f) in the raw string must snapshot even behind a visible stash drop")
+                            "-f) behind a substitution must still snapshot on a dirty tree")
         rec_c6b = _init_repo(tmp / "rec-c6-wrap")
         (rec_c6b / "file.txt").write_text("committed line\nc6 wrap\n", encoding="utf-8")
         expect("(rec-c6-wrap) stash drop + hidden wrapped reset --hard asks",
                "git stash drop; sudo git reset --hard", "ask", cwd=str(rec_c6b))
         if not _recovery_refs(rec_c6b):
             failures.append("(rec-c6-wrap-snap) expected a recovery ref: a hidden snappable verb (reset "
-                            "--hard) in the raw string must snapshot even behind a visible stash drop")
-        # C6 intent preserved: a command whose only lossy content is stash with NO snappable verb in the raw
-        # string still takes NO snapshot (a worktree snapshot cannot capture a stash entry).
+                            "--hard) behind a wrapper must still snapshot on a dirty tree")
+        # The split-quote/eval case is the one a raw lexical scan CANNOT catch: `re'set'` has no contiguous
+        # `reset` in the raw string, yet bash assembles `reset` at runtime. The structural fix snapshots it
+        # anyway, because the command is non-pristine on a not-provably-clean tree.
+        rec_c6d = _init_repo(tmp / "rec-c6-eval")
+        (rec_c6d / "file.txt").write_text("committed line\nc6 eval\n", encoding="utf-8")
+        expect("(rec-c6-eval) stash drop + split-quote eval reset asks",
+               "git stash drop; eval git re'set' --hard", "ask", cwd=str(rec_c6d))
+        if not _recovery_refs(rec_c6d):
+            failures.append("(rec-c6-eval-snap) expected a recovery ref: a snappable verb hidden by "
+                            "split-quoting/eval must still snapshot on a dirty tree")
+        # A pure stash/echo non-pristine command with NO snappable verb anywhere NOW ALSO snapshots (the
+        # rec-c6-nosnap assertion FLIPS): the guard cannot prove no snappable verb is hidden, so it never
+        # gates on absence. Over-snapshotting a pure stash form is an accepted inert cost, never an
+        # under-protection.
         rec_c6c = _init_repo(tmp / "rec-c6-nosnap")
         (rec_c6c / "file.txt").write_text("committed line\nc6 nosnap\n", encoding="utf-8")
         expect("(rec-c6-nosnap) stash drop; echo hi asks", "git stash drop; echo hi", "ask",
                cwd=str(rec_c6c))
-        if _recovery_refs(rec_c6c):
-            failures.append("(rec-c6-nosnap-snap) expected NO recovery ref: stash drop with no snappable verb "
-                            "in the raw string must not snapshot")
+        if not _recovery_refs(rec_c6c):
+            failures.append("(rec-c6-nosnap-snap) expected a recovery ref: any non-pristine in-scope command "
+                            "on a dirty tree is snapshot-backed (accepted over-snapshot)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
