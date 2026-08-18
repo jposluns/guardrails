@@ -69,6 +69,9 @@ jobs:
       - name: Agents drift
         run: python3 tools/gen_agents.py --check
 
+      - name: Mappings page drift
+        run: python3 tools/gen_mappings.py --check
+
       - name: NOTICE drift
         run: python3 tools/gen_notice.py --check
 
