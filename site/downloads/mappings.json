@@ -1586,7 +1586,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CA-7",
       "identifier_title": "Continuous Monitoring"
     },
@@ -1596,7 +1596,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "GOVERN 1.5",
       "identifier_title": "Ongoing monitoring and periodic review of the risk management process and its outcomes are planned."
     },
