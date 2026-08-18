@@ -30,6 +30,8 @@ ASKS, which many cases below assert.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -71,6 +73,14 @@ def _git(repo, *args, env_identity=False):
     subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
 
 
+def _recovery_refs(repo):
+    """The list of refs under refs/aiqt-recovery/ in repo (the private snapshot namespace the EN-6 recovery
+    layer writes). Empty when no snapshot has been taken."""
+    out = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname)",
+                          "refs/aiqt-recovery/"], capture_output=True, text=True, timeout=30)
+    return [r for r in out.stdout.splitlines() if r.strip()]
+
+
 def _init_repo(path):
     """git init a repo at path with two committed tracked files (file.txt, clean.txt) on branch main,
     plus a second branch 'other' at the same commit, and return the Path. Raises on any git failure."""
@@ -92,6 +102,9 @@ def main():
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
+    # Redirect the recovery ledger into the throwaway tree so the EN-6 recovery layer, which fires on every
+    # dirty-tree in-scope case below, never writes to the real user's $XDG_STATE_HOME/~/.local/state.
+    os.environ["XDG_STATE_HOME"] = str(tmp / "xdgstate")
     failures = []
 
     def expect(label, command, want, cwd=None):
@@ -486,6 +499,130 @@ def main():
             if got_role != want_role:
                 failures.append("(role) _discard_role({!r}, {!r}) role: expected {}, got {}"
                                 .format(sub, args, want_role, got_role))
+
+        # === EN-6 recovery/snapshot layer ============================================================
+        # The layer takes an INERT snapshot (a private refs/aiqt-recovery/* ref over a temp-index tree)
+        # before returning its decision for a snapshottable in-scope verb on a not-provably-clean, resolvable
+        # tree, on the ALLOW and ASK paths alike, and NEVER touches the real index/worktree/HEAD. Each case
+        # builds a FRESH repo so a ref count is unambiguous.
+
+        # (rec-ask) a dirty-tree ASK (a scoped checkout revert) takes a snapshot.
+        rec_ask = _init_repo(tmp / "rec-ask")
+        (rec_ask / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        expect("(rec-ask) checkout -- on dirty tree asks", "git checkout -- file.txt", "ask",
+               cwd=str(rec_ask))
+        if not _recovery_refs(rec_ask):
+            failures.append("(rec-ask-snap) expected a recovery ref after a dirty-tree ASK")
+
+        # (rec-misparse) a dirty-tree ALLOW that is a simulated classifier MIS-PARSE still snapshots (the
+        # snapshot is decision-independent), and the decision stays ALLOW when the snapshot succeeds.
+        rec_mis = _init_repo(tmp / "rec-misparse")
+        (rec_mis / "file.txt").write_text("committed line\nmisparse work\n", encoding="utf-8")
+        _orig_role = aiqt_hooks._discard_role
+        aiqt_hooks._discard_role = lambda sub, args: ("allow", None)
+        try:
+            got_mis = _decision(handler, "git reset --hard", cwd=str(rec_mis))
+        finally:
+            aiqt_hooks._discard_role = _orig_role
+        if got_mis != "allow":
+            failures.append("(rec-misparse) simulated mis-parse: expected allow, got {}".format(got_mis))
+        if not _recovery_refs(rec_mis):
+            failures.append("(rec-misparse-snap) expected a recovery ref on a mis-parse ALLOW of a dirty tree")
+
+        # (rec-clean) a provably-clean tree takes NO snapshot (nothing to lose).
+        rec_clean = _init_repo(tmp / "rec-clean")
+        expect("(rec-clean) reset --hard on clean tree allows", "git reset --hard", "allow",
+               cwd=str(rec_clean))
+        if _recovery_refs(rec_clean):
+            failures.append("(rec-clean-snap) expected NO recovery ref on a provably-clean tree")
+
+        # (rec-inv) the real git status, index tree, and HEAD are UNCHANGED after a snapshot (the snapshot
+        # uses a temp index outside the repo and writes only objects + one ref).
+        rec_inv = _init_repo(tmp / "rec-inv")
+        (rec_inv / "file.txt").write_text("committed line\nworktree edit\n", encoding="utf-8")
+        (rec_inv / "newstaged.txt").write_text("staged\n", encoding="utf-8")
+        _git(rec_inv, "add", "newstaged.txt")
+        (rec_inv / "untr.txt").write_text("junk\n", encoding="utf-8")
+
+        def _snap(*a):
+            return subprocess.run(["git", "-C", str(rec_inv), *a], capture_output=True, text=True,
+                                  timeout=30).stdout.strip()
+        before = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"))
+        expect("(rec-inv) checkout -- on dirty invariant tree asks", "git checkout -- file.txt", "ask",
+               cwd=str(rec_inv))
+        after = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"))
+        if not _recovery_refs(rec_inv):
+            failures.append("(rec-inv-snap) expected a recovery ref on the invariant repo")
+        if before[0] != after[0]:
+            failures.append("(rec-inv-status) the real git status changed after a snapshot")
+        if before[1] != after[1]:
+            failures.append("(rec-inv-head) HEAD changed after a snapshot")
+        if before[2] != after[2]:
+            failures.append("(rec-inv-index) the real index tree changed after a snapshot")
+
+        # (rec-restore) the snapshot ref actually RESTORES the work: dirty (tracked + untracked), snapshot
+        # via a clean discard, wipe the tree, then `git checkout <ref> -- :/` recovers both.
+        rec_res = _init_repo(tmp / "rec-restore")
+        (rec_res / "file.txt").write_text("committed line\nrecovered fix\n", encoding="utf-8")
+        (rec_res / "untr.txt").write_text("untracked work\n", encoding="utf-8")
+        expect("(rec-restore-setup) clean -fd on dirty+untracked tree asks", "git clean -fd", "ask",
+               cwd=str(rec_res))
+        res_refs = _recovery_refs(rec_res)
+        if not res_refs:
+            failures.append("(rec-restore-ref) expected a recovery ref before a clean discard")
+        else:
+            _git(rec_res, "reset", "--hard")
+            _git(rec_res, "clean", "-fd")
+            _git(rec_res, "checkout", res_refs[0], "--", ":/")
+            if "recovered fix" not in (rec_res / "file.txt").read_text(encoding="utf-8"):
+                failures.append("(rec-restore-tracked) restore did not recover the tracked modification")
+            if not (rec_res / "untr.txt").exists() or \
+                    (rec_res / "untr.txt").read_text(encoding="utf-8") != "untracked work\n":
+                failures.append("(rec-restore-untracked) restore did not recover the untracked file")
+
+        # (rec-faildowngrade) a FORCED snapshot failure downgrades a would-be ALLOW to ASK (never a silent
+        # allow of a not-provably-clean discard).
+        rec_fail = _init_repo(tmp / "rec-fail")
+        (rec_fail / "file.txt").write_text("committed line\nat risk\n", encoding="utf-8")
+        _orig_role = aiqt_hooks._discard_role
+        _orig_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced failure (self-test)")
+        try:
+            aiqt_hooks._discard_role = lambda sub, args: ("allow", None)
+            got_dg = _decision(handler, "git reset --hard", cwd=str(rec_fail))
+            aiqt_hooks._discard_role = _orig_role  # real role: reset --hard is a clobber
+            got_dn = _decision(handler, "git reset --hard", cwd=str(rec_fail))
+        finally:
+            aiqt_hooks._discard_role = _orig_role
+            aiqt_hooks._record_recovery = _orig_rec
+        if got_dg != "ask":
+            failures.append("(rec-faildowngrade) a snapshot failure must downgrade a would-be ALLOW to ASK, "
+                            "got {}".format(got_dg))
+        if got_dn != "deny":
+            failures.append("(rec-faildeny) a snapshot failure must leave a clobber DENY as DENY, got {}"
+                            .format(got_dn))
+
+        # (rec-ledger) the external ledger records the VERB, ref, sha, classes, and restore command, and
+        # NEVER the raw command (privacy). The ledger lives outside every repo, under the redirected XDG dir.
+        ledger = Path(os.environ["XDG_STATE_HOME"]) / "aiqt-guardrails" / "recovery.jsonl"
+        if not ledger.exists():
+            failures.append("(rec-ledger) expected the recovery ledger to exist after snapshots")
+        else:
+            lines = [ln for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            try:
+                rec = json.loads(lines[-1])
+            except (ValueError, IndexError):
+                rec = None
+                failures.append("(rec-ledger-json) the ledger's last line is not a JSON record")
+            if rec is not None:
+                for key in ("ts", "repo", "verb", "ref", "sha", "classes", "restore"):
+                    if key not in rec:
+                        failures.append("(rec-ledger-field) ledger record missing key {!r}".format(key))
+                if rec.get("verb", "x").startswith("git") or " " in rec.get("verb", " "):
+                    failures.append("(rec-ledger-verb) ledger 'verb' should be a bare subcommand, got {!r}"
+                                    .format(rec.get("verb")))
+                if rec.get("ref", "") not in rec.get("restore", ""):
+                    failures.append("(rec-ledger-restore) the restore command should reference the ref")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -507,7 +644,11 @@ def main():
           "arg-consumption means '-n' is not mis-read as a dry run; switch --merge/--conflict route to "
           "scoped and ASK on a dirty tree; and the DENY wording covers untracked. The prior GD-41 "
           "blocker cases and the F-60/F-62/F-64/F-65/F-66 under-block edges still ASK/DENY, and the role "
-          "classifier is asserted too")
+          "classifier is asserted too. The EN-6 recovery/snapshot layer is proven: a snapshot is taken on a "
+          "dirty-tree ASK and on a simulated mis-parse ALLOW, NOT on a provably-clean tree; the real "
+          "status/index/HEAD are unchanged after a snapshot; the ref restores tracked and untracked work; a "
+          "forced snapshot failure downgrades a would-be ALLOW to ASK while leaving a clobber DENY; and the "
+          "external ledger records the bare verb (not the raw command), ref, sha, classes, and restore")
     return 0
 
 

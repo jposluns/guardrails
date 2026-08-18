@@ -122,6 +122,12 @@ Workers produce research and candidate diffs as inert data; one orchestrator re-
 integrates them, and workers apply nothing themselves. Parallelism lives in the research stage; authority
 and seriality live in the apply stage.
 
+Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be
+undone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to). This
+changes no working state (it is not a branch, HEAD, the index, or the working tree, and is invisible to
+status, branch, and log), so it keeps the inert posture. The exception is limited to recovery snapshots
+written for the actor's own protection; it is not a general licence to mutate repository metadata.
+
 ## Use absolute paths, not relative
 
 A file path the assistant passes to a tool call, command, or file reference is absolute, not relative to

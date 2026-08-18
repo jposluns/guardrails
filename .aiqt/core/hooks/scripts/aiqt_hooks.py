@@ -68,11 +68,15 @@ on exit 0. No Stop invocation can reach exit 2 for any input; only a PreToolUse 
 exit 2, and only a genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on
 a bad invocation.
 """
+import datetime
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
@@ -788,11 +792,16 @@ def absolute_paths(data):
 # coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
 # and ANY wrapper in front of git - sudo/stdbuf/doas/setsid/eval/sh -c/...: the raw 'git'+work-losing-verb
 # scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper cannot slip): ASK.
-# The one probe kept (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
+# The status probe (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
 # read-only and offline and FORCES untracked reporting so a repo-local status.showUntrackedFiles=no config
-# cannot hide an untracked file; the guard never mutates the repo. HONEST RESIDUAL (not caught by a lexical
-# hook): a git alias or shell function that renames git, a discard performed outside the Bash tool, or
-# persistent shell/config state set in a prior turn; the deferred recovery/snapshot layer is the backstop.
+# cannot hide an untracked file. The classifier never mutates working state; BENEATH it, the EN-6 recovery
+# layer (see the block comment above _SNAPSHOTTABLE_VERBS) is SIDE-EFFECTING - it writes an inert
+# refs/aiqt-recovery/* snapshot ref and an external ledger for a not-provably-clean discard - but writes only
+# git objects and one private ref, never the real index, worktree, HEAD, or a branch. HONEST RESIDUAL (not
+# caught by a lexical hook): a git alias or shell function that renames git, a discard performed outside the
+# Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
+# discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
+# marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
 # An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
 _DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.+)$")
 _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
@@ -1228,6 +1237,228 @@ def _pristine_single_bare_git(command, segments):
     return tokens
 
 
+# --- the recovery/snapshot layer (EN-6): an INERT git-DB sealed-epoch snapshot -----------------------
+# BENEATH the ultra-conservative classifier sits a recovery layer that makes a discard RECOVERABLE. Before
+# git_discard returns its decision for an in-scope lossy verb whose worktree it can resolve to the session
+# cwd AND whose tree is NOT provably clean, it takes an INERT snapshot of the uncommitted work, on the ALLOW
+# and the ASK paths alike (the hook fires once at PreToolUse; there is no post-approval callback, so a
+# discard that is asked-then-approved, or one wrongly allowed by a classifier mis-parse, must ALREADY have a
+# recovery point). The snapshot is decision-INDEPENDENT by design: it does not trust the form-classifier to
+# be right about which forms are safe, so it fires for every snapshottable verb on a not-provably-clean tree
+# regardless of the allow/ask/deny verdict. It is skipped when the tree is PROVABLY CLEAN (nothing to lose),
+# when the command is not in scope, and for stash/branch (a worktree snapshot cannot capture stash entries
+# or branch commits; ref-pinning for those is a separate, deferred mechanism).
+#
+# Mechanism (all stdlib/subprocess, offline, READ-ONLY to working state): a TEMPORARY GIT_INDEX_FILE in a
+# throwaway dir OUTSIDE the repo, seeded by COPYING the real index (so staged content is the baseline);
+# `git add --all` into that temp index overlays tracked-modified and UNTRACKED content (ignored excluded);
+# `git write-tree` (temp index) -> a tree; `git commit-tree <tree> [-p HEAD]` -> a snapshot commit; then
+# `git update-ref refs/aiqt-recovery/<utc-ts>-<pid> <sha>` protects it from GC. This writes ONLY git objects
+# and one private ref: it NEVER touches the real index, worktree, HEAD, or any branch, and the ref is
+# invisible to status/branch/log (the selftest asserts the real status/index/HEAD are unchanged). One JSONL
+# line per snapshot is appended to a per-user ledger OUTSIDE the repo (so a `git clean` inside the repo can
+# never destroy it). FAIL POSTURE: when a snapshot is warranted but cannot be made (probe/write error, over
+# the size cap, corrupt/detached repo) the recovery layer NEVER lets that become a silent allow of a
+# not-provably-clean discard - a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is
+# left as-is with the failure surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what
+# the probe cannot see (content hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore),
+# nor ignored files (git add --all excludes them), so a discard of that content is not recoverable here.
+_SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
+_RECOVERY_REF_NS = "refs/aiqt-recovery"
+# Skip (and fail to ASK) rather than snapshot an enormous working tree: a changed+untracked estimate over
+# this many bytes is treated as a snapshot failure, so the guard never tries to seal a multi-gigabyte tree.
+_RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
+# The per-user ledger path components under the XDG state dir. ALWAYS outside any repo.
+_RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
+
+
+def _recovery_git(repo, args, env_extra=None, timeout=10):
+    """Run a git subcommand against repo and return the CompletedProcess. The recovery layer is READ-ONLY
+    to working state: across all of its git calls it writes ONLY objects and one private ref, never the
+    real index (it uses a TEMP GIT_INDEX_FILE), the worktree, HEAD, or a branch. Raises
+    subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
+    snapshot failure. offline, bounded by `timeout`."""
+    cmd = ["git", "-C", repo] + list(args)
+    env = None
+    if env_extra:
+        env = dict(os.environ)
+        env.update(env_extra)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def _recovery_status_entries(repo):
+    """(classes, total_bytes) from a read-only, config-forced porcelain probe of repo: `classes` is the
+    set of covered classes among {'staged','tracked','untracked'} across every changed/untracked entry,
+    and `total_bytes` is the summed on-disk size of those paths (a size-cap estimate; a missing path, e.g.
+    a deletion, contributes 0). Parses the NUL-delimited `--porcelain -z` form, consuming the extra origin
+    field of a rename/copy record. Raises subprocess.SubprocessError / OSError on a probe failure."""
+    result = _recovery_git(
+        repo, ["-c", "status.showUntrackedFiles=all", "status", "--porcelain",
+               "--untracked-files=all", "-z"], timeout=5)
+    if result.returncode != 0:
+        raise subprocess.SubprocessError("status probe returned {}".format(result.returncode))
+    classes = set()
+    total = 0
+    fields = result.stdout.split("\0")
+    i, n = 0, len(fields)
+    while i < n:
+        rec = fields[i]
+        i += 1
+        if not rec or len(rec) < 3:
+            continue
+        xy, path = rec[:2], rec[3:]
+        # A rename/copy record (X in R/C) carries its ORIGIN path as the next NUL field: consume it.
+        if xy and xy[0] in ("R", "C") and i < n:
+            i += 1
+        if xy == "??":
+            classes.add("untracked")
+        else:
+            if xy[0] not in (" ", "?"):
+                classes.add("staged")
+            if xy[1] not in (" ", "?"):
+                classes.add("tracked")
+        try:
+            full = path if os.path.isabs(path) else os.path.join(repo, path)
+            total += os.path.getsize(full)
+        except OSError:
+            pass  # a deleted or unreadable path contributes nothing to the size estimate
+    return classes, total
+
+
+def _take_snapshot(repo, verb):
+    """Take an INERT git-DB snapshot of the working tree (tracked-modified + staged + untracked; ignored
+    excluded) via a TEMPORARY GIT_INDEX_FILE outside the repo, protected by a private
+    refs/aiqt-recovery/<utc-ts>-<pid> ref. Writes ONLY git objects and that one ref; the real index,
+    worktree, HEAD, and every branch are untouched. Returns ('ok', info) with info =
+    {ref, sha, classes, restore}, or ('fail', reason)."""
+    try:
+        classes, total = _recovery_status_entries(repo)
+    except (subprocess.SubprocessError, OSError) as exc:
+        return ("fail", "the working-tree status probe failed ({})".format(exc))
+    if total > _RECOVERY_SIZE_CAP:
+        return ("fail", "the working tree exceeds the {} MiB recovery snapshot size cap"
+                        .format(_RECOVERY_SIZE_CAP // (1024 * 1024)))
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="aiqt-recovery-")  # OUTSIDE the repo, in the system temp dir
+        tmp_index = os.path.join(tmpdir, "index")
+        # Seed the temp index from the REAL index (so staged content is the baseline). git add --all then
+        # overlays the worktree (tracked-modified) and untracked files; ignored files are excluded.
+        real_index = _recovery_git(
+            repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5).stdout.strip()
+        if real_index and os.path.exists(real_index):
+            shutil.copyfile(real_index, tmp_index)  # else: git creates a fresh temp index on add --all
+        env = {"GIT_INDEX_FILE": tmp_index}
+        if _recovery_git(repo, ["add", "--all"], env_extra=env, timeout=20).returncode != 0:
+            return ("fail", "git add --all into the temp index failed")
+        wt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
+        if wt.returncode != 0 or not wt.stdout.strip():
+            return ("fail", "git write-tree (temp index) failed")
+        tree = wt.stdout.strip()
+        head = _recovery_git(repo, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=5)
+        parent = head.stdout.strip() if head.returncode == 0 else ""
+        commit_args = ["commit-tree", tree]
+        if parent:
+            commit_args += ["-p", parent]  # parent HEAD when present; an unborn HEAD makes a rootless snapshot
+        commit_args += ["-m", "aiqt-guardrails recovery snapshot before git {}".format(verb)]
+        ct = _recovery_git(repo, commit_args, timeout=10)
+        if ct.returncode != 0 or not ct.stdout.strip():
+            return ("fail", "git commit-tree failed")
+        sha = ct.stdout.strip()
+        # Microsecond precision plus the pid keeps the ref name unique even for several snapshots within
+        # the same second in the same process, so no two snapshots ever collide onto one ref.
+        ref = "{}/{}-{}".format(
+            _RECOVERY_REF_NS,
+            datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"), os.getpid())
+        if _recovery_git(repo, ["update-ref", ref, sha], timeout=5).returncode != 0:
+            return ("fail", "git update-ref for the recovery ref failed")
+    except (subprocess.SubprocessError, OSError) as exc:
+        return ("fail", "the snapshot could not be created ({})".format(exc))
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    return ("ok", {"ref": ref, "sha": sha, "classes": sorted(classes),
+                   "restore": "git checkout {} -- :/".format(ref)})
+
+
+def _recovery_ledger_path():
+    """The per-user ledger path OUTSIDE any repo: $XDG_STATE_HOME/aiqt-guardrails/recovery.jsonl, or
+    ~/.local/state/aiqt-guardrails/recovery.jsonl when XDG_STATE_HOME is unset. None when neither
+    XDG_STATE_HOME nor HOME resolves (no per-user location to write to)."""
+    base = os.environ.get("XDG_STATE_HOME")
+    if not base:
+        home = os.environ.get("HOME")
+        if not home:
+            return None
+        base = os.path.join(home, ".local", "state")
+    return os.path.join(base, *_RECOVERY_LEDGER_PARTS)
+
+
+def _write_recovery_ledger(repo, verb, info):
+    """Append ONE JSONL record for a snapshot to the per-user ledger. Records ONLY: utc timestamp, repo
+    path, the triggering git VERB (never the raw command or file contents, for privacy), the recovery ref,
+    the snapshot sha, the covered classes, and the exact restore command. Best-effort: a write failure is
+    swallowed (the ref itself is the recovery point; the ledger is a convenience trace read later), so a
+    ledger fault never changes the guard's decision. Returns True on a successful write, else False."""
+    path = _recovery_ledger_path()
+    if not path:
+        return False
+    record = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "repo": repo, "verb": verb, "ref": info["ref"], "sha": info["sha"],
+              "classes": info["classes"], "restore": info["restore"]}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def _record_recovery(repo, verb):
+    """Take a recovery snapshot and, on success, append the ledger (best-effort). Returns ('ok', info) or
+    ('fail', reason). Called ONLY when the worktree is resolvable to the session cwd and the tree is NOT
+    provably clean, so a snapshot is genuinely warranted."""
+    result = _take_snapshot(repo, verb)
+    if result[0] == "ok":
+        _write_recovery_ledger(repo, verb, result[1])
+    return result
+
+
+def _recovery_pointer(info):
+    """A one-line human pointer to a saved snapshot for an ASK/DENY reason. Says a snapshot was SAVED, not
+    that work was discarded (PreToolUse cannot know the command ran)."""
+    covered = ", ".join(info["classes"]) if info["classes"] else "the working tree"
+    return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}', or put it on "
+            "an isolated branch with 'git switch -c aiqt-recover-<id> {}'.".format(
+                covered, info["ref"], info["restore"], info["ref"]))
+
+
+def _ask_with_recovery(kind, detail, snap):
+    """An ASK whose reason folds in the recovery outcome: a restore pointer on a successful snapshot, or
+    the failure surfaced (decision stays ASK) on a snapshot failure. snap is None (no snapshot warranted),
+    ('ok', info), or ('fail', reason)."""
+    reason, banner = _discard_ask_reason(kind, detail)
+    if snap is not None and snap[0] == "ok":
+        reason = reason + " " + _recovery_pointer(snap[1])
+    elif snap is not None and snap[0] == "fail":
+        reason = reason + (" NOTE: no pre-command recovery snapshot could be created ({}), so this "
+                           "discard would not be recoverable by this guard.".format(snap[1]))
+    return _ask(reason, banner)
+
+
+def _deny_with_recovery(kind, snap):
+    """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
+    mirroring _ask_with_recovery."""
+    code, obj, err = _discard_deny(kind)
+    if snap is not None and snap[0] == "ok":
+        obj["hookSpecificOutput"]["permissionDecisionReason"] += " " + _recovery_pointer(snap[1])
+    elif snap is not None and snap[0] == "fail":
+        obj["hookSpecificOutput"]["permissionDecisionReason"] += (
+            " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1]))
+    return (code, obj, err)
+
+
 def git_discard(data):
     """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "ask unless PRISTINE
     and provably clean" guard (EN-6). For a command that names any recognized lossy git verb (checkout/
@@ -1242,8 +1473,20 @@ def git_discard(data):
     option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
     probe, or a softer/index-only discard. No lossy command is ever silently ALLOWED unless it is a pristine
     bare git on a provably-clean tree - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
-    (a non-git command, or no recognized lossy verb). The one probe kept (git status --porcelain, config-
-    forced to report untracked) is read-only and offline; the guard never mutates the repo."""
+    (a non-git command, or no recognized lossy verb). The status probe (git status --porcelain, config-forced
+    to report untracked) is read-only and offline.
+
+    SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
+    decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
+    resolve to the session cwd AND whose tree is NOT provably clean, it takes an INERT recovery snapshot of
+    the uncommitted work (a private refs/aiqt-recovery/<utc-ts>-<pid> ref over a temp-index tree, git objects
+    + one ref only) and appends one line to an EXTERNAL per-user ledger, on the ALLOW and ASK paths alike (the
+    hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
+    branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. See the recovery
+    block comment above _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see
+    (assume-unchanged/skip-worktree marks, submodule.<name>.ignore) or ignored files (git add --all excludes
+    them), so a discard of that content is not recoverable here."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -1305,33 +1548,61 @@ def git_discard(data):
         return _ask(*_discard_ask_reason(
             "a git inline alias ('-c alias.<name>=...')",
             "may expand to a work-losing verb this guard cannot resolve"))
+
+    # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. When it
+    # cannot be resolved to the session cwd (no cwd, or a -C/--git-dir/--work-tree/-c global option or a
+    # GIT_DIR/GIT_WORK_TREE env assignment could redirect it), no snapshot is possible and a lossy form ASKS.
+    cwd = data.get("cwd")
+    base = cwd if isinstance(cwd, str) and cwd else None
+    resolvable = base is not None and _segment_dir_simple(pristine)
+    snapshottable = sub in _SNAPSHOTTABLE_VERBS
+
+    # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
+    # (checkout/switch/restore/reset/rm/clean), when the worktree is resolvable and the tree is NOT provably
+    # clean, snapshot BEFORE returning ANY decision. Decision-INDEPENDENT (it does not trust the
+    # form-classifier), so an asked-then-approved OR a wrongly-allowed (mis-parse) discard still has a
+    # recovery point; the hook fires once with no post-approval callback. Skipped on a provably-clean tree
+    # (nothing to lose) and for stash/branch (a worktree snapshot cannot capture their asset).
+    clean = _tree_is_clean(base) if (resolvable and snapshottable) else None
+    snap = None
+    if resolvable and snapshottable and clean is not True:  # dirty or probe-uncertain: not provably clean
+        snap = _record_recovery(base, sub)
+
     if role == "allow":
-        return _allow()  # a genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, ...)
+        # A genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, plain switch, clean
+        # dry-run, stash pop). FAIL POSTURE: if a snapshot was warranted (a not-provably-clean snapshottable
+        # tree, a defensive backstop against a mis-parse) and it FAILED, downgrade the allow to ASK - never
+        # silent-allow a not-provably-clean discard with no recovery point. Otherwise ALLOW stands.
+        if snap is not None and snap[0] == "fail":
+            return _ask(*_discard_ask_reason(
+                kind or "a git work-losing verb",
+                "would run on a working tree that is not provably clean and no recovery point could be "
+                "created ({}), so this guard will not silently allow it".format(snap[1])))
+        return _allow()
+
     if role == "ask":
         # A softer discard (a real clean of untracked files, stash drop/clear, branch -D): ASK regardless of
-        # the tracked-tree probe, which does not see the asset these verbs destroy.
-        return _ask(*_discard_ask_reason(kind, "cannot be proven safe offline"))
+        # the tracked-tree probe, which does not see the asset these verbs destroy. A clean may have been
+        # snapshotted above (git add --all captures untracked); stash/branch are not snapshottable.
+        return _ask_with_recovery(kind, "cannot be proven safe offline", snap)
 
-    # A scoped or clobber form: gate on the clean probe, which must resolve to the session worktree.
-    cwd = data.get("cwd")
-    base = cwd if isinstance(cwd, str) and cwd else None  # the session dir, or None when absent
-    if base is None or not _segment_dir_simple(pristine):
-        # No session cwd, or a -C/--git-dir/--work-tree/-c global option or a GIT_DIR/GIT_WORK_TREE env
-        # assignment could redirect the worktree: the probe cannot be trusted -> ASK, never allow/deny.
+    # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
+    # session worktree.
+    if not resolvable:
         return _ask(*_discard_ask_reason(
             kind, "targets a working tree this guard cannot resolve to the session directory with "
                   "certainty, so it cannot prove the tree clean"))
-    clean = _tree_is_clean(base)
     if clean is True:
-        return _allow()  # pristine bare lossy verb on a PROVABLY CLEAN tree: nothing to lose
+        return _allow()  # pristine bare lossy verb on a PROVABLY CLEAN tree: nothing to lose, no snapshot
     if clean is None:
-        return _ask(*_discard_ask_reason(
+        # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
+        return _ask_with_recovery(
             kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
-                  "the working tree clean"))
+                  "the working tree clean", snap)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
-        return _discard_deny(kind)  # a confirmed whole-tree loss
-    return _ask(*_discard_ask_reason(kind, "may discard uncommitted changes in the working tree"))
+        return _deny_with_recovery(kind, snap)  # a confirmed whole-tree loss, still recoverable if approved
+    return _ask_with_recovery(kind, "may discard uncommitted changes in the working tree", snap)
 
 
 # --- dispatcher ---------------------------------------------------------------------------------------
