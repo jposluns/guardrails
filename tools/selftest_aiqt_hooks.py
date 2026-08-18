@@ -1114,6 +1114,101 @@ def main():
             failures.append("(rec-path-within-root-self) '/' must be judged within '/'")
         if aiqt_hooks._path_is_within(str(repo), "/") is not True:
             failures.append("(rec-path-within-root-sub) a real subpath must be judged within the root '/'")
+
+        # (rec-cfgparams) Fix A: an ambient GIT_CONFIG_PARAMETERS (the `git -c` propagation channel,
+        # independent of GIT_CONFIG_COUNT) injecting core.excludesFile at a file that lists the untracked
+        # name must NOT fool the probe into reading the dirty tree as clean. GIT_CONFIG_PARAMETERS is in
+        # _GIT_ISOLATE_ENV, so the scrub drops it and the untracked file still reads dirty (False).
+        rec_cp = _init_repo(tmp / "rec-cfgparams")
+        (rec_cp / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        excludes_file = tmp / "cp-excludes"
+        excludes_file.write_text("untracked.txt\n", encoding="utf-8")
+        os.environ["GIT_CONFIG_PARAMETERS"] = "'core.excludesFile={}'".format(excludes_file)
+        try:
+            probe_cp = aiqt_hooks._tree_is_clean(str(rec_cp))
+        finally:
+            os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+        if probe_cp is not False:
+            failures.append("(rec-cfgparams) with an ambient GIT_CONFIG_PARAMETERS injecting "
+                            "core.excludesFile that hides the untracked file, the probe must still read the "
+                            "REAL dirty repo (False), got {}".format(probe_cp))
+
+        # (rec-gittrace) Fix D: git treats an absolute GIT_TRACE value as a FILE PATH and APPENDS trace
+        # output to it, so an ambient GIT_TRACE would make even the read-only probe and the recovery git
+        # calls WRITE a file (possibly inside the protected worktree). _isolate_git_env scrubs every
+        # GIT_TRACE-prefixed var, so after a probe and a snapshot the trace target is NEVER created.
+        rec_tr = _init_repo(tmp / "rec-gittrace")
+        (rec_tr / "file.txt").write_text("committed line\ntrace dirty\n", encoding="utf-8")
+        trace_target = tmp / "git-trace-out.log"
+        trace2_target = Path(str(trace_target) + ".t2")
+        os.environ["GIT_TRACE"] = str(trace_target)
+        os.environ["GIT_TRACE2"] = str(trace2_target)
+        try:
+            _ = aiqt_hooks._tree_is_clean(str(rec_tr))
+            got_tr = _decision(handler, "git checkout -- file.txt", cwd=str(rec_tr))
+        finally:
+            os.environ.pop("GIT_TRACE", None)
+            os.environ.pop("GIT_TRACE2", None)
+        if got_tr != "ask":
+            failures.append("(rec-gittrace) dirty-tree ASK with an ambient GIT_TRACE: expected ask, got {}"
+                            .format(got_tr))
+        if trace_target.exists() or trace2_target.exists():
+            failures.append("(rec-gittrace-file) an ambient GIT_TRACE/GIT_TRACE2 trace file was written; a "
+                            "real-state call did not scrub the GIT_TRACE family")
+        if not _recovery_refs(rec_tr):
+            failures.append("(rec-gittrace-snap) expected a recovery ref on the dirty tree ASK")
+
+        # (rec-ledger-nonfatal) Fix B: the best-effort ledger must NEVER flip a SUCCESSFUL snapshot to a
+        # failure. Monkeypatch _write_recovery_ledger to raise a non-OSError (a ValueError) AFTER the
+        # snapshot succeeds; _record_recovery must still return ('ok', info) with the ref present (the ledger
+        # write is outside the snapshot-fail boundary and separately guarded).
+        rec_lnf = _init_repo(tmp / "rec-ledger-nonfatal")
+        (rec_lnf / "file.txt").write_text("committed line\nledger nonfatal\n", encoding="utf-8")
+        _orig_wrl = aiqt_hooks._write_recovery_ledger
+
+        def _raise_ledger(*_a, **_k):
+            raise ValueError("forced non-OSError ledger fault (self-test)")
+
+        aiqt_hooks._write_recovery_ledger = _raise_ledger
+        try:
+            res_lnf = aiqt_hooks._record_recovery(str(rec_lnf), "checkout")
+        finally:
+            aiqt_hooks._write_recovery_ledger = _orig_wrl
+        if not (isinstance(res_lnf, tuple) and res_lnf[0] == "ok"):
+            failures.append("(rec-ledger-nonfatal) a non-OSError from the ledger write after a SUCCESSFUL "
+                            "snapshot must NOT flip the result; expected ('ok', info), got {!r}"
+                            .format(res_lnf))
+        if not _recovery_refs(rec_lnf):
+            failures.append("(rec-ledger-nonfatal-snap) the successful snapshot ref must be present despite a "
+                            "ledger fault")
+
+        # (rec-c6-subst/rec-c6-wrap) Fix C: a command with a VISIBLE non-snappable verb (stash drop) AND a
+        # HIDDEN snappable verb (checkout -f / reset --hard) in the raw string must take a recovery snapshot,
+        # so an approved hidden reset/checkout still has a recovery point. The predicate now snapshots when
+        # the RAW command contains a snappable verb, not only when a visible sub is snappable.
+        rec_c6a = _init_repo(tmp / "rec-c6-subst")
+        (rec_c6a / "file.txt").write_text("committed line\nc6 subst\n", encoding="utf-8")
+        expect("(rec-c6-subst) stash drop + hidden checkout -f asks",
+               "git stash drop && $(echo git checkout -f)", "ask", cwd=str(rec_c6a))
+        if not _recovery_refs(rec_c6a):
+            failures.append("(rec-c6-subst-snap) expected a recovery ref: a hidden snappable verb (checkout "
+                            "-f) in the raw string must snapshot even behind a visible stash drop")
+        rec_c6b = _init_repo(tmp / "rec-c6-wrap")
+        (rec_c6b / "file.txt").write_text("committed line\nc6 wrap\n", encoding="utf-8")
+        expect("(rec-c6-wrap) stash drop + hidden wrapped reset --hard asks",
+               "git stash drop; sudo git reset --hard", "ask", cwd=str(rec_c6b))
+        if not _recovery_refs(rec_c6b):
+            failures.append("(rec-c6-wrap-snap) expected a recovery ref: a hidden snappable verb (reset "
+                            "--hard) in the raw string must snapshot even behind a visible stash drop")
+        # C6 intent preserved: a command whose only lossy content is stash with NO snappable verb in the raw
+        # string still takes NO snapshot (a worktree snapshot cannot capture a stash entry).
+        rec_c6c = _init_repo(tmp / "rec-c6-nosnap")
+        (rec_c6c / "file.txt").write_text("committed line\nc6 nosnap\n", encoding="utf-8")
+        expect("(rec-c6-nosnap) stash drop; echo hi asks", "git stash drop; echo hi", "ask",
+               cwd=str(rec_c6c))
+        if _recovery_refs(rec_c6c):
+            failures.append("(rec-c6-nosnap-snap) expected NO recovery ref: stash drop with no snappable verb "
+                            "in the raw string must not snapshot")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
