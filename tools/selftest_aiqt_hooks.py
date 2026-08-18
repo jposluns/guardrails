@@ -7,19 +7,25 @@ handler module directly (never the generated plugin copy) and drives each handle
 payload, asserting allow vs ask vs deny by the structured decision the handler returns, not by grepping
 output.
 
-The git_discard control is the EN-6 COARSE-ASK guard (GD-37) with THREE outcomes (allow/ask/deny), so
-this suite distinguishes all three. The coarse rule: for a recognized lossy verb, ASK unless the whole
-tree is PROVABLY CLEAN (or the opt-out is set) in which case ALLOW; a whole-tree-clobbering verb (reset
---hard, switch --force) on a confirmed-dirty tree DENIES. GD-37 REMOVED the earlier cut's prove-safe fast
-paths (path-disjoint, per-path scoped probes, git-faithful option/dir modelling), so the forms those
-paths used to prove SAFE on a dirty tree (a disjoint clean path, a ref-vs-pathspec disambiguation, a
-resolved -C/cd/--work-tree dir, a scoped porcelain column) now ASK or DENY instead - this suite asserts
-that, and proves every previously-fooled under-block edge (F-60/F-62/F-64/F-65/F-66) now ASKS rather than
-silently allowing. The clean/dirty probe runs in the payload cwd, so the probing cases point cwd at a
-hermetic throwaway repo (git init, a local identity, committed files) built under a temp dir and dirtied;
-the temp tree is removed in a finally. A `git -C <dir>`/`cd`/env form is deliberately NOT probed (the
-worktree cannot be resolved with certainty) and ASKS - the coarse replacement for the removed dir
-modelling - which several cases below assert.
+The git_discard control is the EN-6 GENUINELY-COARSE "ask unless provably clean" guard (GD-41 re-hardening
+of the GD-37 cut) with THREE outcomes (allow/ask/deny), so this suite distinguishes all three. The coarse
+rule: for a recognized lossy verb, ASK unless BOTH the command is a SINGLE SIMPLE `git <verb>` invocation
+AND the whole tree is PROVABLY CLEAN (or the leading opt-out is set), in which case ALLOW; a single simple
+whole-tree-clobbering verb (reset --hard, switch --force) on a confirmed-dirty tree DENIES. GD-41 closes
+eight tri-family QA silent-allow blockers, and this suite proves each now ASKS/DENIES rather than allowing:
+(1) an untracked-only-dirty tree counts as dirty (reset --hard DENIES, clean -f ASKS); (2) a compound
+command whose earlier segment dirties the tree (printf x >> f && git reset --hard) ASKS, because the probe
+cannot see the future write; (3) an operand after `--` (git clean -f -- -nasty, git rm -f -- --cached) is a
+pathspec, not a safe-looking option; (4) the opt-out is honoured only LEADING the git command itself, not
+buried nor leading a non-git segment; (5) abbreviated destructive options (--for, --patc, --del, --dis,
+--har) are recognized by prefix; (6) index-only forms (restore --staged, mixed/path reset, rm --cached)
+route through the probe; (7) a forced branch-create (checkout -f -b) no longer early-allows; (8) a shell
+wrapper (command/exec/!/builtin/env/time) hiding the git verb ASKS. The clean/dirty probe runs in the
+payload cwd only for a single simple resolvable git command, so the probing cases point cwd at a hermetic
+throwaway repo (git init, a local identity, committed files) built under a temp dir and dirtied in three
+ways (worktree-dirty, untracked-only, staged-only); the temp tree is removed in a finally. A `git -C
+<dir>`/`cd`/env/compound/wrapped form is deliberately NOT probed (not single-simple-resolvable) and ASKS,
+which many cases below assert.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -149,15 +155,19 @@ def main():
 
         # === restore =========================================================================
         expect("(re-a) restore dirty asks", "git restore file.txt", "ask", cwd=rp)
-        expect("(re-b) restore --staged pure-unstage allows", "git restore --staged file.txt", "allow",
-               cwd=rp)
+        # Blocker 6: restore --staged is no longer an unconditional allow; on a not-provably-clean tree it
+        # routes through the probe and ASKS (a --staged unstage can erase staged-only content).
+        expect("(re-b) restore --staged on dirty tree asks (blocker 6)", "git restore --staged file.txt",
+               "ask", cwd=rp)
 
         # === reset ===========================================================================
         expect("(rs-a) reset --hard dirty denies (whole-tree clobber)", "git reset --hard", "deny",
                cwd=rp)
         expect("(rs-b) reset --merge dirty asks", "git reset --merge", "ask", cwd=rp)
-        expect("(rs-c) reset --mixed allows (keeps worktree)", "git reset --mixed", "allow", cwd=rp)
-        expect("(rs-d) reset -- <path> allows (no worktree clobber)", "git reset -- clean.txt", "allow",
+        # Blocker 6: a --mixed or path reset changes the index and can erase staged-only content, so it is
+        # no longer an unconditional allow; it routes through the probe and ASKS on a not-provably-clean tree.
+        expect("(rs-c) reset --mixed on dirty tree asks (blocker 6)", "git reset --mixed", "ask", cwd=rp)
+        expect("(rs-d) reset -- <path> on dirty tree asks (blocker 6)", "git reset -- clean.txt", "ask",
                cwd=rp)
         # Abbreviated modes: '--h' == '--hard' (clobber -> DENY), an ambiguous bare '--m' errs to merge
         # (scoped -> ASK). The old option parser could be fooled by abbreviations into a silent allow.
@@ -170,7 +180,10 @@ def main():
         # === rm ==============================================================================
         expect("(rm-a) rm dirty tracked asks (was over-blocked to DENY, F-66.6)", "git rm file.txt",
                "ask", cwd=rp)
-        expect("(rm-b) rm --cached pure-unstage allows", "git rm --cached file.txt", "allow", cwd=rp)
+        # Blocker 6: rm --cached is no longer an unconditional allow; it can erase staged-only content, so
+        # it routes through the probe and ASKS on a not-provably-clean tree.
+        expect("(rm-b) rm --cached on dirty tree asks (blocker 6)", "git rm --cached file.txt", "ask",
+               cwd=rp)
         expect("(rm-c) rm clean-path on dirty tree asks", "git rm clean.txt", "ask", cwd=rp)
 
         # === clean, stash, branch: unconditional asks (no per-verb probe) ====================
@@ -235,18 +248,94 @@ def main():
         expect("(dir-h) GIT_DIR= env not-certain asks (F-62.3/F-66.4)", "GIT_DIR=.git git reset --hard",
                "ask", cwd=rp)
 
-        # === the opt-out is a LEADING assignment only (F-65.F3) ==============================
-        # The same string buried in an argument (echo) does NOT disable the guard, so the trailing
-        # reset --hard still DENIES on the dirty tree.
+        # === the opt-out is a LEADING assignment on the git command only (F-65.F3, blocker 4) =
+        # The same string buried in an argument (echo) does NOT disable the guard; the command is compound,
+        # so the trailing reset --hard ASKS (a compound cannot be probed clean, blocker 2) rather than allow.
         expect("(opt-a) buried GUARDRAIL_ALLOW_DISCARD in an arg does not opt out (F-65.F3)",
-               "echo GUARDRAIL_ALLOW_DISCARD=1 ; git reset --hard", "deny", cwd=rp)
-        # A genuine leading opt-out prefix still ALLOWs the same reset.
+               "echo GUARDRAIL_ALLOW_DISCARD=1 ; git reset --hard", "ask", cwd=rp)
+        # Blocker 4: an opt-out LEADING a non-git segment does not opt out the later git command; the
+        # command is compound, so the reset --hard ASKS, never a silent allow.
+        expect("(opt-a2) opt-out leading a non-git segment does not opt out the reset (blocker 4)",
+               "GUARDRAIL_ALLOW_DISCARD=1 true ; git reset --hard", "ask", cwd=rp)
+        # A genuine leading opt-out prefix on the git command itself still ALLOWs the same reset.
         expect("(opt-b) leading GUARDRAIL_ALLOW_DISCARD prefix opts out",
                "GUARDRAIL_ALLOW_DISCARD=1 git reset --hard", "allow", cwd=rp)
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file asks on dirty tree",
                "git restore --pathspec-from-file=paths.txt", "ask", cwd=rp)
+
+        # === GD-41 blockers: each silent-allow blocker now ASKS or DENIES, never allows =======
+        # Blocker 1: an UNTRACKED-ONLY-dirty tree is NOT provably clean (the earlier cut skipped '??' and
+        # silently allowed a force discard). Build a repo dirtied ONLY by an untracked file.
+        untracked_repo = _init_repo(tmp / "untrackedrepo")
+        (untracked_repo / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        ru = str(untracked_repo)
+        if aiqt_hooks._tree_is_clean(ru) is not False:
+            failures.append("(b1-probe) _tree_is_clean on untracked-only tree: expected False")
+        expect("(b1-a) reset --hard on untracked-only tree denies", "git reset --hard", "deny", cwd=ru)
+        expect("(b1-b) clean -f on untracked-only tree asks", "git clean -f", "ask", cwd=ru)
+        expect("(b1-c) checkout other on untracked-only tree asks (not allow)", "git checkout other",
+               "ask", cwd=ru)
+
+        # Blocker 2: a COMPOUND command whose earlier segment dirties the tree cannot be probed clean; on a
+        # CLEAN repo the trailing lossy verb must ASK, not be allowed by a stale pre-write probe.
+        compound_repo = _init_repo(tmp / "compoundrepo")
+        rco = str(compound_repo)
+        expect("(b2-a) printf >> f && reset --hard asks on clean tree (blocker 2)",
+               "printf x >> file.txt && git reset --hard", "ask", cwd=rco)
+        expect("(b2-b) stash apply && reset --hard asks on clean tree (blocker 2)",
+               "git stash apply && git reset --hard", "ask", cwd=rco)
+
+        # Blocker 3: an operand after '--' is a pathspec, never a safe-looking option, so a force clean/rm
+        # is not allowed by misreading it. (On the dirty repo: ASK, not allow.)
+        expect("(b3-a) clean -f -- -nasty asks (not read as -n dry-run)", "git clean -f -- -nasty", "ask",
+               cwd=rp)
+        expect("(b3-b) rm -f -- --cached asks (not read as --cached unstage)", "git rm -f -- --cached",
+               "ask", cwd=rp)
+
+        # Blocker 5: abbreviated destructive options are recognized by prefix, so they do not slip through
+        # as inert tokens on the dirty tree.
+        expect("(b5-a) checkout --for (abbrev --force) denies", "git checkout --for", "deny", cwd=rp)
+        expect("(b5-b) checkout --patc (abbrev --patch) asks", "git checkout --patc", "ask", cwd=rp)
+        expect("(b5-c) switch --dis (abbrev --discard-changes) denies", "git switch --dis other", "deny",
+               cwd=rp)
+        expect("(b5-d) branch --del --force (abbrev) asks", "git branch --del --force other", "ask",
+               cwd=rp)
+
+        # Blocker 6: an index-only change on a STAGED-ONLY-dirty tree (worktree matches index, index differs
+        # from HEAD) ASKS, because the probe sees the staged change; on a CLEAN tree it allows.
+        staged_repo = _init_repo(tmp / "stagedrepo")
+        (staged_repo / "file.txt").write_text("committed line\nstaged fix\n", encoding="utf-8")
+        _git(staged_repo, "add", "file.txt")  # staged only; worktree == index
+        rst = str(staged_repo)
+        expect("(b6-a) restore --staged on staged-only tree asks (blocker 6)",
+               "git restore --staged file.txt", "ask", cwd=rst)
+        expect("(b6-b) reset --mixed on staged-only tree asks (blocker 6)", "git reset --mixed", "ask",
+               cwd=rst)
+        expect("(b6-c) rm --cached on staged-only tree asks (blocker 6)", "git rm --cached file.txt",
+               "ask", cwd=rst)
+        # On a genuinely clean tree the same index-only forms allow (nothing staged to lose).
+        clean_index = _init_repo(tmp / "cleanindexrepo")
+        rci = str(clean_index)
+        expect("(b6-d) restore --staged on clean tree allows", "git restore --staged file.txt", "allow",
+               cwd=rci)
+        expect("(b6-e) rm --cached on clean tree allows", "git rm --cached file.txt", "allow", cwd=rci)
+
+        # Blocker 7: a FORCED branch-create (checkout -f -b) no longer early-allows; on the dirty tree it
+        # ASKS, and an UNforced branch-create still allows.
+        expect("(b7-a) checkout -f -b new on dirty tree asks (not early-allow)", "git checkout -f -b new",
+               "ask", cwd=rp)
+        expect("(b7-b) checkout -b new on clean tree allows", "git checkout -b new", "allow", cwd=rci)
+
+        # Blocker 8: a shell wrapper hiding the git verb ASKS (the verb is not at the segment command-word
+        # position, so it must not fall open). A wrapper over a non-lossy git command still allows.
+        for label, cmd in (("command", "command git reset --hard"), ("exec", "exec git reset --hard"),
+                           ("env", "env git reset --hard"), ("bang", "! git reset --hard"),
+                           ("time", "time git reset --hard"), ("builtin", "builtin git reset --hard")):
+            expect("(b8-{}) wrapper hiding git reset --hard asks".format(label), cmd, "ask", cwd=rp)
+        expect("(b8-status) wrapper over a non-lossy git command allows", "command git status", "allow",
+               cwd=rp)
 
         # === malformed / robustness (F-66.7) ================================================
         # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash.
@@ -263,26 +352,35 @@ def main():
         role_cases = [
             (("reset", ["--hard"]), "clobber"),
             (("reset", ["--soft", "--hard"]), "clobber"),
-            (("reset", ["--hard", "--soft"]), "allow"),
+            (("reset", ["--hard", "--soft"]), "allow"),   # last-wins soft: HEAD-only, index+worktree intact
             (("reset", ["--merge"]), "scoped"),
-            (("reset", ["--mixed"]), "allow"),
-            (("reset", []), "allow"),
+            (("reset", ["--mixed"]), "scoped"),           # blocker 6: index-changing, can lose staged-only
+            (("reset", ["--soft"]), "allow"),
+            (("reset", ["--har"]), "clobber"),            # blocker 5: abbreviated --hard
+            (("reset", []), "scoped"),                    # blocker 6: default --mixed changes the index
             (("checkout", ["-b", "new"]), "allow"),
+            (("checkout", ["-f", "-b", "new"]), "scoped"),  # blocker 7: forced branch-create no early-allow
             (("checkout", ["-f", "other"]), "scoped"),   # bare operand: cannot tell ref from path -> ask
             (("checkout", ["-f"]), "clobber"),            # force, no operand -> whole-tree
+            (("checkout", ["--for"]), "clobber"),         # blocker 5: abbreviated --force, no operand
+            (("checkout", ["--patc"]), "scoped"),         # blocker 5: abbreviated --patch
             (("switch", ["--force", "other"]), "clobber"),
+            (("switch", ["--dis", "other"]), "clobber"),  # blocker 5: abbreviated --discard-changes
             (("switch", ["other"]), "allow"),
-            (("restore", ["--staged", "file"]), "allow"),
+            (("restore", ["--staged", "file"]), "scoped"),  # blocker 6: --staged can erase staged-only
             (("restore", ["--staged", "--worktree", "file"]), "scoped"),
             (("restore", ["file"]), "scoped"),
-            (("rm", ["--cached", "file"]), "allow"),
+            (("rm", ["--cached", "file"]), "scoped"),     # blocker 6: --cached can erase staged-only
             (("rm", ["file"]), "scoped"),
+            (("rm", ["-f", "--", "--cached"]), "scoped"),  # blocker 3: --cached after -- is a pathspec
             (("clean", ["-fd"]), "ask"),
             (("clean", ["-nfd"]), "allow"),
             (("clean", ["-d"]), "ask"),
+            (("clean", ["-f", "--", "-nasty"]), "ask"),   # blocker 3: -nasty after -- is not the -n flag
             (("stash", ["drop"]), "ask"),
             (("stash", ["pop"]), "allow"),
             (("branch", ["-D", "x"]), "ask"),
+            (("branch", ["--del", "--force", "x"]), "ask"),  # blocker 5: abbreviated --delete/--force
             (("branch", ["-d", "x"]), "allow"),
         ]
         for (sub, args), want_role in role_cases:
@@ -298,13 +396,17 @@ def main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: git_discard (EN-6 coarse-ask, GD-37) fails open only at the true boundary; "
-          "within scope it ASKS unless the whole tree is PROVABLY CLEAN (then ALLOW) or the leading "
-          "opt-out is set; a whole-tree clobber (reset --hard, switch --force) on a confirmed-dirty tree "
-          "DENIES. The removed prove-safe fast paths no longer fire: a disjoint clean path, a ref-vs-path "
-          "switch, a resolved -C/cd/--work-tree/env dir, and the clean/patch/abbreviation edges all ASK "
-          "(or DENY) rather than silently allow, closing the F-60/F-62/F-64/F-65/F-66 under-block class; "
-          "the leading-only opt-out and the coarse role classifier are asserted too")
+    print("SELF-TEST PASS: git_discard (EN-6 coarse ask-unless-provably-clean, GD-41) fails open only at "
+          "the true boundary; within scope it ASKS unless the command is a SINGLE SIMPLE 'git <verb>' on a "
+          "PROVABLY CLEAN tree (then ALLOW) or the leading opt-out is set; a single simple whole-tree "
+          "clobber (reset --hard, switch --force) on a confirmed-dirty tree DENIES. All eight GD-41 "
+          "silent-allow blockers are proven closed: an untracked-only-dirty tree counts as dirty (1); a "
+          "compound whose earlier segment dirties the tree ASKS (2); a '--' operand is a pathspec, not a "
+          "safe option (3); the opt-out counts only leading the git command (4); abbreviated destructive "
+          "options are prefix-matched (5); index-only forms route through the probe (6); a forced "
+          "branch-create no longer early-allows (7); a wrapper hiding the git verb ASKS (8). The removed "
+          "prove-safe fast paths and the F-60/F-62/F-64/F-65/F-66 under-block edges still ASK/DENY, and "
+          "the coarse role classifier is asserted too")
     return 0
 
 
