@@ -14,7 +14,13 @@ jobs:
     name: Quality gates
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
+      # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
+      # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-python@v5
         with:
@@ -62,6 +68,23 @@ jobs:
 
       - name: Version format and single-source
         run: python3 tools/check_versions.py
+
+      - name: Version monotonicity self-test
+        run: python3 tools/check_version_monotonicity.py --self-test
+
+      # The baseline differs by trigger: a pull_request compares against its target branch
+      # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name), a push compares against HEAD^.
+      # The gate's root-commit NOT APPLICABLE guards the degenerate HEAD^ case on a first push.
+      - name: Version monotonicity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 tools/check_version_monotonicity.py --base "origin/${GITHUB_BASE_REF}"
+          else
+            python3 tools/check_version_monotonicity.py --base "HEAD^"
+          fi
 
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
