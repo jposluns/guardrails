@@ -21,6 +21,16 @@ def _attr(value):        # attribute value (must escape quotes)
     return html.escape(value, quote=True)
 
 
+def _md_text(value):     # markdown link text: neutralize brackets and backslashes so they cannot break the link
+    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _md_href(value):     # markdown link destination: angle-bracket it when it holds spaces or parens
+    if any(ch in value for ch in " ()"):
+        return "<" + value.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>") + ">"
+    return value
+
+
 def render_md(data):
     base = data.get("site_base", "https://aiqt.ai")
     lines = ["# " + data["title"], "", data["note"], ""]
@@ -28,9 +38,8 @@ def render_md(data):
         lines.append("## {}: {}".format(stage["pill_label"], stage["heading"]))
         lines.append("")
         body = stage["body"]
-        if stage.get("link_text"):
-            body += " [{}]({}{})".format(
-                stage["link_text"], base, stage["link_href"])
+        for link in stage.get("links", []):
+            body += " [{}]({})".format(_md_text(link["text"]), _md_href(base + link["href"]))
         lines.append(body)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -42,9 +51,9 @@ def render_site(data):
     for idx, stage in enumerate(data["stage"]):
         style = ' style="margin-bottom:1.1rem"' if idx < last else ""
         para = _text(stage["body"])
-        if stage.get("link_text"):
+        for link in stage.get("links", []):
             para += ' <a href="{}">{}</a>'.format(
-                _attr(stage["link_href"]), _text(stage["link_text"]))
+                _attr(link["href"]), _text(link["text"]))
         cards.append(
             '      <div class="card"{}>\n'
             '        <span class="pill {}">{}</span>\n'
