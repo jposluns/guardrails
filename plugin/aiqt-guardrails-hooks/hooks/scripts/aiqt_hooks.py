@@ -807,6 +807,36 @@ def _checkout_affects_index(pre):
     return False
 
 
+def _restore_flags(pre):
+    """Return (has_staged, has_worktree) for a restore command's pre-'--' tokens, decoding clustered short
+    flags: git reads '-SW' as '-S -W'. The value-taking '-s'/'--source' consumes the rest of its cluster
+    (or the next token) as the source ref, so any letters after an 's' in a cluster are that value, not
+    flags. The long '--staged'/'--worktree' forms are handled directly."""
+    has_staged = has_worktree = False
+    skip_next = False
+    for tok in pre:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--staged":
+            has_staged = True
+        elif tok == "--worktree":
+            has_worktree = True
+        elif tok in ("--source", "-s"):
+            skip_next = True  # the ref is the next token (space form)
+        elif tok.startswith("--"):
+            continue  # some other long option; no space-form value consumed here
+        elif tok.startswith("-") and len(tok) > 1:
+            for ch in tok[1:]:  # decode the short-flag cluster
+                if ch == "S":
+                    has_staged = True
+                elif ch == "W":
+                    has_worktree = True
+                elif ch == "s":
+                    break  # the rest of the cluster is the --source value
+    return has_staged, has_worktree
+
+
 def _discard_shape(tokens):
     """The whole-file discard shape of a git segment (the caller has confirmed the command word is git),
     as a dict {"kind", "paths", "affects_index", "from_file"}, or None when it is not a discard. Option
@@ -840,8 +870,7 @@ def _discard_shape(tokens):
         return {"kind": "checkout", "paths": post,
                 "affects_index": _checkout_affects_index(pre), "from_file": from_file}
     if sub == "restore":
-        has_staged = "--staged" in pre or "-S" in pre
-        has_worktree = "--worktree" in pre or "-W" in pre
+        has_staged, has_worktree = _restore_flags(pre)
         if not ((not has_staged) or has_worktree):
             return None
         from_file = _pathspec_from_file(pre)

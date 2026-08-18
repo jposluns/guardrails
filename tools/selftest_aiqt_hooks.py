@@ -123,8 +123,8 @@ def main():
                "git -C {} checkout HEAD -- file.txt".format(rp), "deny")
 
         # (iv) FIX B: a --pathspec-from-file source is NOT enumerated (the file reader was removed), so
-        # even a path that would lose work falls OPEN (allow), a deliberate seed-sanctioned residual. The
-        # inline '=' form, the bare space form, and the NUL variant all fail open.
+        # even a path that would lose work falls OPEN (allow), a deliberate seed-sanctioned residual. Both
+        # the inline '=' form and the bare space form fail open.
         tracked.write_text("committed line\nuncommitted fix\nmore\n", encoding="utf-8")  # worktree-dirty
         expect("(iv) inline pathspec-from-file allows (fail-open)",
                "git -C {} restore --pathspec-from-file=paths.txt".format(rp), "allow")
@@ -144,6 +144,15 @@ def main():
         _git(repo, "add", "file.txt")  # worktree now matches index (staged-only): worktree column clean
         expect("(viii) restore --source HEAD staged-only allows",
                "git -C {} restore --source HEAD file.txt".format(rp), "allow")
+
+        # (x) FIX 53: a clustered short flag '-SW' is git's '-S -W' (rewrites index AND worktree), so it
+        # affects the index; on the staged-only state that is a loss and it BLOCKS. The long-form
+        # '--staged --worktree' is the same command and must BLOCK identically.
+        _git(repo, "add", "file.txt")  # re-assert staged-only in case a prior expect re-dirtied the tree
+        expect("(x) restore -SW clustered staged-only blocks",
+               "git -C {} restore -SW file.txt".format(rp), "deny")
+        expect("(x) restore --staged --worktree staged-only blocks",
+               "git -C {} restore --staged --worktree file.txt".format(rp), "deny")
 
         # (ix) FIX C: option parsing is scoped before '--', so a literal pathspec named
         # '--pathspec-from-file=foo' AFTER '--' is a path, not an option: from_file is False and it is
