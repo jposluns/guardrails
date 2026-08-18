@@ -803,25 +803,23 @@ def absolute_paths(data):
 # discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
 # marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
 # An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
-_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.+)$")
+# The value capture is `(.*)` (matches an EMPTY value, `GUARDRAIL_ALLOW_DISCARD=`), consulted with fullmatch, so
+# an exact leading assignment with an empty value updates the last-wins value to '' (bash: effective empty =
+# falsy), and `GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git ...` does NOT opt out (the empty final
+# assignment wins). A `(.+)` capture would ignore the empty final assignment and wrongly honour the earlier 1.
+_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
 _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
 # Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote). We cannot
 # segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
 # always-lossy verbs, or a 'branch' paired with a delete flag ('-D', a clustered '-...D', or '--delete').
 # A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
-# commit_identity fall back to a conservative raw scan on a parse failure. A truthy opt-out still ALLOWs.
+# commit_identity fall back to a conservative raw scan on a parse failure. The opt-out is NOT consulted on
+# this path: the guard cannot parse the command, so it cannot trust an opt-out-looking prefix inside it; an
+# unparseable in-scope command ALWAYS ASKS. The opt-out is honoured ONLY on a PARSEABLE pristine bare command.
 _RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
 _RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
 _RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
 _RAW_BRANCH_DELETE_RE = re.compile(r"(?:(?<![\w-])-[A-Za-z]*D)|(?:--delete\b)")
-# The opt-out is honoured only as a LEADING assignment on the command (GD-41 blocker 4): anchored to the
-# start of the (unparseable) command string, so the same token buried later (echo GUARDRAIL_ALLOW_DISCARD=1
-# ; git reset --hard) does NOT disable the guard, agreeing with the manifest's "leading, not buried" claim.
-# CASE-SENSITIVE (bash env-var names are), so it matches GUARDRAIL_ALLOW_DISCARD exactly and a lowercase
-# guardrail_allow_discard=1 is NOT the opt-out. When the leading region repeats the assignment, bash
-# last-wins applies: the capture takes the LAST leading assignment's value (GUARDRAIL_ALLOW_DISCARD=1
-# GUARDRAIL_ALLOW_DISCARD=0 git ... evaluates 0, not 1, so it does NOT opt out).
-_RAW_OPTOUT_RE = re.compile(r"^\s*(?:GUARDRAIL_ALLOW_DISCARD=\S+\s+)*GUARDRAIL_ALLOW_DISCARD=(\S+)")
 # Shell wrappers/prefixes that stand IN FRONT of the git command so 'git <lossy>' is not the invocation
 # actually being classified. The EN-6 ultra-conservative pass widens the GD-41 set (command/exec/builtin/
 # env/xargs/time/!) with the privilege/scheduling/interpreter prefixes sudo/nice/timeout/nohup/sh/bash: when
@@ -860,7 +858,7 @@ def _segment_has_optout(tokens):
     out)."""
     last = None
     for tok in tokens[:_command_word_index(tokens)]:
-        m = _DISCARD_OPTOUT_RE.match(tok)
+        m = _DISCARD_OPTOUT_RE.fullmatch(tok)
         if m:
             last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value, evaluate only it
     return last is not None and last.lower() not in _DISCARD_FALSY
@@ -1311,10 +1309,15 @@ def _segment_dir_simple(tokens):
 
 def _git_discard_fallback(command, cwd=None):
     """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quote): we cannot
-    segment safely, so scan the RAW string. A truthy GUARDRAIL_ALLOW_DISCARD opt-out still ALLOWs. If git
-    is present AND a recognized work-losing verb keyword is present (an always-lossy verb, or 'branch' with
-    a delete flag) -> ASK (cannot prove safe); otherwise ALLOW (the true boundary). Documented best-effort:
-    a genuinely clean but unparseable command that merely mentions a lossy verb keyword may ASK.
+    segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
+    command, so it cannot soundly trust an opt-out-looking prefix inside it (a quoted-falsy `="0"`, an
+    interspersed `OTHER=x`, an opt-out on a DIFFERENT command `...=1 true; git`, a captured-truthy `0;` all
+    read as opt-outs to a raw scan), so an unparseable in-scope command ALWAYS ASKS regardless of any leading
+    opt-out-looking prefix. The opt-out is honoured ONLY on a PARSEABLE pristine bare command (see
+    _segment_has_optout). If git is present AND a recognized work-losing verb keyword is present (an
+    always-lossy verb, or 'branch' with a delete flag) -> ASK (cannot prove safe); otherwise ALLOW (the true
+    boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
+    verb keyword may ASK.
 
     Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
     best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
@@ -1323,9 +1326,6 @@ def _git_discard_fallback(command, cwd=None):
     ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
     unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
     the failure surfaced."""
-    m = _RAW_OPTOUT_RE.search(command)
-    if m and m.group(1).lower() not in _DISCARD_FALSY:
-        return _allow()  # explicit LEADING opt-out, honoured even on an unparseable command
     if not _raw_has_lossy_git(command):
         return _allow()  # no git, or no recognized work-losing verb: the true boundary
     base = cwd if isinstance(cwd, str) and cwd else None
@@ -1338,8 +1338,9 @@ def _git_discard_fallback(command, cwd=None):
         "asking rather than silently allowing. {}".format(_DISCARD_ALTS))
     banner = (
         "AIQT guardrail: an unparseable git command names a work-losing verb this guard could not prove "
-        "safe - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip this prompt (rule "
-        "prsunc, fail-safe).")
+        "safe - confirm this discard. The GUARDRAIL_ALLOW_DISCARD opt-out is NOT honoured on an unparseable "
+        "command (the guard cannot parse it); to opt out, re-issue the discard as a parseable bare git "
+        "command with the leading prefix (rule prsunc, fail-safe).")
     if snap is not None and snap[0] == "ok":
         reason = reason + " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":

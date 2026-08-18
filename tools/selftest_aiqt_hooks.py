@@ -136,12 +136,14 @@ def main():
         # === boundary: the true fail-open boundary ALLOWS ====================================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
         # An UNPARSEABLE command (unbalanced quote) is not a free ALLOW: a raw scan finds git AND a lossy
-        # verb (checkout) it cannot prove safe -> ASK (F-60.1); a non-lossy unparseable stays ALLOW; a
-        # truthy opt-out on an unparseable command still ALLOWs.
+        # verb (checkout) it cannot prove safe -> ASK (F-60.1); a non-lossy unparseable stays ALLOW. Round-15
+        # STRUCTURAL fix: the opt-out is NOT consulted on the unparseable path (the guard cannot parse the
+        # command, so it cannot soundly trust an opt-out-looking prefix inside it), so an opt-out-prefixed
+        # unparseable in-scope command ALSO ASKS (see the r15-raw-* battery below).
         expect("(bound-b) unparseable + lossy verb asks", 'git checkout -- "unbalanced', "ask", cwd=rp)
         expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
-        expect("(bound-b3) unparseable + lossy but opted out allows",
-               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow", cwd=rp)
+        expect("(bound-b3) unparseable + lossy + opt-out prefix still ASKS (round-15: opt-out not honoured on unparseable)",
+               'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "ask", cwd=rp)
 
         # === a PROVABLY CLEAN tree: every recognized discard is safe -> ALLOW ================
         expect("(clean-a) reset --hard clean allows", "git reset --hard", "allow", cwd=rp)
@@ -289,9 +291,9 @@ def main():
 
         # === EN-6 round-13: opt-out is case-sensitive and last-wins; redirects ASK all forms ==
         # Fix 1: bash env-var names are case-sensitive, so a LOWERCASE guardrail_allow_discard=1 is NOT the
-        # opt-out. On an unparseable heredoc discard the raw fallback must NOT honour it -> ASK (the buggy
-        # (?i) match silently ALLOWed it). The uppercase form on the same unparseable command still ALLOWs
-        # (bound-b3 covers that contrast).
+        # opt-out. On an unparseable heredoc discard the raw fallback must NOT honour it -> ASK. Round-15
+        # STRUCTURAL fix: the opt-out is no longer consulted on the unparseable path at all, so even the
+        # UPPERCASE form on the same unparseable command now ASKS too (see the r15-raw-* battery below).
         expect("(r13-1) lowercase optout on unparseable heredoc discard does not opt out -> ASK",
                "guardrail_allow_discard=1 git reset --hard <<'EOF'\n'\nEOF", "ask", cwd=rp)
         # Fix 2: bash last-wins on a duplicate leading assignment - =1 then =0 evaluates to 0 (NOT truthy),
@@ -315,6 +317,39 @@ def main():
         expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow",
                cwd=rp)
         expect("(r13-4b) plain switch with no redirect still allows", "git switch other", "allow", cwd=rp)
+
+        # === EN-6 round-15: end the opt-out silent-allow class (Fix 1 structural + Fix 2 empty value) =====
+        # Fix 2 (parseable path): the opt-out value capture now matches an EMPTY value, so an empty FINAL
+        # leading assignment is evaluated by bash last-wins as falsy and does NOT opt out. With no resolvable
+        # cwd the un-opted-out reset --hard ASKS ("cannot resolve to the session directory"); had the empty
+        # value been ignored (the old (.+) capture) the earlier =1 would have wrongly opted out to ALLOW.
+        expect("(r15-empty) empty final opt-out assignment is falsy (last-wins), does not opt out -> ASK",
+               "GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git reset --hard", "ask")
+        # Fix 1 (STRUCTURAL): the opt-out is no longer consulted on the UNPARSEABLE (raw-fallback) path at
+        # all - a regex cannot soundly parse an opt-out out of a command the shell lexer could not parse - so
+        # every opt-out-looking prefix on an unparseable in-scope discard now ASKS. The five raw variants that
+        # previously wrung a silent ALLOW out of the raw scan (quoted-falsy that reads truthy raw, an
+        # interspersed other assignment, an opt-out leading a DIFFERENT command, a `0;` captured truthy, and a
+        # quoted "false"), each on an unparseable heredoc discard (the lone quote makes shlex raise), must ASK.
+        _hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc whose lone ' makes shlex raise -> raw fallback
+        expect("(r15-raw-quotedfalsy) quoted-falsy opt-out on unparseable discard -> ASK",
+               'GUARDRAIL_ALLOW_DISCARD="0" git reset --hard' + _hd, "ask", cwd=rp)
+        expect("(r15-raw-interspersed) interspersed other assignment on unparseable discard -> ASK",
+               "GUARDRAIL_ALLOW_DISCARD=1 OTHER=x git reset --hard" + _hd, "ask", cwd=rp)
+        expect("(r15-raw-othercmd) opt-out leading a DIFFERENT command on unparseable discard -> ASK",
+               "GUARDRAIL_ALLOW_DISCARD=1 true; git reset --hard" + _hd, "ask", cwd=rp)
+        expect("(r15-raw-semicolon) `0;` captured-truthy opt-out on unparseable discard -> ASK",
+               "GUARDRAIL_ALLOW_DISCARD=0; git reset --hard" + _hd, "ask", cwd=rp)
+        expect("(r15-raw-quotedfalse) quoted \"false\" opt-out on unparseable discard -> ASK",
+               'GUARDRAIL_ALLOW_DISCARD="false" git reset --hard' + _hd, "ask", cwd=rp)
+        # Fix 3 (documented override semantics): a leading PARSEABLE opt-out on a pristine bare command is an
+        # explicit operator override, evaluated FIRST, so it short-circuits the command-local-redirect (-C)
+        # view-uncertainty gate too -> ALLOW (the manifest now qualifies that gate "unless the leading opt-out
+        # is set"). Contrast (clean-d): the same -C form WITHOUT the opt-out ASKS.
+        expect("(r15-optout-redirect) leading opt-out short-circuits the -C redirect gate -> ALLOW",
+               "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "allow", cwd=rp)
+        # No regression (opt-b, co-a, rs-a above): a plain parseable opt-out still ALLOWs; a plain lossy form
+        # with no opt-out still ASKS (co-a) and a dirty whole-tree clobber still DENIES (rs-a).
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file asks on dirty tree",
