@@ -7,25 +7,26 @@ handler module directly (never the generated plugin copy) and drives each handle
 payload, asserting allow vs ask vs deny by the structured decision the handler returns, not by grepping
 output.
 
-The git_discard control is the EN-6 GENUINELY-COARSE "ask unless provably clean" guard (GD-41 re-hardening
-of the GD-37 cut) with THREE outcomes (allow/ask/deny), so this suite distinguishes all three. The coarse
-rule: for a recognized lossy verb, ASK unless BOTH the command is a SINGLE SIMPLE `git <verb>` invocation
-AND the whole tree is PROVABLY CLEAN (or the leading opt-out is set), in which case ALLOW; a single simple
-whole-tree-clobbering verb (reset --hard, switch --force) on a confirmed-dirty tree DENIES. GD-41 closes
-eight tri-family QA silent-allow blockers, and this suite proves each now ASKS/DENIES rather than allowing:
-(1) an untracked-only-dirty tree counts as dirty (reset --hard DENIES, clean -f ASKS); (2) a compound
-command whose earlier segment dirties the tree (printf x >> f && git reset --hard) ASKS, because the probe
-cannot see the future write; (3) an operand after `--` (git clean -f -- -nasty, git rm -f -- --cached) is a
-pathspec, not a safe-looking option; (4) the opt-out is honoured only LEADING the git command itself, not
-buried nor leading a non-git segment; (5) abbreviated destructive options (--for, --patc, --del, --dis,
---har) are recognized by prefix; (6) index-only forms (restore --staged, mixed/path reset, rm --cached)
-route through the probe; (7) a forced branch-create (checkout -f -b) no longer early-allows; (8) a shell
-wrapper (command/exec/!/builtin/env/time) hiding the git verb ASKS. The clean/dirty probe runs in the
-payload cwd only for a single simple resolvable git command, so the probing cases point cwd at a hermetic
-throwaway repo (git init, a local identity, committed files) built under a temp dir and dirtied in three
-ways (worktree-dirty, untracked-only, staged-only); the temp tree is removed in a finally. A `git -C
-<dir>`/`cd`/env/compound/wrapped form is deliberately NOT probed (not single-simple-resolvable) and ASKS,
-which many cases below assert.
+The git_discard control is the EN-6 ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" guard with
+THREE outcomes (allow/ask/deny), so this suite distinguishes all three. The rule: for a recognized lossy
+verb, ASK unless the command is a PRISTINE SINGLE BARE `git <verb>` invocation (no shell metacharacter
+anywhere even quoted, no reserved word, no wrapper/redirect/compound, and a command word literally `git`)
+AND either its form is genuinely non-destructive, the whole tree is PROVABLY CLEAN, or the leading opt-out is
+set, in which case ALLOW; a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
+--force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
+wrapper form that hides a real `git reset --hard` (an `if`/`for`, a backtick or `$()` substitution, a `|&`,
+a leading or interspersed redirect, and the wrappers sudo/nice/timeout/nohup/sh -c/bash -c/...) now ASKS
+(pristine-* cases). It also proves the four accuracy fixes: (1) a config-forced probe defeats
+status.showUntrackedFiles=no so an untracked file still reads dirty (cfg-* cases: reset --hard/checkout -f
+DENY, clean -f ASKS); (2) the arg-consuming clean options `-e`/`--exclude` are respected so `-n` is not
+mis-read as a dry run (cle-* cases); (3) `switch --merge`/`--conflict` route to scoped and ASK on a dirty
+tree (swm-* cases); (4) the DENY reason wording covers untracked too. The prior GD-41 blocker cases are kept
+and still hold. The clean/dirty probe runs in the payload cwd only for a pristine single bare git command
+that resolves to the session worktree, so the probing cases point cwd at a hermetic throwaway repo (git init,
+a local identity, committed files) built under a temp dir and dirtied several ways (worktree-dirty,
+untracked-only, staged-only, config-hidden-untracked); the temp tree is removed in a finally. A `git -C
+<dir>`/env/compound/wrapped/metacharacter form is deliberately NOT probed (not pristine-single-bare) and
+ASKS, which many cases below assert.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -337,6 +338,68 @@ def main():
         expect("(b8-status) wrapper over a non-lossy git command allows", "command git status", "allow",
                cwd=rp)
 
+        # === EN-6 ULTRA-CONSERVATIVE pristine gate: any shell structure ASKS (never a silent allow) =
+        # A lossy-verb command reaches the clean probe ONLY when it is a PRISTINE SINGLE BARE 'git <verb>'
+        # invocation - no shell metacharacter anywhere (even quoted), no reserved word, no wrapper/redirect/
+        # compound, and a command word that is literally 'git'. Each form below hides a real reset --hard
+        # behind shell structure the lexer does not model; the coarse GD-41 cut still silently allowed some
+        # of these, and each MUST now ASK. Tested on the dirty repo (a silent allow would discard the fix).
+        pristine_asks = [
+            ("gram-if", "if true; then git reset --hard; fi"),            # reserved words + ';'
+            ("gram-for", "for x in 1; do git reset --hard; done"),        # a for-loop
+            ("gram-backtick", "echo `git reset --hard`"),                 # backtick command substitution
+            ("gram-dollar-paren", "echo $(git reset --hard)"),            # $( ) command substitution
+            ("gram-pipe-amp", "echo x |& git reset --hard"),              # a '|&' pipe-both
+            ("gram-lead-redirect", "> log git reset --hard"),            # a LEADING stdout redirect
+            ("gram-mid-redirect", "git 2>/dev/null reset --hard"),        # an interspersed redirect
+            ("wrap-sudo", "sudo git reset --hard"),                       # a privilege wrapper
+            ("wrap-nice", "nice git reset --hard"),                       # a scheduling wrapper
+            ("wrap-timeout", "timeout 5 git reset --hard"),               # a timeout wrapper
+            ("wrap-nohup", "nohup git reset --hard"),                     # a nohup wrapper
+            ("wrap-sh-c", 'sh -c "git reset --hard"'),                    # an interpreter -c wrapper
+            ("wrap-bash-c", 'bash -c "git reset --hard"'),                # an interpreter -c wrapper
+        ]
+        for label, cmd in pristine_asks:
+            expect("(pristine-{}) shell structure hides a reset --hard -> asks".format(label), cmd, "ask",
+                   cwd=rp)
+        # A pathed git ('/usr/bin/git') is not the literal command word 'git', so it is not pristine -> ASK.
+        expect("(pristine-pathed) a pathed git is not literally 'git' -> asks", "/usr/bin/git reset --hard",
+               "ask", cwd=rp)
+
+        # === switch --merge/--conflict overwrite local changes -> scoped, ASK on a dirty tree (fix 3) =
+        expect("(swm-a) switch --merge on dirty tree asks", "git switch --merge other", "ask", cwd=rp)
+        expect("(swm-b) switch --conflict= on dirty tree asks", "git switch --conflict=diff3 other", "ask",
+               cwd=rp)
+        expect("(swm-c) switch -m on dirty tree asks", "git switch -m other", "ask", cwd=rp)
+
+        # === clean arg-consuming options: '-e'/'--exclude' consume the next token -> do NOT trust '-n' ==
+        # 'git clean -f -e '*.keep' -n' must NOT be read as a dry run (fix 2): with an arg-consuming option
+        # present the guard cannot tell a real '-n' flag from an exclude pattern, so it ASKS. '-n' alone still
+        # allows. (Tested on the dirty/untracked repo below via the config-hidden repo too.)
+        (repo / "keeper.keep").write_text("keep\n", encoding="utf-8")
+        expect("(cle-a) clean -f -e PAT -n asks (not read as dry-run)", "git clean -f -e '*.keep' -n", "ask",
+               cwd=rp)
+        expect("(cle-b) clean -f -e -n asks (-n is the exclude pattern)", "git clean -f -e -n", "ask",
+               cwd=rp)
+        expect("(cle-c) clean -n alone still allows (dry run)", "git clean -n", "allow", cwd=rp)
+
+        # === config-proof probe: status.showUntrackedFiles=no cannot hide an untracked file (fix 1) ===
+        # A repo configured to omit untracked files from status must NOT let a force discard read the tree as
+        # clean. The probe forces '-c status.showUntrackedFiles=all --untracked-files=all', so an untracked
+        # file still counts as dirty: reset --hard / checkout -f DENY and clean -f ASKS, never allow.
+        hidden_repo = _init_repo(tmp / "hiddenrepo")
+        _git(hidden_repo, "config", "status.showUntrackedFiles", "no")
+        (hidden_repo / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        rh = str(hidden_repo)
+        if aiqt_hooks._tree_is_clean(rh) is not False:
+            failures.append("(cfg-probe) _tree_is_clean with showUntrackedFiles=no + untracked: expected "
+                            "False (the probe must force untracked reporting)")
+        expect("(cfg-a) reset --hard on config-hidden untracked tree denies", "git reset --hard", "deny",
+               cwd=rh)
+        expect("(cfg-b) clean -f on config-hidden untracked tree asks", "git clean -f", "ask", cwd=rh)
+        expect("(cfg-c) checkout -f on config-hidden untracked tree denies", "git checkout -f", "deny",
+               cwd=rh)
+
         # === malformed / robustness (F-66.7) ================================================
         # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
@@ -366,6 +429,9 @@ def main():
             (("checkout", ["--patc"]), "scoped"),         # blocker 5: abbreviated --patch
             (("switch", ["--force", "other"]), "clobber"),
             (("switch", ["--dis", "other"]), "clobber"),  # blocker 5: abbreviated --discard-changes
+            (("switch", ["--merge", "other"]), "scoped"),  # fix 3: a three-way merge can overwrite worktree
+            (("switch", ["--conflict=diff3", "other"]), "scoped"),  # fix 3: conflict-style merge
+            (("switch", ["-m", "other"]), "scoped"),      # fix 3: '-m' is --merge
             (("switch", ["other"]), "allow"),
             (("restore", ["--staged", "file"]), "scoped"),  # blocker 6: --staged can erase staged-only
             (("restore", ["--staged", "--worktree", "file"]), "scoped"),
@@ -377,6 +443,10 @@ def main():
             (("clean", ["-nfd"]), "allow"),
             (("clean", ["-d"]), "ask"),
             (("clean", ["-f", "--", "-nasty"]), "ask"),   # blocker 3: -nasty after -- is not the -n flag
+            (("clean", ["-f", "-e", "*.keep", "-n"]), "ask"),  # fix 2: -e consumes; '-n' not trusted as dry-run
+            (("clean", ["-f", "-e", "-n"]), "ask"),       # fix 2: '-n' is the exclude PATTERN, not dry-run
+            (("clean", ["--exclude=x", "-n"]), "ask"),    # fix 2: an --exclude= present -> do not trust '-n'
+            (("clean", ["-n"]), "allow"),                 # a plain dry run with no arg-consuming option allows
             (("stash", ["drop"]), "ask"),
             (("stash", ["pop"]), "allow"),
             (("branch", ["-D", "x"]), "ask"),
@@ -396,17 +466,20 @@ def main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: git_discard (EN-6 coarse ask-unless-provably-clean, GD-41) fails open only at "
-          "the true boundary; within scope it ASKS unless the command is a SINGLE SIMPLE 'git <verb>' on a "
-          "PROVABLY CLEAN tree (then ALLOW) or the leading opt-out is set; a single simple whole-tree "
-          "clobber (reset --hard, switch --force) on a confirmed-dirty tree DENIES. All eight GD-41 "
-          "silent-allow blockers are proven closed: an untracked-only-dirty tree counts as dirty (1); a "
-          "compound whose earlier segment dirties the tree ASKS (2); a '--' operand is a pathspec, not a "
-          "safe option (3); the opt-out counts only leading the git command (4); abbreviated destructive "
-          "options are prefix-matched (5); index-only forms route through the probe (6); a forced "
-          "branch-create no longer early-allows (7); a wrapper hiding the git verb ASKS (8). The removed "
-          "prove-safe fast paths and the F-60/F-62/F-64/F-65/F-66 under-block edges still ASK/DENY, and "
-          "the coarse role classifier is asserted too")
+    print("SELF-TEST PASS: git_discard (EN-6 ULTRA-CONSERVATIVE ask-unless-pristine-and-provably-clean) "
+          "fails open only at the true boundary; within scope it ASKS unless the command is a PRISTINE "
+          "SINGLE BARE 'git <verb>' invocation (no shell metacharacter anywhere even quoted, no reserved "
+          "word, no wrapper/redirect/compound, command word literally 'git') that is either genuinely "
+          "non-destructive, on a PROVABLY CLEAN tree, or leading-opt-out; a pristine bare whole-tree clobber "
+          "(reset --hard, checkout -f, switch --force) on a confirmed-dirty tree DENIES. The pristine gate "
+          "is proven: every shell-grammar and wrapper form that hides a real reset --hard (if/for, backtick "
+          "and $() substitution, |&, leading and interspersed redirects, and sudo/nice/timeout/nohup/sh -c/"
+          "bash -c wrappers) now ASKS. The four accuracy fixes are proven: the config-forced probe defeats "
+          "status.showUntrackedFiles=no (untracked reads dirty -> DENY/ASK, not allow); clean -e/--exclude "
+          "arg-consumption means '-n' is not mis-read as a dry run; switch --merge/--conflict route to "
+          "scoped and ASK on a dirty tree; and the DENY wording covers untracked. The prior GD-41 "
+          "blocker cases and the F-60/F-62/F-64/F-65/F-66 under-block edges still ASK/DENY, and the role "
+          "classifier is asserted too")
     return 0
 
 

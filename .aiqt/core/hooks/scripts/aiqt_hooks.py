@@ -26,25 +26,32 @@ through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an un
 string, or an unreadable required field all deny. A detected violation denies the same way. A clean
 pass emits NO decision and exits 0 silently.
 
-git_discard (prsunc) is a DELIBERATE, GENUINELY-COARSE "ask unless provably clean" exception to that
-fail-closed rule (EN-6, GD-41 re-hardening of the GD-37 cut). It has THREE outcomes: ALLOW (exit 0 silent),
-DENY, and ASK (permissionDecision "ask", which prompts the human). It fails OPEN (ALLOW) only at the TRUE
-BOUNDARY - a non-git command, or no recognized lossy verb - because that is not a discard it can reason
-about; an UNPARSEABLE command (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb
-keyword and ASKS when one is present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/
-clean/stash/rm/branch) the rule is COARSE: the outcome is ASK unless BOTH (a) the command is a SINGLE SIMPLE
-'git <verb>' invocation - no compound (; && || | & newline subshell backtick $( )), no shell wrapper
-(command/exec/!/builtin/env/xargs/time), no directory redirection the guard cannot resolve to the session
-cwd (-C, --git-dir, --work-tree, GIT_DIR/GIT_WORK_TREE, a leading cd/pushd), and no option it cannot classify
-- AND (b) the whole working tree is PROVABLY CLEAN, where clean now means the read-only porcelain probe
-reports NO tracked change AND NO untracked ('??') entry (an untracked file is uncommitted work a
-force-checkout/clean/reset can destroy; only an ignored '!!' entry counts as clean). The documented LEADING
-GUARDRAIL_ALLOW_DISCARD=<truthy> opt-out on the git command itself also ALLOWs. Otherwise ASK, except a
-confirmed whole-tree clobber (reset --hard, checkout -f, switch --force) on a probed-dirty tree DENIES. It
-never tries to prove an individual dirty-tree, compound, wrapped, or abbreviated form safe (that cleverness,
-which GD-37 already trimmed and which tri-family QA still found silently allowing real discards, is retired):
-no lossy verb whose loss it cannot disprove is ever silently ALLOWED - worst case it ASKS, at the cost of
-more asks. The one probe kept (git status --porcelain) is read-only and offline; it never mutates the repo.
+git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
+to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK
+(permissionDecision "ask", which prompts the human). It fails OPEN (ALLOW) only at the TRUE BOUNDARY - a
+non-git command, or no recognized lossy verb - because that is not a discard it can reason about; an
+UNPARSEABLE command (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and
+ASKS when one is present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
+rm/branch) the outcome is ASK unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND the
+tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive). PRISTINE
+SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
+assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
+metacharacter anywhere EVEN INSIDE QUOTES (none of ; | & < > ( ) { } $ backtick backslash ! newline, which
+also rules out &&/||/|&, every redirection form, and every command/process substitution), no shell reserved
+word, and a command word that is LITERALLY 'git' (not a path, not a wrapper such as sudo/nice/timeout/nohup/
+env/command/exec/builtin/xargs/time/!/sh -c/bash -c). ANY shell metacharacter, wrapper, redirect, reserved
+word, second command, or option the classifier cannot resolve makes the command not-pristine and it ASKS,
+WITHOUT ever consulting the probe (a safe over-ask). Only a metacharacter-free 'git <verb> <plain args>'
+reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
+status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
+status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
+entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
+checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
+No lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean tree - worst
+case it ASKS, at the cost of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
+function renaming git, a discard performed outside the Bash tool, or persistent shell/config state; the
+deferred recovery/snapshot layer is the backstop. The one probe kept is read-only and offline; it never
+mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
@@ -751,35 +758,41 @@ def absolute_paths(data):
 
 
 # --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
-# GENUINELY-COARSE "ask unless provably clean" guard (EN-6, GD-41 re-hardening of the GD-37 cut). For a
-# command containing any recognized lossy git verb the outcome is ASK unless BOTH (a) it is a SINGLE SIMPLE
-# 'git <verb>' invocation AND (b) the whole working tree is PROVABLY CLEAN; the LEADING opt-out on the git
-# command also ALLOWs. Three outcomes:
+# ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" guard (EN-6, EN-6 hardening pass over the
+# GD-41 coarse cut). For a command that names any recognized lossy git verb (checkout/switch/restore/reset/
+# clean/stash drop-clear/rm/branch delete-force) the outcome is ASK unless the command is a PRISTINE SINGLE
+# BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING opt-out
+# is set). Three outcomes:
 #   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
-#                           unparseable command with no lossy verb), the LEADING opt-out on the git command,
-#                           and the ONE prove-safe case kept: a SINGLE SIMPLE 'git <verb>' on a PROVABLY
-#                           CLEAN tree (the porcelain probe reports no tracked change AND no untracked
-#                           entry), so there is nothing to discard.
-#   DENY   permissionDecision deny - a SINGLE SIMPLE WHOLE-TREE-clobbering verb (reset --hard, checkout -f,
-#                           switch --force/--discard-changes) on a tree the probe confirms is dirty: the
-#                           loss is certain.
-#   ASK    permissionDecision ask  - the default within scope: any recognized lossy verb the guard cannot
-#                           prove safe, which now includes ANY compound/wrapped/redirected form (the probe
-#                           cannot see a prior segment that dirties the tree first, blocker 2/8), a not-
-#                           provably-clean tree (tracked OR untracked change, blocker 1), a worktree it
-#                           cannot resolve with certainty, a status probe that did not complete, an
-#                           index-changing form (restore --staged, mixed/path reset, rm --cached, blocker 6),
-#                           or a softer discard (clean of untracked files, stash drop/clear, branch -D).
-# GD-37 removed the earlier cut's per-path "prove-safe fast paths"; GD-41 goes further and removes the last
-# per-form cleverness that tri-family QA still found silently allowing a discard: the probe now runs ONLY
-# for a lone 'git <verb>' segment (no compound, wrapper, subshell, cd, or dir-redirection), untracked files
-# count as dirty, destructive options are matched by unambiguous PREFIX (blocker 5) and respect a '--'
-# operand boundary (blocker 3), a forced branch-create no longer early-allows (blocker 7), and index-only
-# forms route through the probe (blocker 6). The guard never tries to prove an individual dirty-tree or
-# multi-segment form safe: anything it cannot resolve with certainty ASKS (never a silent allow). Net
-# effect: no silent under-blocks (worst case is a recoverable ASK), at the cost of more asks. If in doubt,
-# ASK. An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING the git command opts out to ALLOW. The
-# one probe kept (git status --porcelain) is read-only and offline; the guard never mutates the repo.
+#                           unparseable command with no lossy verb keyword); OR a PRISTINE SINGLE BARE
+#                           'git <verb>' whose FORM is genuinely non-destructive (a bare no-op, reset
+#                           --soft, an unforced branch-create, clean -n, stash push, branch -d); OR a
+#                           PRISTINE SINGLE BARE lossy 'git <verb>' on a PROVABLY CLEAN tree (the config-
+#                           forced porcelain probe reports no tracked change AND no untracked entry), so
+#                           there is nothing to discard; OR the LEADING opt-out on that same pristine form.
+#   DENY   permissionDecision deny - a PRISTINE SINGLE BARE WHOLE-TREE-clobbering verb (reset --hard,
+#                           checkout -f with no pathspec, switch --force/--discard-changes) on a tree the
+#                           probe confirms is dirty: the loss is certain.
+#   ASK    permissionDecision ask  - EVERYTHING else in scope. This is deliberately the common outcome:
+#                           ANY command that is not a pristine single bare git invocation - ANY shell
+#                           metacharacter anywhere (even quoted), ANY wrapper/redirect/reserved-word/
+#                           compound, a first command word that is not literally 'git', or an option the
+#                           form-classifier cannot resolve - ASKS without ever consulting the probe; and a
+#                           pristine lossy form on a not-provably-clean tree (tracked OR untracked change),
+#                           a worktree the guard cannot resolve to the session cwd, a status probe that did
+#                           not complete, or a softer/index-only discard (clean of untracked files, stash
+#                           drop/clear, branch -D, restore --staged, mixed/path reset, rm --cached) also ASKS.
+# The gate is PURELY LEXICAL and never parses the bash grammar: the presence of any shell metacharacter in a
+# lossy-verb command is treated as a reason to ASK (a safe over-ask), so ONLY a metacharacter-free
+# 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
+# coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
+# and every wrapper - sudo/nice/timeout/nohup/sh -c/env/... - in front of the git command): each now ASKS.
+# The one probe kept (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
+# read-only and offline and FORCES untracked reporting so a repo-local status.showUntrackedFiles=no config
+# cannot hide an untracked file; the guard never mutates the repo. HONEST RESIDUAL (not caught by a lexical
+# hook): a git alias or shell function that renames git, a discard performed outside the Bash tool, or
+# persistent shell/config state set in a prior turn; the deferred recovery/snapshot layer is the backstop.
+# An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
 _DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.+)$")
 _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
 # Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote). We cannot
@@ -795,17 +808,24 @@ _RAW_BRANCH_DELETE_RE = re.compile(r"(?:(?<![\w-])-[A-Za-z]*D)|(?:--delete\b)")
 # start of the (unparseable) command string, so the same token buried later (echo GUARDRAIL_ALLOW_DISCARD=1
 # ; git reset --hard) does NOT disable the guard, agreeing with the manifest's "leading, not buried" claim.
 _RAW_OPTOUT_RE = re.compile(r"(?i)^\s*GUARDRAIL_ALLOW_DISCARD=(\S+)")
-# Shell wrappers that hide the real command word so 'git <lossy>' is not seen at the segment's command-word
-# position (GD-41 blocker 8): command/exec/builtin/env/xargs/time and the '!' negation. When one of these
-# leads a segment and a lossy git verb is present, the guard cannot classify with certainty, so it ASKS.
-_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "xargs", "time", "!"))
-# Directory-shifting command words: a cd/pushd/popd anywhere means a later git segment's worktree cannot be
-# resolved to the session cwd with certainty. A subshell group (a '(' / ')' segment separator) does the same.
-_DIR_SHIFT_WORDS = frozenset(("cd", "pushd", "popd"))
-# Command-substitution / process-substitution shells inside a single segment: a backtick, a '$( )', or a
-# '<( )' / '>( )' means an operand the guard cannot classify with certainty, so the command is not a single
-# simple 'git <verb>' invocation and ASKS rather than trust a clean probe.
-_SUBSHELL_RE = re.compile(r"`|\$\(|<\(|>\(")
+# Shell wrappers/prefixes that stand IN FRONT of the git command so 'git <lossy>' is not the invocation
+# actually being classified. The EN-6 ultra-conservative pass widens the GD-41 set (command/exec/builtin/
+# env/xargs/time/!) with the privilege/scheduling/interpreter prefixes sudo/nice/timeout/nohup/sh/bash: when
+# one of these is the command word and a lossy git verb is present, the guard cannot classify with certainty,
+# so it ASKS. (A pristine bare git never has a wrapper as its command word, so this only widens the ask set.)
+_WRAPPER_WORDS = frozenset((
+    "command", "exec", "builtin", "env", "xargs", "time", "!",
+    "sudo", "nice", "timeout", "nohup", "sh", "bash"))
+# The ULTRA-CONSERVATIVE pristine gate. A lossy-verb command is a PRISTINE SINGLE BARE 'git <verb>'
+# invocation only when the RAW command string carries NONE of this shell structure ANYWHERE, even inside
+# quotes (a deliberate over-ask): a metacharacter (; | & < > ( ) { } $ backtick backslash ! newline, which
+# also covers &&/||/|&, every redirection form, and command/process substitution) or a shell reserved word.
+# The gate NEVER parses the grammar; this lexical scan stands in for it, so only a metacharacter-free
+# 'git <verb> <plain args>' ever reaches the clean probe. Everything else in scope ASKS.
+_SHELL_META_RE = re.compile(r"[;|&<>(){}$`\\!\n\r]")
+_SHELL_RESERVED_WORDS = frozenset((
+    "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
+    "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
@@ -903,21 +923,27 @@ def _has_long_prefix(tokens, full):
 # --- the one probe kept: the coarse whole-tree clean signal ------------------------------------------
 
 def _tree_is_clean(repo):
-    """The coarse clean-tree signal, the ONLY probe this guard keeps. True when 'git -C <repo> status
-    --porcelain' reports NOTHING that a lossy verb could destroy: no uncommitted tracked change (any staged
-    or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False when it
-    reports either, None when the read-only probe could not run (a subprocess error, a non-zero return, an
+    """The clean-tree signal, the ONLY probe this guard keeps, hardened to be CONFIG-PROOF. True when the
+    read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
+    (any staged or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False
+    when it reports either, None when the probe could not run (a subprocess error, a non-zero return, an
     unreadable repo). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset
-    --hard' can destroy, so an untracked-only-dirty tree is NOT provably clean (GD-41 blocker 1: the earlier
-    cut skipped '??' and thus silently allowed reset --hard / checkout -f / clean -f on an untracked-only
-    tree). Only an ignored '!!' entry is treated as clean (git never touches an ignored file on these verbs,
-    and porcelain does not emit '!!' without --ignored anyway). Deliberately coarse: ANY tracked change or
-    untracked file anywhere makes the tree not-provably-clean, so the guard no longer scopes the probe to the
-    command's target paths (that per-path scoping was the fooled fast path GD-37 removed). Offline,
-    read-only, 5s timeout; the guard never mutates the repo."""
+    --hard' can destroy, so an untracked-only-dirty tree is NOT provably clean.
+
+    The probe FORCES untracked reporting - 'git -c status.showUntrackedFiles=all status --porcelain
+    --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
+    file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
+    override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
+    carrying both keeps the intent legible. Only an ignored '!!' entry is treated as clean (git never touches
+    an ignored file on these verbs, and porcelain does not emit '!!' without --ignored anyway); ignored files
+    are deliberately left as clean, since every non-dry-run clean already ASKS unconditionally regardless.
+    Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
+    Offline, read-only, 5s timeout; the guard never mutates the repo."""
     try:
-        result = subprocess.run(["git", "-C", repo, "status", "--porcelain"],
-                                capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["git", "-C", repo, "-c", "status.showUntrackedFiles=all",
+             "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             return None
         for line in result.stdout.splitlines():
@@ -966,14 +992,18 @@ def _checkout_role(args):
 
 
 def _switch_role(args):
-    """git switch. Only '-f'/'--force'/'--discard-changes' overwrites the worktree (whole-tree) -> clobber;
-    a plain switch aborts on a dirty tree (git protects), so it is not a silent discard -> allow. Force and
-    discard-changes are matched by unambiguous PREFIX (GD-41 blocker 5), so '--for' and '--dis' are
-    recognized, not silently allowed as inert tokens."""
+    """git switch. '-f'/'--force'/'--discard-changes' overwrites the worktree (whole-tree) -> clobber; force
+    and discard-changes are matched by unambiguous PREFIX (blocker 5), so '--for' and '--dis' are recognized.
+    A '-m'/'--merge' or '--conflict[=<style>]' switch performs a THREE-WAY merge into the worktree that can
+    overwrite local changes, so it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK
+    on a dirty one), matched by prefix too. A plain switch aborts on a dirty tree (git protects), so it is
+    not a silent discard -> allow."""
     pre, _post, _had_sep = _split_pre_post(args)
     if ("-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
             or _has_long_prefix(pre, "discard-changes")):
         return ("clobber", "git switch --force/--discard-changes (overwrites the worktree)")
+    if _has_short(pre, "m") or _has_long_prefix(pre, "merge") or _has_long_prefix(pre, "conflict"):
+        return ("scoped", "git switch --merge/--conflict (a three-way merge that can overwrite local changes)")
     return ("allow", None)
 
 
@@ -1028,6 +1058,23 @@ def _reset_role(args):
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
 
 
+# git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
+# '--exclude PAT'. The '--exclude=PAT' inline shape carries its value in the same token, consuming none.
+_CLEAN_ARG_OPTS = frozenset(("-e", "--exclude"))
+
+
+def _clean_is_dry_run(pre):
+    """True when a git clean option region (already split before any '--') is a genuine DRY RUN
+    (-n/--dry-run) that removes nothing. ULTRA-CONSERVATIVE about the arg-consuming '-e'/'--exclude': when
+    one is present the guard CANNOT reliably tell a real '-n' flag from an exclude PATTERN token that merely
+    looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
+    pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
+    A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
+    if any(t in _CLEAN_ARG_OPTS or t.startswith("--exclude=") for t in pre):
+        return False  # an arg-consuming option is present: do not trust '-n' -> not a provable dry run
+    return "--dry-run" in pre or _has_short(pre, "n")
+
+
 def _discard_role(sub, args):
     """Classify a git segment's subcommand into (role, kind); see the block comment above. clean, stash,
     and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
@@ -1045,11 +1092,13 @@ def _discard_role(sub, args):
     if sub == "rm":
         return _rm_role(args)
     if sub == "clean":
-        # Judge dry-run on the option region BEFORE any '--' (GD-41 blocker 3): an operand after '--'
-        # (git clean -f -- -nasty is a file literally named -nasty) must NOT be read as the '-n' dry-run
-        # flag, or a real force-clean is misclassified as a harmless dry run and silently allowed.
+        # Judge dry-run on the option region BEFORE any '--' (blocker 3): an operand after '--' (git clean
+        # -f -- -nasty is a file literally named -nasty) must NOT be read as the '-n' dry-run flag, or a real
+        # force-clean is misclassified as a harmless dry run and silently allowed. _clean_is_dry_run also
+        # refuses to trust '-n' when an arg-consuming clean option ('-e'/'--exclude') is present, since '-n'
+        # may be that option's value rather than the dry-run flag.
         pre, _post, _had_sep = _split_pre_post(args)
-        if "--dry-run" in pre or _has_short(pre, "n"):
+        if _clean_is_dry_run(pre):
             return ("allow", None)  # a dry run removes nothing
         return ("ask", "git clean (removes untracked files, which cannot be recovered)")
     if sub == "stash":
@@ -1084,11 +1133,12 @@ def _discard_ask_reason(kind, detail):
 
 
 def _discard_deny(kind):
-    """A DENY: a whole-tree-clobbering verb on a tree the probe confirms holds uncommitted tracked
-    changes, so the loss is certain."""
+    """A DENY: a whole-tree-clobbering verb on a tree the probe confirms is dirty (an uncommitted tracked
+    change OR an untracked file the verb could reach), so the loss is certain. The wording covers untracked
+    too, because the config-forced probe now counts an untracked-only-dirty tree as dirty."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
-              "currently holds uncommitted tracked changes, discarding any fix you have applied but not "
-              "yet committed. {}".format(kind, _DISCARD_ALTS))
+              "currently holds uncommitted or untracked changes the command could destroy, discarding any "
+              "fix you have applied but not yet committed. {}".format(kind, _DISCARD_ALTS))
     banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
               "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
     return _deny(reason, banner)
@@ -1135,21 +1185,52 @@ def _git_discard_fallback(command):
         "prsunc, fail-safe).")
 
 
+def _pristine_single_bare_git(command, segments):
+    """Return the token list of the sole git command when `command` is a PRISTINE SINGLE BARE 'git <verb>'
+    invocation, else None (=> the caller ASKS). ULTRA-CONSERVATIVE and PURELY LEXICAL - the bash grammar is
+    never parsed. Pristine requires ALL of:
+      * the RAW command string carries NO shell metacharacter anywhere, EVEN INSIDE QUOTES (a deliberate
+        over-ask): none of ; | & < > ( ) { } $ backtick backslash ! or a newline, which by construction also
+        rules out &&/||/|&, every redirection form (>, >>, <, 2>, &>, >&, n>&m, a leading or interspersed
+        redirect), and every command/process substitution ($( ), backtick, <( ), >( ));
+      * no shell RESERVED-WORD token (if/then/for/while/case/[[/{/... a compound-command keyword);
+      * exactly ONE operator-free command segment (guaranteed once no metacharacter is present, asserted);
+      * after optional leading KEY=value env/opt-out assignments, the sole command word is LITERALLY 'git'
+        (not a path like /usr/bin/git, and not a wrapper such as sudo/env/sh -c/... whose word is not 'git').
+    Anything else - a compound, a wrapper/redirect/reserved-word, or a command word that is not literally
+    'git' - returns None so the guard ASKS rather than trust the clean probe on a command it cannot read
+    with certainty."""
+    if _SHELL_META_RE.search(command):
+        return None  # any shell metacharacter (even quoted): not pristine -> ASK
+    # With no metacharacter there is exactly one operator-free segment; require precisely that.
+    populated = [(toks, sep) for toks, sep in segments if toks or sep]
+    if len(populated) != 1 or populated[0][1]:
+        return None
+    tokens = populated[0][0]
+    if any(t in _SHELL_RESERVED_WORDS for t in tokens):
+        return None  # a shell reserved word: not a bare git invocation -> ASK
+    idx = _command_word_index(tokens)  # skip leading KEY=value assignments (incl. the opt-out)
+    if idx >= len(tokens) or tokens[idx] != "git":
+        return None  # a wrapper, a pathed git, or no command word: not a bare 'git' -> ASK
+    return tokens
+
+
 def git_discard(data):
-    """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. GENUINELY COARSE "ask unless provably
-    clean" guard (EN-6, GD-41 re-hardening of the GD-37 cut). For a command containing any recognized lossy
-    git verb (checkout/switch/restore/reset/clean/stash drop-clear/rm/branch delete-force), the outcome is
-    ASK unless BOTH: (a) the command is a SINGLE, SIMPLE 'git <verb> ...' invocation - no compound (; && ||
-    | & newline subshell backtick $( )), no shell wrapper (command/exec/!/builtin/env/xargs/time), no
-    directory redirection the guard cannot resolve to the session cwd (-C, --git-dir, --work-tree,
-    GIT_DIR/GIT_WORK_TREE, a leading cd/pushd), and no option it cannot classify; AND (b) the working tree is
-    PROVABLY CLEAN (git status --porcelain reports no tracked change AND no untracked entry). The documented
-    LEADING GUARDRAIL_ALLOW_DISCARD=<truthy> opt-out on the git command itself also ALLOWs. Otherwise ASK,
-    except that a confirmed whole-tree clobber (reset --hard, checkout -f, switch --force) on a probed-dirty
-    tree DENIES. It never tries to prove an individual dirty-tree or multi-segment form safe, so no lossy
-    command on a not-provably-clean tree is ever silently ALLOWED - worst case it ASKS. Fail-open ALLOW is
-    reserved for the TRUE boundary (a non-git command, or no recognized lossy verb). The one probe kept (git
-    status --porcelain) is read-only and offline; the guard never mutates the repo."""
+    """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "ask unless PRISTINE
+    and provably clean" guard (EN-6). For a command that names any recognized lossy git verb (checkout/
+    switch/restore/reset/clean/stash drop-clear/rm/branch delete-force) the outcome is ASK unless the command
+    is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
+    anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
+    'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
+    config-forced porcelain probe reports no tracked change AND no untracked entry), or the LEADING opt-out is
+    set - in which cases ALLOW. A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no
+    pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
+    any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
+    option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
+    probe, or a softer/index-only discard. No lossy command is ever silently ALLOWED unless it is a pristine
+    bare git on a provably-clean tree - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
+    (a non-git command, or no recognized lossy verb). The one probe kept (git status --porcelain, config-
+    forced to report untracked) is read-only and offline; the guard never mutates the repo."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -1166,14 +1247,13 @@ def git_discard(data):
     except ValueError:
         return _git_discard_fallback(command)  # conservative raw scan, not a silent allow
 
-    # Collect the lossy git segments, skipping any git command the LEADING opt-out covers (blocker 4:
-    # the opt-out is honoured only when it leads the git command itself, checked per git segment).
-    lossy = []  # (role, kind, tokens) for each in-scope git segment
+    # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
+    # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
+    # metacharacter-free, unwrapped command, where the segmentation can be trusted.
+    lossy = []  # (role, kind, tokens) for each such segment
     for tokens, _sep in segments:
         if _command_word(tokens) != "git":
             continue
-        if _segment_has_optout(tokens):
-            continue  # opt-out leads this git command: this segment is allowed
         sub, args = _git_sub_and_args(tokens)
         if sub is None:
             continue
@@ -1181,51 +1261,55 @@ def git_discard(data):
         if role != "allow":
             lossy.append((role, kind, tokens))
 
-    # A shell WRAPPER (command/exec/!/builtin/env/xargs/time) can hide 'git <lossy>' from the command-word
-    # scan above (blocker 8). If one leads a segment and the raw command still names a lossy git verb, the
-    # guard cannot classify with certainty, so this counts as an in-scope lossy form that must ASK.
+    # A shell WRAPPER (sudo/env/sh -c/command/exec/...) or a metacharacter can HIDE a lossy 'git <verb>' from
+    # the command-word segment scan (a command substitution, a non-git command word, an interpreter -c). When
+    # either is present alongside a lossy git verb keyword in the raw string, fall back to the coarse raw scan
+    # for the in-scope decision, since segmentation cannot be trusted. On a truly clean command (no
+    # metacharacter, no wrapper) the precise `lossy` list alone governs, so a git command that merely mentions
+    # a lossy verb word (e.g. a commit message) is not dragged in scope.
+    has_meta = bool(_SHELL_META_RE.search(command))
     wrapper_present = any(_command_word(t) in _WRAPPER_WORDS for t, _ in segments)
-    wrapped_lossy = wrapper_present and _raw_has_lossy_git(command)
+    raw_lossy = _raw_has_lossy_git(command)
 
-    if not lossy and not wrapped_lossy:
+    if not lossy and not ((has_meta or wrapper_present) and raw_lossy):
         return _allow()  # boundary: no recognized lossy git verb in scope
 
-    # In scope. Decide whether this is a SINGLE SIMPLE git command that may use the clean probe. Any of:
-    # a compound (an operator or a second non-empty segment, e.g. a newline), a command/process
-    # substitution, a directory shift, or a shell wrapper means a prior or hidden step could dirty the tree
-    # or redirect the worktree, so the probe cannot be trusted (blocker 2, blocker 8): ASK.
-    nonempty = [t for t, _ in segments if t]
-    compound = any(sep for _, sep in segments) or len(nonempty) > 1
-    subshell = bool(_SUBSHELL_RE.search(command))
-    dir_shift = any(_command_word(t) in _DIR_SHIFT_WORDS or sep in ("(", ")") for t, sep in segments)
-
-    cwd = data.get("cwd")
-    base = cwd if isinstance(cwd, str) and cwd else None  # the session dir, or None when absent
-
-    # The clean probe may run only for a single simple git command that also resolves to the session
-    # worktree with certainty (the one lossy segment carries no -C/--git-dir/--work-tree/-c global option
-    # and no leading env-assignment but the opt-out).
-    simple = (not compound and not subshell and not dir_shift and not wrapper_present
-              and base is not None and len(lossy) == 1
-              and _segment_dir_simple(lossy[0][2]))
-
-    if not simple:
-        # Not a single simple resolvable git command: never silent-allow, never deny (a prior segment could
-        # dirty a currently-clean tree, or the worktree/verb cannot be resolved with certainty) -> ASK.
+    # In scope. Apply the ULTRA-CONSERVATIVE pristine gate: anything that is not a pristine single bare
+    # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
+    pristine = _pristine_single_bare_git(command, segments)
+    if pristine is None:
         kind = lossy[0][1] if lossy else "a git work-losing verb"
         return _ask(*_discard_ask_reason(
-            kind, "is not a single simple 'git <verb>' invocation this guard can resolve to the session "
-                  "working tree (it is compound, wrapped, redirected, or carries an operand it cannot "
-                  "classify), so it cannot prove the tree clean"))
+            kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
+                  "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
+                  "that is not literally 'git'), so this guard will not trust a clean probe on it"))
 
-    role, kind, _tokens = lossy[0]
+    # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
+    if _segment_has_optout(pristine):
+        return _allow()
+
+    # Re-derive the verb form from the sole pristine git command.
+    sub, args = _git_sub_and_args(pristine)
+    role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+    if role == "allow":
+        return _allow()  # a genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, ...)
     if role == "ask":
-        # A softer discard (a real clean of untracked files, stash drop/clear, branch -D): ASK regardless
-        # of the tracked-tree probe, which does not see the asset these verbs destroy.
+        # A softer discard (a real clean of untracked files, stash drop/clear, branch -D): ASK regardless of
+        # the tracked-tree probe, which does not see the asset these verbs destroy.
         return _ask(*_discard_ask_reason(kind, "cannot be proven safe offline"))
+
+    # A scoped or clobber form: gate on the clean probe, which must resolve to the session worktree.
+    cwd = data.get("cwd")
+    base = cwd if isinstance(cwd, str) and cwd else None  # the session dir, or None when absent
+    if base is None or not _segment_dir_simple(pristine):
+        # No session cwd, or a -C/--git-dir/--work-tree/-c global option or a GIT_DIR/GIT_WORK_TREE env
+        # assignment could redirect the worktree: the probe cannot be trusted -> ASK, never allow/deny.
+        return _ask(*_discard_ask_reason(
+            kind, "targets a working tree this guard cannot resolve to the session directory with "
+                  "certainty, so it cannot prove the tree clean"))
     clean = _tree_is_clean(base)
     if clean is True:
-        return _allow()  # single simple lossy verb on a PROVABLY CLEAN tree: nothing to lose
+        return _allow()  # pristine bare lossy verb on a PROVABLY CLEAN tree: nothing to lose
     if clean is None:
         return _ask(*_discard_ask_reason(
             kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
