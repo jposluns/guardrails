@@ -142,13 +142,15 @@ def registry_rows(manifests, rows):
 def render_coverage(reg, rows):
     n_frameworks = sum(1 for r in reg if r["ids_cited"])
     n_rules = len({r["rule_id"] for r in rows})
-    n_ids = len(rows)
+    n_ids = len(rows)  # (rule, identifier) mapping pairs
+    n_distinct = len({(r["framework"], r["identifier"]) for r in rows})
     return (
-        '      <p class="lead">The crosswalk references <strong>{ids}</strong> framework identifiers '
-        'across <strong>{fw}</strong> frameworks, cited by <strong>{rules}</strong> of the pack\'s '
-        'rules. Every identifier is validated against a pinned-edition manifest before it can ship; '
-        'the counts here are generated from that live state, never hand-entered.</p>'.format(
-            ids=n_ids, fw=n_frameworks, rules=n_rules))
+        '      <p class="lead">The crosswalk carries <strong>{ids}</strong> mappings from '
+        '<strong>{rules}</strong> of the pack\'s rules to <strong>{distinct}</strong> identifiers '
+        'across <strong>{fw}</strong> frameworks. Every mapped identifier is validated against a '
+        'pinned-edition manifest before it can ship; the counts here are generated from that live '
+        'state, never hand-entered.</p>'.format(
+            ids=n_ids, distinct=n_distinct, fw=n_frameworks, rules=n_rules))
 
 
 def render_registry(reg):
