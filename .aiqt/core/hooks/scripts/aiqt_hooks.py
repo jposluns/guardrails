@@ -932,6 +932,17 @@ def _has_long_prefix(tokens, full):
 
 # --- the one probe kept: the coarse whole-tree clean signal ------------------------------------------
 
+# The ambient git discovery-env vars that could redirect a real-state git call (the clean probe, the
+# recovery snapshot) to a DECOY repository: any of these, if inherited from the environment, can point git
+# at a different index, object store, work tree, or ref namespace than the one at `-C <repo>`, producing a
+# false "provably clean", a false recovery point, or a dirty-tree ALLOW left unchanged. Every real-state
+# call pops ALL of them before applying its own env, so it always observes the ACTUAL repo; a snapshot
+# call's own GIT_INDEX_FILE (supplied via env_extra) still wins because env_extra is applied AFTER this pop.
+_GIT_ISOLATE_ENV = ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+                    "GIT_CEILING_DIRECTORIES", "GIT_QUARANTINE_PATH")
+
+
 def _tree_is_clean(repo):
     """The clean-tree signal, the ONLY probe this guard keeps, hardened to be CONFIG-PROOF. True when the
     read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
@@ -950,12 +961,15 @@ def _tree_is_clean(repo):
     a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
-    from refreshing/writing the real `.git/index`, and an ambient GIT_INDEX_FILE is neutralized so the probe
-    reads the REAL index rather than a foreign preset one."""
+    from refreshing/writing the real `.git/index`, and the whole ambient git discovery-env family
+    (_GIT_ISOLATE_ENV: GIT_INDEX_FILE/GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR/object-dir/namespace/...) is
+    neutralized so the probe reads the REAL repo at `-C <repo>` rather than a foreign preset that could
+    redirect it to a decoy clean repo and win a false ALLOW."""
     try:
         env = dict(os.environ)
         env["GIT_OPTIONAL_LOCKS"] = "0"
-        env.pop("GIT_INDEX_FILE", None)
+        for _var in _GIT_ISOLATE_ENV:
+            env.pop(_var, None)  # neutralize the whole discovery-env family, not just GIT_INDEX_FILE
         result = subprocess.run(
             ["git", "-C", repo, "-c", "status.showUntrackedFiles=all",
              "status", "--porcelain", "--untracked-files=all"],
@@ -1250,30 +1264,44 @@ def _pristine_single_bare_git(command, segments):
 # discard that is asked-then-approved, or one wrongly allowed by a classifier mis-parse, must ALREADY have a
 # recovery point). The snapshot is decision-INDEPENDENT by design: it does not trust the form-classifier to
 # be right about which forms are safe, so it fires for every snapshottable verb on a not-provably-clean tree
-# regardless of the allow/ask/deny verdict. It is skipped when the tree is PROVABLY CLEAN (nothing to lose),
-# when the command is not in scope, and for stash/branch (a worktree snapshot cannot capture stash entries
-# or branch commits; ref-pinning for those is a separate, deferred mechanism).
+# regardless of the allow/ask/deny verdict. It is skipped when the tree is PROVABLY CLEAN (nothing the probe
+# can see to lose), when the command is not in scope, and for stash/branch (a worktree snapshot cannot
+# capture stash entries or branch commits; ref-pinning for those is a separate, deferred mechanism).
+# F-D EXPANSION: a NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is now
+# also snapshot-backed BEST-EFFORT against the SESSION CWD repo, so an asked-then-approved wrapped discard is
+# recoverable too. It is best-effort because a non-pristine command's redirected dir is NOT parsed: a command
+# that changes into a DIFFERENT repository may be snapshotted at the session repo rather than the target (a
+# same-repo cd is still captured by the whole-tree `git add --all`); on snapshot fail the decision stays ASK.
 #
-# Mechanism (all stdlib/subprocess, offline, READ-ONLY to working state IN A NORMAL REPO): a TEMPORARY
-# GIT_INDEX_FILE in a throwaway dir normally OUTSIDE the repo (best-effort and guarded: the snapshot FAILS
-# rather than write inside the repo when TMPDIR resolves within the working tree), seeded by COPYING the real
-# index (so staged content is the baseline); `git add --all` into that temp index overlays tracked-modified
-# and UNTRACKED content (ignored excluded); `git write-tree` (temp index) -> a tree; `git commit-tree <tree>
-# [-p HEAD]` -> a snapshot commit; then `git update-ref refs/aiqt-recovery/<utc-ts>-<pid> <sha>` protects it
-# from GC. This is INERT TO WORKING STATE - it NEVER touches the real index, worktree, HEAD, or any branch -
-# and in a NORMAL repo writes only git objects and one private ref; the ref is invisible to plain `git
-# status`, `git branch`, and `git log` (the working HEAD, index, and branches are untouched), THOUGH
-# reachable via `git log --all` / `git for-each-ref refs/aiqt-recovery` / `git show-ref` (a real ref, not
-# hidden). The selftest asserts the real status/index/HEAD are unchanged. RESIDUAL (the honest bound on
-# "inert"): on a repo configured with clean/smudge/process filters, an fsmonitor hook, or a
-# reference-transaction hook, the snapshot's `git add --all` runs the filters, its `git status` probe runs
-# fsmonitor, and its `git update-ref` runs the reference-transaction hook - repo-configured programs that
-# execute during the snapshot; and a single overlaid tree cannot capture dirty content inside a SUBMODULE or
-# an untracked EMBEDDED git repo (it stores only the gitlink), and it flattens staged-vs-unstaged into ONE
-# tree. One JSONL line per snapshot is appended to a per-user ledger normally OUTSIDE the repo (so a `git
-# clean` inside the repo cannot destroy it); the write is best-effort and guarded: skipped if it would land
-# inside the repo (a misconfigured XDG_STATE_HOME/HOME). FAIL POSTURE: when a snapshot is warranted but
-# cannot be made (probe/write error, over the size cap, a bare or broken git dir, or a temp dir resolving
+# Mechanism (all stdlib/subprocess, offline): the repo TOPLEVEL is resolved once (the anchor for the size
+# estimate and the inside-the-repo containment checks, since status paths are toplevel-relative and the cwd
+# may be a subdir); a TEMPORARY GIT_INDEX_FILE in a throwaway dir normally OUTSIDE the toplevel (best-effort
+# and guarded: the snapshot FAILS rather than write inside the tree when TMPDIR resolves within it), seeded
+# by COPYING the real index (so staged content is the baseline); `git add --all` into that temp index
+# overlays tracked-modified and UNTRACKED content (ignored excluded); `git write-tree` (temp index) -> a
+# tree; `git commit-tree <tree> [-p HEAD]` -> a snapshot commit; then a CREATE-ONLY `git update-ref
+# refs/aiqt-recovery/<utc-ts>-<pid> <sha> ""` (empty expected-old value: a name collision FAILS the snapshot
+# rather than clobbering a prior recovery ref) protects it from GC.
+#
+# The BOUND on "inert" (honest framing): the snapshot's OWN git operations write only git objects and one
+# private ref (plus a reflog entry for that ref when core.logAllRefUpdates is on) and do NOT themselves
+# modify the real index, worktree, HEAD, or any branch; the ref is invisible to plain `git status`, `git
+# branch`, and `git log`, THOUGH reachable via `git log --all` / `git for-each-ref refs/aiqt-recovery` /
+# `git show-ref` (a real ref, not hidden). The selftest asserts the real status/index/HEAD, index bytes,
+# config, and stash list are unchanged. BUT git may ADDITIONALLY run any repo-configured program during the
+# snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
+# categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
+# smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, a
+# reference-transaction hook AND a post-index-change hook can run on the temp-index write, and a
+# reference-transaction hook runs on `git update-ref`. Because a clean filter can TRANSFORM worktree bytes
+# before they enter the snapshot, the snapshot is NOT guaranteed byte-exact on a filtered repo. Further, a
+# single overlaid tree cannot capture dirty content inside a SUBMODULE or an untracked EMBEDDED git repo (it
+# stores only the gitlink), and it flattens staged-vs-unstaged into ONE tree. One JSONL line is appended to a
+# per-user ledger normally OUTSIDE the repo (so a `git clean` inside the repo cannot destroy it); the write
+# is BEST-EFFORT: normally one line per snapshot, but skipped when no per-user location resolves (absent
+# HOME/XDG), when the path would land inside the repo (a misconfigured XDG_STATE_HOME/HOME), or when the
+# directory/open/write fails. FAIL POSTURE: when a snapshot is warranted but cannot be made (probe/write
+# error, an undecodable non-UTF-8 path, over the size cap, a bare or broken git dir, or a temp dir resolving
 # inside the repo) the recovery layer NEVER lets that become a silent allow of a not-provably-clean discard -
 # a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is left as-is with the failure
 # surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what the probe cannot see (content
@@ -1293,25 +1321,50 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
     of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
     env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
-    (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). An ambient GIT_INDEX_FILE
-    is ALWAYS neutralized so a call meant to observe the REAL repo state (the status probe, `rev-parse
-    --git-path index`) cannot read a foreign preset index and cannot leak into the snapshot; a snapshot call
-    overrides it with its own temp index through env_extra. Raises subprocess.SubprocessError / OSError on a
-    spawn or timeout failure, which the caller treats as a snapshot failure. offline, bounded by `timeout`."""
+    (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). The WHOLE ambient git
+    discovery-env family (_GIT_ISOLATE_ENV: GIT_INDEX_FILE, GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
+    GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES,
+    GIT_QUARANTINE_PATH) is ALWAYS neutralized so a call meant to observe the REAL repo state (the status
+    probe, `rev-parse --show-toplevel`/`--git-path index`) and the snapshot itself cannot be redirected to a
+    foreign preset repo (a decoy that would win a false clean, a false recovery point, or leak into the
+    snapshot); a snapshot call overrides GIT_INDEX_FILE with its own temp index through env_extra, applied
+    AFTER the pop. Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller
+    treats as a snapshot failure. offline, bounded by `timeout`."""
     cmd = ["git", "-C", repo] + list(args)
     env = dict(os.environ)
-    env.pop("GIT_INDEX_FILE", None)  # real-state calls must see the real index, not an ambient preset one
+    for _var in _GIT_ISOLATE_ENV:
+        env.pop(_var, None)  # real-state calls must see the REAL repo, not an ambient decoy preset
     if env_extra:
         env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, overriding the neutralize
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
 
-def _recovery_status_entries(repo):
+def _recovery_toplevel(repo):
+    """The absolute repo TOPLEVEL for repo, via `git rev-parse --show-toplevel` (run through _recovery_git,
+    so it inherits the discovery-env neutralization and targets the REAL repo). Returns the toplevel path, or
+    None when git cannot resolve it (a non-zero return or an empty result: a bare repo, a broken git dir, or
+    not a work tree) - the caller treats None as a snapshot failure. This matters because `status --porcelain`
+    paths are repo-ROOT-relative while the session cwd can be a SUBDIR, so the size-estimate joins and the
+    inside-the-repo containment checks must anchor on the TOPLEVEL, not on the (possibly deeper) cwd."""
+    try:
+        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=5)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    top = result.stdout.strip()
+    if result.returncode != 0 or not top:
+        return None
+    return top
+
+
+def _recovery_status_entries(repo, top):
     """(classes, total_bytes) from a read-only, config-forced porcelain probe of repo: `classes` is the
     set of covered classes among {'staged','tracked','untracked'} across every changed/untracked entry,
     and `total_bytes` is the summed on-disk size of those paths (a size-cap estimate; a missing path, e.g.
-    a deletion, contributes 0). Parses the NUL-delimited `--porcelain -z` form, consuming the extra origin
-    field of a rename/copy record. Raises subprocess.SubprocessError / OSError on a probe failure."""
+    a deletion, contributes 0). Its paths are repo-ROOT-relative, so a relative one is joined onto `top`
+    (the resolved toplevel), NOT the passed repo, which can be a subdir and would under-count the estimate.
+    Parses the NUL-delimited `--porcelain -z` form, consuming the extra origin field of a rename/copy record.
+    Raises subprocess.SubprocessError / OSError on a probe failure, or UnicodeDecodeError (a ValueError) when
+    a non-UTF-8 path cannot be decoded, which the caller turns into a snapshot fail (a graceful ASK)."""
     result = _recovery_git(
         repo, ["-c", "status.showUntrackedFiles=all", "status", "--porcelain",
                "--untracked-files=all", "-z"], env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=5)
@@ -1338,7 +1391,7 @@ def _recovery_status_entries(repo):
             if xy[1] not in (" ", "?"):
                 classes.add("tracked")
         try:
-            full = path if os.path.isabs(path) else os.path.join(repo, path)
+            full = path if os.path.isabs(path) else os.path.join(top, path)  # paths are TOPLEVEL-relative
             total += os.path.getsize(full)
         except OSError:
             pass  # a deleted or unreadable path contributes nothing to the size estimate
@@ -1346,36 +1399,48 @@ def _recovery_status_entries(repo):
 
 
 def _path_is_within(candidate, parent):
-    """True when the realpath of candidate is parent itself or lies under it, tested with a path-separator
-    boundary so a sibling like '/repo-x' is not judged inside '/repo'. Used to refuse writing recovery data
-    inside the repo it protects (a misconfigured TMPDIR/XDG_STATE_HOME/HOME); on any error, err toward True
-    (unsafe -> refuse) rather than risk writing inside the tree."""
+    """True when the realpath of candidate is parent itself or lies under it, tested on whole path
+    COMPONENTS (os.path.commonpath) so a sibling like '/repo-x' is not judged inside '/repo', AND a real
+    subpath of the filesystem root '/' is correctly judged inside it: the earlier `base + os.sep` test made
+    '/' into '//', so every candidate read as OUTSIDE and the guard was silently bypassed (Gemini G1). Used
+    to refuse writing recovery data inside the repo it protects (a misconfigured TMPDIR/XDG_STATE_HOME/HOME).
+    realpath(strict=False) resolves a not-yet-existing path (the ledger file on its FIRST write) WITHOUT
+    raising, so the except fires only on a genuine resolution fault (a symlink loop, or commonpath given
+    mixed absolute/relative inputs); on any such error err toward True (unsafe -> refuse) rather than risk
+    writing inside the tree."""
     try:
         cand = os.path.realpath(candidate)
         base = os.path.realpath(parent)
-    except OSError:
+        return cand == base or os.path.commonpath([cand, base]) == base
+    except (OSError, ValueError):
         return True
-    return cand == base or cand.startswith(base + os.sep)
 
 
-def _take_snapshot(repo, verb):
+def _take_snapshot(repo, top, verb):
     """Take an INERT git-DB snapshot of the working tree (tracked-modified + staged + untracked; ignored
     excluded) via a TEMPORARY GIT_INDEX_FILE normally outside the repo, protected by a private
-    refs/aiqt-recovery/<utc-ts>-<pid> ref. In a NORMAL repo writes only git objects and that one ref; the
-    real index, worktree, HEAD, and every branch are untouched (see the block comment above
+    refs/aiqt-recovery/<utc-ts>-<pid> ref. `top` is the resolved repo TOPLEVEL (the containment anchor and
+    the size-estimate root; the session cwd may be a subdir). In a NORMAL repo writes only git objects and
+    that one ref; the real index, worktree, HEAD, and every branch are untouched (see the block comment above
     _SNAPSHOTTABLE_VERBS for the repo-config residual). Returns ('ok', info) with info =
     {ref, sha, classes, restore}, or ('fail', reason)."""
     try:
-        classes, total = _recovery_status_entries(repo)
+        classes, total = _recovery_status_entries(repo, top)
     except (subprocess.SubprocessError, OSError) as exc:
         return ("fail", "the working-tree status probe failed ({})".format(exc))
+    except UnicodeDecodeError as exc:
+        # A non-UTF-8 filename makes `status -z` (text=True) raise a UnicodeDecodeError (a ValueError), which
+        # is NOT a SubprocessError/OSError; catch it so it fails the snapshot -> graceful ASK, never an
+        # uncaught crash that the dispatcher would turn into an exit-2 HARD BLOCK of a would-ALLOW command.
+        return ("fail", "the working-tree status probe returned an undecodable (non-UTF-8) path ({})"
+                        .format(exc))
     if total > _RECOVERY_SIZE_CAP:
         return ("fail", "the working tree exceeds the {} MiB recovery snapshot size cap"
                         .format(_RECOVERY_SIZE_CAP // (1024 * 1024)))
     tmpdir = None
     try:
         tmpdir = tempfile.mkdtemp(prefix="aiqt-recovery-")  # normally OUTSIDE the repo, in the system temp dir
-        if _path_is_within(tmpdir, repo):
+        if _path_is_within(tmpdir, top):
             # A TMPDIR misconfigured to resolve inside the repo would seal recovery data where a `git clean`
             # could destroy it; refuse rather than write inside the tree the snapshot protects.
             return ("fail", "the temp snapshot dir resolved inside the repo (TMPDIR misconfigured), so no "
@@ -1404,14 +1469,19 @@ def _take_snapshot(repo, verb):
         if ct.returncode != 0 or not ct.stdout.strip():
             return ("fail", "git commit-tree failed")
         sha = ct.stdout.strip()
-        # Microsecond precision plus the pid keeps the ref name unique even for several snapshots within
-        # the same second in the same process, so no two snapshots ever collide onto one ref.
+        # Microsecond precision plus the pid makes the ref name unique for several snapshots within the same
+        # second in the same process; the CREATE-ONLY update-ref below (an empty-string expected-old value)
+        # is the backstop, so a name that DID repeat (a clock rollback or a reused pid) FAILS the snapshot
+        # rather than silently clobbering a prior recovery point onto the same ref.
         ref = "{}/{}-{}".format(
             _RECOVERY_REF_NS,
             datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"), os.getpid())
-        if _recovery_git(repo, ["update-ref", ref, sha], timeout=5).returncode != 0:
-            return ("fail", "git update-ref for the recovery ref failed")
-    except (subprocess.SubprocessError, OSError) as exc:
+        # The trailing "" is the expected OLD value: git makes this a CREATE-ONLY update that fails if the ref
+        # already exists, so a colliding name returns non-zero -> ('fail') -> ASK, never an overwrite.
+        if _recovery_git(repo, ["update-ref", ref, sha, ""], timeout=5).returncode != 0:
+            return ("fail", "git update-ref for the recovery ref failed (a create-only collision or a "
+                            "ref-store error), so no recovery point was written over a prior one")
+    except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         return ("fail", "the snapshot could not be created ({})".format(exc))
     finally:
         if tmpdir is not None:
@@ -1435,16 +1505,18 @@ def _recovery_ledger_path():
     return os.path.join(base, *_RECOVERY_LEDGER_PARTS)
 
 
-def _write_recovery_ledger(repo, verb, info):
+def _write_recovery_ledger(repo, top, verb, info):
     """Append ONE JSONL record for a snapshot to the per-user ledger. Records ONLY: utc timestamp, repo
     path, the triggering git VERB (never the raw command or file contents, for privacy), the recovery ref,
     the snapshot sha, the covered classes, and the exact restore command. Best-effort: a write failure is
     swallowed (the ref itself is the recovery point; the ledger is a convenience trace read later), so a
-    ledger fault never changes the guard's decision. Returns True on a successful write, else False."""
+    ledger fault never changes the guard's decision. The containment check anchors on `top` (the resolved
+    toplevel), so a per-user path landing inside the worktree ABOVE the session cwd is still refused. Returns
+    True on a successful write, else False."""
     path = _recovery_ledger_path()
     if not path:
         return False
-    if _path_is_within(path, repo):
+    if _path_is_within(path, top):
         return False  # a misconfigured XDG_STATE_HOME/HOME pointing inside the repo: skip (best-effort)
     record = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "repo": repo, "verb": verb, "ref": info["ref"], "sha": info["sha"],
@@ -1461,19 +1533,29 @@ def _write_recovery_ledger(repo, verb, info):
 def _record_recovery(repo, verb):
     """Take a recovery snapshot and, on success, append the ledger (best-effort). Returns ('ok', info) or
     ('fail', reason). Called ONLY when the worktree is resolvable to the session cwd and the tree is NOT
-    provably clean, so a snapshot is genuinely warranted."""
-    result = _take_snapshot(repo, verb)
+    provably clean, so a snapshot is genuinely warranted. Resolves the repo TOPLEVEL ONCE (via _recovery_git,
+    so it inherits the discovery-env neutralization) and threads it to both the snapshot and the ledger, so
+    the size estimate and the inside-the-repo containment checks anchor on the toplevel, not the (possibly
+    deeper) session cwd. An unresolvable toplevel (a bare or broken git dir) is itself a snapshot fail."""
+    top = _recovery_toplevel(repo)
+    if not top:
+        return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
+    result = _take_snapshot(repo, top, verb)
     if result[0] == "ok":
-        _write_recovery_ledger(repo, verb, result[1])
+        _write_recovery_ledger(repo, top, verb, result[1])
     return result
 
 
 def _recovery_pointer(info):
     """A one-line human pointer to a saved snapshot for an ASK/DENY reason. Says a snapshot was SAVED, not
-    that work was discarded (PreToolUse cannot know the command ran)."""
+    that work was discarded (PreToolUse cannot know the command ran). Discloses that the primary restore is
+    OVERLAY mode (it brings back modified and new content but does NOT re-apply a recorded file deletion),
+    and points to the isolated-branch form for an exact, deletion-inclusive restore."""
     covered = ", ".join(info["classes"]) if info["classes"] else "the working tree"
-    return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}', or put it on "
-            "an isolated branch with 'git switch -c aiqt-recover-<id> {}'.".format(
+    return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}' (overlay mode: "
+            "it brings back modified and new content but does NOT re-apply a file deletion recorded in the "
+            "snapshot), or for an exact, deletion-inclusive restore put it on an isolated branch with 'git "
+            "switch -c aiqt-recover-<id> {}'.".format(
                 covered, info["ref"], info["restore"], info["ref"]))
 
 
@@ -1526,10 +1608,14 @@ def git_discard(data):
     + one ref only) and appends one line to an EXTERNAL per-user ledger, on the ALLOW and ASK paths alike (the
     hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
     branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
-    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. See the recovery
-    block comment above _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see
-    (assume-unchanged/skip-worktree marks, submodule.<name>.ignore) or ignored files (git add --all excludes
-    them), so a discard of that content is not recoverable here."""
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
+    NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
+    BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
+    command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
+    a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
+    _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
+    marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
+    content is not recoverable here."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -1575,10 +1661,32 @@ def git_discard(data):
     pristine = _pristine_single_bare_git(command, segments)
     if pristine is None:
         kind = lossy[0][1] if lossy else "a git work-losing verb"
-        return _ask(*_discard_ask_reason(
+        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but a
+        # SNAPSHOTTABLE one now gets a BEST-EFFORT recovery point first, so an asked-then-approved
+        # compound/wrapped discard is recoverable (the hook fires once, with no post-approval callback). This
+        # is BEST-EFFORT against the SESSION CWD repo only: we do NOT parse a non-pristine command's
+        # redirected dir, so a command that changes into a DIFFERENT repo may be snapshotted at the session
+        # repo rather than the target (a same-repo cd is still captured by the whole-tree add --all). The
+        # snapshot is decision-INDEPENDENT (same _record_recovery path) and fires only when the tree is NOT
+        # provably clean; on snapshot fail the decision stays ASK with the failure surfaced (never allow).
+        np_subs = set()
+        for _role, _kind, _toks in lossy:
+            _s, _ = _git_sub_and_args(_toks)
+            if _s is not None:
+                np_subs.add(_s)
+        # Snapshottable when a visible lossy verb is snapshottable, OR raw_lossy is set (a verb hidden by a
+        # wrapper/metacharacter the segment scan could not see): treat that conservatively as snapshottable.
+        np_snappable = raw_lossy or bool(np_subs & _SNAPSHOTTABLE_VERBS)
+        np_cwd = data.get("cwd")
+        np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
+        np_snap = None
+        if np_snappable and np_base is not None and _tree_is_clean(np_base) is not True:
+            np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
+            np_snap = _record_recovery(np_base, np_verb)
+        return _ask_with_recovery(
             kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
                   "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
-                  "that is not literally 'git'), so this guard will not trust a clean probe on it"))
+                  "that is not literally 'git'), so this guard will not trust a clean probe on it", np_snap)
 
     # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
     # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the

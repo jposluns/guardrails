@@ -30,6 +30,7 @@ ASKS, which many cases below assert.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import datetime
 import json
 import os
 import shutil
@@ -563,11 +564,18 @@ def main():
         before = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"),
                   _snap("config", "--list"), _snap("stash", "list"))
         before_idx = real_idx.read_bytes()
+        # Also capture the WORKTREE bytes of the dirty file and the full branch-ref listing: the snapshot
+        # must leave the actual working-tree content and every branch ref untouched (it writes only objects
+        # and one refs/aiqt-recovery/* ref).
+        before_wt = (rec_inv / "file.txt").read_bytes()
+        before_heads = _snap("for-each-ref", "refs/heads")
         expect("(rec-inv) checkout -- on dirty invariant tree asks", "git checkout -- file.txt", "ask",
                cwd=str(rec_inv))
         after = (_snap("status", "--porcelain"), _snap("rev-parse", "HEAD"), _snap("write-tree"),
                  _snap("config", "--list"), _snap("stash", "list"))
         after_idx = real_idx.read_bytes()
+        after_wt = (rec_inv / "file.txt").read_bytes()
+        after_heads = _snap("for-each-ref", "refs/heads")
         if not _recovery_refs(rec_inv):
             failures.append("(rec-inv-snap) expected a recovery ref on the invariant repo")
         if before[0] != after[0]:
@@ -582,6 +590,10 @@ def main():
             failures.append("(rec-inv-config) the real git config changed after a snapshot")
         if before[4] != after[4]:
             failures.append("(rec-inv-stash) the real stash list changed after a snapshot")
+        if before_wt != after_wt:
+            failures.append("(rec-inv-worktree) the real worktree bytes changed after a snapshot")
+        if before_heads != after_heads:
+            failures.append("(rec-inv-branches) a branch ref changed after a snapshot")
 
         # (rec-restore) the snapshot ref actually RESTORES the work: dirty (tracked + untracked), snapshot
         # via a clean discard, wipe the tree, then `git checkout <ref> -- :/` recovers both.
@@ -804,6 +816,186 @@ def main():
             failures.append("(rec-b2-ledger-snap) expected a recovery ref even when the ledger write is skipped")
         if (inside_ledger / "aiqt-guardrails" / "recovery.jsonl").exists():
             failures.append("(rec-b2-ledger-skip) the ledger must NOT be written inside the repo")
+
+        # (rec-decoy) C1: ambient GIT_DIR + GIT_WORK_TREE pointing at a CLEAN decoy repo must NOT redirect the
+        # probe or the snapshot away from the REAL dirty session-cwd repo. The whole discovery-env family is
+        # neutralized, so the real (dirty) repo is read (reset --hard DENIES, not a false ALLOW), the recovery
+        # ref lands on the REAL repo (never the decoy), and the real index/HEAD are untouched. Without the
+        # neutralization the probe would read the clean decoy and silently ALLOW a discard of real work.
+        rec_decoy = _init_repo(tmp / "rec-decoy")
+        (rec_decoy / "file.txt").write_text("committed line\nreal dirty work\n", encoding="utf-8")
+        decoy = _init_repo(tmp / "rec-decoy-clean")  # a CLEAN decoy the ambient env points at
+        real_head = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
+                                   capture_output=True, text=True, timeout=30).stdout.strip()
+        real_idx_bytes = (rec_decoy / ".git" / "index").read_bytes()
+        decoy_env = {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)}
+        for _k, _v in decoy_env.items():
+            os.environ[_k] = _v
+        try:
+            probe_decoy = aiqt_hooks._tree_is_clean(str(rec_decoy))
+            got_decoy = _decision(handler, "git reset --hard", cwd=str(rec_decoy))
+        finally:
+            for _k in decoy_env:
+                os.environ.pop(_k, None)
+        if probe_decoy is not False:
+            failures.append("(rec-decoy-probe) with ambient GIT_DIR/GIT_WORK_TREE at a clean decoy, the probe "
+                            "must still read the REAL dirty repo (False), got {}".format(probe_decoy))
+        if got_decoy != "deny":
+            failures.append("(rec-decoy) reset --hard on the REAL dirty repo must DENY despite a clean decoy "
+                            "via GIT_DIR/GIT_WORK_TREE, got {}".format(got_decoy))
+        if not _recovery_refs(rec_decoy):
+            failures.append("(rec-decoy-snap) expected a recovery ref on the REAL repo")
+        if _recovery_refs(decoy):
+            failures.append("(rec-decoy-wrongwrite) a recovery ref was written to the DECOY repo (a "
+                            "discovery-env redirect leaked into the snapshot)")
+        if (rec_decoy / ".git" / "index").read_bytes() != real_idx_bytes:
+            failures.append("(rec-decoy-index) the real index changed under an ambient GIT_DIR/GIT_WORK_TREE")
+        real_head_after = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
+                                         capture_output=True, text=True, timeout=30).stdout.strip()
+        if real_head_after != real_head:
+            failures.append("(rec-decoy-head) the real HEAD changed under an ambient GIT_DIR/GIT_WORK_TREE")
+
+        # (rec-subdir-tmp) C2: cwd is a SUBDIR of the repo and TMPDIR points at the worktree ROOT (above cwd).
+        # The temp-dir containment check anchors on the resolved TOPLEVEL, not the cwd, so the temp dir is
+        # judged INSIDE the tree -> snapshot FAIL -> a would-be ALLOW (reset --soft) downgrades to ASK and no
+        # ref is written. (If it anchored on the deeper cwd, the root temp dir would read as outside and the
+        # snapshot would wrongly succeed inside the tree.)
+        rec_sub = _init_repo(tmp / "rec-subdir")
+        (rec_sub / "file.txt").write_text("committed line\nsubdir dirty\n", encoding="utf-8")
+        subdir = rec_sub / "sub" / "deep"
+        subdir.mkdir(parents=True, exist_ok=True)
+        _orig_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(rec_sub)  # TMPDIR at the worktree ROOT, ABOVE the cwd
+        try:
+            got_sub = _decision(handler, "git reset --soft", cwd=str(subdir))
+        finally:
+            tempfile.tempdir = _orig_tempdir
+        if got_sub != "ask":
+            failures.append("(rec-subdir-tmp) a temp dir at the toplevel (above a subdir cwd) must fail-to-ASK "
+                            "a would-be ALLOW, got {}".format(got_sub))
+        if _recovery_refs(rec_sub):
+            failures.append("(rec-subdir-tmp-snap) expected NO ref when the temp dir resolves inside the "
+                            "toplevel from a subdir cwd")
+
+        # (rec-subdir-ledger) C2: cwd is a SUBDIR and XDG_STATE_HOME points at the worktree ROOT. The ledger
+        # containment anchors on the TOPLEVEL, so the ledger write is SKIPPED (never written inside the tree),
+        # but the snapshot ref is still taken and the decision is unaffected (ASK).
+        rec_subl = _init_repo(tmp / "rec-subdir-ledger")
+        (rec_subl / "file.txt").write_text("committed line\nsubdir ledger\n", encoding="utf-8")
+        subdir2 = rec_subl / "nested"
+        subdir2.mkdir(parents=True, exist_ok=True)
+        _orig_xdg2 = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(rec_subl)  # ledger base at the worktree ROOT, ABOVE the cwd
+        try:
+            got_subl = _decision(handler, "git checkout -- file.txt", cwd=str(subdir2))
+        finally:
+            if _orig_xdg2 is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = _orig_xdg2
+        if got_subl != "ask":
+            failures.append("(rec-subdir-ledger) a ledger base at the toplevel above a subdir cwd must leave "
+                            "the decision unaffected (ask), got {}".format(got_subl))
+        if not _recovery_refs(rec_subl):
+            failures.append("(rec-subdir-ledger-snap) expected a recovery ref even when the ledger is skipped")
+        if (rec_subl / "aiqt-guardrails" / "recovery.jsonl").exists():
+            failures.append("(rec-subdir-ledger-skip) the ledger must NOT be written inside the toplevel from "
+                            "a subdir cwd")
+
+        # (rec-badname) C3: a non-UTF-8 filename makes `status -z` (text=True) raise UnicodeDecodeError; it
+        # must be caught and turned into a snapshot FAIL -> graceful ASK, never an uncaught crash (which the
+        # dispatcher would turn into an exit-2 HARD BLOCK of a would-ALLOW command).
+        rec_bad = _init_repo(tmp / "rec-badname")
+        (rec_bad / "file.txt").write_text("committed line\ndirty\n", encoding="utf-8")  # tracked-dirty
+        badname = os.fsencode(str(rec_bad)) + b"/\xff\xfe-bad.txt"  # invalid UTF-8 bytes in the name
+        try:
+            with open(badname, "wb") as fh:
+                fh.write(b"junk\n")
+            made_bad = True
+        except OSError:
+            made_bad = False  # a filesystem that refuses the byte name: skip this case gracefully
+        if made_bad:
+            try:
+                got_bad = _decision(handler, "git checkout -- file.txt", cwd=str(rec_bad))
+            except UnicodeDecodeError:
+                got_bad = "CRASH (UnicodeDecodeError propagated to the dispatcher)"
+            if got_bad != "ask":
+                failures.append("(rec-badname) a non-UTF-8 path must fail-to-ASK gracefully, got {}"
+                                .format(got_bad))
+
+        # (rec-refcollision) C4: the recovery ref is CREATE-ONLY (empty expected-old value). Freezing the
+        # timestamp forces two snapshots onto the SAME ref name; the second update-ref then FAILS rather than
+        # clobbering the first, so the decision stays ASK, the prior ref stays intact, and no second ref is
+        # created.
+        rec_col = _init_repo(tmp / "rec-collision")
+        (rec_col / "file.txt").write_text("committed line\ncollide\n", encoding="utf-8")
+
+        _utc = datetime.timezone.utc
+
+        class _FixedNow:
+            @staticmethod
+            def now(tz=None):
+                return datetime.datetime(2020, 1, 1, 0, 0, 0, 123456, tzinfo=_utc)
+
+        class _FakeDatetime:
+            pass
+
+        _FakeDatetime.datetime = _FixedNow  # set after the class body to avoid name shadowing
+        _FakeDatetime.timezone = datetime.timezone
+
+        _orig_dt = aiqt_hooks.datetime
+        aiqt_hooks.datetime = _FakeDatetime
+        try:
+            got_col1 = _decision(handler, "git checkout -- file.txt", cwd=str(rec_col))
+            refs_after1 = _recovery_refs(rec_col)
+            first_sha = subprocess.run(["git", "-C", str(rec_col), "rev-parse", refs_after1[0]],
+                                       capture_output=True, text=True, timeout=30).stdout.strip() \
+                if refs_after1 else ""
+            data_col2 = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                         "tool_input": {"command": "git checkout -- file.txt"}, "cwd": str(rec_col)}
+            code_col2, obj_col2, _ = handler(data_col2)
+        finally:
+            aiqt_hooks.datetime = _orig_dt
+        dec_col2 = obj_col2.get("hookSpecificOutput", {}).get("permissionDecision") \
+            if isinstance(obj_col2, dict) else None
+        reason_col2 = obj_col2.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
+            if isinstance(obj_col2, dict) else ""
+        refs_after2 = _recovery_refs(rec_col)
+        if got_col1 != "ask" or len(refs_after1) != 1:
+            failures.append("(rec-refcollision-setup) expected one ref after the first snapshot and an ASK, "
+                            "got dec={} refs={}".format(got_col1, refs_after1))
+        if not (code_col2 == 0 and dec_col2 == "ask"):
+            failures.append("(rec-refcollision) a create-only ref collision must keep the decision ASK, got "
+                            "code={!r} dec={!r}".format(code_col2, dec_col2))
+        if "no pre-command recovery snapshot could be created" not in reason_col2:
+            failures.append("(rec-refcollision-reason) the ASK reason must surface the collision failure")
+        if refs_after2 != refs_after1:
+            failures.append("(rec-refcollision-intact) the prior recovery ref must be intact and unique after "
+                            "a collision, was {} now {}".format(refs_after1, refs_after2))
+        if refs_after2 and first_sha and subprocess.run(
+                ["git", "-C", str(rec_col), "rev-parse", refs_after2[0]],
+                capture_output=True, text=True, timeout=30).stdout.strip() != first_sha:
+            failures.append("(rec-refcollision-sha) the prior recovery ref sha was clobbered by a collision")
+
+        # (rec-fd-nonpristine) C6 (F-D EXPAND): a NON-PRISTINE in-scope ASK (a compound snapshottable
+        # command) on a dirty tree now takes a BEST-EFFORT recovery snapshot too, so an asked-then-approved
+        # wrapped/compound discard is recoverable. Decision stays ASK; a recovery ref is created.
+        rec_fd = _init_repo(tmp / "rec-fd")
+        (rec_fd / "file.txt").write_text("committed line\nfd work\n", encoding="utf-8")
+        expect("(rec-fd-nonpristine) compound checkout on dirty tree asks",
+               "git checkout -- file.txt && echo done", "ask", cwd=str(rec_fd))
+        if not _recovery_refs(rec_fd):
+            failures.append("(rec-fd-nonpristine-snap) expected a recovery ref on a non-pristine in-scope ASK "
+                            "of a dirty tree (F-D EXPAND)")
+        # A non-pristine WRAPPED form (a wrapper hides the verb from the segment scan; raw_lossy is the
+        # signal) is likewise snapshot-backed against the session cwd.
+        rec_fdw = _init_repo(tmp / "rec-fd-wrap")
+        (rec_fdw / "file.txt").write_text("committed line\nwrapped fd\n", encoding="utf-8")
+        expect("(rec-fd-wrap) wrapped reset --hard on dirty tree asks", "sudo git reset --hard", "ask",
+               cwd=str(rec_fdw))
+        if not _recovery_refs(rec_fdw):
+            failures.append("(rec-fd-wrap-snap) expected a recovery ref on a wrapped in-scope ASK of a dirty "
+                            "tree (F-D EXPAND, raw_lossy path)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
