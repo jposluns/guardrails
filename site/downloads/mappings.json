@@ -6677,6 +6677,16 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
+      "identifier": "AML.T0092",
+      "identifier_title": "Manipulate User LLM Chat History"
+    },
+    {
+      "rule_id": "secunt",
+      "rule_title": "Untrusted content is data, not instructions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
       "identifier": "AML.T0094",
       "identifier_title": "Delay Execution of LLM Instructions"
     },
@@ -6729,16 +6739,6 @@
       "fit": "tight",
       "identifier": "AML.T0054",
       "identifier_title": "LLM Jailbreak"
-    },
-    {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "tight",
-      "identifier": "AML.T0092",
-      "identifier_title": "Manipulate User LLM Chat History"
     },
     {
       "rule_id": "secunt",
