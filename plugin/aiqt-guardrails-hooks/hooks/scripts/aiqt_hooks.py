@@ -47,8 +47,9 @@ status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a rep
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
 entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
-No lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean tree - worst
-case it ASKS, at the cost of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
+No lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean tree, or a
+pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost
+of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
 function renaming git, a discard performed outside the Bash tool, or persistent shell/config state; the
 deferred recovery/snapshot layer is the backstop. The one probe kept is read-only and offline; it never
 mutates the repo.
@@ -839,11 +840,25 @@ _SHELL_RESERVED_WORDS = frozenset((
     "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
+# The opt-out guidance is PATH-AWARE and appended by the caller, because the opt-out is honoured only on a
+# pristine bare form: on a pristine bare command the leading GUARDRAIL_ALLOW_DISCARD=1 prefix opts THIS
+# command out (_OPTOUT_PRISTINE), but on a raw/unparseable, non-pristine, or repository-view-redirected
+# command the opt-out is NOT honoured on the command as issued, so the actor is told to RE-ISSUE the discard
+# as a parseable pristine bare form carrying the prefix (_OPTOUT_REISSUE).
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
     "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
-    "--cached'; change branch with 'git switch' (it aborts on a dirty tree); or, for a known-safe "
-    "discard, prefix the command with GUARDRAIL_ALLOW_DISCARD=1 to override this guard.")
+    "--cached'; change branch with 'git switch' (it aborts on a dirty tree).")
+# Opt-out guidance for a PRISTINE bare form, where the leading prefix opts THIS command out.
+_OPTOUT_PRISTINE = (
+    " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
+    "guard.")
+# Opt-out guidance for a raw/non-pristine/view-redirected form, where the opt-out is NOT honoured on the
+# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix.
+_OPTOUT_REISSUE = (
+    " For a known-safe discard, re-issue it as a parseable pristine bare 'git <verb>' command carrying a "
+    "leading GUARDRAIL_ALLOW_DISCARD=1 prefix; the opt-out is honoured only on that pristine bare form, not "
+    "on the command as issued here.")
 
 
 def _segment_has_optout(tokens):
@@ -1204,13 +1219,25 @@ def _discard_role(sub, args):
 
 # --- outcome text ------------------------------------------------------------------------------------
 
-def _discard_ask_reason(kind, detail):
+def _discard_ask_reason(kind, detail, optout=None):
     """The (reason, banner) pair for an ASK. Stored by the handler and emitted via _ask if no segment
-    DENIES first, so a confirmed loss still wins over a recoverable ask."""
+    DENIES first, so a confirmed loss still wins over a recoverable ask. `optout` selects the PATH-AWARE
+    opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
+    bare command whose own leading GUARDRAIL_ALLOW_DISCARD=1 prefix opts THIS command out, or
+    _OPTOUT_REISSUE on a raw/non-pristine/view-redirected command where the opt-out is honoured only on a
+    re-issued pristine bare form, never on the command as issued."""
+    if optout is None:
+        optout = _OPTOUT_PRISTINE
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
-              "or stash your work first. {}".format(kind, detail, _DISCARD_ALTS))
-    banner = ("AIQT guardrail: {} - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip this "
-              "prompt (rule prsunc).".format(kind))
+              "or stash your work first. {}{}".format(kind, detail, _DISCARD_ALTS, optout))
+    if optout is _OPTOUT_REISSUE:
+        banner = ("AIQT guardrail: {} - confirm this discard, or re-issue it as a parseable pristine bare "
+                  "'git <verb>' command carrying a leading GUARDRAIL_ALLOW_DISCARD=1 prefix to skip this "
+                  "prompt (the opt-out is not honoured on the command as issued) (rule prsunc)."
+                  .format(kind))
+    else:
+        banner = ("AIQT guardrail: {} - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip "
+                  "this prompt (rule prsunc).".format(kind))
     return (reason, banner)
 
 
@@ -1220,7 +1247,8 @@ def _discard_deny(kind):
     too, because the config-forced probe now counts an untracked-only-dirty tree as dirty."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
               "currently holds uncommitted or untracked changes the command could destroy, discarding any "
-              "fix you have applied but not yet committed. {}".format(kind, _DISCARD_ALTS))
+              "fix you have applied but not yet committed. {}{}"
+              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE))
     banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
               "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
     return _deny(reason, banner)
@@ -1335,7 +1363,7 @@ def _git_discard_fallback(command, cwd=None):
     reason = (
         "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
         "(likely an unbalanced quote) and it names a git work-losing verb this guard cannot prove safe; "
-        "asking rather than silently allowing. {}".format(_DISCARD_ALTS))
+        "asking rather than silently allowing. {}{}".format(_DISCARD_ALTS, _OPTOUT_REISSUE))
     banner = (
         "AIQT guardrail: an unparseable git command names a work-losing verb this guard could not prove "
         "safe - confirm this discard. The GUARDRAIL_ALLOW_DISCARD opt-out is NOT honoured on an unparseable "
@@ -1706,11 +1734,13 @@ def _recovery_pointer(info):
                 covered, info["ref"], info["restore"], info["ref"]))
 
 
-def _ask_with_recovery(kind, detail, snap):
+def _ask_with_recovery(kind, detail, snap, optout=None):
     """An ASK whose reason folds in the recovery outcome: a restore pointer on a successful snapshot, or
     the failure surfaced (decision stays ASK) on a snapshot failure. snap is None (no snapshot warranted),
-    ('ok', info), or ('fail', reason)."""
-    reason, banner = _discard_ask_reason(kind, detail)
+    ('ok', info), or ('fail', reason). `optout` is passed through to _discard_ask_reason to select the
+    path-aware opt-out guidance (default pristine; the non-pristine and view-redirected callers pass
+    _OPTOUT_REISSUE)."""
+    reason, banner = _discard_ask_reason(kind, detail, optout)
     if snap is not None and snap[0] == "ok":
         reason = reason + " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":
@@ -1744,7 +1774,8 @@ def git_discard(data):
     any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
     option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
     probe, or a softer/index-only discard. No lossy command is ever silently ALLOWED unless it is a pristine
-    bare git on a provably-clean tree - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
+    bare git on a provably-clean tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1
+    opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
     (a non-git command, or no recognized lossy verb). The status probe (git status --porcelain, config-forced
     to report untracked) is read-only and offline.
 
@@ -1844,7 +1875,8 @@ def git_discard(data):
         return _ask_with_recovery(
             kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
                   "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
-                  "that is not literally 'git'), so this guard will not trust a clean probe on it", np_snap)
+                  "that is not literally 'git'), so this guard will not trust a clean probe on it", np_snap,
+            _OPTOUT_REISSUE)
 
     # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
     # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
@@ -1881,7 +1913,7 @@ def git_discard(data):
             "cannot prove the command's repository view is the session directory (the probe scrubs an "
             "ambient var, but the actual command still inherits it, and a command-local redirect points "
             "elsewhere); any recovery snapshot is best-effort against the session cwd and may not capture "
-            "a redirected tree", ao_snap)
+            "a redirected tree", ao_snap, _OPTOUT_REISSUE)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _ask(*_discard_ask_reason(
