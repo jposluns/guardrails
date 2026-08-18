@@ -659,9 +659,12 @@ def main():
                 if rec.get("ref", "") not in rec.get("restore", ""):
                     failures.append("(rec-ledger-restore) the restore command should reference the ref")
 
-        # (rec-idxfile) B3: with an ambient GIT_INDEX_FILE preset in the environment, taking a snapshot does
-        # NOT mutate the REAL index; the real-state calls neutralize the ambient index (so they read the REAL
-        # working tree), the snapshot uses its own temp index, and the bogus ambient path is never written.
+        # (rec-idxfile) A: an ambient GIT_INDEX_FILE is a TARGET-REDIRECT var. The probe would scrub it and
+        # read the real cwd repo, but the guard cannot scrub it from the ACTUAL command, which would discard
+        # the custom index the probe never saw. So the guard CANNOT prove the command's target IS the session
+        # cwd: it ASKS (never a silent allow) and takes NO snapshot (an unresolvable target), leaving the real
+        # index and the bogus ambient path untouched. (Old wrong premise: that neutralizing the probe let the
+        # guard read the real repo and snapshot it, ignoring that the real command still carries the redirect.)
         rec_idx = _init_repo(tmp / "rec-idxfile")
         (rec_idx / "file.txt").write_text("committed line\nidx staged\n", encoding="utf-8")
         _git(rec_idx, "add", "file.txt")  # staged content in the REAL index
@@ -675,27 +678,19 @@ def main():
         finally:
             os.environ.pop("GIT_INDEX_FILE", None)
         if got_idx != "ask":
-            failures.append("(rec-idxfile) dirty-tree ASK with an ambient GIT_INDEX_FILE: expected ask, got "
-                            "{}".format(got_idx))
+            failures.append("(rec-idxfile) an ambient GIT_INDEX_FILE target-redirect must ASK (unresolvable "
+                            "target), got {}".format(got_idx))
         if real_index.read_bytes() != idx_before:
-            failures.append("(rec-idxfile-index) the REAL .git/index changed after a snapshot taken with an "
-                            "ambient GIT_INDEX_FILE (B3 neutralization failed)")
+            failures.append("(rec-idxfile-index) the REAL .git/index changed under an ambient GIT_INDEX_FILE")
         if ambient.exists():
-            failures.append("(rec-idxfile-ambient) the ambient GIT_INDEX_FILE path was written; a real-state "
-                            "call did not neutralize it")
-        idx_refs = _recovery_refs(rec_idx)
-        if not idx_refs:
-            failures.append("(rec-idxfile-snap) expected a recovery ref even with an ambient GIT_INDEX_FILE")
-        else:
-            listing = subprocess.run(["git", "-C", str(rec_idx), "ls-tree", "-r", "--name-only", idx_refs[0]],
-                                     capture_output=True, text=True, timeout=30)
-            if listing.returncode != 0 or "untr.txt" not in listing.stdout:
-                failures.append("(rec-idxfile-content) the snapshot did not capture the real working tree "
-                                "(untracked file missing) with an ambient GIT_INDEX_FILE set")
+            failures.append("(rec-idxfile-ambient) the ambient GIT_INDEX_FILE path was written")
+        if _recovery_refs(rec_idx):
+            failures.append("(rec-idxfile-nosnap) an unresolvable-target ASK must take NO recovery snapshot")
 
-        # (rec-ambient) an assortment of ambient GIT_* env vars does not break the decision or the snapshot
-        # isolation: a dirty-tree ASK still ASKS, a snapshot ref is created, and the real index/HEAD are
-        # unchanged.
+        # (rec-ambient) an assortment of NON-redirect ambient GIT_* env vars (identity, pager) does not break
+        # the decision or the snapshot isolation: a dirty-tree ASK still ASKS, a snapshot ref is created, and
+        # the real index/HEAD are unchanged. (Target-redirect vars like GIT_DIR/GIT_INDEX_FILE are a separate
+        # case that forces ASK-with-no-snapshot; see rec-idxfile and rec-decoy.)
         rec_amb = _init_repo(tmp / "rec-ambient")
         (rec_amb / "file.txt").write_text("committed line\nambient env\n", encoding="utf-8")
         amb_index = rec_amb / ".git" / "index"
@@ -704,7 +699,7 @@ def main():
                                          capture_output=True, text=True, timeout=30).stdout.strip()
         amb_env = {"GIT_AUTHOR_NAME": "Ambient", "GIT_AUTHOR_EMAIL": "a@example.invalid",
                    "GIT_COMMITTER_NAME": "Ambient", "GIT_COMMITTER_EMAIL": "a@example.invalid",
-                   "GIT_PAGER": "cat", "GIT_INDEX_FILE": str(tmp / "ambient2-index")}
+                   "GIT_PAGER": "cat"}
         for _k, _v in amb_env.items():
             os.environ[_k] = _v
         try:
@@ -817,11 +812,14 @@ def main():
         if (inside_ledger / "aiqt-guardrails" / "recovery.jsonl").exists():
             failures.append("(rec-b2-ledger-skip) the ledger must NOT be written inside the repo")
 
-        # (rec-decoy) C1: ambient GIT_DIR + GIT_WORK_TREE pointing at a CLEAN decoy repo must NOT redirect the
-        # probe or the snapshot away from the REAL dirty session-cwd repo. The whole discovery-env family is
-        # neutralized, so the real (dirty) repo is read (reset --hard DENIES, not a false ALLOW), the recovery
-        # ref lands on the REAL repo (never the decoy), and the real index/HEAD are untouched. Without the
-        # neutralization the probe would read the clean decoy and silently ALLOW a discard of real work.
+        # (rec-decoy) A: ambient GIT_DIR + GIT_WORK_TREE are TARGET-REDIRECT vars pointing at a CLEAN decoy.
+        # The PROBE still scrubs them and reads the REAL dirty repo (so a false clean-decoy ALLOW is off the
+        # table), but the guard cannot scrub them from the ACTUAL command, which would act on the redirected
+        # decoy, not the probed cwd. So the guard cannot prove the command's target IS the session cwd: it
+        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW), takes NO snapshot
+        # (unresolvable target), writes nothing to the decoy, and leaves the real repo untouched. (Old wrong
+        # premise: that neutralizing the probe let the guard confidently DENY on the real repo, ignoring that
+        # the real command still carries the redirect and would not even touch the probed repo.)
         rec_decoy = _init_repo(tmp / "rec-decoy")
         (rec_decoy / "file.txt").write_text("committed line\nreal dirty work\n", encoding="utf-8")
         decoy = _init_repo(tmp / "rec-decoy-clean")  # a CLEAN decoy the ambient env points at
@@ -839,21 +837,35 @@ def main():
                 os.environ.pop(_k, None)
         if probe_decoy is not False:
             failures.append("(rec-decoy-probe) with ambient GIT_DIR/GIT_WORK_TREE at a clean decoy, the probe "
-                            "must still read the REAL dirty repo (False), got {}".format(probe_decoy))
-        if got_decoy != "deny":
-            failures.append("(rec-decoy) reset --hard on the REAL dirty repo must DENY despite a clean decoy "
-                            "via GIT_DIR/GIT_WORK_TREE, got {}".format(got_decoy))
-        if not _recovery_refs(rec_decoy):
-            failures.append("(rec-decoy-snap) expected a recovery ref on the REAL repo")
+                            "must still scrub them and read the REAL dirty repo (False), got {}"
+                            .format(probe_decoy))
+        if got_decoy != "ask":
+            failures.append("(rec-decoy) an ambient GIT_DIR/GIT_WORK_TREE target-redirect must ASK (the guard "
+                            "cannot prove the command targets the session cwd), got {}".format(got_decoy))
+        if _recovery_refs(rec_decoy):
+            failures.append("(rec-decoy-nosnap) an unresolvable-target ASK must take NO recovery snapshot on "
+                            "the real repo")
         if _recovery_refs(decoy):
-            failures.append("(rec-decoy-wrongwrite) a recovery ref was written to the DECOY repo (a "
-                            "discovery-env redirect leaked into the snapshot)")
+            failures.append("(rec-decoy-wrongwrite) a recovery ref was written to the DECOY repo")
         if (rec_decoy / ".git" / "index").read_bytes() != real_idx_bytes:
             failures.append("(rec-decoy-index) the real index changed under an ambient GIT_DIR/GIT_WORK_TREE")
         real_head_after = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
                                          capture_output=True, text=True, timeout=30).stdout.strip()
         if real_head_after != real_head:
             failures.append("(rec-decoy-head) the real HEAD changed under an ambient GIT_DIR/GIT_WORK_TREE")
+
+        # (rec-heredoc) C: a Bash-valid but shlex-UNPARSEABLE discard (an unbalanced quote inside a quoted
+        # heredoc) reaches the raw-lossy fallback. It must ASK and, on a dirty tree, take a best-effort
+        # recovery snapshot FIRST - before the fix the ValueError path returned ASK with NO recovery ref.
+        rec_hd = _init_repo(tmp / "rec-heredoc")
+        (rec_hd / "file.txt").write_text("committed line\nheredoc dirty\n", encoding="utf-8")
+        hd_cmd = "git reset --hard <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes shlex raise
+        got_hd = _decision(handler, hd_cmd, cwd=str(rec_hd))
+        if got_hd != "ask":
+            failures.append("(rec-heredoc) an unparseable in-scope discard must ASK, got {}".format(got_hd))
+        if not _recovery_refs(rec_hd):
+            failures.append("(rec-heredoc-snap) expected a best-effort recovery ref for an unparseable "
+                            "dirty-tree discard (Class C)")
 
         # (rec-subdir-tmp) C2: cwd is a SUBDIR of the repo and TMPDIR points at the worktree ROOT (above cwd).
         # The temp-dir containment check anchors on the resolved TOPLEVEL, not the cwd, so the temp dir is
@@ -1163,16 +1175,56 @@ def main():
         # GIT_*-prefixed var, not an enumerated family, so a random GIT_FOO and the round-5 GIT_ATTR_SOURCE
         # both go while non-GIT vars stay. This is the structural guarantee that closes the whole ambient-env
         # class at once (rounds 4-5 kept finding new members: GIT_CONFIG_*, GIT_TRACE*, GIT_ATTR_SOURCE).
+        # The ambient GIT_NO_LAZY_FETCH/GIT_TERMINAL_PROMPT are set the WRONG way here to prove the re-assertion
+        # (Class B) OVERRIDES an ambient value, not merely fills an absent one.
         scrub_in = {"GIT_FOO": "bar", "GIT_ATTR_SOURCE": "HEAD", "GIT_DIR": "decoy",
-                    "GIT_CONFIG_PARAMETERS": "'x=y'", "GIT_TRACE": "on", "LANG": "C",
+                    "GIT_CONFIG_PARAMETERS": "'x=y'", "GIT_TRACE": "on",
+                    "GIT_NO_LAZY_FETCH": "0", "GIT_TERMINAL_PROMPT": "1", "LANG": "C",
                     "TERM": "dumb"}
         scrub_out = aiqt_hooks._isolate_git_env(dict(scrub_in))
-        _leaked = sorted(k for k in scrub_out if k.startswith("GIT_"))
+        # The two PROTECTIVE vars are re-asserted AFTER the scrub (Class B), so they are EXPECTED to be present;
+        # every AMBIENT GIT_* must be gone.
+        _protective = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+        _leaked = sorted(k for k in scrub_out if k.startswith("GIT_") and k not in _protective)
         if _leaked:
             failures.append("(rec-scrub-allowlist) _isolate_git_env must scrub EVERY ambient GIT_* var; "
                             "these survived the allowlist scrub: {}".format(_leaked))
+        for _pk, _pv in _protective.items():
+            if scrub_out.get(_pk) != _pv:
+                failures.append("(rec-scrub-protective) _isolate_git_env must re-assert {}={} after the scrub "
+                                "(overriding any ambient value), got {!r}".format(_pk, _pv, scrub_out.get(_pk)))
         if scrub_out.get("LANG") != "C" or scrub_out.get("TERM") != "dumb":
             failures.append("(rec-scrub-allowlist-keep) _isolate_git_env must leave non-GIT vars intact")
+
+        # (rec-nolazyfetch) Class B: the protective offline/non-interactive vars must reach the ACTUAL git
+        # invocation, not just _isolate_git_env. Capture the env _recovery_git threads into subprocess.run and
+        # assert GIT_NO_LAZY_FETCH=1 (no partial-clone lazy-fetch over the network) and GIT_TERMINAL_PROMPT=0
+        # survive, even when the ambient env sets them the OTHER way. A full offline promisor lazy-fetch is not
+        # feasible to stage deterministically here, so this asserts the mechanism at the call site.
+        rec_nlf = _init_repo(tmp / "rec-nolazyfetch")
+        captured_env = {}
+        _orig_run = aiqt_hooks.subprocess.run
+
+        def _capturing_run(cmd, *a, **kw):
+            captured_env.clear()
+            captured_env.update(kw.get("env") or {})
+            return _orig_run(cmd, *a, **kw)
+
+        os.environ["GIT_NO_LAZY_FETCH"] = "0"
+        os.environ["GIT_TERMINAL_PROMPT"] = "1"
+        aiqt_hooks.subprocess.run = _capturing_run
+        try:
+            aiqt_hooks._recovery_git(str(rec_nlf), ["rev-parse", "--show-toplevel"], timeout=5)
+        finally:
+            aiqt_hooks.subprocess.run = _orig_run
+            os.environ.pop("GIT_NO_LAZY_FETCH", None)
+            os.environ.pop("GIT_TERMINAL_PROMPT", None)
+        if captured_env.get("GIT_NO_LAZY_FETCH") != "1":
+            failures.append("(rec-nolazyfetch) _recovery_git must pass GIT_NO_LAZY_FETCH=1 to git, got {!r}"
+                            .format(captured_env.get("GIT_NO_LAZY_FETCH")))
+        if captured_env.get("GIT_TERMINAL_PROMPT") != "0":
+            failures.append("(rec-nolazyfetch-prompt) _recovery_git must pass GIT_TERMINAL_PROMPT=0 to git, "
+                            "got {!r}".format(captured_env.get("GIT_TERMINAL_PROMPT")))
 
         # (rec-attrsource) Fix 1: an ambient GIT_ATTR_SOURCE (round-5's newest ambient-GIT_* vector, which
         # points git's attribute lookup at a chosen treeish) does NOT survive the allowlist scrub. Set to an

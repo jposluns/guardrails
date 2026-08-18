@@ -19,8 +19,11 @@ environment cannot redirect the call to a decoy repository, inject configuration
 attribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a
 read-only call write a trace file; the call re-applies only the few variables it sets itself after the
 scrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent
-allow. The only residual is on-disk git configuration and attributes (repository, global, or system
-`.gitconfig` and `.gitattributes`) that git reads by design. That inert guarantee is bounded, not categorical: git may additionally run a
+allow. The residual is not limited to on-disk config: it spans the non-`GIT_` environment (HOME,
+XDG_CONFIG_HOME, PATH, TMPDIR), on-disk git configuration and attributes (repository, global, or system
+`.gitconfig` and `.gitattributes`), index and ignore state, submodules and embedded repositories,
+configured hooks and filters, PATH-based git resolution, and partial-clone object availability, all of
+which git reads by design. That inert guarantee is bounded, not categorical: git may additionally run a
 git-configured (repo, global, system, or command-scope) clean/process filter, fsmonitor, or
 reference-transaction hook while the snapshot is taken,
 and a clean filter can transform the captured bytes, so the snapshot is not guaranteed byte-exact. The

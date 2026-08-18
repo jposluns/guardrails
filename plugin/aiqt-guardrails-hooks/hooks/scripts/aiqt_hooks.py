@@ -948,24 +948,36 @@ def _has_long_prefix(tokens, full):
 # real-state call observes the ACTUAL repo at `-C <repo>` rather than an ambient-env decoy and writes no
 # trace file; a snapshot call's own GIT_INDEX_FILE (supplied via env_extra) still wins because env_extra is
 # applied AFTER the scrub. This is BOUNDED, not categorical: the allowlist scrub closes the whole ambient-env
-# class at once, but on-disk git configuration AND attributes (repo/global/system .gitconfig and
-# .gitattributes) that git reads by design still apply and can influence git behaviour - the only disclosed
-# residual, not neutralized here.
+# class at once, but the residual is NOT limited to on-disk config - it spans the non-GIT_ environment
+# (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk git configuration AND attributes (repo/global/system .gitconfig
+# and .gitattributes), index and ignore state, submodules and embedded repos, configured hooks and filters,
+# PATH-based git resolution, and partial-clone object availability, all of which git reads by design and none
+# neutralized here.
 
 
 def _isolate_git_env(env):
-    """Scrub EVERY ambient GIT_*-prefixed var from env in place and return it (allowlist posture: no
-    ambient git env is trusted). A real-state git call is fully specified by `-C <repo>` plus the few
-    vars the caller re-applies AFTER this scrub (GIT_OPTIONAL_LOCKS for the read-only probe; a temp
-    GIT_INDEX_FILE via env_extra for a snapshot), so it observes the ACTUAL on-disk repo and writes no
-    trace file. Over-scrubbing fails SAFE: any GIT_* the call genuinely needed makes it error, and the
-    caller treats that as a probe/snapshot FAILURE (None / SubprocessError) -> fail-to-ASK, never a
+    """Scrub EVERY ambient GIT_*-prefixed var from env in place, re-assert the two PROTECTIVE vars, and
+    return it (allowlist posture: no ambient git env is trusted). A real-state git call is fully specified
+    by `-C <repo>` plus the few vars the caller re-applies AFTER this scrub (GIT_OPTIONAL_LOCKS for the
+    read-only probe; a temp GIT_INDEX_FILE via env_extra for a snapshot), so it observes the ACTUAL on-disk
+    repo and writes no trace file. AFTER the scrub this SETS GIT_NO_LAZY_FETCH=1 and GIT_TERMINAL_PROMPT=0,
+    so the scrub cannot strip an operator's offline/non-interactive posture: without them a partial-clone
+    probe/add could LAZY-FETCH (network I/O, writes objects) instead of failing offline, and prompting could
+    be re-enabled. A caller's own later env_extra (a temp GIT_INDEX_FILE) still wins because it is applied
+    after this returns. Over-scrubbing fails SAFE: any GIT_* the call genuinely needed makes it error, and
+    the caller treats that as a probe/snapshot FAILURE (None / SubprocessError) -> fail-to-ASK, never a
     silent allow. This closes the whole ambient-env class at once (GIT_CONFIG_*, GIT_CONFIG_PARAMETERS,
-    GIT_TRACE*, GIT_ATTR_SOURCE, GIT_DIR/GIT_WORK_TREE, ...) instead of enumerating it. The ONLY residual
-    is on-disk git CONFIGURATION and ATTRIBUTES that git reads by design (repo/global/system .gitconfig
-    and .gitattributes)."""
+    GIT_TRACE*, GIT_ATTR_SOURCE, GIT_DIR/GIT_WORK_TREE, ...) instead of enumerating it. The residual is NOT
+    limited to on-disk config: it spans the non-GIT_ environment (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk
+    git configuration AND attributes (repo/global/system .gitconfig and .gitattributes), index and ignore
+    state, submodules and embedded repos, configured hooks and filters, PATH-based git resolution, and
+    partial-clone object availability."""
     for _k in [k for k in env if k.startswith("GIT_")]:
         env.pop(_k, None)
+    # Re-assert the offline + non-interactive posture the scrub would otherwise strip (Class B): keep a
+    # partial-clone operation from lazy-fetching over the network, and keep git from ever prompting.
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 
@@ -1211,6 +1223,28 @@ def _discard_deny(kind):
 
 # --- worktree-certainty (coarse; replaces the removed dir modelling) ---------------------------------
 
+# The ambient env vars that REDIRECT git's target away from the session cwd: they point the command at a
+# different git dir, work tree, common dir, index, object store, or ref namespace. The clean probe scrubs
+# EVERY ambient GIT_* before it runs (so the PROBE reads the REAL cwd repo), but the guard cannot scrub the
+# operator's shell env from the ACTUAL command git will run: with an ambient GIT_DIR at a dirty repo and a
+# clean cwd, the probe reads clean and would ALLOW while the real command clobbers the redirected dir; with
+# an ambient GIT_INDEX_FILE the probe reads the default (clean) index while the command discards the custom
+# one. So ANY of these present means the guard cannot prove the command's target IS the session cwd.
+_AMBIENT_TARGET_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                                 "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE")
+
+
+def _ambient_target_redirect():
+    """True when the ambient process environment carries ANY git target-redirect var (GIT_DIR,
+    GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_NAMESPACE). The clean probe
+    scrubs these before it runs, so IT reads the real cwd repo, but the guard cannot scrub them from the
+    ACTUAL command the shell runs: that command still inherits them and may act on a DIFFERENT git dir or
+    index than the one probed. When any is present the guard cannot prove the command's target == the
+    session cwd, so a lossy pristine form ASKS rather than trust a clean cwd probe (clean becomes
+    not-provably-clean -> ASK, never a silent ALLOW)."""
+    return any(v in os.environ for v in _AMBIENT_TARGET_REDIRECT_VARS)
+
+
 def _segment_dir_simple(tokens):
     """True when a git segment names its worktree simply enough that the session dir IS the worktree the
     command acts on: no leading env-assignment other than the opt-out (a GIT_DIR/GIT_WORK_TREE could
@@ -1230,24 +1264,43 @@ def _segment_dir_simple(tokens):
     return True
 
 
-def _git_discard_fallback(command):
+def _git_discard_fallback(command, cwd=None):
     """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quote): we cannot
     segment safely, so scan the RAW string. A truthy GUARDRAIL_ALLOW_DISCARD opt-out still ALLOWs. If git
     is present AND a recognized work-losing verb keyword is present (an always-lossy verb, or 'branch' with
     a delete flag) -> ASK (cannot prove safe); otherwise ALLOW (the true boundary). Documented best-effort:
-    a genuinely clean but unparseable command that merely mentions a lossy verb keyword may ASK."""
+    a genuinely clean but unparseable command that merely mentions a lossy verb keyword may ASK.
+
+    Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
+    best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
+    clean) BEFORE returning the ASK, so a discard that is asked-then-approved is still recoverable. Without
+    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, shlex ValueError) reached ASK with NO recovery
+    ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
+    unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
+    the failure surfaced."""
     m = _RAW_OPTOUT_RE.search(command)
     if m and m.group(1).lower() not in _DISCARD_FALSY:
         return _allow()  # explicit LEADING opt-out, honoured even on an unparseable command
     if not _raw_has_lossy_git(command):
         return _allow()  # no git, or no recognized work-losing verb: the true boundary
-    return _ask(
+    base = cwd if isinstance(cwd, str) and cwd else None
+    snap = None
+    if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
+        snap = _record_recovery(base, "discard")
+    reason = (
         "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
         "(likely an unbalanced quote) and it names a git work-losing verb this guard cannot prove safe; "
-        "asking rather than silently allowing. {}".format(_DISCARD_ALTS),
+        "asking rather than silently allowing. {}".format(_DISCARD_ALTS))
+    banner = (
         "AIQT guardrail: an unparseable git command names a work-losing verb this guard could not prove "
         "safe - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip this prompt (rule "
         "prsunc, fail-safe).")
+    if snap is not None and snap[0] == "ok":
+        reason = reason + " " + _recovery_pointer(snap[1])
+    elif snap is not None and snap[0] == "fail":
+        reason = reason + (" NOTE: no pre-command recovery snapshot could be created ({}), so this discard "
+                           "would not be recoverable by this guard.".format(snap[1]))
+    return _ask(reason, banner)
 
 
 def _pristine_single_bare_git(command, segments):
@@ -1315,8 +1368,11 @@ def _pristine_single_bare_git(command, segments):
 # `git show-ref` (a real ref, not hidden). The selftest asserts the real status/index/HEAD, index bytes,
 # config, and stash list are unchanged. Every real-state call in this layer scrubs EVERY ambient GIT_*-prefixed
 # var (_isolate_git_env, the allowlist posture), so an ambient GIT_CONFIG_PARAMETERS injection, a
-# GIT_ATTR_SOURCE redirect, or a GIT_TRACE file-write vector cannot reach these calls; the only residual is
-# on-disk git configuration AND attributes (repo/global/system) that git reads by design. BUT git may ADDITIONALLY run any git-configured (repo, global,
+# GIT_ATTR_SOURCE redirect, or a GIT_TRACE file-write vector cannot reach these calls; the residual is NOT
+# limited to on-disk config - it spans the non-GIT_ environment (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk
+# git configuration AND attributes (repo/global/system), index and ignore state, submodules and embedded
+# repos, configured hooks and filters, PATH-based git resolution, and partial-clone object availability, all
+# read by git by design. BUT git may ADDITIONALLY run any git-configured (repo, global,
 # system, or command-scope) program during the
 # snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
 # categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
@@ -1358,8 +1414,10 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     foreign preset repo (a decoy that would win a false clean, a false recovery point, or leak into the
     snapshot) and cannot be made to WRITE a trace file through an ambient GIT_TRACE path; a snapshot call
     overrides GIT_INDEX_FILE with its own temp index through env_extra, applied AFTER the scrub. This scrub
-    is BOUNDED to the ambient ENV: on-disk git configuration AND attributes (repo, global, and system) that
-    git reads by design still apply and can influence git behaviour, the only disclosed residual, not
+    is BOUNDED to the ambient ENV: the residual is NOT limited to on-disk config - it spans the non-GIT_
+    environment (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk git configuration AND attributes (repo, global,
+    and system), index and ignore state, submodules and embedded repos, configured hooks and filters,
+    PATH-based git resolution, and partial-clone object availability, all read by git by design and none
     neutralized here.
     Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
     snapshot failure. offline, bounded by `timeout`."""
@@ -1674,7 +1732,9 @@ def git_discard(data):
     try:
         segments = _segments(command)
     except ValueError:
-        return _git_discard_fallback(command)  # conservative raw scan, not a silent allow
+        # Conservative raw scan, not a silent allow. Pass cwd so an unparseable in-scope discard still gets
+        # a best-effort recovery snapshot before the ASK (Class C), mirroring the non-pristine path.
+        return _git_discard_fallback(command, data.get("cwd"))
 
     # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
     # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
@@ -1718,11 +1778,15 @@ def git_discard(data):
             _s, _ = _git_sub_and_args(_toks)
             if _s is not None:
                 np_subs.add(_s)
-        # A non-pristine command may HIDE a snappable verb behind shell quoting/eval that no lexical scan can
-        # reliably see (`eval git re'set' --hard` assembles `reset` at runtime; the raw string has no
-        # contiguous `reset`), so we do NOT gate on a lexical snappable-detection here: whenever the base
-        # resolves and the tree is NOT provably clean, take the inert best-effort snapshot regardless of which
-        # verb is (or is not) visible. Over-snapshotting a pure stash/branch non-pristine command is an
+        # This command is ALREADY IN SCOPE (a visible lossy token routed it here), so the snapshot is no
+        # longer gated on lexical snappable-detection: shell quoting/eval can hide WHICH snappable verb an
+        # in-scope command carries (a `re'set'` fragment assembles `reset` at runtime, so np_subs may miss
+        # it), so whenever the base resolves and the tree is NOT provably clean we take the inert best-effort
+        # snapshot regardless of which verb is (or is not) visible. A verb obfuscated so thoroughly that it
+        # evades even the raw scan (a standalone `eval git re'set'`, whose raw string has no contiguous
+        # `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at the in-scope
+        # boundary above, a DISCLOSED best-effort residual (the classifier's documented obfuscation residual),
+        # not something this snapshot closes. Over-snapshotting a pure stash/branch non-pristine command is an
         # accepted inert cost (a worktree snapshot cannot capture their asset, but it is never an
         # under-protection). The np_verb label is best-effort from any visible snappable sub.
         np_cwd = data.get("cwd")
@@ -1752,10 +1816,12 @@ def git_discard(data):
 
     # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. When it
     # cannot be resolved to the session cwd (no cwd, or a -C/--git-dir/--work-tree/-c global option or a
-    # GIT_DIR/GIT_WORK_TREE env assignment could redirect it), no snapshot is possible and a lossy form ASKS.
+    # GIT_DIR/GIT_WORK_TREE env assignment on the command could redirect it, OR an AMBIENT git target-redirect
+    # var is set - the probe scrubs it but the real command still inherits it, so the guard cannot prove the
+    # command's target IS the session cwd), no snapshot is possible and a lossy form ASKS.
     cwd = data.get("cwd")
     base = cwd if isinstance(cwd, str) and cwd else None
-    resolvable = base is not None and _segment_dir_simple(pristine)
+    resolvable = base is not None and _segment_dir_simple(pristine) and not _ambient_target_redirect()
     snapshottable = sub in _SNAPSHOTTABLE_VERBS
 
     # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
