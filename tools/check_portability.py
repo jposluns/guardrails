@@ -40,8 +40,11 @@ a PUBLIC-but-operational term goes HERE; never both. Exemptions live ONLY in thi
 marker of any kind), so every exemption is a reviewed code change and never travels with shipped content.
 
   check_portability.py               scan the shippable surface (default: the repo root above tools/)
-  check_portability.py --self-test   deterministic self-test: the finding-1..5 regressions run in memory with
-                                      no filesystem dependency and ALWAYS run; a real-surface end-to-end layer
+  check_portability.py --self-test   deterministic self-test: the finding-1..5 regressions (including
+                                      value-span masking, the whole-document cross-line identity catch, the
+                                      malformed-attribution fail-closed, and the injected-walker enumeration,
+                                      symlink/type, and unreadable-binary cases) run in memory with no
+                                      filesystem dependency and ALWAYS run; a real-surface end-to-end layer
                                       runs too where a writable tempdir exists and is reported PARTIAL where not
 
 Exit convention (matches the repo's gates):
@@ -52,6 +55,7 @@ Exit convention (matches the repo's gates):
      a C3 finding (exit 1), not a fail-closed exit 2, since an unscannable shipped file is itself the thing
      this gate is asserting against.
 """
+import json
 import os
 import re
 import sys
@@ -93,12 +97,12 @@ REQUIRED_FILE_ROOTS = [
 IDENTITY_MANIFEST = ".aiqt/core/hooks/manifest.toml"
 PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 
-# The operator identity is legitimate ONLY in the specific attribution FIELDS of these two files: the
-# manifest [plugin] author-name/author-email, and the plugin.json author.name/author.email the hooks
-# generator renders from them. Everywhere ELSE in these files (a comment, a description) and everywhere else
-# in the surface, the identity is a finding; attribution_lines() resolves the exact allowed source lines.
-# An adopter keeps the original attribution (CC BY-SA), so these fields ship the identity by design.
-IDENTITY_ALLOW = {IDENTITY_MANIFEST, PLUGIN_JSON}
+# The operator identity is legitimate ONLY in the specific attribution VALUES of these two files: the
+# manifest [plugin] author-name/author-email values, and the plugin.json TOP-LEVEL author.name/author.email
+# values the hooks generator renders from them. mask_identity_attribution() blanks ONLY those exact value
+# spans; everywhere ELSE in these files (a comment, a description, an extra or nested-author field, or a
+# value split across lines) and everywhere else in the surface, the identity is a finding. An adopter keeps
+# the original attribution (CC BY-SA), so these values ship the identity by design.
 
 # The only shippable file that is not scannable text. It is byte-reconciled by gen_skill.py --check from
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
@@ -157,70 +161,125 @@ def find_identity(text, ident_forms, ident_maxn):
     return sorted(f for f in ident_forms if f in grams)
 
 
-def attribution_lines(rel, text):
-    """The set of 1-based line numbers of rel on which the operator identity ships by design: the [plugin]
-    author-name/author-email fields of the manifest, and the author.name/author.email fields of plugin.json.
-    Every OTHER line of these files, and every line of every other file, is scanned for the identity
-    normally. A file that is not an attribution file returns the empty set."""
+def mask_identity_attribution(rel, text):
+    """Return text with ONLY the operator-identity attribution VALUE spans blanked out: the manifest
+    [plugin] author-name/author-email values, or plugin.json's TOP-LEVEL author.name/author.email values.
+    Those are the two places the identity ships by design (CC BY-SA attribution). Every OTHER occurrence in
+    these files (a comment, a description, an extra field, a NESTED non-top-level author, or a value split
+    across lines) survives the mask and faces the whole-document C1 scan. Each masked span is replaced by
+    equal-length spaces so line and column offsets elsewhere are preserved for the finding message.
+    Malformed TOML/JSON in an attribution file is fail-closed (GateError -> exit 2): a deny input that
+    cannot be parsed must never scan as clean. A non-attribution file is returned unchanged (no masking)."""
     if rel == IDENTITY_MANIFEST:
-        return _toml_plugin_author_lines(text)
+        return _mask_manifest_identity(text)
     if rel == PLUGIN_JSON:
-        return _json_author_lines(text)
-    return set()
+        return _mask_plugin_json_identity(text)
+    return text
 
 
-def _toml_plugin_author_lines(text):
-    """Line numbers of the author-name/author-email keys inside the manifest [plugin] table (and only
-    there): a [[hook]] table or any other section is not an attribution location."""
-    allowed, section = set(), None
-    for number, line in enumerate(text.splitlines(), 1):
+def _blank_first(line, value):
+    """Replace the FIRST occurrence of value in line with equal-length spaces and return the result. The
+    value sits in the value position (right after the key's = or :), so the first occurrence is the field
+    value; a later occurrence on the same line (a trailing comment, an extra field) is left to be scanned."""
+    idx = line.find(value)
+    if idx < 0:
+        return line
+    return line[:idx] + (" " * len(value)) + line[idx + len(value):]
+
+
+def _mask_manifest_identity(text):
+    """Blank the [plugin] author-name/author-email VALUE spans in the manifest TOML, and only those: a
+    [[hook]] table or any other section is not an attribution location. Malformed TOML is fail-closed."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise GateError("attribution source {} does not parse ({})".format(IDENTITY_MANIFEST, exc))
+    plugin = data.get("plugin") if isinstance(data, dict) else None
+    values = {}
+    if isinstance(plugin, dict):
+        for key in ("author-name", "author-email"):
+            value = plugin.get(key)
+            if isinstance(value, str) and value.strip():
+                values[key] = value
+    if not values:
+        return text
+    out, section = [], None
+    for line in text.splitlines(keepends=True):
         stripped = line.strip()
         header = re.match(r'\[+\s*([^\]]+?)\s*\]+', stripped)
         if header:
             section = header.group(1)
+            out.append(line)
             continue
-        if section == "plugin" and re.match(r'author-(?:name|email)\s*=', stripped):
-            allowed.add(number)
-    return allowed
+        masked = line
+        if section == "plugin":
+            key_match = re.match(r'\s*(author-(?:name|email))\s*=', line)
+            if key_match and key_match.group(1) in values:
+                masked = _blank_first(line, values[key_match.group(1)])
+        out.append(masked)
+    return "".join(out)
 
 
-def _json_author_lines(text):
-    """Line numbers of the name/email keys inside the plugin.json top-level author object, assuming the
-    generator's multiline object shape (one key per line). An unrecognized shape yields no allowed lines,
-    which errs safe: the identity in the attribution field is then FLAGGED (the gate fails, never passes)."""
-    allowed, in_author, depth = set(), False, 0
-    for number, line in enumerate(text.splitlines(), 1):
+def _mask_plugin_json_identity(text):
+    """Blank the TOP-LEVEL author.name/author.email VALUE spans in plugin.json, and only those: a nested
+    (non-top-level) author is NOT exempt, so its identity survives the mask and is flagged. The value spans
+    are located on the top-level author object's name/email lines (the generator's multiline shape, one key
+    per line); an unrecognized shape masks nothing, which errs safe (the identity is then FLAGGED, never
+    passed). Malformed JSON is fail-closed."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise GateError("attribution source {} does not parse ({})".format(PLUGIN_JSON, exc))
+    author = data.get("author") if isinstance(data, dict) else None
+    values = {}
+    if isinstance(author, dict):
+        for key in ("name", "email"):
+            value = author.get(key)
+            if isinstance(value, str) and value.strip():
+                values[key] = value
+    if not values:
+        return text
+    out, depth, in_top_author, author_open_depth = [], 0, False, 0
+    for line in text.splitlines(keepends=True):
         stripped = line.strip()
-        if not in_author:
-            if re.match(r'"author"\s*:', stripped):
-                in_author = True
-                depth = line.count("{") - line.count("}")
-            continue
-        if re.match(r'"(?:name|email)"\s*:', stripped):
-            allowed.add(number)
+        masked = line
+        if in_top_author:
+            key_match = re.match(r'"(name|email)"\s*:', stripped)
+            if key_match and key_match.group(1) in values:
+                masked = _blank_first(line, values[key_match.group(1)])
+        elif depth == 1 and re.match(r'"author"\s*:', stripped):
+            in_top_author, author_open_depth = True, depth
+        out.append(masked)
         depth += line.count("{") - line.count("}")
-        if depth <= 0:
-            in_author = False
-    return allowed
+        if in_top_author and depth <= author_open_depth:
+            in_top_author = False
+    return "".join(out)
 
 
-def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, allowed_lines=frozenset()):
+def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn):
     """Scan one file's text for C1 (operator identity), C2 (operational vocabulary), and C5 (exemption
-    marker). allowed_lines are the attribution field lines of an allow-listed file, where the identity
-    ships by design; a C1 identity match on any OTHER line is a finding, and C2/C5 apply everywhere.
-    Returns a list of finding strings."""
+    marker). For the two attribution files the operator-identity VALUE spans are masked first (that identity
+    ships by design); the identity is then matched over the WHOLE remaining document, so a same-line comment,
+    an extra or nested-author field, or a value split across lines still trips C1. A non-attribution file is
+    scanned whole with no masking. A per-line pass names the exact line for a match sitting on one line; a
+    whole-document pass then adds any form that only appears split across lines. C2 and C5 apply to the whole
+    document. Masking a malformed attribution file is fail-closed (GateError -> exit 2). Returns a list of
+    finding strings."""
     findings = []
-    lines = text.splitlines()
-    for number, line in enumerate(lines, 1):
-        if number in allowed_lines:
-            continue
-        hits = find_identity(line, ident_forms, ident_maxn)
-        if hits:
+    masked = mask_identity_attribution(rel, text)
+    seen = set()
+    for number, line in enumerate(masked.splitlines(), 1):
+        for hit in find_identity(line, ident_forms, ident_maxn):
             findings.append("{}:{}: operator identity ({}) in shipped content (portability C1)".format(
-                rel, number, ", ".join(hits)))
+                rel, number, hit))
+            seen.add(hit)
+    for hit in find_identity(masked, ident_forms, ident_maxn):
+        if hit not in seen:
+            findings.append("{}: operator identity ({}) split across lines in shipped content "
+                            "(portability C1)".format(rel, hit))
     for term in find_operational_terms(text, term_grams, maxn):
         findings.append("{}: repo-operational term {!r} (portability C2)".format(rel, term))
-    for number, line in enumerate(lines, 1):
+    for number, line in enumerate(text.splitlines(), 1):
         if "leak-allow" in line:
             findings.append("{}:{}: shipped leak-allow exemption marker (portability C5)".format(rel, number))
     return findings
@@ -280,20 +339,20 @@ def load_identity(root):
     return name, email
 
 
-def _walk_dir_root(base, root, files, findings):
+def _walk_dir_root(base, root, files, findings, scandir=os.scandir):
     """Recursively account for EVERY entry under base (a required dir root), following no symlink and
     applying NO skip rules, so nothing under a shipped root (not even node_modules/__pycache__/.git) is
     silently unscanned. A regular file is collected to scan; a symlink or unsupported entry type is a C3
-    finding; a real subdirectory is descended. os.scandir raises OSError on an unlistable directory, which
-    the caller converts to fail-closed exit 2."""
-    with os.scandir(base) as it:
+    finding; a real subdirectory is descended. scandir (os.scandir by default; injectable for the self-test)
+    raises OSError on an unlistable directory, which the caller converts to fail-closed exit 2."""
+    with scandir(base) as it:
         entries = sorted(it, key=lambda e: e.name)
     for entry in entries:
         path = Path(entry.path)
         rel = path.relative_to(root).as_posix()
         kind = _classify_entry(entry)
         if kind == "dir":
-            _walk_dir_root(path, root, files, findings)
+            _walk_dir_root(path, root, files, findings, scandir)
         elif kind == "file":
             files.append(path)
         elif kind == "reject-symlink":
@@ -326,17 +385,18 @@ def gather_surface(root):
     return files, findings
 
 
-def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn):
+def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open):
     """Scan one surface file: its relative PATHNAME always (C1/C2), and its CONTENT unless it is an
-    allow-listed binary. An allow-listed binary is OPENED and read so an unreadable one fails closed
-    (GateError -> exit 2), never a silent clean pass. A non-text suffix or a UTF-8 decode failure off the
-    allow-list is a C3 finding (exit 1), never fail-closed exit 2: an unscannable shipped file is exactly
-    what this gate asserts against. Returns a list of finding strings."""
+    allow-listed binary. An allow-listed binary is OPENED and read (opener, builtin open by default;
+    injectable for the self-test) so an unreadable one fails closed (GateError -> exit 2), never a silent
+    clean pass. A non-text suffix or a UTF-8 decode failure off the allow-list is a C3 finding (exit 1),
+    never fail-closed exit 2: an unscannable shipped file is exactly what this gate asserts against. Returns
+    a list of finding strings."""
     rel = path.relative_to(root).as_posix()
     findings = scan_pathname(rel, ident_forms, ident_maxn, term_grams, maxn)
     if rel in BINARY_ALLOW:
         try:
-            with open(path, "rb") as handle:
+            with opener(path, "rb") as handle:
                 handle.read()
         except OSError as exc:
             raise GateError("cannot read allow-listed binary {} ({})".format(rel, exc))
@@ -351,8 +411,7 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn):
         findings.append("{}: shipped text file is not valid UTF-8 and is not on the binary allow-list "
                         "(portability C3)".format(rel))
         return findings
-    findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn,
-                              allowed_lines=attribution_lines(rel, text)))
+    findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn))
     return findings
 
 
@@ -382,27 +441,31 @@ def run(root):
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: the shippable surface is portable (operator identity only in its attribution fields, no "
+    print("PASS: the shippable surface is portable (operator identity only in its attribution values, no "
           "repo-operational vocabulary in content or pathnames, no exemption markers, no unscannable file "
           "classes, symlinks, or unsupported entry types off the allow-list)")
     return 0
 
 
 # --- self-test --------------------------------------------------------------------------------------
-# The finding-1..5 regressions are pure in-memory cases (field-scoped identity keying, case-folded and
-# operator-scoped matching, pathname scanning, symlink/type classification, and the unreadable-binary
-# fail-closed path against a NON-existent allow-listed path). They ALWAYS run: no writable tempdir, no
-# permissions, no wall clock, no randomness. A real-surface end-to-end layer runs additionally where a
-# writable tempdir exists and is reported PARTIAL (never a full PASS) where it cannot.
+# The finding-1..5 regressions are pure in-memory cases (value-span identity masking, the whole-document
+# cross-line identity catch, the malformed-attribution fail-closed, case-folded and operator-scoped
+# matching, pathname scanning, and, through an INJECTED walker/reader, the enumeration, symlink/type
+# classification, and unreadable-binary/unlistable-directory fail-closed paths). They ALWAYS run: no
+# writable tempdir, no chmod, no symlink support, no wall clock, no randomness. A real-surface end-to-end
+# layer runs additionally where a writable tempdir exists, and every case it cannot run is tracked so the
+# result is reported PARTIAL (never a full PASS) whenever ANY case skips.
 
 _CLEAN_MD = "# Heading\n\nPortable governance content with no operator identity and no operating vocabulary.\n"
 
 
 class _FakeEntry:
-    """A stand-in directory entry for classifying an entry TYPE without a real filesystem entry, so the
-    symlink/type rejection logic (finding 3) runs deterministically in memory."""
+    """A stand-in os.DirEntry for the injected-walker self-test: it classifies an entry by TYPE without a
+    real filesystem entry (the symlink/type rejection logic) and carries a name/path so _walk_dir_root can
+    enumerate and descend it deterministically in memory."""
 
-    def __init__(self, symlink=False, isdir=False, isfile=False):
+    def __init__(self, name="e", path="/fake/e", symlink=False, isdir=False, isfile=False):
+        self.name, self.path = name, path
         self._symlink, self._dir, self._file = symlink, isdir, isfile
 
     def is_symlink(self):
@@ -413,6 +476,34 @@ class _FakeEntry:
 
     def is_file(self, follow_symlinks=True):
         return self._file
+
+
+class _FakeScanContext:
+    """The context-manager iterator os.scandir returns, backed by an in-memory entry list."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def __enter__(self):
+        return iter(self._entries)
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeScandir:
+    """A fake os.scandir for the injected-walker self-test: called with a directory path it returns that
+    directory's mapped entries (as a context manager, like os.scandir) or raises its mapped OSError, so the
+    enumeration, descent (no skip rules), and unlistable-directory fail-closed paths run in memory."""
+
+    def __init__(self, by_dir):
+        self._by_dir = by_dir
+
+    def __call__(self, base):
+        result = self._by_dir.get(str(base))
+        if isinstance(result, OSError):
+            raise result
+        return _FakeScanContext(result or [])
 
 
 def _build_surface(base, name, email):
@@ -459,33 +550,72 @@ def self_test_main():
     if find_operational_terms("wholly portable prose", term_grams, maxn):
         failures.append("find_operational_terms found a term in clean prose")
 
-    # Finding 1: FIELD-scoped identity. In the manifest, the identity is allowed ONLY on its [plugin]
-    # author-name/author-email lines; the SAME identity in a description field on another line fails.
+    # Finding 1: VALUE-SPAN masked identity. In the manifest, only the [plugin] author-name/author-email
+    # VALUE spans are masked; the SAME identity in a description field on another line survives and fails.
     manifest_text = (
         '[plugin]\nname = "aiqt-guardrails-hooks"\n'
         'author-name = "{0}"\nauthor-email = "{1}"\n'
         'description = "governance authored by {0}"\n'.format(name, email))
-    mf = scan_text(IDENTITY_MANIFEST, manifest_text, ident_forms, ident_maxn, term_grams, maxn,
-                   attribution_lines(IDENTITY_MANIFEST, manifest_text))
+    mf = scan_text(IDENTITY_MANIFEST, manifest_text, ident_forms, ident_maxn, term_grams, maxn)
     mf_c1 = [f for f in mf if "portability C1" in f]
     if any(":3:" in f or ":4:" in f for f in mf_c1):
-        failures.append("finding 1: identity flagged in its own [plugin] attribution field (should allow)")
+        failures.append("finding 1: identity flagged in its own [plugin] attribution value (should mask)")
     if not any(":5:" in f for f in mf_c1):
         failures.append("finding 1: identity in a non-attribution manifest field was not flagged")
 
-    # Finding 1 (plugin.json): the identity is allowed only inside the author object; a description carrying
-    # it fails, and the top-level package "name" is not the identity so it never trips.
+    # Finding 1 (plugin.json): only the TOP-LEVEL author object's name/email value spans are masked; a
+    # description carrying the identity fails, and the top-level package "name" is not the identity.
     pj_text = (
         '{{\n  "name": "aiqt-guardrails-hooks",\n  "author": {{\n'
         '    "name": "{0}",\n    "email": "{1}"\n  }},\n'
         '  "description": "by {0}"\n}}\n'.format(name, email))
-    pj = scan_text(PLUGIN_JSON, pj_text, ident_forms, ident_maxn, term_grams, maxn,
-                   attribution_lines(PLUGIN_JSON, pj_text))
+    pj = scan_text(PLUGIN_JSON, pj_text, ident_forms, ident_maxn, term_grams, maxn)
     pj_c1 = [f for f in pj if "portability C1" in f]
     if any(":4:" in f or ":5:" in f for f in pj_c1):
-        failures.append("finding 1: identity flagged in the plugin.json author object (should allow)")
+        failures.append("finding 1: identity flagged in the plugin.json author object (should mask)")
     if not any(":7:" in f for f in pj_c1):
         failures.append("finding 1: identity in a non-attribution plugin.json field was not flagged")
+
+    # Value-span C1a: an identity split across lines (name across two lines, email across two lines) is
+    # caught by the WHOLE-DOCUMENT scan even though no single line carries the whole identity, and the two
+    # legitimate attribution values above are still masked (not re-flagged).
+    split_manifest = (
+        '[plugin]\nname = "aiqt-guardrails-hooks"\n'
+        'author-name = "{0}"\nauthor-email = "{1}"\n'
+        '# Jeff\n# Posluns wrote this; reach jeff@\n# posluns.ca\n'.format(name, email))
+    sm_c1 = [f for f in scan_text(IDENTITY_MANIFEST, split_manifest, ident_forms, ident_maxn,
+                                  term_grams, maxn) if "portability C1" in f]
+    if not any("split across lines" in f for f in sm_c1):
+        failures.append("value-span: an identity split across lines was not caught by the whole-document scan")
+    if any(":3:" in f or ":4:" in f for f in sm_c1):
+        failures.append("value-span: an attribution value span was re-flagged (masking too narrow)")
+
+    # Value-span C1b: a NESTED (non-top-level) plugin.json author is NOT exempt; its identity survives the
+    # mask (which only blanks the TOP-LEVEL author values) and is flagged.
+    nested_json = (
+        '{{\n  "name": "aiqt-guardrails-hooks",\n  "author": {{\n'
+        '    "name": "{0}",\n    "email": "{1}"\n  }},\n'
+        '  "meta": {{\n    "author": {{\n      "name": "{0}"\n    }}\n  }}\n}}\n'.format(name, email))
+    nj_c1 = [f for f in scan_text(PLUGIN_JSON, nested_json, ident_forms, ident_maxn, term_grams, maxn)
+             if "portability C1" in f]
+    if not any(":9:" in f for f in nj_c1):
+        failures.append("value-span: identity in a NESTED (non-top-level) author was not flagged")
+    if any(":4:" in f or ":5:" in f for f in nj_c1):
+        failures.append("value-span: the top-level author value span was re-flagged (masking too narrow)")
+
+    # Value-span C1c: malformed TOML/JSON in an attribution file is fail-closed (GateError -> exit 2),
+    # never a silent clean pass on an unparseable deny input.
+    try:
+        scan_text(IDENTITY_MANIFEST, '[plugin\nauthor-name = "x"\n', ident_forms, ident_maxn,
+                  term_grams, maxn)
+        failures.append("value-span: malformed manifest TOML did not fail closed")
+    except GateError:
+        pass
+    try:
+        scan_text(PLUGIN_JSON, '{ "author": { "name": ', ident_forms, ident_maxn, term_grams, maxn)
+        failures.append("value-span: malformed plugin.json did not fail closed")
+    except GateError:
+        pass
 
     # Finding 2: a LOWERCASE operator name in ordinary content is flagged (case-folded matching), the
     # operator email is flagged, and a non-operator example address is NOT (email scoped to the operator).
@@ -514,12 +644,48 @@ def self_test_main():
     if _classify_entry(_FakeEntry()) != "reject-type":
         failures.append("finding 3: an unsupported entry type was not rejected")
 
-    # Finding 4: an unreadable allow-listed binary fails closed (GateError -> exit 2), never a silent clean
-    # pass. A path ON the binary allow-list that does not exist makes open() raise, deterministically.
-    missing_root = Path("/nonexistent-aiqt-portability-selftest")
-    missing_bin = missing_root / "site/downloads/aiqt-skill.zip"
+    # Finding 3 (injected walker): enumeration and symlink/type classification run in memory against a fake
+    # scandir. A directory holds a regular file, a symlink, an unsupported type, and a subdirectory with its
+    # own file; the walk collects BOTH regular files (proving descent with NO skip rules) and raises a C3
+    # finding for the symlink and for the unsupported type.
+    iw_root = Path("/surface")
+    iw_base = iw_root / ".aiqt/core"
+    iw_sub = iw_base / "__pycache__"
+    iw_scandir = _FakeScandir({
+        str(iw_base): [
+            _FakeEntry("good.md", str(iw_base / "good.md"), isfile=True),
+            _FakeEntry("link.md", str(iw_base / "link.md"), symlink=True),
+            _FakeEntry("pipe", str(iw_base / "pipe")),
+            _FakeEntry("__pycache__", str(iw_sub), isdir=True),
+        ],
+        str(iw_sub): [_FakeEntry("note.md", str(iw_sub / "note.md"), isfile=True)],
+    })
+    iw_files, iw_findings = [], []
+    _walk_dir_root(iw_base, iw_root, iw_files, iw_findings, scandir=iw_scandir)
+    if len(iw_files) != 2 or not any(p.name == "note.md" for p in iw_files):
+        failures.append("finding 3: the injected walk did not enumerate both files (descent/no-skip broke)")
+    if not any("symlink" in f for f in iw_findings):
+        failures.append("finding 3: the injected walk did not reject a symlink entry")
+    if not any("unsupported file type" in f for f in iw_findings):
+        failures.append("finding 3: the injected walk did not reject an unsupported entry type")
+
+    # Finding 4a (injected walker): an unlistable directory raises OSError, which run() converts to
+    # fail-closed exit 2. The fake scandir raises deterministically, with no chmod.
     try:
-        scan_file(missing_root, missing_bin, ident_forms, ident_maxn, term_grams, maxn)
+        _walk_dir_root(iw_base, iw_root, [], [],
+                       scandir=_FakeScandir({str(iw_base): OSError("injected unlistable directory")}))
+        failures.append("finding 4: an unlistable directory did not raise (fail-closed path broke)")
+    except OSError:
+        pass
+
+    # Finding 4b (injected reader): an unreadable allow-listed binary fails closed (GateError -> exit 2),
+    # never a silent clean pass. The injected opener raises OSError, with no filesystem path or chmod.
+    def _raising_opener(*_args, **_kwargs):
+        raise OSError("injected unreadable binary")
+
+    try:
+        scan_file(iw_root, iw_root / "site/downloads/aiqt-skill.zip", ident_forms, ident_maxn,
+                  term_grams, maxn, opener=_raising_opener)
         failures.append("finding 4: an unreadable allow-listed binary did not fail closed")
     except GateError:
         pass
@@ -530,26 +696,31 @@ def self_test_main():
         failures.append("a shipped leak-allow marker (C5) was not flagged")
 
     # --- real-surface end-to-end layer (runs where a writable tempdir exists) ----------------------
+    # These cases drive the full run() over a real synthetic tree (real scandir, real reads). They use NO
+    # chmod and NO symlink, so given a writable tempdir they ALL run; the previously flaky symlink,
+    # unreadable-binary, and unlistable-directory cases are covered deterministically by the injected
+    # walker/reader above. The ONLY skip is the whole layer when no writable tempdir exists, tracked so the
+    # result is honestly reported PARTIAL.
     import io
     import shutil
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
+
+    skipped = []
 
     def _run_quiet(sroot):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return run(sroot)
 
     e2e_name, e2e_email = "Test Operator", "operator@example.invalid"
-    tmp_ran = False
-    unreadable_dir_ran = False
     try:
         base_tmp = Path(tempfile.mkdtemp(prefix="aiqt-portability-selftest-"))
     except OSError:
         base_tmp = None
 
-    if base_tmp is not None:
-        tmp_ran = True
-
+    if base_tmp is None:
+        skipped.append("all end-to-end surface cases (no writable temp directory)")
+    else:
         def _fresh(tag):
             return _build_surface(base_tmp / tag, e2e_name, e2e_email)
 
@@ -608,70 +779,17 @@ def self_test_main():
             if _run_quiet(s) != 1:
                 failures.append("e2e: content under a __pycache__ dir was not enumerated (skip rule leaked)")
 
-            # (i) a symlink under a shipped root is a C3 finding (exit 1), never a silently skipped subtree.
-            s = _fresh("symlink")
-            try:
-                os.symlink(s / ".aiqt/core/placeholder.md", s / ".claude/rules/link.md")
-                symlink_made = True
-            except OSError:
-                symlink_made = False
-            if symlink_made:
-                if _run_quiet(s) != 1:
-                    failures.append("e2e: a symlink under a shipped root expected exit 1")
-            else:
-                print("SELF-TEST NOTE: symlinks unsupported here; the e2e symlink case was SKIPPED "
-                      "(the deterministic classify-symlink regression above still ran)", file=sys.stderr)
-
-            # (j) an unreadable allow-listed binary is fail-closed exit 2.
-            s = _fresh("unreadable-binary")
-            zip_path = s / "site/downloads/aiqt-skill.zip"
-            os.chmod(zip_path, 0)
-            try:
-                with open(zip_path, "rb"):
-                    zip_readable = True
-            except PermissionError:
-                zip_readable = False
-            if zip_readable:
-                print("SELF-TEST NOTE: an unreadable file could not be produced (running as root?); the "
-                      "e2e unreadable-binary case was SKIPPED (the deterministic fail-closed regression "
-                      "above still ran)", file=sys.stderr)
-            else:
-                if _run_quiet(s) != 2:
-                    failures.append("e2e: an unreadable allow-listed binary expected fail-closed exit 2")
-            os.chmod(zip_path, 0o644)
-
-            # (k) a missing required root is fail-closed exit 2.
+            # (i) a missing required root is fail-closed exit 2.
             s = _fresh("missing-root")
             shutil.rmtree(s / ".cursor/rules/aiqt-guardrails")
             if _run_quiet(s) != 2:
                 failures.append("e2e: a missing required root expected fail-closed exit 2")
 
-            # (l) an absent identity manifest is fail-closed exit 2.
+            # (j) an absent identity manifest is fail-closed exit 2.
             s = _fresh("no-manifest")
             (s / IDENTITY_MANIFEST).unlink()
             if _run_quiet(s) != 2:
                 failures.append("e2e: an absent identity manifest expected fail-closed exit 2")
-
-            # (m) an unreadable directory under a required root is fail-closed exit 2. Skipped with a note
-            # where the environment cannot produce one (for example running as root, which reads regardless).
-            s = _fresh("unreadable-dir")
-            locked = s / ".aiqt/core/locked"
-            locked.mkdir()
-            (locked / "f.md").write_text(_CLEAN_MD, encoding="utf-8")
-            os.chmod(locked, 0)
-            try:
-                os.listdir(locked)
-                readable = True
-            except PermissionError:
-                readable = False
-            if readable:
-                print("SELF-TEST NOTE: an unreadable directory could not be produced (running as root?); "
-                      "the e2e unreadable-dir case was SKIPPED", file=sys.stderr)
-            else:
-                unreadable_dir_ran = True
-                if _run_quiet(s) != 2:
-                    failures.append("e2e: an unreadable directory expected fail-closed exit 2")
-            os.chmod(locked, 0o755)  # restore so the tree removes cleanly
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -680,17 +798,18 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    core = ("the finding-1..5 regressions ran in memory and hold (field-scoped identity, case-folded and "
-            "operator-scoped matching, pathname scanning, symlink/type classification, unreadable-binary "
-            "fail-closed, and the exemption marker)")
-    if tmp_ran:
-        e2e = ("the end-to-end surface cases hold (clean pass, planted identity/email/vocabulary/pathname/"
-               "marker/unknown-file findings, no-skip enumeration, missing-root and absent-manifest "
-               "fail-closed); the unreadable-dir exit-2 case " + ("ran" if unreadable_dir_ran else "was SKIPPED"))
-        print("SELF-TEST PASS: {}; {}".format(core, e2e))
+    core = ("the finding-1..5 regressions ran in memory and hold (value-span identity masking, the "
+            "whole-document cross-line catch, nested-author non-exemption, malformed-attribution "
+            "fail-closed, case-folded and operator-scoped matching, pathname scanning, and the injected "
+            "walker/reader enumeration, symlink/type, unlistable-directory and unreadable-binary "
+            "fail-closed paths, plus the exemption marker)")
+    if skipped:
+        print("SELF-TEST PASS (PARTIAL): {}; the following were SKIPPED, so those invariants are UNVERIFIED "
+              "this run: {}".format(core, "; ".join(skipped)))
     else:
-        print("SELF-TEST PASS (PARTIAL): {}; the end-to-end surface cases were SKIPPED (no writable temp "
-              "directory), so those integration invariants are UNVERIFIED this run".format(core))
+        print("SELF-TEST PASS: {}; the end-to-end surface cases hold (clean pass, planted identity/email/"
+              "vocabulary/pathname/marker/unknown-file findings, no-skip enumeration, missing-root and "
+              "absent-manifest fail-closed)".format(core))
     return 0
 
 
