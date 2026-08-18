@@ -668,9 +668,10 @@ def main():
         # (rec-idxfile) A: an ambient GIT_INDEX_FILE is a TARGET-REDIRECT var. The probe would scrub it and
         # read the real cwd repo, but the guard cannot scrub it from the ACTUAL command, which would discard
         # the custom index the probe never saw. So the guard CANNOT prove the command's target IS the session
-        # cwd: it ASKS (never a silent allow) and takes NO snapshot (an unresolvable target), leaving the real
-        # index and the bogus ambient path untouched. (Old wrong premise: that neutralizing the probe let the
-        # guard read the real repo and snapshot it, ignoring that the real command still carries the redirect.)
+        # cwd: it ASKS (never a silent allow) and takes a BEST-EFFORT snapshot of the SESSION CWD (dirty here),
+        # while the recovery git calls scrub the ambient GIT_INDEX_FILE so the real index and the bogus ambient
+        # path stay untouched (the snapshot may not capture a redirected tree, but it recovers the common
+        # non-redirecting case).
         rec_idx = _init_repo(tmp / "rec-idxfile")
         (rec_idx / "file.txt").write_text("committed line\nidx staged\n", encoding="utf-8")
         _git(rec_idx, "add", "file.txt")  # staged content in the REAL index
@@ -690,8 +691,9 @@ def main():
             failures.append("(rec-idxfile-index) the REAL .git/index changed under an ambient GIT_INDEX_FILE")
         if ambient.exists():
             failures.append("(rec-idxfile-ambient) the ambient GIT_INDEX_FILE path was written")
-        if _recovery_refs(rec_idx):
-            failures.append("(rec-idxfile-nosnap) an unresolvable-target ASK must take NO recovery snapshot")
+        if not _recovery_refs(rec_idx):
+            failures.append("(rec-idxfile-snap) the ambient-override ASK on a dirty cwd must take a "
+                            "best-effort recovery snapshot of the session cwd")
 
         # (rec-ambient) an assortment of NON-redirect ambient GIT_* env vars (identity, pager) does not break
         # the decision or the snapshot isolation: a dirty-tree ASK still ASKS, a snapshot ref is created, and
@@ -822,8 +824,9 @@ def main():
         # The PROBE still scrubs them and reads the REAL dirty repo (so a false clean-decoy ALLOW is off the
         # table), but the guard cannot scrub them from the ACTUAL command, which would act on the redirected
         # decoy, not the probed cwd. So the guard cannot prove the command's target IS the session cwd: it
-        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW), takes NO snapshot
-        # (unresolvable target), writes nothing to the decoy, and leaves the real repo untouched. (Old wrong
+        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW), takes a
+        # BEST-EFFORT snapshot of the real session cwd (dirty here; it may not capture the redirected target),
+        # writes nothing to the decoy, and leaves the real repo untouched. (Old wrong
         # premise: that neutralizing the probe let the guard confidently DENY on the real repo, ignoring that
         # the real command still carries the redirect and would not even touch the probed repo.)
         rec_decoy = _init_repo(tmp / "rec-decoy")
@@ -848,9 +851,9 @@ def main():
         if got_decoy != "ask":
             failures.append("(rec-decoy) an ambient GIT_DIR/GIT_WORK_TREE target-redirect must ASK (the guard "
                             "cannot prove the command targets the session cwd), got {}".format(got_decoy))
-        if _recovery_refs(rec_decoy):
-            failures.append("(rec-decoy-nosnap) an unresolvable-target ASK must take NO recovery snapshot on "
-                            "the real repo")
+        if not _recovery_refs(rec_decoy):
+            failures.append("(rec-decoy-snap) the ambient-override ASK on a dirty cwd must take a best-effort "
+                            "recovery snapshot on the real repo")
         if _recovery_refs(decoy):
             failures.append("(rec-decoy-wrongwrite) a recovery ref was written to the DECOY repo")
         if (rec_decoy / ".git" / "index").read_bytes() != real_idx_bytes:
@@ -904,6 +907,44 @@ def main():
             if got_cos != "allow":
                 failures.append("(rec-viewoverride-cosmetic-{}) a cosmetic ambient {} must NOT force ASK on a "
                                 "clean pristine discard, got {}".format(_cos, _cos, got_cos))
+        # (rec-viewoverride-allowform) Fix 2 (structural completion): the fail-safe now covers the
+        # NON-DESTRUCTIVE allow forms too. A pristine allow form (reset --soft, plain switch, clean -n,
+        # checkout -b) ALLOWs on a clean tree with NO ambient override, but under a NON-COSMETIC ambient GIT_*
+        # var it ASKS - the redirected repository view invalidates the form's safety premise, so an allow form
+        # can no longer bypass the ambient-override ASK (before Fix 2 these ALLOWed, silently skipping the
+        # fail-safe). The clean tree means no snapshot is warranted; the ASK is attributable to the ambient
+        # var alone.
+        allow_forms = ("git reset --soft", "git switch other", "git clean -n", "git checkout -b newbr")
+        for _cmd in allow_forms:
+            expect("(rec-viewoverride-allow-base) {} allows with no ambient override".format(_cmd),
+                   _cmd, "allow", cwd=str(rec_view))
+        for _amb2 in ("GIT_FUTURE_THING", "GIT_CONFIG_COUNT"):
+            os.environ[_amb2] = "1"
+            try:
+                for _cmd in allow_forms:
+                    got_af = _decision(handler, _cmd, cwd=str(rec_view))
+                    if got_af != "ask":
+                        failures.append("(rec-viewoverride-allow-{}-{}) an ambient non-cosmetic {} must force "
+                                        "ASK on the allow form '{}' (was ALLOW), got {}"
+                                        .format(_amb2, _cmd.replace(" ", "_"), _amb2, _cmd, got_af))
+            finally:
+                os.environ.pop(_amb2, None)
+        # (rec-viewoverride-trace) Fix 1: GIT_TRACE is NO LONGER cosmetic - an absolute GIT_TRACE value makes
+        # the ACTUAL command append trace output to that path (which could be a repo file), so an ambient
+        # GIT_TRACE now forces ASK even on a clean pristine discard that used to ALLOW. The recovery/probe git
+        # calls still scrub the GIT_TRACE family, so the guard itself writes no trace file.
+        trace_view = tmp / "vo-trace.log"
+        os.environ["GIT_TRACE"] = str(trace_view)
+        try:
+            got_trv = _decision(handler, "git checkout -- file.txt", cwd=str(rec_view))
+        finally:
+            os.environ.pop("GIT_TRACE", None)
+        if got_trv != "ask":
+            failures.append("(rec-viewoverride-trace) an ambient GIT_TRACE must force ASK on a clean pristine "
+                            "discard (no longer cosmetic), got {}".format(got_trv))
+        if trace_view.exists():
+            failures.append("(rec-viewoverride-trace-file) the guard's git calls must scrub GIT_TRACE; no "
+                            "trace file may be written")
 
         # (rec-heredoc) C: a Bash-valid but shlex-UNPARSEABLE discard (an unbalanced quote inside a quoted
         # heredoc) reaches the raw-lossy fallback. It must ASK and, on a dirty tree, take a best-effort
@@ -1081,8 +1122,9 @@ def main():
         # at a CLEAN decoy, plus GIT_DISCOVERY_ACROSS_FILESYSTEM, are all NON-COSMETIC ambient GIT_* vars, so
         # the fail-safe repository-view check makes the target UNRESOLVABLE: the guard cannot prove the ACTUAL
         # command (which still carries the injected core.worktree) targets the session cwd, so reset --hard
-        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW) and takes NO
-        # snapshot, exactly like an ambient GIT_DIR/GIT_INDEX_FILE (see rec-decoy/rec-idxfile). Separately,
+        # ASKS (never a DENY it cannot justify about the wrong target, never a false ALLOW) and takes a
+        # best-effort snapshot of the session cwd (dirty here), exactly like an ambient GIT_DIR/GIT_INDEX_FILE
+        # (see rec-decoy/rec-idxfile). Separately,
         # the PROBE still scrubs every ambient GIT_* (the allowlist scrub disables the KEY/VALUE injection and
         # the discovery-boundary override), so it reads the REAL dirty repo (False); nothing is written to the
         # decoy and the real index/HEAD/worktree are untouched.
@@ -1111,9 +1153,9 @@ def main():
             failures.append("(rec-cfgcount) reset --hard under an injected core.worktree decoy via a "
                             "non-cosmetic ambient GIT_CONFIG_COUNT must ASK (unresolvable target, fail-safe), "
                             "got {}".format(got_cfg))
-        if _recovery_refs(rec_cfg):
-            failures.append("(rec-cfgcount-nosnap) an unresolvable-target ASK must take NO recovery snapshot "
-                            "on the REAL repo")
+        if not _recovery_refs(rec_cfg):
+            failures.append("(rec-cfgcount-snap) the ambient-override ASK on a dirty cwd must take a "
+                            "best-effort recovery snapshot on the REAL repo")
         if _recovery_refs(cfg_decoy):
             failures.append("(rec-cfgcount-wrongwrite) a recovery ref was written to the DECOY (an injected "
                             "core.worktree leaked into the snapshot)")

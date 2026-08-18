@@ -1233,8 +1233,10 @@ def _discard_deny(kind):
 # redirecting vars proved a whack-a-mole (round after round found new members: GIT_NO_REPLACE_OBJECTS,
 # GIT_REPLACE_REF_BASE, GIT_REFERENCE_BACKEND, and more will exist), so this FLIPS to fail-safe: ANY
 # ambient GIT_* var forces ASK EXCEPT a small COSMETIC allowlist proven not to change the discard target,
-# the object/ref view, the index, or dirtiness detection - only UI/editor/pager/prompt/lock/trace/identity
-# concerns. An unknown or new GIT_* var ASKS rather than silently allowing.
+# the object/ref view, the index, or dirtiness detection - only UI/editor/pager/prompt/lock/identity
+# concerns. A GIT_TRACE* var is NOT cosmetic (an absolute GIT_TRACE value makes the ACTUAL command append
+# trace output to that path, which could be a repo file), so it too forces ASK. An unknown or new GIT_* var
+# ASKS rather than silently allowing.
 _COSMETIC_GIT_VARS = frozenset((
     "GIT_PAGER",             # selects the pager UI; no effect on target/view/index/dirtiness
     "GIT_EDITOR",            # selects the commit-message editor; UI only
@@ -1257,7 +1259,7 @@ _COSMETIC_GIT_VARS = frozenset((
 
 def _ambient_repo_view_override():
     """FAIL-SAFE: True when the ambient process environment carries ANY GIT_*-prefixed variable that is
-    NOT in the small cosmetic allowlist (and not a GIT_TRACE* var). Such a variable can point git at a
+    NOT in the small cosmetic allowlist. Such a variable can point git at a
     different git dir, work tree, index, object/ref view, replace/reference view, or config/attribute
     source than the session cwd. The clean probe scrubs these before it runs, so IT reads the real cwd
     repo, but the guard cannot scrub them from the ACTUAL command the shell runs: that command still
@@ -1266,13 +1268,16 @@ def _ambient_repo_view_override():
     GIT_REPLACE_REF_BASE, GIT_REFERENCE_BACKEND), so this asks whenever it cannot PROVE the scrubbed
     cwd-probe matches the command's actual repository view: an unknown or new GIT_* var ASKS rather than
     silently allowing (clean becomes not-provably-clean -> ASK, never a silent ALLOW). Only clearly
-    cosmetic UI/editor/pager/prompt/lock/trace/identity vars, which cannot change the discard target, the
-    object/ref view, the index, or dirtiness detection, are allowed through (a GIT_TRACE* var is cosmetic:
-    it only changes debug output, never the repository view)."""
+    cosmetic UI/editor/pager/prompt/lock/identity vars, which cannot change the discard target, the
+    object/ref view, the index, or dirtiness detection, are allowed through. A GIT_TRACE* var is NOT
+    cosmetic and ASKS: an absolute GIT_TRACE value makes the ACTUAL command append trace output to that
+    path, which could be a file inside the repo, so it is not provably view-neutral (the recovery/probe git
+    calls still scrub the whole GIT_TRACE family, so THEY write no trace, but the command's own ambient
+    GIT_TRACE is not neutralized)."""
     for key in os.environ:
         if not key.startswith("GIT_"):
             continue
-        if key in _COSMETIC_GIT_VARS or key.startswith("GIT_TRACE"):
+        if key in _COSMETIC_GIT_VARS:
             continue
         return True
     return False
@@ -1842,20 +1847,43 @@ def git_discard(data):
     # Re-derive the verb form from the sole pristine git command.
     sub, args = _git_sub_and_args(pristine)
     role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+
+    # FAIL-SAFE (EN-6, structural completion): a NON-COSMETIC ambient GIT_* var means the command's
+    # repository view cannot be proven to be the session cwd (the probe scrubs the var, but the ACTUAL
+    # command still inherits it and may act on a redirected git dir, work tree, index, or object/ref view).
+    # So ANY in-scope pristine form ASKS here - a destructive form OR a genuinely non-destructive allow form
+    # (reset --soft, plain switch, clean -n, checkout -b) - BEFORE the role/allow logic below that would
+    # otherwise let an allow form through and bypass the fail-safe. Only the explicit leading opt-out
+    # (short-circuited above) bypasses it. A best-effort snapshot of the SESSION CWD is still taken on a
+    # not-provably-clean snappable tree (the cwd is known even when the target is not): it is inert and
+    # provides recovery IF the command acts on the cwd (the common benign non-redirecting case), but may NOT
+    # capture a redirected tree.
+    if _ambient_repo_view_override():
+        ao_cwd = data.get("cwd")
+        ao_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
+        ao_snap = None
+        if ao_base is not None and sub in _SNAPSHOTTABLE_VERBS and _tree_is_clean(ao_base) is not True:
+            ao_snap = _record_recovery(ao_base, sub)
+        return _ask_with_recovery(
+            kind or "a git work-losing verb",
+            "runs under a non-cosmetic ambient GIT_* variable, so this guard cannot prove the command's "
+            "repository view is the session directory (the probe scrubs the var, but the actual command "
+            "still inherits it); any recovery snapshot is best-effort against the session cwd and may not "
+            "capture a redirected tree", ao_snap)
+
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _ask(*_discard_ask_reason(
             "a git inline alias ('-c alias.<name>=...')",
             "may expand to a work-losing verb this guard cannot resolve"))
 
-    # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. When it
-    # cannot be resolved to the session cwd (no cwd, or a -C/--git-dir/--work-tree/-c global option or a
-    # GIT_DIR/GIT_WORK_TREE env assignment on the command could redirect it, OR any NON-COSMETIC AMBIENT
-    # GIT_* var is set - the probe scrubs it but the real command still inherits it, so the guard cannot
-    # prove the command's repository view IS the session cwd; the check is fail-safe, so an unknown or new
-    # GIT_* var also blocks resolution), no snapshot is possible and a lossy form ASKS.
+    # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. A non-cosmetic
+    # ambient GIT_* override was already handled ABOVE (it ASKS with a best-effort cwd snapshot, which may
+    # not capture a redirected tree), so it never reaches here. When the worktree still cannot be resolved to
+    # the session cwd (no cwd, or a -C/--git-dir/--work-tree/-c global option or a GIT_DIR/GIT_WORK_TREE env
+    # assignment ON THE COMMAND could redirect it), no snapshot is possible and a lossy form ASKS.
     cwd = data.get("cwd")
     base = cwd if isinstance(cwd, str) and cwd else None
-    resolvable = base is not None and _segment_dir_simple(pristine) and not _ambient_repo_view_override()
+    resolvable = base is not None and _segment_dir_simple(pristine)
     snapshottable = sub in _SNAPSHOTTABLE_VERBS
 
     # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
