@@ -358,6 +358,10 @@ def main():
             ("wrap-nohup", "nohup git reset --hard"),                     # a nohup wrapper
             ("wrap-sh-c", 'sh -c "git reset --hard"'),                    # an interpreter -c wrapper
             ("wrap-bash-c", 'bash -c "git reset --hard"'),                # an interpreter -c wrapper
+            ("wrap-stdbuf", "stdbuf -oL git reset --hard"),              # a wrapper NOT in any enumerated list
+            ("wrap-doas", "doas git reset --hard"),                      # a privilege wrapper not in any list
+            ("wrap-setsid", "setsid git reset --hard"),                 # a session wrapper not in any list
+            ("wrap-eval", "eval 'git reset --hard'"),                   # eval runs its quoted argument
         ]
         for label, cmd in pristine_asks:
             expect("(pristine-{}) shell structure hides a reset --hard -> asks".format(label), cmd, "ask",
@@ -382,6 +386,8 @@ def main():
         expect("(cle-b) clean -f -e -n asks (-n is the exclude pattern)", "git clean -f -e -n", "ask",
                cwd=rp)
         expect("(cle-c) clean -n alone still allows (dry run)", "git clean -n", "allow", cwd=rp)
+        expect("(cle-d) clean -n --no-dry-run -f asks (boolean negation disables the dry run)",
+               "git clean -n --no-dry-run -f", "ask", cwd=rp)
 
         # === config-proof probe: status.showUntrackedFiles=no cannot hide an untracked file (fix 1) ===
         # A repo configured to omit untracked files from status must NOT let a force discard read the tree as

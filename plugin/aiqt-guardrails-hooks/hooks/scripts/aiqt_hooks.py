@@ -786,7 +786,8 @@ def absolute_paths(data):
 # lossy-verb command is treated as a reason to ASK (a safe over-ask), so ONLY a metacharacter-free
 # 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
 # coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
-# and every wrapper - sudo/nice/timeout/nohup/sh -c/env/... - in front of the git command): each now ASKS.
+# and ANY wrapper in front of git - sudo/stdbuf/doas/setsid/eval/sh -c/...: the raw 'git'+work-losing-verb
+# scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper cannot slip): ASK.
 # The one probe kept (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
 # read-only and offline and FORCES untracked reporting so a repo-local status.showUntrackedFiles=no config
 # cannot hide an untracked file; the guard never mutates the repo. HONEST RESIDUAL (not caught by a lexical
@@ -1072,6 +1073,8 @@ def _clean_is_dry_run(pre):
     A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
     if any(t in _CLEAN_ARG_OPTS or t.startswith("--exclude=") for t in pre):
         return False  # an arg-consuming option is present: do not trust '-n' -> not a provable dry run
+    if "--no-dry-run" in pre:
+        return False  # boolean negation (git parses --[no-]dry-run last-wins) disables the dry run
     return "--dry-run" in pre or _has_short(pre, "n")
 
 
@@ -1261,18 +1264,15 @@ def git_discard(data):
         if role != "allow":
             lossy.append((role, kind, tokens))
 
-    # A shell WRAPPER (sudo/env/sh -c/command/exec/...) or a metacharacter can HIDE a lossy 'git <verb>' from
-    # the command-word segment scan (a command substitution, a non-git command word, an interpreter -c). When
-    # either is present alongside a lossy git verb keyword in the raw string, fall back to the coarse raw scan
-    # for the in-scope decision, since segmentation cannot be trusted. On a truly clean command (no
-    # metacharacter, no wrapper) the precise `lossy` list alone governs, so a git command that merely mentions
-    # a lossy verb word (e.g. a commit message) is not dragged in scope.
-    has_meta = bool(_SHELL_META_RE.search(command))
-    wrapper_present = any(_command_word(t) in _WRAPPER_WORDS for t, _ in segments)
+    # A wrapper or metacharacter can hide a lossy 'git <verb>' from the command-word segment scan, so the
+    # in-scope decision below trusts the raw scan rather than any (unbounded) wrapper enumeration.
+    # Trust the raw scan UNCONDITIONALLY (round-3 fix): enumerating wrappers is unbounded (stdbuf/doas/
+    # setsid/eval defeated the list), so any raw 'git' + work-losing verb is in scope even when the precise
+    # `lossy` list is empty (a wrapped or quoted git verb). A non-lossy git command still routes through the
+    # pristine path below and allows. Residual: git renamed out of the string (alias/function) -> recovery layer.
     raw_lossy = _raw_has_lossy_git(command)
-
-    if not lossy and not ((has_meta or wrapper_present) and raw_lossy):
-        return _allow()  # boundary: no recognized lossy git verb in scope
+    if not lossy and not raw_lossy:
+        return _allow()  # boundary: no git + work-losing verb anywhere
 
     # In scope. Apply the ULTRA-CONSERVATIVE pristine gate: anything that is not a pristine single bare
     # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
