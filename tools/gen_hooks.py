@@ -313,8 +313,12 @@ def main():
 #   8. a named handler not defined in the source script fails closed (exit 2),
 #   9. a missing handler script fails closed (exit 2),
 #  10. an unreadable manifest fails closed (exit 2),
-#  11. a "warn" default on a tool event fails closed (exit 2): warn is legal only on Stop/SubagentStop,
-#  12. a "warn" default on a Stop event is accepted and regenerates drift-clean.
+#  11. the FULL "warn" default policy, table-driven across every KNOWN_EVENTS event: warn is REJECTED
+#      (exit 2) on every non-warn event and ACCEPTED (clean generate + drift-clean) on Stop and
+#      SubagentStop, the only WARN_EVENTS,
+#  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
+#      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
+#  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
 
 _APEX = """---
 corpus-id: apex01
@@ -504,26 +508,62 @@ def self_test_main():
             failures.append("unreadable manifest expected exit 2 (fail-closed)")
         os.chmod(manifest, 0o644)  # restore so cleanup can remove it
 
-        # 11. A "warn" default on a TOOL event fails closed: warn is a non-blocking Stop-layer default,
-        #     legal only on Stop/SubagentStop, so a PreToolUse hook carrying it must fail the generator.
-        warntool = tmp / "warntool"
-        warntool.mkdir()
-        _build_tree(warntool)
-        _mutate(warntool, 'default = "block"', 'default = "warn"')
-        if run_quiet(warntool, check=True) != 2:
-            failures.append("'warn' default on a tool event expected exit 2 (fail-closed)")
+        # 11. The FULL "warn" default policy, table-driven across every known event. warn is a
+        #     non-blocking Stop-layer default, legal only on the WARN_EVENTS (Stop, SubagentStop), so the
+        #     generator must REJECT it (exit 2) on every other event and ACCEPT it on the WARN_EVENTS,
+        #     regenerating drift-clean. Converting the base tool hook to a non-tool event also drops the
+        #     now-forbidden matcher, matching a real Stop/UserPromptSubmit control.
+        tool_block = 'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "test_handler"\ndefault = "block"'
+        for event in KNOWN_EVENTS:
+            warntree = tmp / ("warn-" + event.lower())
+            warntree.mkdir()
+            _build_tree(warntree)
+            if event in TOOL_EVENTS:
+                # a tool event keeps its matcher; retarget the event and flip the default to warn
+                _mutate(warntree, 'event = "PreToolUse"', 'event = "{}"'.format(event))
+                _mutate(warntree, 'default = "block"', 'default = "warn"')
+            else:
+                # a non-tool event must drop the now-forbidden matcher as it flips to warn
+                _mutate(warntree, tool_block,
+                        'event = "{}"\nhandler = "test_handler"\ndefault = "warn"'.format(event))
+            if event in WARN_EVENTS:
+                if run_quiet(warntree, check=False) != 0 or run_quiet(warntree, check=True) != 0:
+                    failures.append("'warn' default on WARN event {} expected a clean generate + "
+                                    "drift-clean check".format(event))
+            elif run_quiet(warntree, check=True) != 2:
+                failures.append("'warn' default on non-warn event {} expected exit 2 (fail-closed)"
+                                .format(event))
 
-        # 12. A "warn" default on a Stop event is accepted (the honest warn-only default) and regenerates
-        #     drift-clean. Converting the tool hook to a Stop hook also drops the now-forbidden matcher,
-        #     matching a real Stop control.
-        warnstop = tmp / "warnstop"
-        warnstop.mkdir()
-        _build_tree(warnstop)
-        _mutate(warnstop,
-                'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "test_handler"\ndefault = "block"',
+        # 12. Render byte-identity: the default is authoring metadata, never rendered into hooks.json, so
+        #     an otherwise-identical Stop hook must render the SAME bytes whether its default is "block"
+        #     or "warn". Proven by generating both and comparing the emitted hooks.json.
+        stop_block = tmp / "stop-block"
+        stop_block.mkdir()
+        _build_tree(stop_block)
+        _mutate(stop_block, tool_block,
+                'event = "Stop"\nhandler = "test_handler"\ndefault = "block"')
+        stop_warn = tmp / "stop-warn"
+        stop_warn.mkdir()
+        _build_tree(stop_warn)
+        _mutate(stop_warn, tool_block,
                 'event = "Stop"\nhandler = "test_handler"\ndefault = "warn"')
-        if run_quiet(warnstop, check=False) != 0 or run_quiet(warnstop, check=True) != 0:
-            failures.append("'warn' default on a Stop event expected a clean generate + drift-clean check")
+        if run_quiet(stop_block, check=False) != 0 or run_quiet(stop_warn, check=False) != 0:
+            failures.append("byte-identity setup: both Stop trees expected a clean generate (exit 0)")
+        else:
+            block_json = (stop_block / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            warn_json = (stop_warn / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            if block_json != warn_json:
+                failures.append("Stop hooks.json must be byte-identical for default 'block' vs 'warn' "
+                                "(default is authoring metadata, not rendered output)")
+
+        # 13. A malformed/unknown default keyword fails closed (the default whitelist), so a typo can
+        #     never silently select an unintended enforcement posture.
+        baddefault = tmp / "baddefault"
+        baddefault.mkdir()
+        _build_tree(baddefault)
+        _mutate(baddefault, 'default = "block"', 'default = "nonesuch"')
+        if run_quiet(baddefault, check=True) != 2:
+            failures.append("unknown default keyword expected exit 2 (fail-closed)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -538,8 +578,10 @@ def self_test_main():
     print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
           "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
-          "the script, a missing handler script, an unreadable manifest, and a 'warn' default on a "
-          "tool event all fail closed; a 'warn' default on a Stop event is accepted" + note)
+          "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
+          "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
+          "every non-warn event, accepted on Stop and SubagentStop); and a Stop hook renders "
+          "byte-identical hooks.json whether its default is 'block' or 'warn'" + note)
     return 0
 
 
