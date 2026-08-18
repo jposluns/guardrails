@@ -96,8 +96,14 @@ def main():
 
         # === boundary + posture: the true fail-open boundary ALLOWS ==========================
         expect("(bound-a) non-git command allows", "ls -la {}".format(rp), "allow")
-        expect("(bound-b) unparseable command allows", 'git -C {} checkout -- "unbalanced'.format(rp),
-               "allow")
+        # FIX 1: an UNPARSEABLE command (unbalanced quote) is no longer a free ALLOW. A raw scan finds git
+        # AND a lossy verb (checkout) it cannot enumerate -> ASK; a non-lossy unparseable stays ALLOW; and
+        # a truthy opt-out on an unparseable command still ALLOWs.
+        expect("(bound-b) unparseable + lossy verb asks", 'git -C {} checkout -- "unbalanced'.format(rp),
+               "ask")
+        expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
+        expect("(bound-b3) unparseable + lossy but opted out allows",
+               'GUARDRAIL_ALLOW_DISCARD=1 git -C {} reset --hard "unbalanced'.format(rp), "allow")
         # A clean tree: every recognized discard is prove-safe -> ALLOW.
         expect("(clean-a) reset --hard clean allows", "git -C {} reset --hard".format(rp), "allow")
         expect("(clean-b) checkout -- clean allows", "git -C {} checkout -- file.txt".format(rp), "allow")
@@ -260,6 +266,54 @@ def main():
         (inner / "file.txt").write_text("committed line\ndirty\n", encoding="utf-8")
         expect("(dir-g) chained -C inner dirty denies",
                "git -C {} -C inner checkout -- file.txt".format(str(tmp / "outer")), "deny")
+
+        # === consolidated EN-6 fixes (FIX 1-6): unresolved -> ASK ============================
+        # Re-dirty the worktree so a whole-tree discard would lose work, for the FIX 3/4 probes.
+        tracked.write_text("committed line\nen6 fix dirt\n", encoding="utf-8")
+        (repo / "untracked2.txt").write_text("junk\n", encoding="utf-8")
+
+        # FIX 2: a pathspec/target carrying an unresolved shell expansion cannot be enumerated against the
+        # dirty set, so the prove-safe fast path must NOT fire -> ASK (checkout/restore/rm).
+        expect("(fix2-a) checkout -- $DIR/f (variable) asks",
+               "git -C {} checkout -- $DIR/f".format(rp), "ask")
+        expect("(fix2-b) rm $(cat list) (command substitution) asks",
+               "git -C {} rm $(cat list)".format(rp), "ask")
+        expect("(fix2-c) checkout -- glob asks", 'git -C {} checkout -- "*.txt"'.format(rp), "ask")
+        expect("(fix2-d) restore -- $VAR (variable) asks",
+               "git -C {} restore -- $VAR".format(rp), "ask")
+
+        # FIX 3: a cd that does not for-certain govern the git segment must NOT be threaded into the probe
+        # dir. A cd inside a subshell '( )' is discarded when it closes, so the git after it runs in the
+        # (dirty) cwd -> DENY (the OLD code silently ALLOWed by probing the clean subshell dir). A cd that
+        # is the RHS of a '&&' short-circuit MAY not run, so the effective dir is unresolvable -> ASK.
+        clean_repo = _init_repo(tmp / "cleanrepo")  # a second, CLEAN repo to misdirect a cd toward
+        expect("(fix3-a) subshell cd misdirect, git in dirty cwd denies",
+               "( cd {} ) ; git reset --hard".format(str(clean_repo)), "deny", cwd=rp)
+        expect("(fix3-b) short-circuit cd misdirect makes dir unresolvable, asks",
+               "false && cd {} ; git reset --hard".format(str(clean_repo)), "ask", cwd=rp)
+
+        # FIX 4: a leading GIT_WORK_TREE=/GIT_DIR= env assignment is threaded into the probe dir (work-tree
+        # wins), just like the flag forms. GIT_WORK_TREE=sub on a dirty repo -> DENY; an expansion -> ASK.
+        (repo / "sub").mkdir(exist_ok=True)
+        expect("(fix4-a) GIT_WORK_TREE=sub reset --hard dirty denies",
+               "GIT_WORK_TREE=sub git reset --hard", "deny", cwd=rp)
+        expect("(fix4-b) GIT_WORK_TREE=$X (unresolvable) reset --hard asks",
+               "GIT_WORK_TREE=$X git reset --hard", "ask", cwd=rp)
+
+        # FIX 5: interactive patch discards selected hunks, unenumerable offline -> ASK (checkout/restore,
+        # -p or --patch, with or without --staged, including a clustered short form).
+        expect("(fix5-a) checkout -p asks", "git -C {} checkout -p".format(rp), "ask")
+        expect("(fix5-b) checkout --patch asks", "git -C {} checkout --patch -- file.txt".format(rp),
+               "ask")
+        expect("(fix5-c) restore -p asks", "git -C {} restore -p file.txt".format(rp), "ask")
+        expect("(fix5-d) restore --patch --staged asks",
+               "git -C {} restore --patch --staged file.txt".format(rp), "ask")
+
+        # FIX 6: 'git clean' force detection handles clustered short flags, not just a standalone '-f'; a
+        # '-n'/--dry-run form (even clustered) still removes nothing -> ALLOW.
+        expect("(fix6-a) clean -df would-remove asks", "git -C {} clean -df".format(rp), "ask")
+        expect("(fix6-b) clean -fdx would-remove asks", "git -C {} clean -fdx".format(rp), "ask")
+        expect("(fix6-c) clean -ndf dry-run allows", "git -C {} clean -ndf".format(rp), "allow")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

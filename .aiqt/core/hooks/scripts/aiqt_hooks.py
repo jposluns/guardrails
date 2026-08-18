@@ -28,8 +28,9 @@ pass emits NO decision and exits 0 silently.
 
 git_discard (prsunc) is a DELIBERATE, SCOPED-POSTURE exception to that fail-closed rule (EN-6 redesign).
 It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK (permissionDecision "ask", which prompts the
-human). It fails OPEN (ALLOW) only at the TRUE BOUNDARY - a non-git command, no recognized lossy verb, or
-an unparseable command - because that is not a discard it can reason about. WITHIN scope (a recognized
+human). It fails OPEN (ALLOW) only at the TRUE BOUNDARY - a non-git command, or no recognized lossy verb -
+because that is not a discard it can reason about; an UNPARSEABLE command (unbalanced quote) is not a free
+pass, it is scanned raw for a lossy verb keyword and ASKS when one is present. WITHIN scope (a recognized
 lossy verb: checkout/switch/restore/reset/clean/stash/rm/branch) it PROVES SAFE: a provably-safe discard
 ALLOWS, a CONFIRMED tracked-work loss DENIES, and a lossy verb it can neither prove safe nor confirm lossy
 ASKS. It never silent-allows a recognized lossy verb whose loss it cannot disprove (that was the EN-4
@@ -760,6 +761,16 @@ def absolute_paths(data):
 # probes (git status/rev-parse/clean -n) are READ-ONLY and offline; the guard never mutates the repo.
 _DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.+)$")
 _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
+# Fallback-only raw-string probes (FIX 1), used when shlex cannot parse the command (unbalanced quote).
+# We cannot segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
+# always-lossy verbs, or a 'branch' paired with a delete flag ('-D', a clustered '-...D', or '--delete').
+# A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
+# commit_identity fall back to a conservative raw scan on a parse failure. A truthy opt-out still ALLOWs.
+_RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
+_RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
+_RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
+_RAW_BRANCH_DELETE_RE = re.compile(r"(?:(?<![\w-])-[A-Za-z]*D)|(?:--delete\b)")
+_RAW_OPTOUT_RE = re.compile(r"(?i)\bGUARDRAIL_ALLOW_DISCARD=(\S+)")
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
@@ -822,6 +833,18 @@ def _has_short(tokens, ch):
         if t.startswith("-") and not t.startswith("--") and len(t) > 1 and ch in t[1:]:
             return True
     return False
+
+
+# The shell-expansion signals a token can carry that this guard does NOT evaluate: a variable or command
+# substitution ('$', including '$(...)'), a backtick command substitution, or a glob metacharacter
+# ('*'/'?'/'['). A pathspec or a dir value carrying any of these cannot be enumerated or compared against
+# the dirty set offline, so a prove-safe fast path must NOT fire on it - the discard is un-provable and
+# ASKS (the same discipline _cd_target already applies to a cd operand). Mirrors that check's signal set
+# (minus the '~', which is a dir-only home-prefix concern handled in _cd_target).
+def _has_expansion(token):
+    """True when a token carries an unresolved shell expansion (a variable/command substitution or a glob)
+    that this guard cannot resolve, so the token cannot be enumerated to prove a discard safe."""
+    return any(ch in token for ch in ("$", "`", "*", "?", "["))
 
 
 def _pathspec_from_file(args):
@@ -1017,17 +1040,42 @@ def _apply_cd(base, tokens):
     return _combine(base, tgt)
 
 
+# FIX 4: the equivalent leading ENV-assignment forms of the '--work-tree'/'--git-dir' flags. A leading
+# 'GIT_WORK_TREE=...' sets the tree git operates on (it WINS for the probe, like the flag); a leading
+# 'GIT_DIR=...' names the git dir (not the worktree, so it is skipped for the probe, like '--git-dir').
+# Either carrying an unresolved expansion makes the effective dir un-provable -> the caller ASKS.
+_GIT_WORK_TREE_ENV_RE = re.compile(r"^GIT_WORK_TREE=(.*)$")
+_GIT_DIR_ENV_RE = re.compile(r"^GIT_DIR=(.*)$")
+
+
 def _resolve_repo(base, tokens):
-    """The worktree dir a git segment acts on, from the base dir plus the segment's global options, or
-    None when unresolvable. Scans only the global-option region (up to the first non-option token, the
+    """The worktree dir a git segment acts on, from the base dir plus the segment's env assignments and
+    global options, or None when unresolvable. A leading 'GIT_WORK_TREE='/'GIT_DIR=' env assignment (FIX 4)
+    is parsed first, work-tree winning for the probe; either with an unresolved expansion yields None (the
+    ASK trigger). Then it scans only the global-option region (up to the first non-option token, the
     subcommand; a pathspec after it is never read): cumulative '-C' (each relative to the dir resolved so
     far, an absolute value resets, exactly as git chains -C), and '--work-tree' (which WINS for the probe,
     since that is the tree git operates on). '--git-dir' is the git dir, not the worktree, so it is
-    skipped. Other arg-consuming global options have their value skipped so it is not misread."""
+    skipped. Other arg-consuming global options have their value skipped so it is not misread. A
+    command-line '--work-tree' flag overrides the GIT_WORK_TREE env, matching git."""
+    cw_idx = _command_word_index(tokens)
+    env_worktree = None
+    env_worktree_set = False
+    for tok in tokens[:cw_idx]:  # the leading env-assignment prefix, before the 'git' command word
+        m = _GIT_WORK_TREE_ENV_RE.match(tok)
+        if m:
+            if _has_expansion(m.group(1)):
+                return None  # an unresolvable work-tree: cannot prove safe -> ASK
+            env_worktree = m.group(1)
+            env_worktree_set = True
+            continue
+        m = _GIT_DIR_ENV_RE.match(tok)
+        if m and _has_expansion(m.group(1)):
+            return None  # an unresolvable git dir: cannot even locate the repo -> ASK
     repo = base
     worktree = None
     worktree_set = False
-    i = _command_word_index(tokens) + 1  # after the command word; global options precede the subcommand
+    i = cw_idx + 1  # after the command word; global options precede the subcommand
     n = len(tokens)
     while i < n:
         tok = tokens[i]
@@ -1053,7 +1101,11 @@ def _resolve_repo(base, tokens):
             i += 2 if ("=" not in tok and tok in _GIT_ARG_OPTS) else 1
             continue
         break  # reached the subcommand; global options end here, never scan pathspecs after it
-    return worktree if worktree_set else repo
+    if worktree_set:
+        return worktree  # the command-line '--work-tree' flag wins (matches git's precedence)
+    if env_worktree_set:
+        return _combine(repo, env_worktree)  # GIT_WORK_TREE env, relative to the -C-adjusted dir
+    return repo
 
 
 # --- read-only probes (offline; the guard never mutates the repo) ------------------------------------
@@ -1166,6 +1218,13 @@ def _porcelain_outcome(repo, paths, whole_tree, affects_index, from_file, deny_o
     if from_file:
         return _ask_outcome(kind, "sources its pathspecs from a file or stdin, which this guard cannot "
                                   "enumerate to prove the change safe")
+    if not whole_tree and paths and any(_has_expansion(p) for p in paths):
+        # FIX 2: a pathspec carrying an unresolved shell expansion (a variable, command substitution, or
+        # glob) cannot be enumerated or compared against the dirty set, so the path-disjoint / prove-safe
+        # fast path must NOT fire on it. The discard is un-provable -> ASK (mirrors the from_file path).
+        return _ask_outcome(kind, "targets a pathspec carrying an unresolved shell expansion (a variable, "
+                                  "command substitution, or glob) that this guard cannot enumerate to "
+                                  "prove the change safe")
     if not whole_tree and not paths:
         return _ALLOW_OUTCOME  # nothing named: a no-op, nothing to lose
     lost = _probe_porcelain(repo, paths, whole_tree, affects_index)
@@ -1189,6 +1248,13 @@ def _eval_checkout(repo, args):
     checkout); a first operand that is not a ref means every operand is a pathspec (a worktree discard,
     e.g. 'git checkout .')."""
     pre, post, had_sep = _split_pre_post(args)
+    if "--patch" in pre or _has_short(pre, "p"):
+        # FIX 5: 'git checkout -p'/'--patch' interactively discards selected worktree hunks, a loss that
+        # cannot be enumerated offline -> ASK. Judged on the PRE-'--' region only, so a pathspec named
+        # '-p' after '--' is not misread as the flag.
+        return _ask_outcome("git checkout -p/--patch",
+                            "interactively discards selected worktree hunks, which this guard cannot "
+                            "enumerate offline to prove safe")
     if "-f" in pre or "--force" in pre or _has_short(pre, "f"):
         return _porcelain_outcome(repo, None, True, True, False, True,
                                   "git checkout -f (a forced branch switch)")
@@ -1233,6 +1299,12 @@ def _eval_restore(repo, args):
     """git restore: a discard when it touches the worktree. '--staged' alone (a pure unstage) or a git-
     invalid flag combination is NOT a discard (ALLOW)."""
     pre, post, _had_sep = _split_pre_post(args)
+    if "--patch" in pre or _has_short(pre, "p"):
+        # FIX 5: 'git restore -p'/'--patch' (with or without --staged) interactively discards selected
+        # hunks, a loss that cannot be enumerated offline -> ASK. Judged on the PRE-'--' region only.
+        return _ask_outcome("git restore -p/--patch",
+                            "interactively discards selected hunks, which this guard cannot enumerate "
+                            "offline to prove safe")
     has_staged, has_worktree, valid = _restore_flags(pre)
     if not valid or not has_worktree:
         return _ALLOW_OUTCOME
@@ -1351,10 +1423,35 @@ def _eval_git_segment(repo, tokens):
     return handler(repo, args)
 
 
+def _git_discard_fallback(command):
+    """FIX 1, FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quote): we cannot
+    segment safely, so scan the RAW string. A truthy GUARDRAIL_ALLOW_DISCARD opt-out still ALLOWs. If git
+    is present AND a recognized work-losing verb keyword is present (an always-lossy verb, or 'branch' with
+    a delete flag) -> ASK (cannot prove safe); otherwise ALLOW (the true boundary). Documented best-effort:
+    a genuinely clean but unparseable command that merely mentions a lossy verb keyword may ASK."""
+    m = _RAW_OPTOUT_RE.search(command)
+    if m and m.group(1).lower() not in _DISCARD_FALSY:
+        return _allow()  # explicit opt-out, honoured even on an unparseable command
+    if not _RAW_GIT_RE.search(command):
+        return _allow()  # no git: the true boundary
+    lossy = _RAW_LOSSY_VERB_RE.search(command) or (
+        _RAW_BRANCH_RE.search(command) and _RAW_BRANCH_DELETE_RE.search(command))
+    if not lossy:
+        return _allow()  # git present but no recognized work-losing verb: the true boundary
+    return _ask(
+        "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
+        "(likely an unbalanced quote) and it names a git work-losing verb this guard cannot enumerate to "
+        "prove safe; asking rather than silently allowing. {}".format(_DISCARD_ALTS),
+        "AIQT guardrail: an unparseable git command names a work-losing verb this guard could not prove "
+        "safe - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip this prompt (rule "
+        "prsunc, fail-safe).")
+
+
 def git_discard(data):
     """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. SCOPED-POSTURE guard (EN-6): fail-open
-    ALLOW only at the true boundary (a non-git command, no recognized lossy verb, or an unparseable
-    command); within scope it PROVES SAFE - a provably-safe discard ALLOWS, a CONFIRMED tracked-work loss
+    ALLOW only at the true boundary (a non-git command, or no recognized lossy verb; an unparseable command
+    is scanned raw and ASKS when it names a lossy verb - FIX 1); within scope it PROVES SAFE - a
+    provably-safe discard ALLOWS, a CONFIRMED tracked-work loss
     DENIES, and a recognized lossy verb it cannot prove either way ASKS (never silent-allows, the EN-4
     leak). The unprovable middle ALWAYS asks regardless of interactivity, a deliberate conservative first
     cut (ask is recoverable). Every probe (git status/rev-parse/clean -n) is read-only and offline; the
@@ -1373,25 +1470,42 @@ def git_discard(data):
     try:
         segments = _segments(command)
     except ValueError:
-        return _allow()  # boundary: unparseable (no raw-string discard scan)
+        return _git_discard_fallback(command)  # FIX 1: conservative raw scan, not a silent allow
     if _has_discard_optout(segments):
         return _allow()  # GUARDRAIL_ALLOW_DISCARD truthy anywhere
     cwd = data.get("cwd")
     base = cwd if isinstance(cwd, str) and cwd else None  # the session dir, or None when absent
+    base_stack = []   # FIX 3: subshell scoping - '(' saves the outer dir, ')' restores it (a cd inside
+    prev_sep = ""     # a subshell never escapes it). prev_sep is the operator PRECEDING this segment.
     pending_ask = None
-    for tokens, _sep in segments:
+    for tokens, sep_after in segments:
         cw = _command_word(tokens)
         if cw in ("cd", "pushd"):
-            base = _apply_cd(base, tokens)  # thread a leading cd/pushd into the effective dir
-            continue
-        if cw != "git":
-            continue
-        repo = _resolve_repo(base, tokens)
-        outcome, reason, banner = _eval_git_segment(repo, tokens)
-        if outcome == "deny":
-            return _deny(reason, banner)  # a confirmed loss wins immediately
-        if outcome == "ask" and pending_ask is None:
-            pending_ask = (reason, banner)
+            # FIX 3: honour a cd/pushd ONLY as a genuine LEADING, UNCONDITIONAL, non-pipeline prefix, so
+            # the git command runs in that dir for sure. A cd that is the RHS of a '&&'/'||' short-circuit
+            # MAY not run, so the effective dir is ambiguous -> mark it unresolvable (a later git there
+            # ASKS, never probes a guessed dir and allows). A cd in a pipeline runs in a subshell and does
+            # not change the parent dir, so it is ignored. A cd inside '( )' is scoped by base_stack below.
+            if prev_sep == "|" or sep_after == "|":
+                pass  # a pipeline cd runs in a subshell: it does not change the parent dir
+            elif prev_sep in ("&&", "||"):
+                base = None  # conditional: may or may not run, so the effective dir is unresolvable
+            else:
+                base = _apply_cd(base, tokens)  # a leading unconditional cd/pushd threads into the dir
+        elif cw == "git":
+            repo = _resolve_repo(base, tokens)
+            outcome, reason, banner = _eval_git_segment(repo, tokens)
+            if outcome == "deny":
+                return _deny(reason, banner)  # a confirmed loss wins immediately
+            if outcome == "ask" and pending_ask is None:
+                pending_ask = (reason, banner)
+        # Apply subshell scoping on the segment's trailing operator: '(' saves the current dir before the
+        # subshell, ')' restores it, so a cd made inside the subshell is discarded when it closes (FIX 3).
+        if sep_after == "(":
+            base_stack.append(base)
+        elif sep_after == ")" and base_stack:
+            base = base_stack.pop()
+        prev_sep = sep_after
     if pending_ask is not None:
         return _ask(*pending_ask)
     return _allow()
