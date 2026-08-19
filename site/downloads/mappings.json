@@ -10,7 +10,7 @@
       "citation_unit": "technique",
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
-      "ids_cited": 64,
+      "ids_cited": 66,
       "ids_total": 173
     },
     "csa-aicm": {
@@ -23,7 +23,7 @@
       "citation_unit": "control",
       "source_artefact": "CSA AI Controls Matrix v1.1.0",
       "retrieved": "2026-07-07",
-      "ids_cited": 78,
+      "ids_cited": 79,
       "ids_total": 247
     },
     "csa-ccm": {
@@ -36,7 +36,7 @@
       "citation_unit": "control",
       "source_artefact": "CSA Cloud Controls Matrix v4.1.0",
       "retrieved": "2026-07-07",
-      "ids_cited": 56,
+      "ids_cited": 57,
       "ids_total": 207
     },
     "iso-23894": {
@@ -75,7 +75,7 @@
       "citation_unit": "control",
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
-      "ids_cited": 58,
+      "ids_cited": 64,
       "ids_total": 1196
     },
     "nist-airmf": {
@@ -409,6 +409,16 @@
       "fit": "broad",
       "identifier": "RV.1.2",
       "identifier_title": "Test code to confirm new vulnerabilities"
+    },
+    {
+      "rule_id": "tstamp",
+      "rule_title": "A recorded timestamp is read from the clock",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "AU-8",
+      "identifier_title": "Time Stamps"
     },
     {
       "rule_id": "valinf",
@@ -801,6 +811,36 @@
       "identifier_title": "Protect stored code with least privilege"
     },
     {
+      "rule_id": "rerunf",
+      "rule_title": "A pass obtained by rerunning is still the failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md",
+      "framework": "iso-42001",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "A.6.2.4",
+      "identifier_title": "AI system verification and validation"
+    },
+    {
+      "rule_id": "rerunf",
+      "rule_title": "A pass obtained by rerunning is still the failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SI-2",
+      "identifier_title": "Flaw Remediation"
+    },
+    {
+      "rule_id": "septsk",
+      "rule_title": "Separate task changes from pre-existing work",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-separate-task-changes.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CM-3",
+      "identifier_title": "Configuration Change Control"
+    },
+    {
       "rule_id": "valgat",
       "rule_title": "Validation is a gate on apply",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md",
@@ -1179,6 +1219,16 @@
       "fit": "broad",
       "identifier": "PW.5.1",
       "identifier_title": "Follow secure coding practices"
+    },
+    {
+      "rule_id": "mindep",
+      "rule_title": "Minimize external dependencies in favour of standard libraries",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-minimize-dependencies.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SA-8",
+      "identifier_title": "Security and Privacy Engineering Principles"
     },
     {
       "rule_id": "slfgrd",
@@ -1984,6 +2034,86 @@
       "rule_id": "datbnd",
       "rule_title": "Classify content by sensitivity tier",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-data-boundary.md",
+      "framework": "owasp-llm",
+      "relation": "addresses risk",
+      "fit": "broad",
+      "identifier": "LLM02",
+      "identifier_title": "Sensitive Information Disclosure"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0024",
+      "identifier_title": "Exfiltration via AI Inference API"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "tight",
+      "identifier": "AML.T0025",
+      "identifier_title": "Exfiltration via Cyber Means"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "tight",
+      "identifier": "AML.T0086",
+      "identifier_title": "Exfiltration via AI Agent Tool Invocation"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SC-7",
+      "identifier_title": "Boundary Protection"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "AC-4",
+      "identifier_title": "Information Flow Enforcement"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "SC-7(5)",
+      "identifier_title": "Deny by Default - Allow by Exception"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "owasp-asi",
+      "relation": "addresses risk",
+      "fit": "broad",
+      "identifier": "ASI02",
+      "identifier_title": "Tool Misuse and Exploitation"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
       "framework": "owasp-llm",
       "relation": "addresses risk",
       "fit": "broad",
@@ -7849,6 +7979,56 @@
       "fit": "tight",
       "identifier": "LLM06",
       "identifier_title": "Unbounded Consumption"
+    },
+    {
+      "rule_id": "secrst",
+      "rule_title": "A destructive operation requires a verified restore path",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "BCR-08",
+      "identifier_title": "Backup"
+    },
+    {
+      "rule_id": "secrst",
+      "rule_title": "A destructive operation requires a verified restore path",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "BCR-08",
+      "identifier_title": "Backup"
+    },
+    {
+      "rule_id": "secrst",
+      "rule_title": "A destructive operation requires a verified restore path",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CP-9",
+      "identifier_title": "System Backup"
+    },
+    {
+      "rule_id": "secrst",
+      "rule_title": "A destructive operation requires a verified restore path",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CP-9(1)",
+      "identifier_title": "Testing for Reliability and Integrity"
+    },
+    {
+      "rule_id": "secrst",
+      "rule_title": "A destructive operation requires a verified restore path",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CP-10",
+      "identifier_title": "System Recovery and Reconstitution"
     },
     {
       "rule_id": "secmin",
