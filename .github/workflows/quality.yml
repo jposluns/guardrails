@@ -126,6 +126,9 @@ jobs:
       - name: Hooks drift
         run: python3 tools/gen_hooks.py --check
 
+      - name: Hooks behaviour self-test
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
+
       - name: Skill drift
         run: python3 tools/gen_skill.py --check
       - name: Skill self-test
