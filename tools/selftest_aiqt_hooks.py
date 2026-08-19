@@ -192,6 +192,21 @@ def main():
                "deny", cwd=rp)
         expect("(sw-c) plain switch allows (git aborts on dirty)", "git switch other", "allow", cwd=rp)
 
+        # === EN-6 round-22 Fix 1 (F-81): a force branch-create/RESET on checkout/switch now ASKS =====
+        # 'git checkout -B', 'git switch -C', and 'git switch --force-create' force-create or RESET a branch
+        # ref exactly like 'git branch -f'/'-M'/'-C' (orphaning committed commits, reflog-recoverable), so
+        # they ASK even on a dirty tree; a plain unforced create (-b/-c) keeps its allow. The checkout -f
+        # whole-tree outcomes stay locked by (r21b-1) ASK and (r21b-2) DENY above.
+        expect("(r22-1) checkout -B force branch-create/reset asks", "git checkout -B foo other", "ask",
+               cwd=rp)
+        expect("(r22-2) switch -C force branch-create/reset asks", "git switch -C foo other", "ask", cwd=rp)
+        expect("(r22-3) switch --force-create force branch-create/reset asks",
+               "git switch --force-create foo other", "ask", cwd=rp)
+        expect("(r22-4) checkout -b plain create still allows (unchanged)", "git checkout -b foo", "allow",
+               cwd=rp)
+        expect("(r22-5) switch -c plain create still allows (unchanged)", "git switch -c foo", "allow",
+               cwd=rp)
+
         # === restore =========================================================================
         expect("(re-a) restore dirty asks", "git restore file.txt", "ask", cwd=rp)
         # Blocker 6: restore --staged is no longer an unconditional allow; on a not-provably-clean tree it
@@ -270,6 +285,22 @@ def main():
                cwd=rp)
         expect("(r21a-5b) branch newbr create still allows", "git branch newbr", "allow", cwd=rp)
         expect("(r21a-6) parseable bare branch (list) allows", "git branch", "allow", cwd=rp)
+
+        # === EN-6 round-22 Fix 2 (F-82): '-u <upstream>' value is not char-scanned as a force flag =====
+        # Round-21's blind char-scan read the ATTACHED upstream value of '-u<val>' as clustered force flags,
+        # so 'git branch -ufoo topic' / '-uMain topic' / '-uCandidate topic' wrongly ASKED. The option parser
+        # now stops the cluster scan at '-u' and treats the remainder as the upstream, so these ALLOW; a real
+        # force delete/move/copy/reset still ASKS, and a plain create/list still allows (unchanged above).
+        expect("(r22-6) branch -ufoo sets upstream, allows (not read as -f)", "git branch -ufoo topic",
+               "allow", cwd=rp)
+        expect("(r22-7) branch -uMain sets upstream, allows (not read as -M)", "git branch -uMain topic",
+               "allow", cwd=rp)
+        expect("(r22-8) branch -uCandidate sets upstream, allows (not read as -C/-d)",
+               "git branch -uCandidate topic", "allow", cwd=rp)
+        expect("(r22-9) branch -u <upstream> separated form allows", "git branch -u origin/main topic",
+               "allow", cwd=rp)
+        expect("(r22-10) branch -f a other force reset still asks (unchanged)", "git branch -f a other",
+               "ask", cwd=rp)
 
         # === previously-fooled shell-expansion pathspecs now ASK (F-62.1, F-64.1/2, F-65.F1) ==
         # A pathspec carrying a variable, command substitution, glob, brace, or tilde used to be probed
@@ -605,6 +636,8 @@ def main():
             (("reset", ["--har"]), "clobber"),            # blocker 5: abbreviated --hard
             (("reset", []), "scoped"),                    # blocker 6: default --mixed changes the index
             (("checkout", ["-b", "new"]), "allow"),
+            (("checkout", ["-B", "new", "start"]), "ask"),  # F-81: -B force-creates/RESETS a branch ref
+            (("checkout", ["-f", "-B", "new"]), "ask"),     # F-81: -B ASKS even combined with -f
             (("checkout", ["-f", "-b", "new"]), "scoped"),  # blocker 7: forced branch-create no early-allow
             (("checkout", ["-f", "other"]), "scoped"),   # bare operand: cannot tell ref from path -> ask
             (("checkout", ["-f"]), "clobber"),            # force, no operand -> whole-tree
@@ -615,6 +648,10 @@ def main():
             (("switch", ["--merge", "other"]), "scoped"),  # fix 3: a three-way merge can overwrite worktree
             (("switch", ["--conflict=diff3", "other"]), "scoped"),  # fix 3: conflict-style merge
             (("switch", ["-m", "other"]), "scoped"),      # fix 3: '-m' is --merge
+            (("switch", ["-C", "new", "start"]), "ask"),  # F-81: -C force-creates/RESETS a branch ref
+            (("switch", ["--force-create", "new", "start"]), "ask"),  # F-81: long spelling
+            (("switch", ["--force-c", "new"]), "ask"),    # F-81: abbreviated --force-create by prefix
+            (("switch", ["-c", "new"]), "allow"),         # F-81: plain -c create unchanged
             (("switch", ["other"]), "allow"),
             (("restore", ["--staged", "file"]), "scoped"),  # blocker 6: --staged can erase staged-only
             (("restore", ["--staged", "--worktree", "file"]), "scoped"),
@@ -635,6 +672,11 @@ def main():
             (("branch", ["-D", "x"]), "ask"),
             (("branch", ["--del", "--force", "x"]), "ask"),  # blocker 5: abbreviated --delete/--force
             (("branch", ["-d", "x"]), "allow"),
+            (("branch", ["-ufoo", "topic"]), "allow"),       # F-82: '-ufoo' is -u<upstream>, not -f/-o/-o
+            (("branch", ["-uMain", "topic"]), "allow"),      # F-82: 'M' is in the upstream VALUE, not -M
+            (("branch", ["-uCandidate", "topic"]), "allow"),  # F-82: 'C'/'d' are in the VALUE, not -C/-d
+            (("branch", ["-u", "foo", "topic"]), "allow"),   # F-82: separated '-u <upstream>' consumes value
+            (("branch", ["-f", "a", "other"]), "ask"),       # F-82: a real force reset still ASKS
         ]
         for (sub, args), want_role in role_cases:
             got_role = aiqt_hooks._discard_role(sub, args)[0]
@@ -1556,7 +1598,12 @@ def main():
           "and not chased. The four accuracy fixes are proven: the config-forced probe defeats "
           "status.showUntrackedFiles=no (untracked reads dirty -> DENY/ASK, not allow); clean -e/--exclude "
           "arg-consumption means '-n' is not mis-read as a dry run; switch --merge/--conflict route to "
-          "scoped and ASK on a dirty tree; and the DENY wording covers untracked. The prior GD-41 "
+          "scoped and ASK on a dirty tree; and the DENY wording covers untracked. The EN-6 round-22 fixes "
+          "are proven: checkout -B and switch -C/--force-create force-create/RESET a branch ref (the "
+          "reflog-recoverable class of branch -f/-M/-C) and ASK, even combined with other flags (F-81); the "
+          "branch option parser treats an attached -u<upstream> value as the upstream and not a clustered "
+          "force flag, so -ufoo/-uMain/-uCandidate ALLOW while a real force delete/move/copy/reset still "
+          "ASKS (F-82). The prior GD-41 "
           "blocker cases and the F-60/F-62/F-64/F-65/F-66 under-block edges still ASK/DENY, and the role "
           "classifier is asserted too. The EN-6 recovery/snapshot layer is proven: a snapshot is taken on a "
           "dirty-tree ASK and on a simulated mis-parse ALLOW, NOT on a provably-clean tree; the real "

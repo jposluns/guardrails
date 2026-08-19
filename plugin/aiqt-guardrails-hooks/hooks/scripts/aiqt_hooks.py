@@ -773,8 +773,9 @@ def absolute_paths(data):
 
 # --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
 # ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" guard (EN-6, EN-6 hardening pass over the
-# GD-41 coarse cut). For a command that names any recognized lossy git verb (checkout/switch/restore/reset/
-# clean/stash drop-clear/rm/branch delete-force) the outcome is ASK unless the command is a PRISTINE SINGLE
+# GD-41 coarse cut). For a command that names any recognized lossy git verb (checkout incl -B force-create,
+# switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force delete/move/copy/reset)
+# the outcome is ASK unless the command is a PRISTINE SINGLE
 # BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING opt-out
 # is set). Three outcomes:
 #   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
@@ -1077,9 +1078,12 @@ def _tree_is_clean(repo):
 # probe AND on the command being a single simple 'git <verb>' invocation.
 
 def _checkout_role(args):
-    """git checkout. Force ('-f'/'--force', abbreviations included) is decided FIRST (GD-41 blocker 7): a
-    branch-create ('-b'/'-B'/'--orphan') only allows when force is ABSENT, because a FORCED branch-create
-    can discard, so 'checkout -f -b <name>' must fall through to a lossy classification, not the early
+    """git checkout. Force ('-f'/'--force', abbreviations included) is decided FIRST (GD-41 blocker 7). A
+    '-B' force branch-create/RESET overwrites an existing branch ref and can orphan committed commits (the
+    same reflog-recoverable loss class as 'git branch -f'/'-M'/'-C'), so it ASKS unconditionally, INCLUDING
+    when combined with other flags (F-81), before the unforced branch-create allow. A plain branch-create
+    ('-b'/'--orphan') only allows when force is ABSENT, because a FORCED branch-create can discard, so
+    'checkout -f -b <name>' must fall through to a lossy classification, not the early
     allow. '-p'/'--patch' (prefix-matched) interactively discards worktree hunks -> scoped. A forced
     checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
     be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
@@ -1093,7 +1097,10 @@ def _checkout_role(args):
     if _has_long_prefix(pre, "pathspec-from-file"):  # prefix-matched: '--pathspec-from-f' too
         return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
     force = "-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
-    branch_create = (_has_short(pre, "b") or _has_short(pre, "B") or _has_long_prefix(pre, "orphan"))
+    if _has_short(pre, "B"):  # -B force-creates/RESETS a branch ref, orphaning committed commits (F-81)
+        return ("ask", "git checkout -B (a force branch-create/reset that overwrites an existing branch "
+                       "ref and may orphan its commits)")
+    branch_create = (_has_short(pre, "b") or _has_long_prefix(pre, "orphan"))
     if branch_create and not force:
         return ("allow", None)  # create/switch to a new branch; git carries changes and aborts on conflict
     if "--patch" in pre or _has_short(pre, "p") or _has_long_prefix(pre, "patch"):
@@ -1111,6 +1118,10 @@ def _checkout_role(args):
 def _switch_role(args):
     """git switch. '-f'/'--force'/'--discard-changes' overwrites the worktree (whole-tree) -> clobber; force
     and discard-changes are matched by unambiguous PREFIX (blocker 5), so '--for' and '--dis' are recognized.
+    A '-C'/'--force-create' force branch-create/RESET (matched by prefix too) overwrites an existing branch
+    ref and can orphan committed commits (the same reflog-recoverable loss class as 'git branch
+    -f'/'-M'/'-C'), so it ASKS (F-81); plain '-c' create keeps the allow. '--force' is decided FIRST, so a
+    genuine worktree clobber still DENIES rather than being downgraded to the force-create ASK.
     A '-m'/'--merge' or '--conflict[=<style>]' switch performs a THREE-WAY merge into the worktree that can
     overwrite local changes, so it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK
     on a dirty one), matched by prefix too. A plain switch aborts on a dirty tree (git protects), so it is
@@ -1119,6 +1130,9 @@ def _switch_role(args):
     if ("-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
             or _has_long_prefix(pre, "discard-changes")):
         return ("clobber", "git switch --force/--discard-changes (overwrites the worktree)")
+    if _has_short(pre, "C") or _has_long_prefix(pre, "force-create"):
+        return ("ask", "git switch -C/--force-create (a force branch-create/reset that overwrites an "
+                       "existing branch ref and may orphan its commits)")
     if _has_short(pre, "m") or _has_long_prefix(pre, "merge") or _has_long_prefix(pre, "conflict"):
         return ("scoped", "git switch --merge/--conflict (a three-way merge that can overwrite local changes)")
     return ("allow", None)
@@ -1199,6 +1213,63 @@ def _clean_is_dry_run(pre):
     return "--dry-run" in pre or _has_short(pre, "n")
 
 
+# git branch long options that CONSUME the following token as a REQUIRED separated value, so that value is
+# never read as an operand or scanned as clustered force flags. Only required-arg options are listed:
+# optional-arg long options (--track/--contains/--merged/--points-at/--color/--abbrev) take a value only in
+# the attached '--opt=val' form and never consume a following token.
+_BRANCH_LONG_ARG_OPTS = ("set-upstream-to", "sort", "format")
+# Long options a '--<name>' abbreviation could ALSO mean; when a name could abbreviate one of these
+# destructive options it is NOT treated as arg-consuming, so an ambiguous '--f' errs toward ASK rather than
+# swallowing the following operand.
+_BRANCH_FORCE_OPTS = ("force", "delete", "move", "copy")
+
+
+def _branch_long_takes_arg(name):
+    """True when the '--<name>' branch option (its '--' and any '=value' already stripped) is an unambiguous
+    PREFIX of a git-branch long option that REQUIRES a separated value, so the NEXT token is that value
+    rather than a flag or an operand. When `name` could also abbreviate a destructive option (--force/
+    --delete/--move/--copy) it is NOT treated as arg-consuming, so an ambiguous '--f' still routes to ASK
+    rather than swallowing the following operand and winning a silent allow."""
+    if any(full.startswith(name) for full in _BRANCH_FORCE_OPTS):
+        return False
+    return any(full.startswith(name) for full in _BRANCH_LONG_ARG_OPTS)
+
+
+def _branch_parse_options(pre):
+    """Parse a 'git branch' option region (already split before any '--') into (short_flags, operands).
+    short_flags is the set of genuine short flag letters; operands is the list of bare operands. An
+    argument-taking option's VALUE is never added to either: the arg-taking short option is '-u <upstream>'
+    (attached '-u<val>' or separated '-u <val>'), so a short cluster stops scanning at the first '-u' and the
+    remainder of that token (or the next token) is the upstream value, NOT clustered force flags. This closes
+    the F-82 over-ASK regression where a blind char-scan read '-ufoo'/'-uMain'/'-uCandidate' as carrying
+    -f/-M/-C/-d. Long options are not char-scanned here (the force forms match them by prefix on `pre`); a
+    required-arg long option ('--set-upstream-to'/'--sort'/'--format') consumes its separated value so it is
+    not mistaken for an operand or a flag."""
+    short_flags = set()
+    operands = []
+    skip_value = False  # the previous token opened a separated-value slot (e.g. '-u <upstream>')
+    for tok in pre:
+        if skip_value:
+            skip_value = False
+            continue  # this token is a prior option's VALUE, not a flag or an operand
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0][2:]
+            if name and "=" not in tok and _branch_long_takes_arg(name):
+                skip_value = True  # its value is the next token
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch == "u":  # '-u <upstream>': the remainder of this token is the VALUE
+                    if i == len(body) - 1:
+                        skip_value = True  # a bare '-u': the value is the next token
+                    break  # stop the cluster scan; the rest of this token is the upstream value
+                short_flags.add(ch)
+            continue
+        operands.append(tok)  # a bare operand (a branch name)
+    return short_flags, operands
+
+
 def _discard_role(sub, args):
     """Classify a git segment's subcommand into (role, kind); see the block comment above. clean, stash,
     and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
@@ -1233,18 +1304,20 @@ def _discard_role(sub, args):
         return ("allow", None)
     if sub == "branch":
         pre, post, _had_sep = _split_pre_post(args)
-        short = [t for t in pre if t.startswith("-") and not t.startswith("--")]
-        has_big_d = any("D" in t[1:] for t in short)
-        has_big_m = any("M" in t[1:] for t in short)  # -M is 'move --force' (a force rename)
-        has_big_c = any("C" in t[1:] for t in short)  # -C is 'copy --force' (a force copy)
+        short_flags, operands = _branch_parse_options(pre)
+        operands = operands + post
+        has_big_d = "D" in short_flags
+        has_big_m = "M" in short_flags  # -M is 'move --force' (a force rename)
+        has_big_c = "C" in short_flags  # -C is 'copy --force' (a force copy)
         # Delete, move, copy, and force are matched by unambiguous PREFIX too (GD-41 blocker 5):
         # '--del'/'--mov'/'--cop'/'--for'. Short flags are case-sensitive, so -m/-c (unforced move/copy)
-        # are distinct from -M/-C (their force forms).
-        has_delete = _has_long_prefix(pre, "delete") or any("d" in t[1:] for t in short)
-        has_move = _has_long_prefix(pre, "move") or any("m" in t[1:] for t in short)
-        has_copy = _has_long_prefix(pre, "copy") or any("c" in t[1:] for t in short)
-        has_force = _has_long_prefix(pre, "force") or any("f" in t[1:] for t in short)
-        operands = [a for a in pre if not a.startswith("-")] + post
+        # are distinct from -M/-C (their force forms). _branch_parse_options stops a short cluster at the
+        # arg-taking '-u <upstream>' so an attached value ('-ufoo'/'-uMain') is the UPSTREAM, never scanned
+        # as a clustered force flag (F-82 over-ASK regression: round-21's blind char-scan mis-read it).
+        has_delete = _has_long_prefix(pre, "delete") or "d" in short_flags
+        has_move = _has_long_prefix(pre, "move") or "m" in short_flags
+        has_copy = _has_long_prefix(pre, "copy") or "c" in short_flags
+        has_force = _has_long_prefix(pre, "force") or "f" in short_flags
         # A force DELETE, force MOVE/rename, force COPY, or a bare force branch RESET each reset or overwrite
         # a branch ref and can orphan committed commits (the same reflog-recoverable loss class as -D), so all
         # ASK. A non-force create/list, an unforced -m/-c, and a safe -d delete keep their prior outcome.
@@ -1812,8 +1885,9 @@ def _deny_with_recovery(kind, snap):
 
 def git_discard(data):
     """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "ask unless PRISTINE
-    and provably clean" guard (EN-6). For a command that names any recognized lossy git verb (checkout/
-    switch/restore/reset/clean/stash drop-clear/rm/branch delete-force) the outcome is ASK unless the command
+    and provably clean" guard (EN-6). For a command that names any recognized lossy git verb (checkout incl
+    -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
+    delete/move/copy/reset) the outcome is ASK unless the command
     is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
     anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
@@ -1822,7 +1896,7 @@ def git_discard(data):
     pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
     any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
     option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
-    probe, or a softer/index-only discard. No lossy command is ever silently ALLOWED unless it is a pristine
+    probe, or a softer/index-only discard. No recognized lossy command is ever silently ALLOWED unless it is a pristine
     bare git on a provably-clean tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1
     opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
     (a non-git command, or no recognized lossy verb). A wrapper is in scope only while the raw scan still
