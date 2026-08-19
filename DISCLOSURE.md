@@ -68,7 +68,7 @@ Evidence: [Platform test status](https://aiqt.ai/evidence#platform-tests)
 
 ## Licence, warranty, and endorsement
 
-Claim: AIQT is published under CC BY-SA 4.0: you may use, adapt, and share it, and a shared adaptation carries the same licence.
+Claim: AIQT is published under CC BY-SA 4.0: you may use, adapt, and share it, and a shared adaptation must use a qualifying ShareAlike licence (CC BY-SA 4.0 or later, or a BY-SA Compatible License).
 
 Limitation: It is provided as-is, with no warranty of any kind. No patent or trademark rights are licensed. Using AIQT does not mean the project or its maintainer endorses you, and nothing permits you to imply sponsorship or official status. Equally, no framework publisher or platform vendor endorses AIQT.
 

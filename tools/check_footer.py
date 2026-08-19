@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Footer-coverage gate: every site/*.html carries exactly one /disclosure footer link.
+"""Footer-coverage gate: every site/*.html carries exactly one /disclosure link INSIDE its <footer>.
 
 The disclosure matrix is the site's standing "what we claim, and what we do not" page; every public
 page must point to it from its footer so a reader is never more than one click from the limitations.
-This gate asserts that link is present on every page EXCEPT an explicit allowlist, and fails closed if
-a non-exempt page lacks it or the allowlist drifts.
+This gate asserts that link is present, and IN THE FOOTER, on every page EXCEPT an explicit allowlist,
+and fails closed if a non-exempt page lacks it or the allowlist drifts. A /disclosure link elsewhere in
+the page body does NOT satisfy the requirement: only anchors nested inside a <footer> element count, so
+the link cannot drift out of the footer into the body and still pass. <footer> nesting is tracked, so an
+anchor is attributed to the footer only while one is open.
 
 The allowlist is exactly the pre-launch splash (site/index.html), which carries no footer at all. It is
 an EXPLICIT exemption, not a silent skip: if an allowlisted page is missing, or an allowlisted page
@@ -29,20 +32,29 @@ ALLOWLIST = frozenset({"index.html"})
 
 
 class _Anchors(HTMLParser):
-    """Collect the href of every <a> tag."""
+    """Collect the href of every <a> that sits INSIDE a <footer> element. <footer> nesting is tracked
+    so an anchor counts only while a footer is open; a link in the page body is ignored, so it can
+    never satisfy a gate that requires the link in the footer."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.hrefs = []
+        self._footer_depth = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag == "a":
+        if tag == "footer":
+            self._footer_depth += 1
+        elif tag == "a" and self._footer_depth > 0:
             d = dict(attrs)
             if d.get("href") is not None:
                 self.hrefs.append(d["href"].strip())
 
+    def handle_endtag(self, tag):
+        if tag == "footer" and self._footer_depth:
+            self._footer_depth -= 1
+
 
 def disclosure_link_count(text):
-    """Number of <a href="/disclosure"> links in one page's HTML."""
+    """Number of <a href="/disclosure"> links nested inside a <footer> in one page's HTML."""
     parser = _Anchors()
     parser.feed(text)
     return sum(1 for href in parser.hrefs if href == DISCLOSURE_HREF)
@@ -77,6 +89,14 @@ def _self_test():
         ("present page passes", {"about.html": footer}, frozenset(), []),
         ("missing link fails", {"about.html": "<footer></footer>"}, frozenset(),
          ["about.html: missing the /disclosure footer link"]),
+        ("body-only link (not in footer) fails",
+         {"about.html": '<main><a href="/disclosure">Disclosure</a></main><footer></footer>'}, frozenset(),
+         ["about.html: missing the /disclosure footer link"]),
+        ("no-footer page fails",
+         {"about.html": '<main><a href="/disclosure">Disclosure</a></main>'}, frozenset(),
+         ["about.html: missing the /disclosure footer link"]),
+        ("body link plus footer link counts only the footer one (passes)",
+         {"about.html": '<main><a href="/disclosure">body</a></main>' + footer}, frozenset(), []),
         ("duplicate link fails", {"about.html": footer + footer}, frozenset(),
          ["about.html: carries 2 /disclosure links (expected exactly one)"]),
         ("allowlisted page without link passes",

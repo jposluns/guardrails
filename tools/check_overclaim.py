@@ -6,11 +6,25 @@ required to do, never what AIQT itself guarantees the model will do. This gate c
 the guarantee-flavoured class the F-59/F-67 pass softened, so a reintroduced overclaim fails CI rather
 than shipping. It scans the VISIBLE TEXT of each page (tags, <script>, and <style> stripped; entities
 unescaped; whitespace collapsed), so a phrase that wraps across source lines is still one string and an
-overclaim hidden in an attribute is not falsely flagged.
+overclaim hidden in an attribute is not falsely flagged. Text from two SEPARATE block elements is kept
+apart by a space (see BLOCK_TAGS): "<p>guarantees</p><p>secure</p>" reads as two phrases, not the
+phantom token "guaranteessecure", so an overclaim cannot hide by straddling a block boundary; inline
+markup ("<b>guar</b>antee") still joins into one word.
 
-Negation is CLAUSE-aware (see NEGATOR / CLAUSE_BOUNDARY): a negator marks a match honest only when it
-sits in the SAME clause as the match. A fixed char window let a negator in a prior sentence launder a
-fresh overclaim, so a negation-aware pattern now checks only the clause the match is in.
+BEST-EFFORT, NOT COMPLETE. This lint is a compensating control, a hand-maintained DENY-LIST of the
+overclaim phrasings seen so far. It CANNOT catch every paraphrase: a novel wording that dodges the
+vocabulary below will pass. It is not a complete overclaim detector, and it does not replace human
+review of public copy for honesty; it exists to fail CI on a REGRESSION of a known class, not to
+certify that no overclaim exists. Grow the vocabulary when a new class is found; do not read a PASS as
+proof the copy is free of overclaims.
+
+Negation binds to the GUARANTEE PHRASE, not the whole clause (see NEGATOR / CLAUSE_BOUNDARY): a negator
+marks a match honest only when it sits in the same window as the match, where the window begins after
+the last sentence/clause punctuation OR contrastive conjunction before it. A fixed char window let a
+negator in a prior sentence launder a fresh overclaim; a whole-clause window let a contrastive "but"
+launder one too ("does not merely help but guarantees secure output"), because the "not" there negates
+"help", not "guarantees". Cutting the window at "but"/"yet"/... binds the negation to the phrase it
+actually modifies.
 
 The vocabulary, and why each pattern is shaped the way it is (calibrated so the current softened site is
 clean; a pattern that flagged a legitimate line would be too broad):
@@ -27,10 +41,19 @@ clean; a pattern that flagged a legitimate line would be too broad):
   - "so claims match their sources": the CAUSAL framing that promises the outcome. The site's honest
     "claims match their sources" (a definition of Accuracy) and "claims matched to their sources"
     ("guides toward") lack the "so", so only the promise form trips.
-  - unconditional "works [adverb] with/across/... all/every/any": universal-compatibility claims,
-    tolerating an adverb between the verb and the preposition ("works seamlessly with every assistant").
-  - universal-RESULT paraphrase: an efficacy verb immediately governing "all"/"every" ("catches all
-    mistakes"). Adjacency is required, so honest prose ("you stop trusting every suggestion") is clean.
+  - unconditional "works [adverb] with/across/... [adverb] all/every/any": universal-compatibility
+    claims, tolerating an adverb before the preposition ("works seamlessly with every assistant") and
+    after it ("works with absolutely every assistant").
+  - "serves/supports/applies ... with/across/for ... all/every/any": the same universal-compatibility
+    claim via serve/support/apply. Its preposition set omits "on"/"in" and its quantifier set omits
+    "both"/"each", so honest "applies on both sides" and "apply to it. For each source" stay clean.
+  - universal-RESULT paraphrase: an efficacy/coverage verb immediately governing "all"/"every"/"any"
+    ("catches all mistakes", "catches any mistake", "eliminates all errors", "serves every assistant").
+    Adjacency is required, so honest prose ("you stop trusting every suggestion") is clean.
+  - universal-SUBJECT "one standard serves every": a single-standard subject claiming it serves/covers/
+    works all|every|any target. Requires the subject and a coverage verb, so "one standard your whole
+    team can work to" and "one standard, three paths" stay clean.
+  - "foolproof": a bare guarantee-of-perfection adjective.
 
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
 the instruction loading each turn ("AIQT is on for every turn", "applied to every response") is a
@@ -56,8 +79,14 @@ from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not 
 NEGATOR = re.compile(
     r"\b(?:not|no|never|cannot|can't|without|nor|neither|hardly|rarely|"
     r"n't|doesn't|don't|isn't|aren't|won't|wouldn't)\b", re.IGNORECASE)
-# Sentence and clause punctuation ends the clause a match belongs to.
-CLAUSE_BOUNDARY = re.compile(r"[.!?;:,]")
+# Sentence and clause punctuation ends the clause a match belongs to. A CONTRASTIVE conjunction
+# (but/yet/however/...) also ends the negation window: it flips polarity, so a negator before it does
+# NOT scope over a guarantee after it. Binding negation to the guarantee-phrase segment this way makes
+# "does not merely help but guarantees secure output" flag, where a whole-clause negation window let
+# the earlier "not" (which negates "help", not "guarantees") launder the overclaim.
+CLAUSE_BOUNDARY = re.compile(
+    r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
+    re.IGNORECASE)
 
 # (name, pattern, negation_aware)
 PATTERNS = [
@@ -79,23 +108,57 @@ PATTERNS = [
     ("so claims match their sources", re.compile(
         r"\bso\s+(?:that\s+)?claims?\s+match(?:es|ed)?\b", re.IGNORECASE), False),
     # universal-COMPATIBILITY: "works with/across/... all|every|any". An adverb may sit between the verb
-    # and the preposition ("works seamlessly with every assistant"), so allow a short gap.
+    # and the preposition ("works seamlessly with every assistant") AND after the preposition ("works
+    # with absolutely every assistant"), so allow a short gap on both sides.
     ("unconditional works with/across", re.compile(
-        r"\bworks?\b[^.]{0,30}?\b(?:with|across|on|for|in)\s+"
+        r"\bworks?\b[^.]{0,30}?\b(?:with|across|on|for|in)\s+(?:\w+\s+){0,2}?"
         r"(?:all|every|any|each|both|everything|the\s+full\s+range)\b", re.IGNORECASE), False),
-    # universal-RESULT paraphrase: an efficacy verb immediately governing "all"/"every"
-    # ("catches all mistakes", "prevents every error"). Adjacency keeps honest prose clear
-    # (e.g. "you stop trusting every suggestion" has a word between the verb and "every").
-    ("universal result (verb + all/every)", re.compile(
+    # universal-COMPATIBILITY via serve/support/apply: "serves/supports/applies ... with|across|for ...
+    # all|every|any" (an adverb may follow the preposition: "applies across virtually all"). The
+    # preposition set is narrower than the works pattern (no "on"/"in") and the quantifier set excludes
+    # "both"/"each", so an honest "applies on both sides" and "apply to it. For each source" stay clean.
+    ("serves/supports/applies across all", re.compile(
+        r"\b(?:serves?|supports?|appl(?:y|ies))\b[^.]{0,30}?\b(?:with|across|for)\s+"
+        r"(?:\w+\s+){0,2}?(?:all|every|any)\b", re.IGNORECASE), False),
+    # universal-RESULT paraphrase: an efficacy/coverage verb immediately governing "all"/"every"/"any"
+    # ("catches all mistakes", "prevents every error", "catches any mistake", "eliminates all errors",
+    # "serves every assistant"). Adjacency keeps honest prose clear (e.g. "you stop trusting every
+    # suggestion" has a word between the verb and "every").
+    ("universal result (verb + all/every/any)", re.compile(
         r"\b(?:catch(?:es)?|detect(?:s)?|prevent(?:s)?|block(?:s)?|find(?:s)?|fix(?:es)?|"
-        r"stop(?:s)?|secure(?:s)?)\s+(?:all|every)\b", re.IGNORECASE), False),
+        r"stop(?:s)?|secure(?:s)?|eliminat(?:e|es)|serves?|supports?|covers?)\s+"
+        r"(?:all|every|any)\b", re.IGNORECASE), False),
+    # universal-SUBJECT: a single-standard subject claiming it serves/covers/works all|every|any target
+    # ("one standard serves every assistant"). Requires the "one standard/rule/instruction" subject and
+    # an in-range coverage verb governing the quantifier, so honest prose that merely contains "one
+    # standard" ("one standard your whole team can work to", "one standard, three paths") stays clean.
+    ("universal-subject (one standard serves every)", re.compile(
+        r"\bone\s+(?:standard|rule|instruction)\b[^.]{0,40}?"
+        r"\b(?:serves?|covers?|fits?|works?|applies|supports?)\s+(?:all|every|any|each)\b",
+        re.IGNORECASE), False),
+    # "foolproof": a bare guarantee-of-perfection adjective, an overclaim wherever it appears.
+    ("foolproof", re.compile(r"\bfool-?proof\b", re.IGNORECASE), False),
 ]
 
 SKIP_TEXT_TAGS = {"script", "style"}
 
+# Block-level (and line-breaking) elements separate their text content: "<p>guarantees</p><p>secure</p>"
+# is two visible phrases, not the word "guaranteessecure". Their boundaries emit a space so adjacent text
+# nodes never fuse into a phantom token an overclaim could hide across (a real evasion the earlier
+# "".join let through). Inline elements (b, em, a, span, code, ...) deliberately do NOT separate, so a
+# phrase marked up mid-word ("<b>guar</b>antee") stays one token.
+BLOCK_TAGS = {
+    "address", "article", "aside", "blockquote", "br", "button", "caption", "dd", "div", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+    "hr", "label", "legend", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td",
+    "tfoot", "th", "thead", "tr", "ul",
+}
+
 
 class VisibleText(HTMLParser):
-    """Accumulate visible text, dropping <script>/<style> bodies. Entities are converted (default)."""
+    """Accumulate visible text, dropping <script>/<style> bodies. Entities are converted (default).
+    A block-element boundary emits a space so text from two separate blocks cannot fuse into one
+    token; inline elements do not separate, so mid-word markup stays a single word."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.chunks = []
@@ -104,10 +167,19 @@ class VisibleText(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in SKIP_TEXT_TAGS:
             self._skip += 1
+        elif tag in BLOCK_TAGS:
+            self.chunks.append(" ")
+
+    def handle_startendtag(self, tag, attrs):
+        # a self-closing void block element (e.g. <br/>, <hr/>) still separates
+        if tag in BLOCK_TAGS:
+            self.chunks.append(" ")
 
     def handle_endtag(self, tag):
         if tag in SKIP_TEXT_TAGS and self._skip:
             self._skip -= 1
+        elif tag in BLOCK_TAGS:
+            self.chunks.append(" ")
 
     def handle_data(self, data):
         if self._skip == 0:
@@ -124,9 +196,10 @@ def _snippet(text, start, end):
 
 
 def _clause_window(text, start):
-    """The text from the start of the clause containing `start` up to `start`. The clause begins after
-    the last sentence/clause punctuation before the match, so a negator only counts when it is in the
-    same clause as the match, never one that leaked in from a prior sentence."""
+    """The text from the start of the clause containing `start` up to `start`. The window begins after
+    the last CLAUSE_BOUNDARY before the match, which is sentence/clause punctuation OR a contrastive
+    conjunction, so a negator only counts when it binds to the guarantee phrase: never one that leaked
+    in from a prior sentence, and never one that a 'but'/'yet' has flipped away from the match."""
     boundary = 0
     for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
         boundary = m.end()
@@ -152,6 +225,14 @@ POSITIVE = [
     "AIQT is guaranteeing every result you get.",                     # gerund
     "It works seamlessly with every assistant.",                      # adverb between verb and preposition
     "AIQT catches all mistakes before they ship.",                    # universal result
+    "AIQT does not merely help but guarantees secure output.",        # negation bound to the guarantee phrase: "but" flips the earlier "not"
+    "One standard serves every assistant.",                           # universal-subject + serves
+    "AIQT supports every assistant you use.",                         # supports + universal result
+    "The same rules apply across all assistants.",                    # applies-across
+    "It works with absolutely every assistant.",                      # adverb AFTER the preposition
+    "AIQT catches any mistake you make.",                             # catches-any
+    "It eliminates all errors in your code.",                         # eliminates-all
+    "The AIQT skill is foolproof.",                                   # foolproof
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",

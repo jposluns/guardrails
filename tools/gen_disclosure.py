@@ -11,9 +11,11 @@ limitation and its pointer. The load step fails closed (exit 2) before anything 
   2. a row missing a non-empty id/topic/claim/limitation or a non-empty evidence array;
   3. an href that is not a well-formed site-internal path or external HTTPS URL: the href is PARSED,
      not prefix-matched, so a hostless "https://" and a scheme-relative "//host/x" both fail closed
-     (a prefix match let them render). An internal link is one leading slash with no scheme and no
-     netloc; an external link is https with a non-empty host. check_site.py then validates every
-     internal target and anchor;
+     (a prefix match let them render). Backslashes and control/whitespace characters are rejected up
+     front, so a browser-normalized "/\\evil" or "/\\/evil" open redirect cannot slip past the
+     leading-slash test; any port on an external URL must be numeric. An internal link is one leading
+     slash with no scheme and no netloc; an external link is https with a non-empty host. check_site.py
+     then validates every internal target and anchor;
   4. a duplicate id, or an id that is not [a-z0-9-]+ (it becomes the HTML id disclosure-<id>);
   5. an en/em dash in any emitted text (check_no_dashes.py does not scan root toml, so this is the dash
      gate for disclosure.toml, exactly as gen_mappings.py:_no_dash is for the manifests);
@@ -79,13 +81,31 @@ def _check_href(href, where):
     """Fail closed unless href is a well-formed site-internal path or external HTTPS URL. Parse it
     (urlsplit), never prefix-match: a prefix check on 'https://' or '/' admits a hostless 'https://'
     and a scheme-relative '//host/x'. An internal link is a single leading slash with no scheme and
-    no netloc; an external link is https with a non-empty host. Everything else raises ValueError."""
+    no netloc; an external link is https with a non-empty host and, if a port is present, a numeric
+    one. Everything else raises ValueError.
+
+    Backslashes and control/whitespace characters are rejected UP FRONT, before the path/netloc
+    tests: a browser normalizes a backslash to '/', so a path like '/\\evil' or '/\\/evil' is a
+    scheme-relative '//evil' open redirect in disguise that the leading-slash test alone would pass;
+    a control or whitespace character has no place in a static href and can hide such a payload."""
+    if "\\" in href:
+        raise ValueError(
+            "{}: href {!r} contains a backslash (a disguised scheme-relative redirect); "
+            "use '/' in an internal path".format(where, href))
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f or ch.isspace() for ch in href):
+        raise ValueError(
+            "{}: href {!r} contains a control or whitespace character".format(where, href))
     parts = urlsplit(href)
     if parts.scheme:
         if parts.scheme.lower() != "https" or not parts.hostname:
             raise ValueError(
                 "{}: href {!r} must be an https URL with a host, or a site-internal '/path'".format(
                     where, href))
+        try:
+            parts.port  # accessing a non-numeric port raises ValueError; reject it fail-closed
+        except ValueError:
+            raise ValueError(
+                "{}: href {!r} has a non-numeric port".format(where, href)) from None
     elif parts.netloc:
         # a scheme-relative "//host/x" has no scheme but a netloc: not an internal path, fail closed
         raise ValueError("{}: href {!r} is scheme-relative (//host); use https:// or '/path'".format(
@@ -214,6 +234,10 @@ def _self_test():
         ("hostless https href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "https://"}]}]}),
         ("scheme-relative href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "//evil.example/x"}]}]}),
         ("scheme-relative host-only href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "//cdn.example"}]}]}),
+        ("backslash-redirect href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "/\\evil.example"}]}]}),
+        ("backslash-slash-redirect href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "/\\/evil.example"}]}]}),
+        ("control-char href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "/ok\x01path"}]}]}),
+        ("non-numeric port href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "https://host:notaport/x"}]}]}),
         ("hostless relative href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "evidence#x"}]}]}),
         ("bad id chars", {**good, "row": [{**good["row"][0], "id": "Bad Id"}]}),
         ("duplicate id", {**good, "row": [good["row"][0], good["row"][0]]}),
