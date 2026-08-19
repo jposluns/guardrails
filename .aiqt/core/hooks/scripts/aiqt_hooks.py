@@ -32,7 +32,9 @@ to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), D
 (permissionDecision "ask", which prompts the human). UNLIKE the fail-closed controls above, it fails OPEN
 (ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
 cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
-discard it can reason about, and it NEVER silently allows a RECOGNIZED discard; an UNPARSEABLE command
+discard it can reason about, and it NEVER silently allows a RECOGNIZED discard (a recognized verb in a
+genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - destroys nothing, so it is not a
+discard and may ALLOW even on a dirty tree, as detailed below); an UNPARSEABLE command
 (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and ASKS when one is
 present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) the outcome is ASK unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND the
@@ -52,9 +54,10 @@ status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a rep
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
 entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
-No recognized lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean
-tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS,
-at the cost of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
+No recognized lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' whose FORM is
+genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on a dirty tree), or on a
+provably-clean tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst
+case it ASKS, at the cost of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
 function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
 the verb (a wrapper whose git command word or verb is SPLIT so neither the token scan nor the raw scan sees
 a contiguous git+verb keyword, e.g. env git re'set' --hard, eval git re'set', or command g'it' reset --hard
@@ -1132,7 +1135,11 @@ def _checkout_role(args):
     when combined with other flags (F-81), before the unforced branch-create allow. A plain branch-create
     ('-b'/'--orphan') only allows when force is ABSENT, because a FORCED branch-create can discard, so
     'checkout -f -b <name>' must fall through to a lossy classification, not the early
-    allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
+    allow. A '-m'/'--merge' or '--conflict[=<style>]' checkout (matched like the switch classifier,
+    unambiguous-prefix aware) does a THREE-WAY merge that can overwrite local changes, so even combined
+    with a branch-create it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK on a
+    dirty one), decided BEFORE the plain branch-create allow (F-88); a plain '-b'/'--orphan' create with NO
+    merge option stays allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
     separated '-b foo') and is NOT char-scanned as force flags, so '-bfoo'/'-bBranch' ALLOW and are never
     mis-read as carrying -f/-B (F-85; see _checkout_switch_parse_options). '-p'/'--patch' (prefix-matched)
     interactively discards worktree hunks -> scoped. A forced
@@ -1152,6 +1159,10 @@ def _checkout_role(args):
     if "B" in short_flags:  # -B force-creates/RESETS a branch ref, orphaning committed commits (F-81)
         return ("ask", "git checkout -B (a force branch-create/reset that overwrites an existing branch "
                        "ref and may orphan its commits)")
+    if not force and ("m" in short_flags or _has_long_prefix(pre, "merge")
+                      or _has_long_prefix(pre, "conflict")):  # F-88: a three-way merge, even with a -b
+        return ("scoped", "git checkout --merge/--conflict (a three-way merge that can overwrite local "
+                          "changes)")  # decided BEFORE the branch-create allow, mirroring the switch classifier
     branch_create = ("b" in short_flags or _has_long_prefix(pre, "orphan"))
     if branch_create and not force:
         return ("allow", None)  # create/switch to a new branch; git carries changes and aborts on conflict

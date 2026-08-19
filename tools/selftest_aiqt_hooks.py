@@ -225,6 +225,26 @@ def main():
         expect("(f85-sw3) switch -C foo separated force-create asks", "git switch -C foo", "ask", cwd=rp)
         expect("(f85-sw4) switch --force-create foo asks", "git switch --force-create foo", "ask", cwd=rp)
 
+        # === EN-6 round-24 Fix F-88: checkout -m/--merge/--conflict is detected BEFORE the branch-create ==
+        # allow, mirroring the switch classifier. A checkout --merge does a three-way merge that can overwrite
+        # (and lose) local changes, so -m/--merge/--conflict[=<style>] is worktree-scoped EVEN when combined
+        # with a -b create -> ASK on a dirty tree; a plain -b create with NO merge option stays ALLOW. '-m'
+        # takes no argument, so '-mb new' == '-m -b new' (the parser treats -m as a flag, -b's arg as the name).
+        expect("(f88-co1) checkout -m -b new merge-switch+create asks", "git checkout -m -b new other",
+               "ask", cwd=rp)
+        expect("(f88-co2) checkout --merge -b new merge-switch+create asks",
+               "git checkout --merge -b new other", "ask", cwd=rp)
+        expect("(f88-co3) checkout --conflict=merge -b new merge-switch+create asks",
+               "git checkout --conflict=merge -b new other", "ask", cwd=rp)
+        expect("(f88-co4) checkout -m other merge-switch (no create) asks", "git checkout -m other", "ask",
+               cwd=rp)
+        expect("(f88-co5) checkout -mb new (== -m -b new) merge-switch+create asks",
+               "git checkout -mb new other", "ask", cwd=rp)
+        expect("(f88-co6) checkout -b new plain create with no merge option still allows",
+               "git checkout -b new", "allow", cwd=rp)
+        expect("(f88-co7) checkout -bnew attached-name plain create with no merge option still allows",
+               "git checkout -bnew", "allow", cwd=rp)
+
         # === restore =========================================================================
         expect("(re-a) restore dirty asks", "git restore file.txt", "ask", cwd=rp)
         # Blocker 6: restore --staged is no longer an unconditional allow; on a not-provably-clean tree it
@@ -669,6 +689,14 @@ def main():
             (("checkout", ["-f"]), "clobber"),            # force, no operand -> whole-tree
             (("checkout", ["--for"]), "clobber"),         # blocker 5: abbreviated --force, no operand
             (("checkout", ["--patc"]), "scoped"),         # blocker 5: abbreviated --patch
+            (("checkout", ["-m", "-b", "new"]), "scoped"),  # F-88: merge-switch before the create allow
+            (("checkout", ["--merge", "-b", "new"]), "scoped"),  # F-88: long spelling, with a -b create
+            (("checkout", ["--conflict=diff3", "-b", "new"]), "scoped"),  # F-88: conflict-style merge + create
+            (("checkout", ["--mer", "-b", "new"]), "scoped"),  # F-88: abbreviated --merge by prefix + create
+            (("checkout", ["-m", "other"]), "scoped"),      # F-88: '-m' is --merge, no create
+            (("checkout", ["-mb", "new"]), "scoped"),       # F-88: '-mb new' == '-m -b new' (m is a flag)
+            (("checkout", ["-f", "-m"]), "clobber"),        # F-88: force keeps its outcome (not downgraded)
+            (("checkout", ["-f", "-m", "-b", "new"]), "scoped"),  # F-88: forced merge+create stays scoped
             (("switch", ["--force", "other"]), "clobber"),
             (("switch", ["--dis", "other"]), "clobber"),  # blocker 5: abbreviated --discard-changes
             (("switch", ["--merge", "other"]), "scoped"),  # fix 3: a three-way merge can overwrite worktree
