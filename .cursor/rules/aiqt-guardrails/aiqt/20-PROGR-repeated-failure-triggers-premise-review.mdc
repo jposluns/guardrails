@@ -2,7 +2,7 @@
 alwaysApply: true
 ---
 
-# Repeated failure of an approach invalidates its premise
+# Repeated failure triggers premise review
 
 When successive attempts along the same line fail, the repetition is treated as evidence against the
 working diagnosis, not as a prompt for another variant. The assistant stops, re-derives the problem from

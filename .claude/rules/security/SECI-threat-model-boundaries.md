@@ -19,5 +19,4 @@ map-csa-aicm-tight: [TVM-04]
 
 Before a new external interface, privileged operation, untrusted data flow, or trust boundary is
 implemented, its credible abuse paths are identified and their mitigations carried into the change's
-acceptance criteria. Missing controls are discovered at design time, not patched after the threat is
-recognized in production.
+acceptance criteria. This makes identified gaps reviewable before implementation rather than waiting for production evidence.

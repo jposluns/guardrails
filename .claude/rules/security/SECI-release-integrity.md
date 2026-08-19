@@ -14,6 +14,6 @@ map-csa-aicm-broad: [MDS-09]
 
 # Publish artefacts with verifiable integrity
 
-A released or published artefact ships with a signature or digest that consumers can verify, delivered
-through a channel separate from the artefact itself. What an adopter installs can then be confirmed to be
-what the maintainer released.
+A released or published artefact ships with a signature verifiable against an authenticated maintainer key,
+or a digest published through an authenticated channel independent of artefact delivery. An adopter can then
+verify that what they installed matches that authenticated reference.

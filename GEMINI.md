@@ -315,7 +315,7 @@ time or good behaviour has passed.
 Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked
 (BLOCKED)? Record the classification before acting on it.
 
-## Repeated failure of an approach invalidates its premise
+## Repeated failure triggers premise review
 
 When successive attempts along the same line fail, the repetition is treated as evidence against the
 working diagnosis, not as a prompt for another variant. The assistant stops, re-derives the problem from
@@ -492,8 +492,7 @@ so a planted document or a corrupted memory cannot quietly steer behaviour.
 ## Protect audit records from the actors they record
 
 Security and change audit records are append-only or integrity-protected and held under authority separate
-from the actor or agent whose actions they record. The recorded actor cannot silently rewrite or erase its
-own trail, so the evidence survives an erroneous or compromised run.
+from the actor or agent whose actions they record. This prevents or makes detectable attempts by the recorded actor to rewrite or erase its own trail.
 
 ## Reject known-vulnerable dependency versions
 
@@ -504,9 +503,9 @@ to an artefact that is unsafe to ship.
 
 ## Publish artefacts with verifiable integrity
 
-A released or published artefact ships with a signature or digest that consumers can verify, delivered
-through a channel separate from the artefact itself. What an adopter installs can then be confirmed to be
-what the maintainer released.
+A released or published artefact ships with a signature verifiable against an authenticated maintainer key,
+or a digest published through an authenticated channel independent of artefact delivery. An adopter can then
+verify that what they installed matches that authenticated reference.
 
 ## Deserialize untrusted data only as data
 
@@ -544,8 +543,7 @@ target outside the allowed set.
 
 Before a new external interface, privileged operation, untrusted data flow, or trust boundary is
 implemented, its credible abuse paths are identified and their mitigations carried into the change's
-acceptance criteria. Missing controls are discovered at design time, not patched after the threat is
-recognized in production.
+acceptance criteria. This makes identified gaps reviewable before implementation rather than waiting for production evidence.
 
 ## Validate tool arguments before use
 
@@ -599,6 +597,7 @@ data already in hand is not thereby available for training, analytics, enrichmen
 
 ## Fixtures and examples use synthetic data
 
-Test fixtures, seed data, examples, and documentation use synthetic or irreversibly anonymized data, never
-real personal data or production records copied over for convenience. What enters a durable project
-artefact is data that can leak without harm, because version control forgets nothing.
+Test fixtures, seed data, examples, and documentation use purpose-built synthetic data or anonymization
+validated against the applicable re-identification risk, never real personal data or production records
+copied over for convenience. Version control can retain removed content in history, so later cleanup is not
+the primary safeguard.

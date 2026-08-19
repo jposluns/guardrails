@@ -85,7 +85,7 @@ and both are drift-gated in CI.
 
 **Progress**
 - [Decision classification before enacting](.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md)
-- [Repeated failure of an approach invalidates its premise](.claude/rules/aiqt/20-PROGR-repeated-failure-invalidates-premise.md)
+- [Repeated failure triggers premise review](.claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md)
 
 **Speed**
 - [Background work during CI waits](.claude/rules/aiqt/30-SPEED-background-work-during-ci-waits.md)

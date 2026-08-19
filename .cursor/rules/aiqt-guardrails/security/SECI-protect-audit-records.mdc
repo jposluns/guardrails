@@ -5,5 +5,4 @@ alwaysApply: true
 # Protect audit records from the actors they record
 
 Security and change audit records are append-only or integrity-protected and held under authority separate
-from the actor or agent whose actions they record. The recorded actor cannot silently rewrite or erase its
-own trail, so the evidence survives an erroneous or compromised run.
+from the actor or agent whose actions they record. This prevents or makes detectable attempts by the recorded actor to rewrite or erase its own trail.
