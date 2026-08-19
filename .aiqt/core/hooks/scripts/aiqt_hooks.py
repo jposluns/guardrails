@@ -10,6 +10,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
+  git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -19,11 +20,68 @@ the user's own permission flow is never bypassed, and a deny decision blocks the
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
-Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read the input it is meant
+Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
+deliberate boundary posture is stated next). A fail-closed control that cannot read the input it is meant
 to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
 string, or an unreadable required field all deny. A detected violation denies the same way. A clean
 pass emits NO decision and exits 0 silently.
+
+git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
+to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK
+(permissionDecision "ask", which prompts the human). UNLIKE the fail-closed controls above, it fails OPEN
+(ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
+cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
+discard it can reason about, and it never silently allows a recognized WORKING-TREE-CONTENT discard (a
+recognized verb in a genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - preserves the
+index and worktree content, though reset --soft still MOVES HEAD, a reflog-recoverable ref move, so it
+discards no working-tree content and may ALLOW even on a dirty tree, as detailed below). That no-silent-allow
+guarantee is bounded to WORKING-TREE CONTENT and is best-effort, not categorical: some ref-level moves (a
+merged-branch delete, reset --soft moving HEAD) are reflog-recoverable, and the obfuscation/config residuals
+disclosed below (a fragmented git command word or verb, a git alias, ambient config) can hide a discard the
+lexical scan never sees. An UNPARSEABLE command
+(unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and ASKS when one is
+present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
+rm/branch) the outcome is ASK unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND the
+tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive). PRISTINE
+SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
+assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
+metacharacter anywhere EVEN INSIDE QUOTES (none of ; | & < > ( ) { } $ backtick backslash ! newline, which
+also rules out &&/||/|&, every redirection form, and every command/process substitution), no shell reserved
+word, and a command word that is LITERALLY 'git' (not a path, not a wrapper such as sudo/nice/timeout/nohup/
+env/command/exec/builtin/xargs/time/!/sh -c/bash -c). ANY shell metacharacter, wrapper, redirect, reserved
+word, or second command makes the command not-pristine - a PURELY LEXICAL determination - and it ASKS
+WITHOUT ever consulting the probe (a safe over-ask). An option the form-classifier cannot resolve is a
+SEPARATE mechanism and does NOT bear on pristineness: a pristine command carrying an unresolved option still
+reaches the probe, where its role routes to a scoped ASK, so it is not silently allowed either. A wrapper is
+caught only while the raw scan still sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT
+categorical (a wrapper that ALSO fragments the verb is a disclosed residual, below). Only a
+metacharacter-free 'git <verb> <plain args>'
+reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
+status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
+status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
+entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
+checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
+No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
+'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
+on a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
+GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost of more asks. This guarantee is bounded to
+working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
+recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
+function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
+the verb (a wrapper whose git command word or verb is SPLIT so neither the token scan nor the raw scan sees
+a contiguous git+verb keyword, e.g. env git re'set' --hard, eval git re'set', or command g'it' reset --hard
+/ env /usr/bin/g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset', reads as 'no
+recognized lossy verb' and is silently ALLOWED - a best-effort residual, not chased); a real discard whose
+VERB is outside the recognized set AND the raw scan does NOT flag at all (a 'git worktree remove -f' of a
+dirty linked worktree discards that worktree's uncommitted work, yet 'worktree' matches no lossy keyword, so
+it is allowed at the true boundary - disclosed, not closed this round). A command the raw scan DOES flag as
+in-scope whose resolved subcommand is nonetheless outside the recognized set ('git checkout-index -a -f',
+'git read-tree -u --reset HEAD', flagged by their 'checkout'/'reset' substring) is NO LONGER silently
+allowed: it ASKS (F-97), since a flagged sub the classifier cannot resolve to a known verb cannot be proven
+non-destructive. A discard performed outside the Bash tool; or
+persistent shell/config state; the deferred recovery/snapshot layer is the backstop. The one probe kept is
+read-only and offline; it never mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
@@ -40,10 +98,15 @@ on exit 0. No Stop invocation can reach exit 2 for any input; only a PreToolUse 
 exit 2, and only a genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on
 a bad invocation.
 """
+import datetime
 import json
+import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
@@ -63,6 +126,17 @@ def _deny(reason, banner):
     """A PreToolUse block: permissionDecision deny on exit 0, honoured by the platform."""
     return (0, {"hookSpecificOutput": {"hookEventName": PRETOOL,
                                        "permissionDecision": "deny",
+                                       "permissionDecisionReason": reason},
+                "systemMessage": banner},
+            None)
+
+
+def _ask(reason, banner):
+    """A PreToolUse ASK: permissionDecision ask on exit 0, which prompts the human to confirm rather
+    than blocking outright. The recoverable middle of the git_discard three-outcome posture (allow /
+    ask / deny): used when a recognized lossy verb cannot be PROVEN safe but is not confirmed lossy."""
+    return (0, {"hookSpecificOutput": {"hookEventName": PRETOOL,
+                                       "permissionDecision": "ask",
                                        "permissionDecisionReason": reason},
                 "systemMessage": banner},
             None)
@@ -120,6 +194,11 @@ def _segments(command):
     command is split into segments on the shell operators ; | || && & ( ) and on newlines. '( git diff )'
     yields a segment [git, diff] (the parens are separators), closing the subshell/grouping bypass.
     Raises ValueError on a shell parse error so callers can fall back conservatively."""
+    # Splice bash line-continuations (a backslash immediately before a newline joins the continued line)
+    # BEFORE splitting on newlines, so a continued command lexes as one line instead of raising. Residual:
+    # a backslash-newline inside single quotes is a literal in bash and is over-spliced by this naive
+    # replace (an accepted, astronomically-rare edge).
+    command = command.replace("\\\n", "")
     result = []
     for line in command.split("\n"):
         current = []
@@ -712,12 +791,1489 @@ def absolute_paths(data):
     return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
 
 
+# --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
+# ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" guard (EN-6, EN-6 hardening pass over the
+# GD-41 coarse cut). For a command that names any recognized lossy git verb (checkout incl -B force-create,
+# switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force delete/move/copy/reset)
+# the outcome is ASK unless the command is a PRISTINE SINGLE
+# BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING opt-out
+# is set). Three outcomes:
+#   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
+#                           unparseable command with no lossy verb keyword); OR a PRISTINE SINGLE BARE
+#                           'git <verb>' whose FORM is genuinely non-destructive (a bare no-op, reset
+#                           --soft, an unforced branch-create, clean -n, stash push, branch -d); OR a
+#                           PRISTINE SINGLE BARE lossy 'git <verb>' on a PROVABLY CLEAN tree (the config-
+#                           forced porcelain probe reports no tracked change AND no untracked entry), so
+#                           there is nothing to discard; OR the LEADING opt-out on that same pristine form.
+#   DENY   permissionDecision deny - a PRISTINE SINGLE BARE WHOLE-TREE-clobbering verb (reset --hard,
+#                           checkout -f with no pathspec, switch --force/--discard-changes) on a tree the
+#                           probe confirms is dirty: the loss is certain.
+#   ASK    permissionDecision ask  - EVERYTHING else in scope. This is deliberately the common outcome:
+#                           ANY command that is not a pristine single bare git invocation - ANY shell
+#                           metacharacter anywhere (even quoted), ANY wrapper/redirect/reserved-word/
+#                           compound, a first command word that is not literally 'git', or an option the
+#                           form-classifier cannot resolve - ASKS without ever consulting the probe; and a
+#                           pristine lossy form on a not-provably-clean tree (tracked OR untracked change),
+#                           a worktree the guard cannot resolve to the session cwd, a status probe that did
+#                           not complete, or a softer/index-only discard (clean of untracked files, stash
+#                           drop/clear, branch -D, restore --staged, mixed/path reset, rm --cached) also ASKS.
+# The gate is PURELY LEXICAL and never parses the bash grammar: the presence of any shell metacharacter in a
+# lossy-verb command is treated as a reason to ASK (a safe over-ask), so ONLY a metacharacter-free
+# 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
+# coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
+# and ANY wrapper in front of git - sudo/stdbuf/doas/setsid/eval/sh -c/...: the raw 'git'+work-losing-verb
+# scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper is caught): ASK.
+# That "cannot slip" is NOT categorical: a wrapper that ALSO fragments the command word 'git' or the verb so
+# neither the token scan nor the raw scan sees a contiguous git+verb keyword reads as "no recognized lossy
+# verb" and is silently ALLOWED (a DISCLOSED best-effort residual, see the module docstring; GD-34
+# do-not-chase). The raw scan also OVER-ASKS in the SAFE direction: a command that merely CONTAINS a git
+# token and a lossy verb as TEXT while running no discard ('echo git branch', 'git log | grep branch') still
+# ASKS; narrowing that is the whack-a-mole GD-34 rejected, so the over-ask is disclosed, not chased.
+# The status probe (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
+# read-only and offline and FORCES untracked reporting so a repo-local status.showUntrackedFiles=no config
+# cannot hide an untracked file. The classifier never mutates working state; BENEATH it, the EN-6 recovery
+# layer (see the block comment above _SNAPSHOTTABLE_VERBS) is SIDE-EFFECTING - it writes an inert
+# refs/aiqt-recovery/* snapshot ref and an external ledger for a not-provably-clean discard - but writes only
+# git objects and one private ref, never the real index, worktree, HEAD, or a branch. HONEST RESIDUAL (not
+# caught by a lexical hook): a git alias or shell function that renames git, a discard performed outside the
+# Bash tool, or persistent shell/config state set in a prior turn; the recovery/snapshot layer backstops a
+# discard it CAN see, but cannot snapshot content the probe itself cannot see (assume-unchanged/skip-worktree
+# marks or submodule.<name>.ignore hide work from the probe) nor ignored files (git add --all excludes them).
+# An explicit GUARDRAIL_ALLOW_DISCARD truthy assignment LEADING a pristine bare git command opts out to ALLOW.
+# The value capture is `(.*)` (matches an EMPTY value, `GUARDRAIL_ALLOW_DISCARD=`), consulted with fullmatch, so
+# an exact leading assignment with an empty value updates the last-wins value to '' (bash: effective empty =
+# falsy), and `GUARDRAIL_ALLOW_DISCARD=1 GUARDRAIL_ALLOW_DISCARD= git ...` does NOT opt out (the empty final
+# assignment wins). A `(.+)` capture would ignore the empty final assignment and wrongly honour the earlier 1.
+_DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
+_DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
+# Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote). We cannot
+# segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
+# always-lossy verbs, or 'branch' in ANY form. On the raw path we do NOT parse branch flags: an unparseable
+# 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' cannot be told from a create or a list, so ANY
+# raw 'git' + 'branch' is treated as lossy and ASKS regardless of a delete flag. This over-asks a benign
+# unparseable 'git branch --list' (rare, safe) and ends the raw-branch silent-allow gap.
+# A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
+# commit_identity fall back to a conservative raw scan on a parse failure. The opt-out is NOT consulted on
+# this path: the guard cannot parse the command, so it cannot trust an opt-out-looking prefix inside it; an
+# unparseable in-scope command ALWAYS ASKS. The opt-out is honoured ONLY on a PARSEABLE pristine bare command.
+_RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
+_RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
+_RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
+# Shell wrappers/prefixes that stand IN FRONT of the git command so 'git <lossy>' is not the invocation
+# actually being classified. The EN-6 ultra-conservative pass widens the GD-41 set (command/exec/builtin/
+# env/xargs/time/!) with the privilege/scheduling/interpreter prefixes sudo/nice/timeout/nohup/sh/bash: when
+# one of these is the command word and a lossy git verb is present, the guard cannot classify with certainty,
+# so it ASKS. (A pristine bare git never has a wrapper as its command word, so this only widens the ask set.)
+_WRAPPER_WORDS = frozenset((
+    "command", "exec", "builtin", "env", "xargs", "time", "!",
+    "sudo", "nice", "timeout", "nohup", "sh", "bash"))
+# The ULTRA-CONSERVATIVE pristine gate. A lossy-verb command is a PRISTINE SINGLE BARE 'git <verb>'
+# invocation only when the RAW command string carries NONE of this shell structure ANYWHERE, even inside
+# quotes (a deliberate over-ask): a metacharacter (; | & < > ( ) { } $ backtick backslash ! newline, which
+# also covers &&/||/|&, every redirection form, and command/process substitution) or a shell reserved word.
+# The gate NEVER parses the grammar; this lexical scan stands in for it, so only a metacharacter-free
+# 'git <verb> <plain args>' ever reaches the clean probe. Everything else in scope ASKS.
+_SHELL_META_RE = re.compile(r"[;|&<>(){}$`\\!*?\[\n\r]")  # includes glob chars *?[ (bash filename expansion)
+_SHELL_RESERVED_WORDS = frozenset((
+    "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
+    "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
+# The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
+# The opt-out guidance is PATH-AWARE and appended by the caller. The opt-out is honoured on the command AS
+# ISSUED whenever a leading GUARDRAIL_ALLOW_DISCARD=1 prefix short-circuits to ALLOW: on a pristine bare
+# command the leading prefix opts THIS command out (_OPTOUT_PRISTINE), and because that short-circuit fires
+# BEFORE the repository-view-redirect gate, a pristine repository-view-redirected form (a 'git -C <dir>
+# <verb>' or an ambient-GIT_* form that ASKS at that gate) is ALSO opted out by prefixing the command as
+# issued, keeping its -C (_OPTOUT_PRISTINE too). Only on a raw/unparseable or non-pristine command, where no
+# pristine bare form is present to carry the prefix, is the opt-out NOT honoured on the command as issued, so
+# the actor is told to RE-ISSUE the discard as a parseable pristine bare form carrying the prefix
+# (_OPTOUT_REISSUE).
+_DISCARD_ALTS = (
+    "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
+    "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
+    "--cached'; change branch with 'git switch' (it carries non-conflicting changes and aborts rather than "
+    "overwrite them).")
+# Opt-out guidance for a PRISTINE bare form, where the leading prefix opts THIS command out.
+_OPTOUT_PRISTINE = (
+    " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
+    "guard.")
+# Opt-out guidance for a raw/unparseable or non-pristine form, where the opt-out is NOT honoured on the
+# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix. A
+# repository-view-redirected form does NOT use this: it is pristine-lexically, so its leading prefix opts it
+# out on the command as issued (_OPTOUT_PRISTINE, keeping its -C), short-circuiting before the redirect gate.
+_OPTOUT_REISSUE = (
+    " For a known-safe discard, re-issue it as a parseable pristine bare 'git <verb>' command carrying a "
+    "leading GUARDRAIL_ALLOW_DISCARD=1 prefix; the opt-out is honoured only on that pristine bare form, not "
+    "on the command as issued here.")
+
+
+def _segment_has_optout(tokens):
+    """True when THIS segment carries a truthy GUARDRAIL_ALLOW_DISCARD as a LEADING env-assignment (the
+    documented 'GUARDRAIL_ALLOW_DISCARD=1 git ...' prefix on the git command itself). Only the leading
+    assignment region (the tokens before this segment's command word) is inspected, so the same string
+    buried in an argument does NOT count. The caller consults this ONLY on a segment whose command word is
+    git (GD-41 blocker 4), so an opt-out leading a NON-git command ('GUARDRAIL_ALLOW_DISCARD=1 true; git
+    reset --hard') never disables the guard on the later git command. A value in {'', '0', 'false', 'no',
+    'off'} (case-insensitive) is NOT truthy. When the leading region repeats the assignment, bash last-wins
+    applies: only the LAST GUARDRAIL_ALLOW_DISCARD assignment's value is evaluated (=1 then =0 does NOT opt
+    out)."""
+    last = None
+    for tok in tokens[:_command_word_index(tokens)]:
+        m = _DISCARD_OPTOUT_RE.fullmatch(tok)
+        if m:
+            last = m.group(1)  # bash last-wins: keep the LAST leading assignment's value, evaluate only it
+    return last is not None and last.lower() not in _DISCARD_FALSY
+
+
+def _raw_has_lossy_git(command):
+    """True when the RAW command string names git AND a recognized work-losing verb (an always-lossy verb,
+    or 'branch' in ANY form: the raw path does not parse branch flags, so any raw 'git' + 'branch' is
+    treated as lossy regardless of a delete flag). A coarse fail-safe used both by the unparseable-command
+    fallback and by the wrapper-obscured path (GD-41 blocker 8), where a wrapper hides the git verb from the
+    token scan; a hit there means the guard cannot classify with certainty and ASKS."""
+    if not _RAW_GIT_RE.search(command):
+        return False
+    return bool(_RAW_LOSSY_VERB_RE.search(command) or _RAW_BRANCH_RE.search(command))
+
+
+def _git_sub_and_args(tokens):
+    """(sub, args): the git subcommand and the token list AFTER it, or (None, []) when there is no
+    subcommand. Reuses the _command_word_index skip of leading env assignments and the _GIT_ARG_OPTS skip,
+    so a '-C DIR' value is never mistaken for the subcommand."""
+    i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
+    n = len(tokens)
+    while i < n:
+        token = tokens[i]
+        if token.startswith("-"):
+            if "=" not in token and token in _GIT_ARG_OPTS:
+                i += 2
+            else:
+                i += 1
+            continue
+        return token, tokens[i + 1:]
+    return None, []
+
+
+# The option-parsing boundary tokens: after either, every remaining token is an operand (a pathspec or
+# ref), never an option, so a token that merely LOOKS like an option past this point is a literal operand.
+_EOO_TOKENS = frozenset(("--", "--end-of-options"))
+
+
+def _split_pre_post(args):
+    """Split a subcommand's arg list at the FIRST option-boundary token ('--' or '--end-of-options').
+    Returns (pre, post, had_sep): pre is the option region before it, post is every operand after it (all
+    pathspecs, verbatim), had_sep says a boundary token was present."""
+    for idx, a in enumerate(args):
+        if a in _EOO_TOKENS:
+            return args[:idx], args[idx + 1:], True
+    return args, [], False
+
+
+def _has_short(tokens, ch):
+    """True when a clustered short-flag token (a single '-' then letters, e.g. '-fd') carries the letter
+    ch. Spots '-f' inside a cluster (checkout '-f', clean '-fd'), '-p', '-S'/'-W' (restore)."""
+    for t in tokens:
+        if t.startswith("-") and not t.startswith("--") and len(t) > 1 and ch in t[1:]:
+            return True
+    return False
+
+
+def _has_long_prefix(tokens, full):
+    """True when a '--<name>' option token in tokens is a CONSERVATIVE prefix of `full`. The match is
+    deliberately broad: it fires whenever `name` is any leading substring of `full`, WITHOUT verifying that
+    git itself would accept the abbreviation. Git accepts many UNAMBIGUOUS abbreviations ('--patc' for
+    '--patch', '--del' for '--delete', '--dis' for '--discard-changes'), but it REJECTS an AMBIGUOUS one:
+    'git branch --for' is ambiguous with '--format' and 'git switch --for' with '--force-create', so git
+    errors rather than running '--force'. This guard intentionally treats such an ambiguous force-prefix
+    ('--for') as force ANYWAY, routing it to ASK or DENY. The name compared is the part before any '=', so
+    '--orphan=x' matches 'orphan'. A bare '--' (empty name) never matches. GD-41 blocker 5: a destructive
+    option must be recognized by prefix, not only by its full spelling, or an abbreviated
+    force/patch/delete/discard slips through as an inert token and is silently allowed. Erring toward a
+    MATCH is safe: over-recognizing a destructive option, even an abbreviation git would reject as
+    ambiguous, only routes a form to ASK or DENY, never to a silent allow."""
+    for t in tokens:
+        if not t.startswith("--"):
+            continue
+        name = t.split("=", 1)[0][2:]
+        if name and full.startswith(name):
+            return True
+    return False
+
+
+# --- the one probe kept: the coarse whole-tree clean signal ------------------------------------------
+
+# The ambient git environment could redirect a real-state git call (the clean probe, the recovery
+# snapshot) to a DECOY repository, inject config into it, hide content from it, or make a "read-only" call
+# WRITE a trace file: an inherited GIT_* var can point git at a different index, object store, work tree,
+# ref namespace, or discovery boundary than the one at `-C <repo>` (producing a false "provably clean", a
+# false recovery point, or a dirty-tree ALLOW left unchanged), propagate config through the `git -c`
+# GIT_CONFIG_PARAMETERS channel (able to hide untracked content via core.excludesFile or inject a
+# filter.*.clean that runs during the snapshot `git add --all`), suppress system config via
+# GIT_CONFIG_NOSYSTEM, redirect attribute lookup through GIT_ATTR_SOURCE, or (git treats an absolute
+# GIT_TRACE value as a FILE PATH and APPENDS trace output to it) make even the read-only status probe and
+# the recovery git calls WRITE a file, possibly inside the protected worktree, violating the read-only/inert
+# posture. Rather than ENUMERATE this family (rounds 4-5 kept finding new members: GIT_CONFIG_*, then
+# GIT_TRACE*, then GIT_ATTR_SOURCE), every real-state call takes an ALLOWLIST posture: _isolate_git_env
+# scrubs EVERY ambient GIT_*-prefixed var before the caller applies its own env, so after the scrub a
+# real-state call observes the ACTUAL repo at `-C <repo>` rather than an ambient-env decoy and writes no
+# trace file; a snapshot call's own GIT_INDEX_FILE (supplied via env_extra) still wins because env_extra is
+# applied AFTER the scrub. This is BOUNDED, not categorical: the allowlist scrub closes the whole ambient-env
+# class at once, but the residual is NOT limited to on-disk config - it spans the non-GIT_ environment
+# (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk git configuration AND attributes (repo/global/system .gitconfig
+# and .gitattributes), index and ignore state, submodules and embedded repos, configured hooks and filters,
+# PATH-based git resolution, and partial-clone object availability, all of which git reads by design and none
+# neutralized here.
+
+
+# The FIXED INTERNAL identity the recovery snapshot's `git commit-tree` commits under. The allowlist scrub
+# strips every ambient GIT_* (including any GIT_AUTHOR_*/GIT_COMMITTER_*) AND neutralizes on-disk config's
+# reach for the call, so with no ambient identity re-applied commit-tree would FALL BACK to user.name/email
+# and then FAIL on a host that has none (a CI runner or a fresh install with no global gitconfig), silently
+# disabling the recovery backstop there. Re-applying this fixed identity after the scrub makes commit-tree
+# depend on NO ambient state; a deterministic identity is also correct on its own terms, since a recovery
+# commit is attributed to the guard, not to the user. The address is a fixed non-routable localhost one.
+_RECOVERY_IDENTITY_NAME = "aiqt-recovery"
+_RECOVERY_IDENTITY_EMAIL = "aiqt-recovery@localhost"
+
+
+def _isolate_git_env(env):
+    """Scrub EVERY ambient GIT_*-prefixed var from env in place, re-assert the PROTECTIVE vars and the fixed
+    recovery commit identity, and return it (allowlist posture: no ambient git env is trusted). A real-state
+    git call is fully specified by `-C <repo>` plus the few vars the caller re-applies AFTER this scrub
+    (GIT_OPTIONAL_LOCKS for the read-only probe; a temp GIT_INDEX_FILE via env_extra for a snapshot), so it
+    observes the ACTUAL on-disk repo and writes no trace file. AFTER the scrub this SETS GIT_NO_LAZY_FETCH=1
+    and GIT_TERMINAL_PROMPT=0, so the scrub cannot strip an operator's offline/non-interactive posture:
+    without them a partial-clone probe/add could LAZY-FETCH (network I/O, writes objects) instead of failing
+    offline, and prompting could be re-enabled. It ALSO re-applies GIT_AUTHOR_NAME/EMAIL and
+    GIT_COMMITTER_NAME/EMAIL as the fixed _RECOVERY_IDENTITY_* so the snapshot's `git commit-tree` never
+    depends on an ambient or on-disk identity the scrub removed (without it commit-tree FAILS where no git
+    identity is configured, silently disabling the recovery backstop); the read-only probes simply ignore
+    it. A caller's own later env_extra (a temp GIT_INDEX_FILE) still wins because it is applied
+    after this returns. Over-scrubbing fails SAFE: any GIT_* the call genuinely needed makes it error, and
+    the caller treats that as a probe/snapshot FAILURE (None / SubprocessError) -> fail-to-ASK, never a
+    silent allow. This closes the whole ambient-env class at once (GIT_CONFIG_*, GIT_CONFIG_PARAMETERS,
+    GIT_TRACE*, GIT_ATTR_SOURCE, GIT_DIR/GIT_WORK_TREE, ...) instead of enumerating it. The residual is NOT
+    limited to on-disk config: it spans the non-GIT_ environment (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk
+    git configuration AND attributes (repo/global/system .gitconfig and .gitattributes), index and ignore
+    state, submodules and embedded repos, configured hooks and filters, PATH-based git resolution, and
+    partial-clone object availability."""
+    for _k in [k for k in env if k.startswith("GIT_")]:
+        env.pop(_k, None)
+    # Re-assert the offline + non-interactive posture the scrub would otherwise strip (Class B): keep a
+    # partial-clone operation from lazy-fetching over the network, and keep git from ever prompting.
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # Re-assert a fixed internal commit identity the scrub removed, so the snapshot's `git commit-tree`
+    # never falls back to (now-scrubbed) ambient config and FAILS where no git identity is configured; the
+    # read-only probes ignore it. A recovery commit is the guard's, not the user's, so the identity is fixed.
+    env["GIT_AUTHOR_NAME"] = _RECOVERY_IDENTITY_NAME
+    env["GIT_AUTHOR_EMAIL"] = _RECOVERY_IDENTITY_EMAIL
+    env["GIT_COMMITTER_NAME"] = _RECOVERY_IDENTITY_NAME
+    env["GIT_COMMITTER_EMAIL"] = _RECOVERY_IDENTITY_EMAIL
+    return env
+
+
+def _tree_is_clean(repo):
+    """The clean-tree signal, the ONLY probe this guard keeps, hardened to be CONFIG-PROOF. True when the
+    read-only porcelain probe reports NOTHING that a lossy verb could destroy: no uncommitted tracked change
+    (any staged or unstaged modification, in EITHER porcelain column) AND no untracked ('??') entry. False
+    when it reports either, None when the probe could not run (a subprocess error, a non-zero return, an
+    unreadable repo). Untracked files are uncommitted work a force-checkout, a 'git clean', or a 'git reset
+    --hard' can destroy, so an untracked-only-dirty tree is NOT provably clean.
+
+    The probe FORCES untracked reporting - 'git -c status.showUntrackedFiles=all status --porcelain
+    --untracked-files=all' - so a repo-local 'status.showUntrackedFiles=no' config cannot hide an untracked
+    file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
+    override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
+    carrying both keeps the intent legible. An ignored '!!' entry is treated as clean (porcelain does not emit
+    '!!' without --ignored anyway). A forced checkout or 'clean -x' CAN overwrite/remove an ignored file, but
+    probing --ignored would ASK on every repo carrying build artifacts, so ignored-file loss on those forms is
+    a DISCLOSED residual the recovery layer backstops (every non-dry-run clean already ASKS regardless).
+    Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
+    Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
+    from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
+    _isolate_git_env (the allowlist posture, re-applying only GIT_OPTIONAL_LOCKS after the scrub) so the
+    probe reads the REAL repo at `-C <repo>` rather than a foreign preset that could redirect it to a decoy
+    clean repo and win a false ALLOW, and writes no ambient GIT_TRACE file."""
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        result = subprocess.run(
+            ["git", "-C", repo, "-c", "status.showUntrackedFiles=all",
+             "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True, timeout=5, env=env)
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if not line or line[:2] == "!!":
+                continue  # only an ignored entry is treated as clean
+            return False  # a tracked change (staged or unstaged) OR an untracked file: not provably clean
+        return True
+    except Exception:
+        return None
+
+
+# --- verb-form recognition (coarse; erring toward lossy) ---------------------------------------------
+# Each _*_role returns (role, kind): role is one of "allow" (this FORM never discards tracked work),
+# "ask" (a softer discard that ASKS unconditionally, not gated on the tracked-tree probe - clean of
+# untracked files, stash drop/clear, branch -D), "scoped" (an index- or worktree-touching discard: ALLOW on
+# a provably-clean tree, else ASK; this now includes the index-only forms restore --staged, mixed/path
+# reset, and rm --cached, which can erase staged-only content, GD-41 blocker 6), or "clobber" (a WHOLE-TREE
+# overwrite: ALLOW on a clean tree, DENY on a confirmed-dirty tree). kind is a short human label. This
+# recognition is purely lexical and never probes to prove an individual dirty-tree form safe; it only
+# classifies the FORM, matching destructive options by CONSERVATIVE PREFIX (blocker 5; an ambiguous
+# force-prefix like '--for' is treated as force, erring safe) and respecting a '--'
+# operand boundary (blocker 3), then the handler gates a scoped/clobber form on the single whole-tree clean
+# probe AND on the command being a single simple 'git <verb>' invocation.
+
+# git checkout/switch short options that CONSUME a NEW-BRANCH-NAME argument: '-b'/'-B' (checkout create /
+# force-create), '-c'/'-C' (switch create / force-create). The option letter itself is a genuine flag, but
+# the REST of its cluster token (attached '-bfoo') or the NEXT token (separated '-b foo') is that branch
+# name and must NOT be char-scanned as clustered force flags. Mirrors the branch '-u<upstream>' parser
+# (_branch_parse_options, F-82). checkout has no -c/-C and switch has no -b/-B, so one shared set is safe.
+_CHECKOUT_SWITCH_NAME_OPTS = frozenset(("b", "B", "c", "C"))
+
+
+def _checkout_switch_parse_options(pre):
+    """Parse a checkout/switch option region (already split before any '--') into (short_flags, operands).
+    short_flags is the set of genuine short flag letters; operands is the list of bare operands. A branch-
+    name-taking short option ('-b'/'-B' for checkout, '-c'/'-C' for switch) is recorded as a flag, then the
+    remainder of its cluster token (attached '-bfoo') or the next token (separated '-b foo') is its NEW-
+    BRANCH-NAME value and is NOT char-scanned as force flags. This mirrors _branch_parse_options (F-82) and
+    closes the F-85 over-restriction where an attached name like '-bfoo' (the 'f') or '-bBranch' (the 'B')
+    was char-scanned as carrying -f/-B and mis-routed to DENY/ASK. Long options are not char-scanned here
+    (force/orphan/discard-changes/force-create match by prefix on `pre`)."""
+    short_flags = set()
+    operands = []
+    skip_value = False  # the previous token opened a separated branch-name slot (e.g. '-b <name>')
+    for tok in pre:
+        if skip_value:
+            skip_value = False
+            continue  # this token is a prior option's branch-name VALUE, not a flag or an operand
+        if tok.startswith("--"):
+            continue  # long options match by prefix on `pre`, not char-scanned here
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch in _CHECKOUT_SWITCH_NAME_OPTS:  # record the option, then its branch name is the
+                    short_flags.add(ch)                # rest of this token (or the next token)
+                    if i == len(body) - 1:
+                        skip_value = True  # a bare '-b': the name is the next token
+                    break  # stop the cluster scan; the remainder is the new-branch name, not flags
+                short_flags.add(ch)
+            continue
+        operands.append(tok)  # a bare operand (a branch or a pathspec)
+    return short_flags, operands
+
+
+def _checkout_role(args):
+    """git checkout. Force ('-f'/'--force', abbreviations included) is decided FIRST (GD-41 blocker 7). A
+    '-B' force branch-create/RESET overwrites an existing branch ref and can orphan committed commits (the
+    same reflog-recoverable loss class as 'git branch -f'/'-M'/'-C'), so it ASKS unconditionally, INCLUDING
+    when combined with other flags (F-81), before the unforced branch-create allow. A plain branch-create
+    ('-b'/'--orphan') only allows when force is ABSENT, because a FORCED branch-create can discard, so
+    'checkout -f -b <name>' must fall through to a lossy classification, not the early
+    allow. A '-m'/'--merge' or '--conflict[=<style>]' checkout (matched like the switch classifier,
+    unambiguous-prefix aware) does a THREE-WAY merge that can overwrite local changes, so even combined
+    with a branch-create it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK on a
+    dirty one), decided BEFORE the plain branch-create allow (F-88); a plain '-b'/'--orphan' create with NO
+    merge option stays allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
+    separated '-b foo') and is NOT char-scanned as force flags, so '-bfoo'/'-bBranch' ALLOW and are never
+    mis-read as carrying -f/-B (F-85; see _checkout_switch_parse_options). '-p'/'--patch' (prefix-matched)
+    interactively discards worktree hunks -> scoped. A forced
+    checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
+    be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
+    disambiguated by a rev-parse probe - so it is treated as -> scoped (which ASKS on a not-provably-clean
+    tree; recoverable and human-gated), never a hard DENY that would false-block a legitimate forced
+    path-restore. Any '-- <paths>' or other bare-operand form is scoped for the same reason. Only an
+    operand-FREE forced checkout ('checkout -f' with no branch and no pathspec) clobbers the whole worktree
+    with certainty -> clobber (which DENIES on a confirmed-dirty tree). A bare 'git checkout' with no options
+    and no operands has no worktree effect -> allow."""
+    pre, post, _had_sep = _split_pre_post(args)
+    if _has_long_prefix(pre, "pathspec-from-file"):  # prefix-matched: '--pathspec-from-f' too
+        return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
+    short_flags, operands = _checkout_switch_parse_options(pre)  # '-b'/'-B' consume their branch name (F-85)
+    force = "f" in short_flags or _has_long_prefix(pre, "force")
+    if "B" in short_flags:  # -B force-creates/RESETS a branch ref, orphaning committed commits (F-81)
+        return ("ask", "git checkout -B (a force branch-create/reset that overwrites an existing branch "
+                       "ref and may orphan its commits)")
+    if not force and ("m" in short_flags or _has_long_prefix(pre, "merge")
+                      or _has_long_prefix(pre, "conflict")):  # F-88: a three-way merge, even with a -b
+        return ("scoped", "git checkout --merge/--conflict (a three-way merge that can overwrite local "
+                          "changes)")  # decided BEFORE the branch-create allow, mirroring the switch classifier
+    branch_create = ("b" in short_flags or _has_long_prefix(pre, "orphan"))
+    if branch_create and not force:
+        return ("allow", None)  # create/switch to a new branch; git carries changes and aborts on conflict
+    if "--patch" in pre or "p" in short_flags or _has_long_prefix(pre, "patch"):
+        return ("scoped", "git checkout -p/--patch (an interactive worktree-hunk discard)")
+    has_paths = bool(post) or bool(operands)
+    # A forced branch-create ('checkout -f -b <name>') is lossy but NOT the operand-free whole-tree clobber
+    # (blocker 7): its branch name is consumed by -b so it leaves no operand, yet it must stay SCOPED (a
+    # recoverable ASK), not clobber. Only a force with NO branch-create and NO operand is the certain
+    # whole-tree clobber. (Pre-F-85 the branch name was mis-counted as a bare operand and reached scoped via
+    # has_paths; parsing it as -b's argument keeps that outcome without relying on the mis-count.)
+    if force and not has_paths and not branch_create:
+        return ("clobber", "git checkout -f (a forced branch switch that overwrites the worktree)")
+    if has_paths or branch_create:
+        return ("scoped", "git checkout (a worktree revert; a forced or branch-create form can discard)")
+    if pre:  # options present but none recognized as safe (an abbreviated/exotic option) -> do not trust
+        return ("scoped", "git checkout (an option this guard cannot prove non-destructive)")
+    return ("allow", None)  # a truly bare 'git checkout': no options, no operand, no worktree effect
+
+
+def _switch_role(args):
+    """git switch. '-f'/'--force'/'--discard-changes' overwrites the worktree (whole-tree) -> clobber; force
+    and discard-changes are matched by CONSERVATIVE prefix (blocker 5), so '--dis' is recognized and an
+    ambiguous '--for' (which git itself rejects for switch as ambiguous with '--force-create') is treated as
+    force anyway, erring safe.
+    A '-C'/'--force-create' force branch-create/RESET (matched by prefix too) overwrites an existing branch
+    ref and can orphan committed commits (the same reflog-recoverable loss class as 'git branch
+    -f'/'-M'/'-C'), so it ASKS (F-81); plain '-c' create keeps the allow. The new-branch NAME of '-c'/'-C'
+    is consumed as that option's ARGUMENT (attached '-cfoo' or separated '-c foo') and is NOT char-scanned
+    as force flags, so '-cfeature' ALLOWs and is never mis-read as carrying -f/-C (F-85; see
+    _checkout_switch_parse_options). '--force' is decided FIRST, so a
+    genuine worktree clobber still DENIES rather than being downgraded to the force-create ASK.
+    A '-m'/'--merge' or '--conflict[=<style>]' switch performs a THREE-WAY merge into the worktree that can
+    overwrite local changes, so it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK
+    on a dirty one), matched by prefix too. A plain switch preserves non-conflicting local changes and aborts
+    only when the switch would lose them (git protects), so it is not a silent discard -> allow."""
+    pre, _post, _had_sep = _split_pre_post(args)
+    short_flags, _operands = _checkout_switch_parse_options(pre)  # '-c'/'-C' consume their branch name (F-85)
+    if ("f" in short_flags or _has_long_prefix(pre, "force")
+            or _has_long_prefix(pre, "discard-changes")):
+        return ("clobber", "git switch --force/--discard-changes (overwrites the worktree)")
+    if "C" in short_flags or _has_long_prefix(pre, "force-create"):
+        return ("ask", "git switch -C/--force-create (a force branch-create/reset that overwrites an "
+                       "existing branch ref and may orphan its commits)")
+    if "m" in short_flags or _has_long_prefix(pre, "merge") or _has_long_prefix(pre, "conflict"):
+        return ("scoped", "git switch --merge/--conflict (a three-way merge that can overwrite local changes)")
+    return ("allow", None)
+
+
+def _restore_role(args):
+    """git restore reverts tracked content, and NO form is unconditionally safe (GD-41 blocker 6): a
+    worktree restore drops uncommitted edits, '-p'/'--patch' discards selected hunks, and even a pure
+    '--staged' unstage can erase staged-ONLY content (present in the index but not HEAD or the worktree).
+    So every restore routes through the whole-tree clean probe -> scoped: it ALLOWS on a provably-clean tree
+    (a clean index has no staged-only content to lose) and ASKS on a dirty one. The earlier cut allowed a
+    '--staged' unstage unconditionally, which silently discarded staged-only work."""
+    return ("scoped", "git restore (reverts tracked content; --staged can erase staged-only changes)")
+
+
+def _rm_role(args):
+    """git rm removes tracked content, and NO form is unconditionally safe (GD-41 blocker 6): plain rm drops
+    uncommitted worktree changes, and '--cached' unstages and can erase staged-ONLY content (present in the
+    index but not HEAD or the worktree). So both route through the whole-tree clean probe -> scoped: ALLOW on
+    a provably-clean tree, ASK on a dirty one. This also means an operand after '--' (git rm -f -- --cached,
+    GD-41 blocker 3) can never be misread as the '--cached' option to win an allow: rm is scoped either way.
+    The earlier cut allowed '--cached' unconditionally, which silently discarded staged-only work."""
+    return ("scoped", "git rm (removes tracked content, dropping uncommitted or staged-only changes)")
+
+
+def _reset_role(args):
+    """git reset. The EFFECTIVE (last-wins) mode from the option region decides: an effective '--hard'
+    overwrites the whole worktree -> clobber; only '--soft' is unconditionally safe -> allow (it moves HEAD
+    only, leaving the index AND the worktree intact). Every other mode touches the index or worktree and can
+    lose work, so it routes through the whole-tree clean probe -> scoped: '--merge' (may abort, may lose),
+    '--mixed'/'--keep', a path-scoped reset, or NO mode flag (git defaults to --mixed, which unstages and can
+    erase staged-ONLY content, GD-41 blocker 6 - the earlier cut allowed these unconditionally). Mode flags
+    are matched by unambiguous PREFIX ('--ha' == '--hard'), and an ambiguous bare '--m' (mixed OR merge) is
+    scoped either way; option parsing stops at the first '--'/'--end-of-options' so a mode-looking operand
+    past it is a pathspec, not a mode."""
+    pre, _post, _had_sep = _split_pre_post(args)
+    if any(a == "--pathspec-from-file" or a.startswith("--pathspec-from-file=") for a in pre):
+        return ("scoped", "git reset --pathspec-from-file (a path-scoped reset from a file)")
+    mode = None  # "clobber" / "soft" / "scoped"
+    for a in pre:
+        if not (a.startswith("--") and "=" not in a):
+            continue
+        name = a[2:]
+        if not name:
+            continue
+        if "hard".startswith(name):
+            mode = "clobber"
+        elif "soft".startswith(name):
+            mode = "soft"
+        elif ("merge".startswith(name) or "mixed".startswith(name) or "keep".startswith(name)):
+            mode = "scoped"  # index/worktree-touching (an ambiguous '--m' also lands here): err toward probe
+    if mode == "clobber":
+        return ("clobber", "git reset --hard")
+    if mode == "soft":
+        return ("allow", None)  # HEAD-only: the index and worktree are untouched
+    return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
+
+
+# git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
+# '--exclude PAT'. The '--exclude=PAT' inline shape carries its value in the same token, consuming none.
+_CLEAN_ARG_OPTS = frozenset(("-e", "--exclude"))
+
+
+def _clean_is_dry_run(pre):
+    """True when a git clean option region (already split before any '--') is a genuine DRY RUN
+    (-n/--dry-run) that removes nothing. ULTRA-CONSERVATIVE about the arg-consuming '-e'/'--exclude': when
+    one is present the guard CANNOT reliably tell a real '-n' flag from an exclude PATTERN token that merely
+    looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
+    pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
+    A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
+    for t in pre:
+        if t in _CLEAN_ARG_OPTS or t.startswith("--exclude="):
+            return False  # a separate/inline arg-consuming exclude: do not trust '-n'
+        if t.startswith("-") and not t.startswith("--") and "e" in t[1:]:
+            return False  # an ATTACHED short exclude ('-en' is '-e' with value 'n'): '-n' not trustworthy
+    if _has_long_prefix(pre, "no-dry-run"):
+        return False  # the negation (prefix-matched, e.g. '--no-dry-r') turns the dry run back on
+    return "--dry-run" in pre or _has_short(pre, "n")
+
+
+# git branch long options that CONSUME the following token as a REQUIRED separated value, so that value is
+# never read as an operand or scanned as clustered force flags. Only required-arg options are listed:
+# optional-arg long options (--track/--contains/--merged/--points-at/--color/--abbrev) take a value only in
+# the attached '--opt=val' form and never consume a following token.
+_BRANCH_LONG_ARG_OPTS = ("set-upstream-to", "sort", "format")
+# Long options a '--<name>' abbreviation could ALSO mean; when a name could abbreviate one of these
+# destructive options it is NOT treated as arg-consuming, so an ambiguous '--f' errs toward ASK rather than
+# swallowing the following operand.
+_BRANCH_FORCE_OPTS = ("force", "delete", "move", "copy")
+
+
+def _branch_long_takes_arg(name):
+    """True when the '--<name>' branch option (its '--' and any '=value' already stripped) is an unambiguous
+    PREFIX of a git-branch long option that REQUIRES a separated value, so the NEXT token is that value
+    rather than a flag or an operand. When `name` could also abbreviate a destructive option (--force/
+    --delete/--move/--copy) it is NOT treated as arg-consuming, so an ambiguous '--f' still routes to ASK
+    rather than swallowing the following operand and winning a silent allow."""
+    if any(full.startswith(name) for full in _BRANCH_FORCE_OPTS):
+        return False
+    return any(full.startswith(name) for full in _BRANCH_LONG_ARG_OPTS)
+
+
+def _branch_parse_options(pre):
+    """Parse a 'git branch' option region (already split before any '--') into (short_flags, operands).
+    short_flags is the set of genuine short flag letters; operands is the list of bare operands. An
+    argument-taking option's VALUE is never added to either: the arg-taking short option is '-u <upstream>'
+    (attached '-u<val>' or separated '-u <val>'), so a short cluster stops scanning at the first '-u' and the
+    remainder of that token (or the next token) is the upstream value, NOT clustered force flags. This closes
+    the F-82 over-ASK regression where a blind char-scan read '-ufoo'/'-uMain'/'-uCandidate' as carrying
+    -f/-M/-C/-d. Long options are not char-scanned here (the force forms match them by prefix on `pre`); a
+    required-arg long option ('--set-upstream-to'/'--sort'/'--format') consumes its separated value so it is
+    not mistaken for an operand or a flag."""
+    short_flags = set()
+    operands = []
+    skip_value = False  # the previous token opened a separated-value slot (e.g. '-u <upstream>')
+    for tok in pre:
+        if skip_value:
+            skip_value = False
+            continue  # this token is a prior option's VALUE, not a flag or an operand
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0][2:]
+            if name and "=" not in tok and _branch_long_takes_arg(name):
+                skip_value = True  # its value is the next token
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch == "u":  # '-u <upstream>': the remainder of this token is the VALUE
+                    if i == len(body) - 1:
+                        skip_value = True  # a bare '-u': the value is the next token
+                    break  # stop the cluster scan; the rest of this token is the upstream value
+                short_flags.add(ch)
+            continue
+        operands.append(tok)  # a bare operand (a branch name)
+    return short_flags, operands
+
+
+def _discard_role(sub, args):
+    """Classify a git segment's subcommand into (role, kind); see the block comment above. clean, stash,
+    and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
+    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean ASKS
+    unconditionally (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the
+    guard no longer tries to model whether the clean would fire); stash drop/clear ASK, and a force branch
+    delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
+    if sub == "checkout":
+        return _checkout_role(args)
+    if sub == "switch":
+        return _switch_role(args)
+    if sub == "restore":
+        return _restore_role(args)
+    if sub == "reset":
+        return _reset_role(args)
+    if sub == "rm":
+        return _rm_role(args)
+    if sub == "clean":
+        # Judge dry-run on the option region BEFORE any '--' (blocker 3): an operand after '--' (git clean
+        # -f -- -nasty is a file literally named -nasty) must NOT be read as the '-n' dry-run flag, or a real
+        # force-clean is misclassified as a harmless dry run and silently allowed. _clean_is_dry_run also
+        # refuses to trust '-n' when an arg-consuming clean option ('-e'/'--exclude') is present, since '-n'
+        # may be that option's value rather than the dry-run flag.
+        pre, _post, _had_sep = _split_pre_post(args)
+        if _clean_is_dry_run(pre):
+            return ("allow", None)  # a dry run removes nothing
+        return ("ask", "git clean (removes untracked files, which cannot be recovered)")
+    if sub == "stash":
+        first = next((a for a in args if not a.startswith("-")), None)
+        if first in ("drop", "clear"):
+            return ("ask", "git stash {} (discards saved stash entries)".format(first))
+        # F-95: 'stash export' writes stash state to a ref, and its --to-ref form overwrites an arbitrary ref
+        # UNCONDITIONALLY (no fast-forward or merged-ref safeguard), so every 'export' spelling ASKS; ASK for
+        # all export forms (including --print) is acceptable per the disclosed over-ask posture.
+        if first == "export":
+            return ("ask", "git stash export (writes stash state to a ref, and --to-ref overwrites an "
+                           "arbitrary ref unconditionally)")
+        return ("allow", None)
+    if sub == "branch":
+        pre, post, _had_sep = _split_pre_post(args)
+        short_flags, operands = _branch_parse_options(pre)
+        operands = operands + post
+        has_big_d = "D" in short_flags
+        has_big_m = "M" in short_flags  # -M is 'move --force' (a force rename)
+        has_big_c = "C" in short_flags  # -C is 'copy --force' (a force copy)
+        # Delete, move, copy, and force are matched by CONSERVATIVE prefix too (GD-41 blocker 5):
+        # '--del'/'--mov'/'--cop', and an ambiguous '--for' (which git itself rejects for branch as
+        # ambiguous with '--format') is treated as force anyway, erring safe. Short flags are case-
+        # sensitive, so -m/-c (unforced move/copy)
+        # are distinct from -M/-C (their force forms). _branch_parse_options stops a short cluster at the
+        # arg-taking '-u <upstream>' so an attached value ('-ufoo'/'-uMain') is the UPSTREAM, never scanned
+        # as a clustered force flag (F-82 over-ASK regression: round-21's blind char-scan mis-read it).
+        has_delete = _has_long_prefix(pre, "delete") or "d" in short_flags
+        has_move = _has_long_prefix(pre, "move") or "m" in short_flags
+        has_copy = _has_long_prefix(pre, "copy") or "c" in short_flags
+        has_force = _has_long_prefix(pre, "force") or "f" in short_flags
+        has_remotes = _has_long_prefix(pre, "remotes") or "r" in short_flags
+        # F-94: a delete (-d/-D/--delete) combined with -r/--remotes deletes remote-tracking refs, which git
+        # force-removes UNCONDITIONALLY, bypassing the merged-branch safeguard that protects a plain local
+        # '-d'. So a delete+remotes ASKS even without an explicit force flag; a local non-force '-d' keeps its
+        # allow below. Decided before the -D/force-delete branch so a delete-of-remotes gets its own reason.
+        if has_remotes and (has_big_d or has_delete):
+            return ("ask", "git branch -d/-D --remotes (deletes remote-tracking refs, which git "
+                           "force-removes past the merged-branch safeguard)")
+        # A force DELETE, force MOVE/rename, force COPY, or a bare force branch RESET each reset or overwrite
+        # a branch ref and can orphan committed commits (the same reflog-recoverable loss class as -D), so all
+        # ASK. A non-force create/list, an unforced -m/-c, and a safe -d delete keep their prior outcome.
+        if has_big_d or (has_delete and has_force):
+            return ("ask", "git branch -D/--delete --force (a force branch delete that may drop unmerged "
+                           "commits)")
+        if has_big_m or (has_move and has_force):
+            return ("ask", "git branch -M/--move --force (a force rename that overwrites an existing branch "
+                           "ref and may orphan its commits)")
+        if has_big_c or (has_copy and has_force):
+            return ("ask", "git branch -C/--copy --force (a force copy that overwrites an existing branch "
+                           "ref and may orphan its commits)")
+        if has_force and operands:
+            return ("ask", "git branch -f/--force (a force branch reset that overwrites an existing branch "
+                           "ref and may orphan its commits)")
+        return ("allow", None)
+    return ("allow", None)  # not a recognized lossy verb: the true boundary
+
+
+# --- outcome text ------------------------------------------------------------------------------------
+
+def _discard_ask_reason(kind, detail, optout=None):
+    """The (reason, banner) pair for an ASK. Stored by the handler and emitted via _ask if no segment
+    DENIES first, so a confirmed loss still wins over a recoverable ask. `optout` selects the PATH-AWARE
+    opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
+    bare command, INCLUDING a pristine repository-view-redirected form (its leading GUARDRAIL_ALLOW_DISCARD=1
+    prefix opts THIS command out, short-circuiting even the redirect gate), or _OPTOUT_REISSUE on a
+    raw/unparseable or non-pristine command where no pristine bare form is present, so the opt-out is honoured
+    only on a re-issued pristine bare form, never on the command as issued."""
+    if optout is None:
+        optout = _OPTOUT_PRISTINE
+    reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
+              "or stash your work first. {}{}".format(kind, detail, _DISCARD_ALTS, optout))
+    if optout is _OPTOUT_REISSUE:
+        banner = ("AIQT guardrail: {} - confirm this discard, or re-issue it as a parseable pristine bare "
+                  "'git <verb>' command carrying a leading GUARDRAIL_ALLOW_DISCARD=1 prefix to skip this "
+                  "prompt (the opt-out is not honoured on the command as issued) (rule prsunc)."
+                  .format(kind))
+    else:
+        banner = ("AIQT guardrail: {} - confirm this discard, or prefix GUARDRAIL_ALLOW_DISCARD=1 to skip "
+                  "this prompt (rule prsunc).".format(kind))
+    return (reason, banner)
+
+
+def _discard_deny(kind):
+    """A DENY: a whole-tree-clobbering verb on a tree the probe confirms is dirty (an uncommitted tracked
+    change OR an untracked file the verb could reach), so the loss is certain. The wording covers untracked
+    too, because the config-forced probe now counts an untracked-only-dirty tree as dirty."""
+    reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
+              "currently holds uncommitted or untracked changes the command could destroy, discarding any "
+              "fix you have applied but not yet committed. {}{}"
+              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE))
+    banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
+              "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
+    return _deny(reason, banner)
+
+
+# --- worktree-certainty (coarse; replaces the removed dir modelling) ---------------------------------
+
+# FAIL-SAFE repository-view check. An ambient GIT_*-prefixed var in the process env can point git at a
+# different git dir, work tree, common dir, index, object store, ref namespace, replace/reference view, or
+# config/attribute source than the session cwd. The clean probe scrubs EVERY ambient GIT_* before it runs
+# (so the PROBE reads the REAL cwd repo), but the guard cannot scrub the operator's shell env from the
+# ACTUAL command git will run: with an ambient GIT_DIR at a dirty repo and a clean cwd, the probe reads
+# clean and would ALLOW while the real command clobbers the redirected dir; with an ambient GIT_INDEX_FILE
+# the probe reads the default (clean) index while the command discards the custom one. Enumerating the
+# redirecting vars proved a whack-a-mole (round after round found new members: GIT_NO_REPLACE_OBJECTS,
+# GIT_REPLACE_REF_BASE, GIT_REFERENCE_BACKEND, and more will exist), so this FLIPS to fail-safe: ANY
+# ambient GIT_* var forces ASK EXCEPT a small COSMETIC allowlist proven not to change the discard target,
+# the object/ref view, the index, or dirtiness detection - only UI/editor/pager/prompt/lock/identity
+# concerns. A GIT_TRACE* var is NOT cosmetic (an absolute GIT_TRACE value makes the ACTUAL command append
+# trace output to that path, which could be a repo file), so it too forces ASK. An unknown or new GIT_* var
+# ASKS rather than silently allowing.
+_COSMETIC_GIT_VARS = frozenset((
+    "GIT_PAGER",             # selects the pager UI; no effect on target/view/index/dirtiness
+    "GIT_EDITOR",            # selects the commit-message editor; UI only
+    "GIT_SEQUENCE_EDITOR",   # editor for the rebase todo list; UI only
+    "GIT_ASKPASS",           # credential-prompt helper; auth UI only
+    "GIT_TERMINAL_PROMPT",   # whether git prompts on the terminal; interactivity only
+    "GIT_OPTIONAL_LOCKS",    # whether to take optional locks; performance, not target/dirtiness
+    "GIT_NO_LAZY_FETCH",     # whether to lazy-fetch missing objects; network posture, not the view
+    "GIT_ADVICE",            # whether to print advice hints; output UI only
+    "GIT_FLUSH",             # output buffering/flushing; I/O behaviour only
+    "GIT_MERGE_AUTOEDIT",    # whether merge auto-opens the editor; UI only
+    "GIT_AUTHOR_NAME",       # author identity stamped on new commits; not the working-tree view
+    "GIT_AUTHOR_EMAIL",      # author identity; not the view
+    "GIT_AUTHOR_DATE",       # author date; not the view
+    "GIT_COMMITTER_NAME",    # committer identity; not the view
+    "GIT_COMMITTER_EMAIL",   # committer identity; not the view
+    "GIT_COMMITTER_DATE",    # committer date; not the view
+))
+
+
+def _ambient_repo_view_override():
+    """FAIL-SAFE: True when the ambient process environment carries ANY GIT_*-prefixed variable that is
+    NOT in the small cosmetic allowlist. Such a variable can point git at a
+    different git dir, work tree, index, object/ref view, replace/reference view, or config/attribute
+    source than the session cwd. The clean probe scrubs these before it runs, so IT reads the real cwd
+    repo, but the guard cannot scrub them from the ACTUAL command the shell runs: that command still
+    inherits them and may act on a DIFFERENT repository view than the one probed. Enumerating the
+    redirecting vars was a whack-a-mole (new members kept appearing: GIT_NO_REPLACE_OBJECTS,
+    GIT_REPLACE_REF_BASE, GIT_REFERENCE_BACKEND), so this asks whenever it cannot PROVE the scrubbed
+    cwd-probe matches the command's actual repository view: an unknown or new GIT_* var ASKS rather than
+    silently allowing (clean becomes not-provably-clean -> ASK, never a silent ALLOW). Only clearly
+    cosmetic UI/editor/pager/prompt/lock/identity vars, which cannot change the discard target, the
+    object/ref view, the index, or dirtiness detection, are allowed through. A GIT_TRACE* var is NOT
+    cosmetic and ASKS: an absolute GIT_TRACE value makes the ACTUAL command append trace output to that
+    path, which could be a file inside the repo, so it is not provably view-neutral (the recovery/probe git
+    calls still scrub the whole GIT_TRACE family, so THEY write no trace, but the command's own ambient
+    GIT_TRACE is not neutralized)."""
+    for key in os.environ:
+        if not key.startswith("GIT_"):
+            continue
+        if key in _COSMETIC_GIT_VARS:
+            continue
+        return True
+    return False
+
+
+def _segment_dir_simple(tokens):
+    """True when a git segment names its worktree simply enough that the session dir IS the worktree the
+    command acts on: no leading env-assignment other than the opt-out (a GIT_DIR/GIT_WORK_TREE could
+    redirect it), and no global option before the subcommand (a -C/--git-dir/--work-tree/-c, possibly
+    abbreviated or attached, could redirect the worktree or change config). Anything else -> not simple ->
+    the handler ASKS rather than trust a clean probe in the session dir. This is the coarse replacement
+    for the git-faithful -C/--git-dir/--work-tree/env dir modelling GD-37 removed (that modelling was
+    repeatedly fooled into probing a clean dir and silently allowing - F-62/F-64/F-66)."""
+    cw_idx = _command_word_index(tokens)
+    for tok in tokens[:cw_idx]:
+        if _DISCARD_OPTOUT_RE.match(tok):
+            continue  # the opt-out assignment is benign and is handled separately
+        return False  # some other leading env-assignment: it may redirect the worktree or config
+    i = cw_idx + 1  # the token after the 'git' command word
+    if i < len(tokens) and tokens[i].startswith("-"):
+        return False  # a global option before the subcommand: may be -C/--git-dir/--work-tree/-c
+    return True
+
+
+def _git_discard_fallback(command, cwd=None):
+    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quote): we cannot
+    segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
+    command, so it cannot soundly trust an opt-out-looking prefix inside it (a quoted-falsy `="0"`, an
+    interspersed `OTHER=x`, an opt-out on a DIFFERENT command `...=1 true; git`, a captured-truthy `0;` all
+    read as opt-outs to a raw scan), so an unparseable in-scope command ALWAYS ASKS regardless of any leading
+    opt-out-looking prefix. The opt-out is honoured ONLY on a PARSEABLE pristine bare command (see
+    _segment_has_optout). If git is present AND a recognized work-losing verb keyword is present (an
+    always-lossy verb, or 'branch' in any form) -> ASK (cannot prove safe); otherwise ALLOW (the true
+    boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
+    verb keyword may ASK.
+
+    Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
+    best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
+    clean) BEFORE returning the ASK, so a discard that is asked-then-approved is still recoverable. Without
+    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, shlex ValueError) reached ASK with NO recovery
+    ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
+    unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
+    the failure surfaced."""
+    if not _raw_has_lossy_git(command):
+        return _allow()  # no git, or no recognized work-losing verb: the true boundary
+    base = cwd if isinstance(cwd, str) and cwd else None
+    snap = None
+    if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
+        snap = _record_recovery(base, "discard")
+    reason = (
+        "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
+        "(likely an unbalanced quote) and it names a git work-losing verb this guard cannot prove safe; "
+        "asking rather than silently allowing. {}{}".format(_DISCARD_ALTS, _OPTOUT_REISSUE))
+    banner = (
+        "AIQT guardrail: an unparseable git command names a work-losing verb this guard could not prove "
+        "safe - confirm this discard. The GUARDRAIL_ALLOW_DISCARD opt-out is NOT honoured on an unparseable "
+        "command (the guard cannot parse it); to opt out, re-issue the discard as a parseable bare git "
+        "command with the leading prefix (rule prsunc, fail-safe).")
+    if snap is not None and snap[0] == "ok":
+        reason = reason + " " + _recovery_pointer(snap[1])
+    elif snap is not None and snap[0] == "fail":
+        reason = reason + (" NOTE: no pre-command recovery snapshot could be created ({}), so this discard "
+                           "would not be recoverable by this guard.".format(snap[1]))
+    return _ask(reason, banner)
+
+
+def _pristine_single_bare_git(command, segments):
+    """Return the token list of the sole git command when `command` is a PRISTINE SINGLE BARE 'git <verb>'
+    invocation, else None (=> the caller ASKS). ULTRA-CONSERVATIVE and PURELY LEXICAL - the bash grammar is
+    never parsed. Pristine requires ALL of:
+      * the RAW command string carries NO shell metacharacter anywhere, EVEN INSIDE QUOTES (a deliberate
+        over-ask): none of ; | & < > ( ) { } $ backtick backslash ! or a newline, which by construction also
+        rules out &&/||/|&, every redirection form (>, >>, <, 2>, &>, >&, n>&m, a leading or interspersed
+        redirect), and every command/process substitution ($( ), backtick, <( ), >( ));
+      * no shell RESERVED-WORD token (if/then/for/while/case/[[/{/... a compound-command keyword);
+      * exactly ONE operator-free command segment (guaranteed once no metacharacter is present, asserted);
+      * after optional leading KEY=value env/opt-out assignments, the sole command word is LITERALLY 'git'
+        (not a path like /usr/bin/git, and not a wrapper such as sudo/env/sh -c/... whose word is not 'git').
+    Anything else - a compound, a wrapper/redirect/reserved-word, or a command word that is not literally
+    'git' - returns None so the guard ASKS rather than trust the clean probe on a command it cannot read
+    with certainty."""
+    if _SHELL_META_RE.search(command):
+        return None  # any shell metacharacter (even quoted): not pristine -> ASK
+    # With no metacharacter there is exactly one operator-free segment; require precisely that.
+    populated = [(toks, sep) for toks, sep in segments if toks or sep]
+    if len(populated) != 1 or populated[0][1]:
+        return None
+    tokens = populated[0][0]
+    if any(t in _SHELL_RESERVED_WORDS for t in tokens):
+        return None  # a shell reserved word: not a bare git invocation -> ASK
+    idx = _command_word_index(tokens)  # skip leading KEY=value assignments (incl. the opt-out)
+    if idx >= len(tokens) or tokens[idx] != "git":
+        return None  # a wrapper, a pathed git, or no command word: not a bare 'git' -> ASK
+    return tokens
+
+
+# --- the recovery/snapshot layer (EN-6): an INERT git-DB sealed-epoch snapshot -----------------------
+# BENEATH the ultra-conservative classifier sits a recovery layer that makes a discard RECOVERABLE. Before
+# git_discard returns its decision for an in-scope lossy verb whose worktree it can resolve to the session
+# cwd AND whose tree is NOT provably clean, it takes an INERT snapshot of the uncommitted work, on the ALLOW
+# and the ASK paths alike (the hook fires once at PreToolUse; there is no post-approval callback, so a
+# discard that is asked-then-approved, or one wrongly allowed by a classifier mis-parse, must ALREADY have a
+# recovery point). The snapshot is decision-INDEPENDENT by design: it does not trust the form-classifier to
+# be right about which forms are safe, so it fires for every snapshottable verb on a not-provably-clean tree
+# regardless of the allow/ask/deny verdict. It is skipped when the tree is PROVABLY CLEAN (nothing the probe
+# can see to lose), when the command is not in scope, and for stash/branch (a worktree snapshot cannot
+# capture stash entries or branch commits; ref-pinning for those is a separate, deferred mechanism).
+# F-D EXPANSION: a NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is now
+# also snapshot-backed BEST-EFFORT against the SESSION CWD repo, so an asked-then-approved wrapped discard is
+# recoverable too. It is best-effort because a non-pristine command's redirected dir is NOT parsed: a command
+# that changes into a DIFFERENT repository may be snapshotted at the session repo rather than the target (a
+# same-repo cd is still captured by the whole-tree `git add --all`); on snapshot fail the decision stays ASK.
+#
+# Mechanism (all stdlib/subprocess, offline): the repo TOPLEVEL is resolved once (the anchor for the size
+# estimate and the inside-the-repo containment checks, since status paths are toplevel-relative and the cwd
+# may be a subdir); a TEMPORARY GIT_INDEX_FILE in a throwaway dir normally OUTSIDE the toplevel (best-effort
+# and guarded: the snapshot FAILS rather than write inside the tree when TMPDIR resolves within it), seeded
+# by COPYING the real index (so staged content is the baseline); `git add --all` into that temp index
+# overlays tracked-modified and UNTRACKED content (ignored excluded); `git write-tree` (temp index) -> a
+# tree; `git commit-tree <tree> [-p HEAD]` -> a snapshot commit; then a CREATE-ONLY `git update-ref
+# refs/aiqt-recovery/<utc-ts>-<pid> <sha> ""` (empty expected-old value: a name collision FAILS the snapshot
+# rather than clobbering a prior recovery ref) protects it from GC.
+#
+# The BOUND on "inert" (honest framing): the snapshot's OWN git operations write only git objects and one
+# private ref (plus a reflog entry for that ref when core.logAllRefUpdates=always, or when a reflog already
+# exists for the ref) and do NOT themselves
+# modify the real index, worktree, HEAD, or any branch; the ref is invisible to plain `git status`, `git
+# branch`, and `git log`, THOUGH reachable via `git log --all` / `git for-each-ref refs/aiqt-recovery` /
+# `git show-ref` (a real ref, not hidden). The selftest asserts the real status/index/HEAD, index bytes,
+# config, and stash list are unchanged. Every real-state call in this layer scrubs EVERY ambient GIT_*-prefixed
+# var (_isolate_git_env, the allowlist posture), so an ambient GIT_CONFIG_PARAMETERS injection, a
+# GIT_ATTR_SOURCE redirect, or a GIT_TRACE file-write vector cannot reach these calls; the residual is NOT
+# limited to on-disk config - it spans the non-GIT_ environment (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk
+# git configuration AND attributes (repo/global/system), index and ignore state, submodules and embedded
+# repos, configured hooks and filters, PATH-based git resolution, and partial-clone object availability, all
+# read by git by design. BUT git may ADDITIONALLY run any git-configured (repo, global,
+# system, or command-scope) program during the
+# snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
+# categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
+# smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, a
+# reference-transaction hook AND a post-index-change hook can run on the temp-index write, and a
+# reference-transaction hook runs on `git update-ref`. Because a clean filter can TRANSFORM worktree bytes
+# before they enter the snapshot, the snapshot is NOT guaranteed byte-exact on a filtered repo. Further, a
+# single overlaid tree cannot capture dirty content inside a SUBMODULE or an untracked EMBEDDED git repo (it
+# stores only the gitlink), and it flattens staged-vs-unstaged into ONE tree. One JSONL line is appended to a
+# per-user ledger normally OUTSIDE the repo (so a `git clean` inside the repo cannot destroy it); the write
+# is BEST-EFFORT: normally one line per snapshot, but skipped when no per-user location resolves (absent
+# HOME/XDG), when the path would land inside the repo (a misconfigured XDG_STATE_HOME/HOME), or when the
+# directory/open/write fails. FAIL POSTURE: when a snapshot is warranted but cannot be made (probe/write
+# error, an undecodable non-UTF-8 path, over the size cap, a bare or broken git dir, or a temp dir resolving
+# inside the repo) the recovery layer NEVER lets that become a silent allow of a not-provably-clean discard -
+# a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is left as-is with the failure
+# surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what the probe cannot see (content
+# hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore), nor ignored files (git add
+# --all excludes them), so a discard of that content is not recoverable here.
+_SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
+# The lossy git verbs the form-classifier can reason about (the recognized-verb set). A command the raw scan
+# flags as in-scope whose resolved subcommand is outside this set (e.g. 'checkout-index', 'read-tree',
+# flagged by a 'checkout'/'reset' substring) cannot be classified, so it must not win the catch-all allow
+# (F-97): it ASKS instead. This is a SUPERSET of _SNAPSHOTTABLE_VERBS (it also covers stash/branch, whose
+# assets a worktree snapshot cannot capture).
+_RECOGNIZED_VERBS = frozenset((
+    "checkout", "switch", "restore", "reset", "rm", "clean", "stash", "branch"))
+_RECOVERY_REF_NS = "refs/aiqt-recovery"
+# Skip (and fail to ASK) rather than snapshot an enormous working tree: a changed+untracked estimate over
+# this many bytes is treated as a snapshot failure, so the guard never tries to seal a multi-gigabyte tree.
+_RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
+# The per-user ledger path components under the XDG state dir. Normally outside any repo; the write is
+# guarded (skipped if the resolved path would land inside the repo).
+_RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
+
+
+def _recovery_git(repo, args, env_extra=None, timeout=10):
+    """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
+    of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
+    env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
+    (see the block comment above _SNAPSHOTTABLE_VERBS for the repo-config residual). EVERY ambient
+    GIT_*-prefixed var is ALWAYS scrubbed via _isolate_git_env (the allowlist posture: no ambient git env is
+    trusted, so GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_*/GIT_TRACE*/GIT_ATTR_SOURCE and any future GIT_* go at
+    once) so a call meant to observe the REAL repo state (the status probe,
+    `rev-parse --show-toplevel`/`--git-path index`) and the snapshot itself cannot be redirected to a
+    foreign preset repo (a decoy that would win a false clean, a false recovery point, or leak into the
+    snapshot) and cannot be made to WRITE a trace file through an ambient GIT_TRACE path; a snapshot call
+    overrides GIT_INDEX_FILE with its own temp index through env_extra, applied AFTER the scrub. This scrub
+    is BOUNDED to the ambient ENV: the residual is NOT limited to on-disk config - it spans the non-GIT_
+    environment (HOME/XDG_CONFIG_HOME/PATH/TMPDIR), on-disk git configuration AND attributes (repo, global,
+    and system), index and ignore state, submodules and embedded repos, configured hooks and filters,
+    PATH-based git resolution, and partial-clone object availability, all read by git by design and none
+    neutralized here.
+    Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
+    snapshot failure. offline, bounded by `timeout`."""
+    cmd = ["git", "-C", repo] + list(args)
+    env = _isolate_git_env(dict(os.environ))  # real-state calls must see the REAL repo, not an ambient decoy
+    if env_extra:
+        env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, applied AFTER the scrub
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def _recovery_toplevel(repo):
+    """The absolute repo TOPLEVEL for repo, via `git rev-parse --show-toplevel` (run through _recovery_git,
+    so it inherits the discovery-env neutralization and targets the REAL repo). Returns the toplevel path, or
+    None when git cannot resolve it (a non-zero return or an empty result: a bare repo, a broken git dir, or
+    not a work tree) - the caller treats None as a snapshot failure. This matters because `status --porcelain`
+    paths are repo-ROOT-relative while the session cwd can be a SUBDIR, so the size-estimate joins and the
+    inside-the-repo containment checks must anchor on the TOPLEVEL, not on the (possibly deeper) cwd."""
+    try:
+        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=5)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    top = result.stdout.strip()
+    if result.returncode != 0 or not top:
+        return None
+    return top
+
+
+def _recovery_status_entries(repo, top):
+    """(classes, total_bytes) from a read-only, config-forced porcelain probe of repo: `classes` is the
+    set of covered classes among {'staged','tracked','untracked'} across every changed/untracked entry,
+    and `total_bytes` is the summed on-disk size of those paths (a size-cap estimate; a missing path, e.g.
+    a deletion, contributes 0). Its paths are repo-ROOT-relative, so a relative one is joined onto `top`
+    (the resolved toplevel), NOT the passed repo, which can be a subdir and would under-count the estimate.
+    Parses the NUL-delimited `--porcelain -z` form, consuming the extra origin field of a rename/copy record.
+    Raises subprocess.SubprocessError / OSError on a probe failure, or UnicodeDecodeError (a ValueError) when
+    a non-UTF-8 path cannot be decoded, which the caller turns into a snapshot fail (a graceful ASK)."""
+    result = _recovery_git(
+        repo, ["-c", "status.showUntrackedFiles=all", "status", "--porcelain",
+               "--untracked-files=all", "-z"], env_extra={"GIT_OPTIONAL_LOCKS": "0"}, timeout=5)
+    if result.returncode != 0:
+        raise subprocess.SubprocessError("status probe returned {}".format(result.returncode))
+    classes = set()
+    total = 0
+    fields = result.stdout.split("\0")
+    i, n = 0, len(fields)
+    while i < n:
+        rec = fields[i]
+        i += 1
+        if not rec or len(rec) < 3:
+            continue
+        xy, path = rec[:2], rec[3:]
+        # A rename/copy record (X in R/C) carries its ORIGIN path as the next NUL field: consume it.
+        if xy and xy[0] in ("R", "C") and i < n:
+            i += 1
+        if xy == "??":
+            classes.add("untracked")
+        else:
+            if xy[0] not in (" ", "?"):
+                classes.add("staged")
+            if xy[1] not in (" ", "?"):
+                classes.add("tracked")
+        try:
+            full = path if os.path.isabs(path) else os.path.join(top, path)  # paths are TOPLEVEL-relative
+            total += os.path.getsize(full)
+        except OSError:
+            pass  # a deleted or unreadable path contributes nothing to the size estimate
+    return classes, total
+
+
+def _path_is_within(candidate, parent):
+    """True when the realpath of candidate is parent itself or lies under it, tested on whole path
+    COMPONENTS (os.path.commonpath) so a sibling like '/repo-x' is not judged inside '/repo', AND a real
+    subpath of the filesystem root '/' is correctly judged inside it: the earlier `base + os.sep` test made
+    '/' into '//', so every candidate read as OUTSIDE and the guard was silently bypassed (Gemini G1). Used
+    to refuse writing recovery data inside the repo it protects (a misconfigured TMPDIR/XDG_STATE_HOME/HOME).
+    realpath(strict=False) resolves a not-yet-existing path (the ledger file on its FIRST write) WITHOUT
+    raising, so the except fires only on a genuine resolution fault (a symlink loop, or commonpath given
+    mixed absolute/relative inputs); on any such error err toward True (unsafe -> refuse) rather than risk
+    writing inside the tree."""
+    try:
+        cand = os.path.realpath(candidate)
+        base = os.path.realpath(parent)
+        return cand == base or os.path.commonpath([cand, base]) == base
+    except (OSError, ValueError):
+        return True
+
+
+def _take_snapshot(repo, top, verb):
+    """Take an INERT git-DB snapshot of the working tree (tracked-modified + staged + untracked; ignored
+    excluded) via a TEMPORARY GIT_INDEX_FILE normally outside the repo, protected by a private
+    refs/aiqt-recovery/<utc-ts>-<pid> ref. `top` is the resolved repo TOPLEVEL (the containment anchor and
+    the size-estimate root; the session cwd may be a subdir). In a NORMAL repo writes only git objects and
+    that one ref; the real index, worktree, HEAD, and every branch are untouched (see the block comment above
+    _SNAPSHOTTABLE_VERBS for the repo-config residual). Returns ('ok', info) with info =
+    {ref, sha, classes, restore}, or ('fail', reason)."""
+    try:
+        classes, total = _recovery_status_entries(repo, top)
+    except (subprocess.SubprocessError, OSError) as exc:
+        return ("fail", "the working-tree status probe failed ({})".format(exc))
+    except UnicodeDecodeError as exc:
+        # A non-UTF-8 filename makes `status -z` (text=True) raise a UnicodeDecodeError (a ValueError), which
+        # is NOT a SubprocessError/OSError; catch it so it fails the snapshot -> graceful ASK, never an
+        # uncaught crash that the dispatcher would turn into an exit-2 HARD BLOCK of a would-ALLOW command.
+        return ("fail", "the working-tree status probe returned an undecodable (non-UTF-8) path ({})"
+                        .format(exc))
+    if total > _RECOVERY_SIZE_CAP:
+        return ("fail", "the working tree exceeds the {} MiB recovery snapshot size cap"
+                        .format(_RECOVERY_SIZE_CAP // (1024 * 1024)))
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="aiqt-recovery-")  # normally OUTSIDE the repo, in the system temp dir
+        if _path_is_within(tmpdir, top):
+            # A TMPDIR misconfigured to resolve inside the repo would seal recovery data where a `git clean`
+            # could destroy it; refuse rather than write inside the tree the snapshot protects.
+            return ("fail", "the temp snapshot dir resolved inside the repo (TMPDIR misconfigured), so no "
+                            "recovery snapshot was written inside the tree it protects")
+        tmp_index = os.path.join(tmpdir, "index")
+        # Seed the temp index from the REAL index (so staged content is the baseline). git add --all then
+        # overlays the worktree (tracked-modified) and untracked files; ignored files are excluded.
+        real_index = _recovery_git(
+            repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5).stdout.strip()
+        if real_index and os.path.exists(real_index):
+            shutil.copyfile(real_index, tmp_index)  # else: git creates a fresh temp index on add --all
+        env = {"GIT_INDEX_FILE": tmp_index}
+        if _recovery_git(repo, ["add", "--all"], env_extra=env, timeout=20).returncode != 0:
+            return ("fail", "git add --all into the temp index failed")
+        wt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
+        if wt.returncode != 0 or not wt.stdout.strip():
+            return ("fail", "git write-tree (temp index) failed")
+        tree = wt.stdout.strip()
+        head = _recovery_git(repo, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=5)
+        parent = head.stdout.strip() if head.returncode == 0 else ""
+        commit_args = ["commit-tree", tree]
+        if parent:
+            commit_args += ["-p", parent]  # parent HEAD when present; an unborn HEAD makes a rootless snapshot
+        commit_args += ["-m", "aiqt-guardrails recovery snapshot before git {}".format(verb)]
+        ct = _recovery_git(repo, commit_args, timeout=10)
+        if ct.returncode != 0 or not ct.stdout.strip():
+            return ("fail", "git commit-tree failed")
+        sha = ct.stdout.strip()
+        # Microsecond precision plus the pid makes the ref name unique for several snapshots within the same
+        # second in the same process; the CREATE-ONLY update-ref below (an empty-string expected-old value)
+        # is the backstop, so a name that DID repeat (a clock rollback or a reused pid) FAILS the snapshot
+        # rather than silently clobbering a prior recovery point onto the same ref.
+        ref = "{}/{}-{}".format(
+            _RECOVERY_REF_NS,
+            datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"), os.getpid())
+        # The trailing "" is the expected OLD value: git makes this a CREATE-ONLY update that fails if the ref
+        # already exists, so a colliding name returns non-zero -> ('fail') -> ASK, never an overwrite.
+        if _recovery_git(repo, ["update-ref", ref, sha, ""], timeout=5).returncode != 0:
+            return ("fail", "git update-ref for the recovery ref failed (a create-only collision or a "
+                            "ref-store error), so no recovery point was written over a prior one")
+    except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
+        return ("fail", "the snapshot could not be created ({})".format(exc))
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    return ("ok", {"ref": ref, "sha": sha, "classes": sorted(classes),
+                   "restore": "git checkout {} -- :/".format(ref)})
+
+
+def _recovery_ledger_path():
+    """The per-user ledger path, normally OUTSIDE any repo: $XDG_STATE_HOME/aiqt-guardrails/recovery.jsonl, or
+    ~/.local/state/aiqt-guardrails/recovery.jsonl when XDG_STATE_HOME is unset. None when neither
+    XDG_STATE_HOME nor HOME resolves (no per-user location to write to). The write itself is guarded in
+    _write_recovery_ledger: it is skipped if this path would resolve inside the repo (a misconfigured
+    XDG_STATE_HOME/HOME)."""
+    base = os.environ.get("XDG_STATE_HOME")
+    if not base:
+        home = os.environ.get("HOME")
+        if not home:
+            return None
+        base = os.path.join(home, ".local", "state")
+    return os.path.join(base, *_RECOVERY_LEDGER_PARTS)
+
+
+def _write_recovery_ledger(repo, top, verb, info):
+    """Append ONE JSONL record for a snapshot to the per-user ledger. Records ONLY: utc timestamp, repo
+    path, the triggering git VERB (never the raw command or file contents, for privacy), the recovery ref,
+    the snapshot sha, the covered classes, and the exact restore command. Best-effort: ANY error (not only
+    an OSError) is swallowed to False (the ref itself is the recovery point; the ledger is a convenience
+    trace read later), so a ledger fault never changes the guard's decision. The containment check anchors on
+    `top` (the resolved toplevel), so a per-user path landing inside the worktree ABOVE the session cwd is
+    still refused. Returns True on a successful write, else False."""
+    path = _recovery_ledger_path()
+    if not path:
+        return False
+    if _path_is_within(path, top):
+        return False  # a misconfigured XDG_STATE_HOME/HOME pointing inside the repo: skip (best-effort)
+    record = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "repo": repo, "verb": verb, "ref": info["ref"], "sha": info["sha"],
+              "classes": info["classes"], "restore": info["restore"]}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+        return True
+    except Exception:
+        return False
+
+
+def _record_recovery(repo, verb):
+    """Take a recovery snapshot and, on success, append the ledger (best-effort). Returns ('ok', info) or
+    ('fail', reason). Called ONLY when the worktree is resolvable to the session cwd and the tree is NOT
+    provably clean, so a snapshot is genuinely warranted. Resolves the repo TOPLEVEL ONCE (via _recovery_git,
+    so it inherits the discovery-env neutralization) and threads it to both the snapshot and the ledger, so
+    the size estimate and the inside-the-repo containment checks anchor on the toplevel, not the (possibly
+    deeper) session cwd. An unresolvable toplevel (a bare or broken git dir) is itself a snapshot fail. ANY
+    snapshot-path fault (a non-UTF-8 repo/toplevel path, an embedded-NUL cwd, or any future snapshot fault)
+    is caught and downgraded to a snapshot failure (a graceful fail-to-ASK), so no snapshot-path exception
+    can propagate to the dispatcher and crash the guard. The ledger write is OUTSIDE that boundary and
+    separately best-effort: it runs only on a successful snapshot and any fault in it is swallowed, so it can
+    NEVER downgrade a successful snapshot's ('ok', info) to a failure."""
+    try:
+        top = _recovery_toplevel(repo)
+        if not top:
+            return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
+        result = _take_snapshot(repo, top, verb)
+    except Exception as exc:  # a snapshot-path fault -> graceful fail-to-ASK
+        return ("fail", "the recovery snapshot could not be taken ({}: {})".format(
+            type(exc).__name__, exc))
+    if result[0] == "ok":
+        try:
+            _write_recovery_ledger(repo, top, verb, result[1])
+        except Exception:  # best-effort ledger: a fault here never affects the snapshot outcome
+            pass
+    return result
+
+
+def _recovery_pointer(info):
+    """A one-line human pointer to a saved snapshot for an ASK/DENY reason. Says a snapshot was SAVED, not
+    that work was discarded (PreToolUse cannot know the command ran). Discloses that the primary restore is
+    OVERLAY mode (it brings back modified and new content but does NOT re-apply a recorded file deletion),
+    and points to the isolated-branch form for an exact, deletion-inclusive restore."""
+    covered = ", ".join(info["classes"]) if info["classes"] else "the working tree"
+    return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}' (overlay mode: "
+            "it brings back modified and new content but does NOT re-apply a file deletion recorded in the "
+            "snapshot), or for an exact, deletion-inclusive restore put it on an isolated branch with 'git "
+            "switch -c aiqt-recover-<id> {}'.".format(
+                covered, info["ref"], info["restore"], info["ref"]))
+
+
+def _ask_with_recovery(kind, detail, snap, optout=None):
+    """An ASK whose reason folds in the recovery outcome: a restore pointer on a successful snapshot, or
+    the failure surfaced (decision stays ASK) on a snapshot failure. snap is None (no snapshot warranted),
+    ('ok', info), or ('fail', reason). `optout` is passed through to _discard_ask_reason to select the
+    path-aware opt-out guidance (default pristine; the non-pristine caller passes _OPTOUT_REISSUE, while the
+    ambient/view-redirected caller passes _OPTOUT_PRISTINE because a pristine redirected form is opted out by
+    prefixing the command as issued)."""
+    reason, banner = _discard_ask_reason(kind, detail, optout)
+    if snap is not None and snap[0] == "ok":
+        reason = reason + " " + _recovery_pointer(snap[1])
+    elif snap is not None and snap[0] == "fail":
+        reason = reason + (" NOTE: no pre-command recovery snapshot could be created ({}), so this "
+                           "discard would not be recoverable by this guard.".format(snap[1]))
+    return _ask(reason, banner)
+
+
+def _deny_with_recovery(kind, snap):
+    """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
+    mirroring _ask_with_recovery."""
+    code, obj, err = _discard_deny(kind)
+    if snap is not None and snap[0] == "ok":
+        obj["hookSpecificOutput"]["permissionDecisionReason"] += " " + _recovery_pointer(snap[1])
+    elif snap is not None and snap[0] == "fail":
+        obj["hookSpecificOutput"]["permissionDecisionReason"] += (
+            " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1]))
+    return (code, obj, err)
+
+
+def git_discard(data):
+    """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "ask unless PRISTINE
+    and provably clean" guard (EN-6). For a command that names any recognized lossy git verb (checkout incl
+    -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
+    delete/move/copy/reset) the outcome is ASK unless the command
+    is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
+    anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
+    'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
+    config-forced porcelain probe reports no tracked change AND no untracked entry), or the LEADING opt-out is
+    set - in which cases ALLOW. A pristine single bare WHOLE-TREE clobber (reset --hard, checkout -f with no
+    pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
+    any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
+    option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
+    probe, or a softer/index-only discard. No recognized lossy command that would discard WORKING-TREE CONTENT
+    is silently ALLOWED unless it is a pristine
+    bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
+    a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
+    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS; the guarantee is bounded to working-tree content
+    (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are reflog-recoverable) and is
+    best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is reserved for the TRUE boundary
+    (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
+    or no recognized lossy verb). A wrapper is in scope only while the raw scan still
+    sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
+    fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
+    g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
+    verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. A real discard whose VERB is
+    outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
+    worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
+    closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
+    recognized set ('git checkout-index -a -f', 'git read-tree -u --reset HEAD') now ASKS (F-97): a flagged
+    sub the classifier cannot resolve to a known verb cannot be proven non-destructive, so it never wins the
+    catch-all allow. The status probe (git status --porcelain,
+    config-forced to report untracked) is read-only and offline.
+
+    SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
+    decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
+    resolve to the session cwd AND whose tree is NOT provably clean, it takes an INERT recovery snapshot of
+    the uncommitted work (a private refs/aiqt-recovery/<utc-ts>-<pid> ref over a temp-index tree, git objects
+    + one ref only) and BEST-EFFORT appends a line to an EXTERNAL per-user ledger (normally one per snapshot;
+    skipped when no per-user location resolves, the path would land inside the repo, or the write fails), on
+    the ALLOW and ASK paths alike (the hook fires once, with no post-approval callback). It NEVER mutates the real index, worktree, HEAD, or any
+    branch. If a warranted snapshot cannot be made, a would-be ALLOW is downgraded to ASK ('no recovery point
+    could be created'); an already-ASK/DENY decision is left as-is with the failure surfaced. F-D EXPANSION: a
+    NON-PRISTINE in-scope ASK (a compound/wrapped/redirected snapshottable command) is ALSO snapshot-backed
+    BEST-EFFORT against the SESSION CWD repo (the redirected dir of a non-pristine command is not parsed, so a
+    command that changes into a DIFFERENT repo may be snapshotted at the session repo rather than the target;
+    a same-repo cd is still captured by the whole-tree add --all). See the recovery block comment above
+    _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
+    marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
+    content is not recoverable here."""
+    if data.get("hook_event_name") != PRETOOL:
+        # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
+        return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name != "Bash":
+        return _allow()  # boundary: a missing or other tool is out of scope
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _allow()  # boundary: unreadable/malformed command container
+    try:
+        segments = _segments(command)
+    except ValueError:
+        # Conservative raw scan, not a silent allow. Pass cwd so an unparseable in-scope discard still gets
+        # a best-effort recovery snapshot before the ASK (Class C), mirroring the non-pristine path.
+        return _git_discard_fallback(command, data.get("cwd"))
+
+    # Precisely-identified lossy git segments (the clean-parse signal). A git command-word segment whose
+    # verb-form is not "allow" is a real in-scope lossy form. Used for the in-scope decision on a
+    # metacharacter-free, unwrapped command, where the segmentation can be trusted.
+    lossy = []  # (role, kind, tokens) for each such segment
+    for tokens, _sep in segments:
+        if _command_word(tokens) != "git":
+            continue
+        sub, args = _git_sub_and_args(tokens)
+        if sub is None:
+            continue
+        role, kind = _discard_role(sub, args)
+        if role != "allow":
+            lossy.append((role, kind, tokens))
+
+    # A wrapper or metacharacter can hide a lossy 'git <verb>' from the command-word segment scan, so the
+    # in-scope decision below trusts the raw scan rather than any (unbounded) wrapper enumeration.
+    # Trust the raw scan UNCONDITIONALLY (round-3 fix): enumerating wrappers is unbounded (stdbuf/doas/
+    # setsid/eval defeated the list), so any raw 'git' + work-losing verb is in scope even when the precise
+    # `lossy` list is empty (a wrapped or quoted git verb). A non-lossy git command still routes through the
+    # pristine path below and allows. Residual: git renamed out of the string (alias/function) -> recovery layer.
+    raw_lossy = _raw_has_lossy_git(command)
+    if not lossy and not raw_lossy:
+        return _allow()  # boundary: no git + work-losing verb anywhere
+
+    # In scope. Apply the ULTRA-CONSERVATIVE pristine gate: anything that is not a pristine single bare
+    # 'git <verb>' invocation ASKS, without ever consulting the probe (a safe over-ask).
+    pristine = _pristine_single_bare_git(command, segments)
+    if pristine is None:
+        kind = lossy[0][1] if lossy else "a git work-losing verb"
+        # F-D EXPAND (GD-41, Architect-approved): a non-pristine in-scope command still ASKS, but now gets a
+        # BEST-EFFORT recovery point first, so an asked-then-approved compound/wrapped discard is recoverable
+        # (the hook fires once, with no post-approval callback). This is BEST-EFFORT against the SESSION CWD
+        # repo only: we do NOT parse a non-pristine command's redirected dir, so a command that changes into a
+        # DIFFERENT repo may be snapshotted at the session repo rather than the target (a same-repo cd is
+        # still captured by the whole-tree add --all). The snapshot is decision-INDEPENDENT (same
+        # _record_recovery path); on snapshot fail the decision stays ASK with the failure surfaced (never
+        # allow).
+        np_subs = set()
+        for _role, _kind, _toks in lossy:
+            _s, _ = _git_sub_and_args(_toks)
+            if _s is not None:
+                np_subs.add(_s)
+        # This command is ALREADY IN SCOPE (a visible lossy token routed it here), so the snapshot is no
+        # longer gated on lexical snappable-detection: shell quoting/eval can hide WHICH snappable verb an
+        # in-scope command carries (a `re'set'` fragment assembles `reset` at runtime, so np_subs may miss
+        # it), so whenever the base resolves and the tree is NOT provably clean we take the inert best-effort
+        # snapshot regardless of which verb is (or is not) visible. A verb obfuscated so thoroughly that it
+        # evades even the raw scan (a standalone `eval git re'set'`, whose raw string has no contiguous
+        # `reset` for _raw_has_lossy_git to catch) never reaches here at all: it is ALLOWED at the in-scope
+        # boundary above, a DISCLOSED best-effort residual (the classifier's documented obfuscation residual),
+        # not something this snapshot closes. Over-snapshotting a pure stash/branch non-pristine command is an
+        # accepted inert cost (a worktree snapshot cannot capture their asset, but it is never an
+        # under-protection). The np_verb label is best-effort from any visible snappable sub.
+        np_cwd = data.get("cwd")
+        np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
+        np_snap = None
+        if np_base is not None and _tree_is_clean(np_base) is not True:
+            np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
+            np_snap = _record_recovery(np_base, np_verb)
+        return _ask_with_recovery(
+            kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
+                  "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
+                  "that is not literally 'git'), so this guard will not trust a clean probe on it", np_snap,
+            _OPTOUT_REISSUE)
+
+    # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
+    # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
+    # operator has explicitly taken responsibility for having saved the work.
+    if _segment_has_optout(pristine):
+        return _allow()
+
+    # Re-derive the verb form from the sole pristine git command.
+    sub, args = _git_sub_and_args(pristine)
+    role, kind = _discard_role(sub, args) if sub is not None else ("allow", None)
+
+    # FAIL-SAFE (EN-6, structural completion): the command's repository view cannot be proven to be the
+    # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
+    # but the ACTUAL command still inherits it and may act on a redirected git dir, work tree, index, or
+    # object/ref view. (2) A COMMAND-LOCAL redirect that _segment_dir_simple flags: a -C/--git-dir/--work-
+    # tree global option or an inline GIT_DIR=/GIT_WORK_TREE= leading assignment ON the command can point it
+    # at a different worktree or config. In EITHER case ANY in-scope pristine form ASKS here - a destructive
+    # form OR a genuinely non-destructive allow form (reset --soft, plain switch, clean -n, checkout -b) -
+    # BEFORE the role/allow logic below that would otherwise let an allow form through and bypass the fail-
+    # safe. Only the explicit leading opt-out (short-circuited above) bypasses it. A best-effort snapshot of
+    # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
+    # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
+    # non-redirecting case), but may NOT capture a redirected tree.
+    if _ambient_repo_view_override() or not _segment_dir_simple(pristine):
+        ao_cwd = data.get("cwd")
+        ao_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
+        ao_snap = None
+        if ao_base is not None and sub in _SNAPSHOTTABLE_VERBS and _tree_is_clean(ao_base) is not True:
+            ao_snap = _record_recovery(ao_base, sub)
+        return _ask_with_recovery(
+            kind or "a git work-losing verb",
+            "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
+            "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment), so this guard "
+            "cannot prove the command's repository view is the session directory (the probe scrubs an "
+            "ambient var, but the actual command still inherits it, and a command-local redirect points "
+            "elsewhere); any recovery snapshot is best-effort against the session cwd and may not capture "
+            "a redirected tree", ao_snap, _OPTOUT_PRISTINE)
+
+    if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
+        return _ask(*_discard_ask_reason(
+            "a git inline alias ('-c alias.<name>=...')",
+            "may expand to a work-losing verb this guard cannot resolve"))
+
+    # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. A non-cosmetic
+    # ambient GIT_* override AND a command-local redirect (a -C/--git-dir/--work-tree/-c global option or a
+    # GIT_DIR/GIT_WORK_TREE env assignment ON THE COMMAND, both flagged by _segment_dir_simple) were already
+    # handled ABOVE (each ASKS with a best-effort cwd snapshot, which may not capture a redirected tree), so
+    # neither reaches here. The _segment_dir_simple guard is kept in `resolvable` as a defensive backstop;
+    # when the worktree cannot be resolved to the session cwd, no snapshot is possible and a lossy form ASKS.
+    cwd = data.get("cwd")
+    base = cwd if isinstance(cwd, str) and cwd else None
+    resolvable = base is not None and _segment_dir_simple(pristine)
+    snapshottable = sub in _SNAPSHOTTABLE_VERBS
+
+    # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
+    # (checkout/switch/restore/reset/rm/clean), when the worktree is resolvable and the tree is NOT provably
+    # clean, snapshot BEFORE returning ANY decision. Decision-INDEPENDENT (it does not trust the
+    # form-classifier), so an asked-then-approved OR a wrongly-allowed (mis-parse) discard still has a
+    # recovery point; the hook fires once with no post-approval callback. Skipped on a provably-clean tree
+    # (nothing to lose) and for stash/branch (a worktree snapshot cannot capture their asset).
+    clean = _tree_is_clean(base) if (resolvable and snapshottable) else None
+    snap = None
+    if resolvable and snapshottable and clean is not True:  # dirty or probe-uncertain: not provably clean
+        snap = _record_recovery(base, sub)
+
+    # F-97 (structural class-fix): the command is IN SCOPE (the raw scan flagged a git work-losing keyword)
+    # yet its resolved subcommand is NOT one of the recognized lossy verbs - e.g. 'git checkout-index -a -f'
+    # or 'git read-tree -u --reset HEAD', whose 'checkout'/'reset' substring trips the raw scan while
+    # _discard_role falls to its catch-all allow. Such a command can discard tracked working-tree content
+    # (and its sub is not snapshottable, so no recovery point exists), so it must NOT win the catch-all allow:
+    # ASK, since a flagged sub the classifier cannot resolve to a known verb cannot be proven non-destructive.
+    # A genuine safe FORM of a RECOGNIZED verb (checkout -b, reset --soft, clean -n) is unaffected: its sub IS
+    # recognized, so this never fires for it.
+    if raw_lossy and sub is not None and sub not in _RECOGNIZED_VERBS:
+        return _ask(*_discard_ask_reason(
+            kind or "a git command the raw scan flags as work-losing",
+            "resolves to the git subcommand {!r}, which is outside the recognized lossy-verb set "
+            "(checkout/switch/restore/reset/rm/clean/stash/branch), so this guard cannot prove it "
+            "non-destructive".format(sub)))
+
+    if role == "allow":
+        # A genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, plain switch, clean
+        # dry-run, stash pop). FAIL POSTURE: if a snapshot was warranted (a not-provably-clean snapshottable
+        # tree, a defensive backstop against a mis-parse) and it FAILED, downgrade the allow to ASK - never
+        # silent-allow a not-provably-clean discard with no recovery point. Otherwise ALLOW stands.
+        if snap is not None and snap[0] == "fail":
+            return _ask(*_discard_ask_reason(
+                kind or "a git work-losing verb",
+                "would run on a working tree that is not provably clean and no recovery point could be "
+                "created ({}), so this guard will not silently allow it".format(snap[1])))
+        return _allow()
+
+    if role == "ask":
+        # A softer discard (a real clean of untracked files, stash drop/clear, a force branch delete/move/
+        # copy/reset): ASK regardless of the tracked-tree probe, which does not see the asset these verbs
+        # destroy (a branch ref is a separate, reflog-recoverable asset). A clean may have been
+        # snapshotted above (git add --all captures untracked); stash/branch are not snapshottable.
+        return _ask_with_recovery(kind, "cannot be proven safe offline", snap)
+
+    # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
+    # session worktree.
+    if not resolvable:
+        return _ask(*_discard_ask_reason(
+            kind, "targets a working tree this guard cannot resolve to the session directory with "
+                  "certainty, so it cannot prove the tree clean"))
+    if clean is True:
+        return _allow()  # pristine bare lossy verb on a PROVABLY CLEAN tree: nothing to lose, no snapshot
+    if clean is None:
+        # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
+        return _ask_with_recovery(
+            kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
+                  "the working tree clean", snap)
+    # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
+    if role == "clobber":
+        return _deny_with_recovery(kind, snap)  # a confirmed whole-tree loss, still recoverable if approved
+    return _ask_with_recovery(kind, "may discard uncommitted changes in the working tree", snap)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
     "diff_source_pretool": diff_source_pretool,
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
+    "git_discard": git_discard,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -731,6 +2287,7 @@ HANDLER_EVENT = {
     "diff_source_pretool": PRETOOL,
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
+    "git_discard": PRETOOL,
 }
 
 
