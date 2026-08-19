@@ -67,6 +67,8 @@ run_gate "versions"        python3 tools/check_versions.py
 run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py
 run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
+run_gate "artifact-checksums-selftest" python3 tools/check_artifact_checksums.py --self-test
+run_gate "artifact-checksums"          python3 tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "mappings-page-drift" python3 tools/gen_mappings.py --check
