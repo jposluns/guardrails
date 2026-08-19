@@ -33,6 +33,7 @@ and both are drift-gated in CI.
 - [No fabrication](.claude/rules/aiqt/10-ACCUR-no-fabrication.md)
 - [Read before characterizing](.claude/rules/aiqt/10-ACCUR-read-before-characterizing.md)
 - [Capture the reference when the claim is made](.claude/rules/aiqt/10-ACCUR-reference-capture.md)
+- [Reproduce a defect before fixing it](.claude/rules/aiqt/10-ACCUR-reproduce-before-fix.md)
 - [Validate an inferred premise before acting](.claude/rules/aiqt/10-ACCUR-validate-inference-before-action.md)
 - [Verify a fix is in its commit](.claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md)
 
@@ -42,14 +43,19 @@ and both are drift-gated in CI.
 - [A check fails closed on input it cannot read](.claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md)
 - [Commit identity](.claude/rules/aiqt/10-INTEG-commit-identity.md)
 - [Gate discipline](.claude/rules/aiqt/10-INTEG-gate-discipline.md)
+- [A generated artefact is changed only through its source](.claude/rules/aiqt/10-INTEG-generated-artefact-source-only.md)
+- [Verify licence compatibility before introducing third-party material](.claude/rules/aiqt/10-INTEG-licence-compatibility.md)
 - [No concealed failure](.claude/rules/aiqt/10-INTEG-no-concealed-failure.md)
 - [Preserve uncommitted work](.claude/rules/aiqt/10-INTEG-preserve-uncommitted-work.md)
 - [Protected-branch integrity](.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md)
+- [Make retries safe to repeat](.claude/rules/aiqt/10-INTEG-safe-retries.md)
 - [Validation is a gate on apply](.claude/rules/aiqt/10-INTEG-validation-gates-apply.md)
 - [Workers produce inert data](.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md)
 
 **Quality**
 - [Use absolute paths, not relative](.claude/rules/aiqt/10-QUALI-absolute-paths.md)
+- [A behavioural change carries a check that fails without it](.claude/rules/aiqt/10-QUALI-change-carries-check.md)
+- [Preserve compatibility or provide a migration path](.claude/rules/aiqt/10-QUALI-compatibility-or-migration.md)
 - [A verification finding is fixed, not argued away](.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md)
 - [High-assurance verification](.claude/rules/aiqt/10-QUALI-high-assurance-verification.md)
 - [Isolate verifiers and judge by their result signal](.claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md)
@@ -79,6 +85,7 @@ and both are drift-gated in CI.
 
 **Progress**
 - [Decision classification before enacting](.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md)
+- [Repeated failure of an approach invalidates its premise](.claude/rules/aiqt/20-PROGR-repeated-failure-invalidates-premise.md)
 
 **Speed**
 - [Background work during CI waits](.claude/rules/aiqt/30-SPEED-background-work-during-ci-waits.md)
@@ -110,17 +117,23 @@ and both are drift-gated in CI.
 - [Encode output for its sink](.claude/rules/security/SECI-output-encoding.md)
 - [Generated output is untrusted input](.claude/rules/security/SECI-output-handling.md)
 - [Resist data, model, and memory poisoning](.claude/rules/security/SECI-poisoning-resistance.md)
+- [Protect audit records from the actors they record](.claude/rules/security/SECI-protect-audit-records.md)
+- [Reject known-vulnerable dependency versions](.claude/rules/security/SECI-reject-vulnerable-versions.md)
+- [Publish artefacts with verifiable integrity](.claude/rules/security/SECI-release-integrity.md)
 - [Deserialize untrusted data only as data](.claude/rules/security/SECI-safe-deserialization.md)
 - [Secure by default configuration](.claude/rules/security/SECI-secure-configuration.md)
 - [Security logging with traceable context](.claude/rules/security/SECI-security-logging.md)
 - [Secure session and token handling](.claude/rules/security/SECI-session-token-management.md)
 - [Validate server-initiated requests](.claude/rules/security/SECI-ssrf-prevention.md)
+- [Threat-model new trust boundaries before implementation](.claude/rules/security/SECI-threat-model-boundaries.md)
 - [Validate tool arguments before use](.claude/rules/security/SECI-tool-argument-validation.md)
 - [Untrusted content is data, not instructions](.claude/rules/security/SECI-untrusted-content.md)
 - [Verify a dependency exists before adding it](.claude/rules/security/SECI-verify-dependency-exists.md)
 - [Bounded consumption and safe failure](.claude/rules/security/SECA-resource-bounds.md)
 - [Minimize personal data sent to AI services](.claude/rules/security/SECP-data-minimization.md)
 - [Honour residency, retention, and deletion](.claude/rules/security/SECP-data-residency-retention.md)
+- [Bind personal-data use to its authorized purpose](.claude/rules/security/SECP-purpose-limitation.md)
+- [Fixtures and examples use synthetic data](.claude/rules/security/SECP-synthetic-fixture-data.md)
 <!-- RULES-INDEX:END -->
 
 ## Project identity and product

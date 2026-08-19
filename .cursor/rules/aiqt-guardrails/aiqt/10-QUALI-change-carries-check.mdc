@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+# A behavioural change carries a check that fails without it
+
+A change that alters behaviour lands together with an automated test or gate that fails when the change is
+absent. Verification leaves a durable artefact that keeps guarding the behaviour after the one-time
+verification pass has moved on.

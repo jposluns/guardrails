@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# Verify licence compatibility before introducing third-party material
+
+Before a dependency, vendored file, or copied code fragment is introduced, its licence is identified and
+confirmed compatible with the project's licence and intended distribution. Material with no identifiable
+licence is not introduced, and an incompatible or copyleft-conflicting term is surfaced to the maintainer
+rather than absorbed silently.

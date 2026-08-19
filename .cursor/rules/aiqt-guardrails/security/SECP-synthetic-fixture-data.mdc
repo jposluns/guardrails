@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+# Fixtures and examples use synthetic data
+
+Test fixtures, seed data, examples, and documentation use synthetic or irreversibly anonymized data, never
+real personal data or production records copied over for convenience. What enters a durable project
+artefact is data that can leak without harm, because version control forgets nothing.

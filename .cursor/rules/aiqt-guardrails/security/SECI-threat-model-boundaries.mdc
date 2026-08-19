@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# Threat-model new trust boundaries before implementation
+
+Before a new external interface, privileged operation, untrusted data flow, or trust boundary is
+implemented, its credible abuse paths are identified and their mitigations carried into the change's
+acceptance criteria. Missing controls are discovered at design time, not patched after the threat is
+recognized in production.
