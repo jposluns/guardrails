@@ -234,10 +234,23 @@ PATTERNS = [
     # present fact ("a colleague on one assistant is working to the same rules as a colleague on another").
     # This catches the present-continuous/finite assertion the earlier subject-first pattern misses (that
     # one needs an "all|every assistant" subject and finite "works"). INTENT-guarded, and the softened
-    # intent form reads bare "work" ("is meant to work to the same rules"), so it is not "works|working"
-    # and stays clean; "works under the same rules as the session that spawned it" is "under", not "to".
+    # intent form ("is meant to work to the same rules") stays clean via the INTENT guard (a "meant"/
+    # "intended" hedge in its clause window), NOT via the verb form: bare "work" is now caught too, so a
+    # bare-"work" assertion with no hedge ("All assistants work to the same rules") trips. "works under
+    # the same rules as the session that spawned it" is "under", not "to", so it stays clean.
     ("working/works to the same (compat)", re.compile(
-        r"\b(?:works|working)\s+to\s+the\s+same\b", re.IGNORECASE), "intent"),
+        r"\b(?:work|works|working)\s+to\s+the\s+same\b", re.IGNORECASE), "intent"),
+    # COMPATIBILITY, reach carried by "wherever/whichever ... assistant|model|tool": one/the-same standard
+    # or rules asserted to apply the same wherever the work runs or whichever assistant/model/tool does it
+    # ("one standard applied the same way ... whichever model does the reviewing", "the same rules apply
+    # whichever assistant you use"). This universal cross-target reach is carried by "wherever"/"whichever"
+    # (not by the "across ... all|every" the earlier compat patterns need), so those miss it. INTENT-guarded,
+    # and the softened form frames the aim ("its intent is to reduce variation ...") and reads "which tool",
+    # not "whichever", so it stays clean by both the hedge and the quantifier form.
+    ("standard/rules ... wherever/whichever assistant/model/tool (compat)", re.compile(
+        r"\b(?:one|a|the\s+same)\s+(?:shared\s+)?(?:standard|rules?)\b[^.]{0,50}?"
+        r"\b(?:appl(?:y|ies|ied)|works?)\b[^.]{0,80}?\b(?:wherever|whichever)\b"
+        r"[^.]{0,40}?\b(?:assistant|model|tool)s?\b", re.IGNORECASE), "intent"),
     # ShareAlike imprecision: a "the same ... licence" claim that does not name the full permitted set from
     # LICENSE 3(b)(1) (same License Elements, this version or later, OR a BY-SA Compatible License). This
     # catches the absolute ("under/carry the same ShareAlike licence") AND the two-alternative form ("the
@@ -400,6 +413,9 @@ POSITIVE = [
     "Improvements come back under the same licence.",                 # ShareAlike absolute (about/development.html)
     "Improvements contributed back carry the same ShareAlike licence.",  # ShareAlike absolute, verb carry, ShareAlike interposed (teams.html)
     "A fix can be reused under the same or a compatible ShareAlike licence.",  # ShareAlike two-alternative: names compatible but drops "or later" (teams/about/development.html)
+    "The result is one standard applied the same way wherever the work runs and whichever model does the reviewing.",  # F-108 live tech-details:293 regression: reach by whichever model
+    "The same rules apply whichever assistant you use.",              # F-108 reach-by-whichever paraphrase
+    "All assistants work to the same rules.",                        # F-108 bare-work plural-subject assertion (no hedge)
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",
@@ -420,6 +436,7 @@ NEGATIVE = [
     "Contributions come back under CC BY-SA 4.0 or later, or a BY-SA Compatible License.",  # precise ShareAlike wording: all three alternatives, drops "the same"
     "The Adapter's License You apply must be a Creative Commons license with the same License Elements, this version or later, or a BY-SA Compatible License.",  # LICENSE 3(b)(1): names "the same" but the full permitted set clears it
     "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
+    "The 1.1.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:293 (intent hedge + which tool, not whichever)
 ]
 
 
