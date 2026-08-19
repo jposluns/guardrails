@@ -66,11 +66,29 @@ clean; a pattern that flagged a legitimate line would be too broad):
     to one standard ("every assistant on the team works to the same ordering"). Requires the FINITE
     "works" (present-tense assertion), so the softened intent form ("every assistant ... is meant to
     work to the same ordering") stays clean because it reads bare "work", not "works".
-  - "under the same licen[cs]e": the ShareAlike imprecision, "the same licence" stated as an absolute.
-    CC BY-SA's ShareAlike is same-or-later-or-BY-SA-compatible (LICENSE clause 3(b)(1): a CC license
-    with the same License Elements, this version or later, or a BY-SA Compatible License), so the
-    absolute overstates it. The precise softened form ("under the same or a compatible ShareAlike
-    licence") stays clean because "or" follows "same", not "licence".
+  - "portable across ...": the pack asserted portable across tools/assistants/toolchains as a verified
+    property ("the guardrails are portable across tools"). Cross-assistant reach is not yet verified (the
+    evidence page marks every platform pending), so the flat assertion overstates it. INTENT-guarded: the
+    softened "designed/intended to be portable across ..." stays clean.
+  - "across every|all assistant|team|tool": universal cross-target reach carried by the preposition
+    "across ... every|all assistant(s)|team(s)|tool(s)|toolchain(s)", not tied to the "one standard"
+    subject. INTENT-guarded, so "intended to reach across every assistant" stays clean; the required
+    quantifier+noun keeps honest "across every surface a change touches" clean.
+  - "working|works to the same ...": parties asserted to be working to one standard as a present fact
+    ("a colleague on one assistant is working to the same rules as a colleague on another"), the
+    present-continuous/finite form the subject-first pattern (which needs an all|every-assistant subject)
+    misses. INTENT-guarded, and the softened intent form reads bare "work" ("is meant to work to the same
+    rules"), so it is not "works|working" and stays clean; "works under the same rules as the session that
+    spawned it" is "under", not "to", so the subagent mechanism claim stays clean.
+  - "the same ... licen[cs]e": the ShareAlike imprecision. CC BY-SA's ShareAlike is same-or-later-or-BY-SA-
+    compatible (LICENSE clause 3(b)(1): a CC license with the same License Elements, this version or later,
+    or a BY-SA Compatible License), so a "the same ... licence" claim that omits any of those alternatives
+    overstates it. This catches the bare absolute ("the same ShareAlike licence") AND the two-alternative
+    form ("the same or a compatible ShareAlike licence", which drops "or later"), with "ShareAlike"
+    optionally interposed and the verbs under/carry/come-back/reused. SHAREALIKE-guarded: clean only when
+    the surrounding sentence names BOTH the later-version AND the BY-SA-compatible alternatives, so the
+    decided softened form ("CC BY-SA 4.0 or later, or a BY-SA Compatible License", which drops "the same")
+    does not even match, and the LICENSE's own full wording matches but is cleared.
   - "foolproof": a bare guarantee-of-perfection adjective.
 
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
@@ -106,12 +124,37 @@ CLAUSE_BOUNDARY = re.compile(
     r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
     re.IGNORECASE)
 
-# (name, pattern, negation_aware)
+# An INTENT HEDGE marks a COMPATIBILITY claim honest: the decided softening frames cross-assistant reach
+# as an aim, not a verified result ("intended/designed to be portable across ...", "is meant to work to
+# the same rules", "the intent, not a verified result yet"). A compat match is skipped when an intent
+# hedge (or a negator) sits in its clause window, so the softened forms stay clean while a bare present-
+# tense assertion of reach still trips. The word "intent" is included so "the intent, not a verified
+# result" reads as a hedge. It is clause-scoped exactly like NEGATOR: a hedge in a PRIOR clause does not
+# launder a fresh assertion (teams.html says the standard is "intended to reach across ..." and then, in a
+# separate clause after the comma+"so", asserts a colleague "is working to the same rules" as a verified
+# fact; the earlier hedge does not scope over that later clause, so the assertion is what must soften).
+INTENT_HEDGE = re.compile(
+    r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?|intent)\b",
+    re.IGNORECASE)
+# The SHAREALIKE clean form names the full permitted set from LICENSE clause 3(b)(1): a CC license with
+# the same License Elements, THIS VERSION OR LATER, OR a BY-SA Compatible License. A "the same ... licence"
+# claim is honest only when BOTH the later-version alternative AND the BY-SA-compatible alternative are
+# stated in the same sentence; a two-alternative form ("the same or a compatible ShareAlike licence",
+# missing "or later") and a bare absolute ("the same ShareAlike licence") both understate the permitted
+# set and trip. These are searched over the whole SENTENCE around the match, not the pre-match clause
+# window, because the alternatives follow the licence noun ("... licence, this version or later, or a
+# BY-SA Compatible License").
+LATER_ALT = re.compile(r"\blater\b", re.IGNORECASE)
+COMPAT_ALT = re.compile(r"\bcompatible\b", re.IGNORECASE)
+
+# (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
+# window), "intent" (skip when a negator OR an intent hedge is in that window), or "sharealike" (skip only
+# when the later-version AND BY-SA-compatible alternatives are both named in the surrounding sentence).
 PATTERNS = [
     # guarantee/ensure incl. gerunds ("guaranteeing", "ensuring"): the bare guarantee verbs. An honest
     # in-clause negation ("does not guarantee that generated code is secure") is not an overclaim.
-    ("ensures", re.compile(r"\bensur(?:e|es|ed|ing)\b", re.IGNORECASE), True),
-    ("guarantees", re.compile(r"\bguarantee(?:s|d|ing)?\b", re.IGNORECASE), True),
+    ("ensures", re.compile(r"\bensur(?:e|es|ed|ing)\b", re.IGNORECASE), "neg"),
+    ("guarantees", re.compile(r"\bguarantee(?:s|d|ing)?\b", re.IGNORECASE), "neg"),
     ("always <efficacy verb>", re.compile(
         r"\balways\s+(?:catch(?:es)?|prevent(?:s)?|block(?:s)?|stop(?:s)?|find(?:s)?|"
         r"detect(?:s)?|fix(?:es)?|secure(?:s)?|guarantee(?:s)?|ensure(?:s)?|work(?:s)?)\b",
@@ -121,23 +164,23 @@ PATTERNS = [
         r"\b(?:cannot|can(?:'|’)?t|will\s+not|won(?:'|’)?t|never)\s+fail(?:s|ed|ing)?\b",
         re.IGNORECASE), False),
     ("makes ... impossible", re.compile(
-        r"\bmake[s]?\b[^.]{0,40}\bimpossible\b", re.IGNORECASE), False),
-    ("impossible", re.compile(r"\bimpossible\b", re.IGNORECASE), True),
+        r"\bmake[s]?\b[^.]{0,40}\bimpossible\b", re.IGNORECASE), ""),
+    ("impossible", re.compile(r"\bimpossible\b", re.IGNORECASE), "neg"),
     ("so claims match their sources", re.compile(
-        r"\bso\s+(?:that\s+)?claims?\s+match(?:es|ed)?\b", re.IGNORECASE), False),
+        r"\bso\s+(?:that\s+)?claims?\s+match(?:es|ed)?\b", re.IGNORECASE), ""),
     # universal-COMPATIBILITY: "works with/across/... all|every|any". An adverb may sit between the verb
     # and the preposition ("works seamlessly with every assistant") AND after the preposition ("works
     # with absolutely every assistant"), so allow a short gap on both sides.
     ("unconditional works with/across", re.compile(
         r"\bworks?\b[^.]{0,30}?\b(?:with|across|on|for|in)\s+(?:\w+\s+){0,2}?"
-        r"(?:all|every|any|each|both|everything|the\s+full\s+range)\b", re.IGNORECASE), False),
+        r"(?:all|every|any|each|both|everything|the\s+full\s+range)\b", re.IGNORECASE), ""),
     # universal-COMPATIBILITY via serve/support/apply: "serves/supports/applies ... with|across|for ...
     # all|every|any" (an adverb may follow the preposition: "applies across virtually all"). The
     # preposition set is narrower than the works pattern (no "on"/"in") and the quantifier set excludes
     # "both"/"each", so an honest "applies on both sides" and "apply to it. For each source" stay clean.
     ("serves/supports/applies across all", re.compile(
         r"\b(?:serves?|supports?|appl(?:y|ies))\b[^.]{0,30}?\b(?:with|across|for)\s+"
-        r"(?:\w+\s+){0,2}?(?:all|every|any)\b", re.IGNORECASE), False),
+        r"(?:\w+\s+){0,2}?(?:all|every|any)\b", re.IGNORECASE), ""),
     # universal-RESULT paraphrase: an efficacy/coverage verb immediately governing "all"/"every"/"any"
     # ("catches all mistakes", "prevents every error", "catches any mistake", "eliminates all errors",
     # "serves every assistant"). Adjacency keeps honest prose clear (e.g. "you stop trusting every
@@ -145,7 +188,7 @@ PATTERNS = [
     ("universal result (verb + all/every/any)", re.compile(
         r"\b(?:catch(?:es)?|detect(?:s)?|prevent(?:s)?|block(?:s)?|find(?:s)?|fix(?:es)?|"
         r"stop(?:s)?|secure(?:s)?|eliminat(?:e|es)|serves?|supports?|covers?)\s+"
-        r"(?:all|every|any)\b", re.IGNORECASE), False),
+        r"(?:all|every|any)\b", re.IGNORECASE), ""),
     # universal-SUBJECT: a single-standard subject claiming it serves/covers/works all|every|any target
     # ("one standard serves every assistant"). Requires the "one standard/rule/instruction" subject and
     # an in-range coverage verb governing the quantifier, so honest prose that merely contains "one
@@ -160,7 +203,7 @@ PATTERNS = [
     # comma follows "standard") stays clean.
     ("one standard across every|all assistant/team", re.compile(
         r"\bone\s+(?:shared\s+)?standard\s+(?:across|for)\s+(?:\w+\s+){0,2}?"
-        r"(?:all|every|any)\s+(?:assistant|team)\b", re.IGNORECASE), False),
+        r"(?:all|every|any)\s+(?:assistant|team)\b", re.IGNORECASE), ""),
     # coverage carried by a past-participle verb plus "by" ("applied by every assistant"), outside the
     # appl(y|ies) shape of the serves pattern. The softened "intended for every assistant" carries no
     # such verb and stays clean.
@@ -172,14 +215,42 @@ PATTERNS = [
     # softened intent form ("every assistant ... is meant to work to the same ordering", bare "work")
     # stays clean.
     ("universal-subject (every assistant works to the same)", re.compile(
-        r"\b(?:all|every)\s+assistants?\b[^.]{0,30}?\bworks\s+to\s+the\s+same\b", re.IGNORECASE), False),
-    # ShareAlike imprecision: "the same licence" stated as an absolute. CC BY-SA's ShareAlike is
-    # same-or-later-or-BY-SA-compatible, so the absolute overstates it. The precise softened form
-    # ("under the same or a compatible ShareAlike licence") stays clean because "or" follows "same".
-    ("sharealike imprecision (under the same licence)", re.compile(
-        r"\bunder\s+the\s+same\s+licen[cs]e\b", re.IGNORECASE), False),
+        r"\b(?:all|every)\s+assistants?\b[^.]{0,30}?\bworks\s+to\s+the\s+same\b", re.IGNORECASE), ""),
+    # COMPATIBILITY, "portable across ...": the pack asserted portable across tools/assistants/toolchains
+    # as a verified property ("the guardrails are portable across tools"). CC BY-SA aside, cross-assistant
+    # reach is not yet verified (the evidence page marks every platform pending), so the flat assertion
+    # overstates it. INTENT-guarded: the softened "designed/intended to be portable across ..." carries a
+    # hedge in-clause and stays clean, while the bare "is portable across ..." trips.
+    ("portable across (compat)", re.compile(r"\bportable\s+across\b", re.IGNORECASE), "intent"),
+    # COMPATIBILITY, "across every|all assistant|team|tool": universal cross-target reach carried by
+    # "across ... every|all assistant(s)|team(s)|tool(s)|toolchain(s)", the reach not tied to the "one
+    # standard" subject the earlier pattern needs. INTENT-guarded, so "intended to reach across every
+    # assistant" stays clean; the quantifier+noun requirement keeps honest "across every surface a change
+    # touches" clean (its noun is not an assistant/team/tool).
+    ("across every|all assistant/team/tool (compat)", re.compile(
+        r"\bacross\s+(?:\w+\s+){0,2}?(?:all|every)\s+(?:assistant|team|toolchain|tool)s?\b",
+        re.IGNORECASE), "intent"),
+    # COMPATIBILITY, "working/works to the same ...": parties asserted to be working to one standard as a
+    # present fact ("a colleague on one assistant is working to the same rules as a colleague on another").
+    # This catches the present-continuous/finite assertion the earlier subject-first pattern misses (that
+    # one needs an "all|every assistant" subject and finite "works"). INTENT-guarded, and the softened
+    # intent form reads bare "work" ("is meant to work to the same rules"), so it is not "works|working"
+    # and stays clean; "works under the same rules as the session that spawned it" is "under", not "to".
+    ("working/works to the same (compat)", re.compile(
+        r"\b(?:works|working)\s+to\s+the\s+same\b", re.IGNORECASE), "intent"),
+    # ShareAlike imprecision: a "the same ... licence" claim that does not name the full permitted set from
+    # LICENSE 3(b)(1) (same License Elements, this version or later, OR a BY-SA Compatible License). This
+    # catches the absolute ("under/carry the same ShareAlike licence") AND the two-alternative form ("the
+    # same or a compatible ShareAlike licence", which drops "or later"), with "ShareAlike" optionally
+    # interposed and any of the verbs under/carry/come-back/reused. SHAREALIKE-guarded: clean only when the
+    # surrounding sentence names BOTH the later-version and BY-SA-compatible alternatives, so the correct
+    # form ("CC BY-SA 4.0 or later, or a BY-SA Compatible License", which drops "the same") does not even
+    # match, and the LICENSE's own "the same License Elements, this version or later, or a BY-SA Compatible
+    # License" matches but is cleared by the guard.
+    ("sharealike imprecision (the same licence)", re.compile(
+        r"\b(?:the\s+)?same\b[^.]{0,40}?\blicen[cs]e\b", re.IGNORECASE), "sharealike"),
     # "foolproof": a bare guarantee-of-perfection adjective, an overclaim wherever it appears.
-    ("foolproof", re.compile(r"\bfool-?proof\b", re.IGNORECASE), False),
+    ("foolproof", re.compile(r"\bfool-?proof\b", re.IGNORECASE), ""),
 ]
 
 SKIP_TEXT_TAGS = {"script", "style"}
@@ -197,16 +268,32 @@ BLOCK_TAGS = {
 }
 
 
+# The SEO/social snippets, meta[name=description] and meta[property=og:description], are attribute
+# content that never renders in the page body, so the visible-text scan below does not see them; yet they
+# are public-facing copy a search result or a shared link shows, and an overclaim there ships just as
+# surely. They are the ONE deliberate exception to "an overclaim hidden in an attribute is not flagged":
+# their content is collected and scanned with the same PATTERNS. No other attribute is scanned.
+META_DESC_NAMES = {"description", "og:description"}
+
+
 class VisibleText(HTMLParser):
     """Accumulate visible text, dropping <script>/<style> bodies. Entities are converted (default).
     A block-element boundary emits a space so text from two separate blocks cannot fuse into one
-    token; inline elements do not separate, so mid-word markup stays a single word."""
+    token; inline elements do not separate, so mid-word markup stays a single word. The
+    meta[name=description] and meta[property=og:description] snippets are captured separately (see
+    META_DESC_NAMES) so their public-facing copy is scanned too, though it never renders in the body."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.chunks = []
+        self.meta = []
         self._skip = 0
 
     def handle_starttag(self, tag, attrs):
+        if tag == "meta":
+            a = dict(attrs)
+            key = a.get("name") or a.get("property")
+            if key and key.lower() in META_DESC_NAMES and a.get("content"):
+                self.meta.append(a["content"])
         if tag in SKIP_TEXT_TAGS:
             self._skip += 1
         elif tag in BLOCK_TAGS:
@@ -248,12 +335,40 @@ def _clause_window(text, start):
     return text[boundary:start]
 
 
+def _sentence_window(text, start, end):
+    """The whole sentence around the match: from the last sentence-ending punctuation (.!?) before the
+    match to the next one after it. Used by the SHAREALIKE guard, whose exonerating alternatives ("this
+    version or later, or a BY-SA Compatible License") follow the licence noun and so fall outside the
+    pre-match clause window."""
+    left = 0
+    for m in re.finditer(r"[.!?]", text[:start]):
+        left = m.end()
+    right = re.search(r"[.!?]", text[end:])
+    return text[left:end + right.start()] if right else text[left:]
+
+
+def _guard_clears(guard, text, m):
+    """True when the pattern's guard exonerates this match. "neg": an in-clause negator. "intent": an
+    in-clause negator OR intent hedge (the compat softening frames reach as an aim). "sharealike": the
+    surrounding sentence names BOTH the later-version and the BY-SA-compatible alternatives, the full
+    permitted set from LICENSE 3(b)(1). "" never clears."""
+    if guard == "neg":
+        return bool(NEGATOR.search(_clause_window(text, m.start())))
+    if guard == "intent":
+        window = _clause_window(text, m.start())
+        return bool(NEGATOR.search(window) or INTENT_HEDGE.search(window))
+    if guard == "sharealike":
+        window = _sentence_window(text, m.start(), m.end())
+        return bool(LATER_ALT.search(window) and COMPAT_ALT.search(window))
+    return False
+
+
 def scan(text):
     """Return a list of (pattern_name, snippet) overclaim findings in one page's visible text."""
     findings = []
-    for name, pat, neg_aware in PATTERNS:
+    for name, pat, guard in PATTERNS:
         for m in pat.finditer(text):
-            if neg_aware and NEGATOR.search(_clause_window(text, m.start())):
+            if _guard_clears(guard, text, m):
                 continue
             findings.append((name, _snippet(text, m.start(), m.end())))
     return findings
@@ -279,7 +394,12 @@ POSITIVE = [
     "One shared standard across every assistant your team uses.",     # one-standard-across (draft.html)
     "One definition of done, applied by every assistant.",            # applied-by-every (teams.html)
     "Every assistant on the team works to the same ordering.",        # universal-subject works-to-same (teams.html)
-    "Improvements come back under the same licence.",                 # ShareAlike imprecision (about/development.html)
+    "The guardrails are portable across every toolchain.",            # portable-across compat (draft/teams.html)
+    "It reaches across every assistant on your team.",                # across-every/all compat
+    "A colleague on one assistant is working to the same rules as a colleague on another.",  # working-to-same compat (teams.html)
+    "Improvements come back under the same licence.",                 # ShareAlike absolute (about/development.html)
+    "Improvements contributed back carry the same ShareAlike licence.",  # ShareAlike absolute, verb carry, ShareAlike interposed (teams.html)
+    "A fix can be reused under the same or a compatible ShareAlike licence.",  # ShareAlike two-alternative: names compatible but drops "or later" (teams/about/development.html)
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",
@@ -293,7 +413,12 @@ NEGATIVE = [
     "One shared standard, intended to reach across the assistants your team uses.",      # softened one-standard-across
     "One definition of done, intended for every assistant on the team.",                 # softened applied-by-every
     "Every assistant on the team is meant to work to the same ordering.",                # softened works-to-same (intent, bare "work")
-    "Contributions come back under the same or a compatible ShareAlike licence.",        # precise ShareAlike wording
+    "The guardrails are designed to be portable across the tools you use.",              # softened portable-across (intent)
+    "It is intended to reach across every assistant on your team.",                      # softened across-every/all (intent)
+    "A colleague on one assistant is meant to work to the same rules as a colleague on another.",  # softened working-to-same (intent, bare "work")
+    "A subagent works under the same rules as the session that spawned it.",             # development.html mechanism claim: "works under", not "works to"; no licence
+    "Contributions come back under CC BY-SA 4.0 or later, or a BY-SA Compatible License.",  # precise ShareAlike wording: all three alternatives, drops "the same"
+    "The Adapter's License You apply must be a Creative Commons license with the same License Elements, this version or later, or a BY-SA Compatible License.",  # LICENSE 3(b)(1): names "the same" but the full permitted set clears it
     "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
 ]
 
@@ -349,6 +474,9 @@ def main():
             continue
         for name, snip in scan(parser.text()):
             findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
+        for meta in parser.meta:
+            for name, snip in scan(meta):
+                findings.append("{} (meta): overclaim [{}] -> {}".format(rel, name, snip))
     if findings:
         print("FAIL: {} overclaim issue(s)".format(len(findings)))
         for finding in sorted(set(findings)):
