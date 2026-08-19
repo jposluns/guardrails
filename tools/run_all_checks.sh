@@ -46,7 +46,10 @@ run_gate "portability" python3 tools/check_portability.py
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
 run_gate "site"      python3 tools/check_site.py
+run_gate "overclaim-selftest" python3 tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 tools/check_overclaim.py
+run_gate "footer-selftest" python3 tools/check_footer.py --self-test
+run_gate "footer" python3 tools/check_footer.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py

@@ -4,9 +4,9 @@ For each thing AIQT does, the claim and its limitation stand side by side, each 
 
 ## What exists today
 
-Claim: AIQT 1.0.0, the chat assistant, is released and installable today: a Skill for Claude, or a portable instruction file for any other assistant. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments.
+Claim: AIQT 1.0.0, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments.
 
-Limitation: A 1.1.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all.
+Limitation: No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.1.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all.
 
 Evidence: [The 1.0.0 release](https://aiqt.ai/evidence#release) [Where 1.1.0 stands](https://aiqt.ai/development#availability)
 
@@ -28,7 +28,7 @@ Evidence: [What AIQT does not do](https://aiqt.ai/evidence#limits)
 
 ## Security coverage
 
-Claim: AIQT ships a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization.
+Claim: AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.0 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.1.0 design, not yet shipped.
 
 Limitation: It is not a static analyzer, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Deeper per-language depth is a 1.1.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for.
 
@@ -44,7 +44,7 @@ Evidence: [How the crosswalk is built](https://aiqt.ai/mappings#methodology) [Th
 
 ## How AIQT itself is verified, and its change record
 
-Claim: Substantive changes to the pack are reviewed before they land by independent verifiers from different model families, each briefed to refute rather than confirm; the standing floor is three families. Every change is recorded in the public change log.
+Claim: Substantive changes to the pack are reviewed before they land by independent verifiers from different model families, each briefed to refute rather than confirm. This project holds its own pack to a standing floor of three families; the pack's portable rule for adopters is two families for substantive work, and a third for critical changes. Every substantive change is recorded; the public change log is a curated release-level view.
 
 Limitation: This describes how the AIQT project verifies its own pack; it says nothing about whether changes you make with AIQT installed receive the same review. Routine bookkeeping changes run the mechanical gates only.
 

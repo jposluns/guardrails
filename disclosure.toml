@@ -14,8 +14,8 @@ site_base = "https://aiqt.ai"
 [[row]]
 id = "what-exists"
 topic = "What exists today"
-claim = "AIQT 1.0.0, the chat assistant, is released and installable today: a Skill for Claude, or a portable instruction file for any other assistant. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments."
-limitation = "A 1.1.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all."
+claim = "AIQT 1.0.0, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments."
+limitation = "No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.1.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all."
 evidence = [
   { text = "The 1.0.0 release", href = "/evidence#release" },
   { text = "Where 1.1.0 stands", href = "/development#availability" },
@@ -43,7 +43,7 @@ evidence = [
 [[row]]
 id = "security-coverage"
 topic = "Security coverage"
-claim = "AIQT ships a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization."
+claim = "AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.0 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.1.0 design, not yet shipped."
 limitation = "It is not a static analyzer, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Deeper per-language depth is a 1.1.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for."
 evidence = [
   { text = "Per-language depth, composed at install", href = "/tech-details#composed" },
@@ -63,7 +63,7 @@ evidence = [
 [[row]]
 id = "how-aiqt-is-verified"
 topic = "How AIQT itself is verified, and its change record"
-claim = "Substantive changes to the pack are reviewed before they land by independent verifiers from different model families, each briefed to refute rather than confirm; the standing floor is three families. Every change is recorded in the public change log."
+claim = "Substantive changes to the pack are reviewed before they land by independent verifiers from different model families, each briefed to refute rather than confirm. This project holds its own pack to a standing floor of three families; the pack's portable rule for adopters is two families for substantive work, and a third for critical changes. Every substantive change is recorded; the public change log is a curated release-level view."
 limitation = "This describes how the AIQT project verifies its own pack; it says nothing about whether changes you make with AIQT installed receive the same review. Routine bookkeeping changes run the mechanical gates only."
 evidence = [
   { text = "One QA standard, whichever model checks", href = "/tech-details#qa-standard" },

@@ -9,8 +9,11 @@ limitation and its pointer. The load step fails closed (exit 2) before anything 
   1. an unknown key (top level, row, or evidence entry): a typo like `limitations` can never silently
      drop a guard;
   2. a row missing a non-empty id/topic/claim/limitation or a non-empty evidence array;
-  3. an href that is neither site-internal ("/...") nor external ("https://..."): check_site.py then
-     validates every internal target and anchor;
+  3. an href that is not a well-formed site-internal path or external HTTPS URL: the href is PARSED,
+     not prefix-matched, so a hostless "https://" and a scheme-relative "//host/x" both fail closed
+     (a prefix match let them render). An internal link is one leading slash with no scheme and no
+     netloc; an external link is https with a non-empty host. check_site.py then validates every
+     internal target and anchor;
   4. a duplicate id, or an id that is not [a-z0-9-]+ (it becomes the HTML id disclosure-<id>);
   5. an en/em dash in any emitted text (check_no_dashes.py does not scan root toml, so this is the dash
      gate for disclosure.toml, exactly as gen_mappings.py:_no_dash is for the manifests);
@@ -28,6 +31,7 @@ import html
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, replace_block, reconcile  # noqa: E402
@@ -69,6 +73,27 @@ def _guard(value, where):
     if EN in value or EM in value:
         raise ValueError("{}: emitted text contains an en/em dash: {!r}".format(where, value))
     return value
+
+
+def _check_href(href, where):
+    """Fail closed unless href is a well-formed site-internal path or external HTTPS URL. Parse it
+    (urlsplit), never prefix-match: a prefix check on 'https://' or '/' admits a hostless 'https://'
+    and a scheme-relative '//host/x'. An internal link is a single leading slash with no scheme and
+    no netloc; an external link is https with a non-empty host. Everything else raises ValueError."""
+    parts = urlsplit(href)
+    if parts.scheme:
+        if parts.scheme.lower() != "https" or not parts.hostname:
+            raise ValueError(
+                "{}: href {!r} must be an https URL with a host, or a site-internal '/path'".format(
+                    where, href))
+    elif parts.netloc:
+        # a scheme-relative "//host/x" has no scheme but a netloc: not an internal path, fail closed
+        raise ValueError("{}: href {!r} is scheme-relative (//host); use https:// or '/path'".format(
+            where, href))
+    elif not (href.startswith("/") and not href.startswith("//")):
+        raise ValueError(
+            "{}: href {!r} must be an internal '/path' or an external https URL".format(where, href))
+    return href
 
 
 def validate(data):
@@ -117,9 +142,7 @@ def validate(data):
                     where, ei, ", ".join(sorted(unknown))))
             etext = _guard(ev.get("text"), "{} evidence[{}] text".format(where, ei))
             href = _guard(ev.get("href"), "{} evidence[{}] href".format(where, ei))
-            if not (href.startswith("/") or href.startswith("https://")):
-                raise ValueError("{}: evidence[{}] href {!r} must start with '/' or 'https://'".format(
-                    where, ei, href))
+            _check_href(href, "{} evidence[{}] href".format(where, ei))
             evidence.append({"text": etext, "href": href})
         pending = None
         if "pending" in row:
@@ -188,6 +211,10 @@ def _self_test():
         ("empty evidence array", {**good, "row": [{**good["row"][0], "evidence": []}]}),
         ("evidence empty href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": ""}]}]}),
         ("bad href scheme", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "ftp://x"}]}]}),
+        ("hostless https href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "https://"}]}]}),
+        ("scheme-relative href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "//evil.example/x"}]}]}),
+        ("scheme-relative host-only href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "//cdn.example"}]}]}),
+        ("hostless relative href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "evidence#x"}]}]}),
         ("bad id chars", {**good, "row": [{**good["row"][0], "id": "Bad Id"}]}),
         ("duplicate id", {**good, "row": [good["row"][0], good["row"][0]]}),
         ("en dash", {**good, "row": [{**good["row"][0], "claim": "a" + EN + "b"}]}),
@@ -202,6 +229,17 @@ def _self_test():
             failures.append("MALFORMED INPUT ACCEPTED: {}".format(label))
         except ValueError:
             pass
+    # Positive cases: a good internal link and a good external https link must both validate.
+    good_hrefs = [
+        ("good internal link", "/evidence#release"),
+        ("good external https link", "https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md"),
+    ]
+    for label, href in good_hrefs:
+        variant = {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": href}]}]}
+        try:
+            validate(variant)
+        except ValueError as exc:
+            failures.append("well-formed {} REFUSED: {}".format(label, exc))
     try:
         title, note, site_base, rows = validate(good)
         render_site(rows)
@@ -213,7 +251,8 @@ def _self_test():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: gen_disclosure self-test ({} refusal classes, 1 happy path)".format(len(bad)))
+    print("PASS: gen_disclosure self-test ({} refusal classes, {} good hrefs, 1 happy path)".format(
+        len(bad), len(good_hrefs)))
     return 0
 
 
