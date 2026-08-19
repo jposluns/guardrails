@@ -373,6 +373,16 @@ protocol flow before granting access: the token issuer, audience, signature, and
 nonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact
 relying party requested. A token is trusted only after every one of these checks passes.
 
+## Validate and contain uploaded files
+
+An uploaded file is accepted only when its extension is on an allow-list and its actual content is
+validated to match that expected type; the client-supplied filename and declared content type are not
+trusted on their own. Its size and any archive expansion are bounded before processing. It is stored
+under an application-generated name outside the web root and any executable or directly served path, and
+is never executed or included as code. It is served back only with a safe, explicit content type and a
+content-disposition that forces download rather than inline rendering, so an accepted upload is not
+turned into executable or active content on the system that received it.
+
 ## Human authorization for consequential actions
 
 A destructive, financial, irreversible, or configuration-changing action is taken only with explicit human
@@ -498,7 +508,9 @@ registry itself, not assumed from a plausible-looking name in generated text.
 Tool-call depth and recursion, token and cost budgets, and request rate are bounded, and the assistant
 fails safe when a bound is reached rather than continuing unchecked. Loops that call tools or spawn work
 carry a limit and a timeout, so a manipulated or runaway agent cannot exhaust resources, run up cost, or
-cascade a failure across a system.
+cascade a failure across a system. Repeated failure of a downstream dependency suppresses further calls
+to it, a circuit breaker or an equivalent backoff that stops while failure persists and probes before
+full traffic resumes, so a degraded component is relieved rather than amplified into a wider outage.
 
 ## Minimize personal data sent to AI services
 

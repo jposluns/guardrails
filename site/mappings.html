@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>742</strong> mappings from <strong>75</strong> of the pack's rules to <strong>393</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>746</strong> mappings from <strong>76</strong> of the pack's rules to <strong>397</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -112,7 +112,7 @@
         <table class="dtable">
           <thead><tr><th>Framework</th><th>Publisher</th><th>Edition</th><th>Relation</th><th>Edition stability</th><th>Identifiers referenced</th></tr></thead>
           <tbody>
-            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>63 of 173</td></tr>
+            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>64 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>72 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>50 of 207</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>13 of 61</td></tr>
@@ -122,8 +122,8 @@
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>16 of 42</td></tr>
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
             <tr><td>OWASP Top 10 for Agentic Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
-            <tr><td>OWASP Application Security Verification Standard</td><td>OWASP Foundation</td><td>5.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>12 of 17</td></tr>
-            <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>23 of 116</td></tr>
+            <tr><td>OWASP Application Security Verification Standard</td><td>OWASP Foundation</td><td>5.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>13 of 17</td></tr>
+            <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>25 of 116</td></tr>
             <tr><td>OWASP Top 10 for LLM Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP MCP Top 10</td><td>OWASP Foundation</td><td>2025</td><td>addresses risk</td><td><span class="pill next">beta</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP Top 10 Proactive Controls</td><td>OWASP Foundation</td><td>4.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>7 of 10</td></tr>
@@ -1781,6 +1781,24 @@
         </div>
       </details>
       <details class="more">
+        <summary>Validate and contain uploaded files</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>OWASP Application Security Verification Standard (5.0.0): supports control
+              <ul>
+                <li>V5: File Handling (tight)</li>
+              </ul>
+            </li>
+            <li>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)): aligns with guidance
+              <ul>
+                <li>file-upload: File Upload Cheat Sheet (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
         <summary>Human authorization for consequential actions</summary>
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">View this rule on GitHub</a></p>
@@ -2316,6 +2334,7 @@
             <li>MITRE ATLAS (2026.06): mitigates technique
               <ul>
                 <li>AML.T0010.002: Data (broad)</li>
+                <li>AML.T0066: Retrieval Content Crafting (broad)</li>
                 <li>AML.T0018.000: Poison AI Model (tight)</li>
                 <li>AML.T0020: Poison Training Data (tight)</li>
                 <li>AML.T0059: Erode Dataset Integrity (tight)</li>
@@ -2900,7 +2919,12 @@
             </li>
             <li>OWASP Top 10 for Agentic Applications (2026): addresses risk
               <ul>
-                <li>ASI08: Cascading Failures (broad)</li>
+                <li>ASI08: Cascading Failures (tight)</li>
+              </ul>
+            </li>
+            <li>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)): aligns with guidance
+              <ul>
+                <li>denial-of-service: Denial of Service Cheat Sheet (broad)</li>
               </ul>
             </li>
             <li>OWASP Top 10 for LLM Applications (2026): addresses risk
@@ -3031,7 +3055,7 @@
       <details class="more">
         <summary>MITRE ATLAS (2026.06)</summary>
         <div class="inner">
-          <p>mitigates technique. 63 of 173 identifiers referenced.</p>
+          <p>mitigates technique. 64 of 173 identifiers referenced.</p>
           <ul>
             <li>AML.T0010.001: AI Software
               <ul>
@@ -3202,6 +3226,11 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md">Redact sensitive content from logs</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md">Secure by default configuration</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0066: Retrieval Content Crafting
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (broad)</li>
               </ul>
             </li>
             <li>AML.T0067.000: Citations
@@ -5025,7 +5054,7 @@
             </li>
             <li>ASI08: Cascading Failures
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md">Bounded consumption and safe failure</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md">Bounded consumption and safe failure</a> (tight)</li>
               </ul>
             </li>
             <li>ASI09: Human-Agent Trust Exploitation
@@ -5044,7 +5073,7 @@
       <details class="more">
         <summary>OWASP Application Security Verification Standard (5.0.0)</summary>
         <div class="inner">
-          <p>supports control. 12 of 17 identifiers referenced.</p>
+          <p>supports control. 13 of 17 identifiers referenced.</p>
           <ul>
             <li>V1: Encoding and Sanitization
               <ul>
@@ -5057,6 +5086,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md">Validate external input at the boundary</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md">Generated output is untrusted input</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md">Validate tool arguments before use</a> (tight)</li>
+              </ul>
+            </li>
+            <li>V5: File Handling
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md">Validate and contain uploaded files</a> (tight)</li>
               </ul>
             </li>
             <li>V6: Authentication
@@ -5121,7 +5155,7 @@
       <details class="more">
         <summary>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04))</summary>
         <div class="inner">
-          <p>aligns with guidance. 23 of 116 identifiers referenced.</p>
+          <p>aligns with guidance. 25 of 116 identifiers referenced.</p>
           <ul>
             <li>ai-agent-security: AI Agent Security Cheat Sheet
               <ul>
@@ -5154,6 +5188,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md">Sound cryptography</a> (tight)</li>
               </ul>
             </li>
+            <li>denial-of-service: Denial of Service Cheat Sheet
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
             <li>deserialization: Deserialization Cheat Sheet
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md">Deserialize untrusted data only as data</a> (tight)</li>
@@ -5163,6 +5202,11 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md">A check fails closed on input it cannot read</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md">Fail closed in security-relevant paths</a> (broad)</li>
+              </ul>
+            </li>
+            <li>file-upload: File Upload Cheat Sheet
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md">Validate and contain uploaded files</a> (tight)</li>
               </ul>
             </li>
             <li>injection-prevention: Injection Prevention Cheat Sheet

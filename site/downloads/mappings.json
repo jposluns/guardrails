@@ -10,7 +10,7 @@
       "citation_unit": "technique",
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
-      "ids_cited": 63,
+      "ids_cited": 64,
       "ids_total": 173
     },
     "csa-aicm": {
@@ -140,7 +140,7 @@
       "citation_unit": "chapter",
       "source_artefact": "OWASP Application Security Verification Standard (ASVS) 5.0.0 (tag v5.0.0_release)",
       "retrieved": "2026-08-16",
-      "ids_cited": 12,
+      "ids_cited": 13,
       "ids_total": 17
     },
     "owasp-cheatsheet": {
@@ -153,7 +153,7 @@
       "citation_unit": "cheat sheet",
       "source_artefact": "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)",
       "retrieved": "2026-08-16",
-      "ids_cited": 23,
+      "ids_cited": 25,
       "ids_total": 116
     },
     "owasp-llm": {
@@ -3911,6 +3911,26 @@
       "identifier_title": "Secure Digital Identities"
     },
     {
+      "rule_id": "secupl",
+      "rule_title": "Validate and contain uploaded files",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md",
+      "framework": "owasp-asvs",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "V5",
+      "identifier_title": "File Handling"
+    },
+    {
+      "rule_id": "secupl",
+      "rule_title": "Validate and contain uploaded files",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "tight",
+      "identifier": "file-upload",
+      "identifier_title": "File Upload Cheat Sheet"
+    },
+    {
       "rule_id": "sechau",
       "rule_title": "Human authorization for consequential actions",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
@@ -5479,6 +5499,16 @@
       "fit": "broad",
       "identifier": "AML.T0010.002",
       "identifier_title": "Data"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0066",
+      "identifier_title": "Retrieval Content Crafting"
     },
     {
       "rule_id": "secpsn",
@@ -7326,9 +7356,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
       "framework": "owasp-asi",
       "relation": "addresses risk",
-      "fit": "broad",
+      "fit": "tight",
       "identifier": "ASI08",
       "identifier_title": "Cascading Failures"
+    },
+    {
+      "rule_id": "secres",
+      "rule_title": "Bounded consumption and safe failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "denial-of-service",
+      "identifier_title": "Denial of Service Cheat Sheet"
     },
     {
       "rule_id": "secres",
