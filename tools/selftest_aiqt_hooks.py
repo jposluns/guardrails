@@ -228,6 +228,23 @@ def main():
         expect("(br-a) branch -D asks", "git branch -D other", "ask", cwd=rp)
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
+        # === EN-6 round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
+        # The raw fallback (shlex ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
+        # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
+        # longer slip past the old '-D'/'--delete'-only raw check into a silent ALLOW; every form ASKS.
+        _br_hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes shlex raise -> raw fallback
+        expect("(r19a-1) unparseable branch -d -f asks (was a silent allow)",
+               "git branch -d -f topic" + _br_hd, "ask", cwd=rp)
+        expect("(r19a-2) unparseable branch -df (clustered) asks",
+               "git branch -df topic" + _br_hd, "ask", cwd=rp)
+        expect("(r19a-3) unparseable branch --del --for (abbrev) asks",
+               "git branch --del --for topic" + _br_hd, "ask", cwd=rp)
+        # The PARSEABLE branch classifier is UNCHANGED by the raw-path widening: a parseable force-delete
+        # still ASKS, and a parseable non-delete branch-create still ALLOWs.
+        expect("(r19a-4) parseable branch -d -f still asks", "git branch -d -f other", "ask", cwd=rp)
+        expect("(r19a-5) parseable non-delete branch-create still allows", "git branch newbranch",
+               "allow", cwd=rp)
+
         # === previously-fooled shell-expansion pathspecs now ASK (F-62.1, F-64.1/2, F-65.F1) ==
         # A pathspec carrying a variable, command substitution, glob, brace, or tilde used to be probed
         # LITERALLY, so the path-disjoint fast path fired and a real discard was silently ALLOWED. Coarse:
@@ -350,6 +367,29 @@ def main():
                "GUARDRAIL_ALLOW_DISCARD=1 git -C /tmp reset --hard", "allow", cwd=rp)
         # No regression (opt-b, co-a, rs-a above): a plain parseable opt-out still ALLOWs; a plain lossy form
         # with no opt-out still ASKS (co-a) and a dirty whole-tree clobber still DENIES (rs-a).
+
+        # === EN-6 round-19 Fix B: the redirect/ambient ASK emits the _OPTOUT_PRISTINE guidance ======
+        # A pristine repository-view-redirected form (a 'git -C <dir> <verb>' whose opt-out short-circuits
+        # BEFORE the redirect gate) is opted out by prefixing the command AS ISSUED, keeping its -C. So its
+        # ASK must carry the _OPTOUT_PRISTINE ("prefix this command") guidance, NOT the _OPTOUT_REISSUE
+        # ("re-issue it as a parseable pristine bare 'git <verb>'") text, which drops the -C and is false here.
+        data_bopt = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                     "tool_input": {"command": "git -C /tmp reset --hard"}, "cwd": rp}
+        code_bopt, obj_bopt, _ = handler(data_bopt)
+        dec_bopt = obj_bopt.get("hookSpecificOutput", {}).get("permissionDecision") \
+            if isinstance(obj_bopt, dict) else None
+        reason_bopt = obj_bopt.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
+            if isinstance(obj_bopt, dict) else ""
+        banner_bopt = obj_bopt.get("systemMessage", "") if isinstance(obj_bopt, dict) else ""
+        if not (code_bopt == 0 and dec_bopt == "ask"):
+            failures.append("(r19b-1) redirect/ambient view-uncertainty must ASK, got code={!r} dec={!r}"
+                            .format(code_bopt, dec_bopt))
+        if aiqt_hooks._OPTOUT_PRISTINE.strip() not in reason_bopt:
+            failures.append("(r19b-2) redirect ASK reason must carry the _OPTOUT_PRISTINE guidance")
+        if aiqt_hooks._OPTOUT_REISSUE.strip() in reason_bopt:
+            failures.append("(r19b-3) redirect ASK reason must NOT carry the _OPTOUT_REISSUE guidance")
+        if "prefix GUARDRAIL_ALLOW_DISCARD=1 to skip" not in banner_bopt:
+            failures.append("(r19b-4) redirect ASK banner must be the pristine 'prefix ...' form")
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file asks on dirty tree",

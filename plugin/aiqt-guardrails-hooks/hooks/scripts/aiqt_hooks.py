@@ -41,7 +41,9 @@ also rules out &&/||/|&, every redirection form, and every command/process subst
 word, and a command word that is LITERALLY 'git' (not a path, not a wrapper such as sudo/nice/timeout/nohup/
 env/command/exec/builtin/xargs/time/!/sh -c/bash -c). ANY shell metacharacter, wrapper, redirect, reserved
 word, second command, or option the classifier cannot resolve makes the command not-pristine and it ASKS,
-WITHOUT ever consulting the probe (a safe over-ask). Only a metacharacter-free 'git <verb> <plain args>'
+WITHOUT ever consulting the probe (a safe over-ask) - but a wrapper is caught only while the raw scan still
+sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical (a wrapper that ALSO fragments
+the verb is a disclosed residual, below). Only a metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
@@ -50,7 +52,10 @@ checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; ev
 No lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean tree, or a
 pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost
 of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git, a discard performed outside the Bash tool, or persistent shell/config state; the
+function renaming git; deliberate token fragmentation or obfuscation of the verb (a wrapper whose git verb
+is SPLIT so the raw scan misses the contiguous keyword, e.g. env git re'set' --hard or eval git re'set',
+whose raw string carries no contiguous 'reset', is silently ALLOWED - a best-effort residual, not chased);
+a discard performed outside the Bash tool; or persistent shell/config state; the
 deferred recovery/snapshot layer is the backstop. The one probe kept is read-only and offline; it never
 mutates the repo.
 
@@ -812,7 +817,10 @@ _DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
 _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
 # Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote). We cannot
 # segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
-# always-lossy verbs, or a 'branch' paired with a delete flag ('-D', a clustered '-...D', or '--delete').
+# always-lossy verbs, or 'branch' in ANY form. On the raw path we do NOT parse branch flags: an unparseable
+# 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' cannot be told from a create or a list, so ANY
+# raw 'git' + 'branch' is treated as lossy and ASKS regardless of a delete flag. This over-asks a benign
+# unparseable 'git branch --list' (rare, safe) and ends the raw-branch silent-allow gap.
 # A hit -> ASK (cannot prove safe); no hit -> ALLOW (the true boundary). Mirrors how diff_source/
 # commit_identity fall back to a conservative raw scan on a parse failure. The opt-out is NOT consulted on
 # this path: the guard cannot parse the command, so it cannot trust an opt-out-looking prefix inside it; an
@@ -820,7 +828,6 @@ _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insen
 _RAW_GIT_RE = re.compile(r"(?i)\bgit\b")
 _RAW_LOSSY_VERB_RE = re.compile(r"(?i)\b(?:checkout|switch|restore|reset|clean|rm|stash)\b")
 _RAW_BRANCH_RE = re.compile(r"(?i)\bbranch\b")
-_RAW_BRANCH_DELETE_RE = re.compile(r"(?:(?<![\w-])-[A-Za-z]*D)|(?:--delete\b)")
 # Shell wrappers/prefixes that stand IN FRONT of the git command so 'git <lossy>' is not the invocation
 # actually being classified. The EN-6 ultra-conservative pass widens the GD-41 set (command/exec/builtin/
 # env/xargs/time/!) with the privilege/scheduling/interpreter prefixes sudo/nice/timeout/nohup/sh/bash: when
@@ -840,11 +847,15 @@ _SHELL_RESERVED_WORDS = frozenset((
     "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "function", "select", "in", "[[", "]]", "{", "}"))
 # The safe alternatives named in every DENY/ASK reason, so the actor is never left without a next step.
-# The opt-out guidance is PATH-AWARE and appended by the caller, because the opt-out is honoured only on a
-# pristine bare form: on a pristine bare command the leading GUARDRAIL_ALLOW_DISCARD=1 prefix opts THIS
-# command out (_OPTOUT_PRISTINE), but on a raw/unparseable, non-pristine, or repository-view-redirected
-# command the opt-out is NOT honoured on the command as issued, so the actor is told to RE-ISSUE the discard
-# as a parseable pristine bare form carrying the prefix (_OPTOUT_REISSUE).
+# The opt-out guidance is PATH-AWARE and appended by the caller. The opt-out is honoured on the command AS
+# ISSUED whenever a leading GUARDRAIL_ALLOW_DISCARD=1 prefix short-circuits to ALLOW: on a pristine bare
+# command the leading prefix opts THIS command out (_OPTOUT_PRISTINE), and because that short-circuit fires
+# BEFORE the repository-view-redirect gate, a pristine repository-view-redirected form (a 'git -C <dir>
+# <verb>' or an ambient-GIT_* form that ASKS at that gate) is ALSO opted out by prefixing the command as
+# issued, keeping its -C (_OPTOUT_PRISTINE too). Only on a raw/unparseable or non-pristine command, where no
+# pristine bare form is present to carry the prefix, is the opt-out NOT honoured on the command as issued, so
+# the actor is told to RE-ISSUE the discard as a parseable pristine bare form carrying the prefix
+# (_OPTOUT_REISSUE).
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
     "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
@@ -881,13 +892,13 @@ def _segment_has_optout(tokens):
 
 def _raw_has_lossy_git(command):
     """True when the RAW command string names git AND a recognized work-losing verb (an always-lossy verb,
-    or 'branch' paired with a delete flag). A coarse fail-safe used both by the unparseable-command fallback
-    and by the wrapper-obscured path (GD-41 blocker 8), where a wrapper hides the git verb from the token
-    scan; a hit there means the guard cannot classify with certainty and ASKS."""
+    or 'branch' in ANY form: the raw path does not parse branch flags, so any raw 'git' + 'branch' is
+    treated as lossy regardless of a delete flag). A coarse fail-safe used both by the unparseable-command
+    fallback and by the wrapper-obscured path (GD-41 blocker 8), where a wrapper hides the git verb from the
+    token scan; a hit there means the guard cannot classify with certainty and ASKS."""
     if not _RAW_GIT_RE.search(command):
         return False
-    return bool(_RAW_LOSSY_VERB_RE.search(command) or
-                (_RAW_BRANCH_RE.search(command) and _RAW_BRANCH_DELETE_RE.search(command)))
+    return bool(_RAW_LOSSY_VERB_RE.search(command) or _RAW_BRANCH_RE.search(command))
 
 
 def _git_sub_and_args(tokens):
@@ -1223,9 +1234,10 @@ def _discard_ask_reason(kind, detail, optout=None):
     """The (reason, banner) pair for an ASK. Stored by the handler and emitted via _ask if no segment
     DENIES first, so a confirmed loss still wins over a recoverable ask. `optout` selects the PATH-AWARE
     opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
-    bare command whose own leading GUARDRAIL_ALLOW_DISCARD=1 prefix opts THIS command out, or
-    _OPTOUT_REISSUE on a raw/non-pristine/view-redirected command where the opt-out is honoured only on a
-    re-issued pristine bare form, never on the command as issued."""
+    bare command, INCLUDING a pristine repository-view-redirected form (its leading GUARDRAIL_ALLOW_DISCARD=1
+    prefix opts THIS command out, short-circuiting even the redirect gate), or _OPTOUT_REISSUE on a
+    raw/unparseable or non-pristine command where no pristine bare form is present, so the opt-out is honoured
+    only on a re-issued pristine bare form, never on the command as issued."""
     if optout is None:
         optout = _OPTOUT_PRISTINE
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} {}. Confirm before proceeding, or commit "
@@ -1343,7 +1355,7 @@ def _git_discard_fallback(command, cwd=None):
     read as opt-outs to a raw scan), so an unparseable in-scope command ALWAYS ASKS regardless of any leading
     opt-out-looking prefix. The opt-out is honoured ONLY on a PARSEABLE pristine bare command (see
     _segment_has_optout). If git is present AND a recognized work-losing verb keyword is present (an
-    always-lossy verb, or 'branch' with a delete flag) -> ASK (cannot prove safe); otherwise ALLOW (the true
+    always-lossy verb, or 'branch' in any form) -> ASK (cannot prove safe); otherwise ALLOW (the true
     boundary). Documented best-effort: a genuinely clean but unparseable command that merely mentions a lossy
     verb keyword may ASK.
 
@@ -1776,7 +1788,11 @@ def git_discard(data):
     probe, or a softer/index-only discard. No lossy command is ever silently ALLOWED unless it is a pristine
     bare git on a provably-clean tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1
     opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
-    (a non-git command, or no recognized lossy verb). The status probe (git status --porcelain, config-forced
+    (a non-git command, or no recognized lossy verb). A wrapper is in scope only while the raw scan still
+    sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
+    fragments the verb (env git re'set' --hard / eval git re'set', whose raw string carries no contiguous
+    'reset') reads as 'no recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual,
+    not chased. The status probe (git status --porcelain, config-forced
     to report untracked) is read-only and offline.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
@@ -1913,7 +1929,7 @@ def git_discard(data):
             "cannot prove the command's repository view is the session directory (the probe scrubs an "
             "ambient var, but the actual command still inherits it, and a command-local redirect points "
             "elsewhere); any recovery snapshot is best-effort against the session cwd and may not capture "
-            "a redirected tree", ao_snap, _OPTOUT_REISSUE)
+            "a redirected tree", ao_snap, _OPTOUT_PRISTINE)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _ask(*_discard_ask_reason(
