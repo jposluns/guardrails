@@ -375,11 +375,13 @@ relying party requested. A token is trusted only after every one of these checks
 
 ## Validate and contain uploaded files
 
-A file received from an untrusted source is validated by its actual content, never by its declared
-name, extension, or content type, and its size and archive expansion are bounded before processing.
-It is stored under a generated name outside any executable or directly served path and served back
-only with a safe, explicit content type, so an upload can never become code on the system that
-accepted it.
+An uploaded file is accepted only when its extension is on an allow-list and its actual content is
+validated to match that expected type; the client-supplied filename and declared content type are not
+trusted on their own. Its size and any archive expansion are bounded before processing. It is stored
+under an application-generated name outside the web root and any executable or directly served path, and
+is never executed or included as code. It is served back only with a safe, explicit content type and a
+content-disposition that forces download rather than inline rendering, so an accepted upload is not
+turned into executable or active content on the system that received it.
 
 ## Human authorization for consequential actions
 
