@@ -207,6 +207,24 @@ def main():
         expect("(r22-5) switch -c plain create still allows (unchanged)", "git switch -c foo", "allow",
                cwd=rp)
 
+        # === EN-6 round-23 Fix F-85: argument-aware checkout/switch -b/-B/-c/-C parsing ==============
+        # The new-branch NAME argument of -b/-B (checkout) and -c/-C (switch), whether ATTACHED ('-bfoo') or
+        # SEPARATED ('-b foo'), is that option's value and is NOT char-scanned as clustered force flags. So
+        # an attached name whose characters include 'f'/'B'/'C' ('-bfoo', '-bBranch', '-cfeature') is a plain
+        # create -> ALLOW even on a dirty tree, never mis-read as carrying -f/-B/-C. The force-create forms
+        # (-Bfoo/-B foo, -Cfoo/-C foo, --force-create foo) still ASK. This mirrors the branch -u<upstream>
+        # parser (F-82) and closes the round-21 char-scan over-restriction.
+        expect("(f85-co1) checkout -bfoo attached name allows", "git checkout -bfoo", "allow", cwd=rp)
+        expect("(f85-co2) checkout -bBranch attached name (the B) allows", "git checkout -bBranch", "allow",
+               cwd=rp)
+        expect("(f85-co3) checkout -b foo separated name allows", "git checkout -b foo", "allow", cwd=rp)
+        expect("(f85-co4) checkout -Bfoo attached force-create asks", "git checkout -Bfoo", "ask", cwd=rp)
+        expect("(f85-co5) checkout -B foo separated force-create asks", "git checkout -B foo", "ask", cwd=rp)
+        expect("(f85-sw1) switch -cfeature attached name allows", "git switch -cfeature", "allow", cwd=rp)
+        expect("(f85-sw2) switch -Cfoo attached force-create asks", "git switch -Cfoo", "ask", cwd=rp)
+        expect("(f85-sw3) switch -C foo separated force-create asks", "git switch -C foo", "ask", cwd=rp)
+        expect("(f85-sw4) switch --force-create foo asks", "git switch --force-create foo", "ask", cwd=rp)
+
         # === restore =========================================================================
         expect("(re-a) restore dirty asks", "git restore file.txt", "ask", cwd=rp)
         # Blocker 6: restore --staged is no longer an unconditional allow; on a not-provably-clean tree it
@@ -615,7 +633,11 @@ def main():
                cwd=rh)
 
         # === malformed / robustness (F-66.7) ================================================
-        # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash.
+        # A malformed tool_input (a string, not a dict) -> boundary ALLOW (fail open), not a crash. This is
+        # the DELIBERATE true-boundary fail-open the module and git_discard docstrings state (F-86): a
+        # malformed/missing command is input git_discard cannot read as a discard, so it fails OPEN here
+        # rather than fail-CLOSED like the other PreToolUse controls; it never silently allows a RECOGNIZED
+        # discard, only input it cannot recognize as one.
         malformed = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": "malformed"}
         code, stdout_obj, _stderr = handler(malformed)
         if not (code == 0 and stdout_obj is None):
@@ -636,6 +658,10 @@ def main():
             (("reset", ["--har"]), "clobber"),            # blocker 5: abbreviated --hard
             (("reset", []), "scoped"),                    # blocker 6: default --mixed changes the index
             (("checkout", ["-b", "new"]), "allow"),
+            (("checkout", ["-bfoo"]), "allow"),             # F-85: attached name, the 'f' is not force
+            (("checkout", ["-bBranch"]), "allow"),          # F-85: attached name, the 'B' is not -B
+            (("checkout", ["-Bfoo"]), "ask"),               # F-85: attached name on the force-create -B
+            (("checkout", ["-B", "foo"]), "ask"),           # F-85: separated name on the force-create -B
             (("checkout", ["-B", "new", "start"]), "ask"),  # F-81: -B force-creates/RESETS a branch ref
             (("checkout", ["-f", "-B", "new"]), "ask"),     # F-81: -B ASKS even combined with -f
             (("checkout", ["-f", "-b", "new"]), "scoped"),  # blocker 7: forced branch-create no early-allow
@@ -652,6 +678,9 @@ def main():
             (("switch", ["--force-create", "new", "start"]), "ask"),  # F-81: long spelling
             (("switch", ["--force-c", "new"]), "ask"),    # F-81: abbreviated --force-create by prefix
             (("switch", ["-c", "new"]), "allow"),         # F-81: plain -c create unchanged
+            (("switch", ["-cfeature"]), "allow"),         # F-85: attached name, the 'f' is not force
+            (("switch", ["-Cfoo"]), "ask"),               # F-85: attached name on the force-create -C
+            (("switch", ["-C", "foo"]), "ask"),           # F-85: separated name on the force-create -C
             (("switch", ["other"]), "allow"),
             (("restore", ["--staged", "file"]), "scoped"),  # blocker 6: --staged can erase staged-only
             (("restore", ["--staged", "--worktree", "file"]), "scoped"),
@@ -1603,7 +1632,9 @@ def main():
           "reflog-recoverable class of branch -f/-M/-C) and ASK, even combined with other flags (F-81); the "
           "branch option parser treats an attached -u<upstream> value as the upstream and not a clustered "
           "force flag, so -ufoo/-uMain/-uCandidate ALLOW while a real force delete/move/copy/reset still "
-          "ASKS (F-82). The prior GD-41 "
+          "ASKS (F-82). The EN-6 round-23 fix is proven: the checkout/switch parser consumes the new-branch "
+          "NAME argument of -b/-B/-c/-C (attached -bfoo or separated -b foo), so -bfoo/-bBranch/-cfeature "
+          "ALLOW while -Bfoo/-B foo/-Cfoo/-C foo/--force-create ASK (F-85). The prior GD-41 "
           "blocker cases and the F-60/F-62/F-64/F-65/F-66 under-block edges still ASK/DENY, and the role "
           "classifier is asserted too. The EN-6 recovery/snapshot layer is proven: a snapshot is taken on a "
           "dirty-tree ASK and on a simulated mis-parse ALLOW, NOT on a provably-clean tree; the real "

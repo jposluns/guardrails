@@ -20,7 +20,8 @@ the user's own permission flow is never bypassed, and a deny decision blocks the
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
-Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read the input it is meant
+Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
+deliberate boundary posture is stated next). A fail-closed control that cannot read the input it is meant
 to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
 string, or an unreadable required field all deny. A detected violation denies the same way. A clean
@@ -28,10 +29,12 @@ pass emits NO decision and exits 0 silently.
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
 to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK
-(permissionDecision "ask", which prompts the human). It fails OPEN (ALLOW) only at the TRUE BOUNDARY - a
-non-git command, or no recognized lossy verb - because that is not a discard it can reason about; an
-UNPARSEABLE command (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and
-ASKS when one is present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
+(permissionDecision "ask", which prompts the human). UNLIKE the fail-closed controls above, it fails OPEN
+(ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
+cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
+discard it can reason about, and it NEVER silently allows a RECOGNIZED discard; an UNPARSEABLE command
+(unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and ASKS when one is
+present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) the outcome is ASK unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND the
 tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive). PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
@@ -957,14 +960,18 @@ def _has_short(tokens, ch):
 
 
 def _has_long_prefix(tokens, full):
-    """True when a '--<name>' option token in tokens is an unambiguous PREFIX of `full` (git accepts
-    '--for' for '--force', '--patc' for '--patch', '--del' for '--delete', '--dis' for '--discard-changes').
-    The name compared is the part before any '=', so '--orphan=x' matches 'orphan'. A bare '--'
-    (empty name) never matches. GD-41 blocker 5: git accepts unambiguous option abbreviations, so a
-    destructive option must be recognized by prefix, not only by its full spelling, or an abbreviated
+    """True when a '--<name>' option token in tokens is a CONSERVATIVE prefix of `full`. The match is
+    deliberately broad: it fires whenever `name` is any leading substring of `full`, WITHOUT verifying that
+    git itself would accept the abbreviation. Git accepts many UNAMBIGUOUS abbreviations ('--patc' for
+    '--patch', '--del' for '--delete', '--dis' for '--discard-changes'), but it REJECTS an AMBIGUOUS one:
+    'git branch --for' is ambiguous with '--format' and 'git switch --for' with '--force-create', so git
+    errors rather than running '--force'. This guard intentionally treats such an ambiguous force-prefix
+    ('--for') as force ANYWAY, routing it to ASK or DENY. The name compared is the part before any '=', so
+    '--orphan=x' matches 'orphan'. A bare '--' (empty name) never matches. GD-41 blocker 5: a destructive
+    option must be recognized by prefix, not only by its full spelling, or an abbreviated
     force/patch/delete/discard slips through as an inert token and is silently allowed. Erring toward a
-    MATCH is safe: over-recognizing a destructive option only routes a form to ASK or DENY, never to a
-    silent allow."""
+    MATCH is safe: over-recognizing a destructive option, even an abbreviation git would reject as
+    ambiguous, only routes a form to ASK or DENY, never to a silent allow."""
     for t in tokens:
         if not t.startswith("--"):
             continue
@@ -1073,9 +1080,50 @@ def _tree_is_clean(repo):
 # reset, and rm --cached, which can erase staged-only content, GD-41 blocker 6), or "clobber" (a WHOLE-TREE
 # overwrite: ALLOW on a clean tree, DENY on a confirmed-dirty tree). kind is a short human label. This
 # recognition is purely lexical and never probes to prove an individual dirty-tree form safe; it only
-# classifies the FORM, matching destructive options by unambiguous PREFIX (blocker 5) and respecting a '--'
+# classifies the FORM, matching destructive options by CONSERVATIVE PREFIX (blocker 5; an ambiguous
+# force-prefix like '--for' is treated as force, erring safe) and respecting a '--'
 # operand boundary (blocker 3), then the handler gates a scoped/clobber form on the single whole-tree clean
 # probe AND on the command being a single simple 'git <verb>' invocation.
+
+# git checkout/switch short options that CONSUME a NEW-BRANCH-NAME argument: '-b'/'-B' (checkout create /
+# force-create), '-c'/'-C' (switch create / force-create). The option letter itself is a genuine flag, but
+# the REST of its cluster token (attached '-bfoo') or the NEXT token (separated '-b foo') is that branch
+# name and must NOT be char-scanned as clustered force flags. Mirrors the branch '-u<upstream>' parser
+# (_branch_parse_options, F-82). checkout has no -c/-C and switch has no -b/-B, so one shared set is safe.
+_CHECKOUT_SWITCH_NAME_OPTS = frozenset(("b", "B", "c", "C"))
+
+
+def _checkout_switch_parse_options(pre):
+    """Parse a checkout/switch option region (already split before any '--') into (short_flags, operands).
+    short_flags is the set of genuine short flag letters; operands is the list of bare operands. A branch-
+    name-taking short option ('-b'/'-B' for checkout, '-c'/'-C' for switch) is recorded as a flag, then the
+    remainder of its cluster token (attached '-bfoo') or the next token (separated '-b foo') is its NEW-
+    BRANCH-NAME value and is NOT char-scanned as force flags. This mirrors _branch_parse_options (F-82) and
+    closes the F-85 over-restriction where an attached name like '-bfoo' (the 'f') or '-bBranch' (the 'B')
+    was char-scanned as carrying -f/-B and mis-routed to DENY/ASK. Long options are not char-scanned here
+    (force/orphan/discard-changes/force-create match by prefix on `pre`)."""
+    short_flags = set()
+    operands = []
+    skip_value = False  # the previous token opened a separated branch-name slot (e.g. '-b <name>')
+    for tok in pre:
+        if skip_value:
+            skip_value = False
+            continue  # this token is a prior option's branch-name VALUE, not a flag or an operand
+        if tok.startswith("--"):
+            continue  # long options match by prefix on `pre`, not char-scanned here
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch in _CHECKOUT_SWITCH_NAME_OPTS:  # record the option, then its branch name is the
+                    short_flags.add(ch)                # rest of this token (or the next token)
+                    if i == len(body) - 1:
+                        skip_value = True  # a bare '-b': the name is the next token
+                    break  # stop the cluster scan; the remainder is the new-branch name, not flags
+                short_flags.add(ch)
+            continue
+        operands.append(tok)  # a bare operand (a branch or a pathspec)
+    return short_flags, operands
+
 
 def _checkout_role(args):
     """git checkout. Force ('-f'/'--force', abbreviations included) is decided FIRST (GD-41 blocker 7). A
@@ -1084,7 +1132,10 @@ def _checkout_role(args):
     when combined with other flags (F-81), before the unforced branch-create allow. A plain branch-create
     ('-b'/'--orphan') only allows when force is ABSENT, because a FORCED branch-create can discard, so
     'checkout -f -b <name>' must fall through to a lossy classification, not the early
-    allow. '-p'/'--patch' (prefix-matched) interactively discards worktree hunks -> scoped. A forced
+    allow. The new-branch NAME of '-b'/'-B' is consumed as that option's ARGUMENT (attached '-bfoo' or
+    separated '-b foo') and is NOT char-scanned as force flags, so '-bfoo'/'-bBranch' ALLOW and are never
+    mis-read as carrying -f/-B (F-85; see _checkout_switch_parse_options). '-p'/'--patch' (prefix-matched)
+    interactively discards worktree hunks -> scoped. A forced
     checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
     be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
     disambiguated by a rev-parse probe - so it is treated as -> scoped (which ASKS on a not-provably-clean
@@ -1096,19 +1147,25 @@ def _checkout_role(args):
     pre, post, _had_sep = _split_pre_post(args)
     if _has_long_prefix(pre, "pathspec-from-file"):  # prefix-matched: '--pathspec-from-f' too
         return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
-    force = "-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
-    if _has_short(pre, "B"):  # -B force-creates/RESETS a branch ref, orphaning committed commits (F-81)
+    short_flags, operands = _checkout_switch_parse_options(pre)  # '-b'/'-B' consume their branch name (F-85)
+    force = "f" in short_flags or _has_long_prefix(pre, "force")
+    if "B" in short_flags:  # -B force-creates/RESETS a branch ref, orphaning committed commits (F-81)
         return ("ask", "git checkout -B (a force branch-create/reset that overwrites an existing branch "
                        "ref and may orphan its commits)")
-    branch_create = (_has_short(pre, "b") or _has_long_prefix(pre, "orphan"))
+    branch_create = ("b" in short_flags or _has_long_prefix(pre, "orphan"))
     if branch_create and not force:
         return ("allow", None)  # create/switch to a new branch; git carries changes and aborts on conflict
-    if "--patch" in pre or _has_short(pre, "p") or _has_long_prefix(pre, "patch"):
+    if "--patch" in pre or "p" in short_flags or _has_long_prefix(pre, "patch"):
         return ("scoped", "git checkout -p/--patch (an interactive worktree-hunk discard)")
-    has_paths = bool(post) or any(not a.startswith("-") for a in pre)
-    if force and not has_paths:
+    has_paths = bool(post) or bool(operands)
+    # A forced branch-create ('checkout -f -b <name>') is lossy but NOT the operand-free whole-tree clobber
+    # (blocker 7): its branch name is consumed by -b so it leaves no operand, yet it must stay SCOPED (a
+    # recoverable ASK), not clobber. Only a force with NO branch-create and NO operand is the certain
+    # whole-tree clobber. (Pre-F-85 the branch name was mis-counted as a bare operand and reached scoped via
+    # has_paths; parsing it as -b's argument keeps that outcome without relying on the mis-count.)
+    if force and not has_paths and not branch_create:
         return ("clobber", "git checkout -f (a forced branch switch that overwrites the worktree)")
-    if has_paths:
+    if has_paths or branch_create:
         return ("scoped", "git checkout (a worktree revert; a forced or branch-create form can discard)")
     if pre:  # options present but none recognized as safe (an abbreviated/exotic option) -> do not trust
         return ("scoped", "git checkout (an option this guard cannot prove non-destructive)")
@@ -1117,23 +1174,29 @@ def _checkout_role(args):
 
 def _switch_role(args):
     """git switch. '-f'/'--force'/'--discard-changes' overwrites the worktree (whole-tree) -> clobber; force
-    and discard-changes are matched by unambiguous PREFIX (blocker 5), so '--for' and '--dis' are recognized.
+    and discard-changes are matched by CONSERVATIVE prefix (blocker 5), so '--dis' is recognized and an
+    ambiguous '--for' (which git itself rejects for switch as ambiguous with '--force-create') is treated as
+    force anyway, erring safe.
     A '-C'/'--force-create' force branch-create/RESET (matched by prefix too) overwrites an existing branch
     ref and can orphan committed commits (the same reflog-recoverable loss class as 'git branch
-    -f'/'-M'/'-C'), so it ASKS (F-81); plain '-c' create keeps the allow. '--force' is decided FIRST, so a
+    -f'/'-M'/'-C'), so it ASKS (F-81); plain '-c' create keeps the allow. The new-branch NAME of '-c'/'-C'
+    is consumed as that option's ARGUMENT (attached '-cfoo' or separated '-c foo') and is NOT char-scanned
+    as force flags, so '-cfeature' ALLOWs and is never mis-read as carrying -f/-C (F-85; see
+    _checkout_switch_parse_options). '--force' is decided FIRST, so a
     genuine worktree clobber still DENIES rather than being downgraded to the force-create ASK.
     A '-m'/'--merge' or '--conflict[=<style>]' switch performs a THREE-WAY merge into the worktree that can
     overwrite local changes, so it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK
     on a dirty one), matched by prefix too. A plain switch aborts on a dirty tree (git protects), so it is
     not a silent discard -> allow."""
     pre, _post, _had_sep = _split_pre_post(args)
-    if ("-f" in pre or _has_short(pre, "f") or _has_long_prefix(pre, "force")
+    short_flags, _operands = _checkout_switch_parse_options(pre)  # '-c'/'-C' consume their branch name (F-85)
+    if ("f" in short_flags or _has_long_prefix(pre, "force")
             or _has_long_prefix(pre, "discard-changes")):
         return ("clobber", "git switch --force/--discard-changes (overwrites the worktree)")
-    if _has_short(pre, "C") or _has_long_prefix(pre, "force-create"):
+    if "C" in short_flags or _has_long_prefix(pre, "force-create"):
         return ("ask", "git switch -C/--force-create (a force branch-create/reset that overwrites an "
                        "existing branch ref and may orphan its commits)")
-    if _has_short(pre, "m") or _has_long_prefix(pre, "merge") or _has_long_prefix(pre, "conflict"):
+    if "m" in short_flags or _has_long_prefix(pre, "merge") or _has_long_prefix(pre, "conflict"):
         return ("scoped", "git switch --merge/--conflict (a three-way merge that can overwrite local changes)")
     return ("allow", None)
 
@@ -1309,8 +1372,10 @@ def _discard_role(sub, args):
         has_big_d = "D" in short_flags
         has_big_m = "M" in short_flags  # -M is 'move --force' (a force rename)
         has_big_c = "C" in short_flags  # -C is 'copy --force' (a force copy)
-        # Delete, move, copy, and force are matched by unambiguous PREFIX too (GD-41 blocker 5):
-        # '--del'/'--mov'/'--cop'/'--for'. Short flags are case-sensitive, so -m/-c (unforced move/copy)
+        # Delete, move, copy, and force are matched by CONSERVATIVE prefix too (GD-41 blocker 5):
+        # '--del'/'--mov'/'--cop', and an ambiguous '--for' (which git itself rejects for branch as
+        # ambiguous with '--format') is treated as force anyway, erring safe. Short flags are case-
+        # sensitive, so -m/-c (unforced move/copy)
         # are distinct from -M/-C (their force forms). _branch_parse_options stops a short cluster at the
         # arg-taking '-u <upstream>' so an attached value ('-ufoo'/'-uMain') is the UPSTREAM, never scanned
         # as a clustered force flag (F-82 over-ASK regression: round-21's blind char-scan mis-read it).
@@ -1897,9 +1962,11 @@ def git_discard(data):
     any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
     option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
     probe, or a softer/index-only discard. No recognized lossy command is ever silently ALLOWED unless it is a pristine
-    bare git on a provably-clean tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1
-    opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
-    (a non-git command, or no recognized lossy verb). A wrapper is in scope only while the raw scan still
+    bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
+    a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
+    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
+    (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
+    or no recognized lossy verb). A wrapper is in scope only while the raw scan still
     sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
     fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
     g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
