@@ -32,9 +32,14 @@ to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), D
 (permissionDecision "ask", which prompts the human). UNLIKE the fail-closed controls above, it fails OPEN
 (ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
 cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
-discard it can reason about, and it NEVER silently allows a RECOGNIZED discard (a recognized verb in a
-genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - destroys nothing, so it is not a
-discard and may ALLOW even on a dirty tree, as detailed below); an UNPARSEABLE command
+discard it can reason about, and it never silently allows a recognized WORKING-TREE-CONTENT discard (a
+recognized verb in a genuinely non-destructive FORM - checkout -b, reset --soft, clean -n - preserves the
+index and worktree content, though reset --soft still MOVES HEAD, a reflog-recoverable ref move, so it
+discards no working-tree content and may ALLOW even on a dirty tree, as detailed below). That no-silent-allow
+guarantee is bounded to WORKING-TREE CONTENT and is best-effort, not categorical: some ref-level moves (a
+merged-branch delete, reset --soft moving HEAD) are reflog-recoverable, and the obfuscation/config residuals
+disclosed below (a fragmented git command word or verb, a git alias, ambient config) can hide a discard the
+lexical scan never sees. An UNPARSEABLE command
 (unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and ASKS when one is
 present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) the outcome is ASK unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND the
@@ -45,27 +50,36 @@ metacharacter anywhere EVEN INSIDE QUOTES (none of ; | & < > ( ) { } $ backtick 
 also rules out &&/||/|&, every redirection form, and every command/process substitution), no shell reserved
 word, and a command word that is LITERALLY 'git' (not a path, not a wrapper such as sudo/nice/timeout/nohup/
 env/command/exec/builtin/xargs/time/!/sh -c/bash -c). ANY shell metacharacter, wrapper, redirect, reserved
-word, second command, or option the classifier cannot resolve makes the command not-pristine and it ASKS,
-WITHOUT ever consulting the probe (a safe over-ask) - but a wrapper is caught only while the raw scan still
-sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical (a wrapper that ALSO fragments
-the verb is a disclosed residual, below). Only a metacharacter-free 'git <verb> <plain args>'
+word, or second command makes the command not-pristine - a PURELY LEXICAL determination - and it ASKS
+WITHOUT ever consulting the probe (a safe over-ask). An option the form-classifier cannot resolve is a
+SEPARATE mechanism and does NOT bear on pristineness: a pristine command carrying an unresolved option still
+reaches the probe, where its role routes to a scoped ASK, so it is not silently allowed either. A wrapper is
+caught only while the raw scan still sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT
+categorical (a wrapper that ALSO fragments the verb is a disclosed residual, below). Only a
+metacharacter-free 'git <verb> <plain args>'
 reaches the probe, where PROVABLY CLEAN means the read-only, config-forced porcelain probe (git -c
 status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a repo-local
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
 entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
-No recognized lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' whose FORM is
-genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on a dirty tree), or on a
-provably-clean tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst
-case it ASKS, at the cost of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
+No recognized lossy verb that would discard WORKING-TREE CONTENT is silently ALLOWED except a pristine bare
+'git <verb>' whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even
+on a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
+GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost of more asks. This guarantee is bounded to
+working-tree content: ref-level moves (reset --soft moving HEAD, a merged-branch delete) are reflog-
+recoverable, and the obfuscation/config residuals below are best-effort, not categorical. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
 function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
 the verb (a wrapper whose git command word or verb is SPLIT so neither the token scan nor the raw scan sees
 a contiguous git+verb keyword, e.g. env git re'set' --hard, eval git re'set', or command g'it' reset --hard
 / env /usr/bin/g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset', reads as 'no
 recognized lossy verb' and is silently ALLOWED - a best-effort residual, not chased); a real discard whose
-VERB is outside the recognized lossy-verb set (a 'git worktree remove -f' of a dirty linked worktree
-discards that worktree's uncommitted work, but 'worktree' is not a recognized lossy verb, so it is allowed
-at the true boundary - disclosed, not closed this round); a discard performed outside the Bash tool; or
+VERB is outside the recognized set AND the raw scan does NOT flag at all (a 'git worktree remove -f' of a
+dirty linked worktree discards that worktree's uncommitted work, yet 'worktree' matches no lossy keyword, so
+it is allowed at the true boundary - disclosed, not closed this round). A command the raw scan DOES flag as
+in-scope whose resolved subcommand is nonetheless outside the recognized set ('git checkout-index -a -f',
+'git read-tree -u --reset HEAD', flagged by their 'checkout'/'reset' substring) is NO LONGER silently
+allowed: it ASKS (F-97), since a flagged sub the classifier cannot resolve to a known verb cannot be proven
+non-destructive. A discard performed outside the Bash tool; or
 persistent shell/config state; the deferred recovery/snapshot layer is the backstop. The one probe kept is
 read-only and offline; it never mutates the repo.
 
@@ -876,7 +890,8 @@ _SHELL_RESERVED_WORDS = frozenset((
 _DISCARD_ALTS = (
     "Safe alternatives: commit or 'git stash' your work first; scope the revert with an explicit "
     "'-- <paths>'; unstage without touching the worktree via 'git restore --staged' or 'git rm "
-    "--cached'; change branch with 'git switch' (it aborts on a dirty tree).")
+    "--cached'; change branch with 'git switch' (it carries non-conflicting changes and aborts rather than "
+    "overwrite them).")
 # Opt-out guidance for a PRISTINE bare form, where the leading prefix opts THIS command out.
 _OPTOUT_PRISTINE = (
     " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
@@ -1197,8 +1212,8 @@ def _switch_role(args):
     genuine worktree clobber still DENIES rather than being downgraded to the force-create ASK.
     A '-m'/'--merge' or '--conflict[=<style>]' switch performs a THREE-WAY merge into the worktree that can
     overwrite local changes, so it is not unconditionally safe -> scoped (ALLOW on a provably-clean tree, ASK
-    on a dirty one), matched by prefix too. A plain switch aborts on a dirty tree (git protects), so it is
-    not a silent discard -> allow."""
+    on a dirty one), matched by prefix too. A plain switch preserves non-conflicting local changes and aborts
+    only when the switch would lose them (git protects), so it is not a silent discard -> allow."""
     pre, _post, _had_sep = _split_pre_post(args)
     short_flags, _operands = _checkout_switch_parse_options(pre)  # '-c'/'-C' consume their branch name (F-85)
     if ("f" in short_flags or _has_long_prefix(pre, "force")
@@ -1375,6 +1390,12 @@ def _discard_role(sub, args):
         first = next((a for a in args if not a.startswith("-")), None)
         if first in ("drop", "clear"):
             return ("ask", "git stash {} (discards saved stash entries)".format(first))
+        # F-95: 'stash export' writes stash state to a ref, and its --to-ref form overwrites an arbitrary ref
+        # UNCONDITIONALLY (no fast-forward or merged-ref safeguard), so every 'export' spelling ASKS; ASK for
+        # all export forms (including --print) is acceptable per the disclosed over-ask posture.
+        if first == "export":
+            return ("ask", "git stash export (writes stash state to a ref, and --to-ref overwrites an "
+                           "arbitrary ref unconditionally)")
         return ("allow", None)
     if sub == "branch":
         pre, post, _had_sep = _split_pre_post(args)
@@ -1394,6 +1415,14 @@ def _discard_role(sub, args):
         has_move = _has_long_prefix(pre, "move") or "m" in short_flags
         has_copy = _has_long_prefix(pre, "copy") or "c" in short_flags
         has_force = _has_long_prefix(pre, "force") or "f" in short_flags
+        has_remotes = _has_long_prefix(pre, "remotes") or "r" in short_flags
+        # F-94: a delete (-d/-D/--delete) combined with -r/--remotes deletes remote-tracking refs, which git
+        # force-removes UNCONDITIONALLY, bypassing the merged-branch safeguard that protects a plain local
+        # '-d'. So a delete+remotes ASKS even without an explicit force flag; a local non-force '-d' keeps its
+        # allow below. Decided before the -D/force-delete branch so a delete-of-remotes gets its own reason.
+        if has_remotes and (has_big_d or has_delete):
+            return ("ask", "git branch -d/-D --remotes (deletes remote-tracking refs, which git "
+                           "force-removes past the merged-branch safeguard)")
         # A force DELETE, force MOVE/rename, force COPY, or a bare force branch RESET each reset or overwrite
         # a branch ref and can orphan committed commits (the same reflog-recoverable loss class as -D), so all
         # ASK. A non-force create/list, an unforced -m/-c, and a safe -d delete keep their prior outcome.
@@ -1664,6 +1693,13 @@ def _pristine_single_bare_git(command, segments):
 # hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore), nor ignored files (git add
 # --all excludes them), so a discard of that content is not recoverable here.
 _SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
+# The lossy git verbs the form-classifier can reason about (the recognized-verb set). A command the raw scan
+# flags as in-scope whose resolved subcommand is outside this set (e.g. 'checkout-index', 'read-tree',
+# flagged by a 'checkout'/'reset' substring) cannot be classified, so it must not win the catch-all allow
+# (F-97): it ASKS instead. This is a SUPERSET of _SNAPSHOTTABLE_VERBS (it also covers stash/branch, whose
+# assets a worktree snapshot cannot capture).
+_RECOGNIZED_VERBS = frozenset((
+    "checkout", "switch", "restore", "reset", "rm", "clean", "stash", "branch"))
 _RECOVERY_REF_NS = "refs/aiqt-recovery"
 # Skip (and fail to ASK) rather than snapshot an enormous working tree: a changed+untracked estimate over
 # this many bytes is treated as a snapshot failure, so the guard never tries to seal a multi-gigabyte tree.
@@ -1972,18 +2008,25 @@ def git_discard(data):
     pathspec, switch --force/--discard-changes) on a probed-DIRTY tree DENIES. EVERYTHING ELSE in scope ASKS:
     any shell structure at all (a metacharacter, wrapper, redirect, reserved word, or second segment), an
     option the form-classifier cannot resolve, a worktree it cannot resolve to the session cwd, an incomplete
-    probe, or a softer/index-only discard. No recognized lossy command is ever silently ALLOWED unless it is a pristine
+    probe, or a softer/index-only discard. No recognized lossy command that would discard WORKING-TREE CONTENT
+    is silently ALLOWED unless it is a pristine
     bare git whose FORM is genuinely non-destructive (checkout -b, reset --soft, clean -n, which ALLOW even on
     a dirty tree), or on a provably-clean tree, or a pristine bare form carrying the leading
-    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
+    GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS; the guarantee is bounded to working-tree content
+    (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are reflog-recoverable) and is
+    best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is reserved for the TRUE boundary
     (a non-Bash or absent tool, a malformed or missing command it cannot read as a discard, a non-git command,
     or no recognized lossy verb). A wrapper is in scope only while the raw scan still
     sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
     fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
     g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
-    verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. Likewise a real discard
-    whose VERB is outside the recognized set ('git worktree remove -f' of a dirty linked worktree) is allowed
-    at the true boundary - disclosed, not closed this round. The status probe (git status --porcelain,
+    verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. A real discard whose VERB is
+    outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
+    worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
+    closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
+    recognized set ('git checkout-index -a -f', 'git read-tree -u --reset HEAD') now ASKS (F-97): a flagged
+    sub the classifier cannot resolve to a known verb cannot be proven non-destructive, so it never wins the
+    catch-all allow. The status probe (git status --porcelain,
     config-forced to report untracked) is read-only and offline.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
@@ -2148,6 +2191,21 @@ def git_discard(data):
     snap = None
     if resolvable and snapshottable and clean is not True:  # dirty or probe-uncertain: not provably clean
         snap = _record_recovery(base, sub)
+
+    # F-97 (structural class-fix): the command is IN SCOPE (the raw scan flagged a git work-losing keyword)
+    # yet its resolved subcommand is NOT one of the recognized lossy verbs - e.g. 'git checkout-index -a -f'
+    # or 'git read-tree -u --reset HEAD', whose 'checkout'/'reset' substring trips the raw scan while
+    # _discard_role falls to its catch-all allow. Such a command can discard tracked working-tree content
+    # (and its sub is not snapshottable, so no recovery point exists), so it must NOT win the catch-all allow:
+    # ASK, since a flagged sub the classifier cannot resolve to a known verb cannot be proven non-destructive.
+    # A genuine safe FORM of a RECOGNIZED verb (checkout -b, reset --soft, clean -n) is unaffected: its sub IS
+    # recognized, so this never fires for it.
+    if raw_lossy and sub is not None and sub not in _RECOGNIZED_VERBS:
+        return _ask(*_discard_ask_reason(
+            kind or "a git command the raw scan flags as work-losing",
+            "resolves to the git subcommand {!r}, which is outside the recognized lossy-verb set "
+            "(checkout/switch/restore/reset/rm/clean/stash/branch), so this guard cannot prove it "
+            "non-destructive".format(sub)))
 
     if role == "allow":
         # A genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, plain switch, clean

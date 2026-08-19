@@ -340,6 +340,43 @@ def main():
         expect("(r22-10) branch -f a other force reset still asks (unchanged)", "git branch -f a other",
                "ask", cwd=rp)
 
+        # === EN-6 round-25 Fix F-94: a branch delete combined with -r/--remotes ASKS ================
+        # Deleting remote-tracking refs (-d/-D/--delete with -r/--remotes) is force-removed by git past the
+        # merged-branch safeguard that protects a plain local -d, so every delete+remotes spelling ASKS; a
+        # local non-force -d keeps its allow, and -D still ASKS.
+        expect("(f94-1) branch -d -r origin/topic asks", "git branch -d -r origin/topic", "ask", cwd=rp)
+        expect("(f94-2) branch -dr origin/topic (clustered) asks", "git branch -dr origin/topic", "ask",
+               cwd=rp)
+        expect("(f94-3) branch --delete --remotes asks", "git branch --delete --remotes origin/topic", "ask",
+               cwd=rp)
+        expect("(f94-4) branch -d local (local safe delete) still allows", "git branch -d other", "allow",
+               cwd=rp)
+
+        # === EN-6 round-25 Fix F-95: git stash export ASKS for every spelling =======================
+        # 'stash export' writes stash state to a ref, and --to-ref overwrites an arbitrary ref
+        # unconditionally, so every export form ASKS (drop/clear unchanged; push/list unaffected).
+        expect("(f95-1) stash export --to-ref asks", "git stash export --to-ref refs/heads/topic", "ask",
+               cwd=rp)
+        expect("(f95-2) stash export --print asks", "git stash export --print", "ask", cwd=rp)
+        expect("(f95-3) stash export (bare) asks", "git stash export", "ask", cwd=rp)
+
+        # === EN-6 round-25 Fix F-97: a raw-lossy-flagged command with an UNRECOGNIZED sub ASKS =======
+        # 'git checkout-index -a -f' and 'git read-tree -u --reset HEAD' are flagged in-scope by the raw scan
+        # (a 'checkout'/'reset' substring) but resolve to a subcommand the form-classifier does not recognize,
+        # so they used to win the catch-all allow and discard tracked worktree content with no snapshot. They
+        # now ASK. A genuine safe FORM of a RECOGNIZED verb still ALLOWs (its sub IS recognized), and a verb
+        # the raw scan does NOT flag at all (git worktree) stays allowed at the true boundary.
+        expect("(f97-1) checkout-index -a -f on dirty tree asks", "git checkout-index -a -f", "ask", cwd=rp)
+        expect("(f97-2) read-tree -u --reset HEAD on dirty tree asks", "git read-tree -u --reset HEAD", "ask",
+               cwd=rp)
+        expect("(f97-3) checkout -b new (recognized safe form) still allows", "git checkout -b new", "allow",
+               cwd=rp)
+        expect("(f97-4) reset --soft (recognized safe form) still allows", "git reset --soft", "allow",
+               cwd=rp)
+        expect("(f97-5) clean -n (recognized safe form) still allows", "git clean -n", "allow", cwd=rp)
+        expect("(f97-6) worktree remove -f unflagged, still allows at the true boundary",
+               "git worktree remove -f", "allow", cwd=rp)
+
         # === previously-fooled shell-expansion pathspecs now ASK (F-62.1, F-64.1/2, F-65.F1) ==
         # A pathspec carrying a variable, command substitution, glob, brace, or tilde used to be probed
         # LITERALLY, so the path-disjoint fast path fired and a real discard was silently ALLOWED. Coarse:
@@ -726,9 +763,18 @@ def main():
             (("clean", ["-n"]), "allow"),                 # a plain dry run with no arg-consuming option allows
             (("stash", ["drop"]), "ask"),
             (("stash", ["pop"]), "allow"),
+            (("stash", ["export", "--to-ref", "refs/heads/topic"]), "ask"),  # F-95: export overwrites a ref
+            (("stash", ["export", "--print"]), "ask"),       # F-95: every export spelling ASKS
+            (("stash", ["export"]), "ask"),                  # F-95: bare export ASKS
+            (("stash", ["push"]), "allow"),                  # F-95: push unaffected
             (("branch", ["-D", "x"]), "ask"),
             (("branch", ["--del", "--force", "x"]), "ask"),  # blocker 5: abbreviated --delete/--force
             (("branch", ["-d", "x"]), "allow"),
+            (("branch", ["-d", "-r", "origin/topic"]), "ask"),  # F-94: delete + remotes force-removes refs
+            (("branch", ["-dr", "origin/topic"]), "ask"),    # F-94: clustered -dr
+            (("branch", ["--delete", "--remotes", "x"]), "ask"),  # F-94: long spellings
+            (("branch", ["-D", "-r", "x"]), "ask"),          # F-94: -D + remotes still asks
+            (("branch", ["-r"]), "allow"),                   # F-94: list remotes only (no delete) allows
             (("branch", ["-ufoo", "topic"]), "allow"),       # F-82: '-ufoo' is -u<upstream>, not -f/-o/-o
             (("branch", ["-uMain", "topic"]), "allow"),      # F-82: 'M' is in the upstream VALUE, not -M
             (("branch", ["-uCandidate", "topic"]), "allow"),  # F-82: 'C'/'d' are in the VALUE, not -C/-d
@@ -1668,7 +1714,12 @@ def main():
           "dirty-tree ASK and on a simulated mis-parse ALLOW, NOT on a provably-clean tree; the real "
           "status/index/HEAD are unchanged after a snapshot; the ref restores tracked and untracked work; a "
           "forced snapshot failure downgrades a would-be ALLOW to ASK while leaving a clobber DENY; and the "
-          "external ledger records the bare verb (not the raw command), ref, sha, classes, and restore")
+          "external ledger records the bare verb (not the raw command), ref, sha, classes, and restore. The "
+          "EN-6 round-25 fixes are proven: a branch delete combined with -r/--remotes ASKS while a local -d "
+          "still allows (F-94); git stash export ASKS for every spelling (F-95); and a raw-lossy-flagged "
+          "command whose resolved subcommand is outside the recognized set (checkout-index, read-tree "
+          "--reset) ASKS rather than winning the catch-all allow, while recognized safe forms and the "
+          "unflagged git worktree remove are unchanged (F-97)")
     return 0
 
 
