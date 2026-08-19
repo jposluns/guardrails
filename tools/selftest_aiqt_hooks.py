@@ -14,9 +14,11 @@ anywhere even quoted, no reserved word, no wrapper/redirect/compound, and a comm
 AND either its form is genuinely non-destructive, the whole tree is PROVABLY CLEAN, or the leading opt-out is
 set, in which case ALLOW; a pristine bare whole-tree-clobbering verb (reset --hard, checkout -f, switch
 --force) on a confirmed-dirty tree DENIES. This suite proves the EN-6 pristine gate: every shell-grammar and
-wrapper form that hides a real `git reset --hard` (an `if`/`for`, a backtick or `$()` substitution, a `|&`,
-a leading or interspersed redirect, and the wrappers sudo/nice/timeout/nohup/sh -c/bash -c/...) now ASKS
-(pristine-* cases). It also proves the four accuracy fixes: (1) a config-forced probe defeats
+wrapper form that hides a real `git reset --hard` while the raw scan still sees a contiguous git+verb keyword
+(an `if`/`for`, a backtick or `$()` substitution, a `|&`, a leading or interspersed redirect, and the
+wrappers sudo/nice/timeout/nohup/sh -c/bash -c/...) now ASKS (pristine-* cases); a wrapper that ALSO
+fragments the command word `git` or the verb so no recognized lossy verb is seen is a DISCLOSED best-effort
+residual, silently ALLOWED and not chased. It also proves the four accuracy fixes: (1) a config-forced probe defeats
 status.showUntrackedFiles=no so an untracked file still reads dirty (cfg-* cases: reset --hard/checkout -f
 DENY, clean -f ASKS); (2) the arg-consuming clean options `-e`/`--exclude` are respected so `-n` is not
 mis-read as a dry run (cle-* cases); (3) `switch --merge`/`--conflict` route to scoped and ASK on a dirty
@@ -174,6 +176,15 @@ def main():
         # DENIED this even for a clean path; the coarse guard asks, which is recoverable).
         expect("(co-f) checkout -f -- <path> asks not denies", "git checkout -f -- clean.txt", "ask",
                cwd=rp)
+        # EN-6 round-21 Fix B (text-only contract correction, NO logic change): LOCK the checkout -f
+        # outcomes so the docstring rewording cannot silently drift them. A forced checkout carrying a BARE
+        # OPERAND is lexically ambiguous (a branch OR a pathspec), so it is scoped -> ASK (recoverable and
+        # human-gated), never a hard DENY that would false-block a legitimate forced path-restore; only an
+        # operand-FREE forced whole-tree checkout DENIES on a confirmed-dirty tree.
+        expect("(r21b-1) checkout -f <branch> (bare operand) asks, not denies", "git checkout -f main",
+               "ask", cwd=rp)
+        expect("(r21b-2) checkout -f (operand-free) denies on a dirty tree", "git checkout -f", "deny",
+               cwd=rp)
 
         # === switch (a whole-tree clobber on force) ==========================================
         expect("(sw-a) switch -f dirty denies", "git switch -f other", "deny", cwd=rp)
@@ -244,6 +255,21 @@ def main():
         expect("(r19a-4) parseable branch -d -f still asks", "git branch -d -f other", "ask", cwd=rp)
         expect("(r19a-5) parseable non-delete branch-create still allows", "git branch newbranch",
                "allow", cwd=rp)
+
+        # === EN-6 round-21 Fix A: a PARSEABLE force branch move/rename/copy/reset now ASKS ===========
+        # A force MOVE/rename (-M, or -m/--move with --force), a force COPY (-C, or -c/--copy with --force),
+        # and a bare force branch RESET (-f/--force with a branch and start-point) each reset or overwrite a
+        # branch ref and can orphan committed commits (the same reflog-recoverable loss class as -D), so all
+        # ASK. A non-force create and the parseable branch list stay ALLOW; the safe -d delete keeps its
+        # allow and the -D force-delete keeps its ask (both unchanged). Closes F-77 (a silent-allow gap).
+        expect("(r21a-1) branch -f <branch> <start> force reset asks", "git branch -f topic other", "ask",
+               cwd=rp)
+        expect("(r21a-2) branch -M force rename asks", "git branch -M a b", "ask", cwd=rp)
+        expect("(r21a-3) branch -C force copy asks", "git branch -C a b", "ask", cwd=rp)
+        expect("(r21a-4) branch -D force delete still asks (unchanged)", "git branch -D topic", "ask",
+               cwd=rp)
+        expect("(r21a-5b) branch newbr create still allows", "git branch newbr", "allow", cwd=rp)
+        expect("(r21a-6) parseable bare branch (list) allows", "git branch", "allow", cwd=rp)
 
         # === previously-fooled shell-expansion pathspecs now ASK (F-62.1, F-64.1/2, F-65.F1) ==
         # A pathspec carrying a variable, command substitution, glob, brace, or tilde used to be probed
@@ -1523,9 +1549,11 @@ def main():
           "word, no wrapper/redirect/compound, command word literally 'git') that is either genuinely "
           "non-destructive, on a PROVABLY CLEAN tree, or leading-opt-out; a pristine bare whole-tree clobber "
           "(reset --hard, checkout -f, switch --force) on a confirmed-dirty tree DENIES. The pristine gate "
-          "is proven: every shell-grammar and wrapper form that hides a real reset --hard (if/for, backtick "
-          "and $() substitution, |&, leading and interspersed redirects, and sudo/nice/timeout/nohup/sh -c/"
-          "bash -c wrappers) now ASKS. The four accuracy fixes are proven: the config-forced probe defeats "
+          "is proven: every shell-grammar and wrapper form that hides a real reset --hard while the raw scan "
+          "still sees a contiguous git+verb keyword (if/for, backtick and $() substitution, |&, leading and "
+          "interspersed redirects, and sudo/nice/timeout/nohup/sh -c/bash -c wrappers) now ASKS; a wrapper "
+          "that ALSO fragments the command word 'git' or the verb is a disclosed residual, silently ALLOWED "
+          "and not chased. The four accuracy fixes are proven: the config-forced probe defeats "
           "status.showUntrackedFiles=no (untracked reads dirty -> DENY/ASK, not allow); clean -e/--exclude "
           "arg-consumption means '-n' is not mis-read as a dry run; switch --merge/--conflict route to "
           "scoped and ASK on a dirty tree; and the DENY wording covers untracked. The prior GD-41 "

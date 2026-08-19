@@ -49,15 +49,19 @@ status.showUntrackedFiles=all status --porcelain --untracked-files=all, so a rep
 status.showUntrackedFiles=no cannot hide an untracked file) reports NO tracked change AND NO untracked ('??')
 entry (only an ignored '!!' entry counts as clean). A pristine bare whole-tree clobber (reset --hard,
 checkout -f, switch --force/--discard-changes) on a probed-dirty tree DENIES; everything else in scope ASKS.
-No lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean tree, or a
-pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS, at the cost
-of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
-function renaming git; deliberate token fragmentation or obfuscation of the verb (a wrapper whose git verb
-is SPLIT so the raw scan misses the contiguous keyword, e.g. env git re'set' --hard or eval git re'set',
-whose raw string carries no contiguous 'reset', is silently ALLOWED - a best-effort residual, not chased);
-a discard performed outside the Bash tool; or persistent shell/config state; the
-deferred recovery/snapshot layer is the backstop. The one probe kept is read-only and offline; it never
-mutates the repo.
+No recognized lossy verb is ever silently ALLOWED except a pristine bare 'git <verb>' on a provably-clean
+tree, or a pristine bare form carrying the leading GUARDRAIL_ALLOW_DISCARD=1 opt-out - worst case it ASKS,
+at the cost of more asks. The HONEST RESIDUAL a lexical hook cannot catch: a git alias or shell
+function renaming git; deliberate token fragmentation or obfuscation of the COMMAND WORD 'git' ITSELF or of
+the verb (a wrapper whose git command word or verb is SPLIT so neither the token scan nor the raw scan sees
+a contiguous git+verb keyword, e.g. env git re'set' --hard, eval git re'set', or command g'it' reset --hard
+/ env /usr/bin/g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset', reads as 'no
+recognized lossy verb' and is silently ALLOWED - a best-effort residual, not chased); a real discard whose
+VERB is outside the recognized lossy-verb set (a 'git worktree remove -f' of a dirty linked worktree
+discards that worktree's uncommitted work, but 'worktree' is not a recognized lossy verb, so it is allowed
+at the true boundary - disclosed, not closed this round); a discard performed outside the Bash tool; or
+persistent shell/config state; the deferred recovery/snapshot layer is the backstop. The one probe kept is
+read-only and offline; it never mutates the repo.
 
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
@@ -797,7 +801,13 @@ def absolute_paths(data):
 # 'git <verb> <plain args>' ever reaches the probe. This closes the residual silent-allows that survived the
 # coarse cut (a shell 'if'/'for', a backtick or '$()' substitution, a '|&' or leading/interspersed redirect,
 # and ANY wrapper in front of git - sudo/stdbuf/doas/setsid/eval/sh -c/...: the raw 'git'+work-losing-verb
-# scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper cannot slip): ASK.
+# scan is trusted UNCONDITIONALLY, not an enumerated wrapper list, so an un-listed wrapper is caught): ASK.
+# That "cannot slip" is NOT categorical: a wrapper that ALSO fragments the command word 'git' or the verb so
+# neither the token scan nor the raw scan sees a contiguous git+verb keyword reads as "no recognized lossy
+# verb" and is silently ALLOWED (a DISCLOSED best-effort residual, see the module docstring; GD-34
+# do-not-chase). The raw scan also OVER-ASKS in the SAFE direction: a command that merely CONTAINS a git
+# token and a lossy verb as TEXT while running no discard ('echo git branch', 'git log | grep branch') still
+# ASKS; narrowing that is the whack-a-mole GD-34 rejected, so the over-ask is disclosed, not chased.
 # The status probe (git -c status.showUntrackedFiles=all status --porcelain --untracked-files=all) is
 # read-only and offline and FORCES untracked reporting so a repo-local status.showUntrackedFiles=no config
 # cannot hide an untracked file. The classifier never mutates working state; BENEATH it, the EN-6 recovery
@@ -864,8 +874,10 @@ _DISCARD_ALTS = (
 _OPTOUT_PRISTINE = (
     " Or, for a known-safe discard, prefix this command with GUARDRAIL_ALLOW_DISCARD=1 to override this "
     "guard.")
-# Opt-out guidance for a raw/non-pristine/view-redirected form, where the opt-out is NOT honoured on the
-# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix.
+# Opt-out guidance for a raw/unparseable or non-pristine form, where the opt-out is NOT honoured on the
+# command as issued: re-issue it as a parseable pristine bare 'git <verb>' with the leading prefix. A
+# repository-view-redirected form does NOT use this: it is pristine-lexically, so its leading prefix opts it
+# out on the command as issued (_OPTOUT_PRISTINE, keeping its -C), short-circuiting before the redirect gate.
 _OPTOUT_REISSUE = (
     " For a known-safe discard, re-issue it as a parseable pristine bare 'git <verb>' command carrying a "
     "leading GUARDRAIL_ALLOW_DISCARD=1 prefix; the opt-out is honoured only on that pristine bare form, not "
@@ -1068,11 +1080,15 @@ def _checkout_role(args):
     """git checkout. Force ('-f'/'--force', abbreviations included) is decided FIRST (GD-41 blocker 7): a
     branch-create ('-b'/'-B'/'--orphan') only allows when force is ABSENT, because a FORCED branch-create
     can discard, so 'checkout -f -b <name>' must fall through to a lossy classification, not the early
-    allow. '-p'/'--patch' (prefix-matched) interactively discards worktree hunks -> scoped. A force switch
-    with NO pathspec ('checkout -f <branch>') overwrites the whole worktree -> clobber. Any form that
-    carries pathspecs (a '-- <paths>', or bare operands, which may be a ref OR a pathspec - no longer
-    disambiguated by a rev-parse probe) -> scoped. A bare 'git checkout' with no operands has no worktree
-    effect -> allow."""
+    allow. '-p'/'--patch' (prefix-matched) interactively discards worktree hunks -> scoped. A forced
+    checkout that carries a BARE OPERAND ('checkout -f <operand>') is lexically ambiguous - the operand may
+    be a branch (a whole-tree switch) OR a pathspec (a scoped path-restore), and it is no longer
+    disambiguated by a rev-parse probe - so it is treated as -> scoped (which ASKS on a not-provably-clean
+    tree; recoverable and human-gated), never a hard DENY that would false-block a legitimate forced
+    path-restore. Any '-- <paths>' or other bare-operand form is scoped for the same reason. Only an
+    operand-FREE forced checkout ('checkout -f' with no branch and no pathspec) clobbers the whole worktree
+    with certainty -> clobber (which DENIES on a confirmed-dirty tree). A bare 'git checkout' with no options
+    and no operands has no worktree effect -> allow."""
     pre, post, _had_sep = _split_pre_post(args)
     if _has_long_prefix(pre, "pathspec-from-file"):  # prefix-matched: '--pathspec-from-f' too
         return ("scoped", "git checkout --pathspec-from-file (reverts paths listed in a file)")
@@ -1188,7 +1204,8 @@ def _discard_role(sub, args):
     and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
     unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean ASKS
     unconditionally (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the
-    guard no longer tries to model whether the clean would fire); stash drop/clear and branch -D ASK."""
+    guard no longer tries to model whether the clean would fire); stash drop/clear ASK, and a force branch
+    delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
     if sub == "checkout":
         return _checkout_role(args)
     if sub == "switch":
@@ -1215,15 +1232,34 @@ def _discard_role(sub, args):
             return ("ask", "git stash {} (discards saved stash entries)".format(first))
         return ("allow", None)
     if sub == "branch":
-        pre, _post, _had_sep = _split_pre_post(args)
+        pre, post, _had_sep = _split_pre_post(args)
         short = [t for t in pre if t.startswith("-") and not t.startswith("--")]
         has_big_d = any("D" in t[1:] for t in short)
-        # Delete and force are matched by unambiguous PREFIX too (GD-41 blocker 5): '--del'/'--for'.
+        has_big_m = any("M" in t[1:] for t in short)  # -M is 'move --force' (a force rename)
+        has_big_c = any("C" in t[1:] for t in short)  # -C is 'copy --force' (a force copy)
+        # Delete, move, copy, and force are matched by unambiguous PREFIX too (GD-41 blocker 5):
+        # '--del'/'--mov'/'--cop'/'--for'. Short flags are case-sensitive, so -m/-c (unforced move/copy)
+        # are distinct from -M/-C (their force forms).
         has_delete = _has_long_prefix(pre, "delete") or any("d" in t[1:] for t in short)
+        has_move = _has_long_prefix(pre, "move") or any("m" in t[1:] for t in short)
+        has_copy = _has_long_prefix(pre, "copy") or any("c" in t[1:] for t in short)
         has_force = _has_long_prefix(pre, "force") or any("f" in t[1:] for t in short)
+        operands = [a for a in pre if not a.startswith("-")] + post
+        # A force DELETE, force MOVE/rename, force COPY, or a bare force branch RESET each reset or overwrite
+        # a branch ref and can orphan committed commits (the same reflog-recoverable loss class as -D), so all
+        # ASK. A non-force create/list, an unforced -m/-c, and a safe -d delete keep their prior outcome.
         if has_big_d or (has_delete and has_force):
             return ("ask", "git branch -D/--delete --force (a force branch delete that may drop unmerged "
                            "commits)")
+        if has_big_m or (has_move and has_force):
+            return ("ask", "git branch -M/--move --force (a force rename that overwrites an existing branch "
+                           "ref and may orphan its commits)")
+        if has_big_c or (has_copy and has_force):
+            return ("ask", "git branch -C/--copy --force (a force copy that overwrites an existing branch "
+                           "ref and may orphan its commits)")
+        if has_force and operands:
+            return ("ask", "git branch -f/--force (a force branch reset that overwrites an existing branch "
+                           "ref and may orphan its commits)")
         return ("allow", None)
     return ("allow", None)  # not a recognized lossy verb: the true boundary
 
@@ -1750,8 +1786,9 @@ def _ask_with_recovery(kind, detail, snap, optout=None):
     """An ASK whose reason folds in the recovery outcome: a restore pointer on a successful snapshot, or
     the failure surfaced (decision stays ASK) on a snapshot failure. snap is None (no snapshot warranted),
     ('ok', info), or ('fail', reason). `optout` is passed through to _discard_ask_reason to select the
-    path-aware opt-out guidance (default pristine; the non-pristine and view-redirected callers pass
-    _OPTOUT_REISSUE)."""
+    path-aware opt-out guidance (default pristine; the non-pristine caller passes _OPTOUT_REISSUE, while the
+    ambient/view-redirected caller passes _OPTOUT_PRISTINE because a pristine redirected form is opted out by
+    prefixing the command as issued)."""
     reason, banner = _discard_ask_reason(kind, detail, optout)
     if snap is not None and snap[0] == "ok":
         reason = reason + " " + _recovery_pointer(snap[1])
@@ -1790,10 +1827,12 @@ def git_discard(data):
     opt-out - worst case it ASKS. Fail-open ALLOW is reserved for the TRUE boundary
     (a non-git command, or no recognized lossy verb). A wrapper is in scope only while the raw scan still
     sees a contiguous git verb keyword, so 'any wrapper ASKS' is NOT categorical: a wrapper that ALSO
-    fragments the verb (env git re'set' --hard / eval git re'set', whose raw string carries no contiguous
-    'reset') reads as 'no recognized lossy verb' and is silently ALLOWED - a DISCLOSED best-effort residual,
-    not chased. The status probe (git status --porcelain, config-forced
-    to report untracked) is read-only and offline.
+    fragments the COMMAND WORD 'git' itself or the verb (env git re'set' --hard / eval git re'set' / command
+    g'it' reset --hard, whose raw string carries no contiguous 'git'+'reset') reads as 'no recognized lossy
+    verb' and is silently ALLOWED - a DISCLOSED best-effort residual, not chased. Likewise a real discard
+    whose VERB is outside the recognized set ('git worktree remove -f' of a dirty linked worktree) is allowed
+    at the true boundary - disclosed, not closed this round. The status probe (git status --porcelain,
+    config-forced to report untracked) is read-only and offline.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
     decision for a snapshottable in-scope verb (checkout/switch/restore/reset/rm/clean) whose worktree it can
@@ -1971,8 +2010,9 @@ def git_discard(data):
         return _allow()
 
     if role == "ask":
-        # A softer discard (a real clean of untracked files, stash drop/clear, branch -D): ASK regardless of
-        # the tracked-tree probe, which does not see the asset these verbs destroy. A clean may have been
+        # A softer discard (a real clean of untracked files, stash drop/clear, a force branch delete/move/
+        # copy/reset): ASK regardless of the tracked-tree probe, which does not see the asset these verbs
+        # destroy (a branch ref is a separate, reflog-recoverable asset). A clean may have been
         # snapshotted above (git add --all captures untracked); stash/branch are not snapshottable.
         return _ask_with_recovery(kind, "cannot be proven safe offline", snap)
 
