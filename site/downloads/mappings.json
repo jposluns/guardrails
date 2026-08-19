@@ -10,7 +10,7 @@
       "citation_unit": "technique",
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
-      "ids_cited": 66,
+      "ids_cited": 65,
       "ids_total": 173
     },
     "csa-aicm": {
@@ -75,7 +75,7 @@
       "citation_unit": "control",
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
-      "ids_cited": 64,
+      "ids_cited": 65,
       "ids_total": 1196
     },
     "nist-airmf": {
@@ -412,7 +412,7 @@
     },
     {
       "rule_id": "tstamp",
-      "rule_title": "A recorded timestamp is read from the clock",
+      "rule_title": "A current timestamp is read from the clock",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md",
       "framework": "nist-80053",
       "relation": "supports control",
@@ -812,7 +812,7 @@
     },
     {
       "rule_id": "rerunf",
-      "rule_title": "A pass obtained by rerunning is still the failure",
+      "rule_title": "A rerun pass does not erase an earlier failure",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md",
       "framework": "iso-42001",
       "relation": "supports control",
@@ -822,7 +822,7 @@
     },
     {
       "rule_id": "rerunf",
-      "rule_title": "A pass obtained by rerunning is still the failure",
+      "rule_title": "A rerun pass does not erase an earlier failure",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md",
       "framework": "nist-80053",
       "relation": "supports control",
@@ -2047,16 +2047,6 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0024",
-      "identifier_title": "Exfiltration via AI Inference API"
-    },
-    {
-      "rule_id": "secegr",
-      "rule_title": "Egress goes only to expected destinations",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "tight",
       "identifier": "AML.T0025",
       "identifier_title": "Exfiltration via Cyber Means"
     },
@@ -7986,7 +7976,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "BCR-08",
       "identifier_title": "Backup"
     },
@@ -7996,7 +7986,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "BCR-08",
       "identifier_title": "Backup"
     },
@@ -8006,7 +7996,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CP-9",
       "identifier_title": "System Backup"
     },
@@ -8016,7 +8006,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CP-9(1)",
       "identifier_title": "Testing for Reliability and Integrity"
     },
@@ -8026,9 +8016,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CP-10",
       "identifier_title": "System Recovery and Reconstitution"
+    },
+    {
+      "rule_id": "secrst",
+      "rule_title": "A destructive operation requires a verified restore path",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CP-9(2)",
+      "identifier_title": "Test Restoration Using Sampling"
     },
     {
       "rule_id": "secmin",

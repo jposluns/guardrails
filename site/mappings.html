@@ -112,12 +112,12 @@
         <table class="dtable">
           <thead><tr><th>Framework</th><th>Publisher</th><th>Edition</th><th>Relation</th><th>Edition stability</th><th>Identifiers referenced</th></tr></thead>
           <tbody>
-            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>66 of 173</td></tr>
+            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 of 61</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 of 74</td></tr>
-            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>64 of 1196</td></tr>
+            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>65 of 1196</td></tr>
             <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>23 of 72</td></tr>
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 of 42</td></tr>
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
@@ -287,7 +287,7 @@
         </div>
       </details>
       <details class="more">
-        <summary>A recorded timestamp is read from the clock</summary>
+        <summary>A current timestamp is read from the clock</summary>
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md">View this rule on GitHub</a></p>
           <ul>
@@ -523,7 +523,7 @@
         </div>
       </details>
       <details class="more">
-        <summary>A pass obtained by rerunning is still the failure</summary>
+        <summary>A rerun pass does not erase an earlier failure</summary>
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md">View this rule on GitHub</a></p>
           <ul>
@@ -1244,8 +1244,7 @@
           <ul>
             <li>MITRE ATLAS (2026.06): mitigates technique
               <ul>
-                <li>AML.T0024: Exfiltration via AI Inference API (broad)</li>
-                <li>AML.T0025: Exfiltration via Cyber Means (tight)</li>
+                <li>AML.T0025: Exfiltration via Cyber Means (broad)</li>
                 <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (tight)</li>
               </ul>
             </li>
@@ -3282,19 +3281,20 @@
           <ul>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
-                <li>BCR-08: Backup (tight)</li>
+                <li>BCR-08: Backup (broad)</li>
               </ul>
             </li>
             <li>CSA Cloud Controls Matrix (4.1.0): supports control
               <ul>
-                <li>BCR-08: Backup (tight)</li>
+                <li>BCR-08: Backup (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
               <ul>
-                <li>CP-9: System Backup (tight)</li>
-                <li>CP-9(1): Testing for Reliability and Integrity (tight)</li>
-                <li>CP-10: System Recovery and Reconstitution (tight)</li>
+                <li>CP-9: System Backup (broad)</li>
+                <li>CP-9(1): Testing for Reliability and Integrity (broad)</li>
+                <li>CP-10: System Recovery and Reconstitution (broad)</li>
+                <li>CP-9(2): Test Restoration Using Sampling (tight)</li>
               </ul>
             </li>
           </ul>
@@ -3493,7 +3493,7 @@
       <details class="more">
         <summary>MITRE ATLAS (2026.06)</summary>
         <div class="inner">
-          <p>mitigates technique. 66 of 173 identifiers referenced.</p>
+          <p>mitigates technique. 65 of 173 identifiers referenced.</p>
           <ul>
             <li>AML.T0010.001: AI Software
               <ul>
@@ -3553,11 +3553,6 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (tight)</li>
               </ul>
             </li>
-            <li>AML.T0024: Exfiltration via AI Inference API
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md">Egress goes only to expected destinations</a> (broad)</li>
-              </ul>
-            </li>
             <li>AML.T0024.000: Infer Training Data Membership
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md">Minimize personal data sent to AI services</a> (broad)</li>
@@ -3570,7 +3565,7 @@
             </li>
             <li>AML.T0025: Exfiltration via Cyber Means
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md">Egress goes only to expected destinations</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md">Egress goes only to expected destinations</a> (broad)</li>
               </ul>
             </li>
             <li>AML.T0029: Denial of AI Service
@@ -3940,7 +3935,7 @@
             </li>
             <li>BCR-08: Backup
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (broad)</li>
               </ul>
             </li>
             <li>CCC-04: Unauthorized Change Protection
@@ -4357,7 +4352,7 @@
             </li>
             <li>BCR-08: Backup
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (broad)</li>
               </ul>
             </li>
             <li>CCC-04: Unauthorized Change Protection
@@ -4858,7 +4853,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-gate-discipline.md">Gate discipline</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md">No concealed failure</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md">A pass obtained by rerunning is still the failure</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md">A rerun pass does not erase an earlier failure</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md">Validation is a gate on apply</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-change-carries-check.md">A behavioural change carries a check that fails without it</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md">A verification finding is fixed, not argued away</a> (broad)</li>
@@ -4923,7 +4918,7 @@
       <details class="more">
         <summary>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0))</summary>
         <div class="inner">
-          <p>supports control. 64 of 1196 identifiers referenced.</p>
+          <p>supports control. 65 of 1196 identifiers referenced.</p>
           <ul>
             <li>AC-3: Access Enforcement
               <ul>
@@ -4965,7 +4960,7 @@
             </li>
             <li>AU-8: Time Stamps
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md">A recorded timestamp is read from the clock</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md">A current timestamp is read from the clock</a> (broad)</li>
               </ul>
             </li>
             <li>AU-9: Protection of Audit Information
@@ -5027,17 +5022,22 @@
             </li>
             <li>CP-9: System Backup
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (broad)</li>
               </ul>
             </li>
             <li>CP-9(1): Testing for Reliability and Integrity
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CP-9(2): Test Restoration Using Sampling
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (tight)</li>
               </ul>
             </li>
             <li>CP-10: System Recovery and Reconstitution
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md">A destructive operation requires a verified restore path</a> (broad)</li>
               </ul>
             </li>
             <li>IA-2: Identification and Authentication (Organizational Users)
@@ -5205,7 +5205,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-reproduce-before-fix.md">Reproduce a defect before fixing it</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md">Anything wrong is fixed first</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md">A pass obtained by rerunning is still the failure</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md">A rerun pass does not erase an earlier failure</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md">A verification finding is fixed, not argued away</a> (tight)</li>
               </ul>
             </li>

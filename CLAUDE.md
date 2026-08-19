@@ -34,7 +34,7 @@ and both are drift-gated in CI.
 - [Read before characterizing](.claude/rules/aiqt/10-ACCUR-read-before-characterizing.md)
 - [Capture the reference when the claim is made](.claude/rules/aiqt/10-ACCUR-reference-capture.md)
 - [Reproduce a defect before fixing it](.claude/rules/aiqt/10-ACCUR-reproduce-before-fix.md)
-- [A recorded timestamp is read from the clock](.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)
+- [A current timestamp is read from the clock](.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)
 - [Validate an inferred premise before acting](.claude/rules/aiqt/10-ACCUR-validate-inference-before-action.md)
 - [Verify a fix is in its commit](.claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md)
 
@@ -49,7 +49,7 @@ and both are drift-gated in CI.
 - [No concealed failure](.claude/rules/aiqt/10-INTEG-no-concealed-failure.md)
 - [Preserve uncommitted work](.claude/rules/aiqt/10-INTEG-preserve-uncommitted-work.md)
 - [Protected-branch integrity](.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md)
-- [A pass obtained by rerunning is still the failure](.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)
+- [A rerun pass does not erase an earlier failure](.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)
 - [Make retries safe to repeat](.claude/rules/aiqt/10-INTEG-safe-retries.md)
 - [Separate task changes from pre-existing work](.claude/rules/aiqt/10-INTEG-separate-task-changes.md)
 - [Validation is a gate on apply](.claude/rules/aiqt/10-INTEG-validation-gates-apply.md)

@@ -2,10 +2,9 @@
 alwaysApply: true
 ---
 
-# A pass obtained by rerunning is still the failure
+# A rerun pass does not erase an earlier failure
 
-A check that fails and then passes on rerun with no intervening change is treated as a still-open
-intermittent defect: the earlier failure is recorded and investigated, and the rerun's green is not
-presented as the verification the original run was meant to give. Retrying until the gate agrees
-changes nothing the gate measures, so the failure keeps its signal even though the final state reads
-green.
+A check that fails and then passes on rerun with no deliberate intervening change is treated as an
+unresolved intermittent result: the earlier failure is recorded and investigated, and the later pass
+is not presented as conclusive verification. A rerun does not by itself explain or resolve the earlier
+failure, so both results remain part of the gate evidence.

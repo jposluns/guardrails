@@ -7,8 +7,8 @@ secondary: [SECI]
 slug: egress-destinations
 map-nist-80053-tight: [AC-4, SC-7(5)]
 map-nist-80053-broad: [SC-7]
-map-atlas-tight: [AML.T0025, AML.T0086]
-map-atlas-broad: [AML.T0024]
+map-atlas-tight: [AML.T0086]
+map-atlas-broad: [AML.T0025]
 map-owasp-llm-broad: [LLM02]
 map-owasp-asi-broad: [ASI02]
 ---

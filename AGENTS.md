@@ -61,12 +61,13 @@ Before a defect is fixed, the failure is reproduced and observed, and the same r
 pass after the change. A fix claim rests on that witnessed fail-to-pass transition, never on a plausible
 diagnosis of code the defect may not have touched.
 
-## A recorded timestamp is read from the clock
+## A current timestamp is read from the clock
 
-A date or time written into any record, artefact, or message is read from the environment's clock at
-the moment of writing, never recalled from the model's prior, assumed from surrounding context, or
-copied forward from an earlier value. Where no clock is available, the record says so rather than
-carrying a plausible guess.
+A timestamp that represents when the assistant performs an action or writes a record is read from
+the environment's clock at the relevant event, never recalled from the model's prior or inferred
+from surrounding context. A date or time representing an external or earlier event is taken from
+an authoritative source and identified as such. Where the required source is unavailable, the
+value is recorded as unknown rather than guessed.
 
 ## Validate an inferred premise before acting
 
@@ -136,13 +137,12 @@ The protected line of development is never rewritten, overwritten, or changed di
 through a reviewed, verified integration. On git that means no force-push and no direct commit to the
 protected branch, only a merged pull request.
 
-## A pass obtained by rerunning is still the failure
+## A rerun pass does not erase an earlier failure
 
-A check that fails and then passes on rerun with no intervening change is treated as a still-open
-intermittent defect: the earlier failure is recorded and investigated, and the rerun's green is not
-presented as the verification the original run was meant to give. Retrying until the gate agrees
-changes nothing the gate measures, so the failure keeps its signal even though the final state reads
-green.
+A check that fails and then passes on rerun with no deliberate intervening change is treated as an
+unresolved intermittent result: the earlier failure is recorded and investigated, and the later pass
+is not presented as conclusive verification. A rerun does not by itself explain or resolve the earlier
+failure, so both results remain part of the gate evidence.
 
 ## Make retries safe to repeat
 
@@ -656,8 +656,9 @@ An operation that destroys or overwrites state proceeds only when the state it w
 restorable through a backup, snapshot, or versioned copy whose restorability has been confirmed
 against the actual target, or when the maintainer has explicitly accepted the loss. An untested
 rollback idea is not evidence of reversibility: the restore path is verified before the destruction,
-not designed after it. Authorization to destroy does not substitute for recoverability, and both may
-be required at once.
+not designed after it. General authorization to perform a destructive action is not evidence of recoverability; unless the
+maintainer separately and explicitly accepts irreversible loss, authorization and a verified restore
+path are both required.
 
 ## Minimize personal data sent to AI services
 
