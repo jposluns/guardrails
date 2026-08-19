@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>738</strong> mappings from <strong>75</strong> of the pack's rules to <strong>389</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>742</strong> mappings from <strong>75</strong> of the pack's rules to <strong>393</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -112,7 +112,7 @@
         <table class="dtable">
           <thead><tr><th>Framework</th><th>Publisher</th><th>Edition</th><th>Relation</th><th>Edition stability</th><th>Identifiers referenced</th></tr></thead>
           <tbody>
-            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>60 of 173</td></tr>
+            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>63 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>72 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>50 of 207</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>13 of 61</td></tr>
@@ -123,7 +123,7 @@
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
             <tr><td>OWASP Top 10 for Agentic Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
             <tr><td>OWASP Application Security Verification Standard</td><td>OWASP Foundation</td><td>5.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>12 of 17</td></tr>
-            <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>22 of 116</td></tr>
+            <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>23 of 116</td></tr>
             <tr><td>OWASP Top 10 for LLM Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP MCP Top 10</td><td>OWASP Foundation</td><td>2025</td><td>addresses risk</td><td><span class="pill next">beta</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP Top 10 Proactive Controls</td><td>OWASP Foundation</td><td>4.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>7 of 10</td></tr>
@@ -2614,6 +2614,7 @@
             </li>
             <li>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)): aligns with guidance
               <ul>
+                <li>cross-site-request-forgery-prevention: Cross-Site Request Forgery Prevention Cheat Sheet (broad)</li>
                 <li>session-management: Session Management Cheat Sheet (tight)</li>
               </ul>
             </li>
@@ -2724,10 +2725,13 @@
                 <li>AML.T0070: RAG Poisoning (broad)</li>
                 <li>AML.T0078: Drive-by Compromise (broad)</li>
                 <li>AML.T0080: AI Agent Context Poisoning (broad)</li>
+                <li>AML.T0092: Manipulate User LLM Chat History (broad)</li>
                 <li>AML.T0094: Delay Execution of LLM Instructions (broad)</li>
                 <li>AML.T0099: AI Agent Tool Data Poisoning (broad)</li>
+                <li>AML.T0051.000: Direct (tight)</li>
                 <li>AML.T0051.001: Indirect (tight)</li>
                 <li>AML.T0051.002: Triggered (tight)</li>
+                <li>AML.T0054: LLM Jailbreak (tight)</li>
                 <li>AML.T0093: Prompt Infiltration via Public-Facing Application (tight)</li>
                 <li>AML.T0100: AI Agent Clickbait (tight)</li>
                 <li>AML.T0110: AI Agent Tool Poisoning (tight)</li>
@@ -3027,7 +3031,7 @@
       <details class="more">
         <summary>MITRE ATLAS (2026.06)</summary>
         <div class="inner">
-          <p>mitigates technique. 60 of 173 identifiers referenced.</p>
+          <p>mitigates technique. 63 of 173 identifiers referenced.</p>
           <ul>
             <li>AML.T0010.001: AI Software
               <ul>
@@ -3136,6 +3140,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md">Validate tool arguments before use</a> (broad)</li>
               </ul>
             </li>
+            <li>AML.T0051.000: Direct
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
             <li>AML.T0051.001: Indirect
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (broad)</li>
@@ -3156,6 +3165,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">Human authorization for consequential actions</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0054: LLM Jailbreak
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
               </ul>
             </li>
             <li>AML.T0055: Unsecured Credentials
@@ -3285,6 +3299,11 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md">Rotate a leaked secret</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md">Secure session and token handling</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0092: Manipulate User LLM Chat History
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (broad)</li>
               </ul>
             </li>
             <li>AML.T0093: Prompt Infiltration via Public-Facing Application
@@ -5102,7 +5121,7 @@
       <details class="more">
         <summary>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04))</summary>
         <div class="inner">
-          <p>aligns with guidance. 22 of 116 identifiers referenced.</p>
+          <p>aligns with guidance. 23 of 116 identifiers referenced.</p>
           <ul>
             <li>ai-agent-security: AI Agent Security Cheat Sheet
               <ul>
@@ -5117,6 +5136,11 @@
             <li>authorization: Authorization Cheat Sheet
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md">Least-privilege authorization</a> (tight)</li>
+              </ul>
+            </li>
+            <li>cross-site-request-forgery-prevention: Cross-Site Request Forgery Prevention Cheat Sheet
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md">Secure session and token handling</a> (broad)</li>
               </ul>
             </li>
             <li>cross-site-scripting-prevention: Cross Site Scripting Prevention Cheat Sheet
