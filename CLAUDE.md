@@ -70,6 +70,7 @@ and both are drift-gated in CI.
 - [Express authorization before execution](.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md)
 - [Human oversight and the autonomy threshold](.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md)
 - [Do not bury the review surface under raw dumps](.claude/rules/aiqt/10-TRUST-no-console-diff-dumps.md)
+- [Reconcile the record against reality](.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md)
 - [Records first](.claude/rules/aiqt/10-TRUST-records-first.md)
 - [Close each session on green](.claude/rules/aiqt/10-TRUST-session-close-on-green.md)
 - [Resume from the durable handoff](.claude/rules/aiqt/10-TRUST-session-resume-from-handoff.md)
