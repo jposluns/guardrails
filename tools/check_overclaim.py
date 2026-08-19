@@ -53,6 +53,24 @@ clean; a pattern that flagged a legitimate line would be too broad):
   - universal-SUBJECT "one standard serves every": a single-standard subject claiming it serves/covers/
     works all|every|any target. Requires the subject and a coverage verb, so "one standard your whole
     team can work to" and "one standard, three paths" stay clean.
+  - "one standard across every|all assistant|team": the one-standard-across compat claim where the
+    reach is carried by the preposition "across"/"for", not a verb, so the serves/applies patterns miss
+    it ("share one standard across every assistant"). Requires "across"/"for" IMMEDIATELY after
+    "standard", so the softened intent form ("one standard, intended to reach across the assistants it
+    uses") stays clean because a comma, not "across", follows "standard".
+  - "applied/used/enforced/run by every|all assistant|team": universal compatibility carried by a
+    past-participle coverage verb plus "by" ("one definition applied by every assistant"), which the
+    appl(y|ies) shape of the serves pattern does not reach. The softened "intended for every assistant"
+    carries no such verb and stays clean.
+  - subject-first "every|all assistant works to the same": the assistants themselves asserted to work
+    to one standard ("every assistant on the team works to the same ordering"). Requires the FINITE
+    "works" (present-tense assertion), so the softened intent form ("every assistant ... is meant to
+    work to the same ordering") stays clean because it reads bare "work", not "works".
+  - "under the same licen[cs]e": the ShareAlike imprecision, "the same licence" stated as an absolute.
+    CC BY-SA's ShareAlike is same-or-later-or-BY-SA-compatible (LICENSE clause 3(b)(1): a CC license
+    with the same License Elements, this version or later, or a BY-SA Compatible License), so the
+    absolute overstates it. The precise softened form ("under the same or a compatible ShareAlike
+    licence") stays clean because "or" follows "same", not "licence".
   - "foolproof": a bare guarantee-of-perfection adjective.
 
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
@@ -136,6 +154,30 @@ PATTERNS = [
         r"\bone\s+(?:standard|rule|instruction)\b[^.]{0,40}?"
         r"\b(?:serves?|covers?|fits?|works?|applies|supports?)\s+(?:all|every|any|each)\b",
         re.IGNORECASE), False),
+    # one-standard-across: reach carried by "across"/"for" (not a verb), so the serves/applies patterns
+    # miss it ("share one standard across every assistant"). "across"/"for" must sit IMMEDIATELY after
+    # "standard", so the softened "one standard, intended to reach across the assistants it uses" (a
+    # comma follows "standard") stays clean.
+    ("one standard across every|all assistant/team", re.compile(
+        r"\bone\s+(?:shared\s+)?standard\s+(?:across|for)\s+(?:\w+\s+){0,2}?"
+        r"(?:all|every|any)\s+(?:assistant|team)\b", re.IGNORECASE), False),
+    # coverage carried by a past-participle verb plus "by" ("applied by every assistant"), outside the
+    # appl(y|ies) shape of the serves pattern. The softened "intended for every assistant" carries no
+    # such verb and stays clean.
+    ("applied by every|all assistant/team", re.compile(
+        r"\b(?:applied|used|enforced|run)\s+by\s+(?:all|every|any)\s+(?:assistant|team)\b",
+        re.IGNORECASE), False),
+    # subject-first: the assistants asserted to work to one standard ("every assistant on the team works
+    # to the same ordering"). Requires the FINITE "works" (a present-tense assertion of fact), so the
+    # softened intent form ("every assistant ... is meant to work to the same ordering", bare "work")
+    # stays clean.
+    ("universal-subject (every assistant works to the same)", re.compile(
+        r"\b(?:all|every)\s+assistants?\b[^.]{0,30}?\bworks\s+to\s+the\s+same\b", re.IGNORECASE), False),
+    # ShareAlike imprecision: "the same licence" stated as an absolute. CC BY-SA's ShareAlike is
+    # same-or-later-or-BY-SA-compatible, so the absolute overstates it. The precise softened form
+    # ("under the same or a compatible ShareAlike licence") stays clean because "or" follows "same".
+    ("sharealike imprecision (under the same licence)", re.compile(
+        r"\bunder\s+the\s+same\s+licen[cs]e\b", re.IGNORECASE), False),
     # "foolproof": a bare guarantee-of-perfection adjective, an overclaim wherever it appears.
     ("foolproof", re.compile(r"\bfool-?proof\b", re.IGNORECASE), False),
 ]
@@ -233,6 +275,11 @@ POSITIVE = [
     "AIQT catches any mistake you make.",                             # catches-any
     "It eliminates all errors in your code.",                         # eliminates-all
     "The AIQT skill is foolproof.",                                   # foolproof
+    "A team can share one standard across every assistant it uses.",  # one-standard-across (install.html)
+    "One shared standard across every assistant your team uses.",     # one-standard-across (draft.html)
+    "One definition of done, applied by every assistant.",            # applied-by-every (teams.html)
+    "Every assistant on the team works to the same ordering.",        # universal-subject works-to-same (teams.html)
+    "Improvements come back under the same licence.",                 # ShareAlike imprecision (about/development.html)
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",
@@ -242,6 +289,12 @@ NEGATIVE = [
     "You find out at build time, and you stop trusting every suggestion after it.",
     "Always apply the AIQT skill to every response.",
     "Claims match their sources, and every override is logged.",
+    "A team can share one standard, intended to reach across the assistants it uses.",   # softened one-standard-across
+    "One shared standard, intended to reach across the assistants your team uses.",      # softened one-standard-across
+    "One definition of done, intended for every assistant on the team.",                 # softened applied-by-every
+    "Every assistant on the team is meant to work to the same ordering.",                # softened works-to-same (intent, bare "work")
+    "Contributions come back under the same or a compatible ShareAlike licence.",        # precise ShareAlike wording
+    "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
 ]
 
 
