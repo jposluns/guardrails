@@ -14,7 +14,13 @@ jobs:
     name: Quality gates
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 gives the version-monotonicity gate the changelog.toml history it compares
+      # base-vs-head; fetch-tags: true is explicit (depth-0 already fetches tags) so the tag layer, once
+      # a release records a tag, sees real tag objects rather than an unfetched-but-present ambiguity.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-python@v5
         with:
@@ -45,6 +51,15 @@ jobs:
       - name: Leak denylist
         run: python3 tools/check_leaks.py
 
+      # Portability is DISTINCT from the leak gate: the leak gate answers a confidentiality question
+      # repo-wide, this answers whether the shippable surface can land on a stranger's machine unchanged
+      # (no operator identity outside its attribution, no repo-operational vocabulary, no exemption
+      # markers, no unscannable file classes off the allow-list). See the gate header.
+      - name: Portability self-test
+        run: python3 tools/check_portability.py --self-test
+      - name: Portability
+        run: python3 tools/check_portability.py
+
       - name: Dashes
         run: python3 tools/check_no_dashes.py
 
@@ -62,6 +77,28 @@ jobs:
 
       - name: Version format and single-source
         run: python3 tools/check_versions.py
+
+      - name: Version monotonicity self-test
+        run: python3 tools/check_version_monotonicity.py --self-test
+
+      # The baseline differs by trigger: a pull_request compares against its target branch
+      # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name); a push probes HEAD^ first and
+      # passes it as --base when it resolves, otherwise invokes the gate with no --base so the gate's
+      # own root detection decides (a genuine root: NOT APPLICABLE; a shallow or broken-parent
+      # history: fail-closed). The rev-parse probe is an if-guard, so its nonzero exit on a first
+      # push (no HEAD^) does not abort the step under set -e.
+      - name: Version monotonicity
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 tools/check_version_monotonicity.py --base "origin/${GITHUB_BASE_REF}"
+          elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
+            python3 tools/check_version_monotonicity.py --base "HEAD^"
+          else
+            python3 tools/check_version_monotonicity.py
+          fi
 
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
@@ -88,6 +125,9 @@ jobs:
 
       - name: Hooks drift
         run: python3 tools/gen_hooks.py --check
+
+      - name: Hooks behaviour self-test
+        run: python3 tools/selftest_aiqt_hooks.py
 
       - name: Skill drift
         run: python3 tools/gen_skill.py --check

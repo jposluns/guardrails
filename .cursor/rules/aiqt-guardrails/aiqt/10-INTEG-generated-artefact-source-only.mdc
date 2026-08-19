@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# A generated artefact is changed only through its source
+
+A derived or generated artefact is never hand-edited; it changes only by changing its source and
+regenerating. Source and derivative land in the same change, so the two cannot drift apart.

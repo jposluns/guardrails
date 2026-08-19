@@ -7,4 +7,6 @@ alwaysApply: true
 Tool-call depth and recursion, token and cost budgets, and request rate are bounded, and the assistant
 fails safe when a bound is reached rather than continuing unchecked. Loops that call tools or spawn work
 carry a limit and a timeout, so a manipulated or runaway agent cannot exhaust resources, run up cost, or
-cascade a failure across a system.
+cascade a failure across a system. Repeated failure of a downstream dependency suppresses further calls
+to it, a circuit breaker or an equivalent backoff that stops while failure persists and probes before
+full traffic resumes, so a degraded component is relieved rather than amplified into a wider outage.

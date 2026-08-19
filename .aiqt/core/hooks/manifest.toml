@@ -18,8 +18,9 @@
 #   event    a known Claude Code hook event (Stop, PreToolUse, ...); whitelisted by the generator
 #   matcher  the tool-name pattern for tool events; OMITTED for non-tool events such as Stop
 #   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control)
-#   default  "block" (hard deny / exit 2) or "ask"; slice-1 controls are lexical and zero-intent,
-#            so they ship at block
+#   default  "block" (hard deny / exit 2), "ask", or "warn" (a non-blocking surfacing warn, exit 0,
+#            legal only on a Stop/SubagentStop event); most slice-1 controls are lexical and
+#            zero-intent, so they ship at block
 #   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
 #            d judgement), carried through so the surface traces to its enforceability claim
 #   residue  REQUIRED, never empty: what this control does NOT catch, so the shipped surface stays
@@ -39,7 +40,7 @@ rules = ["cnsdif"]  # trust / no-console-diff-dumps
 platform = "claude-code"
 event = "Stop"
 handler = "diff_wall_stop"
-default = "block"
+default = "warn"
 class = "b"
 residue = "This Stop layer is a NON-BLOCKING surfacing WARN (systemMessage, exit 0), not a hard block: by Stop time the wall has already rendered, and with no stop_hook_active field and no documented loop bound a hard block could wedge the session, so hard prevention lives in the PreToolUse diff-source layer instead. It catches only a unified-diff wall in the final assistant message of a turn: diff --git headers, paired @@ hunk headers, fenced diff/patch/udiff blocks (backtick or tilde) of 10 or more lines, and mixed +/- runs of 8 or more lines. It does not catch a diff dumped mid-turn between tool calls, side-by-side or word-diff renderings, or raw log or patch walls that carry none of those markers; a mixed +/- Markdown checklist can rarely trip the +/- run detector (accepted residual)."
 

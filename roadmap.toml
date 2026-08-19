@@ -5,22 +5,22 @@ note = "What you can use today, what is being built, and what is only an idea, e
 pill_class = "now"
 pill_label = "Available now"
 heading = "The chat assistant"
-body = 'You can have this today. AIQT 1.0.0 is one skill you load into a chat assistant that accepts one (Claude, ChatGPT, and Copilot among them). It holds that assistant to a stated standard: claims match their sources, checks keep their full strength, and "finished" has been verified before it is said.'
-link_text = "Add it to your assistant."
-link_href = "/install"
+body = 'You can have this today. AIQT 1.0.0 packages the governance core for a chat assistant: a Skill you upload to Claude, or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides that assistant toward a stated standard: claims matched to their sources, checks kept at full strength, and "finished" verified before it is said.'
+links = [
+  { text = "See what has been tested on each platform.", href = "/evidence" },
+  { text = "Add it to your assistant.", href = "/install" },
+]
 
 [[stage]]
 pill_class = "next"
 pill_label = "In development"
 heading = "The development assistant"
 body = "Version 1.1.0, in development, installs the same governance core into a project. It generates the file each coding agent expects, sets itself up through a wizard, and ships a doctor that verifies the install. It writes only inside its own directory, so nothing else in your repository changes without your say-so."
-link_text = "Read about the development assistant."
-link_href = "/development"
+links = [{ text = "Read about the development assistant.", href = "/development" }]
 
 [[stage]]
 pill_class = "idea"
 pill_label = "Ideas we are considering"
 heading = "Teams and Enterprise"
 body = "A web console would show governance activity across projects without requiring a terminal. Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. No dates and no commitments."
-link_text = "Read about Teams & Enterprise."
-link_href = "/teams"
+links = [{ text = "Read about Teams & Enterprise.", href = "/teams" }]
