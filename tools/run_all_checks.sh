@@ -41,12 +41,16 @@ else
 fi
 echo
 run_gate "leaks"     python3 tools/check_leaks.py
+run_gate "portability-selftest" python3 tools/check_portability.py --self-test
+run_gate "portability" python3 tools/check_portability.py
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
 run_gate "site"      python3 tools/check_site.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py
+run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicity.py --self-test
+run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "mappings-page-drift" python3 tools/gen_mappings.py --check

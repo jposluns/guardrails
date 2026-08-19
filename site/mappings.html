@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>740</strong> mappings from <strong>74</strong> of the pack's rules to <strong>391</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>742</strong> mappings from <strong>75</strong> of the pack's rules to <strong>393</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -117,8 +117,8 @@
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>50 of 207</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>13 of 61</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 of 74</td></tr>
-            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>49 of 1196</td></tr>
-            <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>22 of 72</td></tr>
+            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>50 of 1196</td></tr>
+            <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>23 of 72</td></tr>
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>16 of 42</td></tr>
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
             <tr><td>OWASP Top 10 for Agentic Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
@@ -918,6 +918,24 @@
               <ul>
                 <li>GOVERN 3.2: Policies and procedures are in place to define and differentiate roles and responsibilities for human-AI configurations and oversight. (tight)</li>
                 <li>MAP 3.5: Processes for human oversight are defined, assessed, and documented in accordance with organizational policies. (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Reconcile the record against reality</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>CA-7: Continuous Monitoring (broad)</li>
+              </ul>
+            </li>
+            <li>NIST AI Risk Management Framework (1.0 (NIST AI 100-1)): aligns with guidance
+              <ul>
+                <li>GOVERN 1.5: Ongoing monitoring and periodic review of the risk management process and its outcomes are planned. (broad)</li>
               </ul>
             </li>
           </ul>
@@ -4344,7 +4362,7 @@
       <details class="more">
         <summary>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0))</summary>
         <div class="inner">
-          <p>supports control. 49 of 1196 identifiers referenced.</p>
+          <p>supports control. 50 of 1196 identifiers referenced.</p>
           <ul>
             <li>AC-3: Access Enforcement
               <ul>
@@ -4386,6 +4404,11 @@
             <li>AU-12: Audit Record Generation
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md">Security logging with traceable context</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CA-7: Continuous Monitoring
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md">Reconcile the record against reality</a> (broad)</li>
               </ul>
             </li>
             <li>CM-3: Configuration Change Control
@@ -4631,7 +4654,7 @@
       <details class="more">
         <summary>NIST AI Risk Management Framework (1.0 (NIST AI 100-1))</summary>
         <div class="inner">
-          <p>aligns with guidance. 22 of 72 identifiers referenced.</p>
+          <p>aligns with guidance. 23 of 72 identifiers referenced.</p>
           <ul>
             <li>GOVERN 1.1: Legal and regulatory requirements involving AI are understood, managed, and documented.
               <ul>
@@ -4646,6 +4669,11 @@
             <li>GOVERN 1.4: The risk management process and its outcomes are established through transparent policies, procedures, and other controls.
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md">Records first</a> (broad)</li>
+              </ul>
+            </li>
+            <li>GOVERN 1.5: Ongoing monitoring and periodic review of the risk management process and its outcomes are planned.
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md">Reconcile the record against reality</a> (broad)</li>
               </ul>
             </li>
             <li>GOVERN 1.6: Mechanisms are in place to inventory AI systems and are resourced according to organizational risk priorities.

@@ -75,7 +75,7 @@
       "citation_unit": "control",
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
-      "ids_cited": 49,
+      "ids_cited": 50,
       "ids_total": 1196
     },
     "nist-airmf": {
@@ -88,7 +88,7 @@
       "citation_unit": "subcategory",
       "source_artefact": "NIST AI 100-1, AI Risk Management Framework 1.0",
       "retrieved": "2026-08-16",
-      "ids_cited": 22,
+      "ids_cited": 23,
       "ids_total": 72
     },
     "nist-ssdf": {
@@ -1579,6 +1579,26 @@
       "fit": "tight",
       "identifier": "MAP 3.5",
       "identifier_title": "Processes for human oversight are defined, assessed, and documented in accordance with organizational policies."
+    },
+    {
+      "rule_id": "recncl",
+      "rule_title": "Reconcile the record against reality",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CA-7",
+      "identifier_title": "Continuous Monitoring"
+    },
+    {
+      "rule_id": "recncl",
+      "rule_title": "Reconcile the record against reality",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-reconcile-record-against-reality.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "GOVERN 1.5",
+      "identifier_title": "Ongoing monitoring and periodic review of the risk management process and its outcomes are planned."
     },
     {
       "rule_id": "recfst",
