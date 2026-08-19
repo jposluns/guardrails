@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# Reject known-vulnerable dependency versions
+
+Before a dependency is added or upgraded, the exact resolved version is checked against current
+authoritative vulnerability advisories, and a version with a known exploitable vulnerability is rejected.
+Authentic provenance does not make a version safe; a legitimate, correctly named package can still resolve
+to an artefact that is unsafe to ship.
