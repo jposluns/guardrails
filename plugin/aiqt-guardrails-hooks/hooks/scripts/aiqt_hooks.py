@@ -1024,15 +1024,30 @@ def _has_long_prefix(tokens, full):
 # neutralized here.
 
 
+# The FIXED INTERNAL identity the recovery snapshot's `git commit-tree` commits under. The allowlist scrub
+# strips every ambient GIT_* (including any GIT_AUTHOR_*/GIT_COMMITTER_*) AND neutralizes on-disk config's
+# reach for the call, so with no ambient identity re-applied commit-tree would FALL BACK to user.name/email
+# and then FAIL on a host that has none (a CI runner or a fresh install with no global gitconfig), silently
+# disabling the recovery backstop there. Re-applying this fixed identity after the scrub makes commit-tree
+# depend on NO ambient state; a deterministic identity is also correct on its own terms, since a recovery
+# commit is attributed to the guard, not to the user. The address is a fixed non-routable localhost one.
+_RECOVERY_IDENTITY_NAME = "aiqt-recovery"
+_RECOVERY_IDENTITY_EMAIL = "aiqt-recovery@localhost"
+
+
 def _isolate_git_env(env):
-    """Scrub EVERY ambient GIT_*-prefixed var from env in place, re-assert the two PROTECTIVE vars, and
-    return it (allowlist posture: no ambient git env is trusted). A real-state git call is fully specified
-    by `-C <repo>` plus the few vars the caller re-applies AFTER this scrub (GIT_OPTIONAL_LOCKS for the
-    read-only probe; a temp GIT_INDEX_FILE via env_extra for a snapshot), so it observes the ACTUAL on-disk
-    repo and writes no trace file. AFTER the scrub this SETS GIT_NO_LAZY_FETCH=1 and GIT_TERMINAL_PROMPT=0,
-    so the scrub cannot strip an operator's offline/non-interactive posture: without them a partial-clone
-    probe/add could LAZY-FETCH (network I/O, writes objects) instead of failing offline, and prompting could
-    be re-enabled. A caller's own later env_extra (a temp GIT_INDEX_FILE) still wins because it is applied
+    """Scrub EVERY ambient GIT_*-prefixed var from env in place, re-assert the PROTECTIVE vars and the fixed
+    recovery commit identity, and return it (allowlist posture: no ambient git env is trusted). A real-state
+    git call is fully specified by `-C <repo>` plus the few vars the caller re-applies AFTER this scrub
+    (GIT_OPTIONAL_LOCKS for the read-only probe; a temp GIT_INDEX_FILE via env_extra for a snapshot), so it
+    observes the ACTUAL on-disk repo and writes no trace file. AFTER the scrub this SETS GIT_NO_LAZY_FETCH=1
+    and GIT_TERMINAL_PROMPT=0, so the scrub cannot strip an operator's offline/non-interactive posture:
+    without them a partial-clone probe/add could LAZY-FETCH (network I/O, writes objects) instead of failing
+    offline, and prompting could be re-enabled. It ALSO re-applies GIT_AUTHOR_NAME/EMAIL and
+    GIT_COMMITTER_NAME/EMAIL as the fixed _RECOVERY_IDENTITY_* so the snapshot's `git commit-tree` never
+    depends on an ambient or on-disk identity the scrub removed (without it commit-tree FAILS where no git
+    identity is configured, silently disabling the recovery backstop); the read-only probes simply ignore
+    it. A caller's own later env_extra (a temp GIT_INDEX_FILE) still wins because it is applied
     after this returns. Over-scrubbing fails SAFE: any GIT_* the call genuinely needed makes it error, and
     the caller treats that as a probe/snapshot FAILURE (None / SubprocessError) -> fail-to-ASK, never a
     silent allow. This closes the whole ambient-env class at once (GIT_CONFIG_*, GIT_CONFIG_PARAMETERS,
@@ -1047,6 +1062,13 @@ def _isolate_git_env(env):
     # partial-clone operation from lazy-fetching over the network, and keep git from ever prompting.
     env["GIT_NO_LAZY_FETCH"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Re-assert a fixed internal commit identity the scrub removed, so the snapshot's `git commit-tree`
+    # never falls back to (now-scrubbed) ambient config and FAILS where no git identity is configured; the
+    # read-only probes ignore it. A recovery commit is the guard's, not the user's, so the identity is fixed.
+    env["GIT_AUTHOR_NAME"] = _RECOVERY_IDENTITY_NAME
+    env["GIT_AUTHOR_EMAIL"] = _RECOVERY_IDENTITY_EMAIL
+    env["GIT_COMMITTER_NAME"] = _RECOVERY_IDENTITY_NAME
+    env["GIT_COMMITTER_EMAIL"] = _RECOVERY_IDENTITY_EMAIL
     return env
 
 

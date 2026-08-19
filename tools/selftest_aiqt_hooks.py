@@ -119,6 +119,24 @@ def main():
     # os.environ; this scrub is a test-harness isolation, not a change to the control.
     for _amb in [k for k in os.environ if k.startswith("GIT_")]:
         os.environ.pop(_amb, None)
+    # F-106 regression guard: run the whole self-test with NO ambient git identity, so the EN-6 recovery
+    # snapshot's `git commit-tree` must supply its OWN fixed identity to succeed. The recovery layer scrubs
+    # GIT_CONFIG_*/GIT_AUTHOR_*/GIT_COMMITTER_* itself (the allowlist posture), but NOT HOME/XDG_CONFIG_HOME,
+    # so pointing those at an EMPTY throwaway dir is what actually denies the snapshot a global-config
+    # identity, reproducing CI's no-global-gitconfig condition LOCALLY (why F-106 passed here but failed in
+    # CI), so a future regression that reintroduces an ambient-identity dependence in the snapshot fails THIS
+    # gate, not only in CI. HOME/XDG_CONFIG_HOME are NOT GIT_*-prefixed, so this does not trip the guard's
+    # own ambient-GIT_* view-override check (unlike GIT_CONFIG_GLOBAL/SYSTEM, which are non-cosmetic and would
+    # force every case to ASK), and the recovery layer scrubs GIT_CONFIG_* regardless, so nulling those would
+    # not reach its commit-tree anyway. The seed-repo commits set their identity inline via `-c user.name=...`
+    # (env_identity), so they are unaffected; the rec-ambient case still injects and removes its own
+    # GIT_AUTHOR_*/GIT_COMMITTER_* to prove an ambient identity does not break the snapshot.
+    _emptyhome = tmp / "emptyhome"
+    _emptyhome.mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(_emptyhome)
+    os.environ["XDG_CONFIG_HOME"] = str(_emptyhome / "xdgconfig")
+    for _idk in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        os.environ.pop(_idk, None)
     failures = []
 
     def expect(label, command, want, cwd=None):
@@ -1548,16 +1566,26 @@ def main():
         # GIT_*-prefixed var, not an enumerated family, so a random GIT_FOO and the round-5 GIT_ATTR_SOURCE
         # both go while non-GIT vars stay. This is the structural guarantee that closes the whole ambient-env
         # class at once (rounds 4-5 kept finding new members: GIT_CONFIG_*, GIT_TRACE*, GIT_ATTR_SOURCE).
-        # The ambient GIT_NO_LAZY_FETCH/GIT_TERMINAL_PROMPT are set the WRONG way here to prove the re-assertion
-        # (Class B) OVERRIDES an ambient value, not merely fills an absent one.
+        # The ambient GIT_NO_LAZY_FETCH/GIT_TERMINAL_PROMPT and the ambient git identity (GIT_AUTHOR_*/
+        # GIT_COMMITTER_*) are set the WRONG way here to prove the re-assertion (Class B) OVERRIDES an ambient
+        # value, not merely fills an absent one; the fixed recovery identity (F-106) must WIN over an ambient
+        # user identity, so a recovery commit is deterministically the guard's and never depends on ambient
+        # or on-disk identity that a fresh install / CI runner may lack.
         scrub_in = {"GIT_FOO": "bar", "GIT_ATTR_SOURCE": "HEAD", "GIT_DIR": "decoy",
                     "GIT_CONFIG_PARAMETERS": "'x=y'", "GIT_TRACE": "on",
-                    "GIT_NO_LAZY_FETCH": "0", "GIT_TERMINAL_PROMPT": "1", "LANG": "C",
-                    "TERM": "dumb"}
+                    "GIT_NO_LAZY_FETCH": "0", "GIT_TERMINAL_PROMPT": "1",
+                    "GIT_AUTHOR_NAME": "Ambient User", "GIT_AUTHOR_EMAIL": "ambient@example.invalid",
+                    "GIT_COMMITTER_NAME": "Ambient User", "GIT_COMMITTER_EMAIL": "ambient@example.invalid",
+                    "LANG": "C", "TERM": "dumb"}
         scrub_out = aiqt_hooks._isolate_git_env(dict(scrub_in))
-        # The two PROTECTIVE vars are re-asserted AFTER the scrub (Class B), so they are EXPECTED to be present;
-        # every AMBIENT GIT_* must be gone.
-        _protective = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+        # The PROTECTIVE vars and the fixed recovery identity are re-asserted AFTER the scrub (Class B), so
+        # they are EXPECTED to be present at their fixed values; every OTHER ambient GIT_* must be gone. The
+        # identity values are read from the source constants so this expectation cannot drift from the fix.
+        _protective = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
+                       "GIT_AUTHOR_NAME": aiqt_hooks._RECOVERY_IDENTITY_NAME,
+                       "GIT_AUTHOR_EMAIL": aiqt_hooks._RECOVERY_IDENTITY_EMAIL,
+                       "GIT_COMMITTER_NAME": aiqt_hooks._RECOVERY_IDENTITY_NAME,
+                       "GIT_COMMITTER_EMAIL": aiqt_hooks._RECOVERY_IDENTITY_EMAIL}
         _leaked = sorted(k for k in scrub_out if k.startswith("GIT_") and k not in _protective)
         if _leaked:
             failures.append("(rec-scrub-allowlist) _isolate_git_env must scrub EVERY ambient GIT_* var; "
