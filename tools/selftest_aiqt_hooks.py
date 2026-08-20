@@ -2103,6 +2103,21 @@ def main():
         gexpect("(gw-ar) '--message --no-verify' over-denies (disclosed value-spelling residual)",
                 "git commit --message --no-verify", "deny")
 
+        # gatdis round-2 (F-123): the newline-continuation ASK-miss (F3) and the --resolvemsg
+        # value-option over-block (F4) are fixed; the adjacency/regression locks hold; the disclosed
+        # redirect-pollution slips (F1/F2, routed to the common enforcement-hook redesign) are pinned.
+        gexpect("(gw-as) newline before the swallow now asks (F3)", "pytest ||\n true", "ask")
+        gexpect("(gw-at) newline before the truncating sink now asks (F3)", "pytest |\n head", "ask")
+        gexpect("(gw-au) am --resolvemsg -n consumes -n as the message value, allows (F4)",
+                "git am --resolvemsg -n patch.mbox", "allow")
+        gexpect("(gw-av) pytest || true still asks (adjacency lock)", "pytest || true", "ask")
+        gexpect("(gw-aw) pytest ; true allows (';' is not a swallow)", "pytest ; true", "allow")
+        gexpect("(gw-ax) am -n still denies (bare short -n is the bypass)", "git am -n", "deny")
+        gexpect("(gw-ay) redirect before the git subcommand slips, allows (disclosed F1/F2)",
+                "git >/dev/null commit --no-verify -m x", "allow")
+        gexpect("(gw-az) redirect before the checker word slips, allows (disclosed F1/F2)",
+                ">/dev/null pytest || true", "allow")
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

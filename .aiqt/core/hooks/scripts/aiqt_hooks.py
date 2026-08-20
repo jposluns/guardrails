@@ -2804,7 +2804,11 @@ _NOVERIFY_SHORT_N_VERBS = frozenset(("commit", "am"))
 # the attached "stuck" form, so the scan stops at the letter but a bare one consumes NOTHING; the LONG
 # sets are the mandatory-value long options in their SEPARATED form (--message <msg>), whose value
 # token could itself begin with '-n' and must be skipped (their '--opt=value' shape carries the value
-# in the same token and consumes nothing).
+# in the same token and consumes nothing). These sets cover the COMMON value-taking options rather
+# than claiming an exhaustive enumeration: an OMITTED value-taking option is safe-direction (on a
+# contrived input whose value itself spells -n or --no-verify it can only cause an over-ask/over-deny,
+# never a silent allow), so an option is added only once confirmed value-taking (adding a NON-value-
+# taking option would wrongly skip a real operand and could cause a silent allow, so it is never done).
 _GATE_SHORT_VALUE_OPTS = {
     "commit": frozenset(("m", "F", "C", "c", "t")),
     "am": frozenset(()),
@@ -2817,7 +2821,8 @@ _GATE_LONG_ARG_OPTS = {
     "commit": frozenset((
         "--message", "--file", "--author", "--date", "--template", "--trailer", "--cleanup",
         "--reuse-message", "--reedit-message", "--fixup", "--squash", "--pathspec-from-file")),
-    "am": frozenset(("--whitespace", "--exclude", "--include", "--directory", "--quoted-cr")),
+    "am": frozenset(("--whitespace", "--exclude", "--include", "--directory", "--quoted-cr",
+                     "--resolvemsg")),
 }
 
 # The checker lexicon for the ASK heuristics. Three shapes qualify a segment as checker-shaped: a
@@ -3022,7 +3027,15 @@ def gate_weakening(data):
                         "(rule gatdis).")
         if not _is_checker_segment(tokens):
             continue
-        nxt = segments[index + 1][0] if index + 1 < len(segments) else []
+        # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
+        # line-continuation/newline inserts a segment with no tokens, so 'pytest ||\n true' and
+        # 'pytest |\n head' would otherwise read as having no following swallow/sink and miss the
+        # ASK). Only genuinely empty segments are skipped; a real intervening command (a non-empty
+        # segment) still breaks adjacency and is NOT skipped.
+        nxt_index = index + 1
+        while nxt_index < len(segments) and not segments[nxt_index][0]:
+            nxt_index += 1
+        nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
             if pending_ask is None:
                 pending_ask = _ask(
