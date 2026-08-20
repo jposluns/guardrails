@@ -232,36 +232,6 @@ def _command_word_index(tokens):
     return i
 
 
-# A shell redirection operator token as shlex produces it: an optional leading fd digit fused to the
-# operator, then one of the redirect operators. shlex usually splits a leading fd into its own token
-# (a bare '2' before '>'), which _strip_redirects also drops.
-_REDIR_OP_RE = re.compile(r"^[0-9]*(?:>>|>\||>&|<<<|<<|<>|<&|>|<)$")
-
-
-def _strip_redirects(tokens):
-    """Return the segment's tokens with shell redirections removed, reconstructing the argv git actually
-    receives (the shell consumes redirects before exec, so git never sees them). A redirect is an operator
-    token (>, >>, <, <<, <<<, <>, >|, >&, <&, optionally fd-prefixed like 2>) plus the target token that
-    follows it, and a bare fd-digit token that shlex split off immediately before the operator ('2' in
-    '2 >'). Conservative by construction: only a well-formed redirect operator strips, so an unrecognized
-    form leaves the tokens unchanged (no worse than before) rather than dropping a real argument; and a
-    stripped target or fd digit is never a protected branch name, so stripping can never drop a protected
-    refspec (it removes only what git would not see, never introducing a silent allow)."""
-    out = []
-    skip_next = False
-    for tok in tokens:
-        if skip_next:
-            skip_next = False
-            continue  # the redirect target
-        if _REDIR_OP_RE.match(tok):
-            if out and out[-1].isdigit():
-                out.pop()  # the fd digit shlex split off, e.g. the '2' of '2 >'
-            skip_next = True
-            continue
-        out.append(tok)
-    return out
-
-
 def _command_word(tokens):
     """The command word of a segment: the basename of the first non-assignment token, so an absolute
     path to the tool still resolves (/usr/bin/git -> git) and a leading env-assignment prefix (FOO=bar,
@@ -2762,15 +2732,14 @@ def protected_line(data):
     pending_ask = None  # the first ASK found; a DENY anywhere returns immediately and wins over it
     saw_git = False     # did any parsed segment have 'git' as its command word?
     for tokens, _sep in segments:
-        argv = _strip_redirects(tokens)  # git receives argv, not the shell's redirect tokens (F-122)
-        if _command_word(argv) != "git":
+        if _command_word(tokens) != "git":
             continue
         saw_git = True
-        if _has_info_flag(argv):
+        if _has_info_flag(tokens):
             continue  # a --help/-h segment shows help, it pushes and commits nothing (see diff_source)
-        sub, args = _git_sub_and_args(argv)
+        sub, args = _git_sub_and_args(tokens)
         if sub == "push":
-            outcome = _push_protected(argv, args, cwd)
+            outcome = _push_protected(tokens, args, cwd)
             if outcome is None:
                 continue
             decision, detail, act_noun = outcome
@@ -2789,7 +2758,7 @@ def protected_line(data):
                     "AIQT guardrail: a git push this guard cannot prove misses the protected branch - "
                     "confirm before proceeding (rule prtbrn).")
         elif sub == "commit":
-            detail = _commit_on_protected(argv, cwd)
+            detail = _commit_on_protected(tokens, cwd)
             if detail is not None and pending_ask is None:
                 pending_ask = _ask(
                     "AIQT rule artbr1 (branch-and-merge-on-green): this git commit {}. A change "
