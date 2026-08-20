@@ -12,7 +12,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
-  secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/Bash writing an obvious hardcoded secret
+  secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -3063,7 +3063,7 @@ def gate_weakening(data):
     return _allow()
 
 
-# --- secsec: an obvious hardcoded secret in a Write/Edit/Bash write-form -----------------------------
+# --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
 # written, so an accidental paste is caught before it ever lands on disk. The patterns are SINGLE-SOURCED
@@ -3076,9 +3076,10 @@ def gate_weakening(data):
 # letter and a digit) AND is not a PLACEHOLDER. The secret value is NEVER echoed into a reason; only the
 # pattern label is named. Best-effort, targeting the accidental paste/commit, not an adversary: it does
 # NOT catch an entropy-only secret with no recognizable shape, a secret written by a tool other than
-# Write/Edit/Bash, a secret split across tokens/lines or built by concatenation, the post-shlex
-# shell-syntax boundary the other lexical hooks share (a redirect or an embedded '#') on the Bash path,
-# or a base64/obfuscated form.
+# Write/Edit/MultiEdit/Bash, or a secret split across tokens/lines or built by concatenation; on the
+# Bash path the command string is scanned as RAW TEXT (not shlex-tokenized, not executed), so a secret
+# assembled by concatenation or supplied through a shell variable or expansion is missed, but a redirect
+# or an embedded '#' does NOT cause a Bash-path miss; and it does not catch a base64/obfuscated form.
 #
 # The pattern SOURCE STRINGS below are GENERATED from tools/check_secrets.py by
 # tools/gen_secret_patterns.py and are drift-gated; NEVER hand-edit them, and NEVER runtime-import

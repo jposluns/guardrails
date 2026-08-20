@@ -62,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
@@ -2283,6 +2284,29 @@ def main():
         # Out of scope (F-128b disclosure): NotebookEdit is not in the matcher set, so it ALLOWS.
         sexpect("(ss-aa) NotebookEdit (out of scope) allows",
                 "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow")
+
+        # secsec round-4 (F-129): the pattern drift gate must REJECT a target carrying more than one
+        # generated BEGIN..END region. text.find inspects only the FIRST region, so a SECOND region (e.g.
+        # a second _SECSEC_PREFIX_SOURCES = []) could override the patterns undetected while --check still
+        # passed. gen_secret_patterns._splice now asserts EXACTLY ONE BEGIN and EXACTLY ONE END, raising
+        # ValueError (which run() maps to a nonzero exit) otherwise; both the regen and --check paths reach
+        # the region through _splice, so this guards both. A one-region text splices cleanly; a two-region
+        # text must raise. Without the F-129 count guard, the two-region splice returns silently and this
+        # case fails, so it is the durable check that fails without the change.
+        _begin, _end = gen_secret_patterns.BEGIN, gen_secret_patterns.END
+        _region = "{}\n_SECSEC_PREFIX_SOURCES = []\n{}".format(_begin, _end)
+        _one_region = "prefix\n{}\nbody\n{}\nsuffix\n".format(_begin, _end)
+        _two_region = _one_region + "{}\nsecond body\n{}\n".format(_begin, _end)
+        try:
+            gen_secret_patterns._splice(_one_region, _region)
+        except ValueError as exc:
+            failures.append("(ss-drift-a) single-region _splice unexpectedly raised: {}".format(exc))
+        try:
+            gen_secret_patterns._splice(_two_region, _region)
+            failures.append("(ss-drift-b) two-region _splice did not raise; the drift gate would miss a "
+                            "second generated region")
+        except ValueError:
+            pass
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

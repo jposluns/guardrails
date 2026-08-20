@@ -68,8 +68,19 @@ def render_region(prefix_sources, assign_source, placeholder_source):
 
 def _splice(text, region):
     """Replace the on-disk region (BEGIN..END inclusive) with the rendered region. Raises ValueError
-    when a sentinel is missing or out of order, so a mangled or removed region fails closed rather than
-    appending a second copy or writing nothing."""
+    when a sentinel is missing, duplicated, or out of order, so a mangled, removed, or multi-region file
+    fails closed rather than appending a second copy, writing nothing, or splicing only the first of
+    several regions. Requiring EXACTLY ONE BEGIN and EXACTLY ONE END is what stops a second BEGIN..END
+    block (which text.find would never inspect) from overriding the patterns undetected: both the regen
+    path and the --check path reach the region through this function, so the count guard covers both."""
+    begin_count = text.count(BEGIN)
+    if begin_count != 1:
+        raise ValueError("expected exactly one BEGIN sentinel in {}, found {}".format(TARGET_REL,
+                                                                                      begin_count))
+    end_count = text.count(END)
+    if end_count != 1:
+        raise ValueError("expected exactly one END sentinel in {}, found {}".format(TARGET_REL,
+                                                                                    end_count))
     i = text.find(BEGIN)
     if i == -1:
         raise ValueError("BEGIN sentinel not found in {}".format(TARGET_REL))
