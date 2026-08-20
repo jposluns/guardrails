@@ -1912,6 +1912,18 @@ def main():
                 "git push --force origin --end-of-options main --help", "deny", cwd=plr)
         pexpect("(f117r8-a) --repo does not create a false refspec escape (refspec-less force denies)",
                 "git push -f --repo=origin backup", "deny", cwd=plr)
+        # F-121 round-9: value-taking-option parse gaps (a global --attr-source, and abbreviated push
+        # value-options) must not mask a protected-branch action.
+        pexpect("(f117r9-a) separated --attr-source global option does not mask a force-push",
+                "git --attr-source HEAD push --force origin main", "deny", cwd=plr)
+        pexpect("(f117r9-b) separated --attr-source does not mask a direct commit",
+                "git --attr-source HEAD commit -m x", "ask", cwd=plr)
+        pexpect("(f117r9-c) abbreviated --rep (=--repo) does not mask a refspec-less force",
+                "git push -f --rep backup origin", "deny", cwd=plr)
+        pexpect("(f117r9-d) abbreviated --push-opt does not mask a refspec-less force",
+                "git push -f --push-opt marker origin", "deny", cwd=plr)
+        pexpect("(f117r9-e) a genuine separated --push-option value is still skipped (plain push allows)",
+                "git push --push-option marker origin main", "allow", cwd=plr)
         pexpect("(f117r7-x1) embedded-quote flag in the raw fallback is a DISCLOSED inherent residual",
                 "env git push -'f' origin main", "allow", cwd=plr)
         dexpect("(f117r7-d) clustered patch flag -wp is a DISCLOSED cnsdif residual (allows; routed F-119)",

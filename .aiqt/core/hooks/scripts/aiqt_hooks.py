@@ -249,7 +249,8 @@ def _command_word(tokens):
 # separate arg; that case is handled by the '=' test, so only the space-separated forms skip two tokens.
 _GIT_ARG_OPTS = frozenset((
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix",
-    "--config-env"))
+    "--config-env", "--attr-source"))  # --attr-source (git 2.40+) consumes its value in separated form;
+    # git does NOT abbreviate top-level options, so exact membership is complete here (F-121)
 
 
 def _git_subcommand(tokens):
@@ -2433,7 +2434,9 @@ def _push_parse(args):
     as the option VALUE they are, never as a force flag. Each candidate long option is still matched by
     CONSERVATIVE LONG PREFIX (the shipped _has_long_prefix, applied one token at a time), plus the
     short '-f'/'-d' cluster scan, so an abbreviated '--for' or '--d' - even one git itself would reject
-    as ambiguous - routes to ASK/DENY, never a silent allow. A value-taking option in its SEPARATED
+    as ambiguous - routes to ASK/DENY, never a silent allow. A value-taking option is likewise
+    recognized by prefix (--rep for --repo, --push-opt for --push-option), so its value token is
+    skipped rather than misread as the repository or a refspec (F-121). A value-taking option in its SEPARATED
     form (_PUSH_LONG_ARG_OPTS / _PUSH_SHORT_ARG_OPTS) sets skip_value so its value token is skipped,
     never scanned as a flag or an operand; the attached '--opt=value'/'-o<value>' shape carries its
     value in the same token and needs no skip. --force-with-lease and --signed take an OPTIONAL value
@@ -2456,8 +2459,12 @@ def _push_parse(args):
             skip_value = False
             continue  # this token is a prior option's VALUE, not a flag or an operand
         if tok.startswith("--"):
-            if "=" not in tok and tok in _PUSH_LONG_ARG_OPTS:
-                skip_value = True  # its value is the next token
+            if "=" not in tok and any(_has_long_prefix([tok], _n[2:]) for _n in _PUSH_LONG_ARG_OPTS):
+                skip_value = True  # a value-taking push option OR an unambiguous abbreviation git accepts
+                                   # (e.g. --rep for --repo, --push-opt for --push-option) consumes the
+                                   # next token as its value; erring toward skip is safe (an ambiguous
+                                   # prefix git itself rejects is moot), and this closes the abbreviated
+                                   # value-option silent-allow (F-121)
             elif _has_long_prefix([tok], "mirror"):  # --mirror: a forced sweep of ALL refs
                 mirror = True
             elif _has_long_prefix([tok], "all") or _has_long_prefix([tok], "branches"):
