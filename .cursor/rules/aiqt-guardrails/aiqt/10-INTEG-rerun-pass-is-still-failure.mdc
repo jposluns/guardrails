@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+
+# A rerun pass does not erase an earlier failure
+
+A check that fails and then passes on rerun with no deliberate intervening change is treated as an
+unresolved intermittent result: the earlier failure is recorded and investigated, and the later pass
+is not presented as conclusive verification. A rerun does not by itself explain or resolve the earlier
+failure, so both results remain part of the gate evidence.
