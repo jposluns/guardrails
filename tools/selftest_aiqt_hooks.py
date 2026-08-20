@@ -1924,6 +1924,21 @@ def main():
                 "git push -f --push-opt marker origin", "deny", cwd=plr)
         pexpect("(f117r9-e) a genuine separated --push-option value is still skipped (plain push allows)",
                 "git push --push-option marker origin main", "allow", cwd=plr)
+        # F-122 round-10: shell redirections must not corrupt the protected-line parse.
+        pexpect("(f117r10-a) redirect before the subcommand does not mask a force-push",
+                "git 2>/dev/null push --force origin main", "deny", cwd=plr)
+        pexpect("(f117r10-b) redirect before the subcommand does not mask a direct commit",
+                "git 2>/dev/null commit -m fix", "ask", cwd=plr)
+        pexpect("(f117r10-c) trailing redirect on a refspec-less force still probes HEAD (deny on main)",
+                "git push --force origin 2>/dev/null", "deny", cwd=plr)
+        pexpect("(f117r10-d) trailing redirect refspec-less force allows off a feature branch",
+                "git push --force origin 2>/dev/null", "allow", cwd=plf)
+        pexpect("(f117r10-e) redirect between -o and --help does not mask a force-push",
+                "git push -o 2>/dev/null --help --force origin main", "deny", cwd=plr)
+        pexpect("(f117r10-f) end-of-options as a redirect target is not the option boundary (genuine help allows)",
+                "git push --force origin main > -- --help", "allow", cwd=plr)
+        pexpect("(f117r10-g) a normal trailing redirect does not break plain-push allow",
+                "git push origin main > /tmp/out.log", "allow", cwd=plr)
         pexpect("(f117r7-x1) embedded-quote flag in the raw fallback is a DISCLOSED inherent residual",
                 "env git push -'f' origin main", "allow", cwd=plr)
         dexpect("(f117r7-d) clustered patch flag -wp is a DISCLOSED cnsdif residual (allows; routed F-119)",
