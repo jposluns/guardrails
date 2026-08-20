@@ -12,6 +12,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
+  secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -3062,6 +3063,160 @@ def gate_weakening(data):
     return _allow()
 
 
+# --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
+# A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
+# remain the real backstop), it moves the same high-signal detection to the moment a secret would be
+# written, so an accidental paste is caught before it ever lands on disk. The patterns are SINGLE-SOURCED
+# from tools/check_secrets.py, the pack's source of truth: the PREFIX provider-token shapes, the
+# credential-named ASSIGN shape, and the PLACEHOLDER non-secret shape are rendered into the GENERATED
+# REGION below by tools/gen_secret_patterns.py (drift-gated), so the hook can never fork from the scanner
+# and the standalone plugin needs no runtime import of check_secrets (it stays stdlib-only). The decision
+# mirrors check_secrets.py EXACTLY, scanning line by line: a provider-prefix match is a hit; a
+# credential-named assignment is a hit only when its value is real (an unquoted value must carry both a
+# letter and a digit) AND is not a PLACEHOLDER. The secret value is NEVER echoed into a reason; only the
+# pattern label is named. Best-effort, targeting the accidental paste/commit, not an adversary: it does
+# NOT catch an entropy-only secret with no recognizable shape, a secret written by a tool other than
+# Write/Edit/MultiEdit/Bash, or a secret split across tokens/lines or built by concatenation; on the
+# Bash path the command string is scanned as RAW TEXT (not shlex-tokenized, not executed), so a secret
+# assembled by concatenation or supplied through a shell variable or expansion is missed, but a redirect
+# or an embedded '#' does NOT cause a Bash-path miss; and it does not catch a base64/obfuscated form.
+#
+# The pattern SOURCE STRINGS below are GENERATED from tools/check_secrets.py by
+# tools/gen_secret_patterns.py and are drift-gated; NEVER hand-edit them, and NEVER runtime-import
+# check_secrets. Edit tools/check_secrets.py and regenerate (gen_secret_patterns.py, then gen_hooks.py).
+# BEGIN generated secret patterns (source: tools/check_secrets.py; regenerate with tools/gen_secret_patterns.py)
+_SECSEC_PREFIX_SOURCES = [
+    ('\\bgh[pousr]_[A-Za-z0-9]{16,}', 'GitHub token'),
+    ('\\bgithub_pat_[A-Za-z0-9_]{20,}', 'GitHub fine-grained PAT'),
+    ('\\bsk-[A-Za-z0-9]{20,}', 'OpenAI-style secret key'),
+    ('\\bsk-proj-[A-Za-z0-9_-]{20,}', 'OpenAI project key'),
+    ('\\bsk-ant-[A-Za-z0-9\\-_]{20,}', 'Anthropic key'),
+    ('\\bAKIA[0-9A-Z]{16}\\b', 'AWS access key id'),
+    ('\\bxox[baprs]-[A-Za-z0-9-]{10,}', 'Slack token'),
+    ('\\bxapp-[A-Za-z0-9-]{10,}', 'Slack app-level token'),
+    ('-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----', 'private key block'),
+]
+_SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>[^\'"\\n]{12,})(?P=q)    # quoted\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
+_SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
+# END generated secret patterns
+# Compiled at module load from the generated source strings (stdlib re only; no runtime import of
+# check_secrets). Recompiling from a pattern's .pattern string preserves its inline flags ((?ix)/(?i)),
+# so these behave identically to check_secrets.py's own compiled objects.
+_SECSEC_PREFIXES = [(re.compile(_pattern), _label) for _pattern, _label in _SECSEC_PREFIX_SOURCES]
+_SECSEC_ASSIGN = re.compile(_SECSEC_ASSIGN_SOURCE)
+_SECSEC_PLACEHOLDER = re.compile(_SECSEC_PLACEHOLDER_SOURCE)
+# The target field per SINGLE-FIELD tool: the text a Write/Edit would write, or the command a Bash call
+# would emit. MultiEdit is in scope too but carries a LIST of edits rather than one field, so it is
+# extracted separately (see _secsec_multiedit_text); its name is added to the in-scope tool set here.
+_SECSEC_FIELD = {"Write": "content", "Edit": "new_string", "Bash": "command"}
+_SECSEC_TOOLS = frozenset(_SECSEC_FIELD) | {"MultiEdit"}
+
+
+def _scan_secret(text):
+    """Return the pattern label of the first real (non-placeholder) secret in text, or None. Mirrors
+    tools/check_secrets.py's own decision EXACTLY, line by line: a provider-prefix match on a line is a
+    hit (check_secrets does not placeholder-exclude a prefixed token); a credential-named ASSIGN match is
+    a hit only when its value is real - an UNQUOTED value must contain both a letter and a digit (else it
+    is likelier ordinary prose or code), and the value must not be a PLACEHOLDER. The matched value is
+    never returned, only the label, so a reason can name the shape without echoing the secret."""
+    for line in text.splitlines():
+        for pattern, label in _SECSEC_PREFIXES:
+            if pattern.search(line):
+                return label
+        # Scan EVERY credential-named assignment on the line, not just the first, exactly as
+        # check_secrets.py does: a placeholder assignment earlier on the line must not mask a real
+        # one after it. The first real (non-placeholder) match on any line is the hit.
+        for match in _SECSEC_ASSIGN.finditer(line):
+            value = match.group("qvalue") or match.group("value") or ""
+            value = value.strip()
+            # An UNQUOTED value must additionally look like a credential (letters AND digits), the same
+            # extra bar check_secrets.py applies, because an unquoted match is far likelier to be prose.
+            if value and match.group("qvalue") is None:
+                if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
+                    value = ""
+            if value and not _SECSEC_PLACEHOLDER.match(value):
+                return "credential-named variable assigned a literal"
+    return None
+
+
+def _secsec_multiedit_text(tool_input):
+    """Return the text a MultiEdit would introduce: the newline-joined concatenation of the new_string
+    value of each edit in tool_input["edits"] (a LIST of dicts, each carrying the "new_string" that edit
+    would add). Return None to signal FAIL-CLOSED - the edits field absent or not a list, or ANY element
+    not a dict or carrying no string new_string - so the caller denies, consistent with the handler's
+    posture that a payload the scan cannot read is blocked. Edits are joined on a newline so each edit's
+    text stays on its own line for the per-line scan and no secret is split or fused across the boundary."""
+    edits = tool_input.get("edits")
+    if not isinstance(edits, list):
+        return None
+    parts = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            return None
+        new_string = edit.get("new_string")
+        if not isinstance(new_string, str):
+            return None
+        parts.append(new_string)
+    return "\n".join(parts)
+
+
+def secrets_shift_left(data):
+    """secsec (security/keep-secrets-out), PreToolUse on Write|Edit|MultiEdit|Bash: DENY a call that would
+    write an obvious hardcoded secret. Fail-closed like the other PreToolUse controls: a missing tool_name
+    denies, a non-dict tool_input denies (the payload cannot be read), and a present tool in scope whose
+    target payload is absent or malformed denies (the check cannot read what would be written). A present
+    tool NOT in {Write, Edit, MultiEdit, Bash} is out of scope and allows. The target text is the Write
+    content, the Edit new_string, the newline-joined new_string values of a MultiEdit's edits (the text
+    being introduced), or the Bash command string (the write-form path, best-effort). A DENY names the
+    pattern label only, never the secret."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: secrets_shift_left wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("secsec")
+    if tool_name not in _SECSEC_TOOLS:
+        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit/Bash)
+    # A non-dict tool_input cannot answer the scan; fail CLOSED cleanly in-handler (mirrors git_discard's
+    # isinstance-dict guard) rather than raising an AttributeError only the dispatcher would catch.
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _deny(
+            "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable tool_input, so the "
+            "secret scan could not run over what would be written; failing closed.".format(tool_name),
+            "AIQT guardrail: denied a {} call with no readable payload (rule secsec, fail-closed)."
+            .format(tool_name))
+    if tool_name == "MultiEdit":
+        target = _secsec_multiedit_text(tool_input)
+        if target is None:
+            return _deny(
+                "AIQT rule secsec (keep-secrets-out): the MultiEdit payload carried no readable edits "
+                "list, so the secret scan could not run over what would be written; failing closed.",
+                "AIQT guardrail: denied a MultiEdit call with no readable edits (rule secsec, "
+                "fail-closed).")
+    else:
+        field = _SECSEC_FIELD[tool_name]
+        target = tool_input.get(field)
+        if not isinstance(target, str):
+            return _deny(
+                "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable {}, so the "
+                "secret scan could not run over what would be written; failing closed.".format(tool_name, field),
+                "AIQT guardrail: denied a {} call with no readable {} (rule secsec, fail-closed)."
+                .format(tool_name, field))
+    label = _scan_secret(target)
+    if label is None:
+        return _allow()
+    reason = ("AIQT rule secsec (keep-secrets-out): the text this {} would write contains what looks like "
+              "a hardcoded secret ({}). No credential, token, or key is written to a repository or any "
+              "persisted location; supply it through the platform's secret store, environment, or auth "
+              "flow instead. If it reached a remote, treat it as compromised and rotate it. (This is a "
+              "compensating shift-left control; the CI secret-scan and gitleaks gates remain the backstop. "
+              "The value is redacted from this message.)".format(tool_name, label))
+    return _deny(reason,
+                 "AIQT guardrail: denied a {} that would write an apparent hardcoded secret ({}) "
+                 "(rule secsec).".format(tool_name, label))
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -3071,6 +3226,7 @@ HANDLERS = {
     "git_discard": git_discard,
     "protected_line": protected_line,
     "gate_weakening": gate_weakening,
+    "secrets_shift_left": secrets_shift_left,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -3087,6 +3243,7 @@ HANDLER_EVENT = {
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "gate_weakening": PRETOOL,
+    "secrets_shift_left": PRETOOL,
 }
 
 

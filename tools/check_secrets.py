@@ -50,10 +50,12 @@ PREFIXES = [
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"), "GitHub token"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "GitHub fine-grained PAT"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "OpenAI-style secret key"),
+    (re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}"), "OpenAI project key"),
     (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}"), "Anthropic key"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "Slack token"),
-    (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"), "private key block"),
+    (re.compile(r"\bxapp-[A-Za-z0-9-]{10,}"), "Slack app-level token"),
+    (re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"), "private key block"),
 ]
 
 # A credential-named variable assigned a literal of real length.
@@ -110,8 +112,10 @@ def main() -> int:
                 for pattern, label in PREFIXES:
                     if pattern.search(line):
                         findings.append(f"{rel}:{number}: {label}")
-                match = ASSIGN.search(line)
-                if match:
+                # Scan EVERY credential-named assignment on the line, not just the first: a
+                # placeholder assignment earlier on the line must not mask a real one after it.
+                # One finding per line suffices, so append on the first real match and stop.
+                for match in ASSIGN.finditer(line):
                     value = match.group("qvalue") or match.group("value") or ""
                     value = value.strip()
                     # An UNQUOTED value must additionally look like a credential (letters AND
@@ -124,6 +128,7 @@ def main() -> int:
                         findings.append(
                             f"{rel}:{number}: credential-named variable assigned a literal"
                         )
+                        break
     except OSError as exc:
         # An unreadable directory or file is a read error, not a clean skip: fail closed (exit 2) so the
         # secret gate never reports clean without having scanned an unreadable subtree.
