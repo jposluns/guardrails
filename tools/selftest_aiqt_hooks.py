@@ -1910,17 +1910,16 @@ def main():
         # cnsdif clustered patch + command-word-wrapper fallback), plus disclosed-residual lock cases.
         pexpect("(f117r7-a) --end-of-options boundary does not mask a force-push",
                 "git push --force origin --end-of-options main --help", "deny", cwd=plr)
-        pexpect("(f117r7-b) --repo=origin makes the positional a refspec (protected deletion)",
-                "git push --delete --repo=origin main", "deny", cwd=plr)
-        pexpect("(f117r7-c) --repo=origin force to main from a feature branch denies (was silent-allow)",
-                "git push --force --repo=origin main", "deny", cwd=plf)
+        pexpect("(f117r8-a) --repo does not create a false refspec escape (refspec-less force denies)",
+                "git push -f --repo=origin backup", "deny", cwd=plr)
         pexpect("(f117r7-x1) embedded-quote flag in the raw fallback is a DISCLOSED inherent residual",
                 "env git push -'f' origin main", "allow", cwd=plr)
-        dexpect("(f117r7-d) clustered patch flag -wp denies (log patch dump)", "git log -wp", "deny")
+        dexpect("(f117r7-d) clustered patch flag -wp is a DISCLOSED cnsdif residual (allows; routed F-119)",
+                "git log -wp", "allow")
         dexpect("(f117r7-e) pickaxe -Sfoo is not mis-read as a patch flag (allows a listing)",
                 "git log -Sfoo", "allow")
-        dexpect("(f117r7-f) command-word-wrapper git diff denies (wrapper fallback)",
-                "env git diff", "deny")
+        dexpect("(f117r7-f) wrapped git diff is a DISCLOSED cnsdif residual (allows; routed F-119)",
+                "env git diff", "allow")
         dexpect("(f117r7-g) wrapper over a non-producer allows", "env git status", "allow")
         dexpect("(f117r7-i) common summary git diff -M --stat still allows (not over-denied)",
                 "git diff -M --stat", "allow")

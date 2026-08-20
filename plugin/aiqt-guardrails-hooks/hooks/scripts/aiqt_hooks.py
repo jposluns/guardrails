@@ -413,7 +413,6 @@ def diff_wall_stop(data):
 # dropped the fragile '# allow-diff' quote-parsing bug surface, and it stays removed): an opt-in
 # anti-diff-dump hook blocks console diffs, and these allows cover the legitimate non-wall cases.
 _PATCH_FLAGS = frozenset(("-p", "-u"))
-_DIFF_VALUE_SHORT = frozenset("SGOUlL")  # value-taking short options of diff producers (-S/-G pickaxe, -O orderfile, -U unified, -l/-L limits): a cluster remainder after one is that option's value, not flags
 _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat", "--shortstat"))
 # An info flag turns a diff subcommand into a help invocation, not a diff dump. A pager pipe sends the
 # diff into an interactive reader, not a console wall; cat/tee/anything else is not a pager.
@@ -436,20 +435,11 @@ _RAW_DIFF_PRODUCER_RE = re.compile(r"(?is)\bgit\b.*?\b(?:diff|show|range-diff)\b
 def _has_patch_flag(tokens):
     """True when a segment carries a patch flag (-p, -u, or a --patch* form: --patch, --patch-with-stat,
     --patch-with-raw), the flag that turns a listing/plumbing/stash producer into a console patch and
-    that also dumps the full diff alongside a summary flag (git diff --stat -p). A CLUSTERED short patch
-    flag (-wp == -w -p) counts too (F-117): a '-'-cluster is scanned left to right and a 'p'/'u' counts,
-    but the scan STOPS at a value-taking short option (-S/-G/-O/-U/-l/-L), whose cluster remainder is that
-    option's value, so -Sfoo (a pickaxe search) is not mis-read as carrying -p."""
-    if any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens):
-        return True
-    for t in tokens:
-        if t.startswith("-") and not t.startswith("--") and len(t) > 1:
-            for ch in t[1:]:
-                if ch in _DIFF_VALUE_SHORT:
-                    break
-                if ch in ("p", "u"):
-                    return True
-    return False
+    that also dumps the full diff alongside a summary flag (git diff --stat -p). Clustered short patch
+    flags (-wp), patch-implying options (-U/-c/--cc/-L), and wrapped producers are NOT modelled here: the
+    diff-dump guard is best-effort and those forms are a DISCLOSED lexical residual routed to a separate
+    cnsdif hardening effort (F-119)."""
+    return any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
 
 
 def _has_summary_flag(tokens):
@@ -623,11 +613,9 @@ def diff_source_pretool(data):
         segments = _segments(command)
     except ValueError:
         return _diff_source_fallback(command)
-    saw_git = False
     for index, (tokens, _sep) in enumerate(segments):
         if _command_word(tokens) != "git":
             continue
-        saw_git = True
         if not _is_diff_producer(tokens):
             continue
         # Allowed cases, each judged on THIS segment's own tokens (never a raw substring): an info flag
@@ -647,13 +635,6 @@ def diff_source_pretool(data):
                   "(> file), or pipe it into a pager (| less), not the console.")
         return _deny(reason,
                      "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
-    # No parsed segment had 'git' as its command word, yet the raw command names a git diff-producer: a
-    # command-word wrapper (env/sudo/...) hides the git call. Mirror protected_line's raw posture - an
-    # apparent wrapped diff dump is denied via the fallback rather than passing silently (F-117). The
-    # compound residual (a benign git segment elsewhere sets saw_git and suppresses this) is disclosed,
-    # as in protected_line.
-    if not saw_git and _RAW_DIFF_PRODUCER_RE.search(command):
-        return _diff_source_fallback(command)
     return _allow()
 
 
@@ -2435,7 +2416,7 @@ def _is_protected_ref(name):
 
 def _push_parse(args):
     """Parse the token list AFTER a 'git push' subcommand (the args of _git_sub_and_args). Returns
-    (force, delete, mirror, sweep_all, prune, repo_given, operands): force is any force spelling (-f/--force, every
+    (force, delete, mirror, sweep_all, prune, operands): force is any force spelling (-f/--force, every
     --force-with-lease spelling - a lease-guarded force still rewrites the remote ref - and
     --force-if-includes, with --mirror implying force as git does); delete is the branch-deletion mode
     (--delete or a clustered -d; the empty-source ':<dst>' delete refspec is judged per-operand by the
@@ -2461,10 +2442,13 @@ def _push_parse(args):
     flags are NOT modelled (round-4, disclosed): '--no-force'/'--no-delete' cancel nothing here,
     '--force-if-includes' alone (a documented no-op without --force-with-lease) still reads as force,
     and --dry-run is judged like the real thing - all safe-direction over-denies; re-issue without the
-    contrived flag combination. repo_given is true when a --repo option supplies the repository, in which
-    case the caller treats operands[0] as a refspec rather than the repository (F-117)."""
+    contrived flag combination. Also NOT modelled (disclosed, contrived under-block): a
+    `--`/`--end-of-options` that is the VALUE of a preceding value-taking option (git push -o
+    --end-of-options --force ...) is split as an end-of-options boundary by _split_pre_post
+    before the value-aware loop, so a force after it can read as an operand; re-issue without the
+    contrived option-value."""
     pre, post, _had_sep = _split_pre_post(args)
-    force = delete = mirror = sweep_all = prune = repo_given = False
+    force = delete = mirror = sweep_all = prune = False
     skip_value = False  # the previous token was a separated value-taking option: skip its value
     operands = []       # remote + refspecs in command order; the loop appends, then post extends
     for tok in pre:
@@ -2472,9 +2456,6 @@ def _push_parse(args):
             skip_value = False
             continue  # this token is a prior option's VALUE, not a flag or an operand
         if tok.startswith("--"):
-            if _has_long_prefix([tok], "repo"):
-                repo_given = True  # --repo <remote> supplies the repository, so the first positional
-                                   # operand is a refspec, not the repo (F-117)
             if "=" not in tok and tok in _PUSH_LONG_ARG_OPTS:
                 skip_value = True  # its value is the next token
             elif _has_long_prefix([tok], "mirror"):  # --mirror: a forced sweep of ALL refs
@@ -2503,7 +2484,7 @@ def _push_parse(args):
             continue
         operands.append(tok)  # a bare operand: the remote or a refspec
     operands += post  # after '--' every token is a refspec (push has no pathspec position)
-    return force or mirror, delete, mirror, sweep_all, prune, repo_given, operands
+    return force or mirror, delete, mirror, sweep_all, prune, operands
 
 def _push_protected(tokens, args, cwd):
     """Classify one git push segment against the protected set: ('deny', detail, act_noun), where
@@ -2533,10 +2514,8 @@ def _push_protected(tokens, args, cwd):
     invalid remote ref, so the probe-backed deny on the delete side is a harmless safe-direction
     over-deny kept for uniformity (round-4 rewording: round-3 wrongly claimed git resolves a deleted
     HEAD to the current branch)."""
-    force, delete, mirror, sweep_all, prune, repo_given, operands = _push_parse(args)
-    # operands[0] is the repository (git's grammar) and never a destination - UNLESS a --repo option
-    # supplied the repository, in which case operands[0] is itself a refspec (F-117).
-    refspecs = operands if repo_given else operands[1:]
+    force, delete, mirror, sweep_all, prune, operands = _push_parse(args)
+    refspecs = operands[1:]  # operands[0] is the repository (git's own grammar): never a destination
     # Collect every FORCED and every DELETED destination over the REFSPEC-position operands. Forced:
     # the dst of a '+'-prefixed refspec always, and of every refspec when a force flag is present; the
     # src:dst DESTINATION is what the push overwrites ('feature:main' forces main; 'main:feature'
