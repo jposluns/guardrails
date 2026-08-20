@@ -2083,7 +2083,11 @@ def main():
         # gatdis (EN-5 PR-B): additional brief coverage - the full verb roster in long form, the
         # short/abbrev spellings, the out-of-roster verbs, and the disclosed value-spelling over-deny.
         gexpect("(gw-ag) am --no-verify denies (exact long form)", "git am --no-verify", "deny")
-        gexpect("(gw-ah) abbreviated --no-ver treated as the bypass", "git commit --no-ver -m 'x'", "deny")
+        # (gw-ah) --no-ver is INTENDED conservative-long-prefix over-deny, NOT the catch of a real
+        # bypass: --no-ver is ambiguous between --no-verify and --no-verbose, so git itself rejects it
+        # and no bypass occurs; this is a safe-direction over-deny of an invalid command.
+        gexpect("(gw-ah) --no-ver is a conservative-long-prefix over-deny of an ambiguous (git-rejected) "
+                "option, not a real bypass", "git commit --no-ver -m 'x'", "deny")
         gexpect("(gw-ai) clustered -sn carries -n", "git commit -sn -m 'x'", "deny")
         gexpect("(gw-aj) pull -n is --no-stat, allows", "git pull -n", "allow")
         gexpect("(gw-ak) an -m value naming the no-verify word allows",
@@ -2117,6 +2121,19 @@ def main():
                 "git >/dev/null commit --no-verify -m x", "allow")
         gexpect("(gw-az) redirect before the checker word slips, allows (disclosed F1/F2)",
                 ">/dev/null pytest || true", "allow")
+
+        # gatdis round-3 (F-123 disclosed residuals): the CURRENT (unchanged) behaviour of the newly
+        # disclosed residuals, locked and visible. An embedded unquoted '#' is a shlex comment start
+        # that drops the rest of the line, so the bypass/swallow after it slips (routed to the common
+        # enforcement-hook tokenizer redesign); the two contrived safe-direction over-blocks still DENY.
+        gexpect("(gw-ba) embedded-# drops the trailing --no-verify, allows (embedded-# residual, "
+                "routed to redesign)", "git commit -m ticket#123 --no-verify", "allow")
+        gexpect("(gw-bb) embedded-# drops the '|| true' swallow, allows (embedded-# residual)",
+                "pytest foo#bar || true", "allow")
+        gexpect("(gw-bc) a trailing --verify does not cancel --no-verify here, still denies "
+                "(disclosed --verify-cancel over-block)", "git commit --no-verify --verify -m x", "deny")
+        gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
+                "(disclosed clustered-help over-block)", "git commit -hn -m x", "deny")
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
