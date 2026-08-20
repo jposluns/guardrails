@@ -1860,6 +1860,21 @@ def main():
                 "git push --delete origin HEAD", "deny", cwd=plr)
         pexpect("(pl-u8) a refspec-less --delete allows (git itself rejects it, nothing to resolve)",
                 "git push --delete origin", "allow", cwd=plr)
+        # F-117: info-flag value-awareness and the widened fallback force/delete short clusters.
+        pexpect("(f117-a) commit -m --help on protected HEAD asks (--help is the -m value, not help)",
+                "git commit -m --help", "ask", cwd=plr)
+        pexpect("(f117-b) push -o --help --force to main denies (--help is the -o value, --force is real)",
+                "git push -o --help --force origin main", "deny", cwd=plr)
+        pexpect("(f117-c) genuine push --help still allows", "git push --help", "allow", cwd=plr)
+        pexpect("(f117-d) genuine commit --help still allows", "git commit --help", "allow", cwd=plr)
+        pexpect("(f117-e) commit --amend --help over-asks (documented safe-direction residual)",
+                "git commit --amend --help", "ask", cwd=plr)
+        pexpect("(f117-f) unparseable push --prune asks (fallback prune spelling, F-117)",
+                'git push --prune origin main "unbalanced', "ask", cwd=plr)
+        pexpect("(f117-g) unparseable push -4d digit cluster asks (fallback, F-117)",
+                'git push -4d origin main "unbalanced', "ask", cwd=plr)
+        pexpect("(f117-h) unparseable push -4f digit cluster force asks (fallback, F-117)",
+                'git push -4f origin main "unbalanced', "ask", cwd=plr)
         # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
         pexpect("(pl-v1) '-o --force' is the push-option value, not force",
                 "git push -o --force origin main", "allow", cwd=plr)

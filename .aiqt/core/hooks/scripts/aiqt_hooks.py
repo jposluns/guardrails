@@ -505,10 +505,19 @@ def _redirects_to_real_file(tokens):
 
 
 def _has_info_flag(tokens):
-    """True when a segment carries an info flag (--help or -h) as its own token: the segment is invoking
-    the subcommand's help text, not rendering a diff, so it is not a console diff dump. Judged on the
-    segment's own token stream (never a raw substring)."""
-    return any(t in _INFO_FLAGS for t in tokens)
+    """True when a segment carries an info flag (--help or -h) as a genuine help invocation: git would
+    show the subcommand's manual rather than run it, so the segment renders no diff and lands no push or
+    commit. Judged on the segment's own token stream (never a raw substring), and VALUE-AWARE (F-117): a
+    --help/-h that is the VALUE of a preceding separated option (git commit -m --help, git push -o --help
+    --force) is that option's argument, not a help flag, and git runs the command, so it does NOT count.
+    Fail-safe by construction: an info flag counts only when the token before it is NOT an option token
+    (does not start with '-'), which is exactly where git treats it as help (right after the subcommand,
+    an operand, or a consumed value) and never in a value slot; incompleteness of any value-option list
+    therefore can never cause a silent allow. The safe-direction residual is an over-ask/over-deny on a
+    valueless flag placed immediately before help (git commit --amend --help), where git shows help but
+    the preceding '-' token makes this treat the segment as live."""
+    return any(t in _INFO_FLAGS and (i == 0 or not tokens[i - 1].startswith("-"))
+               for i, t in enumerate(tokens))
 
 
 def _piped_to_pager(segments, index):
@@ -2303,13 +2312,18 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
 # a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
 # '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
-# --for/--force/--force-with-lease/--force-if-includes; the short cluster scan can false-hit an
-# attached -o value ending in f ('-of'); and the '+<ref>' force-refspec anchor admits a preceding
+# --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
+# ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
+# disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; and the
+# '+<ref>' force-refspec anchor admits a preceding
 # QUOTE character as well as start/whitespace, so a quoted '+main:main' under a wrapper is caught
 # (F-112 round-3) - all accepted over-asks on this path. _RAW_PUSH_DELETE_RE spots a branch-deletion
 # spelling (round-3: a delete rewrites the protected line with no force flag and no '+'): a '--de...'
-# long flag ('--de' is git-unambiguous for --delete; '--dry-run' shares no such prefix) or a 'd'
-# carried ANYWHERE in a '-' short cluster, mirroring the force '-[A-Za-z]*f' shape (round-4: the old
+# long flag ('--de' is git-unambiguous for --delete; '--dry-run' shares no such prefix), a
+# '--pru...' long flag (--prune deletes remote refs absent locally with no force flag,
+# F-117), or a 'd' carried ANYWHERE in a '-' short cluster that now admits digits
+# ('-[A-Za-z0-9]*d'), so a clustered ipv4/ipv6 '-4d'/'-6d' is caught (F-117), mirroring the
+# force '-[A-Za-z0-9]*f' shape (round-4: the old
 # cluster-END '-[A-Za-z]*d\b' let a wrapped 'git push -dv origin main' slip while the parsed path
 # denies it), both name-independent like the force spellings (the true target may be unreadable or
 # shell-expanded); or an empty-source ':<protected>' refspec, judged by its visible name and built
@@ -2317,9 +2331,9 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # does not ask. _RAW_PROTECTED_RE is built from _PROTECTED and folds case: a raw over-match only
 # asks/denies, never allows.
 _RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
-_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z]*f|(?:^|[\s'\"])\+\S")
+_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
-    r"(?i)--de[a-z-]*|(?:^|\s)-[A-Za-z]*d[A-Za-z]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
+    r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|\s)-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
