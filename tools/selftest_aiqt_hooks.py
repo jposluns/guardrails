@@ -1813,12 +1813,32 @@ def main():
             aiqt_hooks._head_branch = _orig_head
 
         # Parse-error posture (unbalanced quote): fail-safe, never a silent allow.
-        pexpect("(pl-k1) unparseable apparent force-push naming main denies",
-                'git push --force origin main "unbalanced', "deny", cwd=plr)
+        pexpect("(pl-k1) unparseable apparent force-push naming main asks (fallback recoverable)",
+                'git push --force origin main "unbalanced', "ask", cwd=plr)
         pexpect("(pl-k2) unparseable force-push with no readable protected target asks",
                 'git push --force "unbalanced', "ask", cwd=plr)
         pexpect("(pl-k3) unparseable apparent commit asks", 'git commit -m "it broke', "ask", cwd=plr)
         pexpect("(pl-k4) unparseable non-git command allows", 'ls -la "unbalanced', "allow", cwd=plr)
+
+        # === F-112 round-2: HEAD/@ proxy (B1), fallback +refspec/--for (B2/3B), separated optional-value
+        # option (1A), and a wrapped git push (1C) ===
+        pexpect("(pl-n1) force-push to HEAD on main denies (HEAD resolves to the current branch)",
+                "git push --force origin HEAD", "deny", cwd=plr)
+        pexpect("(pl-n2) '-f origin @' on main denies (@ is HEAD)", "git push -f origin @", "deny", cwd=plr)
+        pexpect("(pl-n3) force-push to HEAD on a feature branch allows",
+                "git push --force origin HEAD", "allow", cwd=plf)
+        pexpect("(pl-n4) '+HEAD' on main denies", "git push origin +HEAD", "deny", cwd=plr)
+        pexpect("(pl-o1) separated --recurse-submodules does not eat the refspec: force to main denies",
+                "git push -f --recurse-submodules main origin", "deny", cwd=plr)
+        pexpect("(pl-p1) unparseable '+main' force-push (no -f) asks on the fallback",
+                'git push origin +main "unbalanced', "ask", cwd=plr)
+        pexpect("(pl-p2) unparseable '--for' abbreviation force-push asks on the fallback",
+                'git push --for origin main "unbalanced', "ask", cwd=plr)
+        pexpect("(pl-q1) a wrapped force-push (env) asks via the raw scan, not a silent allow",
+                "env git push --force origin main", "ask", cwd=plr)
+        pexpect("(pl-q2) a wrapped NON-force push is out of scope, allows",
+                "env git push origin main", "allow", cwd=plr)
+        pexpect("(pl-q3) a non-git wrapped command allows", "env FOO=1 echo hi", "allow", cwd=plr)
 
         # A deny in a later segment wins over an earlier ask; discard verbs are out of this scope.
         pexpect("(pl-l1) a later force-push deny wins over an earlier commit ask",
@@ -1874,8 +1894,10 @@ def main():
           "read-only probe (deny on a protected HEAD, fail-to-ASK when unresolvable); a "
           "--mirror or forced --all/--branches sweep ASKS; a direct git commit while HEAD is "
           "protected (or unprovable) ASKS; an '-o' value is not mis-scanned as force; and "
-          "the parse-error fallback denies/asks an apparent protected force-push or commit, "
-          "never a silent allow")
+          "a forced HEAD/@ refspec resolving to a protected current branch also DENIES; and the "
+          "fallback (a shell parse error OR a command-word wrapper hiding git) ASKS an apparent git "
+          "force-push (incl +refspec, --for, --mirror/--all) or commit, never a hard deny and never a "
+          "silent allow")
     return 0
 
 

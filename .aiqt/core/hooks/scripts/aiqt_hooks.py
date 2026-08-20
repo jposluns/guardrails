@@ -2287,7 +2287,9 @@ _PROTECTED = frozenset(("main", "master"))
 # NOTHING (listing them would skip a real operand); --force-if-includes takes NO value in ANY form.
 # None of the three ever consumes a following token. Force DETECTION lives in the token loop, not here.
 _PUSH_LONG_ARG_OPTS = frozenset((
-    "--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"))
+    "--push-option", "--repo", "--receive-pack", "--exec"))  # NOT --recurse-submodules:
+# it takes an OPTIONAL value git accepts only ATTACHED (=check|on-demand|only|no), so a SEPARATED next
+# token is a refspec, not its value; skipping it dropped a real refspec and silent-allowed a force (F-112 1A)
 _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests body chars; '-o <val>' skips its value, attached '-o<val>' does not
 
 # The safe alternative named in every deny/ask reason, so the actor is never left without a next step
@@ -2306,7 +2308,7 @@ _PROTECTED_ALTS = (
 # _RAW_PROTECTED_RE is built from _PROTECTED (single source, no drift) and folds case: a raw
 # over-match only asks/denies, never allows.
 _RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
-_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--force\b|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z]*f")
+_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z]*f|(?:^|\s)\+\S")  # --for[a-z-]* covers --for/--force/--force-with-lease/--force-if-includes; '+<ref>' is a force refspec (F-112 B2/3B)
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 
@@ -2432,25 +2434,36 @@ def _push_protected(tokens, args, cwd):
                        "protected branch")
     if force and sweep_all:
         return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch")
-    if not force:
-        return None  # no force spelling and no '+' hit: a plain push is out of scope (server-side gate)
-    if len(operands) >= 2:
-        return None  # explicit refspecs present (operands beyond the remote) and none protected
-    # A force-push with NO explicit refspec: the target is the current branch (push.default). Resolve it
-    # through the HEAD probe, but only when the repository view is provable; the push.default=matching
-    # configured-state residual (which would force every matching branch) is disclosed, not modelled.
+    # HEAD and @ are explicit refspecs that RESOLVE to the current branch (git's documented behaviour:
+    # 'git push <remote> HEAD' pushes the current branch to a like-named remote branch), so a forced
+    # HEAD/@ - by the global force flag OR a '+HEAD'/'+@' refspec - on a protected branch rewrites the
+    # protected line even though the literal token is not a protected NAME. Treat it like a refspec-less
+    # force: resolve via the HEAD probe (F-112 B1). Computed BEFORE the not-force gate so a '+HEAD' with
+    # no global -f is not returned as out-of-scope.
+    head_proxy = any(dst in ("HEAD", "@") for dst in forced_dsts)
+    if not force and not head_proxy:
+        return None  # no global force and no forced HEAD/@: a plain (or plus-forced non-HEAD) push is out
+        # of scope for the current-branch probe (a protected NAME was already checked and a '+feature'
+        # plus-force to a non-protected branch is allowed)
+    if not head_proxy and len(operands) >= 2:
+        return None  # global force with explicit non-HEAD refspecs present (beyond the remote), none protected
+    # The forced target is the CURRENT branch (a refspec-less force, or a forced HEAD/@). Resolve it via
+    # the read-only HEAD probe, only when the repository view is provable; the push.default=matching
+    # configured-state residual (which could force every matching branch) is disclosed, not modelled.
     if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
-        return ("ask", "force-pushes with no explicit refspec under a non-cosmetic ambient GIT_* "
-                       "variable or a command-local redirect, so this guard cannot resolve which branch "
-                       "it would force")
+        return ("ask", "force-pushes the current branch (a refspec-less push, or a HEAD/@ refspec) under "
+                       "a non-cosmetic ambient GIT_* variable or a command-local redirect, so this guard "
+                       "cannot resolve which branch it would force")
     base = cwd if isinstance(cwd, str) and cwd else None
     head = _head_branch(base) if base is not None else None
     if head is None:
-        return ("ask", "force-pushes with no explicit refspec and HEAD could not be resolved, so this "
-                       "guard cannot prove the forced target is off the protected line")
+        return ("ask", "force-pushes the current branch (a refspec-less push, or a HEAD/@ refspec) but "
+                       "HEAD could not be resolved, so this guard cannot prove the forced target is off "
+                       "the protected line")
     if _is_protected_ref(head):
-        return ("deny", "force-pushes with no explicit refspec while HEAD is the protected branch "
-                        "{!r}, so the forced target is the protected line itself".format(head))
+        return ("deny", "force-pushes the current branch (a refspec-less push, or a HEAD/@ refspec) while "
+                        "HEAD is the protected branch {!r}, so the forced target is the protected line "
+                        "itself".format(head))
     return None  # HEAD provably a non-protected branch: the forced target is off the protected line
 
 
@@ -2481,27 +2494,22 @@ def _commit_on_protected(tokens, cwd):
 
 
 def _protected_line_fallback(command):
-    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quotes): an apparent
-    force-push naming a protected branch DENIES; an apparent force-push whose target cannot be read ASKS;
-    an apparent git commit ASKS (the guard cannot read where it lands, and it will not trust a probe to
-    describe a command it cannot parse); anything else ALLOWS (the true boundary). A genuinely clean but
-    unparseable command may over-deny or over-ask, the documented posture of the sibling fallbacks
-    (_diff_source_fallback, _commit_identity_fallback, _git_discard_fallback)."""
+    """FAIL-SAFE conservative raw scan for the two cases the parsed path cannot judge: shlex could not
+    parse the command (unbalanced quotes), OR git is hidden under a command-word wrapper (env/sudo/...).
+    An apparent git force-push (any -f/--force/--for.../+refspec/--mirror/--all form), protected-named or
+    not, ASKS; an apparent git commit ASKS; anything else ALLOWS (the true boundary). It ASKS, NEVER a
+    hard DENY (a recoverable prompt, matching _git_discard_fallback) and NEVER a silent allow of an
+    apparent force-push. It OVER-MATCHES by design (a keyword in prose or an unrelated '+' token asks),
+    the documented posture of the sibling fallbacks (_diff_source_fallback, _git_discard_fallback)."""
     if _RAW_PUSH_RE.search(command) and _RAW_PUSH_FORCE_RE.search(command):
-        if _RAW_PROTECTED_RE.search(command):
-            return _deny(
-                "AIQT rule prtbrn (protected-branch-integrity): the command could not be parsed by the "
-                "shell lexer (likely unbalanced quotes) and it appears to force-push a protected branch; "
-                "failing closed. {}".format(_PROTECTED_ALTS),
-                "AIQT guardrail: denied an unparseable command that appears to force-push a protected "
-                "branch (rule prtbrn, fail-safe).")
+        named = " a protected branch" if _RAW_PROTECTED_RE.search(command) else " a target this guard cannot read"
         return _ask(
-            "AIQT rule prtbrn (protected-branch-integrity): the command could not be parsed by the "
-            "shell lexer (likely unbalanced quotes) and it appears to force-push a target this guard "
-            "cannot read; confirm it cannot rewrite the protected line, or re-issue it as a parseable "
-            "command. {}".format(_PROTECTED_ALTS),
-            "AIQT guardrail: an unparseable command appears to force-push a target this guard cannot "
-            "read - confirm before proceeding (rule prtbrn, fail-safe).")
+            "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
+            "shell lexer (unbalanced quotes) or hides git under a command-word wrapper, and it appears to "
+            "force-push{}; confirm it cannot rewrite the protected line, or re-issue it as a plain, "
+            "parseable git command. {}".format(named, _PROTECTED_ALTS),
+            "AIQT guardrail: an apparent force-push this guard cannot fully parse - confirm before "
+            "proceeding (rule prtbrn, fail-safe).")
     if _RAW_COMMIT_RE.search(command):
         return _ask(
             "AIQT rule artbr1 (branch-and-merge-on-green): the command could not be parsed by the shell "
@@ -2548,9 +2556,11 @@ def protected_line(data):
         return _protected_line_fallback(command)
     cwd = data.get("cwd")
     pending_ask = None  # the first ASK found; a DENY anywhere returns immediately and wins over it
+    saw_git = False     # did any parsed segment have 'git' as its command word?
     for tokens, _sep in segments:
         if _command_word(tokens) != "git":
             continue
+        saw_git = True
         if _has_info_flag(tokens):
             continue  # a --help/-h segment shows help, it pushes and commits nothing (see diff_source)
         sub, args = _git_sub_and_args(tokens)
@@ -2585,6 +2595,13 @@ def protected_line(data):
                     "confirm, or move to a feature branch first (rule artbr1).")
     if pending_ask is not None:
         return pending_ask
+    # No parsed segment had 'git' as its command word, yet the raw command names git: a
+    # command-word wrapper (env/sudo/command/xargs/timeout/nohup/sh -c) or obfuscation hides the
+    # git call. Mirror git_discard's raw posture - an apparent wrapped force-push or commit ASKS
+    # rather than passing silently; a FRAGMENTED command word or verb is the disclosed residual
+    # (F-112 1C).
+    if not saw_git and _RAW_GIT_RE.search(command):
+        return _protected_line_fallback(command)
     return _allow()
 
 
