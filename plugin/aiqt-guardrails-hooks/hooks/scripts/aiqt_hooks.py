@@ -2267,6 +2267,327 @@ def git_discard(data):
     return _ask_with_recovery(kind, "may discard uncommitted changes in the working tree", snap)
 
 
+# --- protected-line guard (EN-5 PR-A): prtbrn (push layer) + artbr1 (direct-commit layer) -------------
+
+# The protected line of development. A fixed default pair, deliberately: repo-specific names (a
+# 'develop', a 'release/*') are a configuration surface EN-5 defers, and the two universal defaults
+# cover the accidental case this guard targets. Membership is exact and case-sensitive, as git
+# resolves ref names; the case-folding lives only in the raw fallback, where over-matching errs safe.
+_PROTECTED = frozenset(("main", "master"))
+
+# git-push options that CONSUME a following token in their SEPARATED form, so the token loop skips
+# their value rather than misreading it as the remote or a refspec. Verified against
+# git-scm.com/docs/git-push (SYNOPSIS/OPTIONS) and git-scm.com/docs/gitcli, 2026-08-19: a MANDATORY
+# option value may be attached (--opt=value, -ovalue) or separated (--opt value, -o value), and each
+# option listed here is documented ONLY with a value (no bare form), hence mandatory, hence separable.
+# The attached shape carries its value in the same token (the '=' / '-o<value>' test in the loop),
+# consuming no separate token, so only the exact bare spelling triggers the skip. NOT listed, on the
+# same gitcli(7) rule read the other way: --force-with-lease and --signed take an OPTIONAL value,
+# legal only in the "stuck" attached form (--force-with-lease=main), and their bare form consumes
+# NOTHING (listing them would skip a real operand); --force-if-includes takes NO value in ANY form.
+# None of the three ever consumes a following token. Force DETECTION lives in the token loop, not here.
+_PUSH_LONG_ARG_OPTS = frozenset((
+    "--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"))
+_PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests body chars; '-o <val>' skips its value, attached '-o<val>' does not
+
+# The safe alternative named in every deny/ask reason, so the actor is never left without a next step
+# (mirrors _DISCARD_ALTS): the pack's own rule IS the route.
+_PROTECTED_ALTS = (
+    "Safe route: push to a feature branch instead ('git switch -c <branch>' then push, or 'git push "
+    "<remote> HEAD:refs/heads/<feature>') and change the protected branch only through a reviewed, "
+    "verified merge on green; never force-push or commit to it directly.")
+
+# Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote);
+# mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
+# a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
+# '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--force\b' also hits
+# --force-with-lease and --force-if-includes at their internal '-' boundary, and the short cluster
+# scan can false-hit an attached -o value ending in f ('-of'), an accepted over-ask on this path.
+# _RAW_PROTECTED_RE is built from _PROTECTED (single source, no drift) and folds case: a raw
+# over-match only asks/denies, never allows.
+_RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--force\b|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z]*f")
+_RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
+_RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+
+def _head_branch(repo):
+    """The branch HEAD is on at `repo`, or None when it cannot be read: a detached HEAD (symbolic-ref
+    exits non-zero), an unborn ref, a broken or absent repo, a timeout, or any subprocess error.
+    Read-only, offline, 5s timeout, mirroring _tree_is_clean: EVERY ambient GIT_*-prefixed var is
+    scrubbed via _isolate_git_env so the probe reads the REAL repo at `-C <repo>` rather than an
+    ambient-env decoy (and writes no ambient GIT_TRACE file), and GIT_OPTIONAL_LOCKS=0 keeps the
+    read-only posture explicit. None is the fail-safe answer: the caller treats an unreadable HEAD as
+    UNKNOWN, never as 'not protected'."""
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        result = subprocess.run(
+            ["git", "-C", repo, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, env=env)
+        if result.returncode != 0:
+            return None  # detached HEAD, not a repository, or an unreadable one
+        return result.stdout.strip() or None
+    except Exception:
+        return None
+
+def _is_protected_ref(name):
+    """True when a ref, or the DESTINATION side of a refspec already split by the caller, names a
+    protected branch: bare ('main') or carrying the 'refs/heads/' or 'heads/' prefix a push refspec
+    may spell out. Comparison is EXACT and case-sensitive, as git resolves ref names ('Main' is a
+    different ref); case-folding lives only in the raw fallback. A name in another namespace
+    (refs/tags/..., refs/remotes/...) is not a protected-branch destination."""
+    if not name:
+        return False
+    for prefix in ("refs/heads/", "heads/"):
+        if name.startswith(prefix):
+            return name[len(prefix):] in _PROTECTED
+    return name in _PROTECTED
+
+def _push_parse(args):
+    """Parse the token list AFTER a 'git push' subcommand (the args of _git_sub_and_args). Returns
+    (force, mirror, sweep_all, operands): force is any force spelling (-f/--force, every
+    --force-with-lease spelling - a lease-guarded force still rewrites the remote ref - and
+    --force-if-includes, with --mirror implying force as git does); mirror and sweep_all are the
+    ref-sweeping modes (--mirror; --all/--branches pushes EVERY branch, protected included, so forced
+    it clobbers the protected one without naming it); operands is the remote/refspec token list in
+    command order. The option region is split from the operand region at the first
+    '--'/'--end-of-options' boundary via the shipped _split_pre_post, so an operand that merely looks
+    like an option ('git push origin -- --force') is never read as one; post tokens extend operands
+    AFTER the loop, preserving command order. A value-taking option in its SEPARATED form
+    (_PUSH_LONG_ARG_OPTS / _PUSH_SHORT_ARG_OPTS) sets skip_value so its value token is skipped, never
+    scanned as an operand; the attached '--opt=value'/'-o<value>' shape carries its value in the same
+    token and needs no skip. --force-with-lease and --signed take an OPTIONAL value git accepts only
+    ATTACHED (gitcli(7) stuck form), and --force-if-includes takes no value at all, so none of the
+    three ever consumes a following token and none is in the skip sets."""
+    pre, post, _had_sep = _split_pre_post(args)
+    # Force and the ref-sweeping modes are matched by CONSERVATIVE LONG-PREFIX over the option region
+    # (the shipped _has_long_prefix, exactly as git_discard matches "force"), plus the short '-f' cluster
+    # in the loop below. _has_long_prefix over-recognizes an ambiguous abbreviation, which only routes to
+    # ASK/DENY, never a silent allow. Every --force-with-lease spelling and --force-if-includes are force
+    # (a lease-guarded or include-checked force still rewrites the remote ref); --mirror implies force.
+    mirror = _has_long_prefix(pre, "mirror")            # --mirror: a forced sweep of ALL refs
+    sweep_all = (_has_long_prefix(pre, "all")           # --all/--branches: every branch, protected included
+                 or _has_long_prefix(pre, "branches"))
+    force = (mirror or _has_long_prefix(pre, "force") or _has_long_prefix(pre, "force-with-lease")
+             or _has_long_prefix(pre, "force-if-includes"))
+    skip_value = False  # the previous token was a separated value-taking option: skip its value
+    operands = []       # remote + refspecs in command order; the loop appends, then post extends
+    for tok in pre:
+        if skip_value:
+            skip_value = False
+            continue  # this token is a prior option's VALUE, not a flag or an operand
+        if tok.startswith("--"):
+            if "=" not in tok and tok in _PUSH_LONG_ARG_OPTS:
+                skip_value = True  # its value is the next token
+            continue  # long options are matched by prefix above, never char-scanned
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch in _PUSH_SHORT_ARG_OPTS:  # '-o': the rest of this token (or the next) is its value
+                    if i == len(body) - 1:
+                        skip_value = True  # a bare '-o': the value is the next token
+                    break  # stop the cluster scan; the remainder is the value, not flags
+                if ch == "f":
+                    force = True
+            continue
+        operands.append(tok)  # a bare operand: the remote or a refspec
+    operands += post  # after '--' every token is a refspec (push has no pathspec position)
+    return force, mirror, sweep_all, operands
+
+
+def _push_protected(tokens, args, cwd):
+    """Classify one git push segment against the protected set: ('deny', detail), ('ask', detail), or
+    None (the push provably misses the protected branches, or is not forced). The refspec-NAMED paths are
+    judged purely lexically and are redirect-INDEPENDENT (a 'git -C <dir> push --force origin main' still
+    denies: the protected NAME is what is guarded, wherever the remote lives). Only the refspec-LESS
+    force-push consults the HEAD probe, and only when the repository view is provable (no non-cosmetic
+    ambient GIT_* var, no command-local redirect, a usable session cwd); otherwise it ASKS, never a
+    silent allow of an apparent force-push."""
+    force, mirror, sweep_all, operands = _push_parse(args)
+    # Collect every FORCED destination: the dst of a '+'-prefixed refspec always, and of every operand
+    # when a force flag is present. The src:dst DESTINATION is what the push overwrites ('feature:main'
+    # forces main; 'main:feature' forces only feature). The remote-position operand is matched too: a
+    # remote literally named 'main' over-denies, an accepted safe-direction cost (operand roles are not
+    # modelled, so a role mis-split can never hide a protected refspec behind the remote slot).
+    forced_dsts = []
+    for op in operands:
+        plus = op.startswith("+")
+        spec = op[1:] if plus else op
+        dst = spec.split(":", 1)[1] if ":" in spec else spec
+        if (plus or force) and dst:
+            forced_dsts.append(dst)
+    for dst in forced_dsts:
+        if _is_protected_ref(dst):
+            return ("deny", "force-pushes the protected branch {!r} (a force flag or a '+'-prefixed "
+                            "refspec targeting it)".format(dst))
+    # A forced sweep the guard cannot prove misses the protected names ASKS rather than denies: a forced
+    # wildcard destination over the branch namespace (or an unqualified one), a --mirror push (which
+    # force-updates EVERY ref), or a forced --all/--branches.
+    for dst in forced_dsts:
+        if "*" in dst and (dst.startswith(("refs/heads/", "heads/")) or not dst.startswith("refs/")):
+            return ("ask", "force-pushes the wildcard refspec {!r}, a sweep this guard cannot prove "
+                           "misses the protected branches".format(dst))
+    if mirror:
+        return ("ask", "is a --mirror push, which force-updates every remote ref including any "
+                       "protected branch")
+    if force and sweep_all:
+        return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch")
+    if not force:
+        return None  # no force spelling and no '+' hit: a plain push is out of scope (server-side gate)
+    if len(operands) >= 2:
+        return None  # explicit refspecs present (operands beyond the remote) and none protected
+    # A force-push with NO explicit refspec: the target is the current branch (push.default). Resolve it
+    # through the HEAD probe, but only when the repository view is provable; the push.default=matching
+    # configured-state residual (which would force every matching branch) is disclosed, not modelled.
+    if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
+        return ("ask", "force-pushes with no explicit refspec under a non-cosmetic ambient GIT_* "
+                       "variable or a command-local redirect, so this guard cannot resolve which branch "
+                       "it would force")
+    base = cwd if isinstance(cwd, str) and cwd else None
+    head = _head_branch(base) if base is not None else None
+    if head is None:
+        return ("ask", "force-pushes with no explicit refspec and HEAD could not be resolved, so this "
+                       "guard cannot prove the forced target is off the protected line")
+    if _is_protected_ref(head):
+        return ("deny", "force-pushes with no explicit refspec while HEAD is the protected branch "
+                        "{!r}, so the forced target is the protected line itself".format(head))
+    return None  # HEAD provably a non-protected branch: the forced target is off the protected line
+
+
+def _commit_on_protected(tokens, cwd):
+    """The ASK detail when this git commit segment cannot be proven to land off the protected line, else
+    None (HEAD provably a non-protected branch). Fail-to-ASK posture throughout: an unprovable repository
+    view (a non-cosmetic ambient GIT_* var, or a command-local -C/--git-dir/--work-tree redirect or
+    leading env assignment, both via the shared _segment_dir_simple/_ambient_repo_view_override checks),
+    a missing session cwd, and an unresolvable HEAD (detached, a non-repository, a probe error) all ASK;
+    only a probe that positively names a non-protected branch allows. A 'cd' in an EARLIER segment of the
+    same compound command is NOT modelled (the probe reads the session cwd): the covered accidental case
+    is the plain add-and-commit chain in the session repo, and asking on every compound commit would
+    defeat the guard's own purpose (this is an ASK-level, fully-recoverable surface, so the lighter
+    posture than git_discard's compound handling is proportionate)."""
+    if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
+        return ("runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
+                "(-C/--git-dir/--work-tree or a leading env assignment), so this guard cannot prove "
+                "which repository's HEAD it would commit on")
+    base = cwd if isinstance(cwd, str) and cwd else None
+    head = _head_branch(base) if base is not None else None
+    if head is None:
+        return ("targets a repository whose HEAD this guard could not resolve (no usable session "
+                "directory, a detached HEAD, or a failed probe), so it cannot prove the commit lands "
+                "off the protected line")
+    if _is_protected_ref(head):
+        return "would commit directly on the protected branch {!r}".format(head)
+    return None
+
+
+def _protected_line_fallback(command):
+    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quotes): an apparent
+    force-push naming a protected branch DENIES; an apparent force-push whose target cannot be read ASKS;
+    an apparent git commit ASKS (the guard cannot read where it lands, and it will not trust a probe to
+    describe a command it cannot parse); anything else ALLOWS (the true boundary). A genuinely clean but
+    unparseable command may over-deny or over-ask, the documented posture of the sibling fallbacks
+    (_diff_source_fallback, _commit_identity_fallback, _git_discard_fallback)."""
+    if _RAW_PUSH_RE.search(command) and _RAW_PUSH_FORCE_RE.search(command):
+        if _RAW_PROTECTED_RE.search(command):
+            return _deny(
+                "AIQT rule prtbrn (protected-branch-integrity): the command could not be parsed by the "
+                "shell lexer (likely unbalanced quotes) and it appears to force-push a protected branch; "
+                "failing closed. {}".format(_PROTECTED_ALTS),
+                "AIQT guardrail: denied an unparseable command that appears to force-push a protected "
+                "branch (rule prtbrn, fail-safe).")
+        return _ask(
+            "AIQT rule prtbrn (protected-branch-integrity): the command could not be parsed by the "
+            "shell lexer (likely unbalanced quotes) and it appears to force-push a target this guard "
+            "cannot read; confirm it cannot rewrite the protected line, or re-issue it as a parseable "
+            "command. {}".format(_PROTECTED_ALTS),
+            "AIQT guardrail: an unparseable command appears to force-push a target this guard cannot "
+            "read - confirm before proceeding (rule prtbrn, fail-safe).")
+    if _RAW_COMMIT_RE.search(command):
+        return _ask(
+            "AIQT rule artbr1 (branch-and-merge-on-green): the command could not be parsed by the shell "
+            "lexer (likely unbalanced quotes) and it appears to run git commit; this guard cannot prove "
+            "the commit lands off the protected line, so confirm, or re-issue it as a parseable "
+            "command. {}".format(_PROTECTED_ALTS),
+            "AIQT guardrail: an unparseable command appears to commit; this guard cannot prove it lands "
+            "off the protected branch - confirm before proceeding (rule artbr1, fail-safe).")
+    return _allow()
+
+
+def protected_line(data):
+    """prtbrn + artbr1 (integ/protected-branch-integrity, integ/branch-and-merge-on-green),
+    PreToolUse/Bash. DENY a git push segment that force-pushes a protected branch: a force spelling
+    (--force, --force-with-lease bare or =value, --force-if-includes, a bare or clustered -f, a
+    conservative long prefix) or a '+'-prefixed refspec whose DESTINATION names a protected branch; a
+    refspec-less force-push resolves its target through the read-only HEAD probe (deny on a protected
+    HEAD, fail-to-ASK when unprovable). A forced sweep (a wildcard refspec over the branch namespace,
+    --mirror, a forced --all/--branches) ASKS. A force-push to a non-protected ref and a plain non-force
+    push ALLOW. ASK a git commit segment while HEAD is a protected branch (probed read-only under the
+    ambient-GIT_* scrub; fail-to-ASK when HEAD cannot be resolved): the protected line changes only
+    through a reviewed merge, and the direct commit is the accidental case this client guard catches;
+    server-side branch protection is the real gate. A DENY found in any segment wins over a pending ASK
+    (a confirmed rewrite outranks the recoverable prompt, mirroring the git_discard posture). No escape
+    hatch prefix: the ASK outcomes are themselves the human gate, and the deny mirrors commit_identity's
+    absoluteness."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("prtbrn")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    command = (data.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
+            "string, so the protected-line check could not run; failing closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _protected_line_fallback(command)
+    cwd = data.get("cwd")
+    pending_ask = None  # the first ASK found; a DENY anywhere returns immediately and wins over it
+    for tokens, _sep in segments:
+        if _command_word(tokens) != "git":
+            continue
+        if _has_info_flag(tokens):
+            continue  # a --help/-h segment shows help, it pushes and commits nothing (see diff_source)
+        sub, args = _git_sub_and_args(tokens)
+        if sub == "push":
+            outcome = _push_protected(tokens, args, cwd)
+            if outcome is None:
+                continue
+            decision, detail = outcome
+            if decision == "deny":
+                return _deny(
+                    "AIQT rule prtbrn (protected-branch-integrity): this git push {}. The protected "
+                    "line is never rewritten or overwritten directly; it changes only through a "
+                    "reviewed, verified merge (artbr1). {}".format(detail, _PROTECTED_ALTS),
+                    "AIQT guardrail: denied a force-push targeting a protected branch (rule prtbrn).")
+            if pending_ask is None:
+                pending_ask = _ask(
+                    "AIQT rule prtbrn (protected-branch-integrity): this git push {}. Confirm it "
+                    "cannot rewrite the protected line before proceeding. {}"
+                    .format(detail, _PROTECTED_ALTS),
+                    "AIQT guardrail: a git push this guard cannot prove misses the protected branch - "
+                    "confirm before proceeding (rule prtbrn).")
+        elif sub == "commit":
+            detail = _commit_on_protected(tokens, cwd)
+            if detail is not None and pending_ask is None:
+                pending_ask = _ask(
+                    "AIQT rule artbr1 (branch-and-merge-on-green): this git commit {}. A change "
+                    "develops on a feature branch and lands on the protected line only through a "
+                    "reviewed merge (prtbrn); server-side branch protection remains the real gate, and "
+                    "this prompt covers the accidental direct commit. {}"
+                    .format(detail, _PROTECTED_ALTS),
+                    "AIQT guardrail: a direct commit on (or unprovably off) the protected branch - "
+                    "confirm, or move to a feature branch first (rule artbr1).")
+    if pending_ask is not None:
+        return pending_ask
+    return _allow()
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -2274,6 +2595,7 @@ HANDLERS = {
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
     "git_discard": git_discard,
+    "protected_line": protected_line,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -2288,6 +2610,7 @@ HANDLER_EVENT = {
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
     "git_discard": PRETOOL,
+    "protected_line": PRETOOL,
 }
 
 

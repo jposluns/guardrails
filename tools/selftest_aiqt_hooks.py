@@ -30,6 +30,11 @@ untracked-only, staged-only, config-hidden-untracked); the temp tree is removed 
 <dir>`/env/compound/wrapped/metacharacter form is deliberately NOT probed (not pristine-single-bare) and
 ASKS, which many cases below assert.
 
+It also covers the protected-line guard (protected_line, prtbrn/artbr1): a force-push to a
+protected branch (main/master) denies and to a feature branch allows, a refspec-less force-push
+and a direct commit are judged by a read-only HEAD probe (fail-to-ASK when unresolvable), a
+--mirror/--all sweep asks, and the parse-error fallback fails safe.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import datetime
@@ -1708,6 +1713,119 @@ def main():
         if not _recovery_refs(rec_c6c):
             failures.append("(rec-c6-nosnap-snap) expected a recovery ref: any non-pristine in-scope command "
                             "on a dirty tree is snapshot-backed (accepted over-snapshot)")
+        # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
+        plg = aiqt_hooks.protected_line
+
+        def pexpect(label, command, want, cwd=None):
+            got = _decision(plg, command, cwd=cwd)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        pl_repo = _init_repo(tmp / "pl-repo")  # HEAD is main (a protected name) by construction
+        plr = str(pl_repo)
+        pl_feat = _init_repo(tmp / "pl-feat")
+        _git(pl_feat, "switch", "other")       # HEAD is the non-protected 'other'
+        plf = str(pl_feat)
+
+        # The core contract: force to protected DENIES, force to a feature ref ALLOWS, '+' refspec to
+        # protected DENIES, a plain non-force push ALLOWS (server-side protection is the real gate).
+        pexpect("(pl-a) push --force to main denies", "git push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-b) push --force to a feature branch allows",
+                "git push --force origin my-feature", "allow", cwd=plr)
+        pexpect("(pl-c) '+'-prefixed refspec to main denies", "git push origin +main", "deny", cwd=plr)
+        pexpect("(pl-d) plain push to main allows", "git push origin main", "allow", cwd=plr)
+        pexpect("(pl-e) '+' refspec to a feature branch allows",
+                "git push origin +my-feature", "allow", cwd=plr)
+        pexpect("(pl-e2) '+main:feature' forces only feature: allows",
+                "git push origin +main:feature", "allow", cwd=plr)
+
+        # Force spellings: -f, clustered, with-lease bare and =value, if-includes, a conservative long
+        # prefix, the refs/heads/ qualifier, src:dst destination matching, and the master name.
+        pexpect("(pl-f1) push -f to main denies", "git push -f origin main", "deny", cwd=plr)
+        pexpect("(pl-f2) clustered -nf carries force", "git push -nf origin main", "deny", cwd=plr)
+        pexpect("(pl-f3) --force-with-lease to main denies",
+                "git push --force-with-lease origin main", "deny", cwd=plr)
+        pexpect("(pl-f4) --force-with-lease=main:sha denies",
+                "git push --force-with-lease=main:0000 origin main", "deny", cwd=plr)
+        pexpect("(pl-f5) --force-if-includes denies",
+                "git push --force-if-includes --force-with-lease origin main", "deny", cwd=plr)
+        pexpect("(pl-f6) abbreviated --forc treated as force (conservative prefix)",
+                "git push --forc origin main", "deny", cwd=plr)
+        pexpect("(pl-f7) refs/heads/main qualifies as protected",
+                "git push --force origin refs/heads/main", "deny", cwd=plr)
+        pexpect("(pl-f8) src:dst matches the DESTINATION: feature:main denies",
+                "git push --force origin feature:main", "deny", cwd=plr)
+        pexpect("(pl-f9) main:feature forces only feature: allows",
+                "git push --force origin main:feature", "allow", cwd=plr)
+        pexpect("(pl-f10) push --force to master denies", "git push --force origin master", "deny",
+                cwd=plr)
+
+        # Argument-aware flags (the F-94/F-82 lesson): an '-o' VALUE is never scanned as flags or read
+        # as a refspec, and a non-force long option sharing a prefix letter is not force.
+        pexpect("(pl-g1) '-of' is -o with attached value 'f', not force",
+                "git push -of origin main", "allow", cwd=plr)
+        pexpect("(pl-g2) separated '-o force' value is not a flag",
+                "git push -o force origin my-feature", "allow", cwd=plr)
+        pexpect("(pl-g3) --follow-tags is not force", "git push --follow-tags origin main", "allow",
+                cwd=plr)
+        pexpect("(pl-g4) a separated --push-option value naming main is consumed, not a refspec",
+                "git push --force --push-option main origin my-feature", "allow", cwd=plr)
+
+        # A forced sweep the guard cannot prove misses the protected names ASKS.
+        pexpect("(pl-h1) forced wildcard refspec asks",
+                "git push --force origin refs/heads/*:refs/heads/*", "ask", cwd=plr)
+        pexpect("(pl-h2) --mirror push asks", "git push --mirror backup", "ask", cwd=plr)
+        pexpect("(pl-h3) forced --all asks", "git push --force --all origin", "ask", cwd=plr)
+
+        # Refspec-less force-push: resolved through the HEAD probe (real repos, no mock).
+        pexpect("(pl-i1) bare 'git push --force' with HEAD=main denies", "git push --force", "deny",
+                cwd=plr)
+        pexpect("(pl-i2) 'git push --force origin' with HEAD=main denies", "git push --force origin",
+                "deny", cwd=plr)
+        pexpect("(pl-i3) bare force-push with HEAD on a feature branch allows", "git push --force",
+                "allow", cwd=plf)
+
+        # Direct commit: ASK on the protected branch, ALLOW on a feature branch (HEAD probed for real).
+        pexpect("(pl-j1) git commit with HEAD=main asks", "git commit -m 'fix'", "ask", cwd=plr)
+        pexpect("(pl-j2) git commit on a feature branch allows", "git commit -m 'fix'", "allow",
+                cwd=plf)
+        pexpect("(pl-j3) add-and-commit compound on main asks",
+                "git add -A && git commit -m 'fix'", "ask", cwd=plr)
+        pexpect("(pl-j4) commit --amend on main asks", "git commit --amend --no-edit", "ask", cwd=plr)
+        pexpect("(pl-j5) 'git -C <dir> commit' asks (redirected repository view)",
+                "git -C {} commit -m 'fix'".format(plf), "ask", cwd=plr)
+        os.environ["GIT_DIR"] = str(pl_feat / ".git")
+        try:
+            pexpect("(pl-j6) commit under an ambient GIT_DIR asks (unprovable view)",
+                    "git commit -m 'fix'", "ask", cwd=plr)
+        finally:
+            os.environ.pop("GIT_DIR", None)
+
+        # Probe failure is fail-to-ASK for both surfaces (mocked like _tree_is_clean above).
+        _orig_head = aiqt_hooks._head_branch
+        aiqt_hooks._head_branch = lambda repo: None
+        try:
+            pexpect("(pl-i4) bare force-push asks when HEAD cannot be resolved",
+                    "git push --force", "ask", cwd=plr)
+            pexpect("(pl-i5) direct commit asks when HEAD cannot be resolved",
+                    "git commit -m 'x'", "ask", cwd=plr)
+        finally:
+            aiqt_hooks._head_branch = _orig_head
+
+        # Parse-error posture (unbalanced quote): fail-safe, never a silent allow.
+        pexpect("(pl-k1) unparseable apparent force-push naming main denies",
+                'git push --force origin main "unbalanced', "deny", cwd=plr)
+        pexpect("(pl-k2) unparseable force-push with no readable protected target asks",
+                'git push --force "unbalanced', "ask", cwd=plr)
+        pexpect("(pl-k3) unparseable apparent commit asks", 'git commit -m "it broke', "ask", cwd=plr)
+        pexpect("(pl-k4) unparseable non-git command allows", 'ls -la "unbalanced', "allow", cwd=plr)
+
+        # A deny in a later segment wins over an earlier ask; discard verbs are out of this scope.
+        pexpect("(pl-l1) a later force-push deny wins over an earlier commit ask",
+                "git commit -m 'x' && git push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-m1) a git_discard verb is out of protected_line scope (disjoint controls)",
+                "git reset --hard", "allow", cwd=plr)
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1747,7 +1865,17 @@ def main():
           "still allows (F-94); git stash export ASKS for every spelling (F-95); and a raw-lossy-flagged "
           "command whose resolved subcommand is outside the recognized set (checkout-index, read-tree "
           "--reset) ASKS rather than winning the catch-all allow, while recognized safe forms and the "
-          "unflagged git worktree remove are unchanged (F-97)")
+          "unflagged git worktree remove are unchanged (F-97). The protected-line guard (EN-5 "
+          "PR-A, prtbrn/artbr1) is proven: a force-push (every -f/--force/--force-with-lease/"
+          "--force-if-includes spelling, a conservative long prefix, and a '+'-prefixed "
+          "refspec) whose DESTINATION names a protected branch (main/master, bare or "
+          "refs/heads/-qualified) DENIES, while a force-push to a feature branch and a plain "
+          "non-force push ALLOW; a refspec-less force-push resolves HEAD by a scrubbed "
+          "read-only probe (deny on a protected HEAD, fail-to-ASK when unresolvable); a "
+          "--mirror or forced --all/--branches sweep ASKS; a direct git commit while HEAD is "
+          "protected (or unprovable) ASKS; an '-o' value is not mis-scanned as force; and "
+          "the parse-error fallback denies/asks an apparent protected force-push or commit, "
+          "never a silent allow")
     return 0
 
 
