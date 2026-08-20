@@ -37,6 +37,12 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
+It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
+(--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
+commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
+(|| true, || :) or piped into a truncating sink (| head, | tail) asks; option-value, post-'--',
+and push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import datetime
@@ -1997,6 +2003,138 @@ def main():
         pexpect("(pl-m1) a git_discard verb is out of protected_line scope (disjoint controls)",
                 "git reset --hard", "allow", cwd=plr)
 
+        # gatdis (EN-5 PR-B): decision-signal battery for the gate-weakening guard.
+        # === gate_weakening (gatdis): a git hook bypass + a swallowed or truncated checker ============
+        # Purely lexical: no repo fixture and no probe, so no cwd is passed (the handler never reads it).
+        gwg = aiqt_hooks.gate_weakening
+
+        def gexpect(label, command, want):
+            got = _decision(gwg, command)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # The DENY core: --no-verify on every verb that accepts it (verified against the git 2.53.0 man
+        # pages), exact, abbreviated (conservative prefix), and the short -n ONLY where -n IS --no-verify.
+        gexpect("(gw-a) commit --no-verify denies", "git commit --no-verify -m 'x'", "deny")
+        gexpect("(gw-b) commit -n denies", "git commit -n -m 'x'", "deny")
+        gexpect("(gw-b2) a -c global-option value is skipped, -n still found",
+                "git -c user.email=x@example.invalid commit -n -m 'x'", "deny")
+        gexpect("(gw-b3) a leading env assignment is skipped, -n still found",
+                "GIT_EDITOR=true git commit -n -m 'x'", "deny")
+        gexpect("(gw-c) clustered -an carries -n", "git commit -an -m 'x'", "deny")
+        gexpect("(gw-d) push --no-verify denies even to a feature branch",
+                "git push --no-verify origin my-feature", "deny")
+        gexpect("(gw-e) merge --no-verify denies", "git merge --no-verify topic", "deny")
+        gexpect("(gw-f) abbreviated --no-verif treated as the bypass (conservative prefix)",
+                "git commit --no-verif -m 'x'", "deny")
+        gexpect("(gw-g1) rebase --no-verify denies", "git rebase --no-verify origin/main", "deny")
+        gexpect("(gw-g2) pull --no-verify denies", "git pull --no-verify", "deny")
+        gexpect("(gw-g3) am -n denies (-n IS --no-verify on am)", "git am -n patch.mbox", "deny")
+
+        # The -n discipline: -n is NOT the bypass on push (--dry-run) or merge (--no-stat), and an
+        # option VALUE or post-'--' operand carrying the letter n is never read as the flag.
+        gexpect("(gw-h) push -n is a dry run, allows", "git push -n origin main", "allow")
+        gexpect("(gw-i) merge -n is --no-stat, allows", "git merge -n topic", "allow")
+        gexpect("(gw-j) plain commit allows", "git commit -m 'fix: adjust'", "allow")
+        gexpect("(gw-k) attached -m value containing -n allows", "git commit -m'-n note'", "allow")
+        gexpect("(gw-l) separated --message value -n is consumed, allows",
+                "git commit --message -n", "allow")
+        gexpect("(gw-m) post-'--' pathspec -n is an operand, allows",
+                "git commit -m 'x' -- -n", "allow")
+        gexpect("(gw-n1) --no-verbose is not --no-verify", "git commit --no-verbose -m 'x'", "allow")
+        gexpect("(gw-n2) git log -n is outside the verb roster", "git log -n 5", "allow")
+        gexpect("(gw-n3) --no-verify-signatures is not the bypass",
+                "git merge --no-verify-signatures topic", "allow")
+        gexpect("(gw-n4) positive --verify allows", "git commit --verify -m 'x'", "allow")
+
+        # The ASK heuristics: a checker-shaped segment swallowed or truncated.
+        gexpect("(gw-o) pytest || true asks", "pytest || true", "ask")
+        gexpect("(gw-p) pytest || : asks", "pytest -q || :", "ask")
+        gexpect("(gw-q) make test || true asks (runner + operand)", "make test || true", "ask")
+        gexpect("(gw-r) checker-named script || true asks (name parts)",
+                "tools/run_all_checks.sh || true", "ask")
+        gexpect("(gw-s) pytest | head asks (truncating sink)", "pytest | head", "ask")
+        gexpect("(gw-t) pytest | tail -20 asks", "pytest -q | tail -20", "ask")
+        gexpect("(gw-u) python -m pytest || true asks (runner -m module)",
+                "python -m pytest || true", "ask")
+        gexpect("(gw-v) npm test || true asks", "npm test || true", "ask")
+
+        # The heuristic stays scoped: non-checkers and non-truncating pipes are untouched.
+        gexpect("(gw-w) checker with no swallow allows", "pytest && echo done", "allow")
+        gexpect("(gw-x) non-checker || true allows (disclosed scoping choice)",
+                "grep -q foo file.txt || true", "allow")
+        gexpect("(gw-y) checker | tee is not truncating, allows", "pytest | tee out.log", "allow")
+        gexpect("(gw-z) echo is not checker-shaped", "echo test || true", "allow")
+
+        # Precedence and disjointness (mirrors pl-l1/pl-m1).
+        gexpect("(gw-aa) a later hook-bypass deny wins over an earlier swallow ask",
+                "pytest || true; git commit -n -m 'x'", "deny")
+        gexpect("(gw-ab) a git_discard verb is out of gate_weakening scope (disjoint controls)",
+                "git reset --hard", "allow")
+
+        # Parse-error posture (unbalanced quote): fail-safe, never a silent allow.
+        gexpect("(gw-ac) unparseable apparent --no-verify denies",
+                'git commit --no-verify -m "unbalanced', "deny")
+        gexpect("(gw-ad) unparseable commit -n asks (the raw scan cannot bind the cluster)",
+                'git commit -n -m "unbalanced', "ask")
+        gexpect("(gw-ae) unparseable checker + swallow asks", 'pytest || true "unbalanced', "ask")
+        gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
+
+        # gatdis (EN-5 PR-B): additional brief coverage - the full verb roster in long form, the
+        # short/abbrev spellings, the out-of-roster verbs, and the disclosed value-spelling over-deny.
+        gexpect("(gw-ag) am --no-verify denies (exact long form)", "git am --no-verify", "deny")
+        # (gw-ah) --no-ver is INTENDED conservative-long-prefix over-deny, NOT the catch of a real
+        # bypass: --no-ver is ambiguous between --no-verify and --no-verbose, so git itself rejects it
+        # and no bypass occurs; this is a safe-direction over-deny of an invalid command.
+        gexpect("(gw-ah) --no-ver is a conservative-long-prefix over-deny of an ambiguous (git-rejected) "
+                "option, not a real bypass", "git commit --no-ver -m 'x'", "deny")
+        gexpect("(gw-ai) clustered -sn carries -n", "git commit -sn -m 'x'", "deny")
+        gexpect("(gw-aj) pull -n is --no-stat, allows", "git pull -n", "allow")
+        gexpect("(gw-ak) an -m value naming the no-verify word allows",
+                'git commit -m "fix the no-verify flag"', "allow")
+        gexpect("(gw-al) --no-verify-signatures on commit is not the bypass",
+                "git commit --no-verify-signatures -m 'x'", "allow")
+        gexpect("(gw-am) cherry-pick with a stray -n is out of the verb roster, allows",
+                "git cherry-pick -n 0000", "allow")
+        gexpect("(gw-an) revert with a stray -n is out of the verb roster, allows",
+                "git revert -n 0000", "allow")
+        gexpect("(gw-ao) a plain pytest with no swallow allows", "pytest", "allow")
+        gexpect("(gw-ap) ruff check . || true asks", "ruff check . || true", "ask")
+        gexpect("(gw-aq) npm test | tail asks (truncating sink)", "npm test | tail", "ask")
+        # DISCLOSED safe-direction over-deny (residue): a separated option VALUE that itself spells
+        # --no-verify is scanned in the option region and DENIES; git would read it as the --message
+        # value (no bypass), so this is a deliberate deny-direction over-match, never a silent allow.
+        gexpect("(gw-ar) '--message --no-verify' over-denies (disclosed value-spelling residual)",
+                "git commit --message --no-verify", "deny")
+
+        # gatdis round-2 (F-123): the newline-continuation ASK-miss (F3) and the --resolvemsg
+        # value-option over-block (F4) are fixed; the adjacency/regression locks hold; the disclosed
+        # redirect-pollution slips (F1/F2, routed to the common enforcement-hook redesign) are pinned.
+        gexpect("(gw-as) newline before the swallow now asks (F3)", "pytest ||\n true", "ask")
+        gexpect("(gw-at) newline before the truncating sink now asks (F3)", "pytest |\n head", "ask")
+        gexpect("(gw-au) am --resolvemsg -n consumes -n as the message value, allows (F4)",
+                "git am --resolvemsg -n patch.mbox", "allow")
+        gexpect("(gw-av) pytest || true still asks (adjacency lock)", "pytest || true", "ask")
+        gexpect("(gw-aw) pytest ; true allows (';' is not a swallow)", "pytest ; true", "allow")
+        gexpect("(gw-ax) am -n still denies (bare short -n is the bypass)", "git am -n", "deny")
+        gexpect("(gw-ay) redirect before the git subcommand slips, allows (disclosed F1/F2)",
+                "git >/dev/null commit --no-verify -m x", "allow")
+        gexpect("(gw-az) redirect before the checker word slips, allows (disclosed F1/F2)",
+                ">/dev/null pytest || true", "allow")
+
+        # gatdis round-3 (F-123 disclosed residuals): the CURRENT (unchanged) behaviour of the newly
+        # disclosed residuals, locked and visible. An embedded unquoted '#' is a shlex comment start
+        # that drops the rest of the line, so the bypass/swallow after it slips (routed to the common
+        # enforcement-hook tokenizer redesign); the two contrived safe-direction over-blocks still DENY.
+        gexpect("(gw-ba) embedded-# drops the trailing --no-verify, allows (embedded-# residual, "
+                "routed to redesign)", "git commit -m ticket#123 --no-verify", "allow")
+        gexpect("(gw-bb) embedded-# drops the '|| true' swallow, allows (embedded-# residual)",
+                "pytest foo#bar || true", "allow")
+        gexpect("(gw-bc) a trailing --verify does not cancel --no-verify here, still denies "
+                "(disclosed --verify-cancel over-block)", "git commit --no-verify --verify -m x", "deny")
+        gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
+                "(disclosed clustered-help over-block)", "git commit -hn -m x", "deny")
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2066,7 +2204,15 @@ def main():
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
           "inherent lexical boundary; and the safe-direction over-DENIES hold: --force "
           "--no-force, --delete --no-delete, --force-if-includes alone, and --dry-run with a "
-          "force or delete spelling all DENY)")
+          "force or delete spelling all DENY)"
+          ". The gate-weakening guard (EN-5 PR-B, gatdis) is proven: --no-verify denies on every verb "
+          "that accepts it (commit/merge/push/pull/rebase/am; exact and conservative-prefix), the short "
+          "-n denies only where it IS --no-verify (commit, am; clustered too, with -c values and "
+          "leading env assignments skipped), a push -n dry-run and a merge -n no-stat stay allowed, "
+          "option values (attached -m, separated --message, post-'--' pathspecs) are never read as "
+          "flags, a checker-shaped segment swallowed by '|| true'/'|| :' or piped into head/tail ASKS "
+          "while non-checkers and non-truncating pipes stay allowed, a deny wins over a pending ask, "
+          "and the parse-error fallback denies/asks the raw spellings, never a silent allow")
     return 0
 
 
