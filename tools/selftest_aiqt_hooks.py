@@ -1906,6 +1906,27 @@ def main():
                 "git diff > real.txt", "allow")
         dexpect("(f117r6-l) explicit fd-1 stdout redirect allows",
                 "git diff 1> real.txt", "allow")
+        # F-117 round-7: remaining reachable silent-allows now fixed (prtbrn --end-of-options + --repo;
+        # cnsdif clustered patch + command-word-wrapper fallback), plus disclosed-residual lock cases.
+        pexpect("(f117r7-a) --end-of-options boundary does not mask a force-push",
+                "git push --force origin --end-of-options main --help", "deny", cwd=plr)
+        pexpect("(f117r7-b) --repo=origin makes the positional a refspec (protected deletion)",
+                "git push --delete --repo=origin main", "deny", cwd=plr)
+        pexpect("(f117r7-c) --repo=origin force to main from a feature branch denies (was silent-allow)",
+                "git push --force --repo=origin main", "deny", cwd=plf)
+        pexpect("(f117r7-x1) embedded-quote flag in the raw fallback is a DISCLOSED inherent residual",
+                "env git push -'f' origin main", "allow", cwd=plr)
+        dexpect("(f117r7-d) clustered patch flag -wp denies (log patch dump)", "git log -wp", "deny")
+        dexpect("(f117r7-e) pickaxe -Sfoo is not mis-read as a patch flag (allows a listing)",
+                "git log -Sfoo", "allow")
+        dexpect("(f117r7-f) command-word-wrapper git diff denies (wrapper fallback)",
+                "env git diff", "deny")
+        dexpect("(f117r7-g) wrapper over a non-producer allows", "env git status", "allow")
+        dexpect("(f117r7-i) common summary git diff -M --stat still allows (not over-denied)",
+                "git diff -M --stat", "allow")
+        dexpect("(f117r7-x2) -S --stat pickaxe-value is a DISCLOSED residual (allows)",
+                "git diff -S --stat", "allow")
+        dexpect("(f117r7-j) genuine git log -p still denies", "git log -p", "deny")
         # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
         pexpect("(pl-v1) '-o --force' is the push-option value, not force",
                 "git push -o --force origin main", "allow", cwd=plr)

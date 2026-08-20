@@ -413,6 +413,7 @@ def diff_wall_stop(data):
 # dropped the fragile '# allow-diff' quote-parsing bug surface, and it stays removed): an opt-in
 # anti-diff-dump hook blocks console diffs, and these allows cover the legitimate non-wall cases.
 _PATCH_FLAGS = frozenset(("-p", "-u"))
+_DIFF_VALUE_SHORT = frozenset("SGOUlL")  # value-taking short options of diff producers (-S/-G pickaxe, -O orderfile, -U unified, -l/-L limits): a cluster remainder after one is that option's value, not flags
 _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat", "--shortstat"))
 # An info flag turns a diff subcommand into a help invocation, not a diff dump. A pager pipe sends the
 # diff into an interactive reader, not a console wall; cat/tee/anything else is not a pager.
@@ -435,15 +436,31 @@ _RAW_DIFF_PRODUCER_RE = re.compile(r"(?is)\bgit\b.*?\b(?:diff|show|range-diff)\b
 def _has_patch_flag(tokens):
     """True when a segment carries a patch flag (-p, -u, or a --patch* form: --patch, --patch-with-stat,
     --patch-with-raw), the flag that turns a listing/plumbing/stash producer into a console patch and
-    that also dumps the full diff alongside a summary flag (git diff --stat -p)."""
-    return any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
+    that also dumps the full diff alongside a summary flag (git diff --stat -p). A CLUSTERED short patch
+    flag (-wp == -w -p) counts too (F-117): a '-'-cluster is scanned left to right and a 'p'/'u' counts,
+    but the scan STOPS at a value-taking short option (-S/-G/-O/-U/-l/-L), whose cluster remainder is that
+    option's value, so -Sfoo (a pickaxe search) is not mis-read as carrying -p."""
+    if any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens):
+        return True
+    for t in tokens:
+        if t.startswith("-") and not t.startswith("--") and len(t) > 1:
+            for ch in t[1:]:
+                if ch in _DIFF_VALUE_SHORT:
+                    break
+                if ch in ("p", "u"):
+                    return True
+    return False
 
 
 def _has_summary_flag(tokens):
     """True when a segment carries a summary/listing flag (--stat, --name-only, --name-status, --numstat,
     --shortstat), in either the bare or the '=value' shape. A summary flag is a listing rather than a raw
     diff, but ONLY when no patch flag is also present (see the handler: --stat -p still dumps the full
-    diff), so the summary escape is gated on _has_patch_flag being false."""
+    diff), so the summary escape is gated on _has_patch_flag being false. A `--stat`/summary token in a
+    NON-flag position - the value of a value-taking option (git diff -S --stat), a post-`--` pathspec
+    (git diff -- --stat), or a redirect target (git diff > --stat) - is still counted as a summary flag; a
+    role-aware fix would over-deny common commands such as `git diff -M --stat`, so this contrived
+    mis-count is a disclosed residual rather than a fix (F-119)."""
     return any(t.split("=", 1)[0] in _SUMMARY_FLAGS for t in tokens)
 
 
@@ -474,7 +491,9 @@ def _is_stdout_fd_dup(tokens, i):
     or a console), so it is never a real-file diff output: '&>' (redirects both streams), and '>&' (from
     '>&1', '>&2', or a bare '>&') UNLESS an explicit non-stdout source fd precedes it (the '2' of a
     '2>&1', which redirects stderr and leaves stdout untouched). Used by the last-redirect-wins scan so a
-    trailing stdout fd-dup after a real-file redirect flips the segment back to a console dump."""
+    trailing stdout fd-dup after a real-file redirect flips the segment back to a console dump. A csh-style
+    `>&file`/`&>file` that redirects BOTH streams to a real file is classified here as a to-descriptor dup
+    and DENIED; that is a safe-direction over-deny (recoverable via `> file`), a disclosed residual (F-119)."""
     tok = tokens[i]
     if tok == "&>":
         return True
@@ -495,7 +514,11 @@ def _redirects_to_real_file(tokens):
     '>&') tokenize as their own '>&'/'&>' tokens, never a '>'/'>>' token, and a stdout fd-dup as the last
     redirect also lands on a console/descriptor, so it is not a real-file redirect either. The tokenized
     form '2> file' (which shlex splits into '2', '>', 'file') redirects a non-stdout fd, so a '>'/'>>'
-    preceded by a bare fd digit other than 1 is not a stdout real-file redirect (F-118)."""
+    preceded by a bare fd digit other than 1 is not a stdout real-file redirect (F-118). shlex cannot
+    distinguish `2>` (an fd-2 redirect) from `2 > file` (a bare operand `2` plus a stdout redirect) - both
+    tokenize identically - so a `>`/`>>` preceded by a bare fd digit other than 1 always takes the
+    fail-safe non-stdout reading; the rare spaced `N > file` form is a safe over-deny, and the ambiguous
+    `> realfile ... N > /dev/stdout` combination is a disclosed inherent residual (F-117/F-119)."""
     last_is_real_file = False
     n = len(tokens)
     for i, tok in enumerate(tokens):
@@ -515,7 +538,7 @@ def _has_info_flag(tokens):
     show the subcommand's manual rather than run it, so the segment renders no diff and lands no push or
     commit. Judged on the segment's own token stream (never a raw substring), modelled on git's own
     argument parsing (F-117):
-      - END-OF-OPTIONS: after a '--' token every argument is positional (a pathspec or refspec), so a
+      - END-OF-OPTIONS: after a '--' or '--end-of-options' token every argument is positional (a pathspec or refspec), so a
         --help/-h at or after the first '--' is NOT help (git runs the command); only earlier tokens
         are considered.
       - VALUE / OPTION SLOT: a --help/-h that is the VALUE of a preceding separated option
@@ -531,7 +554,11 @@ def _has_info_flag(tokens):
     before help (a valueless flag, git commit --amend --help, or an attached-value flag, git commit
     -mfoo --help / git push -ofoo --help --force), where git shows help but the preceding '-' token makes
     this treat the segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
-    end = tokens.index("--") if "--" in tokens else len(tokens)
+    end = len(tokens)
+    for j, tok in enumerate(tokens):
+        if tok == "--" or tok == "--end-of-options":  # git's two end-of-options spellings (F-117)
+            end = j
+            break
     for i in range(1, end):
         prev = tokens[i - 1]
         if (tokens[i] in _INFO_FLAGS and not prev.startswith("-")
@@ -596,9 +623,11 @@ def diff_source_pretool(data):
         segments = _segments(command)
     except ValueError:
         return _diff_source_fallback(command)
+    saw_git = False
     for index, (tokens, _sep) in enumerate(segments):
         if _command_word(tokens) != "git":
             continue
+        saw_git = True
         if not _is_diff_producer(tokens):
             continue
         # Allowed cases, each judged on THIS segment's own tokens (never a raw substring): an info flag
@@ -618,6 +647,13 @@ def diff_source_pretool(data):
                   "(> file), or pipe it into a pager (| less), not the console.")
         return _deny(reason,
                      "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
+    # No parsed segment had 'git' as its command word, yet the raw command names a git diff-producer: a
+    # command-word wrapper (env/sudo/...) hides the git call. Mirror protected_line's raw posture - an
+    # apparent wrapped diff dump is denied via the fallback rather than passing silently (F-117). The
+    # compound residual (a benign git segment elsewhere sets saw_git and suppresses this) is disclosed,
+    # as in protected_line.
+    if not saw_git and _RAW_DIFF_PRODUCER_RE.search(command):
+        return _diff_source_fallback(command)
     return _allow()
 
 
@@ -2352,7 +2388,10 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # shell-expanded); or an empty-source ':<protected>' refspec, judged by its visible name and built
 # from _PROTECTED (single source, no drift), so an ordinary colon token (a URL, a src:dst refspec)
 # does not ask. _RAW_PROTECTED_RE is built from _PROTECTED and folds case: a raw over-match only
-# asks/denies, never allows.
+# asks/denies, never allows. An embedded quote or backslash-escape INSIDE a flag in the raw string
+# (env git push -'f' origin main, \-f, escaped +main) is not matched, because bash quote/escape removal
+# cannot be replicated by a raw-string regex; this is the same inherent lexical boundary as a
+# shell-expanded $VAR, disclosed and not chased (F-117/F-119).
 _RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
 _RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
@@ -2396,7 +2435,7 @@ def _is_protected_ref(name):
 
 def _push_parse(args):
     """Parse the token list AFTER a 'git push' subcommand (the args of _git_sub_and_args). Returns
-    (force, delete, mirror, sweep_all, prune, operands): force is any force spelling (-f/--force, every
+    (force, delete, mirror, sweep_all, prune, repo_given, operands): force is any force spelling (-f/--force, every
     --force-with-lease spelling - a lease-guarded force still rewrites the remote ref - and
     --force-if-includes, with --mirror implying force as git does); delete is the branch-deletion mode
     (--delete or a clustered -d; the empty-source ':<dst>' delete refspec is judged per-operand by the
@@ -2422,9 +2461,10 @@ def _push_parse(args):
     flags are NOT modelled (round-4, disclosed): '--no-force'/'--no-delete' cancel nothing here,
     '--force-if-includes' alone (a documented no-op without --force-with-lease) still reads as force,
     and --dry-run is judged like the real thing - all safe-direction over-denies; re-issue without the
-    contrived flag combination."""
+    contrived flag combination. repo_given is true when a --repo option supplies the repository, in which
+    case the caller treats operands[0] as a refspec rather than the repository (F-117)."""
     pre, post, _had_sep = _split_pre_post(args)
-    force = delete = mirror = sweep_all = prune = False
+    force = delete = mirror = sweep_all = prune = repo_given = False
     skip_value = False  # the previous token was a separated value-taking option: skip its value
     operands = []       # remote + refspecs in command order; the loop appends, then post extends
     for tok in pre:
@@ -2432,6 +2472,9 @@ def _push_parse(args):
             skip_value = False
             continue  # this token is a prior option's VALUE, not a flag or an operand
         if tok.startswith("--"):
+            if _has_long_prefix([tok], "repo"):
+                repo_given = True  # --repo <remote> supplies the repository, so the first positional
+                                   # operand is a refspec, not the repo (F-117)
             if "=" not in tok and tok in _PUSH_LONG_ARG_OPTS:
                 skip_value = True  # its value is the next token
             elif _has_long_prefix([tok], "mirror"):  # --mirror: a forced sweep of ALL refs
@@ -2460,7 +2503,7 @@ def _push_parse(args):
             continue
         operands.append(tok)  # a bare operand: the remote or a refspec
     operands += post  # after '--' every token is a refspec (push has no pathspec position)
-    return force or mirror, delete, mirror, sweep_all, prune, operands
+    return force or mirror, delete, mirror, sweep_all, prune, repo_given, operands
 
 def _push_protected(tokens, args, cwd):
     """Classify one git push segment against the protected set: ('deny', detail, act_noun), where
@@ -2490,8 +2533,10 @@ def _push_protected(tokens, args, cwd):
     invalid remote ref, so the probe-backed deny on the delete side is a harmless safe-direction
     over-deny kept for uniformity (round-4 rewording: round-3 wrongly claimed git resolves a deleted
     HEAD to the current branch)."""
-    force, delete, mirror, sweep_all, prune, operands = _push_parse(args)
-    refspecs = operands[1:]  # operands[0] is the repository (git's own grammar): never a destination
+    force, delete, mirror, sweep_all, prune, repo_given, operands = _push_parse(args)
+    # operands[0] is the repository (git's grammar) and never a destination - UNLESS a --repo option
+    # supplied the repository, in which case operands[0] is itself a refspec (F-117).
+    refspecs = operands if repo_given else operands[1:]
     # Collect every FORCED and every DELETED destination over the REFSPEC-position operands. Forced:
     # the dst of a '+'-prefixed refspec always, and of every refspec when a force flag is present; the
     # src:dst DESTINATION is what the push overwrites ('feature:main' forces main; 'main:feature'
