@@ -493,11 +493,17 @@ def _redirects_to_real_file(tokens):
     /proc/ (a console/terminal, /dev/stdout, /dev/stderr, /dev/fd/N, /proc/self/fd/1, ...) is NOT, because
     the diff still reaches the console there. The fd-duplication forms ('>&1', '>&2', '1>&2', '2>&1', '&>',
     '>&') tokenize as their own '>&'/'&>' tokens, never a '>'/'>>' token, and a stdout fd-dup as the last
-    redirect also lands on a console/descriptor, so it is not a real-file redirect either."""
+    redirect also lands on a console/descriptor, so it is not a real-file redirect either. The tokenized
+    form '2> file' (which shlex splits into '2', '>', 'file') redirects a non-stdout fd, so a '>'/'>>'
+    preceded by a bare fd digit other than 1 is not a stdout real-file redirect (F-118)."""
     last_is_real_file = False
     n = len(tokens)
     for i, tok in enumerate(tokens):
         if tok in _REDIRECT_TOKENS and i + 1 < n:
+            prev = tokens[i - 1] if i > 0 else ""
+            if prev.isdigit() and prev != "1":
+                continue  # 'N>' for N != 1 redirects a non-stdout fd (e.g. '2>' stderr); stdout still
+                          # reaches the console, so this is not a stdout real-file redirect (F-118)
             last_is_real_file = not _DEV_PROC_TARGET_RE.match(tokens[i + 1])
         elif _is_stdout_fd_dup(tokens, i):
             last_is_real_file = False
@@ -505,19 +511,33 @@ def _redirects_to_real_file(tokens):
 
 
 def _has_info_flag(tokens):
-    """True when a segment carries an info flag (--help or -h) as a genuine help invocation: git would
+    """True when a segment carries an info flag (--help or -h) as a GENUINE help invocation: git would
     show the subcommand's manual rather than run it, so the segment renders no diff and lands no push or
-    commit. Judged on the segment's own token stream (never a raw substring), and VALUE-AWARE (F-117): a
-    --help/-h that is the VALUE of a preceding separated option (git commit -m --help, git push -o --help
-    --force) is that option's argument, not a help flag, and git runs the command, so it does NOT count.
-    Fail-safe by construction: an info flag counts only when the token before it is NOT an option token
-    (does not start with '-'), which is exactly where git treats it as help (right after the subcommand,
-    an operand, or a consumed value) and never in a value slot; incompleteness of any value-option list
-    therefore can never cause a silent allow. The safe-direction residual is an over-ask/over-deny on a
-    valueless flag placed immediately before help (git commit --amend --help), where git shows help but
-    the preceding '-' token makes this treat the segment as live."""
-    return any(t in _INFO_FLAGS and (i == 0 or not tokens[i - 1].startswith("-"))
-               for i, t in enumerate(tokens))
+    commit. Judged on the segment's own token stream (never a raw substring), modelled on git's own
+    argument parsing (F-117):
+      - END-OF-OPTIONS: after a '--' token every argument is positional (a pathspec or refspec), so a
+        --help/-h at or after the first '--' is NOT help (git runs the command); only earlier tokens
+        are considered.
+      - VALUE / OPTION SLOT: a --help/-h that is the VALUE of a preceding separated option
+        (git commit -m --help, git push -o --help --force) is that option's argument, not a help flag,
+        so a token whose PREDECESSOR starts with '-' does not count.
+      - REDIRECT TARGET: a --help/-h that is a shell redirect target (git ... > --help) is a filename,
+        not a git argument, so a token whose predecessor is a redirect operator (a token of only the
+        characters '<>&|') does not count.
+    An info flag counts only when its predecessor is a plain word (the subcommand, an operand, or a
+    consumed value), exactly where git treats it as help. Fail-safe by construction: every 'git actually
+    runs it' shape is excluded, and incompleteness of any value-option list can never cause a silent
+    allow. The safe-direction residual is an over-ask/over-deny on ANY complete option placed immediately
+    before help (a valueless flag, git commit --amend --help, or an attached-value flag, git commit
+    -mfoo --help / git push -ofoo --help --force), where git shows help but the preceding '-' token makes
+    this treat the segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
+    end = tokens.index("--") if "--" in tokens else len(tokens)
+    for i in range(1, end):
+        prev = tokens[i - 1]
+        if (tokens[i] in _INFO_FLAGS and not prev.startswith("-")
+                and not (prev and all(c in "<>&|" for c in prev))):
+            return True
+    return False
 
 
 def _piped_to_pager(segments, index):
@@ -2314,7 +2334,9 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
 # --for/--force/--force-with-lease/--force-if-includes; the short cluster scan now admits a digit
 # ('-[A-Za-z0-9]*f'), so an ipv4/ipv6 '-4f'/'-6f' clustered with force is caught (F-117), and its
-# disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; and the
+# disclosed false-hit on an attached -o value ending in f ('-of') now also covers '-o4f'; the short
+# cluster anchor now also admits a preceding QUOTE character (matching the '+refspec' anchor), so a
+# quoted wrapped cluster like env git push '-4f' ... is caught (F-117); and the
 # '+<ref>' force-refspec anchor admits a preceding
 # QUOTE character as well as start/whitespace, so a quoted '+main:main' under a wrapper is caught
 # (F-112 round-3) - all accepted over-asks on this path. _RAW_PUSH_DELETE_RE spots a branch-deletion
@@ -2322,8 +2344,9 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # long flag ('--de' is git-unambiguous for --delete; '--dry-run' shares no such prefix), a
 # '--pru...' long flag (--prune deletes remote refs absent locally with no force flag,
 # F-117), or a 'd' carried ANYWHERE in a '-' short cluster that now admits digits
-# ('-[A-Za-z0-9]*d'), so a clustered ipv4/ipv6 '-4d'/'-6d' is caught (F-117), mirroring the
-# force '-[A-Za-z0-9]*f' shape (round-4: the old
+# ('-[A-Za-z0-9]*d'), so a clustered ipv4/ipv6 '-4d'/'-6d' is caught (F-117), and like the force
+# anchor it too now admits a preceding QUOTE character (so a quoted wrapped '-4d' is caught),
+# mirroring the force '-[A-Za-z0-9]*f' shape (round-4: the old
 # cluster-END '-[A-Za-z]*d\b' let a wrapped 'git push -dv origin main' slip while the parsed path
 # denies it), both name-independent like the force spellings (the true target may be unreadable or
 # shell-expanded); or an empty-source ':<protected>' refspec, judged by its visible name and built
@@ -2331,9 +2354,9 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # does not ask. _RAW_PROTECTED_RE is built from _PROTECTED and folds case: a raw over-match only
 # asks/denies, never allows.
 _RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
-_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
+_RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|[\s'\"])-[A-Za-z0-9]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
-    r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|\s)-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
+    r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")

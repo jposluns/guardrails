@@ -1723,6 +1723,11 @@ def main():
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
 
+        def dexpect(label, command, want):
+            got = _decision(aiqt_hooks.diff_source_pretool, command)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
         pl_repo = _init_repo(tmp / "pl-repo")  # HEAD is main (a protected name) by construction
         plr = str(pl_repo)
         pl_feat = _init_repo(tmp / "pl-feat")
@@ -1875,6 +1880,32 @@ def main():
                 'git push -4d origin main "unbalanced', "ask", cwd=plr)
         pexpect("(f117-h) unparseable push -4f digit cluster force asks (fallback, F-117)",
                 'git push -4f origin main "unbalanced', "ask", cwd=plr)
+        # F-117 round-6: --help/-h that git does not treat as help (after `--`, or as a redirect
+        # target) must not mask a protected-branch action; quoted short clusters under a wrapper.
+        pexpect("(f117r6-a) redirect-target --help does not mask a force-push",
+                "git push --force origin main > --help", "deny", cwd=plr)
+        pexpect("(f117r6-b) end-of-options operand --help does not mask a force-push",
+                "git push --force origin -- main --help", "deny", cwd=plr)
+        pexpect("(f117r6-c) end-of-options operand --help does not mask a direct commit",
+                "git commit -- README.md --help", "ask", cwd=plr)
+        pexpect("(f117r6-d) quoted short-cluster force under a wrapper asks (fallback)",
+                "env git push '-4f' origin main", "ask", cwd=plr)
+        pexpect("(f117r6-e) quoted short-cluster delete under a wrapper asks (fallback)",
+                "env git push '-4d' origin main", "ask", cwd=plr)
+        pexpect("(f117r6-f) attached-value option before --help over-asks (disclosed residual)",
+                "git commit -mfoo --help", "ask", cwd=plr)
+        # F-117 round-6 / F-118: the shared diff-source guard (cnsdif). Genuine help allows; a --help
+        # that git treats as a pathspec (after `--`) is a real console dump and denies; a non-stdout fd
+        # redirect ('2>') is not a stdout real-file escape (F-118); a real stdout redirect still allows.
+        dexpect("(f117r6-g) genuine diff --help allows", "git diff --help", "allow")
+        dexpect("(f117r6-i) end-of-options operand --help does not mask a diff dump",
+                "git diff -- file --help", "deny")
+        dexpect("(f117r6-j) stderr redirect is not a stdout real-file escape (F-118)",
+                "git diff 2> errors.log", "deny")
+        dexpect("(f117r6-k) genuine stdout real-file redirect still allows",
+                "git diff > real.txt", "allow")
+        dexpect("(f117r6-l) explicit fd-1 stdout redirect allows",
+                "git diff 1> real.txt", "allow")
         # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
         pexpect("(pl-v1) '-o --force' is the push-option value, not force",
                 "git push -o --force origin main", "allow", cwd=plr)
