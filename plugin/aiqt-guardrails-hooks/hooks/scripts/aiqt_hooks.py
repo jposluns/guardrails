@@ -11,6 +11,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
+  gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -2784,6 +2785,270 @@ def protected_line(data):
     return _allow()
 
 
+# --- gatdis (EN-5 PR-B): a Bash command that weakens a verification gate -------------------------------
+
+# The git subcommands that accept --no-verify, and the two where the SHORT -n IS --no-verify. Verified
+# against the git 2.53.0 man pages (git-commit(1), git-merge(1), git-push(1), git-pull(1), git-rebase(1),
+# git-am(1)), 2026-08-19: commit and am bind -n to --no-verify; on push -n is --dry-run and on merge and
+# pull it is --no-stat, so the short scan runs ONLY where -n is the bypass, never where it is a harmless
+# dry-run or diffstat flag (flagging -n there would block safe commands, the opposite of this control's
+# purpose). cherry-pick and revert accept no --no-verify at all and are out of the roster.
+_NOVERIFY_VERBS = frozenset(("commit", "merge", "push", "pull", "rebase", "am"))
+_NOVERIFY_SHORT_N_VERBS = frozenset(("commit", "am"))
+
+# Value-taking options of the short-n verbs, so an option VALUE is never char-scanned as a clustered
+# flag (the '-o' lesson of _push_parse applied to commit -m). Verified against git-commit(1) and
+# git-am(1), git 2.53.0, 2026-08-19, on the gitcli(7) rule the push tables use (aiqt_hooks.py, the
+# _PUSH_LONG_ARG_OPTS note): a MANDATORY value may be attached or separated, so the cluster scan stops
+# at the letter and a bare trailing letter consumes the next token; an OPTIONAL value is legal only in
+# the attached "stuck" form, so the scan stops at the letter but a bare one consumes NOTHING; the LONG
+# sets are the mandatory-value long options in their SEPARATED form (--message <msg>), whose value
+# token could itself begin with '-n' and must be skipped (their '--opt=value' shape carries the value
+# in the same token and consumes nothing).
+_GATE_SHORT_VALUE_OPTS = {
+    "commit": frozenset(("m", "F", "C", "c", "t")),
+    "am": frozenset(()),
+}
+_GATE_SHORT_STUCK_OPTS = {
+    "commit": frozenset(("S", "u")),
+    "am": frozenset(("S",)),
+}
+_GATE_LONG_ARG_OPTS = {
+    "commit": frozenset((
+        "--message", "--file", "--author", "--date", "--template", "--trailer", "--cleanup",
+        "--reuse-message", "--reedit-message", "--fixup", "--squash", "--pathspec-from-file")),
+    "am": frozenset(("--whitespace", "--exclude", "--include", "--directory", "--quoted-cr")),
+}
+
+# The checker lexicon for the ASK heuristics. Three shapes qualify a segment as checker-shaped: a
+# known checker COMMAND WORD; a command whose NAME PARTS (basename split on non-alphanumerics, exact
+# part match so 'latest' never trips a 'test' substring) contain a checker part; or a known RUNNER
+# whose non-option, non-assignment operand qualifies by either test ('make test', 'python -m pytest',
+# 'bash tools/run_all_checks.sh'). The lexicon is deliberately a heuristic: it routes to ASK only,
+# never a deny, so an over-match costs a prompt and an under-match is the disclosed residue.
+_CHECKER_WORDS = frozenset((
+    "pytest", "tox", "nox", "unittest", "mypy", "pyright", "ruff", "flake8", "pylint", "bandit",
+    "eslint", "tsc", "jest", "vitest", "mocha", "rspec", "rubocop", "phpunit", "phpstan",
+    "golangci-lint", "staticcheck", "shellcheck", "hadolint", "yamllint", "markdownlint",
+    "gitleaks", "pre-commit", "ctest", "cppcheck", "clang-tidy"))
+_CHECKER_RUNNERS = frozenset((
+    "make", "npm", "pnpm", "yarn", "npx", "node", "go", "cargo", "mvn", "mvnw", "gradle", "gradlew",
+    "python", "python3", "py", "rake", "bundle", "poetry", "pipenv", "uv", "uvx",
+    "sh", "bash", "zsh", "dash"))
+_CHECKER_NAME_PARTS = frozenset((
+    "test", "tests", "selftest", "selftests", "check", "checks", "checker", "lint", "linter",
+    "verify", "validate", "audit", "conformance", "vet", "clippy", "gate", "gates"))
+_NAME_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+# The failure-discarding right-hand sides: an exit-status swallow after '||' (true or the ':' builtin),
+# and a truncating stdout sink after '|' that, under default pipeline semantics, replaces the checker
+# exit status with its own and can cut the failing tail of the output. tee/cat/less are NOT truncating
+# and never qualify.
+_EXIT_SWALLOWS = frozenset(("true", ":"))
+_TRUNCATING_SINKS = frozenset(("head", "tail"))
+
+# The safe alternative named in every deny/ask reason (mirrors _PROTECTED_ALTS): the rule IS the route.
+_GATE_ALTS = (
+    "Safe route: run the gate as-is and let its exit status stand; a failing gate is signal, so fix "
+    "the artefact it guards. A genuinely broken hook or check is repaired or retired at its source "
+    "through a reviewed change, never bypassed for one run.")
+
+# Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote);
+# mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
+# deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
+# probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
+_RAW_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|merge|push|pull|rebase|am)\b")
+_RAW_NOVERIFY_RE = re.compile(r"(?i)--no-ver")
+_RAW_SHORT_NOVERIFY_VERB_RE = re.compile(r"(?is)\bgit\b.*?\b(?:commit|am)\b")
+_RAW_SHORT_N_RE = re.compile(r"(?:^|\s)-[A-Za-z]*n\b")
+_RAW_CHECKER_RE = re.compile(
+    r"(?i)\b(?:pytest|tox|nox|unittest|mypy|pyright|ruff|flake8|pylint|bandit|eslint|tsc|jest|"
+    r"vitest|mocha|rspec|rubocop|phpunit|phpstan|golangci-lint|staticcheck|shellcheck|hadolint|"
+    r"yamllint|markdownlint|gitleaks|pre-commit|ctest|cppcheck|clang-tidy|"
+    r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance)\b")
+_RAW_SWALLOW_RE = re.compile(r"\|\|\s*(?:true|:)(?=\s|$)")
+_RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
+
+
+def _no_verify_spelling(sub, args):
+    """The matched hook-bypass spelling on this git segment, or None. The long form: a --no-verify
+    token in the option region (before '--'/'--end-of-options', via the shipped _split_pre_post),
+    matched exact or by CONSERVATIVE LONG PREFIX (_has_long_prefix, exactly as protected_line matches
+    'force'): an ambiguous abbreviation git itself would reject ('--no-ver') matches ANYWAY, and a
+    separated option VALUE in pre is scanned too - both err toward a deny, never an allow, while a
+    LONGER distinct option (--no-verify-signatures, --no-verbose) never matches because its full name
+    is not a prefix of 'no-verify'. The short form: a bare or clustered -n, ONLY on the verbs where -n
+    IS --no-verify (commit, am), with the value-taking short and long options skipped (mirroring
+    _push_parse) so an attached value ('-m-n ...'), a separated value ('--message -n'), or a stuck
+    optional value ('-Skeyid') is never char-scanned as the flag."""
+    pre, _post, _had_sep = _split_pre_post(args)
+    if _has_long_prefix(pre, "no-verify"):
+        return "a --no-verify spelling"
+    if sub not in _NOVERIFY_SHORT_N_VERBS:
+        return None
+    value_opts = _GATE_SHORT_VALUE_OPTS[sub]
+    stuck_opts = _GATE_SHORT_STUCK_OPTS[sub]
+    long_arg_opts = _GATE_LONG_ARG_OPTS[sub]
+    skip_value = False  # the previous token was a separated value-taking option: skip its value
+    for tok in pre:
+        if skip_value:
+            skip_value = False
+            continue  # this token is a prior option's VALUE, not a flag
+        if tok.startswith("--"):
+            if "=" not in tok and tok in long_arg_opts:
+                skip_value = True  # its value is the next token
+            continue  # long options were judged by _has_long_prefix above, never char-scanned
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for i, ch in enumerate(body):
+                if ch in value_opts:  # mandatory value: attached remainder, or the next token if bare
+                    if i == len(body) - 1:
+                        skip_value = True
+                    break  # the remainder of this token is the value, not flags
+                if ch in stuck_opts:  # optional value is attached-only: bare form consumes NOTHING
+                    break
+                if ch == "n":
+                    return "the short -n (--no-verify) in {!r}".format(tok[:40])
+    return None
+
+
+def _name_parts_hit(name):
+    """True when a name, split on non-alphanumerics and lowercased, carries a checker-shaped PART
+    (exact part match: 'run_all_checks.sh' hits on 'checks', while 'latest' never hits on a 'test'
+    substring)."""
+    return any(p in _CHECKER_NAME_PARTS for p in _NAME_SPLIT_RE.split(name.lower()) if p)
+
+
+def _is_checker_segment(tokens):
+    """True when a segment is CHECKER-SHAPED: its command word is a known checker, its command word's
+    name parts hit the checker parts, or it is a known runner one of whose non-option, non-assignment
+    operands qualifies by either test ('make test', 'go vet', 'python -m pytest', 'npx jest',
+    'bash tools/run_all_checks.sh'). Heuristic by design (routes to ASK only): a runner's separated
+    option value is scanned as an operand (an accepted over-ask), and a checker hidden inside an
+    'sh -c' quoted script body is one opaque token and is missed (the disclosed residue)."""
+    word = _command_word(tokens)
+    if not word:
+        return False
+    lw = word.lower()
+    if lw in _CHECKER_WORDS or _name_parts_hit(lw):
+        return True
+    if lw not in _CHECKER_RUNNERS:
+        return False
+    for tok in tokens[_command_word_index(tokens) + 1:]:
+        if tok.startswith("-") or _ENV_ASSIGN_RE.match(tok):
+            continue
+        if tok.lower() in _CHECKER_WORDS or _name_parts_hit(tok):
+            return True
+    return False
+
+
+def _gate_weakening_fallback(command):
+    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quotes): an apparent
+    git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
+    a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
+    prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
+    or truncating-pipe spelling ASKS; anything else ALLOWS (the true boundary). Over-matching by
+    design, the documented posture of the sibling fallbacks (_diff_source_fallback,
+    _commit_identity_fallback, _protected_line_fallback): re-issue the command parseable."""
+    if _RAW_NOVERIFY_VERB_RE.search(command) and _RAW_NOVERIFY_RE.search(command):
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+            "(likely unbalanced quotes) and it appears to bypass verification hooks with a --no-verify "
+            "spelling; failing closed. {}".format(_GATE_ALTS),
+            "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
+            "hooks (rule gatdis, fail-safe).")
+    if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
+        return _ask(
+            "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+            "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
+            "which on those verbs bypasses the verification hooks; confirm it does not, or re-issue "
+            "it as a parseable command. {}".format(_GATE_ALTS),
+            "AIQT guardrail: an unparseable git commit/am appears to carry -n (--no-verify) - confirm "
+            "before proceeding (rule gatdis, fail-safe).")
+    if _RAW_CHECKER_RE.search(command) and (
+            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)):
+        return _ask(
+            "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
+            "(likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
+            "signal ('|| true', '|| :', '| head', '| tail'); confirm the checker's exit status still "
+            "gates, or re-issue it as a parseable command. {}".format(_GATE_ALTS),
+            "AIQT guardrail: an unparseable command appears to discard a checker's failure signal - "
+            "confirm before proceeding (rule gatdis, fail-safe).")
+    return _allow()
+
+
+def gate_weakening(data):
+    """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
+    verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
+    that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
+    -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
+    is deliberately not flagged there). ASK a checker-shaped segment whose failure signal is
+    discarded: swallowed by an immediately following '|| true' or '|| :', or piped into a truncating
+    sink (head, tail) whose exit status replaces the checker's under default pipeline semantics. The
+    split posture is deliberate: the hook bypass is lexical and zero-intent, so it DENIES with no
+    escape-hatch prefix (mirroring commit_identity's absoluteness); 'what is a gate' is not lexically
+    certain, so the heuristics only ASK and a mis-shaped name costs a prompt, never a block. A DENY
+    found in any segment wins over a pending ASK (mirrors protected_line)."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("gatdis")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    command = (data.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
+            "so the gate-weakening check could not run; failing closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _gate_weakening_fallback(command)
+    pending_ask = None  # the first ASK found; a DENY anywhere returns immediately and wins over it
+    for index, (tokens, sep_after) in enumerate(segments):
+        if _command_word(tokens) == "git" and not _has_info_flag(tokens):
+            sub, args = _git_sub_and_args(tokens)
+            if sub in _NOVERIFY_VERBS:
+                spelling = _no_verify_spelling(sub, args)
+                if spelling is not None:
+                    return _deny(
+                        "AIQT rule gatdis (gate-discipline): this git {} carries {}, a deliberate "
+                        "bypass of the verification hooks that gate it. Never weaken a gate to obtain "
+                        "a pass; fix the artefact instead. {}".format(sub, spelling, _GATE_ALTS),
+                        "AIQT guardrail: denied a git verification-hook bypass (--no-verify family) "
+                        "(rule gatdis).")
+        if not _is_checker_segment(tokens):
+            continue
+        nxt = segments[index + 1][0] if index + 1 < len(segments) else []
+        if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
+            if pending_ask is None:
+                pending_ask = _ask(
+                    "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate and its "
+                    "failure is swallowed by the following '|| {}', so a failing check would read as "
+                    "a pass. If it gates this work, run it bare and let the exit status stand; "
+                    "confirm only when this command is genuinely not a gate. {}"
+                    .format(_command_word(tokens), _command_word(nxt), _GATE_ALTS),
+                    "AIQT guardrail: a checker-shaped command has its failure swallowed ('|| true') - "
+                    "confirm before proceeding (rule gatdis).")
+        elif sep_after == "|" and _command_word(nxt) in _TRUNCATING_SINKS:
+            if pending_ask is None:
+                pending_ask = _ask(
+                    "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate and is "
+                    "piped into '{}', a truncating sink: under default pipeline semantics the "
+                    "pipeline reports the sink's exit status, not the checker's, and the truncation "
+                    "can also cut the failing output, so the gate's failure signal is discarded. Run "
+                    "it bare, or redirect the output to a file and read that. {}"
+                    .format(_command_word(tokens), _command_word(nxt), _GATE_ALTS),
+                    "AIQT guardrail: a checker-shaped command is piped into a truncating sink "
+                    "(| head/tail) - confirm before proceeding (rule gatdis).")
+    if pending_ask is not None:
+        return pending_ask
+    return _allow()
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -2792,6 +3057,7 @@ HANDLERS = {
     "absolute_paths": absolute_paths,
     "git_discard": git_discard,
     "protected_line": protected_line,
+    "gate_weakening": gate_weakening,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -2807,6 +3073,7 @@ HANDLER_EVENT = {
     "absolute_paths": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
+    "gate_weakening": PRETOOL,
 }
 
 
