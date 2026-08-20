@@ -1820,15 +1820,17 @@ def main():
         pexpect("(pl-k3) unparseable apparent commit asks", 'git commit -m "it broke', "ask", cwd=plr)
         pexpect("(pl-k4) unparseable non-git command allows", 'ls -la "unbalanced', "allow", cwd=plr)
 
-        # === F-112 round-2: HEAD/@ proxy (B1), fallback +refspec/--for (B2/3B), separated optional-value
-        # option (1A), and a wrapped git push (1C) ===
+        # === F-112 round-2: HEAD/@ proxy (B1), fallback +refspec/--for (B2/3B), the --recurse-submodules
+        # value-skip (1A, removed in round-2 and RESTORED in round-3: the value is mandatory-separable),
+        # and a wrapped git push (1C) ===
         pexpect("(pl-n1) force-push to HEAD on main denies (HEAD resolves to the current branch)",
                 "git push --force origin HEAD", "deny", cwd=plr)
         pexpect("(pl-n2) '-f origin @' on main denies (@ is HEAD)", "git push -f origin @", "deny", cwd=plr)
         pexpect("(pl-n3) force-push to HEAD on a feature branch allows",
                 "git push --force origin HEAD", "allow", cwd=plf)
         pexpect("(pl-n4) '+HEAD' on main denies", "git push origin +HEAD", "deny", cwd=plr)
-        pexpect("(pl-o1) separated --recurse-submodules does not eat the refspec: force to main denies",
+        pexpect("(pl-o1) separated --recurse-submodules value is consumed (mandatory value); the "
+                "refspec-less force then probes HEAD and denies on main",
                 "git push -f --recurse-submodules main origin", "deny", cwd=plr)
         pexpect("(pl-p1) unparseable '+main' force-push (no -f) asks on the fallback",
                 'git push origin +main "unbalanced', "ask", cwd=plr)
@@ -1839,6 +1841,47 @@ def main():
         pexpect("(pl-q2) a wrapped NON-force push is out of scope, allows",
                 "env git push origin main", "allow", cwd=plr)
         pexpect("(pl-q3) a non-git wrapped command allows", "env FOO=1 echo hi", "allow", cwd=plr)
+        # === F-112 round-3: protected DELETION, value-aware flags, operand roles, fallback widening ===
+        # A delete of a protected branch rewrites the protected line like a force: every spelling denies.
+        pexpect("(pl-u1) push --delete of main denies", "git push --delete origin main", "deny", cwd=plr)
+        pexpect("(pl-u2) push -d of main denies", "git push -d origin main", "deny", cwd=plr)
+        pexpect("(pl-u3) empty-source ':main' delete refspec denies", "git push origin :main", "deny",
+                cwd=plr)
+        pexpect("(pl-u4) ':refs/heads/main' delete refspec denies",
+                "git push origin :refs/heads/main", "deny", cwd=plr)
+        pexpect("(pl-u5) a delete of a feature branch allows",
+                "git push --delete origin old-feature", "allow", cwd=plr)
+        pexpect("(pl-u6) a wildcard empty-source delete asks (a sweep the guard cannot prove safe)",
+                "git push origin ':refs/heads/*'", "ask", cwd=plr)
+        pexpect("(pl-u7) '--delete origin HEAD' on main denies via the probe (HEAD is the current branch)",
+                "git push --delete origin HEAD", "deny", cwd=plr)
+        pexpect("(pl-u8) a refspec-less --delete allows (git itself rejects it, nothing to resolve)",
+                "git push --delete origin", "allow", cwd=plr)
+        # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
+        pexpect("(pl-v1) '-o --force' is the push-option value, not force",
+                "git push -o --force origin main", "allow", cwd=plr)
+        pexpect("(pl-v2) '--push-option --force' is its value, not force",
+                "git push --push-option --force origin main", "allow", cwd=plr)
+        # Operand ROLES: the first bare operand is the repository, never judged as a destination; and
+        # the restored --recurse-submodules value-skip means a truly refspec-less force still probes.
+        pexpect("(pl-w1) a remote literally named 'main' is not a protected refspec",
+                "git push --force main my-feature", "allow", cwd=plr)
+        pexpect("(pl-w2) '-f --recurse-submodules on-demand origin' is refspec-less: probes and denies on main",
+                "git push -f --recurse-submodules on-demand origin", "deny", cwd=plr)
+        # Fallback widening: a quote-anchored '+refspec' under a wrapper, and the delete spellings.
+        pexpect("(pl-x1) a QUOTED +refspec under a wrapper asks via the fallback",
+                "sudo git push origin '+main:main'", "ask", cwd=plr)
+        pexpect("(pl-x2) a wrapped --delete of main asks via the fallback",
+                "env git push --delete origin main", "ask", cwd=plr)
+        pexpect("(pl-x3) an unparseable ':main' delete asks via the fallback",
+                'git push origin :main "unbalanced', "ask", cwd=plr)
+        # Disclosed residuals, witnessed so the residue cannot drift from reality: a benign parsed git
+        # segment suppresses the wrapped-catch (best-effort, not chased), and --dry-run with a force
+        # spelling over-denies (the safe direction).
+        pexpect("(pl-r1) DISCLOSED residual: a benign git segment before a wrapped force-push allows",
+                "git status && env git push --force origin main", "allow", cwd=plr)
+        pexpect("(pl-r2) DISCLOSED over-deny: --dry-run --force to main still denies",
+                "git push --dry-run --force origin main", "deny", cwd=plr)
 
         # A deny in a later segment wins over an earlier ask; discard verbs are out of this scope.
         pexpect("(pl-l1) a later force-push deny wins over an earlier commit ask",
@@ -1886,18 +1929,25 @@ def main():
           "command whose resolved subcommand is outside the recognized set (checkout-index, read-tree "
           "--reset) ASKS rather than winning the catch-all allow, while recognized safe forms and the "
           "unflagged git worktree remove are unchanged (F-97). The protected-line guard (EN-5 "
-          "PR-A, prtbrn/artbr1) is proven: a force-push (every -f/--force/--force-with-lease/"
-          "--force-if-includes spelling, a conservative long prefix, and a '+'-prefixed "
-          "refspec) whose DESTINATION names a protected branch (main/master, bare or "
-          "refs/heads/-qualified) DENIES, while a force-push to a feature branch and a plain "
-          "non-force push ALLOW; a refspec-less force-push resolves HEAD by a scrubbed "
-          "read-only probe (deny on a protected HEAD, fail-to-ASK when unresolvable); a "
-          "--mirror or forced --all/--branches sweep ASKS; a direct git commit while HEAD is "
-          "protected (or unprovable) ASKS; an '-o' value is not mis-scanned as force; and "
-          "a forced HEAD/@ refspec resolving to a protected current branch also DENIES; and the "
-          "fallback (a shell parse error OR a command-word wrapper hiding git) ASKS an apparent git "
-          "force-push (incl +refspec, --for, --mirror/--all) or commit, never a hard deny and never a "
-          "silent allow")
+          "PR-A round-3, prtbrn/artbr1) is proven: a force-push (every -f/--force/"
+          "--force-with-lease/--force-if-includes spelling, a conservative long prefix, and a "
+          "'+'-prefixed refspec) OR a protected DELETION (--delete, a clustered -d, an "
+          "empty-source ':<dst>' refspec) whose refspec-position DESTINATION names a protected "
+          "branch (main/master, bare or refs/heads/-qualified) DENIES, while a force or delete "
+          "to a feature branch, a plain non-force push, and a push whose REMOTE merely carries a "
+          "protected name ALLOW; flag detection is value-aware ('-o --force' and '--push-option "
+          "--force' are option VALUES, not force; the separated --recurse-submodules value is "
+          "consumed, so the refspec-less force behind it still probes and denies); a refspec-less "
+          "force-push and a forced or deleted HEAD/@ resolve HEAD by a scrubbed read-only probe "
+          "(deny on a protected HEAD, fail-to-ASK when unresolvable); a --mirror or forced "
+          "--all/--branches sweep and a wildcard force or delete destination ASK; a direct git "
+          "commit while HEAD is protected (or unprovable) ASKS; the fallback (a shell parse error "
+          "OR a command-word wrapper hiding git) ASKS an apparent git force-push (incl a +refspec "
+          "even quote-anchored, --for, --mirror/--all), branch deletion (--delete/-d, "
+          "':<protected>'), or commit, never a hard deny and never a silent allow; and the two "
+          "disclosed residuals are witnessed AS disclosed (a benign git segment ahead of a "
+          "wrapped force-push suppresses the wrapped catch and ALLOWS, best-effort and not "
+          "chased; --dry-run --force over-DENIES, the safe direction)")
     return 0
 
 
