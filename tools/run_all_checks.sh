@@ -65,6 +65,7 @@ run_gate "claude-drift"    python3 tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 tools/gen_adapters.py --check
 run_gate "cursor-drift"  python3 tools/gen_cursor.py --check
 run_gate "hooks-selftest" python3 tools/gen_hooks.py --self-test
+run_gate "secret-patterns-drift" python3 tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
 run_gate "skill-drift"     python3 tools/gen_skill.py --check

@@ -141,6 +141,12 @@ jobs:
       - name: Hooks generator self-test
         run: python3 tools/gen_hooks.py --self-test
 
+      # gen_secret_patterns.py --check runs BEFORE the byte-copy drift gate below: a drifted generated
+      # secret-pattern region in the source aiqt_hooks.py is caught here, before gen_hooks.py copies that
+      # file into the plugin surface.
+      - name: Secret-patterns drift
+        run: python3 tools/gen_secret_patterns.py --check
+
       - name: Hooks drift
         run: python3 tools/gen_hooks.py --check
 
