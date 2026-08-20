@@ -2255,6 +2255,35 @@ def main():
         sexpect("(ss-u) F-124 placeholder-only one-liner allows",
                 "Write", {"file_path": "/tmp/x", "content": _ph_only}, "allow")
 
+        # secsec round-3 (F-126/F-128): the two new provider-token variants, MultiEdit coverage, the
+        # in-handler non-dict guard, and NotebookEdit out-of-scope. Shapes assembled from PARTS at
+        # runtime so no contiguous token literal appears in this source (SECP; a literal would trip the
+        # repo secret-scan). The sk-proj/xapp tokens stand ALONE with NO credential keyword beside them,
+        # so the DENY is attributable to the NEW prefix pattern (F-126), not the credential-named ASSIGN.
+        _fake_skproj = "sk-" + "proj-" + "A" * 30           # F-126 OpenAI project key; generic sk- cannot match
+        _fake_xapp = "xapp-" + "1-A0123456789-" + "A" * 40  # F-126 Slack app-level token
+        sexpect("(ss-v) F-126 Write with a bare sk-proj token denies",
+                "Write", {"file_path": "/tmp/x", "content": _fake_skproj + "\n"}, "deny")
+        sexpect("(ss-w) F-126 Write with a bare xapp token denies",
+                "Write", {"file_path": "/tmp/x", "content": _fake_xapp + "\n"}, "deny")
+        # MultiEdit (F-128a): the newline-joined new_string values of the edits are scanned. A ghp_ token
+        # in any edit's new_string DENIES; an edits list with no secret ALLOWS.
+        sexpect("(ss-x) F-128a MultiEdit whose edit introduces a secret denies",
+                "MultiEdit", {"file_path": "/tmp/x",
+                              "edits": [{"old_string": "a", "new_string": "hello world"},
+                                        {"old_string": "b", "new_string": _asgn("auth", _fake_ghp)}]}, "deny")
+        sexpect("(ss-y) F-128a MultiEdit whose edits carry no secret allows",
+                "MultiEdit", {"file_path": "/tmp/x",
+                              "edits": [{"old_string": "a", "new_string": "def add(a, b):"},
+                                        {"old_string": "b", "new_string": "    return a + b"}]}, "allow")
+        # In-handler non-dict guard (F-128a hygiene): a non-dict tool_input for an in-scope tool fails
+        # CLOSED cleanly (a _deny), not an AttributeError only the dispatcher would catch.
+        sexpect("(ss-z) F-128a non-dict tool_input denies cleanly (fail-closed)",
+                "Write", "not-a-dict", "deny")
+        # Out of scope (F-128b disclosure): NotebookEdit is not in the matcher set, so it ALLOWS.
+        sexpect("(ss-aa) NotebookEdit (out of scope) allows",
+                "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow")
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -3088,9 +3088,11 @@ _SECSEC_PREFIX_SOURCES = [
     ('\\bgh[pousr]_[A-Za-z0-9]{16,}', 'GitHub token'),
     ('\\bgithub_pat_[A-Za-z0-9_]{20,}', 'GitHub fine-grained PAT'),
     ('\\bsk-[A-Za-z0-9]{20,}', 'OpenAI-style secret key'),
+    ('\\bsk-proj-[A-Za-z0-9_-]{20,}', 'OpenAI project key'),
     ('\\bsk-ant-[A-Za-z0-9\\-_]{20,}', 'Anthropic key'),
     ('\\bAKIA[0-9A-Z]{16}\\b', 'AWS access key id'),
     ('\\bxox[baprs]-[A-Za-z0-9-]{10,}', 'Slack token'),
+    ('\\bxapp-[A-Za-z0-9-]{10,}', 'Slack app-level token'),
     ('-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----', 'private key block'),
 ]
 _SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>[^\'"\\n]{12,})(?P=q)    # quoted\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
@@ -3102,9 +3104,11 @@ _SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}
 _SECSEC_PREFIXES = [(re.compile(_pattern), _label) for _pattern, _label in _SECSEC_PREFIX_SOURCES]
 _SECSEC_ASSIGN = re.compile(_SECSEC_ASSIGN_SOURCE)
 _SECSEC_PLACEHOLDER = re.compile(_SECSEC_PLACEHOLDER_SOURCE)
-# The target field per tool: the text a Write/Edit would write, or the command a Bash call would emit.
+# The target field per SINGLE-FIELD tool: the text a Write/Edit would write, or the command a Bash call
+# would emit. MultiEdit is in scope too but carries a LIST of edits rather than one field, so it is
+# extracted separately (see _secsec_multiedit_text); its name is added to the in-scope tool set here.
 _SECSEC_FIELD = {"Write": "content", "Edit": "new_string", "Bash": "command"}
-_SECSEC_TOOLS = frozenset(_SECSEC_FIELD)
+_SECSEC_TOOLS = frozenset(_SECSEC_FIELD) | {"MultiEdit"}
 
 
 def _scan_secret(text):
@@ -3134,13 +3138,36 @@ def _scan_secret(text):
     return None
 
 
+def _secsec_multiedit_text(tool_input):
+    """Return the text a MultiEdit would introduce: the newline-joined concatenation of the new_string
+    value of each edit in tool_input["edits"] (a LIST of dicts, each carrying the "new_string" that edit
+    would add). Return None to signal FAIL-CLOSED - the edits field absent or not a list, or ANY element
+    not a dict or carrying no string new_string - so the caller denies, consistent with the handler's
+    posture that a payload the scan cannot read is blocked. Edits are joined on a newline so each edit's
+    text stays on its own line for the per-line scan and no secret is split or fused across the boundary."""
+    edits = tool_input.get("edits")
+    if not isinstance(edits, list):
+        return None
+    parts = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            return None
+        new_string = edit.get("new_string")
+        if not isinstance(new_string, str):
+            return None
+        parts.append(new_string)
+    return "\n".join(parts)
+
+
 def secrets_shift_left(data):
-    """secsec (security/keep-secrets-out), PreToolUse on Write|Edit|Bash: DENY a call that would write an
-    obvious hardcoded secret. Fail-closed like the other PreToolUse controls: a missing tool_name denies,
-    and a present tool in scope whose target field is absent or not a string denies (the check cannot read
-    what would be written). A present tool NOT in {Write, Edit, Bash} is out of scope and allows. The
-    target text is the Write content, the Edit new_string (the text being introduced), or the Bash command
-    string (the write-form path, best-effort). A DENY names the pattern label only, never the secret."""
+    """secsec (security/keep-secrets-out), PreToolUse on Write|Edit|MultiEdit|Bash: DENY a call that would
+    write an obvious hardcoded secret. Fail-closed like the other PreToolUse controls: a missing tool_name
+    denies, a non-dict tool_input denies (the payload cannot be read), and a present tool in scope whose
+    target payload is absent or malformed denies (the check cannot read what would be written). A present
+    tool NOT in {Write, Edit, MultiEdit, Bash} is out of scope and allows. The target text is the Write
+    content, the Edit new_string, the newline-joined new_string values of a MultiEdit's edits (the text
+    being introduced), or the Bash command string (the write-form path, best-effort). A DENY names the
+    pattern label only, never the secret."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: secrets_shift_left wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -3148,15 +3175,33 @@ def secrets_shift_left(data):
     if tool_name is None:
         return _deny_missing_tool_name("secsec")
     if tool_name not in _SECSEC_TOOLS:
-        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/Bash)
-    field = _SECSEC_FIELD[tool_name]
-    target = (data.get("tool_input") or {}).get(field)
-    if not isinstance(target, str):
+        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit/Bash)
+    # A non-dict tool_input cannot answer the scan; fail CLOSED cleanly in-handler (mirrors git_discard's
+    # isinstance-dict guard) rather than raising an AttributeError only the dispatcher would catch.
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
         return _deny(
-            "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable {}, so the "
-            "secret scan could not run over what would be written; failing closed.".format(tool_name, field),
-            "AIQT guardrail: denied a {} call with no readable {} (rule secsec, fail-closed)."
-            .format(tool_name, field))
+            "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable tool_input, so the "
+            "secret scan could not run over what would be written; failing closed.".format(tool_name),
+            "AIQT guardrail: denied a {} call with no readable payload (rule secsec, fail-closed)."
+            .format(tool_name))
+    if tool_name == "MultiEdit":
+        target = _secsec_multiedit_text(tool_input)
+        if target is None:
+            return _deny(
+                "AIQT rule secsec (keep-secrets-out): the MultiEdit payload carried no readable edits "
+                "list, so the secret scan could not run over what would be written; failing closed.",
+                "AIQT guardrail: denied a MultiEdit call with no readable edits (rule secsec, "
+                "fail-closed).")
+    else:
+        field = _SECSEC_FIELD[tool_name]
+        target = tool_input.get(field)
+        if not isinstance(target, str):
+            return _deny(
+                "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable {}, so the "
+                "secret scan could not run over what would be written; failing closed.".format(tool_name, field),
+                "AIQT guardrail: denied a {} call with no readable {} (rule secsec, fail-closed)."
+                .format(tool_name, field))
     label = _scan_secret(target)
     if label is None:
         return _allow()
