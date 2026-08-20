@@ -43,6 +43,12 @@ commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failu
 (|| true, || :) or piped into a truncating sink (| head, | tail) asks; option-value, post-'--',
 and push/merge -n edges stay allowed; and the parse-error fallback fails safe.
 
+It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
+new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
+credential-named assignment of a real-length literal, single-sourced from tools/check_secrets.py) denies;
+a placeholder value, ordinary code, an out-of-scope Read, and a Bash command with no secret allow; and a
+missing tool_name or an absent target field fails closed. Every secret fixture is synthetic-but-shaped.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import datetime
@@ -56,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
@@ -2135,6 +2142,172 @@ def main():
         gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
                 "(disclosed clustered-help over-block)", "git commit -hn -m x", "deny")
 
+        # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
+        # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
+        # Purely lexical over the target text (the Write content, the Edit new_string, or the Bash
+        # command), single-sourced from tools/check_secrets.py. Every secret value below is
+        # CLEARLY-SYNTHETIC-BUT-SHAPE-MATCHING (a run of A/synthetic chars that fits the pattern shape),
+        # never a real token (SECP synthetic-fixture-data). No repo fixture and no probe: the handler
+        # reads only tool_input, so no cwd is passed.
+        ssl = aiqt_hooks.secrets_shift_left
+
+        def sexpect(label, tool, tool_input, want):
+            data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+            code, stdout_obj, _stderr = ssl(data)
+            if code == 0 and stdout_obj is None:
+                got = "allow"
+            elif code == 0 and isinstance(stdout_obj, dict):
+                got = stdout_obj.get("hookSpecificOutput", {}).get("permissionDecision", "unexpected")
+            else:
+                got = "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # Synthetic secret shapes (NOT real), assembled from PARTS at runtime so the shape never appears
+        # as a contiguous literal in THIS source file: it uses the single-sourced check_secrets.py
+        # patterns, so a literal here would itself trip the repo secret-scan gate. The provider values
+        # are a split prefix plus a run of synthetic chars; the credential value is a plain 16-char
+        # mixed literal, real-length but with no credential keyword beside it here (SECP
+        # synthetic-fixture-data). _asgn builds a 'keyword = value' assignment at runtime, so the source
+        # carries only the bare keyword string, never the scannable 'keyword = "<value>"' shape.
+        _fake_ghp = "ghp_" + "A" * 30
+        _fake_ant = "sk-ant-" + "A" * 30
+        _fake_akia = "AKIA" + "A" * 16
+        _fake_pkey = "-----BEGIN RSA PRIVATE" + " KEY-----"  # split so the header is not a literal here
+        _cred = "aB3xY9kL2mN8qR5t"                           # 16 mixed alpha+digit chars, not a placeholder
+
+        def _asgn(keyword, value):
+            return "{} = {}".format(keyword, value)
+
+        # DENY: a Write whose content carries each shape.
+        sexpect("(ss-a) Write content with a GitHub token denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _fake_ghp)}, "deny")
+        sexpect("(ss-b) Write content with an Anthropic key denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("key", _fake_ant)}, "deny")
+        sexpect("(ss-c) Write content with an AWS access key id denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("aws", _fake_akia)}, "deny")
+        sexpect("(ss-d) Write content with a private key block header denies",
+                "Write", {"file_path": "/tmp/x", "content": _fake_pkey + "\nMIIB...\n"}, "deny")
+        sexpect("(ss-e) Write content with a credential assignment denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", '"' + _cred + '"')}, "deny")
+        # DENY: an Edit whose new_string introduces a secret.
+        sexpect("(ss-f) Edit new_string with a GitHub token denies",
+                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _asgn("auth", _fake_ghp)},
+                "deny")
+        # DENY: a Bash write-form (printf redirect, heredoc) emitting a secret in the command string.
+        sexpect("(ss-g) Bash printf > f with a GitHub token denies",
+                "Bash", {"command": "printf '%s' '" + _fake_ghp + "' > /tmp/f"}, "deny")
+        sexpect("(ss-h) Bash heredoc writing an AWS key denies",
+                "Bash", {"command": "cat > /tmp/f <<EOF\n" + _fake_akia + "\nEOF"}, "deny")
+
+        # ALLOW: a Write whose only credential-shaped values are PLACEHOLDERS (excluded exactly as
+        # check_secrets.py excludes them; the first two are 12+ chars so they exercise the ASSIGN
+        # placeholder-exclusion path, not merely the too-short no-match path).
+        _placeholders = ('api_key = "<your-key-here>"\n'
+                         'token = "${SOME_VARIABLE}"\n'
+                         'password = "changeme"\n'
+                         'secret = "example"\n')
+        sexpect("(ss-i) Write content with placeholder values allows",
+                "Write", {"file_path": "/tmp/x", "content": _placeholders}, "allow")
+        # ALLOW: ordinary code/prose with no secret.
+        sexpect("(ss-j) Write content with ordinary code allows",
+                "Write", {"file_path": "/tmp/x", "content": "def add(a, b):\n    return a + b\n"}, "allow")
+        # ALLOW: an Edit new_string with no secret.
+        sexpect("(ss-k) Edit new_string with no secret allows",
+                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": 'print("hello world")'},
+                "allow")
+        # ALLOW: a Read is not in the matcher, so it is out of scope (defensive allow).
+        sexpect("(ss-l) Read (out of matcher scope) allows",
+                "Read", {"file_path": "/tmp/x"}, "allow")
+        # ALLOW: a Bash command with no secret.
+        sexpect("(ss-m) Bash command with no secret allows",
+                "Bash", {"command": "ls -la /tmp"}, "allow")
+        # Fail-closed: a missing tool_name denies; an in-scope tool whose target field is absent denies.
+        sexpect("(ss-n) missing tool_name denies (fail-closed)",
+                None, {"content": _fake_ghp}, "deny")
+        sexpect("(ss-o) Write with no readable content denies (fail-closed)",
+                "Write", {"file_path": "/tmp/x"}, "deny")
+
+        # secsec round-2 (F-124/F-125)
+        # F-124 (scan ALL assignments per line, not just the first): a placeholder assignment BEFORE a
+        # real one on the SAME line must still DENY. Old .search stopped at the first (placeholder) match
+        # and ALLOWED; finditer reaches the real second assignment and DENIES. The one-liner is assembled
+        # from parts so this source file carries no scannable 'keyword = "<value>"' shape (SECP).
+        _ph_then_real = (_asgn("token", '"<your-key-here>"') + "; "
+                         + _asgn("password", '"' + _cred + '"'))
+        sexpect("(ss-p) F-124 Write placeholder-then-real on one line denies",
+                "Write", {"file_path": "/tmp/x", "content": _ph_then_real}, "deny")
+        sexpect("(ss-q) F-124 Edit placeholder-then-real on one line denies",
+                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _ph_then_real}, "deny")
+        sexpect("(ss-r) F-124 Bash placeholder-then-real on one line denies",
+                "Bash", {"command": _ph_then_real}, "deny")
+        # F-125 (broadened private-key block regex): a DSA header and the PGP 'PRIVATE KEY BLOCK' form
+        # now match; both were missed by the old (?:RSA |EC |OPENSSH |PGP )? alternation. Split so the
+        # header is not a contiguous literal here (mirrors _fake_pkey above).
+        _dsa_pkey = "-----BEGIN DSA PRIVATE" + " KEY-----"
+        _pgp_pkey = "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----"
+        sexpect("(ss-s) F-125 Write DSA private key block header denies",
+                "Write", {"file_path": "/tmp/x", "content": _dsa_pkey + "\nMIIB...\n"}, "deny")
+        sexpect("(ss-t) F-125 Write PGP private key block header denies",
+                "Write", {"file_path": "/tmp/x", "content": _pgp_pkey + "\nmQENB...\n"}, "deny")
+        # Control: a placeholder-only one-liner still ALLOWS (both values are non-secrets: a placeholder
+        # and a too-short 'example', so no assignment on the line is real).
+        _ph_only = (_asgn("token", '"<your-key-here>"') + "; " + _asgn("api_key", '"example"'))
+        sexpect("(ss-u) F-124 placeholder-only one-liner allows",
+                "Write", {"file_path": "/tmp/x", "content": _ph_only}, "allow")
+
+        # secsec round-3 (F-126/F-128): the two new provider-token variants, MultiEdit coverage, the
+        # in-handler non-dict guard, and NotebookEdit out-of-scope. Shapes assembled from PARTS at
+        # runtime so no contiguous token literal appears in this source (SECP; a literal would trip the
+        # repo secret-scan). The sk-proj/xapp tokens stand ALONE with NO credential keyword beside them,
+        # so the DENY is attributable to the NEW prefix pattern (F-126), not the credential-named ASSIGN.
+        _fake_skproj = "sk-" + "proj-" + "A" * 30           # F-126 OpenAI project key; generic sk- cannot match
+        _fake_xapp = "xapp-" + "1-A0123456789-" + "A" * 40  # F-126 Slack app-level token
+        sexpect("(ss-v) F-126 Write with a bare sk-proj token denies",
+                "Write", {"file_path": "/tmp/x", "content": _fake_skproj + "\n"}, "deny")
+        sexpect("(ss-w) F-126 Write with a bare xapp token denies",
+                "Write", {"file_path": "/tmp/x", "content": _fake_xapp + "\n"}, "deny")
+        # MultiEdit (F-128a): the newline-joined new_string values of the edits are scanned. A ghp_ token
+        # in any edit's new_string DENIES; an edits list with no secret ALLOWS.
+        sexpect("(ss-x) F-128a MultiEdit whose edit introduces a secret denies",
+                "MultiEdit", {"file_path": "/tmp/x",
+                              "edits": [{"old_string": "a", "new_string": "hello world"},
+                                        {"old_string": "b", "new_string": _asgn("auth", _fake_ghp)}]}, "deny")
+        sexpect("(ss-y) F-128a MultiEdit whose edits carry no secret allows",
+                "MultiEdit", {"file_path": "/tmp/x",
+                              "edits": [{"old_string": "a", "new_string": "def add(a, b):"},
+                                        {"old_string": "b", "new_string": "    return a + b"}]}, "allow")
+        # In-handler non-dict guard (F-128a hygiene): a non-dict tool_input for an in-scope tool fails
+        # CLOSED cleanly (a _deny), not an AttributeError only the dispatcher would catch.
+        sexpect("(ss-z) F-128a non-dict tool_input denies cleanly (fail-closed)",
+                "Write", "not-a-dict", "deny")
+        # Out of scope (F-128b disclosure): NotebookEdit is not in the matcher set, so it ALLOWS.
+        sexpect("(ss-aa) NotebookEdit (out of scope) allows",
+                "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow")
+
+        # secsec round-4 (F-129): the pattern drift gate must REJECT a target carrying more than one
+        # generated BEGIN..END region. text.find inspects only the FIRST region, so a SECOND region (e.g.
+        # a second _SECSEC_PREFIX_SOURCES = []) could override the patterns undetected while --check still
+        # passed. gen_secret_patterns._splice now asserts EXACTLY ONE BEGIN and EXACTLY ONE END, raising
+        # ValueError (which run() maps to a nonzero exit) otherwise; both the regen and --check paths reach
+        # the region through _splice, so this guards both. A one-region text splices cleanly; a two-region
+        # text must raise. Without the F-129 count guard, the two-region splice returns silently and this
+        # case fails, so it is the durable check that fails without the change.
+        _begin, _end = gen_secret_patterns.BEGIN, gen_secret_patterns.END
+        _region = "{}\n_SECSEC_PREFIX_SOURCES = []\n{}".format(_begin, _end)
+        _one_region = "prefix\n{}\nbody\n{}\nsuffix\n".format(_begin, _end)
+        _two_region = _one_region + "{}\nsecond body\n{}\n".format(_begin, _end)
+        try:
+            gen_secret_patterns._splice(_one_region, _region)
+        except ValueError as exc:
+            failures.append("(ss-drift-a) single-region _splice unexpectedly raised: {}".format(exc))
+        try:
+            gen_secret_patterns._splice(_two_region, _region)
+            failures.append("(ss-drift-b) two-region _splice did not raise; the drift gate would miss a "
+                            "second generated region")
+        except ValueError:
+            pass
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2212,7 +2385,13 @@ def main():
           "option values (attached -m, separated --message, post-'--' pathspecs) are never read as "
           "flags, a checker-shaped segment swallowed by '|| true'/'|| :' or piped into head/tail ASKS "
           "while non-checkers and non-truncating pipes stay allowed, a deny wins over a pending ask, "
-          "and the parse-error fallback denies/asks the raw spellings, never a silent allow")
+          "and the parse-error fallback denies/asks the raw spellings, never a silent allow"
+          ". The secrets-shift-left guard (EN-5 PR-C, secsec) is proven: a Write content, an Edit "
+          "new_string, or a Bash command carrying a synthetic-but-shaped provider token (GitHub, "
+          "Anthropic, AWS access key id), a private key block header, or a credential-named assignment of "
+          "a real-length literal DENIES, naming only the pattern label and never the value; a placeholder "
+          "value (single-sourced PLACEHOLDER exclusion), ordinary code, an out-of-scope Read, and a Bash "
+          "command with no secret ALLOW; and a missing tool_name or an absent target field fails closed")
     return 0
 
 
