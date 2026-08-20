@@ -2227,6 +2227,34 @@ def main():
         sexpect("(ss-o) Write with no readable content denies (fail-closed)",
                 "Write", {"file_path": "/tmp/x"}, "deny")
 
+        # secsec round-2 (F-124/F-125)
+        # F-124 (scan ALL assignments per line, not just the first): a placeholder assignment BEFORE a
+        # real one on the SAME line must still DENY. Old .search stopped at the first (placeholder) match
+        # and ALLOWED; finditer reaches the real second assignment and DENIES. The one-liner is assembled
+        # from parts so this source file carries no scannable 'keyword = "<value>"' shape (SECP).
+        _ph_then_real = (_asgn("token", '"<your-key-here>"') + "; "
+                         + _asgn("password", '"' + _cred + '"'))
+        sexpect("(ss-p) F-124 Write placeholder-then-real on one line denies",
+                "Write", {"file_path": "/tmp/x", "content": _ph_then_real}, "deny")
+        sexpect("(ss-q) F-124 Edit placeholder-then-real on one line denies",
+                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _ph_then_real}, "deny")
+        sexpect("(ss-r) F-124 Bash placeholder-then-real on one line denies",
+                "Bash", {"command": _ph_then_real}, "deny")
+        # F-125 (broadened private-key block regex): a DSA header and the PGP 'PRIVATE KEY BLOCK' form
+        # now match; both were missed by the old (?:RSA |EC |OPENSSH |PGP )? alternation. Split so the
+        # header is not a contiguous literal here (mirrors _fake_pkey above).
+        _dsa_pkey = "-----BEGIN DSA PRIVATE" + " KEY-----"
+        _pgp_pkey = "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----"
+        sexpect("(ss-s) F-125 Write DSA private key block header denies",
+                "Write", {"file_path": "/tmp/x", "content": _dsa_pkey + "\nMIIB...\n"}, "deny")
+        sexpect("(ss-t) F-125 Write PGP private key block header denies",
+                "Write", {"file_path": "/tmp/x", "content": _pgp_pkey + "\nmQENB...\n"}, "deny")
+        # Control: a placeholder-only one-liner still ALLOWS (both values are non-secrets: a placeholder
+        # and a too-short 'example', so no assignment on the line is real).
+        _ph_only = (_asgn("token", '"<your-key-here>"') + "; " + _asgn("api_key", '"example"'))
+        sexpect("(ss-u) F-124 placeholder-only one-liner allows",
+                "Write", {"file_path": "/tmp/x", "content": _ph_only}, "allow")
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

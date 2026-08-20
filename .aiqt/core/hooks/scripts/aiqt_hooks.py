@@ -3091,7 +3091,7 @@ _SECSEC_PREFIX_SOURCES = [
     ('\\bsk-ant-[A-Za-z0-9\\-_]{20,}', 'Anthropic key'),
     ('\\bAKIA[0-9A-Z]{16}\\b', 'AWS access key id'),
     ('\\bxox[baprs]-[A-Za-z0-9-]{10,}', 'Slack token'),
-    ('-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----', 'private key block'),
+    ('-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----', 'private key block'),
 ]
 _SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>[^\'"\\n]{12,})(?P=q)    # quoted\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
 _SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
@@ -3118,8 +3118,10 @@ def _scan_secret(text):
         for pattern, label in _SECSEC_PREFIXES:
             if pattern.search(line):
                 return label
-        match = _SECSEC_ASSIGN.search(line)
-        if match:
+        # Scan EVERY credential-named assignment on the line, not just the first, exactly as
+        # check_secrets.py does: a placeholder assignment earlier on the line must not mask a real
+        # one after it. The first real (non-placeholder) match on any line is the hit.
+        for match in _SECSEC_ASSIGN.finditer(line):
             value = match.group("qvalue") or match.group("value") or ""
             value = value.strip()
             # An UNQUOTED value must additionally look like a credential (letters AND digits), the same
