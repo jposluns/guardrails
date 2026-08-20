@@ -30,10 +30,12 @@ untracked-only, staged-only, config-hidden-untracked); the temp tree is removed 
 <dir>`/env/compound/wrapped/metacharacter form is deliberately NOT probed (not pristine-single-bare) and
 ASKS, which many cases below assert.
 
-It also covers the protected-line guard (protected_line, prtbrn/artbr1): a force-push to a
-protected branch (main/master) denies and to a feature branch allows, a refspec-less force-push
-and a direct commit are judged by a read-only HEAD probe (fail-to-ASK when unresolvable), a
---mirror/--all sweep asks, and the parse-error fallback fails safe.
+It also covers the protected-line guard (protected_line, prtbrn/artbr1): a force-push OR a branch
+DELETION of a protected branch (main/master) denies, with the banner naming the actual act, while a
+force or delete to a feature branch allows; a refspec-less force-push, a forced or deleted HEAD/@, and
+a direct commit (the literal commit subcommand only) are judged by a read-only HEAD probe (fail-to-ASK
+when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
+and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -1853,7 +1855,8 @@ def main():
                 "git push --delete origin old-feature", "allow", cwd=plr)
         pexpect("(pl-u6) a wildcard empty-source delete asks (a sweep the guard cannot prove safe)",
                 "git push origin ':refs/heads/*'", "ask", cwd=plr)
-        pexpect("(pl-u7) '--delete origin HEAD' on main denies via the probe (HEAD is the current branch)",
+        pexpect("(pl-u7) '--delete origin HEAD' on main denies via the probe (a harmless over-deny: "
+                "git itself rejects a HEAD delete as a nonexistent ref)",
                 "git push --delete origin HEAD", "deny", cwd=plr)
         pexpect("(pl-u8) a refspec-less --delete allows (git itself rejects it, nothing to resolve)",
                 "git push --delete origin", "allow", cwd=plr)
@@ -1875,13 +1878,40 @@ def main():
                 "env git push --delete origin main", "ask", cwd=plr)
         pexpect("(pl-x3) an unparseable ':main' delete asks via the fallback",
                 'git push origin :main "unbalanced', "ask", cwd=plr)
-        # Disclosed residuals, witnessed so the residue cannot drift from reality: a benign parsed git
-        # segment suppresses the wrapped-catch (best-effort, not chased), and --dry-run with a force
-        # spelling over-denies (the safe direction).
-        pexpect("(pl-r1) DISCLOSED residual: a benign git segment before a wrapped force-push allows",
+        # Disclosed residuals, witnessed so the residue cannot drift from reality: ANY benign parsed
+        # git segment - earlier OR later - suppresses the wrapped-catch (best-effort, not chased),
+        # and --dry-run with a force spelling over-denies (the safe direction).
+        pexpect("(pl-r1) DISCLOSED residual: a benign git segment BEFORE a wrapped force-push allows",
                 "git status && env git push --force origin main", "allow", cwd=plr)
+        pexpect("(pl-r1b) DISCLOSED residual: a benign git segment AFTER a wrapped force-push also "
+                "suppresses the wrapped-catch and allows",
+                "env git push --force origin main && git status", "allow", cwd=plr)
         pexpect("(pl-r2) DISCLOSED over-deny: --dry-run --force to main still denies",
                 "git push --dry-run --force origin main", "deny", cwd=plr)
+
+        # === EN-5 PR-A round-4: matching/prune sweeps, the widened -d fallback, wrapped delete and
+        # commit coverage, and the disclosed over-denies and lexical boundary, witnessed ===
+        pexpect("(pl-y1) the matching refspec ':' asks (a sweep of every branch on both ends)",
+                "git push origin :", "ask", cwd=plr)
+        pexpect("(pl-y2) the forced matching refspec '+:' asks",
+                "git push origin +:", "ask", cwd=plr)
+        pexpect("(pl-y3) --prune with a wildcard refspec asks (deletes absent remote branches, "
+                "no force flag)",
+                "git push --prune origin 'refs/heads/*:refs/heads/*'", "ask", cwd=plr)
+        pexpect("(pl-y4) a wrapped clustered '-dv' delete asks via the widened fallback",
+                "env git push -dv origin main", "ask", cwd=plr)
+        pexpect("(pl-y5) a wrapped git commit asks via the fallback",
+                "sudo git commit -m 'fix'", "ask", cwd=plr)
+        pexpect("(pl-z1) DISCLOSED over-deny: '--force --no-force' still denies (negation not "
+                "modelled)", "git push --force --no-force origin main", "deny", cwd=plr)
+        pexpect("(pl-z2) DISCLOSED over-deny: '--delete --no-delete' still denies",
+                "git push --delete --no-delete origin main", "deny", cwd=plr)
+        pexpect("(pl-z3) DISCLOSED over-deny: --force-if-includes alone (a documented no-op) denies",
+                "git push --force-if-includes origin main", "deny", cwd=plr)
+        pexpect("(pl-z4) DISCLOSED over-deny: --dry-run with a -d delete still denies",
+                "git push --dry-run -d origin main", "deny", cwd=plr)
+        pexpect("(pl-z5) DISCLOSED boundary: a shell-expanded destination is judged as the literal "
+                "token, allows", 'git push --force origin "$BRANCH"', "allow", cwd=plr)
 
         # A deny in a later segment wins over an earlier ask; discard verbs are out of this scope.
         pexpect("(pl-l1) a later force-push deny wins over an earlier commit ask",
@@ -1929,25 +1959,36 @@ def main():
           "command whose resolved subcommand is outside the recognized set (checkout-index, read-tree "
           "--reset) ASKS rather than winning the catch-all allow, while recognized safe forms and the "
           "unflagged git worktree remove are unchanged (F-97). The protected-line guard (EN-5 "
-          "PR-A round-3, prtbrn/artbr1) is proven: a force-push (every -f/--force/"
+          "PR-A round-4, prtbrn/artbr1) is proven: a force-push (every -f/--force/"
           "--force-with-lease/--force-if-includes spelling, a conservative long prefix, and a "
           "'+'-prefixed refspec) OR a protected DELETION (--delete, a clustered -d, an "
           "empty-source ':<dst>' refspec) whose refspec-position DESTINATION names a protected "
-          "branch (main/master, bare or refs/heads/-qualified) DENIES, while a force or delete "
-          "to a feature branch, a plain non-force push, and a push whose REMOTE merely carries a "
-          "protected name ALLOW; flag detection is value-aware ('-o --force' and '--push-option "
-          "--force' are option VALUES, not force; the separated --recurse-submodules value is "
-          "consumed, so the refspec-less force behind it still probes and denies); a refspec-less "
+          "branch (main/master, bare or refs/heads/-qualified) DENIES, with a banner naming the "
+          "actual act (force-push vs branch deletion), while a force or delete to a feature "
+          "branch, a plain non-force push, and a push whose REMOTE merely carries a protected "
+          "name ALLOW; flag detection is value-aware ('-o --force' and '--push-option --force' "
+          "are option VALUES, not force; the separated --recurse-submodules value is consumed, "
+          "so the refspec-less force behind it still probes and denies); a refspec-less "
           "force-push and a forced or deleted HEAD/@ resolve HEAD by a scrubbed read-only probe "
-          "(deny on a protected HEAD, fail-to-ASK when unresolvable); a --mirror or forced "
-          "--all/--branches sweep and a wildcard force or delete destination ASK; a direct git "
-          "commit while HEAD is protected (or unprovable) ASKS; the fallback (a shell parse error "
-          "OR a command-word wrapper hiding git) ASKS an apparent git force-push (incl a +refspec "
-          "even quote-anchored, --for, --mirror/--all), branch deletion (--delete/-d, "
-          "':<protected>'), or commit, never a hard deny and never a silent allow; and the two "
-          "disclosed residuals are witnessed AS disclosed (a benign git segment ahead of a "
-          "wrapped force-push suppresses the wrapped catch and ALLOWS, best-effort and not "
-          "chased; --dry-run --force over-DENIES, the safe direction)")
+          "(deny on a protected HEAD, fail-to-ASK when unresolvable; the deleted-HEAD deny is a "
+          "harmless safe-direction over-deny, git itself rejecting a HEAD delete as a "
+          "nonexistent ref); a --mirror or forced --all/--branches sweep, a wildcard force or "
+          "delete destination, the matching refspec ':' and its forced '+:' form, and --prune "
+          "with a wildcard or matching refspec (which deletes absent remote branches with NO "
+          "force flag) ASK; a direct git commit while HEAD is protected (or unprovable) ASKS - "
+          "only the literal commit subcommand, merge/cherry-pick/revert being out of the "
+          "accidental-case scope by design; the fallback (a shell parse error OR a command-word "
+          "wrapper hiding git) ASKS an apparent git FORCE-PUSH (incl a +refspec even "
+          "quote-anchored, --for, --mirror/--all), an apparent branch DELETION (--de..., a 'd' "
+          "anywhere in a short cluster so a wrapped -dv is caught, ':<protected>'), AND an "
+          "apparent git COMMIT - each witnessed under a wrapper as well as under a parse error - "
+          "never a hard deny and never a silent allow; and the disclosed residuals are witnessed "
+          "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
+          "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
+          "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
+          "inherent lexical boundary; and the safe-direction over-DENIES hold: --force "
+          "--no-force, --delete --no-delete, --force-if-includes alone, and --dry-run with a "
+          "force or delete spelling all DENY)")
     return 0
 
 

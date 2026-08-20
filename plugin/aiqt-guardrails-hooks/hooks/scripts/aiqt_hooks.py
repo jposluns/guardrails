@@ -2308,8 +2308,10 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 # QUOTE character as well as start/whitespace, so a quoted '+main:main' under a wrapper is caught
 # (F-112 round-3) - all accepted over-asks on this path. _RAW_PUSH_DELETE_RE spots a branch-deletion
 # spelling (round-3: a delete rewrites the protected line with no force flag and no '+'): a '--de...'
-# long flag ('--de' is git-unambiguous for --delete; '--dry-run' shares no such prefix) or a '-d'
-# cluster, both name-independent like the force spellings (the true target may be unreadable or
+# long flag ('--de' is git-unambiguous for --delete; '--dry-run' shares no such prefix) or a 'd'
+# carried ANYWHERE in a '-' short cluster, mirroring the force '-[A-Za-z]*f' shape (round-4: the old
+# cluster-END '-[A-Za-z]*d\b' let a wrapped 'git push -dv origin main' slip while the parsed path
+# denies it), both name-independent like the force spellings (the true target may be unreadable or
 # shell-expanded); or an empty-source ':<protected>' refspec, judged by its visible name and built
 # from _PROTECTED (single source, no drift), so an ordinary colon token (a URL, a src:dst refspec)
 # does not ask. _RAW_PROTECTED_RE is built from _PROTECTED and folds case: a raw over-match only
@@ -2317,7 +2319,7 @@ _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests bod
 _RAW_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
 _RAW_PUSH_FORCE_RE = re.compile(r"(?i)--for[a-z-]*|--mirror\b|--all\b|--branches\b|(?:^|\s)-[A-Za-z]*f|(?:^|[\s'\"])\+\S")
 _RAW_PUSH_DELETE_RE = re.compile(
-    r"(?i)--de[a-z-]*|(?:^|\s)-[A-Za-z]*d\b|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
+    r"(?i)--de[a-z-]*|(?:^|\s)-[A-Za-z]*d[A-Za-z]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
@@ -2357,19 +2359,21 @@ def _is_protected_ref(name):
 
 def _push_parse(args):
     """Parse the token list AFTER a 'git push' subcommand (the args of _git_sub_and_args). Returns
-    (force, delete, mirror, sweep_all, operands): force is any force spelling (-f/--force, every
+    (force, delete, mirror, sweep_all, prune, operands): force is any force spelling (-f/--force, every
     --force-with-lease spelling - a lease-guarded force still rewrites the remote ref - and
     --force-if-includes, with --mirror implying force as git does); delete is the branch-deletion mode
     (--delete or a clustered -d; the empty-source ':<dst>' delete refspec is judged per-operand by the
     caller); mirror and sweep_all are the ref-sweeping modes (--mirror; --all/--branches pushes EVERY
-    branch, protected included, so forced it clobbers the protected one without naming it); operands is
-    the remote/refspec token list in command order. The option region is split from the operand region
-    at the first '--'/'--end-of-options' boundary via the shipped _split_pre_post, so an operand that
-    merely looks like an option ('git push origin -- --force') is never read as one; post tokens extend
-    operands AFTER the loop, preserving command order. Flag detection is VALUE-AWARE (F-112 round-3):
-    force/delete/mirror/sweep are recognized INSIDE the token loop, only on a token that is NOT the
-    value of a preceding value-taking option, so '-o --force' and '--push-option --force' read as the
-    option VALUE they are, never as a force flag. Each candidate long option is still matched by
+    branch, protected included, so forced it clobbers the protected one without naming it); prune is
+    --prune (round-4: it DELETES every remote branch absent locally, with NO force flag - witnessed
+    deleting a remote master through a wildcard refspec - and the caller judges it against the refspec
+    shape); operands is the remote/refspec token list in command order. The option region is split from
+    the operand region at the first '--'/'--end-of-options' boundary via the shipped _split_pre_post, so
+    an operand that merely looks like an option ('git push origin -- --force') is never read as one; post
+    tokens extend operands AFTER the loop, preserving command order. Flag detection is VALUE-AWARE (F-112
+    round-3): force/delete/mirror/sweep/prune are recognized INSIDE the token loop, only on a token that
+    is NOT the value of a preceding value-taking option, so '-o --force' and '--push-option --force' read
+    as the option VALUE they are, never as a force flag. Each candidate long option is still matched by
     CONSERVATIVE LONG PREFIX (the shipped _has_long_prefix, applied one token at a time), plus the
     short '-f'/'-d' cluster scan, so an abbreviated '--for' or '--d' - even one git itself would reject
     as ambiguous - routes to ASK/DENY, never a silent allow. A value-taking option in its SEPARATED
@@ -2377,11 +2381,13 @@ def _push_parse(args):
     never scanned as a flag or an operand; the attached '--opt=value'/'-o<value>' shape carries its
     value in the same token and needs no skip. --force-with-lease and --signed take an OPTIONAL value
     git accepts only ATTACHED (gitcli(7) stuck form), and --force-if-includes takes no value at all, so
-    none of the three ever consumes a following token and none is in the skip sets. --dry-run is not
-    modelled: a dry run carrying a force or delete spelling is judged like the real thing, a disclosed
-    safe-direction over-deny."""
+    none of the three ever consumes a following token and none is in the skip sets. Negation and no-op
+    flags are NOT modelled (round-4, disclosed): '--no-force'/'--no-delete' cancel nothing here,
+    '--force-if-includes' alone (a documented no-op without --force-with-lease) still reads as force,
+    and --dry-run is judged like the real thing - all safe-direction over-denies; re-issue without the
+    contrived flag combination."""
     pre, post, _had_sep = _split_pre_post(args)
-    force = delete = mirror = sweep_all = False
+    force = delete = mirror = sweep_all = prune = False
     skip_value = False  # the previous token was a separated value-taking option: skip its value
     operands = []       # remote + refspecs in command order; the loop appends, then post extends
     for tok in pre:
@@ -2400,6 +2406,8 @@ def _push_parse(args):
                 force = True
             elif _has_long_prefix([tok], "delete"):  # '--d'/'--de'/... err toward delete; '--dry-run'
                 delete = True                        # shares no prefix with 'delete', so it never matches
+            elif _has_long_prefix([tok], "prune"):   # --prune deletes remote refs absent locally; the
+                prune = True                         # caller judges it against the refspec shape
             continue  # other long options carry no judged meaning
         if tok.startswith("-") and len(tok) > 1:
             body = tok[1:]
@@ -2415,44 +2423,65 @@ def _push_parse(args):
             continue
         operands.append(tok)  # a bare operand: the remote or a refspec
     operands += post  # after '--' every token is a refspec (push has no pathspec position)
-    return force or mirror, delete, mirror, sweep_all, operands
+    return force or mirror, delete, mirror, sweep_all, prune, operands
 
 def _push_protected(tokens, args, cwd):
-    """Classify one git push segment against the protected set: ('deny', detail), ('ask', detail), or
-    None (the push provably misses the protected branches, or is neither forced nor a deletion). The
-    refspec-NAMED paths are judged purely lexically and are redirect-INDEPENDENT (a 'git -C <dir> push
-    --force origin main' still denies: the protected NAME is what is guarded, wherever the remote
-    lives). Operand ROLES follow the grammar git itself uses ('git push <repository> <refspec>...'):
-    the FIRST bare operand is the repository and is never judged as a destination (a remote literally
-    named 'main' is not a protected refspec - F-112 round-3), and only the later, refspec-position
-    operands are judged, by their DESTINATION. The exemption is safe against a skip-set omission: git
-    itself reads the first operand as the repository, and an unskipped option value can only SHIFT
-    operands right (a spurious extra first operand), keeping every real refspec in judged positions -
-    the over-inclusive direction, never a hidden refspec. A protected DELETION denies like a force
-    (F-112 round-3): '--delete'/'-d' with a protected refspec-position operand, the empty-source
-    ':<dst>' refspec form, or a deleted HEAD/@ resolved via the probe - a delete carries no force flag
-    and no '+', yet it removes the protected ref as surely as a force rewrites it. Only the
-    refspec-less force-push and a forced or deleted HEAD/@ consult the HEAD probe, and only when the
-    repository view is provable (no non-cosmetic ambient GIT_* var, no command-local redirect, a
-    usable session cwd); otherwise it ASKS, never a silent allow of an apparent force or deletion."""
-    force, delete, mirror, sweep_all, operands = _push_parse(args)
+    """Classify one git push segment against the protected set: ('deny', detail, act_noun), where
+    act_noun names the denied act for the banner ('force-push' or 'branch deletion'); ('ask', detail,
+    None); or None (the push provably misses the protected branches, or is neither forced nor a
+    deletion nor a sweep). The refspec-NAMED paths are judged purely lexically and are
+    redirect-INDEPENDENT (a 'git -C <dir> push --force origin main' still denies: the protected NAME
+    is what is guarded, wherever the remote lives). Operand ROLES follow the grammar git itself uses
+    ('git push <repository> <refspec>...'): the FIRST bare operand is the repository and is never
+    judged as a destination (a remote literally named 'main' is not a protected refspec - F-112
+    round-3), and only the later, refspec-position operands are judged, by their DESTINATION. The
+    exemption is safe against a skip-set omission: git itself reads the first operand as the
+    repository, and an unskipped option value can only SHIFT operands right (a spurious extra first
+    operand), keeping every real refspec in judged positions - the over-inclusive direction, never a
+    hidden refspec. A protected DELETION denies like a force (F-112 round-3): '--delete'/'-d' with a
+    protected refspec-position operand, or the empty-source ':<dst>' refspec form. A SWEEP this guard
+    cannot prove misses the protected names ASKS (round-4 completes the set): a wildcard force or
+    delete destination over the branch namespace, --mirror, a forced --all/--branches, the MATCHING
+    refspec ':' (every branch existing on both ends; '+:' is its forced form), which is empty on BOTH
+    sides so the per-operand loop has no destination to judge (round-3 skipped it - a silent allow),
+    and --prune with a wildcard or matching refspec, which DELETES every remote branch absent locally
+    with NO force flag (witnessed deleting a remote master). Only the refspec-less force-push and a
+    forced or deleted HEAD/@ consult the HEAD probe, and only when the repository view is provable
+    (no non-cosmetic ambient GIT_* var, no command-local redirect, a usable session cwd); otherwise
+    it ASKS, never a silent allow of an apparent force or deletion. Git resolves a pushed or FORCED
+    HEAD/@ to the current branch; a DELETED HEAD or ':@' git itself REJECTS as a nonexistent or
+    invalid remote ref, so the probe-backed deny on the delete side is a harmless safe-direction
+    over-deny kept for uniformity (round-4 rewording: round-3 wrongly claimed git resolves a deleted
+    HEAD to the current branch)."""
+    force, delete, mirror, sweep_all, prune, operands = _push_parse(args)
     refspecs = operands[1:]  # operands[0] is the repository (git's own grammar): never a destination
     # Collect every FORCED and every DELETED destination over the REFSPEC-position operands. Forced:
     # the dst of a '+'-prefixed refspec always, and of every refspec when a force flag is present; the
     # src:dst DESTINATION is what the push overwrites ('feature:main' forces main; 'main:feature'
     # forces only feature). Deleted: every refspec dst when --delete/-d is present, and the dst of an
-    # empty-source ':<dst>' refspec (git's push-to-delete form) whatever the flags.
+    # empty-source ':<dst>' refspec (git's push-to-delete form) whatever the flags. The MATCHING
+    # refspec ':' (and its forced '+:' form) is empty on BOTH sides: it pushes every branch existing
+    # on both ends, protected included, yet names no destination for this loop to judge, so it is
+    # flagged as a sweep rather than skipped (round-4; the skip was a silent allow). A wildcard
+    # destination over the branch namespace is also tracked UNFORCED, for the --prune judgment.
     forced_dsts = []
     deleted_dsts = []
+    matching = False     # a ':' or '+:' matching refspec was seen ('+:' is its forced form)
+    wild_branch = False  # some refspec dst wildcards the branch namespace, forced or not
     for op in refspecs:
         plus = op.startswith("+")
         spec = op[1:] if plus else op
+        if spec == ":":
+            matching = True  # the matching refspec: a sweep whether bare (':') or forced ('+:')
+            continue
         if ":" in spec:
             src, dst = spec.split(":", 1)
         else:
             src, dst = None, spec  # a bare refspec pushes to a like-named destination
         if not dst:
-            continue  # 'main:' and a bare ':' name no destination to judge
+            continue  # 'main:' names no destination to judge
+        if "*" in dst and (dst.startswith(("refs/heads/", "heads/")) or not dst.startswith("refs/")):
+            wild_branch = True
         if plus or force:
             forced_dsts.append(dst)
         if delete or src == "":
@@ -2460,30 +2489,43 @@ def _push_protected(tokens, args, cwd):
     for dst in forced_dsts:
         if _is_protected_ref(dst):
             return ("deny", "force-pushes the protected branch {!r} (a force flag or a '+'-prefixed "
-                            "refspec targeting it)".format(dst))
+                            "refspec targeting it)".format(dst), "force-push")
     for dst in deleted_dsts:
         if _is_protected_ref(dst):
             return ("deny", "deletes the protected branch {!r} (a --delete/-d flag or an empty-source "
                             "':<dst>' refspec targeting it); a deletion rewrites the protected line as "
-                            "surely as a force-push".format(dst))
-    # A forced or deleted sweep the guard cannot prove misses the protected names ASKS rather than
-    # denies: a wildcard destination over the branch namespace (or an unqualified one), a --mirror
-    # push (which force-updates EVERY ref), or a forced --all/--branches.
+                            "surely as a force-push".format(dst), "branch deletion")
+    # A sweep the guard cannot prove misses the protected names ASKS rather than denies: a wildcard
+    # force or delete destination over the branch namespace (or an unqualified one), the matching
+    # refspec, --prune over a wildcard refspec (a deletion needing no force flag), a --mirror push
+    # (which force-updates EVERY ref), or a forced --all/--branches.
     for dst in forced_dsts + deleted_dsts:
         if "*" in dst and (dst.startswith(("refs/heads/", "heads/")) or not dst.startswith("refs/")):
             return ("ask", "force-pushes or deletes the wildcard refspec {!r}, a sweep this guard "
-                           "cannot prove misses the protected branches".format(dst))
+                           "cannot prove misses the protected branches".format(dst), None)
+    if matching:
+        return ("ask", "pushes the matching refspec ':' ('+:' is its forced form), a matching-refspec "
+                       "push of every branch existing on both ends, which this guard cannot prove "
+                       "misses the protected branches", None)
+    if prune and wild_branch:
+        return ("ask", "carries --prune with a wildcard refspec, which DELETES every remote branch "
+                       "absent locally with no force flag, a sweep this guard cannot prove misses "
+                       "the protected branches", None)
     if mirror:
         return ("ask", "is a --mirror push, which force-updates every remote ref including any "
-                       "protected branch")
+                       "protected branch", None)
     if force and sweep_all:
-        return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch")
-    # HEAD and @ are explicit refspecs that RESOLVE to the current branch (git's documented behaviour:
-    # 'git push <remote> HEAD' pushes the current branch to a like-named remote branch), so a forced
-    # OR deleted HEAD/@ on a protected branch rewrites the protected line even though the literal
-    # token is not a protected NAME. Treat it like a refspec-less force: resolve via the HEAD probe
-    # (F-112 B1; round-3 extends it to '--delete <remote> HEAD'). Computed BEFORE the out-of-scope
-    # gate so a '+HEAD' or a deleted HEAD with no global -f is not returned as out-of-scope.
+        return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch",
+                None)
+    # HEAD and @ are explicit refspecs. On a push or FORCE git resolves them to the current branch
+    # (documented: 'git push <remote> HEAD' pushes the current branch to a like-named remote branch),
+    # so a forced HEAD/@ on a protected branch rewrites the protected line even though the literal
+    # token is not a protected NAME: treat it like a refspec-less force and resolve via the HEAD
+    # probe (F-112 B1). A DELETED HEAD/@ git itself REJECTS ('--delete <remote> HEAD' names a
+    # nonexistent remote ref, ':@' an invalid one), so the probe-backed deny on the delete side is a
+    # harmless safe-direction over-deny kept for uniformity (round-4 rewording; round-3 wrongly
+    # claimed git resolves a deleted HEAD). Computed BEFORE the out-of-scope gate so a '+HEAD' or a
+    # deleted HEAD with no global -f is not returned as out-of-scope.
     head_proxy = any(dst in ("HEAD", "@") for dst in forced_dsts + deleted_dsts)
     if not force and not delete and not head_proxy:
         return None  # no force, no delete, no forced/deleted HEAD/@: a plain (or plus-forced
@@ -2498,21 +2540,22 @@ def _push_protected(tokens, args, cwd):
     # HEAD/@). Resolve it via the read-only HEAD probe, only when the repository view is provable; the
     # push.default=matching configured-state residual (which could force every matching branch) is
     # disclosed, not modelled.
-    act = "deletes" if delete and not force else "force-pushes"
+    act, act_noun = (("deletes", "branch deletion") if delete and not force
+                     else ("force-pushes", "force-push"))
     if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
         return ("ask", "{} the current branch (a refspec-less push, or a HEAD/@ refspec) under a "
                        "non-cosmetic ambient GIT_* variable or a command-local redirect, so this guard "
-                       "cannot resolve which branch it would target".format(act))
+                       "cannot resolve which branch it would target".format(act), None)
     base = cwd if isinstance(cwd, str) and cwd else None
     head = _head_branch(base) if base is not None else None
     if head is None:
         return ("ask", "{} the current branch (a refspec-less push, or a HEAD/@ refspec) but HEAD "
                        "could not be resolved, so this guard cannot prove the target is off the "
-                       "protected line".format(act))
+                       "protected line".format(act), None)
     if _is_protected_ref(head):
         return ("deny", "{} the current branch (a refspec-less push, or a HEAD/@ refspec) while HEAD "
-                        "is the protected branch {!r}, so the target is the protected line "
-                        "itself".format(act, head))
+                        "is the protected branch {!r}, so the apparent target is the protected line "
+                        "itself".format(act, head), act_noun)
     return None  # HEAD provably a non-protected branch: the forced or deleted target is off the protected line
 
 def _commit_on_protected(tokens, cwd):
@@ -2579,20 +2622,26 @@ def protected_line(data):
     (--force, --force-with-lease bare or =value, --force-if-includes, a bare or clustered -f, a
     conservative long prefix) or a '+'-prefixed refspec whose DESTINATION names a protected branch -
     or that DELETES one: a --delete/-d flag with a protected refspec-position operand, or the
-    empty-source ':<dst>' delete refspec (F-112 round-3). Destinations are judged only in REFSPEC
-    position (the first bare operand is the repository, so a remote literally named 'main' is not a
-    false deny), and flag detection is value-aware (a force or delete spelling in an option-value
-    position, '-o --force', is not a flag). A refspec-less force-push and a forced or deleted HEAD/@
-    resolve their target through the read-only HEAD probe (deny on a protected HEAD, fail-to-ASK when
-    unprovable). A forced sweep (a wildcard force or delete refspec over the branch namespace,
-    --mirror, a forced --all/--branches) ASKS. A force-push or delete to a non-protected ref and a
-    plain non-force push ALLOW. ASK a git commit segment while HEAD is a protected branch (probed
-    read-only under the ambient-GIT_* scrub; fail-to-ASK when HEAD cannot be resolved): the protected
-    line changes only through a reviewed merge, and the direct commit is the accidental case this
-    client guard catches; server-side branch protection is the real gate. A DENY found in any segment
-    wins over a pending ASK (a confirmed rewrite outranks the recoverable prompt, mirroring the
-    git_discard posture). No escape hatch prefix: the ASK outcomes are themselves the human gate, and
-    the deny mirrors commit_identity's absoluteness."""
+    empty-source ':<dst>' delete refspec (F-112 round-3); the deny banner names the actual act,
+    force-push vs branch deletion (round-4). Destinations are judged only in REFSPEC position (the
+    first bare operand is the repository, so a remote literally named 'main' is not a false deny),
+    and flag detection is value-aware (a force or delete spelling in an option-value position,
+    '-o --force', is not a flag). A refspec-less force-push and a forced or deleted HEAD/@ resolve
+    their target through the read-only HEAD probe (deny on a protected HEAD, fail-to-ASK when
+    unprovable; the deleted-HEAD deny is a harmless over-deny, git itself rejecting a HEAD delete as
+    a nonexistent ref). A sweep this guard cannot prove misses the protected names ASKS: a wildcard
+    force or delete refspec over the branch namespace, --mirror, a forced --all/--branches, the
+    matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec (round-4: prune
+    deletes absent remote branches with no force flag). A force-push or delete to a non-protected
+    ref and a plain non-force push ALLOW. ASK a git commit segment while HEAD is a protected branch
+    (probed read-only under the ambient-GIT_* scrub; fail-to-ASK when HEAD cannot be resolved): the
+    protected line changes only through a reviewed merge, and the direct commit is the accidental
+    case this client guard catches - only the literal 'commit' subcommand (a merge, cherry-pick, or
+    revert that lands commits on the protected line is out of this accidental-case scope by design);
+    server-side branch protection is the real gate. A DENY found in any segment wins over a pending
+    ASK (a confirmed rewrite outranks the recoverable prompt, mirroring the git_discard posture). No
+    escape hatch prefix: the ASK outcomes are themselves the human gate, and the deny mirrors
+    commit_identity's absoluteness."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -2625,13 +2674,14 @@ def protected_line(data):
             outcome = _push_protected(tokens, args, cwd)
             if outcome is None:
                 continue
-            decision, detail = outcome
+            decision, detail, act_noun = outcome
             if decision == "deny":
                 return _deny(
                     "AIQT rule prtbrn (protected-branch-integrity): this git push {}. The protected "
                     "line is never rewritten or overwritten directly; it changes only through a "
                     "reviewed, verified merge (artbr1). {}".format(detail, _PROTECTED_ALTS),
-                    "AIQT guardrail: denied a force-push targeting a protected branch (rule prtbrn).")
+                    "AIQT guardrail: denied a {} targeting a protected branch (rule prtbrn)."
+                    .format(act_noun))
             if pending_ask is None:
                 pending_ask = _ask(
                     "AIQT rule prtbrn (protected-branch-integrity): this git push {}. Confirm it "
@@ -2656,10 +2706,11 @@ def protected_line(data):
     # command-word wrapper (env/sudo/command/xargs/timeout/nohup/sh -c) or obfuscation hides the
     # git call. Mirror git_discard's raw posture - an apparent wrapped force-push, deletion, or
     # commit ASKS rather than passing silently; a FRAGMENTED command word or verb is the disclosed
-    # residual (F-112 1C), and so is a compound whose EARLIER segment already parses with git as its
-    # command word ('git status && sudo git push -f ...'): the benign git segment satisfies saw_git
-    # and suppresses this catch - a round-3 disclosure, adversarial and best-effort like
-    # git_discard's fragmented-verb residual, not chased.
+    # residual (F-112 1C), and so is a compound in which ANY OTHER segment - earlier OR later -
+    # parses with git as its command word ('git status && sudo git push -f ...', and equally
+    # 'env git push -f ... && git status'): the benign git segment satisfies saw_git and suppresses
+    # this catch - a round-3 disclosure reworded in round-4 (the suppression was never only-earlier),
+    # adversarial and best-effort like git_discard's fragmented-verb residual, not chased.
     if not saw_git and _RAW_GIT_RE.search(command):
         return _protected_line_fallback(command)
     return _allow()
