@@ -6,4 +6,14 @@ alwaysApply: true
 
 A check whose logic is correct is still worthless when its input cannot answer the question asked of it. Ask
 of every consequential guard not whether the value is correct but whether the source can, even in principle,
-answer what is being asked; when it cannot, change the input rather than harden the check.
+answer what is being asked; when it cannot, change the input rather than harden the check. A value the guard
+is handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,
+threshold, or configuration, is itself such an input: validate a passed premise against the real source or
+authoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather
+than running the guard
+mis-sized or disabled. When the source cannot answer, the guard treats that as a distinct cannot-evaluate
+case rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third
+state, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and
+a consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a
+verdict the guard never reached. Inputs absent from the author's own examples are a particular silent-failure
+risk.
