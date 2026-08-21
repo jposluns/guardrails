@@ -4,7 +4,7 @@
 # .github/workflows/quality.yml). A script whose --self-test and --check both appear in the roster gets
 # ONE entry, keyed on the script. `id` is a stable, unique control identifier (a kebab-case slug);
 # `script` is the repo-relative tools/<name>.py the gate runs, unique across entries and present on disk;
-# `rules` names the corpus-id(s) the gate enforces, and every element must resolve to a real corpus-id in
+# `rules` names the corpus-id(s) the gate cites, and every element must resolve to a real corpus-id in
 # .aiqt/core/rules/ (validated by tools/gen_enforceability.py against gen_rules.load_corpus, the same
 # no-orphan pattern the hooks manifest uses). tools/gen_enforceability.py renders this manifest, the hooks
 # manifest, and the corpus into the machine-readable enforceability ledger .aiqt/enforceability.json and
@@ -13,25 +13,34 @@
 #
 # HONEST SCOPE. This manifest names the repo's DETERMINISTIC gate scripts and their UNDENIABLE rule
 # linkage only. A gate's rule linkage is claimed here (a non-empty `rules`) exclusively where it is
-# undeniable: the byte-identity drift gates enforce the generated-artefact-source-only rule (gensrc), and
-# the secret scanner enforces keep-secrets-out (secsec). Every gate whose linkage to a single corpus rule
+# undeniable: the byte-identity drift gates cite gensrc, and the secret scanner cites secsec. Every gate
+# whose linkage to a single corpus rule
 # is merely arguable ships with an explicit empty `rules`, an open question rather than a coverage
 # statement. The gitleaks binary step is a shell/binary step, not a python3 tools/*.py invocation, so it
 # lives outside the roster protocol this manifest and its ledger reason over and carries NO entry in v1:
-# the coverage check cannot verify a claim about a step it cannot see. Its keep-secrets-out linkage,
+# the roster-reconciliation check cannot verify a claim about a step it cannot see. Its keep-secrets-out linkage,
 # though arguable, is left out for that reason. A known tension, disclosed: this manifest ships inside
 # .aiqt/core (the portability surface) while describing THIS repo's CI gates, not any adopter's install.
 #
 # Fields per [[gate]] (all seven REQUIRED on every entry):
 #   id        a stable, unique control identifier (kebab-case slug)
 #   script    the repo-relative tools/<name>.py the gate runs (unique; must exist on disk)
-#   rules     the corpus-id(s) this gate enforces (a list; MAY be empty but must be PRESENT; every
+#   rules     the corpus-id(s) this gate cites (a list; MAY be empty but must be PRESENT; every
 #             element must resolve to a real corpus-id in .aiqt/core/rules/)
 #   platform  "ci" (the Quality workflow plus its local mirror; a neutrality dimension, not an abstraction)
 #   default   "block" (a failing gate exits nonzero; no roster step carries continue-on-error)
 #   class     the EN-5 enforceability letter, restricted to a (deterministic gate) or c (partial) here;
 #             b is the hook axis and never appears in a gates manifest, d is never authored on a control
 #   residue   REQUIRED, never empty: what this gate does NOT catch, so the ledger stays honest
+#
+# AUTHOR-GRADED LIMIT. The class letter and the residue are maintainer-authored assertions; this
+# generator validates only their PRESENCE and SHAPE (vocabulary and non-emptiness), never their TRUTH - a
+# wrong class or a stale residue survives the gate and is caught only by review.
+#
+# ROSTER-SCAN LIMIT. The inverse roster reconciliation is a line-based lexical scan of trusted, controlled
+# roster files; a `python3 tools/*.py` token embedded in a quoted argument, a heredoc, or an eval string
+# may be miscounted. The authoritative single-source of the roster (generating both runners from this
+# manifest) is deferred.
 
 # --- drift-gate family: byte-identity gates over generated artefacts, rules = ["gensrc"], class "a" ----
 

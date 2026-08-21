@@ -9,13 +9,7 @@ generated and drift-gated, so the two can never fork. It reuses the sibling gene
 loaders (gen_rules.load_corpus, gen_hooks.load_manifest) so the hooks-manifest validation is never
 forked, and _gen_common.reconcile for the drift/write step.
 
-HONEST BOUNDARY. This ledger records LINKAGE, not coverage. A status says which shipped mechanical
-controls cite a rule, and each control carries a residue naming what it does not catch; the residue is
-the honest half of every claim. No status means a rule is enforced: gate-linked means at least one
-deterministic repository gate cites the rule, hook-linked means at least one runtime hook cites it and
-no gate does, prose-only means no shipped control cites it and the rule binds through the governing
-prose alone. Nothing in this file is a completeness or coverage measure, and deriving a score from it
-misreads it.
+HONEST BOUNDARY. See the BOUNDARY constant below, emitted verbatim into the ledger.
 
 STATUS DERIVATION. A non-empty `gates` array makes a rule gate-linked; else a non-empty `hooks` array
 makes it hook-linked; else prose-only. The label names the most deterministic linkage point only; the
@@ -39,6 +33,10 @@ surface; the a-versus-c line is TOTALITY over the examined class, not determinis
     judgement rule appears as status prose-only with no control rows, and this tool fails closed
     (exit 2) on any control carrying d.
 
+AUTHOR-GRADED LIMIT. The class letter and the residue are maintainer-authored assertions; this generator
+validates only their PRESENCE and SHAPE (vocabulary and non-emptiness), never their TRUTH - a wrong class
+or a stale residue survives the gate and is caught only by review.
+
   gen_enforceability.py             regenerate .aiqt/enforceability.json
   gen_enforceability.py --check     fail (exit 1) on drift; exit 2 on a bad input or a read/write error
   gen_enforceability.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
@@ -47,6 +45,12 @@ Exit convention: 0 clean; 1 EXCLUSIVELY ledger byte-drift; 2 for everything else
 absent corpus, hooks manifest, gates manifest, or roster file; a malformed manifest; an orphan
 corpus-id; a class-d control; a roster mismatch in either direction (or an asymmetry between the two
 roster files); a missing gate script file; or a write error (reconcile's own SystemExit(2)).
+
+PROTOCOL LIMITS. The inverse roster check sees only `python3 tools/*.py` steps; the gitleaks binary step
+and any non-`python3 tools/*.py` gate are invisible to it and carry no manifest entry by design. That
+check is a line-based lexical scan of trusted, controlled roster files; a `python3 tools/*.py` token
+embedded in a quoted argument, a heredoc, or an eval string may be miscounted. The authoritative
+single-source of the roster (generating both runners from this manifest) is deferred.
 """
 import json
 import re
@@ -76,14 +80,18 @@ CLASSES = {"a", "c"}   # b is the hook axis; d is never authored on a control (s
 SCRIPT_RE = re.compile(r"^tools/[A-Za-z0-9_]+\.py$")
 # Matches the python3 tools/*.py roster steps with the same shape gen_gensrc discovery uses, so the
 # inverse roster check sees exactly those steps: the gitleaks binary step is a shell step, invisible to
-# this regex, and carries no manifest entry by design.
+# this regex, and carries no manifest entry by design. roster_scripts strips an inline comment before
+# matching, so a trailing-comment token is not miscounted; this remains a line-based lexical scan of
+# trusted, controlled roster files, so a `python3 tools/*.py` token embedded in a quoted argument, a
+# heredoc, or an eval string may still be miscounted. The authoritative single-source of the roster
+# (generating both runners from this manifest) is deferred.
 ROSTER_RE = re.compile(r"python3 (tools/[A-Za-z0-9_]+\.py)")
 
 # The BOUNDARY string carried at the ledger top level: the honest half of the artefact, in the file.
 BOUNDARY = (
     "This ledger records LINKAGE, not coverage. A status says which shipped mechanical controls cite a "
     "rule, and each control carries a residue naming what it does not catch; the residue is the honest "
-    "half of every claim. No status means a rule is enforced: gate-linked means at least one "
+    "half of every claim. None of the statuses means a rule is enforced: gate-linked means at least one "
     "deterministic repository gate cites the rule, hook-linked means at least one runtime hook cites it "
     "and no gate does, prose-only means no shipped control cites it and the rule binds through the "
     "governing prose alone. Nothing in this file is a completeness or coverage measure, and deriving a "
@@ -171,7 +179,7 @@ def load_gates_manifest(path, root):
         if _req_str(gate, "class", where) not in CLASSES:
             raise ValueError("{}: class must be one of {} (b is the hook axis; d is never authored on a "
                              "control)".format(where, "/".join(sorted(CLASSES))))
-        _req_str(gate, "residue", where)  # required, never empty: the gate's honest coverage gap
+        _req_str(gate, "residue", where)  # required, never empty: the gate's honest residue gap
     return gates
 
 
@@ -186,9 +194,14 @@ def roster_scripts(root):
         text = (root / rel).read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
         scripts = set()
         for line in text.splitlines():
-            if line.lstrip().startswith("#"):
+            # Strip an inline comment before matching (a conservative lexical cut, documented at
+            # ROSTER_RE): the first " #" ends a trailing comment, so `true # python3 tools/ghost.py` no
+            # longer miscounts ghost.py; a leading "#" then drops a whole comment line. This does not
+            # parse the shell, so a token inside a quoted argument or a heredoc may still be miscounted.
+            code = line.split(" #", 1)[0]
+            if code.lstrip().startswith("#"):
                 continue
-            scripts.update(ROSTER_RE.findall(line))
+            scripts.update(ROSTER_RE.findall(code))
         if not scripts:
             raise ValueError("roster {} names no python3 tools/*.py gate step (malformed)".format(rel))
         per_file[rel] = scripts
@@ -221,8 +234,8 @@ def cross_checks(gates, hooks, corpus_ids, roster_union, per_file):
             raise ValueError("hooks manifest: hook '{}' is class d; d is never authored on a control"
                              .format(hook["id"]))
     # Inverse roster, bidirectional AND symmetric across the two roster files. A roster script with no
-    # manifest entry is an uncatalogued gate; a manifest entry whose script runs in no roster is an
-    # enforcement claim with no gate; a script in one roster file but not the other is an asymmetry
+    # manifest entry is an uncatalogued gate; a manifest entry whose script runs in no roster is a
+    # linkage claim with no roster step; a script in one roster file but not the other is an asymmetry
     # between the local mirror and CI. All fail closed.
     manifest_scripts = {gate["script"] for gate in gates}
     files = sorted(per_file)
@@ -239,7 +252,7 @@ def cross_checks(gates, hooks, corpus_ids, roster_union, per_file):
                          .format(", ".join(uncatalogued)))
     no_gate = sorted(manifest_scripts - roster_union)
     if no_gate:
-        raise ValueError("gates-manifest script(s) run in no roster (an enforcement claim with no gate): "
+        raise ValueError("gates-manifest script(s) run in no roster (a linkage claim with no roster step): "
                          "{}".format(", ".join(no_gate)))
 
 
@@ -352,7 +365,19 @@ def main():
 #   (j) an unreadable gates manifest fails closed (exit 2); skipped when the runner reads a chmod-0 file,
 #   (k) a duplicate gate id, and separately a duplicate script, each fail closed (exit 2),
 #   (l) a gates manifest absent entirely fails closed (exit 2): absence is never an empty roster,
-#   (m) a roster file absent, and separately one yielding zero scripts, each fail closed (exit 2).
+#   (m) a roster file absent, and separately one yielding zero scripts, each fail closed (exit 2),
+#   (n) a hooks manifest citing an unknown corpus-id fails closed (exit 2): the hook no-orphan direction,
+#   (o) a gates manifest with an unknown top-level key, and separately an unknown [[gate]] entry key,
+#       each fail closed (exit 2): the load_gates_manifest shape validation,
+#   (p) a roster whose ONLY occurrence of a manifest script is inside an inline comment does not
+#       enumerate that script, so its manifest entry reads as a linkage claim with no roster step and
+#       fails closed (exit 2): proves the F-148 comment strip (the quoted-argument / heredoc residual
+#       stays a disclosed limit and is deliberately not asserted here).
+# These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
+# hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
+# read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
+# (gen_rules.load_corpus, gen_hooks.load_manifest) and covered by THEIR suites, so they are not
+# re-tested here.
 # A raised SystemExit anywhere in a run() call is caught by run_quiet and recorded as a FAILURE, so the
 # self-test can never itself exit early (green or otherwise) on an unexpected raise.
 
@@ -635,6 +660,49 @@ def self_test_main():
                                              encoding="utf-8")
         if run_quiet(mzero, check=True) != 2:
             failures.append("a roster file yielding zero scripts expected exit 2 (fail-closed)")
+
+        # (n) A hooks manifest citing an unknown corpus-id fails closed (exit 2): the hook no-orphan
+        #     direction, re-checked at the ledger boundary (case (c) is its gate twin).
+        nhk = _build(tmp / "hook-unknown-cid")
+        replace_in(nhk / HOOKS_MANIFEST_REL, 'rules = ["ruleaa"]', 'rules = ["nosuch9"]')
+        if run_quiet(nhk, check=True) != 2:
+            failures.append("an unknown corpus-id in the hooks manifest expected exit 2 (fail-closed)")
+
+        # (o) A gates manifest with an unknown top-level key, and separately an unknown [[gate]] entry
+        #     key, each fail closed (exit 2): the load_gates_manifest shape validation.
+        otop = _build(tmp / "gates-unknown-top-key")
+        gm = otop / GATES_MANIFEST_REL
+        gm.write_text("bogus = 1\n" + gm.read_text(encoding="utf-8"), encoding="utf-8")
+        if run_quiet(otop, check=True) != 2:
+            failures.append("an unknown top-level key in the gates manifest expected exit 2 (fail-closed)")
+        oent = _build(tmp / "gates-unknown-entry-key")
+        replace_in(oent / GATES_MANIFEST_REL,
+                   'class = "a"\nresidue = "A self-test drift gate."',
+                   'class = "a"\nbogus = 1\nresidue = "A self-test drift gate."')
+        if run_quiet(oent, check=True) != 2:
+            failures.append("an unknown [[gate]] entry key expected exit 2 (fail-closed)")
+
+        # (p) A roster whose ONLY occurrence of a manifest script is inside a TRAILING inline comment does
+        #     not enumerate that script (the F-148 strip), so its manifest entry reads as a linkage claim
+        #     with no roster step and fails closed (exit 2). Without the strip the commented token would
+        #     enumerate and the tree would read clean, so this case proves the tightened parser. Added to
+        #     BOTH roster files so the two stay symmetric and the no-roster (not the asymmetry) check
+        #     fires. The quoted-argument / heredoc residual stays a disclosed limit, not asserted here.
+        pinl = _build(tmp / "roster-inline-comment")
+        (pinl / "tools" / "g_inline.py").write_text("# self-test gate script\n", encoding="utf-8")
+        gm = pinl / GATES_MANIFEST_REL
+        gm.write_text(gm.read_text(encoding="utf-8") +
+                      '\n[[gate]]\nid = "gate-inline"\nscript = "tools/g_inline.py"\nrules = []\n'
+                      'platform = "ci"\ndefault = "block"\nclass = "a"\n'
+                      'residue = "A self-test inline-comment gate."\n', encoding="utf-8")
+        for rel in ROSTER_FILES:
+            p = pinl / rel
+            p.write_text(p.read_text(encoding="utf-8") +
+                         "\ntrue  # a commented step: python3 tools/g_inline.py --check\n",
+                         encoding="utf-8")
+        if run_quiet(pinl, check=True) != 2:
+            failures.append("a manifest script named only in a roster inline comment must not enumerate "
+                            "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -654,7 +722,9 @@ def self_test_main():
           "empty gate residue, a gate class outside {a, c}, a hook at class d, a roster script with no "
           "manifest entry, a manifest gate running in no roster, a missing gate script, an unreadable "
           "gates manifest, a duplicate gate id, a duplicate gate script, an absent gates manifest, an "
-          "absent roster file, and a roster with zero scripts all fail closed (exit 2)" + note)
+          "absent roster file, a roster with zero scripts, an unknown corpus-id in the hooks manifest, an "
+          "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
+          "named only inside a roster inline comment all fail closed (exit 2)" + note)
     return 0
 
 

@@ -1,5 +1,5 @@
 {
-  "boundary": "This ledger records LINKAGE, not coverage. A status says which shipped mechanical controls cite a rule, and each control carries a residue naming what it does not catch; the residue is the honest half of every claim. No status means a rule is enforced: gate-linked means at least one deterministic repository gate cites the rule, hook-linked means at least one runtime hook cites it and no gate does, prose-only means no shipped control cites it and the rule binds through the governing prose alone. Nothing in this file is a completeness or coverage measure, and deriving a score from it misreads it.",
+  "boundary": "This ledger records LINKAGE, not coverage. A status says which shipped mechanical controls cite a rule, and each control carries a residue naming what it does not catch; the residue is the honest half of every claim. None of the statuses means a rule is enforced: gate-linked means at least one deterministic repository gate cites the rule, hook-linked means at least one runtime hook cites it and no gate does, prose-only means no shipped control cites it and the rule binds through the governing prose alone. Nothing in this file is a completeness or coverage measure, and deriving a score from it misreads it.",
   "rules": [
     {
       "corpus-id": "abspth",
