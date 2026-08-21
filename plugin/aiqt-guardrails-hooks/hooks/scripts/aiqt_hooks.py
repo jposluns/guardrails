@@ -3286,7 +3286,11 @@ def _load_gensrc_registry(root):
     validation only guarantees THIS repo's registry; an adopter-authored or hand-tampered registry the
     guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
     tolerated: the version field pins the schema, and strictness on additions would break a
-    forward-compatibly authored registry."""
+    forward-compatibly authored registry. This loader is BEST-EFFORT against the ACCIDENTAL case, not a
+    hardened TOCTOU check: it rejects a STATIONARY non-regular registry and fails a delete race safe to
+    BAD, but a registry concurrently SWAPPED to a different file type in the lstat-to-open window is a
+    disclosed residual (see the comment below and the control residue), a sibling of the hard-link,
+    case-insensitive-filesystem, and NFC/NFD aliases."""
     path = os.path.join(root, _GENSRC_REGISTRY_REL)
     # A generated-artefact registry must be a trusted REGULAR file. Anything that is NOT a regular file (a
     # symlink dangling or redirecting, a FIFO, a directory, a socket, a device) is BAD: a symlink could

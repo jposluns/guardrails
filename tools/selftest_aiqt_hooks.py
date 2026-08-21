@@ -53,7 +53,7 @@ It also covers the generated-artefact edit guard (gensrc_guard, gensrc): a Write
 file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json (read at
 decision time) ASKS the steering ask, while a source edit, an unregistered path, and a kind=block entry
 ALLOW, Bash is out of scope, and component-boundary matching means gen-extra/ and GEN.md.bak do not
-match gen/ and GEN.md. Every fail branch fails SAFE to ASK (an unreadable, malformed, or
+match gen/ and GEN.md. Each fault branch is designed to fail SAFE to ASK (an unreadable, malformed, or
 unknown-version registry, a malformed entry, an unresolvable repo root, a non-contained target, and an
 unreadable payload field), an absent registry is the inert ALLOW, and only a missing tool_name denies.
 Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
@@ -2739,7 +2739,7 @@ def main():
           "(read at decision time) ASKS the explicit steering ask (never leaning on the never-rendered "
           "manifest default), while a source edit, an unregistered path, and a kind=block target ALLOW, "
           "component-boundary matching keeps gen-extra/ and GEN.md.bak from matching gen/ and GEN.md, and "
-          "Bash is out of scope; every fail branch fails SAFE to ASK (a malformed, unknown-version, "
+          "Bash is out of scope; each fault branch is designed to fail SAFE to ASK (a malformed, unknown-version, "
           "malformed-entry, non-regular-file, byte-oversize, non-UTF-8, delete-raced, or unreadable "
           "registry - the non-regular-file rejection (an lstat/S_ISREG probe before the open that reads a "
           "STATIONARY non-regular registry as bad and does not block on a FIFO) is proven deterministically "
