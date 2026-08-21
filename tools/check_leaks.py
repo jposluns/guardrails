@@ -93,6 +93,23 @@ def load_denylist(root):
     return hashes, maxn, bad
 
 
+def scan_text(text, hashes, maxn, honor_leak_allow=True):
+    """Shared blob scanner: returns (line_or_None, label) findings (STRUCTURAL carries a 1-based line; a
+    hash match carries None). honor_leak_allow (file gate True, message gate False) exempts a `leak-allow`
+    line from STRUCTURAL. Keeps STRUCTURAL and the hash denylist applied in exactly one place."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if honor_leak_allow and "leak-allow" in line:
+            continue
+        found += [(number, label) for pattern, label in STRUCTURAL if pattern.search(line)]
+    if hashes:
+        for gram in ngram_forms(text, maxn):
+            if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
+                found.append((None, "internal codename (hash match)"))
+                break
+    return found
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     try:
@@ -110,17 +127,9 @@ def main():
             except UnicodeDecodeError:
                 continue  # binary / non-utf8: a text scanner skips it (gitleaks scans binaries)
             rel = path.relative_to(root)
-            for number, line in enumerate(text.splitlines(), 1):
-                if "leak-allow" in line:
-                    continue
-                for pattern, label in STRUCTURAL:
-                    if pattern.search(line):
-                        findings.append("{}:{}: {}".format(rel, number, label))
-            if hashes:
-                for gram in ngram_forms(text, maxn):
-                    if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
-                        findings.append("{}: internal codename (hash match)".format(rel))
-                        break
+            for number, label in scan_text(text, hashes, maxn, honor_leak_allow=True):
+                findings.append("{}:{}: {}".format(rel, number, label) if number is not None
+                                else "{}: {}".format(rel, label))
     except (OSError, UnicodeDecodeError) as exc:
         # An unreadable/corrupt denylist OR an unreadable directory/file is a read failure on a required
         # input, not a clean skip: fail closed (exit 2) so a leak gate never reports clean without having

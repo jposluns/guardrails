@@ -202,6 +202,15 @@ class = "a"
 residue = "A denylist scan for specific known private strings across the repository. Its linkage to any single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
 
 [[gate]]
+id = "msg-leaks"
+script = "tools/check_msg_leaks.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A denylist scan for known private strings and host specifics in the commit-message and PR-metadata channels the file leak gate does not reach: the commit messages in a change's range, the PR title and body, and the head ref. On a public repository it is post-publication DETECTION, not prevention, and cannot un-expose already-pushed text; it cannot guarantee the final squash message equals what it scanned, since a title or body edited after the check, or a merge message edited at merge time, is caught only by the post-merge run; the hash layer is evadable by deliberate obfuscation; and file contents, reviews and comments, and author identity are out of scope. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "portability"
 script = "tools/check_portability.py"
 rules = []
