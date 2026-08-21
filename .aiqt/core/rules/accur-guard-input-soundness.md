@@ -14,4 +14,13 @@ map-nist-airmf-broad: [MEASURE 2.13]
 
 A check whose logic is correct is still worthless when its input cannot answer the question asked of it. Ask
 of every consequential guard not whether the value is correct but whether the source can, even in principle,
-answer what is being asked; when it cannot, change the input rather than harden the check.
+answer what is being asked; when it cannot, change the input rather than harden the check. A value the guard
+is handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,
+threshold, or configuration, is itself such an input: measure a passed premise against the real source, and
+treat a malformed, contradictory, or out-of-range control as a failure rather than running the guard
+mis-sized or disabled. When the source cannot answer, the guard reports a distinct cannot-evaluate outcome,
+never the value it uses for a definite no; a two-valued predicate cannot honestly carry this third state, so
+read every failure-returning guard clause as either "no" or "cannot evaluate", and route a cannot-evaluate to
+the safe outcome for that guard, a coverage check reporting failure and an action trigger withholding the
+action, never to a silent clean pass or to a verdict the guard never reached. A guard fails most silently on
+exactly the inputs its author never had examples of.

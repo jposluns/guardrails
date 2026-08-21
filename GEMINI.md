@@ -26,17 +26,38 @@ supposition as a verified fact.
 A claim about an external fact is corroborated against a source before it is relied on or presented as
 settled. The weaker the source, the more corroboration a load-bearing claim needs.
 
+## Disclose a guard's residual coverage
+
+A best-effort guard that cannot cover its whole input space does not present itself as complete. Where the
+domain is unbounded or evadable, an open command grammar, a matcher that option-insertion or wrapping can
+slip past, or a denylist over an effectively infinite space, the guard states the residual it does not catch
+rather than implying it catches everything. A coverage boundary named where the guard is defined is
+reviewable; a boundary left implicit reads as a guarantee the guard cannot honour. The disclosure is part of
+the guard, not a footnote discovered after it fails.
+
 ## Evidence-grounded completion
 
 Never claim completion without evidence. Before "done", "fixed", "green", or "verified": re-read the files
 in scope, quote the lines that support the claim, search for contradictions, and state every remaining
-unverified item. A stated intention is a claim; do not end a turn asserting work is proceeding unless it is.
+unverified item. A success, health, or backup marker is evidence only when it rests on the expected payload
+being actually present and well-formed; the marker's existence, freshness, or age is not itself that
+evidence, so check the content it stands for rather than the marker. A stated intention is a claim; do not
+end a turn asserting work is proceeding unless it is.
 
 ## A guard is only as good as its input
 
 A check whose logic is correct is still worthless when its input cannot answer the question asked of it. Ask
 of every consequential guard not whether the value is correct but whether the source can, even in principle,
-answer what is being asked; when it cannot, change the input rather than harden the check.
+answer what is being asked; when it cannot, change the input rather than harden the check. A value the guard
+is handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,
+threshold, or configuration, is itself such an input: measure a passed premise against the real source, and
+treat a malformed, contradictory, or out-of-range control as a failure rather than running the guard
+mis-sized or disabled. When the source cannot answer, the guard reports a distinct cannot-evaluate outcome,
+never the value it uses for a definite no; a two-valued predicate cannot honestly carry this third state, so
+read every failure-returning guard clause as either "no" or "cannot evaluate", and route a cannot-evaluate to
+the safe outcome for that guard, a coverage check reporting failure and an action trigger withholding the
+action, never to a silent clean pass or to a verdict the guard never reached. A guard fails most silently on
+exactly the inputs its author never had examples of.
 
 ## No fabrication
 
@@ -53,8 +74,11 @@ itself the observation; here the observation is the rendered output. A claim tha
 live, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and
 observed the expected result, not on a static check that the configuration or registration looks correct.
 Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the
-configuration it rests on and the observation that would confirm it. A confident assertion of unobserved
-behaviour is not made.
+configuration it rests on and the observation that would confirm it. The same holds for a status a document,
+test, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the
+system, or generate it from an observation, so it cannot silently drift; hand-written prose asserting such a
+status, free to diverge from what the system now does, does not belong in the record as settled fact. A
+confident assertion of unobserved behaviour is not made.
 
 ## Read before characterizing
 
@@ -109,7 +133,10 @@ A gate, validator, scan, or traversal that cannot access, read, or list an input
 reports that as a failure, never as an absent, empty, or clean input. An operation that silently yields
 nothing on a permission or I/O error, a glob or a listing that returns empty, or an existence check that
 returns false, is made to surface the error, so an unreadable input can never read as nothing to check
-and pass.
+and pass. A resource the work declares or is expected to cover is held to the same standard: when it is
+absent or unusable, that is a failure, not a silent skip. The presence-test-then-run-or-succeed shape, which
+lets a missing declared input read as nothing to do, is exactly this failure; absence reads as a clean
+result only for an input the work never declared it would cover.
 
 ## Commit identity
 

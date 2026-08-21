@@ -218,6 +218,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "dscres",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/accur-disclose-guard-residuals.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "evgcmp",
       "family": "aiqt",
       "gates": [],
