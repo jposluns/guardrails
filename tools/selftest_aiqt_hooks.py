@@ -2424,12 +2424,16 @@ def main():
             (gs_big / ".aiqt" / "gensrc.json").write_text(
                 json.dumps({"version": 1, "generated": [], "pad": _big_pad}, ensure_ascii=False),
                 encoding="utf-8")
+            gs_fifo = _gs_init("gsfifo")               # registry PATH is a FIFO (F-169: lstat/S_ISREG rejects)
+            (gs_fifo / ".aiqt").mkdir(parents=True, exist_ok=True)
+            gs_race = _gs_init("gsrace")               # NO registry file; the delete-race is injected (F-169)
+            (gs_race / ".aiqt").mkdir(parents=True, exist_ok=True)
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the gensrc fixtures: {}".format(exc), file=sys.stderr)
             return 2
         gr, gr2, gr3, gng = str(gs_repo), str(gs_repo2), str(gs_repo3), str(gs_nogit)
         grsp, grlink, grdir, grbig = str(gs_repo_sp), str(gs_link), str(gs_dir), str(gs_big)
-        grnl = str(gs_repo_nl)
+        grnl, grfifo, grrace = str(gs_repo_nl), str(gs_fifo), str(gs_race)
 
         # ASK: a file match, a tree-member match, and a MultiEdit file match. gs-a proves the EXPLICIT
         # _ask (the manifest default is never rendered, so an ask here cannot be leaning on it).
@@ -2551,14 +2555,16 @@ def main():
         # only the control-char rejection catches it (guards F-160's independent value). Was a silent ALLOW.
         gexpect("(gs-y2) a non-NUL control char in the payload file_path ASKS (realpath would not reject)",
                 "ask", tool="Write", file_path=os.path.join(gr, "GEN\x1f.md"), cwd=gr)
-        # ASK: a repo dir name with a TRAILING SPACE: the toplevel is preserved (rstrip('\\n'), not
-        # strip()), so the registry IS found and the registered target ASKS. Was ALLOW (strip() dropped
-        # the space -> wrong root -> registry not found -> absent). (F-162)
+        # ASK: a repo dir name with a TRAILING SPACE: the toplevel is preserved because only git's single
+        # trailing-newline terminator is stripped (result.stdout[:-1] when it endswith "\\n", stripping
+        # exactly that one \\n), not strip(), so the registry IS found and the registered target ASKS. Was
+        # ALLOW (strip() dropped the space -> wrong root -> registry not found -> absent). (F-162)
         gexpect("(gs-z) a trailing-space repo dir keeps its toplevel; the registered target ASKS", "ask",
                 tool="Write", file_path=os.path.join(grsp, "GEN.md"), cwd=grsp)
         # ASK: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). lstat does NOT
-        # follow the link, so S_ISREG is False on the link itself -> bad (closing the islink-then-open
-        # TOCTOU). Was an inert ALLOW (open -> FileNotFoundError -> absent). (F-164)
+        # follow the link, so S_ISREG is False on the link itself -> bad; this rejects a STATIONARY symlink
+        # (best-effort against the accidental case, not a TOCTOU-closure claim). Was an inert ALLOW
+        # (open -> FileNotFoundError -> absent). (F-164)
         gexpect("(gs-aa) a dangling-symlink registry ASKS (a symlink is never a regular file)", "ask",
                 tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
         # ASK: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
@@ -2606,6 +2612,43 @@ def main():
         gexpect("(gs-ae) a newline-terminal repo dir keeps its toplevel; the registered target ASKS", "ask",
                 tool="MultiEdit", file_path="GEN.md",
                 edits=[{"old_string": "a", "new_string": "b"}], cwd=grnl)
+
+        # ASK: a NON-UTF-8 registry (invalid bytes) is BAD, never absent: the explicit
+        # raw_bytes.decode("utf-8") raises UnicodeDecodeError, which is caught -> bad. Falsifiable:
+        # removing the decode try/except turns the invalid bytes into an uncaught crash the dispatcher
+        # hard-DENIES, not a clean ASK. (F-169 deterministic decode-path proof)
+        gs_reg3.write_bytes(b"\xff\xfe\x00\x01not utf-8\xc3\x28")
+        gexpect("(gs-af) a non-UTF-8 registry ASKS (invalid bytes -> decode fault -> bad)", "ask",
+                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        # ASK: a FIFO registry is BAD (lstat/S_ISREG sees S_ISFIFO before the open), and the probe does NOT
+        # block: os.lstat does not open the FIFO, so no writer is needed and there is no hang. Falsifiable:
+        # dropping the lstat/S_ISREG probe would make open(path, "rb") block on the FIFO until the hook
+        # timeout instead of returning ASK. The fifo is unlinked in the finally below. (F-169)
+        _fifo_path = os.path.join(grfifo, ".aiqt", "gensrc.json")
+        os.mkfifo(_fifo_path)
+        try:
+            gexpect("(gs-ag) a FIFO registry ASKS (lstat/S_ISREG sees S_ISFIFO, no open, no hang)", "ask",
+                    tool="Write", file_path=os.path.join(grfifo, "GEN.md"), cwd=grfifo)
+        finally:
+            os.remove(_fifo_path)
+        # ASK: a DELETE RACE in the lstat->open window. The registry file does not exist, so open() would
+        # raise FileNotFoundError; monkeypatch os.lstat to report a REGULAR file for that path so the
+        # S_ISREG probe passes and the flow reaches the open, which then raises FNF -> bad (fail-safe ASK),
+        # NOT absent. Falsifiable: the pre-fix open FileNotFoundError returned ("absent", None) -> the inert
+        # ALLOW; the fix maps it to bad -> ASK. os.lstat is restored in the finally. (F-169)
+        _real_lstat = os.lstat
+        _regular_st = _real_lstat(os.path.join(gr, ".aiqt", "gensrc.json"))  # a genuine regular-file stat
+        _race_rel = os.path.join("gsrace", ".aiqt", "gensrc.json")
+        def _racing_lstat(p, *a, **k):
+            if "gsrace" in str(p) and str(p).endswith(_race_rel):
+                return _regular_st           # claim a regular file for the absent registry path
+            return _real_lstat(p, *a, **k)
+        try:
+            os.lstat = _racing_lstat
+            gexpect("(gs-ah) a delete-race (regular at lstat, gone at open) ASKS, not absent-ALLOW", "ask",
+                    tool="Write", file_path=os.path.join(grrace, "GEN.md"), cwd=grrace)
+        finally:
+            os.lstat = _real_lstat
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2697,10 +2740,14 @@ def main():
           "manifest default), while a source edit, an unregistered path, and a kind=block target ALLOW, "
           "component-boundary matching keeps gen-extra/ and GEN.md.bak from matching gen/ and GEN.md, and "
           "Bash is out of scope; every fail branch fails SAFE to ASK (a malformed, unknown-version, "
-          "malformed-entry, non-regular-file, byte-oversize, non-UTF-8, or unreadable registry - the "
-          "non-regular-file rejection (an lstat/S_ISREG probe before the open, closing the islink-then-open "
-          "TOCTOU and a FIFO-blocked open) proven deterministically via a dangling symlink and a "
-          "directory-at-path, no permission-skip; a control character "
+          "malformed-entry, non-regular-file, byte-oversize, non-UTF-8, delete-raced, or unreadable "
+          "registry - the non-regular-file rejection (an lstat/S_ISREG probe before the open that reads a "
+          "STATIONARY non-regular registry as bad and does not block on a FIFO) is proven deterministically "
+          "via a dangling symlink, a directory-at-path, and a FIFO (no permission-skip); the non-UTF-8 "
+          "decode path via invalid bytes; and the delete race (regular at lstat, gone at open -> bad, not "
+          "the absent ALLOW) via an injected os.lstat - a registry concurrently SWAPPED to another type in "
+          "the lstat-to-open window stays a DISCLOSED best-effort residual, not a proven-closed case; a "
+          "control character "
           "in an entry target or in the payload file_path; a JSON-bool or string version; an unresolvable "
           "non-git root, and - proven via an INJECTED os.path fault, both being POSIX-unreachable "
           "defence-in-depth - an unresolvable target (the guarded-realpath branch) and a containment fault "

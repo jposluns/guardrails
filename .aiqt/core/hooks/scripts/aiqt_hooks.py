@@ -3291,11 +3291,18 @@ def _load_gensrc_registry(root):
     # A generated-artefact registry must be a trusted REGULAR file. Anything that is NOT a regular file (a
     # symlink dangling or redirecting, a FIFO, a directory, a socket, a device) is BAD: a symlink could
     # make a foreign or nonexistent target read as this repo's registry, and a FIFO at the path would block
-    # the open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink (so
-    # a symlink is rejected as non-regular, closing the islink-then-open TOCTOU where the path could flip
-    # between the check and the open) and does NOT block on a FIFO. A FileNotFoundError from lstat is
-    # genuine absence (a non-symlink ENOENT) -> inert absent; any other lstat OSError is BAD; a path that
-    # resolves to something other than a regular file is BAD.
+    # the open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink and
+    # does NOT block on a FIFO, so a STATIONARY non-regular registry (a symlink, FIFO, directory, ...) is
+    # rejected as non-regular. A FileNotFoundError from lstat is genuine absence (a non-symlink ENOENT) ->
+    # inert absent (the ONLY inert-absent path); any other lstat OSError is BAD; a path that resolves to
+    # something other than a regular file is BAD; and an open-time disappearance (a delete race in the
+    # lstat->open window) fails safe to BAD, handled at the open below. This read is BEST-EFFORT against
+    # the ACCIDENTAL case, not a hardened check: a registry concurrently SWAPPED to a different type in the
+    # lstat->open window (the lstat sees a regular file, the open then binds a substituted symlink/FIFO) is
+    # a DISCLOSED residual OUTSIDE the accidental-case scope - a sibling of the hard-link, case-insensitive
+    # -filesystem, and NFC/NFD normalization residuals. It requires a concurrent writer inside the repo,
+    # who could equally just author the registry, so O_NOFOLLOW/fstat is deliberately NOT added; the
+    # disclosure is the honest resolution.
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -3312,7 +3319,10 @@ def _load_gensrc_registry(root):
         with open(path, "rb") as handle:
             raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
     except FileNotFoundError:
-        return ("absent", None)
+        # The lstat above saw a regular file, but it is gone at open: a concurrent DELETE race in the
+        # lstat->open window. This is BAD (fail-safe ASK), never absent: absence is ONLY the lstat-probe
+        # FileNotFoundError, so a benign delete race can never read as the inert no-coverage ALLOW.
+        return ("bad", "the registry disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
         return ("bad", "the registry could not be read ({})".format(exc))
     if len(raw_bytes) > _GENSRC_MAX_BYTES:
