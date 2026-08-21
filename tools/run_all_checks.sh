@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.." || exit 2
 # file, so a committed non-portable file (even inside a __pycache__ dir) still fails the portability gate
 # here exactly as it does in CI. This cannot mask a committed violation (gate-discipline).
 export PYTHONDONTWRITEBYTECODE=1
-git clean -fdX -- '*__pycache__*'
+git clean -fdX -- ':(glob)**/__pycache__/**'
 
 failed=0
 notrun=0

@@ -51,7 +51,9 @@ missing tool_name or an absent target field fails closed. Every secret fixture i
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import contextlib
 import datetime
+import io
 import json
 import os
 import shutil
@@ -2153,7 +2155,13 @@ def main():
 
         def sexpect(label, tool, tool_input, want, secret=None):
             data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
-            code, stdout_obj, _stderr = ssl(data)
+            # Capture any DIRECT stdout/stderr the handler might emit, not only its returned tuple, so the
+            # redaction guard covers the FULL emitted surface (a future handler that printed a value instead
+            # of returning it would still be caught). The real secsec path emits only via its return
+            # (no print/log/write), so these buffers are empty today.
+            _cap_out, _cap_err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(_cap_out), contextlib.redirect_stderr(_cap_err):
+                code, stdout_obj, _stderr = ssl(data)
             if code == 0 and stdout_obj is None:
                 got = "allow"
             elif code == 0 and isinstance(stdout_obj, dict):
@@ -2162,14 +2170,15 @@ def main():
                 got = "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
-            # redaction guard (F-131/F-134): a DENY names the pattern label but NEVER echoes the secret
-            # value on ANY emitted surface. The banner rides in stdout_obj["systemMessage"] and the reason
-            # in permissionDecisionReason, so serialize the WHOLE stdout_obj (not just the reason) and cover
-            # stderr too, so no output field can leak the value while this test still passes.
-            if want == "deny" and secret is not None:
-                emitted = (json.dumps(stdout_obj) if stdout_obj is not None else "") + (_stderr or "")
+            # redaction guard (F-131/F-134/F-136): a secsec decision names the pattern label but NEVER
+            # echoes the secret value on ANY emitted surface - permissionDecisionReason, the systemMessage
+            # banner (both in stdout_obj), stderr, or a direct stdout/stderr print. Runs for ANY case that
+            # plants a secret (not only DENYs), so an allow path that echoed a value is caught too.
+            if secret is not None:
+                emitted = ((json.dumps(stdout_obj) if stdout_obj is not None else "") + (_stderr or "")
+                           + _cap_out.getvalue() + _cap_err.getvalue())
                 if secret in emitted:
-                    failures.append("{}: DENY output must not echo the secret value (redaction, F-131/F-134)".format(label))
+                    failures.append("{}: output must not echo the secret value (redaction, F-131/F-134/F-136)".format(label))
 
         # Synthetic secret shapes (NOT real), assembled from PARTS at runtime so the shape never appears
         # as a contiguous literal in THIS source file: it uses the single-sourced check_secrets.py
@@ -2239,7 +2248,7 @@ def main():
                 "Bash", {"command": "ls -la /tmp"}, "allow")
         # Fail-closed: a missing tool_name denies; an in-scope tool whose target field is absent denies.
         sexpect("(ss-n) missing tool_name denies (fail-closed)",
-                None, {"content": _fake_ghp}, "deny")
+                None, {"content": _fake_ghp}, "deny", secret=_fake_ghp)
         sexpect("(ss-o) Write with no readable content denies (fail-closed)",
                 "Write", {"file_path": "/tmp/x"}, "deny")
 
@@ -2298,7 +2307,7 @@ def main():
                 "Write", "not-a-dict", "deny")
         # Out of scope (F-128b disclosure): NotebookEdit is not in the matcher set, so it ALLOWS.
         sexpect("(ss-aa) NotebookEdit (out of scope) allows",
-                "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow")
+                "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow", secret=_fake_ghp)
 
         # secsec round-4 (F-129): the pattern drift gate must REJECT a target carrying more than one
         # generated BEGIN..END region. text.find inspects only the FIRST region, so a SECOND region (e.g.
