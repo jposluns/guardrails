@@ -28,6 +28,7 @@ and both are drift-gated in CI.
 **Accuracy**
 - [Claims about the work rest on observation](.claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md)
 - [Corroborate external claims](.claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md)
+- [Disclose a guard's residual coverage](.claude/rules/aiqt/10-ACCUR-disclose-guard-residuals.md)
 - [Evidence-grounded completion](.claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md)
 - [A guard is only as good as its input](.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md)
 - [No fabrication](.claude/rules/aiqt/10-ACCUR-no-fabrication.md)
