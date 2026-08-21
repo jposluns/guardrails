@@ -22,11 +22,16 @@ as compromised and rotated, whatever any scanner said.
 
 DISCLOSED RESIDUE (F-127, 2026-08-21). To stop flagging a JavaScript-style environment lookup such as
 `token = process.env.OPENAI_KEY_V2` (a code reference, not a literal), an UNQUOTED credential value that
-is a pure dotted-identifier path AND carries an `.env.` accessor segment is treated as a reference, not a
-secret. Residual: a real secret is missed only if it is unquoted, a pure dotted identifier, and itself
-carries an `.env.` segment, or if ASSIGN captures an `.env.`-carrying dotted PREFIX of a longer token a
-non-value character truncated; both are narrow and unusual, and gitleaks scans them regardless. A long
-dotted config path with no `.env.` accessor is still flagged (a false positive in the safe direction).
+is a pure dotted-identifier path AND begins with a recognized env-access root (process.env.,
+import.meta.env., or a leading env.) is treated as a reference, not a secret. The root anchor is
+deliberate: a dotted value that merely contains an `env` segment elsewhere, such as
+`myorg.env.production.<value>`, is still scanned as a literal, so a secret is not excluded just for having
+an `env` segment. Residual: a value that genuinely begins with an env-access root and is a pure dotted
+identifier is treated as a reference even in the rare case it is a real secret shaped exactly like an env
+lookup; and, per the best-effort scope above, a secret a non-value character splits off after such a
+prefix (adversarial fragmentation) is not independently caught. This gate does not claim to catch either,
+and neither is guaranteed to be caught by gitleaks. A long dotted config path with no env-access root is
+still flagged (a false positive in the safe direction).
 """
 import re
 import sys
@@ -51,6 +56,7 @@ EXEMPT_PATHS = set()
 TEXT_SUFFIXES = {
     ".md", ".py", ".sh", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg",
     ".env", ".conf", ".tf", ".tfvars", ".ps1", ".rb", ".js", ".ts", ".go",
+    ".txt", ".properties", ".xml", ".config",
 }
 
 # Recognizable provider token shapes.
@@ -98,13 +104,14 @@ PLACEHOLDER = re.compile(
 )
 
 # A JavaScript-style environment lookup such as process.env.OPENAI_KEY_V2 or import.meta.env.VITE_KEY:
-# a pure dotted-identifier path (DOTTED_PATH) whose accessor is an `env` segment (_ENV_ACCESSOR). It is a
-# CODE REFERENCE to a variable, not a literal secret, so it is excluded from the unquoted credential
-# match (F-127). The `env` accessor is REQUIRED, not merely a dotted shape, so a dotted token that only
-# looks identifier-shaped - a HashiCorp Vault `hvs.<random>` token, a PASETO `v2.local.<payload>`, or
-# `prod.secret.auth.<value>` - stays caught.
+# a pure dotted-identifier path (DOTTED_PATH) that BEGINS with a recognized env-access root (_ENV_REF:
+# process.env., import.meta.env., or a leading env.). It is a CODE REFERENCE to a variable, not a literal
+# secret, so it is excluded from the unquoted credential match (F-127). The root anchor is required, not a
+# mere `env` segment anywhere, so a dotted token that only looks identifier-shaped - a HashiCorp Vault
+# `hvs.<random>`, a PASETO `v2.local.<payload>`, `prod.secret.auth.<value>`, or `myorg.env.prod.<value>`
+# (env NOT at the root) - stays caught.
 DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
-_ENV_ACCESSOR = re.compile(r"(?i)(?:^|\.)env\.")
+_ENV_REF = re.compile(r"(?i)\A(?:process\.env|import\.meta\.env|env)\.")
 
 
 def _assign_is_secret(match):
@@ -118,18 +125,20 @@ def _assign_is_secret(match):
     if match.group("qvalue") is None:  # unquoted
         if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
             return False
-        if DOTTED_PATH.fullmatch(value) and _ENV_ACCESSOR.search(value):
+        if DOTTED_PATH.fullmatch(value) and _ENV_REF.match(value):
             return False
     return not PLACEHOLDER.match(value)
 
 
 def _is_scan_candidate(path):
-    """A file is scanned when it is a dotenv file (name `.env` or starting `.env.`, such as `.env.local`
-    or `.env.production`, which hold real credentials), has a known text suffix, or has no suffix at all
-    (an extensionless PEM key like id_rsa). A binary with no known suffix is still skipped later on a
-    UnicodeDecodeError; only a KNOWN non-text suffix (.png, .pdf) is skipped up front."""
-    name = path.name
-    if name == ".env" or name.startswith(".env."):
+    """A file is scanned when it is a dotenv file (name `.env` or starting `.env.`, case-insensitive, such
+    as `.env.local` or `.env.production`, which hold real credentials), has a suffix in TEXT_SUFFIXES, or
+    has no suffix at all (an extensionless PEM key like id_rsa). A file whose suffix is NOT in
+    TEXT_SUFFIXES is skipped up front; a suffixless binary is read and skipped later on a
+    UnicodeDecodeError. TEXT_SUFFIXES is a curated allow-list, so a text format not on it is skipped here
+    and left to gitleaks; add it to TEXT_SUFFIXES to cover it."""
+    lowered = path.name.lower()
+    if lowered == ".env" or lowered.startswith(".env."):
         return True
     suffix = path.suffix
     return not suffix or suffix in TEXT_SUFFIXES
@@ -198,16 +207,18 @@ def _self_test() -> int:
     vault = "hvs." + "CvmS4c0DPTvHv5eJgXWMJg9r"          # HashiCorp Vault hvs.<random> shape (dotted, real)
     paseto = "v2." + "local." + "abcd1234efgh5678"       # PASETO-style dotted token
     prodsec = "prod.secret.auth." + "a1b2c3d4e5f6"        # dotted non-env provider secret
+    envmid = "myorg.env.production." + "secretkey12345"   # env NOT at the root: a real secret shape, CAUGHT
     longcfg = "application.services.oauth2.client.credentials.providerToken1"  # long dotted config, no env
     cases = [
         ("password = " + real, True),                        # unquoted real literal: caught
-        ("token = process.env.OPENAI_KEY_V2", False),         # F-127 env lookup: excluded
-        ("api_key = import.meta.env.VITE_API_KEY2", False),   # env lookup (Vite): excluded
-        ("secret = env.SECRET_VALUE2", False),                # leading env accessor: excluded
-        ("token = " + vault, True),                          # Vault token, dotted but no env: CAUGHT
-        ("api_key = " + paseto, True),                       # PASETO token, dotted but no env: CAUGHT
+        ("token = process.env.OPENAI_KEY_V2", False),         # F-127 env root: excluded
+        ("api_key = import.meta.env.VITE_API_KEY2", False),   # env root (Vite): excluded
+        ("secret = env.SECRET_VALUE2", False),                # leading env root: excluded
+        ("token = " + vault, True),                          # Vault token, dotted but no env root: CAUGHT
+        ("api_key = " + paseto, True),                       # PASETO token, dotted but no env root: CAUGHT
         ("api_key = " + prodsec, True),                      # dotted non-env secret: CAUGHT
-        ("secret = " + longcfg, True),                       # long dotted config, no env: CAUGHT (safe)
+        ("token = " + envmid, True),                         # env NOT at root (round-3): CAUGHT
+        ("secret = " + longcfg, True),                       # long dotted config, no env root: CAUGHT (safe)
         ('secret = "' + real + '"', True),                   # quoted real literal: caught
         ("password = process_env_KEY2", True),               # single identifier, not dotted: caught
         ('password = "xxxxxxxxxxxx"', False),                # quoted placeholder: excluded
@@ -217,10 +228,13 @@ def _self_test() -> int:
         if got != want:
             failures.append("ASSIGN {!r}: want {}, got {}".format(line, want, got))
 
-    # scan-candidate keys on the file NAME, so dotenv variants scan even when the last suffix is unknown;
-    # ("id_rsa", True) guards the extensionless fix; (".env.local", True) guards the dotenv-by-name fix.
+    # scan-candidate keys on the file NAME (case-insensitive dotenv), so dotenv variants scan even when the
+    # last suffix is unknown; ("id_rsa", True) guards the extensionless fix; (".env.local", True) and
+    # (".ENV.local", True) guard the dotenv-by-name (case-insensitive) fix; ("creds.txt", True) and
+    # ("service.properties", True) guard the added text suffixes.
     names = [("id_rsa", True), ("notes.md", True), (".env", True), (".env.local", True),
-             (".env.production", True), ("image.png", False), ("doc.pdf", False)]
+             (".ENV.local", True), ("creds.txt", True), ("service.properties", True),
+             ("image.png", False), ("doc.pdf", False)]
     for name, want in names:
         got = _is_scan_candidate(PurePath(name))
         if got != want:

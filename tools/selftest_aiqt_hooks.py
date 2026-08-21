@@ -2348,6 +2348,9 @@ def main():
             _asgn("api_key", "prod.secret.auth." + "a1b2c3d4e5f6"),
             _asgn("password", "process_env_KEY2"),
             _asgn("secret", '"' + "AbcDef123456ghiJ" + '"'),
+            _asgn("token", "myorg.env.production." + "secretkey12345"),   # env not at root: caught by both
+            _asgn("token", "process.env.OPENAI_KEY" + "+" + "Abcdef1234567890"),  # + breaks fullmatch: both
+            _asgn("token", '"' + "prod.env.auth.Abcdef1234567890" + '"'),  # quoted env-shaped: both
         ]
         for _pl in _parity_lines:
             _gate = _cs_line_hit(_pl)
