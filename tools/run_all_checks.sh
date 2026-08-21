@@ -2,7 +2,16 @@
 # Run every quality gate, in the same order CI runs them.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
+
+# Never let a gate leave Python bytecode: a stray __pycache__/*.pyc in the shippable surface trips the
+# portability gate as a non-portable file class, a spurious local FAIL a fresh CI checkout never sees.
+# Suppress bytecode for every gate below, so THIS runner never creates one. A gate runner reports the
+# tree, it does not mutate it: a stray cache left by another tool is a real dirty-tree signal the
+# portability gate should surface. If it does, delete the SPECIFIC __pycache__ path the gate names (a
+# scoped `rm -rf <that dir>`). Do NOT blanket `git clean` ignored paths, which would also delete
+# unrelated local files (a stray .venv, .idea, or node_modules); and this runner never auto-sweeps.
+export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
 notrun=0
