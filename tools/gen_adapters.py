@@ -48,6 +48,15 @@ ADAPTERS = (
     },
 )
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": "GEMINI.md", "kind": "file",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_adapters.py"},
+    {"target": ".github/copilot-instructions.md", "kind": "file",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_adapters.py"},
+)
+
 
 def _exists(path):
     """Fail-closed existence probe. Path.exists() swallows EACCES on Python 3.12 (returns False on an

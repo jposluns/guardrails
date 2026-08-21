@@ -38,6 +38,14 @@ BEGIN = ("# BEGIN generated secret patterns (source: tools/check_secrets.py; reg
          "tools/gen_secret_patterns.py)")
 END = "# END generated secret patterns"
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces. The target is a generated block inside the
+# hand-authored aiqt_hooks.py (the sentinelled secret-patterns region), so it is recorded as kind block.
+GENSRC_OUTPUTS = (
+    {"target": ".aiqt/core/hooks/scripts/aiqt_hooks.py", "kind": "block",
+     "sources": ("tools/check_secrets.py",), "regenerate": "python3 tools/gen_secret_patterns.py"},
+)
+
 
 def _load_check_secrets(root):
     """Import tools/check_secrets.py and return (prefix_sources, assign_source, placeholder_source):

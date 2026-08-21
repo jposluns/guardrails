@@ -49,6 +49,15 @@ SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 CID_RE = re.compile(r'^[a-z0-9]{6,}$')
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": ".claude/rules/aiqt/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
+    {"target": ".claude/rules/security/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
+)
+
 
 def _unquote(tok):
     """A single scalar STRING element: strip matching quotes, else the bare token. Fail-closed."""

@@ -15,6 +15,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": "CHANGELOG.md", "kind": "file",
+     "sources": ("changelog.toml",), "regenerate": "python3 tools/gen_changelog.py"},
+    {"target": "VERSION", "kind": "file",
+     "sources": ("changelog.toml",), "regenerate": "python3 tools/gen_changelog.py"},
+)
+
 
 def render_md(data):
     lines = ["# " + data["title"], "", data["note"], ""]
