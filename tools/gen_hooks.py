@@ -64,6 +64,17 @@ CID_RE = re.compile(r"^[a-z0-9]{6,}$")        # a corpus-id (matches gen_rules' 
 HANDLER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 TIMEOUT = 10  # seconds; every control is a lexical scan, far under this
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": "plugin/aiqt-guardrails-hooks/hooks/", "kind": "tree",
+     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json", "kind": "file",
+     "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
+     "regenerate": "python3 tools/gen_hooks.py"},
+)
+
 
 def _exists(path):
     """Fail-closed existence probe (gen_adapters idiom): Path.exists() swallows EACCES on an

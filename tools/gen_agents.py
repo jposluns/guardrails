@@ -17,6 +17,13 @@ from gen_rules import load_corpus  # noqa: E402
 AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3}
 CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": "AGENTS.md", "kind": "file",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_agents.py"},
+)
+
 
 def sort_key(fm):
     if fm["family"] == "aiqt":

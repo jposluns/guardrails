@@ -158,6 +158,11 @@ jobs:
       - name: Skill self-test
         run: python3 tools/gen_skill.py --self-test
 
+      - name: Gensrc registry self-test
+        run: python3 tools/gen_gensrc.py --self-test
+      - name: Gensrc registry drift
+        run: python3 tools/gen_gensrc.py --check
+
       - name: Rule placement
         run: python3 tools/check_rule_placement.py
 

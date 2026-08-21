@@ -40,6 +40,14 @@ GROUPS = [
 GROUP_ORDER = {key: i for i, (key, _label) in enumerate(GROUPS)}
 GROUP_LABEL = {key: label for key, label in GROUPS}
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces. The generated region is a block inside the
+# hand-authored CLAUDE.md (the RULES-INDEX markers), so the whole file is recorded as kind block.
+GENSRC_OUTPUTS = (
+    {"target": "CLAUDE.md", "kind": "block",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_claude.py"},
+)
+
 
 def _group_key(fm):
     """The index group a rule belongs to: apex, its AIQT facet, or the single security group."""

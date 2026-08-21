@@ -50,6 +50,20 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": "site/downloads/aiqt/", "kind": "tree",
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_skill.py"},
+    {"target": "site/downloads/aiqt-instructions.txt", "kind": "file",
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_skill.py"},
+    {"target": "site/downloads/aiqt-skill.zip", "kind": "file",
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_skill.py"},
+)
+
 # The public download is packed deterministically so its bytes never depend on the wall clock, the host
 # OS, or the zlib version: a fixed ZIP-epoch timestamp, members in sorted order, a fixed unix mode, and
 # STORED (uncompressed) entries. STORED also keeps the member text in the clear, so the leak gates read

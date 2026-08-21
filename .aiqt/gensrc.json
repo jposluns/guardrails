@@ -1,0 +1,206 @@
+{
+  "generated": [
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_secret_patterns.py",
+      "sources": [
+        "tools/check_secrets.py"
+      ],
+      "target": ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_gensrc.py",
+      "sources": [
+        "tools/"
+      ],
+      "target": ".aiqt/gensrc.json"
+    },
+    {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_rules.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".claude/rules/aiqt/"
+    },
+    {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_rules.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".claude/rules/security/"
+    },
+    {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_cursor.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".cursor/rules/aiqt-guardrails/"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_adapters.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".github/copilot-instructions.md"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_agents.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": "AGENTS.md"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_changelog.py",
+      "sources": [
+        "changelog.toml"
+      ],
+      "target": "CHANGELOG.md"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_claude.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": "CLAUDE.md"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_disclosure.py",
+      "sources": [
+        "disclosure.toml"
+      ],
+      "target": "DISCLOSURE.md"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_adapters.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": "GEMINI.md"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_notice.py",
+      "sources": [
+        ".aiqt/attribution.toml",
+        ".aiqt/standards/"
+      ],
+      "target": "NOTICE"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_roadmap.py",
+      "sources": [
+        "roadmap.toml"
+      ],
+      "target": "ROADMAP.md"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_changelog.py",
+      "sources": [
+        "changelog.toml"
+      ],
+      "target": "VERSION"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "sources": [
+        ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+      ],
+      "target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
+    },
+    {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "sources": [
+        ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+      ],
+      "target": "plugin/aiqt-guardrails-hooks/hooks/"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_disclosure.py",
+      "sources": [
+        "disclosure.toml"
+      ],
+      "target": "site/disclosure.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_skill.py",
+      "sources": [
+        ".aiqt/core/skill/skill-source.md",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/downloads/aiqt-instructions.txt"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_skill.py",
+      "sources": [
+        ".aiqt/core/skill/skill-source.md",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/downloads/aiqt-skill.zip"
+    },
+    {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_skill.py",
+      "sources": [
+        ".aiqt/core/skill/skill-source.md",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/downloads/aiqt/"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_mappings.py",
+      "sources": [
+        ".aiqt/standards/",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/downloads/mappings.csv"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_mappings.py",
+      "sources": [
+        ".aiqt/standards/",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/downloads/mappings.json"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_mappings.py",
+      "sources": [
+        ".aiqt/standards/",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/mappings.html"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_roadmap.py",
+      "sources": [
+        "roadmap.toml"
+      ],
+      "target": "site/roadmap.html"
+    }
+  ],
+  "version": 1
+}
