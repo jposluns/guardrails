@@ -23,8 +23,9 @@ it), or an empty literal exits 2 naming the file, never a silent partial registr
 enumerated with os.scandir, which RAISES on an unreadable dir (a glob would silently yield nothing).
 Every entry is validated (a canonical repo-relative target with no backslash, "./" prefix, "..", or
 redundant "/"; a known kind; a non-empty tuple of existing repo-relative sources; a regenerate command;
-and a trailing "/" on a tree target), and targets are deduplicated on their CANONICAL form so "X" and
-"./X" cannot both appear. The entries are sorted by target so the render is deterministic. The registry
+and a trailing "/" that appears only on a tree target, never on a file or block), and targets are
+deduplicated on their SLASH-STRIPPED canonical body so a file "X" and a tree "X/" (and "X" vs "./X")
+all collide. The entries are sorted by target so the render is deterministic. The registry
 lists its OWN output too, so .aiqt/gensrc.json appears in the inventory it produces. A source's
 EXISTENCE is checked (the registry declares paths); a source's READABILITY is the generator's gen-time
 concern, not the registry's, so no readability probing is done here. An unreadable input still fails
@@ -62,31 +63,49 @@ def _read_declaration(path, where):
     """Return the value of path's single module-level GENSRC_OUTPUTS literal, recovered by parsing the
     file to an AST and evaluating ONLY that literal with ast.literal_eval. The module is never imported
     or executed, so an import-time SystemExit, a dynamic __getattr__, or any other side effect cannot
-    influence the result. Fail-closed: raises ValueError (naming `where`) when there is no module-level
-    GENSRC_OUTPUTS assignment, more than one, a non-literal right-hand side, or an empty literal; the
-    caller maps that to exit 2. An unreadable file raises OSError, also mapped to exit 2."""
+    influence the result. Fail-closed: raises ValueError (naming `where`) when there is no single
+    top-level literal Assign to GENSRC_OUTPUTS, when the name is bound any OTHER way anywhere in the
+    module (a second/nested/conditional assignment, an augmented assignment, an annotation, or a del),
+    when the right-hand side is non-literal, or when the literal is empty; the caller maps that to exit
+    2. An unreadable file raises OSError, also mapped to exit 2."""
     source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
         raise ValueError("{}: cannot parse for its GENSRC_OUTPUTS declaration ({})".format(where, exc))
-    rhs_nodes = []
-    for node in tree.body:  # MODULE-LEVEL statements only; a nested or conditional assignment is ignored
-        if isinstance(node, ast.Assign):
-            if any(isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS" for t in node.targets):
-                rhs_nodes.append(node.value)
+    # The ONLY valid declaration is a single top-level plain Assign to GENSRC_OUTPUTS.
+    top_assigns = [node for node in tree.body
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS" for t in node.targets)]
+    the_assign = top_assigns[0] if len(top_assigns) == 1 else None
+    # Walk the WHOLE tree and reject any OTHER binding of the name: an augmented assignment, an
+    # annotation (with or without value), a del, or a second/nested/conditional plain assignment. The
+    # net rule is exactly one top-level literal Assign and no other store/aug/del of GENSRC_OUTPUTS
+    # anywhere, so no computed value can slip in past the single literal one.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "GENSRC_OUTPUTS":
+                raise ValueError("{}: GENSRC_OUTPUTS must not be augmented (e.g. '+='); exactly one "
+                                 "top-level literal assignment is allowed (fail-closed)".format(where))
         elif isinstance(node, ast.AnnAssign):
-            if (isinstance(node.target, ast.Name) and node.target.id == "GENSRC_OUTPUTS"
-                    and node.value is not None):
-                rhs_nodes.append(node.value)
-    if not rhs_nodes:
+            if isinstance(node.target, ast.Name) and node.target.id == "GENSRC_OUTPUTS":
+                raise ValueError("{}: GENSRC_OUTPUTS must not be annotated; exactly one top-level "
+                                 "literal assignment is allowed (fail-closed)".format(where))
+        elif isinstance(node, ast.Delete):
+            if any(isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS" for t in node.targets):
+                raise ValueError("{}: GENSRC_OUTPUTS must not be deleted; exactly one top-level "
+                                 "literal assignment is allowed (fail-closed)".format(where))
+        elif isinstance(node, ast.Assign):
+            if (any(isinstance(t, ast.Name) and t.id == "GENSRC_OUTPUTS" for t in node.targets)
+                    and node is not the_assign):
+                raise ValueError("{}: GENSRC_OUTPUTS is assigned more than once, conditionally, or not "
+                                 "at module level; exactly one top-level literal assignment is allowed "
+                                 "(fail-closed)".format(where))
+    if the_assign is None:
         raise ValueError("{} does not declare GENSRC_OUTPUTS; a generator cannot ship without declaring "
                          "its outputs (fail-closed)".format(where))
-    if len(rhs_nodes) > 1:
-        raise ValueError("{} declares GENSRC_OUTPUTS {} times at module level; exactly one is required"
-                         .format(where, len(rhs_nodes)))
     try:
-        decl = ast.literal_eval(rhs_nodes[0])  # never exec/import: a computed RHS raises here
+        decl = ast.literal_eval(the_assign.value)  # never exec/import: a computed RHS raises here
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
         raise ValueError("{}: GENSRC_OUTPUTS must be a literal (a tuple/list of dict literals), not a "
                          "computed expression ({})".format(where, exc))
@@ -102,9 +121,11 @@ def discover_declarations(tools_dir):
     """Statically read every tools/gen_*.py in tools_dir except this tool, in sorted stem order, and
     return a list of (stem, GENSRC_OUTPUTS-value). Each declaration is recovered by parsing, never by
     importing (see _read_declaration), so the import-execution surface is removed entirely. Fail-closed:
-    a bad or missing declaration raises ValueError naming the file (the structural staleness guard), and
-    os.scandir RAISES on an unreadable tools_dir instead of silently yielding nothing as a glob would;
-    the caller maps both, and any OSError reading a file, to exit 2."""
+    a bad or missing declaration raises ValueError naming the file (the structural staleness guard),
+    discovering NO generator at all raises ValueError (a registry-only repo is malformed, never a
+    silent self-only registry), and os.scandir RAISES on an unreadable tools_dir instead of silently
+    yielding nothing as a glob would; the caller maps all of these, and any OSError reading a file, to
+    exit 2."""
     tools_dir = Path(tools_dir)
     stems = []
     with os.scandir(tools_dir) as it:  # OSError on an unreadable/absent dir -> caller's fail-closed try
@@ -113,6 +134,9 @@ def discover_declarations(tools_dir):
             if name.startswith("gen_") and name.endswith(".py") and name[:-3] != SELF:
                 stems.append(name[:-3])
     stems.sort()
+    if not stems:  # a repo carrying the registry tool but no generators is malformed, never self-only
+        raise ValueError("no generators found under {}: expected at least one tools/gen_*.py besides "
+                         "{}.py (fail-closed)".format(tools_dir, SELF))
     declarations = []
     for stem in stems:
         decl = _read_declaration(tools_dir / (stem + ".py"), "{}.py".format(stem))
@@ -120,18 +144,23 @@ def discover_declarations(tools_dir):
     return declarations
 
 
-def _canonical_target(target, where):
+def _canonical_target(target, kind, where):
     """Return the canonical POSIX-relative spelling of `target`, raising ValueError (naming `where`) if
     it is not already in that clean form. Rejects a backslash (a Windows separator), an absolute path, a
-    '.' or '..' segment, a './' prefix, and redundant separators ('//' or a trailing '/' beyond the
-    single one a tree target carries). Targets are deduplicated on this canonical form, so 'X' and './X'
-    cannot both appear."""
+    '.' or '..' segment, a './' prefix, and redundant separators ('//'). A trailing '/' is allowed ONLY
+    on a tree target (it is the tree marker); on a file or block target it is rejected. Callers
+    deduplicate on the SLASH-STRIPPED canonical body, so a file 'X' and a tree 'X/', and 'X' and './X',
+    all collide."""
     if "\\" in target:
         raise ValueError("{}: target {!r} must use POSIX '/' separators, not a backslash"
                          .format(where, target))
     if target.startswith("/"):
         raise ValueError("{}: target {!r} must be repo-relative, not absolute".format(where, target))
-    body = target[:-1] if target.endswith("/") else target  # a lone trailing '/' is the tree marker
+    has_trailing = target.endswith("/")
+    if has_trailing and kind != "tree":
+        raise ValueError("{}: a trailing '/' marks a tree target; {!r} (kind {!r}) must not end with "
+                         "'/'".format(where, target, kind))
+    body = target[:-1] if has_trailing else target  # a lone trailing '/' is the tree marker
     if any(seg in ("", ".", "..") for seg in body.split("/")):
         raise ValueError("{}: target {!r} must be a clean POSIX-relative path (no './' prefix, '..', "
                          "or redundant '/')".format(where, target))
@@ -140,11 +169,17 @@ def _canonical_target(target, where):
 
 def _validate_entry(raw, where, root, seen):
     """Validate one declaration entry against root and return the canonical dict {target, kind, sources
-    (list), regenerate}. Raises ValueError on any malformed field, an unknown/absent source path, or a
-    duplicate target (compared on its canonical form); the caller maps that to exit 2. `where` names the
-    declaring file for the message."""
+    (list), regenerate}. Raises ValueError on any malformed field (including a non-str key or kind, so a
+    malformed literal fails closed rather than raising a bare TypeError), an unknown/absent source path,
+    or a duplicate target (compared on its slash-stripped canonical body); the caller maps that to exit
+    2. `where` names the declaring file for the message."""
     if not isinstance(raw, dict):
         raise ValueError("{}: every GENSRC_OUTPUTS entry must be a dict".format(where))
+    # Type-check the keys BEFORE any set membership or .format: a non-str key would make sorted()/join
+    # below raise a bare TypeError instead of the fail-closed ValueError the caller maps to exit 2.
+    for key in raw:
+        if not isinstance(key, str):
+            raise ValueError("{}: entry keys must be strings, got {!r}".format(where, key))
     extra = set(raw) - ENTRY_KEYS
     if extra:
         raise ValueError("{}: entry has unknown key(s): {}".format(where, ", ".join(sorted(extra))))
@@ -152,14 +187,18 @@ def _validate_entry(raw, where, root, seen):
     if missing:
         raise ValueError("{}: entry missing key(s): {}".format(where, ", ".join(sorted(missing))))
 
+    # Type-check kind BEFORE the set-membership test: an unhashable kind (a list/dict) would make
+    # `kind not in KINDS` raise a bare TypeError rather than the fail-closed ValueError -> exit 2.
+    kind = raw["kind"]
+    if not isinstance(kind, str):
+        raise ValueError("{}: kind must be a string, got {!r}".format(where, kind))
+    if kind not in KINDS:
+        raise ValueError("{}: kind {!r} must be one of {}".format(where, kind, "/".join(sorted(KINDS))))
+
     target = raw["target"]
     if not isinstance(target, str) or not target:
         raise ValueError("{}: target must be a non-empty string".format(where))
-    canon = _canonical_target(target, where)
-
-    kind = raw["kind"]
-    if kind not in KINDS:
-        raise ValueError("{}: kind {!r} must be one of {}".format(where, kind, "/".join(sorted(KINDS))))
+    canon = _canonical_target(target, kind, where)  # rejects a trailing '/' unless kind == "tree"
     if kind == "tree" and not canon.endswith("/"):
         raise ValueError("{}: a tree target ({!r}) must end with '/'".format(where, target))
 
@@ -185,10 +224,13 @@ def _validate_entry(raw, where, root, seen):
     if not isinstance(regenerate, str) or not regenerate:
         raise ValueError("{}: regenerate must be a non-empty string".format(where))
 
-    if canon in seen:
+    # Dedup on the SLASH-STRIPPED canonical body so a file 'X' and a tree 'X/' (and 'X' vs './X')
+    # collide: one filesystem path is generated by exactly one entry, whatever its kind.
+    dedup_key = canon[:-1] if canon.endswith("/") else canon
+    if dedup_key in seen:
         raise ValueError("{}: duplicate target {!r} (a target is generated by exactly one entry)"
                          .format(where, target))
-    seen.add(canon)
+    seen.add(dedup_key)
     return {"target": canon, "kind": kind, "sources": list(sources), "regenerate": regenerate}
 
 
@@ -250,7 +292,12 @@ def main():
 #   (e) a NON-LITERAL RHS beside a module-level raise SystemExit(0) fails closed (exit 2) and is NEVER
 #       executed, proving discovery parses statically and does not import,
 #   (f) an unreadable tools/ dir fails closed (exit 2), os.scandir raising rather than a silent glob,
-#   (g) two entries whose targets are 'X' and './X' fail closed (exit 2), the canonical-dedup collision.
+#   (g) two entries whose canonical bodies are equal (a file 'X' and a tree 'X/') fail closed (exit 2),
+#       the slash-stripped canonical-dedup collision,
+#   (h) a malformed literal (a non-str kind such as []) fails closed with ValueError -> exit 2, never a
+#       bare TypeError from a set-membership test.
+# A raised SystemExit anywhere in a run() call is caught by run_quiet and recorded as a FAILURE, so the
+# self-test can never itself exit early (green or otherwise) on an unexpected raise.
 
 _FAKE_GOOD = '''# self-test generator that declares its output
 GENSRC_OUTPUTS = (
@@ -278,13 +325,25 @@ def _make():
 GENSRC_OUTPUTS = _make()
 '''
 
-# Two entries whose targets are 'X' and './X': the './X' spelling is not canonical, so it collides with
-# 'X' on the canonical form and the tree fails closed (exit 2).
-_FAKE_CANON_DUP = '''# self-test generator with a canonical-duplicate pair of targets
+# Two entries whose SLASH-STRIPPED canonical bodies are equal: a file 'OUT.md' and a tree 'OUT.md/'.
+# Each is individually well formed, but they name the same filesystem path, so dedup collides them and
+# the tree fails closed (exit 2). (The old case used 'OUT.md' vs './OUT.md', which was mislabeled: the
+# './OUT.md' spelling is rejected as a non-canonical path before dedup is ever reached.)
+_FAKE_CANON_DUP = '''# self-test generator with a true canonical-duplicate pair (file 'X' vs tree 'X/')
 GENSRC_OUTPUTS = (
     {"target": "OUT.md", "kind": "file",
      "sources": ("src.txt",), "regenerate": "x"},
-    {"target": "./OUT.md", "kind": "file",
+    {"target": "OUT.md/", "kind": "tree",
+     "sources": ("src.txt",), "regenerate": "x"},
+)
+'''
+
+# A malformed literal: kind is a list (a non-str, and unhashable) rather than a string. Without the
+# type-check this would raise a bare TypeError from `kind not in KINDS`; with it, a fail-closed
+# ValueError -> exit 2.
+_FAKE_BADTYPE = '''# self-test generator whose kind is a non-str list literal
+GENSRC_OUTPUTS = (
+    {"target": "OUT.md", "kind": [],
      "sources": ("src.txt",), "regenerate": "x"},
 )
 '''
@@ -306,8 +365,14 @@ def self_test_main():
     from contextlib import redirect_stdout, redirect_stderr
 
     def run_quiet(root, check):
+        # A raised SystemExit (e.g. reconcile's OSError path) is caught and returned as a non-int
+        # sentinel so it registers as a FAILURE against any expected exit code, rather than aborting
+        # the self-test or letting it exit early green.
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            return run(root, check)
+            try:
+                return run(root, check)
+            except SystemExit as exc:
+                return "raised SystemExit({!r})".format(exc.code)
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-gensrc-selftest-"))
@@ -370,11 +435,19 @@ def self_test_main():
         os.chmod(unread_tools, 0o755)  # restore so cleanup can remove it
         unread_tools = None
 
-        # (g) Two entries whose targets are 'X' and './X' fail closed (exit 2): canonical-dedup collision.
+        # (g) A file 'X' and a tree 'X/' fail closed (exit 2): slash-stripped canonical-dedup collision.
         canondup = tmp / "canondup"
         _build_from(canondup, "gen_selftestcanondup.py", _FAKE_CANON_DUP)
         if run_quiet(canondup, check=True) != 2:
-            failures.append("canonical-duplicate targets 'X' and './X' expected exit 2 (fail-closed)")
+            failures.append("canonical-duplicate targets (file 'X', tree 'X/') expected exit 2 "
+                            "(fail-closed)")
+
+        # (h) A malformed literal (a non-str kind []) fails closed with ValueError -> exit 2, never a
+        #     bare TypeError from the set-membership test.
+        badtype = tmp / "badtype"
+        _build_from(badtype, "gen_selftestbadtype.py", _FAKE_BADTYPE)
+        if run_quiet(badtype, check=True) != 2:
+            failures.append("malformed non-str kind ([]) expected exit 2 (fail-closed ValueError)")
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -391,8 +464,8 @@ def self_test_main():
     print("SELF-TEST PASS: a conformant tree generates and regenerates drift-clean; a mutated "
           ".aiqt/gensrc.json fails --check (exit 1); and a generator that omits GENSRC_OUTPUTS, an "
           "empty GENSRC_OUTPUTS=(), a non-literal declaration beside an import-time SystemExit "
-          "(proving static parse, no import), an unreadable tools/ dir, and canonical-duplicate targets "
-          "all fail closed (exit 2)" + note)
+          "(proving static parse, no import), an unreadable tools/ dir, canonical-duplicate targets "
+          "(a file 'X' and a tree 'X/'), and a malformed non-str kind all fail closed (exit 2)" + note)
     return 0
 
 
