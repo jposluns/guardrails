@@ -39,6 +39,21 @@ BLOB = "https://github.com/jposluns/guardrails/blob/main/.claude/rules/{}"
 NOTICE_URL = "https://github.com/jposluns/guardrails/blob/main/NOTICE"
 EN, EM = "–", "—"
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces. site/mappings.html is a generated block inside
+# a hand-authored page (the mappings markers), so it is recorded as kind block.
+GENSRC_OUTPUTS = (
+    {"target": "site/mappings.html", "kind": "block",
+     "sources": (".aiqt/standards/", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_mappings.py"},
+    {"target": "site/downloads/mappings.csv", "kind": "file",
+     "sources": (".aiqt/standards/", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_mappings.py"},
+    {"target": "site/downloads/mappings.json", "kind": "file",
+     "sources": (".aiqt/standards/", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_mappings.py"},
+)
+
 
 def _text(value):        # element text content
     return html.escape(value, quote=False)

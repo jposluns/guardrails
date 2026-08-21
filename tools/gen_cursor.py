@@ -30,6 +30,13 @@ OUT_PARTS = (".cursor", "rules", "aiqt-guardrails")
 # alwaysApply: true (cursor.com/docs/rules), so neither is emitted as a dead key.
 FRONTMATTER = "---\nalwaysApply: true\n---\n\n"
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": ".cursor/rules/aiqt-guardrails/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_cursor.py"},
+)
+
 
 def cursor_rel(rel):
     """The Cursor tree path for a derived rule path: the same two-axis rel with the required .mdc

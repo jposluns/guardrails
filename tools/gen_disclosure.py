@@ -46,6 +46,16 @@ ALLOWED_ROW = {"id", "topic", "claim", "limitation", "evidence", "pending"}
 ALLOWED_EV = {"text", "href"}
 DEFAULT_BASE = "https://aiqt.ai"
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces. site/disclosure.html is a generated block
+# inside a hand-authored page (the disclosure markers), so it is recorded as kind block.
+GENSRC_OUTPUTS = (
+    {"target": "DISCLOSURE.md", "kind": "file",
+     "sources": ("disclosure.toml",), "regenerate": "python3 tools/gen_disclosure.py"},
+    {"target": "site/disclosure.html", "kind": "block",
+     "sources": ("disclosure.toml",), "regenerate": "python3 tools/gen_disclosure.py"},
+)
+
 
 def _text(value):        # element text content
     return html.escape(value, quote=False)

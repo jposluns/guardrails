@@ -36,6 +36,14 @@ INTRO = (
     "affiliated with this pack."
 )
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces.
+GENSRC_OUTPUTS = (
+    {"target": "NOTICE", "kind": "file",
+     "sources": (".aiqt/attribution.toml", ".aiqt/standards/"),
+     "regenerate": "python3 tools/gen_notice.py"},
+)
+
 
 def _wrap(text, indent=""):
     """Greedy word-wrap to WRAP columns, preserving blank-line paragraph breaks. Each returned line

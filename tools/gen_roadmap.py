@@ -12,6 +12,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, replace_block, reconcile  # noqa: E402
 
+# Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
+# only, it does not affect what this generator produces. site/roadmap.html is a generated block inside
+# a hand-authored page (the roadmap markers), so it is recorded as kind block.
+GENSRC_OUTPUTS = (
+    {"target": "ROADMAP.md", "kind": "file",
+     "sources": ("roadmap.toml",), "regenerate": "python3 tools/gen_roadmap.py"},
+    {"target": "site/roadmap.html", "kind": "block",
+     "sources": ("roadmap.toml",), "regenerate": "python3 tools/gen_roadmap.py"},
+)
+
 
 def _text(value):        # element text content
     return html.escape(value, quote=False)
