@@ -80,16 +80,21 @@ def load_denylist(root):
         for number, line in enumerate(content.splitlines(), 1):
             s = line.strip()
             if not s or s.startswith("#"):
-                if s.startswith("# maxn"):
-                    parts = s.split()
-                    if len(parts) >= 3 and parts[2].isdigit():
+                parts = s.split()
+                if len(parts) >= 2 and parts[0] == "#" and parts[1] == "maxn":
+                    # a maxn directive must be exactly "# maxn <positive integer>"; anything else is
+                    # malformed and fails closed, never silently leaving detection mis-sized (a maxn of 0
+                    # would make ngram_forms yield nothing and disable the whole codename layer).
+                    ok = len(parts) == 3 and parts[2].isascii() and parts[2].isdigit() and int(parts[2]) >= 1
+                    if ok:
                         maxn = int(parts[2])
+                    else:
+                        bad.append("leak-hashes.txt:{}: malformed '# maxn N' (need one positive integer)".format(number))
                 continue
-            token = s.split()[0]
-            if _HEX64.match(token):
-                hashes.add(token)
+            if _HEX64.match(s):
+                hashes.add(s)
             else:
-                bad.append("leak-hashes.txt:{}: not a 64-hex hash (possible plaintext)".format(number))
+                bad.append("leak-hashes.txt:{}: not a 64-hex hash (possible plaintext or trailing token)".format(number))
     return hashes, maxn, bad
 
 

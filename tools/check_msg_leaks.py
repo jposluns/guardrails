@@ -19,17 +19,20 @@ MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for 
 
 HONEST SCOPE. Like check_leaks, this catches ACCIDENTAL reintroduction of internal terms/host specifics; it
 is not an exfiltration control, and deliberate obfuscation (mid-word splits, zero-width, homoglyphs) can
-evade the hash layer. It never echoes the matching text, token, or codename (it reports the channel and, for
-a commit, the short SHA).
+evade the hash layer. It never echoes the matching text, token, codename, or a malformed field value (it
+reports the channel and, for a commit, the short SHA).
 
 FAIL-CLOSED. A missing/unreadable/malformed/empty denylist, missing/unreadable/malformed event JSON, a PR
-event missing or mistyping a required field, an unresolvable commit range, or an event kind whose channel
-set cannot be established -> exit 2. A finding -> exit 1. Clean -> exit 0. Missing input is never read as
-clean. A confidentiality gate that cannot load its codename denylist does not run: absent/empty is exit 2,
-stricter than the file gate, because here there is no compensating repo-wide file scan behind it.
+event missing or mistyping a required field, a revision field that is not a canonical 40-hex SHA, a
+branch-creation push whose complete range cannot be established, an unresolvable commit range, or an event
+kind whose channel set cannot be established -> exit 2. A finding -> exit 1. Clean -> exit 0. Missing input
+is never read as clean. A confidentiality gate that cannot load its codename denylist does not run:
+absent/empty is exit 2, stricter than the file gate, because here there is no compensating repo-wide file
+scan behind it.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +42,7 @@ from check_leaks import load_denylist, scan_text  # noqa: E402  shared denylist 
 
 ROOT = Path(__file__).resolve().parents[1]
 _ZERO_SHA = "0" * 40
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")   # a canonical git object id (the zero-SHA also matches)
 
 
 class FailClosed(Exception):
@@ -46,20 +50,23 @@ class FailClosed(Exception):
 
 
 def _run_git(args):
-    """Run git with an argv array (never a shell); raise FailClosed on any non-zero exit."""
-    proc = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    """Run git with an argv array (never a shell); fail closed on any error, without echoing git's stderr or
+    the revision values (which may reflect a leaked string)."""
+    try:
+        proc = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    except (OSError, ValueError) as exc:                       # git missing, or undecodable output
+        raise FailClosed("git invocation failed ({})".format(type(exc).__name__))
     if proc.returncode != 0:
-        raise FailClosed("git {} failed: {}".format(" ".join(args), proc.stderr.strip()))
+        raise FailClosed("git {} exited non-zero ({})".format(args[0] if args else "?", proc.returncode))
     return proc.stdout
 
 
 def commit_messages(base, head):
-    """Return [(short_sha, message)] for base..head, parsed with unambiguous separators (not a shell)."""
-    # %x1f (unit sep) splits sha from body; -z NUL-separates commits. %B is the raw message body.
+    """Return [(short_sha, message)] for base..head, parsed with unambiguous separators (not a shell).
+    base and head are canonical SHAs validated by the caller before they reach git."""
     out = _run_git(["log", "--no-color", "-z", "--format=%h%x1f%B", "{}..{}".format(base, head)])
-    records = [r for r in out.split("\0") if r]
     parsed = []
-    for rec in records:
+    for rec in (r for r in out.split("\0") if r):
         sha, _, body = rec.partition("\x1f")
         parsed.append((sha, body))
     return parsed
@@ -71,7 +78,7 @@ def require_denylist():
     try:
         hashes, maxn, bad = load_denylist(ROOT)
     except (OSError, UnicodeError) as exc:                      # unreadable / non-UTF-8 denylist
-        raise FailClosed("cannot read the leak denylist: {}".format(exc))
+        raise FailClosed("cannot read the leak denylist: {}".format(type(exc).__name__))
     if bad:
         raise FailClosed("malformed leak denylist: {}".format("; ".join(bad)))
     if not hashes:
@@ -90,7 +97,7 @@ def scan_channels(channels, hashes, maxn):
 
 
 def _require(event, *path):
-    """Fetch event[path...], failing closed if a step is missing or the leaf is not a string/None."""
+    """Fetch event[path...], failing closed if a step is missing."""
     node = event
     for key in path:
         if not isinstance(node, dict) or key not in node:
@@ -99,14 +106,26 @@ def _require(event, *path):
     return node
 
 
+def _require_sha(event, *path):
+    """Fetch a required field and fail closed unless it is a canonical 40-hex SHA (so a value like 'HEAD',
+    '', or a non-string can never be interpolated into git revision syntax and read as a clean empty range)."""
+    value = _require(event, *path)
+    if not isinstance(value, str) or not _SHA_RE.match(value):
+        raise FailClosed("event JSON field {} is not a 40-hex SHA".format(".".join(path)))
+    return value
+
+
 def channels_for_pr(event, messages):
     """Build the channel list for a pull_request event. `messages` is [(sha, body)] for base..head."""
-    pr = _require(event, "pull_request")
     title = _require(event, "pull_request", "title")
-    body = _require(event, "pull_request", "body")           # may be JSON null -> empty text
+    body = _require(event, "pull_request", "body")            # may be JSON null -> empty text
     ref = _require(event, "pull_request", "head", "ref")
-    if not isinstance(title, str) or not isinstance(ref, str) or body not in (None,) and not isinstance(body, str):
-        raise FailClosed("event JSON PR field has an unexpected type")
+    if not isinstance(title, str) or not title.strip():
+        raise FailClosed("event JSON PR title is missing or empty")
+    if not isinstance(ref, str) or not ref.strip():
+        raise FailClosed("event JSON PR head ref is missing or empty")
+    if body is not None and not isinstance(body, str):
+        raise FailClosed("event JSON PR body has an unexpected type")
     composed = title + "\n\n" + (body or "")                  # one blob: catches title/body-boundary n-grams
     channels = [("commit {}".format(sha), msg) for sha, msg in messages]
     channels.append(("PR title/body", composed))
@@ -122,22 +141,24 @@ def load_event():
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
-        raise FailClosed("cannot read/parse event JSON at {}: {}".format(path, exc))
+        raise FailClosed("cannot read/parse event JSON at {}: {}".format(path, type(exc).__name__))
 
 
 def gather_channels(event_name, event):
-    """Dispatch on the event kind; fail closed on any kind whose channel set we cannot establish."""
+    """Dispatch on the event kind; fail closed on any kind whose channel set we cannot establish. Every
+    revision field is validated as a canonical SHA before it reaches git."""
     if event_name.startswith("pull_request"):
-        base = _require(event, "pull_request", "base", "sha")
-        head = _require(event, "pull_request", "head", "sha")
-        if not isinstance(base, str) or not isinstance(head, str):
-            raise FailClosed("event JSON base/head sha has an unexpected type")
+        base = _require_sha(event, "pull_request", "base", "sha")
+        head = _require_sha(event, "pull_request", "head", "sha")
         return channels_for_pr(event, commit_messages(base, head)), "pre-merge"
     if event_name == "push":
-        before = _require(event, "before")
-        after = _require(event, "after")
-        if before == _ZERO_SHA:                               # new branch / unknown base: scan the tip only
-            msgs = commit_messages(after + "^", after) if after != _ZERO_SHA else []
+        before = _require_sha(event, "before")
+        after = _require_sha(event, "after")
+        if after == _ZERO_SHA:                                # branch deletion (or no-op): no new commits
+            msgs = []
+        elif before == _ZERO_SHA:                             # branch creation: the full new range is
+            raise FailClosed("branch-creation push (zero 'before'): cannot establish the complete "
+                             "commit range; failing closed rather than scanning only the tip")
         else:
             msgs = commit_messages(before, after)
         return [("commit {}".format(sha), msg) for sha, msg in msgs], "post-merge"
@@ -181,46 +202,84 @@ def main(argv):
 
 
 def self_test():
-    """In-memory fail-cases; no network or live git needed. Exercises the scanner, the channel builder, and
-    the fail-closed paths. Uses a synthetic denylist hash so no real codename appears here."""
+    """In-memory fail-cases; no network or live git needed. Exercises the scanner, the channel builder, the
+    SHA/field validation, the push semantics, and the denylist-metadata hardening. Uses a synthetic denylist
+    hash so no real codename appears here."""
+    import tempfile
     import check_leaks as c
     hashes = {c.term_hash("alpha bravo")}
     maxn = 3
+    forty = "a" * 40
     # 1. clean channels -> no findings
     assert scan_channels([("PR title/body", "a normal title\n\nnormal body")], hashes, maxn) == []
-    # 2. structural hit (private IP) in a commit message, reported without echoing the value
+    # 2. structural hit reported without echoing the value
     priv = "192.168.1.99"  # leak-allow: a synthetic RFC1918 fixture the structural path must flag
     f = scan_channels([("commit abc1234", "fix networking on " + priv)], hashes, maxn)
     assert f == ["commit abc1234: private IP (192.168/16)"], f
     assert priv not in " ".join(f), "must not echo the matched value (only the class label)"
     # 3. codename hash hit across the title/body boundary (composed blob catches it; separate would not)
-    composed_channels = channels_for_pr(
-        {"pull_request": {"title": "ship alpha", "body": "bravo landed", "head": {"ref": "feat/x"}}}, [])
-    assert scan_channels(composed_channels, hashes, maxn) == ["PR title/body: internal codename (hash match)"], \
-        scan_channels(composed_channels, hashes, maxn)
+    ch = channels_for_pr({"pull_request": {"title": "ship alpha", "body": "bravo landed",
+                                           "head": {"ref": "feat/x"}}}, [])
+    assert scan_channels(ch, hashes, maxn) == ["PR title/body: internal codename (hash match)"]
     # 4. leak-allow is NOT honored here
-    assert scan_channels([("commit d", "10.0.0.1 leak-allow")], hashes, maxn) == \
-        ["commit d: private IP (10/8)"]
-    # 5. fail-closed: PR event missing a required field
-    for bad in ({"pull_request": {"title": "t", "head": {"ref": "r"}}},           # no body
-                {"pull_request": {"title": "t", "body": "b"}},                     # no head.ref
-                {}):                                                               # no pull_request
+    assert scan_channels([("commit d", "10.0.0.1 leak-allow")], hashes, maxn) == ["commit d: private IP (10/8)"]
+    # 5. null body is valid empty text
+    assert ("PR title/body", "t\n\n") in channels_for_pr(
+        {"pull_request": {"title": "t", "body": None, "head": {"ref": "r"}}}, [])
+    # 6. fail-closed: malformed PR field shapes
+    for bad in ({"pull_request": {"title": "t", "head": {"ref": "r"}}},              # no body
+                {"pull_request": {"title": "t", "body": "b"}},                       # no head.ref
+                {"pull_request": {"title": "", "body": "b", "head": {"ref": "r"}}},   # empty title
+                {"pull_request": {"title": "t", "body": "b", "head": {"ref": ""}}},   # empty ref
+                {"pull_request": {"title": "t", "body": 5, "head": {"ref": "r"}}},    # body wrong type
+                {}):
         try:
             channels_for_pr(bad, [])
             assert False, "expected FailClosed for {}".format(bad)
         except FailClosed:
             pass
-    # 6. fail-closed: unknown event kind
+    # 7. fail-closed: a revision field that is not a 40-hex SHA (caught before git is ever called)
+    for name, ev in (("pull_request", {"pull_request": {"base": {"sha": "HEAD"},
+                                                        "head": {"sha": forty, "ref": "r"},
+                                                        "title": "t", "body": None}}),
+                     ("pull_request", {"pull_request": {"base": {"sha": forty},
+                                                        "head": {"sha": "", "ref": "r"},
+                                                        "title": "t", "body": None}}),
+                     ("push", {"before": "HEAD", "after": forty}),
+                     ("push", {"before": forty, "after": []}),
+                     ("push", {"before": _ZERO_SHA, "after": forty})):     # branch creation -> fail closed
+        try:
+            gather_channels(name, ev)
+            assert False, "expected FailClosed for {} {}".format(name, ev)
+        except FailClosed:
+            pass
+    # 8. branch deletion (after == zero): no channels, no git call, no exception
+    channels, phase = gather_channels("push", {"before": forty, "after": _ZERO_SHA})
+    assert channels == [] and phase == "post-merge", (channels, phase)
+    # 9. unknown event kind fails closed
     try:
         gather_channels("issues", {})
         assert False, "expected FailClosed for an unhandled event kind"
     except FailClosed:
         pass
-    # 7. null body is valid empty text (not a failure)
-    ch = channels_for_pr({"pull_request": {"title": "t", "body": None, "head": {"ref": "r"}}}, [])
-    assert ("PR title/body", "t\n\n") in ch, ch
-    print("SELF-TEST PASS: scanner reuse, composed title/body boundary catch, no-echo, leak-allow ignored, "
-          "and the fail-closed paths (missing PR fields, unknown event kind, null body) all hold")
+    # 10. denylist-metadata hardening (load_denylist): malformed maxn / trailing tokens fail closed
+    def denylist(text):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tools").mkdir()
+            (root / "tools" / "leak-hashes.txt").write_text(text, encoding="utf-8")
+            return c.load_denylist(root)
+    h = "0" * 64
+    assert denylist("# maxn 0\n" + h + "\n")[2], "maxn 0 must be rejected (would disable the codename layer)"
+    assert denylist("# maxn 3 extra\n" + h + "\n")[2], "a trailing token on the maxn directive must be rejected"
+    assert denylist("# maxn nope\n" + h + "\n")[2], "a non-integer maxn must be rejected"
+    assert denylist(h + " plaintext\n")[2], "a trailing token on a hash line must be rejected"
+    hs, mx, bad = denylist("# maxn 2\n" + h + "\n")
+    assert bad == [] and mx == 2 and h in hs, (bad, mx, hs)
+    print("SELF-TEST PASS: scanner reuse, composed title/body boundary catch, no-echo, and leak-allow "
+          "ignored; the fail-closed paths hold (malformed PR fields, empty title/ref, a non-40-hex "
+          "base/head/before/after, a branch-creation push, an unknown event kind); a branch-deletion push "
+          "yields no channels; and malformed denylist metadata (maxn 0, trailing tokens) is rejected")
     return 0
 
 
