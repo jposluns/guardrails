@@ -42,9 +42,12 @@ or a stale residue survives the gate and is caught only by review.
   gen_enforceability.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
 
 Exit convention: 0 clean; 1 EXCLUSIVELY ledger byte-drift; 2 for everything else: an unreadable or
-absent corpus, hooks manifest, gates manifest, or roster file; a malformed manifest; an orphan
-corpus-id; a class-d control; a roster mismatch in either direction (or an asymmetry between the two
-roster files); a missing gate script file; or a write error (reconcile's own SystemExit(2)).
+absent gates manifest or roster file; a malformed manifest; an orphan corpus-id; a class-d control; a
+roster mismatch in either direction (or an asymmetry between the two roster files); a missing gate
+script file; or a write error (reconcile's own SystemExit(2)). An unreadable or absent corpus or hooks
+manifest likewise exits 2, but through the reused loaders (gen_rules.load_corpus, gen_hooks.load_manifest)
+which raise on that input; those delegated loader paths are covered by their own suites, not this
+self-test (see the self-test note).
 
 PROTOCOL LIMITS. The inverse roster check sees only `python3 tools/*.py` steps; the gitleaks binary step
 and any non-`python3 tools/*.py` gate are invisible to it and carry no manifest entry by design. That
@@ -195,10 +198,11 @@ def roster_scripts(root):
         scripts = set()
         for line in text.splitlines():
             # Strip an inline comment before matching (a conservative lexical cut, documented at
-            # ROSTER_RE): the first " #" ends a trailing comment, so `true # python3 tools/ghost.py` no
-            # longer miscounts ghost.py; a leading "#" then drops a whole comment line. This does not
-            # parse the shell, so a token inside a quoted argument or a heredoc may still be miscounted.
-            code = line.split(" #", 1)[0]
+            # ROSTER_RE): the first space- or tab-preceded `#` ends a trailing comment, so
+            # `true # python3 tools/ghost.py` (space or tab before the #) no longer miscounts ghost.py;
+            # a leading "#" then drops a whole comment line. This does not parse the shell, so a token
+            # inside a quoted argument or a heredoc may still be miscounted.
+            code = re.split(r"[ \t]#", line, maxsplit=1)[0]
             if code.lstrip().startswith("#"):
                 continue
             scripts.update(ROSTER_RE.findall(code))
