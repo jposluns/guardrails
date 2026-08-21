@@ -4,6 +4,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Never let a gate leave Python bytecode: a stray __pycache__/*.pyc in the shippable surface trips the
+# portability gate as a non-portable file class, a spurious local FAIL that CI (a fresh checkout) never
+# sees. Suppress bytecode for every gate below, and sweep any cache a prior run or ad hoc invocation left.
+export PYTHONDONTWRITEBYTECODE=1
+find . -name '__pycache__' -type d -not -path './.git/*' -prune -exec rm -rf {} +
+
 failed=0
 notrun=0
 

@@ -2151,7 +2151,7 @@ def main():
         # reads only tool_input, so no cwd is passed.
         ssl = aiqt_hooks.secrets_shift_left
 
-        def sexpect(label, tool, tool_input, want):
+        def sexpect(label, tool, tool_input, want, secret=None):
             data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
             code, stdout_obj, _stderr = ssl(data)
             if code == 0 and stdout_obj is None:
@@ -2162,6 +2162,11 @@ def main():
                 got = "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
+            # redaction guard: a DENY reason names the pattern label but never echoes the secret value.
+            if want == "deny" and secret is not None and isinstance(stdout_obj, dict):
+                reason = stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                if secret in reason:
+                    failures.append("{}: DENY reason must not echo the secret value (redaction, F-131)".format(label))
 
         # Synthetic secret shapes (NOT real), assembled from PARTS at runtime so the shape never appears
         # as a contiguous literal in THIS source file: it uses the single-sourced check_secrets.py
@@ -2181,24 +2186,31 @@ def main():
 
         # DENY: a Write whose content carries each shape.
         sexpect("(ss-a) Write content with a GitHub token denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _fake_ghp)}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _fake_ghp)}, "deny",
+                secret=_fake_ghp)
         sexpect("(ss-b) Write content with an Anthropic key denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("key", _fake_ant)}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("key", _fake_ant)}, "deny",
+                secret=_fake_ant)
         sexpect("(ss-c) Write content with an AWS access key id denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("aws", _fake_akia)}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("aws", _fake_akia)}, "deny",
+                secret=_fake_akia)
         sexpect("(ss-d) Write content with a private key block header denies",
-                "Write", {"file_path": "/tmp/x", "content": _fake_pkey + "\nMIIB...\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _fake_pkey + "\nMIIB...\n"}, "deny",
+                secret=_fake_pkey)
         sexpect("(ss-e) Write content with a credential assignment denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", '"' + _cred + '"')}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", '"' + _cred + '"')}, "deny",
+                secret=_cred)
         # DENY: an Edit whose new_string introduces a secret.
         sexpect("(ss-f) Edit new_string with a GitHub token denies",
                 "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _asgn("auth", _fake_ghp)},
-                "deny")
+                "deny", secret=_fake_ghp)
         # DENY: a Bash write-form (printf redirect, heredoc) emitting a secret in the command string.
         sexpect("(ss-g) Bash printf > f with a GitHub token denies",
-                "Bash", {"command": "printf '%s' '" + _fake_ghp + "' > /tmp/f"}, "deny")
+                "Bash", {"command": "printf '%s' '" + _fake_ghp + "' > /tmp/f"}, "deny",
+                secret=_fake_ghp)
         sexpect("(ss-h) Bash heredoc writing an AWS key denies",
-                "Bash", {"command": "cat > /tmp/f <<EOF\n" + _fake_akia + "\nEOF"}, "deny")
+                "Bash", {"command": "cat > /tmp/f <<EOF\n" + _fake_akia + "\nEOF"}, "deny",
+                secret=_fake_akia)
 
         # ALLOW: a Write whose only credential-shaped values are PLACEHOLDERS (excluded exactly as
         # check_secrets.py excludes them; the first two are 12+ chars so they exercise the ASSIGN
