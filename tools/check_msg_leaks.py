@@ -133,13 +133,19 @@ def channels_for_pr(event, messages):
     return channels
 
 
+def _reject_json_constant(token):
+    """json.loads calls this for NaN/Infinity/-Infinity (non-standard JSON); reject them so a malformed
+    event fails closed rather than parsing as if valid."""
+    raise ValueError("non-JSON constant in event: {}".format(token))
+
+
 def load_event():
-    """Read and parse $GITHUB_EVENT_PATH, failing closed if unset/unreadable/malformed."""
+    """Read and parse $GITHUB_EVENT_PATH, failing closed if unset/unreadable/malformed (NaN/Infinity too)."""
     path = os.environ.get("GITHUB_EVENT_PATH")
     if not path:
         raise FailClosed("GITHUB_EVENT_PATH is not set")
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
     except (OSError, UnicodeError, ValueError) as exc:
         raise FailClosed("cannot read/parse event JSON at {}: {}".format(path, type(exc).__name__))
 
@@ -276,10 +282,19 @@ def self_test():
     assert denylist(h + " plaintext\n")[2], "a trailing token on a hash line must be rejected"
     hs, mx, bad = denylist("# maxn 2\n" + h + "\n")
     assert bad == [] and mx == 2 and h in hs, (bad, mx, hs)
+    assert denylist("# maxn 3\n# maxn 1\n" + h + "\n")[2], "a duplicate/contradictory maxn must be rejected"
+    assert denylist("# maxn 101\n" + h + "\n")[2], "an over-cap maxn (>100) must be rejected"
+    assert denylist("# maxn " + "9" * 5000 + "\n" + h + "\n")[2], "an oversized maxn must be rejected, not crash"
+    try:
+        json.loads('{"x": NaN}', parse_constant=_reject_json_constant)
+        assert False, "a non-JSON constant (NaN) must be rejected by strict event parsing"
+    except ValueError:
+        pass
     print("SELF-TEST PASS: scanner reuse, composed title/body boundary catch, no-echo, and leak-allow "
           "ignored; the fail-closed paths hold (malformed PR fields, empty title/ref, a non-40-hex "
           "base/head/before/after, a branch-creation push, an unknown event kind); a branch-deletion push "
-          "yields no channels; and malformed denylist metadata (maxn 0, trailing tokens) is rejected")
+          "yields no channels; malformed denylist metadata (maxn 0, duplicate, over-cap, oversized, "
+          "trailing tokens) is rejected; and a non-JSON NaN constant fails closed")
     return 0
 
 

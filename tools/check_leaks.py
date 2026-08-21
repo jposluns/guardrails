@@ -68,7 +68,7 @@ def term_hash(term):   # the generator (store/gen-leak-hashes.py) imports this f
 def load_denylist(root):
     """Return (hashes, maxn, bad_lines). bad_lines names any non-hash entry (integrity failure)."""
     f = root / "tools" / "leak-hashes.txt"
-    hashes, maxn, bad = set(), 3, []
+    hashes, maxn, bad, maxn_set = set(), 3, [], False
     try:
         content = f.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -82,14 +82,16 @@ def load_denylist(root):
             if not s or s.startswith("#"):
                 parts = s.split()
                 if len(parts) >= 2 and parts[0] == "#" and parts[1] == "maxn":
-                    # a maxn directive must be exactly "# maxn <positive integer>"; anything else is
-                    # malformed and fails closed, never silently leaving detection mis-sized (a maxn of 0
-                    # would make ngram_forms yield nothing and disable the whole codename layer).
-                    ok = len(parts) == 3 and parts[2].isascii() and parts[2].isdigit() and int(parts[2]) >= 1
-                    if ok:
-                        maxn = int(parts[2])
+                    # exactly ONE "# maxn N", N a bounded positive integer; a duplicate, non-positive,
+                    # oversized, or malformed directive fails closed (each would silently weaken or disable
+                    # the codename layer). len<=3 is checked before int() so an overlong run cannot raise.
+                    if maxn_set:
+                        bad.append("leak-hashes.txt:{}: duplicate '# maxn' directive".format(number))
+                    elif (len(parts) == 3 and parts[2].isascii() and parts[2].isdigit()
+                          and 1 <= len(parts[2]) <= 3 and 1 <= int(parts[2]) <= 100):
+                        maxn, maxn_set = int(parts[2]), True
                     else:
-                        bad.append("leak-hashes.txt:{}: malformed '# maxn N' (need one positive integer)".format(number))
+                        bad.append("leak-hashes.txt:{}: malformed '# maxn N' (need one integer 1..100)".format(number))
                 continue
             if _HEX64.match(s):
                 hashes.add(s)
