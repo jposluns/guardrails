@@ -2162,11 +2162,14 @@ def main():
                 got = "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
-            # redaction guard: a DENY reason names the pattern label but never echoes the secret value.
-            if want == "deny" and secret is not None and isinstance(stdout_obj, dict):
-                reason = stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-                if secret in reason:
-                    failures.append("{}: DENY reason must not echo the secret value (redaction, F-131)".format(label))
+            # redaction guard (F-131/F-134): a DENY names the pattern label but NEVER echoes the secret
+            # value on ANY emitted surface. The banner rides in stdout_obj["systemMessage"] and the reason
+            # in permissionDecisionReason, so serialize the WHOLE stdout_obj (not just the reason) and cover
+            # stderr too, so no output field can leak the value while this test still passes.
+            if want == "deny" and secret is not None:
+                emitted = (json.dumps(stdout_obj) if stdout_obj is not None else "") + (_stderr or "")
+                if secret in emitted:
+                    failures.append("{}: DENY output must not echo the secret value (redaction, F-131/F-134)".format(label))
 
         # Synthetic secret shapes (NOT real), assembled from PARTS at runtime so the shape never appears
         # as a contiguous literal in THIS source file: it uses the single-sourced check_secrets.py
@@ -2248,20 +2251,20 @@ def main():
         _ph_then_real = (_asgn("token", '"<your-key-here>"') + "; "
                          + _asgn("password", '"' + _cred + '"'))
         sexpect("(ss-p) F-124 Write placeholder-then-real on one line denies",
-                "Write", {"file_path": "/tmp/x", "content": _ph_then_real}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _ph_then_real}, "deny", secret=_cred)
         sexpect("(ss-q) F-124 Edit placeholder-then-real on one line denies",
-                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _ph_then_real}, "deny")
+                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _ph_then_real}, "deny", secret=_cred)
         sexpect("(ss-r) F-124 Bash placeholder-then-real on one line denies",
-                "Bash", {"command": _ph_then_real}, "deny")
+                "Bash", {"command": _ph_then_real}, "deny", secret=_cred)
         # F-125 (broadened private-key block regex): a DSA header and the PGP 'PRIVATE KEY BLOCK' form
         # now match; both were missed by the old (?:RSA |EC |OPENSSH |PGP )? alternation. Split so the
         # header is not a contiguous literal here (mirrors _fake_pkey above).
         _dsa_pkey = "-----BEGIN DSA PRIVATE" + " KEY-----"
         _pgp_pkey = "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----"
         sexpect("(ss-s) F-125 Write DSA private key block header denies",
-                "Write", {"file_path": "/tmp/x", "content": _dsa_pkey + "\nMIIB...\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _dsa_pkey + "\nMIIB...\n"}, "deny", secret=_dsa_pkey)
         sexpect("(ss-t) F-125 Write PGP private key block header denies",
-                "Write", {"file_path": "/tmp/x", "content": _pgp_pkey + "\nmQENB...\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _pgp_pkey + "\nmQENB...\n"}, "deny", secret=_pgp_pkey)
         # Control: a placeholder-only one-liner still ALLOWS (both values are non-secrets: a placeholder
         # and a too-short 'example', so no assignment on the line is real).
         _ph_only = (_asgn("token", '"<your-key-here>"') + "; " + _asgn("api_key", '"example"'))
@@ -2276,15 +2279,15 @@ def main():
         _fake_skproj = "sk-" + "proj-" + "A" * 30           # F-126 OpenAI project key; generic sk- cannot match
         _fake_xapp = "xapp-" + "1-A0123456789-" + "A" * 40  # F-126 Slack app-level token
         sexpect("(ss-v) F-126 Write with a bare sk-proj token denies",
-                "Write", {"file_path": "/tmp/x", "content": _fake_skproj + "\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _fake_skproj + "\n"}, "deny", secret=_fake_skproj)
         sexpect("(ss-w) F-126 Write with a bare xapp token denies",
-                "Write", {"file_path": "/tmp/x", "content": _fake_xapp + "\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _fake_xapp + "\n"}, "deny", secret=_fake_xapp)
         # MultiEdit (F-128a): the newline-joined new_string values of the edits are scanned. A ghp_ token
         # in any edit's new_string DENIES; an edits list with no secret ALLOWS.
         sexpect("(ss-x) F-128a MultiEdit whose edit introduces a secret denies",
                 "MultiEdit", {"file_path": "/tmp/x",
                               "edits": [{"old_string": "a", "new_string": "hello world"},
-                                        {"old_string": "b", "new_string": _asgn("auth", _fake_ghp)}]}, "deny")
+                                        {"old_string": "b", "new_string": _asgn("auth", _fake_ghp)}]}, "deny", secret=_fake_ghp)
         sexpect("(ss-y) F-128a MultiEdit whose edits carry no secret allows",
                 "MultiEdit", {"file_path": "/tmp/x",
                               "edits": [{"old_string": "a", "new_string": "def add(a, b):"},

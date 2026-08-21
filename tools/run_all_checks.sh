@@ -2,13 +2,16 @@
 # Run every quality gate, in the same order CI runs them.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
 
-# Never let a gate leave Python bytecode: a stray __pycache__/*.pyc in the shippable surface trips the
-# portability gate as a non-portable file class, a spurious local FAIL that CI (a fresh checkout) never
-# sees. Suppress bytecode for every gate below, and sweep any cache a prior run or ad hoc invocation left.
+# Keep the local run honest WITHOUT weakening any gate. Two hygiene steps, both confined to regenerable,
+# GITIGNORED Python bytecode a fresh CI checkout never carries: (1) suppress bytecode for every gate below,
+# so this runner never dirties the tree itself; (2) sweep stray __pycache__ a prior run or ad hoc
+# invocation left, via `git clean -X` (IGNORED-only) - by git construction it never removes a TRACKED
+# file, so a committed non-portable file (even inside a __pycache__ dir) still fails the portability gate
+# here exactly as it does in CI. This cannot mask a committed violation (gate-discipline).
 export PYTHONDONTWRITEBYTECODE=1
-find . -name '__pycache__' -type d -not -path './.git/*' -prune -exec rm -rf {} +
+git clean -fdX -- '*__pycache__*'
 
 failed=0
 notrun=0
