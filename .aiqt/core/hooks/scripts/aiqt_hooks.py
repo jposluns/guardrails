@@ -117,6 +117,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1832,11 +1833,14 @@ def _recovery_toplevel(repo):
     if result.returncode != 0:
         return None
     try:
-        # Strip ONLY git's output terminator (a trailing newline), NOT arbitrary whitespace: a repo dir
-        # name may legitimately carry a leading or trailing SPACE, and .strip() would corrupt that path so
-        # the registry read (or a containment anchor) silently misses. rstrip("\n") preserves every path
-        # character; a decode or type fault fails safe to None (an unresolved root -> the caller ASKs).
-        top = result.stdout.rstrip("\n")
+        # Strip git's ONE output terminator (its single trailing newline), NOT arbitrary whitespace and
+        # NOT every trailing newline: a repo dir name may legitimately carry a leading or trailing SPACE
+        # (which .strip() would corrupt) and may even END in a newline (which rstrip("\n") would eat along
+        # with git's terminator), and either corruption makes the registry read (or a containment anchor)
+        # silently miss. git prints the path plus EXACTLY one \n, so dropping only that one terminator
+        # preserves every path character; a decode or type fault fails safe to None (an unresolved root ->
+        # the caller ASKs).
+        top = result.stdout[:-1] if result.stdout.endswith("\n") else result.stdout
     except (AttributeError, TypeError):
         return None
     if not top or not os.path.isabs(top):
@@ -3268,10 +3272,11 @@ def _load_gensrc_registry(root):
     tuples in registry order with kind=block entries dropped (a path guard cannot see which lines an
     edit touches; the block drift gates backstop those).
 
-    ABSENT (FileNotFoundError on a NON-symlink path: ENOENT on the file or a missing .aiqt/ component) is
+    ABSENT (FileNotFoundError from the lstat probe: ENOENT on the file or a missing .aiqt/ component) is
     the inert boundary: a repo with no registry gets no coverage (adopters author their own). Every OTHER
     read fault is BAD, never absent, so an unreadable input can never read as clean (integ-check-fails-
-    closed-on-unreadable): a symlink registry (dangling or redirecting; not a trusted regular file), a
+    closed-on-unreadable): a registry that is not a regular file (a symlink dangling or redirecting, a
+    FIFO, a directory, a socket, a device; not a trusted regular file), a
     PermissionError/NotADirectoryError/IsADirectoryError, a non-UTF-8 decode, an oversize file (the bound
     is on BYTES via a binary read), malformed JSON, a non-int/unknown version, a non-list `generated`, a
     malformed entry, or a control character (NUL included) in an entry target (rejected BEFORE the
@@ -3283,12 +3288,23 @@ def _load_gensrc_registry(root):
     tolerated: the version field pins the schema, and strictness on additions would break a
     forward-compatibly authored registry."""
     path = os.path.join(root, _GENSRC_REGISTRY_REL)
-    # A generated-artefact registry must be a trusted REGULAR file. A SYMLINK (dangling or redirecting) is
-    # not: it could make a foreign or nonexistent target read as this repo's registry. islink is tested
-    # BEFORE the open, so a DANGLING symlink (whose open would raise FileNotFoundError) is BAD, never the
-    # inert absent-ALLOW; genuine absence (a non-symlink ENOENT) stays absent.
-    if os.path.islink(path):
-        return ("bad", "the registry is a symlink; a generated-artefact registry must be a regular file")
+    # A generated-artefact registry must be a trusted REGULAR file. Anything that is NOT a regular file (a
+    # symlink dangling or redirecting, a FIFO, a directory, a socket, a device) is BAD: a symlink could
+    # make a foreign or nonexistent target read as this repo's registry, and a FIFO at the path would block
+    # the open until the hook timeout. os.lstat is probed BEFORE the open: it does NOT follow a symlink (so
+    # a symlink is rejected as non-regular, closing the islink-then-open TOCTOU where the path could flip
+    # between the check and the open) and does NOT block on a FIFO. A FileNotFoundError from lstat is
+    # genuine absence (a non-symlink ENOENT) -> inert absent; any other lstat OSError is BAD; a path that
+    # resolves to something other than a regular file is BAD.
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return ("absent", None)
+    except OSError as exc:
+        return ("bad", "the registry could not be stat'd ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode):
+        return ("bad", "the registry is not a regular file (a symlink, FIFO, directory, ...); "
+                       "a generated-artefact registry must be a regular file")
     try:
         # BINARY read so the size bound is on BYTES, not characters: read one byte past the cap, and if the
         # file exceeds the cap treat it as malformed (a SECA resource bound a multibyte-oversize file must
@@ -3431,7 +3447,7 @@ def gensrc_guard(data):
     if not isinstance(tool_name, str) or not tool_name:
         # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
         # the scope set; fail SAFE to ask rather than silently allow (only a MISSING tool_name denies).
-        return _gensrc_fail_ask("the tool_name was missing or unreadable")
+        return _gensrc_fail_ask("the tool_name was unreadable")
     if tool_name not in _GENSRC_TOOLS:
         return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
     tool_input = data.get("tool_input")

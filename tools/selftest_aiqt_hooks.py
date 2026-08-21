@@ -2405,6 +2405,9 @@ def main():
             gs_repo_sp = _gs_init("gsrepo_sp ")        # dir name with a TRAILING SPACE (F-162)
             (gs_repo_sp / ".aiqt").mkdir(parents=True, exist_ok=True)
             (gs_repo_sp / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            gs_repo_nl = _gs_init("gsrepo_nl\n")        # dir name ending in a NEWLINE (F-167)
+            (gs_repo_nl / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_repo_nl / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
             gs_link = _gs_init("gslink")               # registry is a DANGLING symlink (F-164)
             (gs_link / ".aiqt").mkdir(parents=True, exist_ok=True)
             os.symlink(str(gs_link / ".aiqt" / "nonexistent.json"),
@@ -2426,6 +2429,7 @@ def main():
             return 2
         gr, gr2, gr3, gng = str(gs_repo), str(gs_repo2), str(gs_repo3), str(gs_nogit)
         grsp, grlink, grdir, grbig = str(gs_repo_sp), str(gs_link), str(gs_dir), str(gs_big)
+        grnl = str(gs_repo_nl)
 
         # ASK: a file match, a tree-member match, and a MultiEdit file match. gs-a proves the EXPLICIT
         # _ask (the manifest default is never rendered, so an ask here cannot be leaning on it).
@@ -2482,10 +2486,12 @@ def main():
                 tool="Write", cwd=gr, tool_input="not-a-dict")
         gexpect("(gs-p) a missing file_path ASKS", "ask",
                 tool="Write", cwd=gr)
-        # ASK: an UNREADABLE registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
-        # DETERMINISTIC: the registry PATH is a DIRECTORY, so open(path,"rb") raises IsADirectoryError
-        # (an OSError -> bad) on every runner, root included. No os.access/chmod skip (F-166).
-        gexpect("(gs-q) an unreadable (directory-at-path) registry ASKS (unreadable is never absent)", "ask",
+        # ASK: a non-regular-file registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
+        # DETERMINISTIC: the registry PATH is a DIRECTORY, so the lstat/S_ISREG probe rejects it as
+        # non-regular BEFORE the open (a directory's st_mode is not S_ISREG -> bad) on every runner, root
+        # included. No os.access/chmod skip (F-166).
+        gexpect("(gs-q) a non-regular (directory-at-path) registry ASKS (not a regular file, never absent)",
+                "ask",
                 tool="Write", file_path=os.path.join(grdir, "GEN.md"), cwd=grdir)
         # ASK: a MultiEdit relative file_path is joined onto cwd, then matched.
         gexpect("(gs-r) a MultiEdit relative file_path is cwd-joined then matched (ASKS)", "ask",
@@ -2550,14 +2556,56 @@ def main():
         # the space -> wrong root -> registry not found -> absent). (F-162)
         gexpect("(gs-z) a trailing-space repo dir keeps its toplevel; the registered target ASKS", "ask",
                 tool="Write", file_path=os.path.join(grsp, "GEN.md"), cwd=grsp)
-        # ASK: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). Was an inert
-        # ALLOW (open -> FileNotFoundError -> absent). (F-164)
-        gexpect("(gs-aa) a dangling-symlink registry ASKS (a symlink is never absent)", "ask",
+        # ASK: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). lstat does NOT
+        # follow the link, so S_ISREG is False on the link itself -> bad (closing the islink-then-open
+        # TOCTOU). Was an inert ALLOW (open -> FileNotFoundError -> absent). (F-164)
+        gexpect("(gs-aa) a dangling-symlink registry ASKS (a symlink is never a regular file)", "ask",
                 tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
         # ASK: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
         # (a char-count read stayed under the cap and parsed to an empty registry). (F-165)
         gexpect("(gs-ab) a multibyte-oversize registry ASKS (the bound is on BYTES)", "ask",
                 tool="Write", file_path=os.path.join(grbig, "GEN.md"), cwd=grbig)
+
+        # gs-ac / gs-ad: the guarded-realpath-fault branch (the target/entry realpath raises) and the
+        # _gensrc_within containment-fault "err" branch are DEFENSE-IN-DEPTH and NOT input-reachable on
+        # POSIX (a control-char input is rejected before realpath; a realpath'd absolute never makes
+        # os.path.commonpath raise on Linux). Exercise them DETERMINISTICALLY by INJECTING the fault:
+        # monkeypatch the module-shared os.path primitive to raise within the call, assert the handler
+        # returns ASK, restore in the finally. The good repo (gr) + a registered target gives a resolvable
+        # root and a real registry, so the flow REACHES the guarded call before the fault fires.
+        # Falsifiable: removing the guarding try/except (gs-ac the gensrc_guard realpath wrap, gs-ad the
+        # _gensrc_within wrap / its "err" sentinel handling) turns the injected fault into an uncaught
+        # crash the dispatcher hard-DENIES, not an ASK.
+        def _raise_realpath(*_a, **_k):
+            raise OSError("injected realpath fault (gs-ac)")
+
+        def _raise_commonpath(*_a, **_k):
+            raise ValueError("injected commonpath fault (gs-ad)")
+
+        _gs_inj_fp = os.path.join(gr, "GEN.md")
+        _real_realpath = os.path.realpath
+        try:
+            os.path.realpath = _raise_realpath
+            gexpect("(gs-ac) an injected realpath fault on the target ASKS (guarded-realpath branch)",
+                    "ask", tool="Write", file_path=_gs_inj_fp, cwd=gr)
+        finally:
+            os.path.realpath = _real_realpath
+        _real_commonpath = os.path.commonpath
+        try:
+            os.path.commonpath = _raise_commonpath
+            gexpect("(gs-ad) an injected commonpath fault ASKS (_gensrc_within containment 'err' branch)",
+                    "ask", tool="Write", file_path=_gs_inj_fp, cwd=gr)
+        finally:
+            os.path.commonpath = _real_commonpath
+
+        # ASK: a repo dir name ending in a NEWLINE keeps its toplevel. git prints the path + EXACTLY one \n
+        # terminator, so stripping only that one \n preserves the dir's own trailing newline; the registry
+        # IS found and the registered target (relative MultiEdit route, cwd = the newline-terminal repo)
+        # ASKS. Falsifiable: rstrip("\n") eats the dir's own newline too -> wrong root -> registry not
+        # found -> inert absent ALLOW. (F-167)
+        gexpect("(gs-ae) a newline-terminal repo dir keeps its toplevel; the registered target ASKS", "ask",
+                tool="MultiEdit", file_path="GEN.md",
+                edits=[{"old_string": "a", "new_string": "b"}], cwd=grnl)
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2649,14 +2697,20 @@ def main():
           "manifest default), while a source edit, an unregistered path, and a kind=block target ALLOW, "
           "component-boundary matching keeps gen-extra/ and GEN.md.bak from matching gen/ and GEN.md, and "
           "Bash is out of scope; every fail branch fails SAFE to ASK (a malformed, unknown-version, "
-          "malformed-entry, symlink, byte-oversize, non-UTF-8, or unreadable registry - the unreadable "
-          "case proven deterministically via a directory-at-path, no permission-skip; a control character "
+          "malformed-entry, non-regular-file, byte-oversize, non-UTF-8, or unreadable registry - the "
+          "non-regular-file rejection (an lstat/S_ISREG probe before the open, closing the islink-then-open "
+          "TOCTOU and a FIFO-blocked open) proven deterministically via a dangling symlink and a "
+          "directory-at-path, no permission-skip; a control character "
           "in an entry target or in the payload file_path; a JSON-bool or string version; an unresolvable "
-          "non-git root or target; a non-contained target or a containment fault; a non-dict tool_input; a "
+          "non-git root, and - proven via an INJECTED os.path fault, both being POSIX-unreachable "
+          "defence-in-depth - an unresolvable target (the guarded-realpath branch) and a containment fault "
+          "(the _gensrc_within 'err' branch); a proven-outside (non-contained) target; a non-dict "
+          "tool_input; a "
           "missing file_path or cwd; an empty/list/bool tool_name; and a cwd-joined relative MultiEdit "
-          "path), a repo dir name with a trailing space keeps its toplevel so the registered target still "
-          "ASKS, an absent registry is the inert ALLOW, a mis-wired event HARD-BLOCKS (exit 2), and only a "
-          "MISSING tool_name DENIES")
+          "path), a repo dir name with a trailing SPACE or a trailing NEWLINE keeps its toplevel (only "
+          "git's single trailing-newline terminator is stripped, not every trailing newline) so the "
+          "registered target still ASKS, an absent registry is the inert ALLOW, a mis-wired event "
+          "HARD-BLOCKS (exit 2), and only a MISSING tool_name DENIES")
     return 0
 
 
