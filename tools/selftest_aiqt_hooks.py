@@ -49,6 +49,16 @@ credential-named assignment of a real-length literal, single-sourced from tools/
 a placeholder value, ordinary code, an out-of-scope Read, and a Bash command with no secret allow; and a
 missing tool_name or an absent target field fails closed. Every secret fixture is synthetic-but-shaped.
 
+It also covers the generated-artefact edit guard (gensrc_guard, gensrc): a Write/Edit/MultiEdit whose
+file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json (read at
+decision time) ASKS the steering ask, while a source edit, an unregistered path, and a kind=block entry
+ALLOW, Bash is out of scope, and component-boundary matching means gen-extra/ and GEN.md.bak do not
+match gen/ and GEN.md. Every fail branch fails SAFE to ASK (an unreadable, malformed, or
+unknown-version registry, a malformed entry, an unresolvable repo root, a non-contained target, and an
+unreadable payload field), an absent registry is the inert ALLOW, and only a missing tool_name denies.
+Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
+mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import contextlib
@@ -160,6 +170,7 @@ def main():
     for _idk in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
         os.environ.pop(_idk, None)
     failures = []
+    gs_skipped = []  # gensrc gs-q: skipped where a chmod-0 registry stays readable (root/DAC-bypass)
 
     def expect(label, command, want, cwd=None):
         got = _decision(handler, command, cwd=cwd)
@@ -2332,6 +2343,141 @@ def main():
         except ValueError:
             pass
 
+        # === gensrc_guard (gensrc): a Write/Edit/MultiEdit onto a REGISTERED generated artefact ASKS =
+        # A registry-driven PATH guard: the handler reads the per-repo .aiqt/gensrc.json at decision
+        # time and ASKS on a kind=file or kind=tree match. Judged by the STRUCTURED decision, never by
+        # grepping output. Fixtures are throwaway git repos under tmp (removed in the finally); registry
+        # targets need not exist on disk (realpath resolves a non-existent path), so no seed commits are
+        # needed beyond git init.
+        def _gs_init(name):
+            path = tmp / name
+            path.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(path)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            return path
+
+        def gdecide(data):
+            code, stdout_obj, _stderr = aiqt_hooks.gensrc_guard(data)
+            if code == 0 and stdout_obj is None:
+                return "allow"
+            if code == 0 and isinstance(stdout_obj, dict):
+                return stdout_obj.get("hookSpecificOutput", {}).get("permissionDecision", "unexpected")
+            return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
+
+        def gexpect(label, want, tool="Write", file_path=None, edits=None, cwd=None,
+                    with_tool=True, with_cwd=True, tool_input="__default__"):
+            data = {"hook_event_name": "PreToolUse"}
+            if with_tool:
+                data["tool_name"] = tool
+            if tool_input == "__default__":
+                ti = {}
+                if file_path is not None:
+                    ti["file_path"] = file_path
+                if edits is not None:
+                    ti["edits"] = edits
+                data["tool_input"] = ti
+            elif tool_input is not None:
+                data["tool_input"] = tool_input
+            if with_cwd and cwd is not None:
+                data["cwd"] = cwd
+            got = gdecide(data)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # A checked-in-shape registry with one file, one tree, and one block entry.
+        _gs_registry = {"version": 1, "generated": [
+            {"kind": "file", "target": "GEN.md", "sources": ["src.toml"],
+             "regenerate": "python3 tools/gen_x.py"},
+            {"kind": "tree", "target": "gen/", "sources": ["src/"],
+             "regenerate": "python3 tools/gen_tree.py"},
+            {"kind": "block", "target": "CLAUDE.md", "sources": ["rules/"],
+             "regenerate": "python3 tools/gen_claude.py"}]}
+        try:
+            gs_repo = _gs_init("gsrepo")               # carries the registry
+            (gs_repo / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_repo / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            gs_repo2 = _gs_init("gsrepo2")             # NO registry (absent, inert)
+            gs_repo3 = _gs_init("gsrepo3")             # mutable bad registries
+            (gs_repo3 / ".aiqt").mkdir(parents=True, exist_ok=True)
+            gs_reg3 = gs_repo3 / ".aiqt" / "gensrc.json"
+            gs_nogit = tmp / "gsnogit"                 # plain non-git dir (unresolved root)
+            gs_nogit.mkdir(parents=True, exist_ok=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the gensrc fixtures: {}".format(exc), file=sys.stderr)
+            return 2
+        gr, gr2, gr3, gng = str(gs_repo), str(gs_repo2), str(gs_repo3), str(gs_nogit)
+
+        # ASK: a file match, a tree-member match, and a MultiEdit file match. gs-a proves the EXPLICIT
+        # _ask (the manifest default is never rendered, so an ask here cannot be leaning on it).
+        gexpect("(gs-a) Write a registered file target ASKS", "ask",
+                tool="Write", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
+        gexpect("(gs-b) Edit a member of a registered tree ASKS", "ask",
+                tool="Edit", file_path=os.path.join(gr, "gen", "part.md"), cwd=gr)
+        gexpect("(gs-c) MultiEdit a registered file target ASKS (MultiEdit in scope)", "ask",
+                tool="MultiEdit", file_path=os.path.join(gr, "GEN.md"),
+                edits=[{"old_string": "a", "new_string": "b"}], cwd=gr)
+        # ALLOW: a source edit, an unregistered path, a block-entry file.
+        gexpect("(gs-d) Edit a source (never a generated target) allows", "allow",
+                tool="Edit", file_path=os.path.join(gr, "src.toml"), cwd=gr)
+        gexpect("(gs-e) Write an unregistered path allows (no-match inertness)", "allow",
+                tool="Write", file_path=os.path.join(gr, "README.md"), cwd=gr)
+        gexpect("(gs-f) Edit a kind=block target allows (block exclusion)", "allow",
+                tool="Edit", file_path=os.path.join(gr, "CLAUDE.md"), cwd=gr)
+        # ALLOW: component-boundary and equality matching (fails under a raw string prefix).
+        gexpect("(gs-g1) Write gen-extra/ does not match the gen/ tree", "allow",
+                tool="Write", file_path=os.path.join(gr, "gen-extra", "x.md"), cwd=gr)
+        gexpect("(gs-g2) Write GEN.md.bak does not match the GEN.md file", "allow",
+                tool="Write", file_path=os.path.join(gr, "GEN.md.bak"), cwd=gr)
+        # ALLOW: an absent registry is inert (repo2 has no .aiqt/gensrc.json).
+        gexpect("(gs-h) an absent registry is the inert ALLOW", "allow",
+                tool="Write", file_path=os.path.join(gr2, "GEN.md"), cwd=gr2)
+        # ASK: malformed JSON, unknown version, malformed entry (kind=dir) all fail SAFE to ask.
+        gs_reg3.write_text("{ not json", encoding="utf-8")
+        gexpect("(gs-i1) malformed-JSON registry ASKS", "ask",
+                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        gs_reg3.write_text(json.dumps({"version": 2, "generated": []}), encoding="utf-8")
+        gexpect("(gs-i2) unknown-version registry ASKS", "ask",
+                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+            {"kind": "dir", "target": "x", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
+        gexpect("(gs-i3) malformed-entry (unknown kind) registry ASKS", "ask",
+                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        # ASK: an unresolved repo root (a plain non-git cwd).
+        gexpect("(gs-j) a non-git cwd (unresolved root) ASKS", "ask",
+                tool="Write", file_path=os.path.join(gng, "GEN.md"), cwd=gng)
+        # DENY: the only deny, the shared fail-closed contract (no tool_name).
+        gexpect("(gs-k) a missing tool_name DENIES (fail-closed contract)", "deny",
+                file_path=os.path.join(gr, "GEN.md"), cwd=gr, with_tool=False)
+        # ASK: no session cwd, so the root cannot be resolved.
+        gexpect("(gs-l) a missing cwd ASKS (root cannot be resolved)", "ask",
+                tool="Write", file_path=os.path.join(gr, "GEN.md"), with_cwd=False)
+        # ASK: a target outside the repo cannot be cleared against this repo registry.
+        gexpect("(gs-m) a target outside the repo ASKS (non-contained)", "ask",
+                tool="Write", file_path=str(tmp / "outside.md"), cwd=gr)
+        # ALLOW: Bash is out of scope by design (defensive branch; the matcher excludes it too).
+        gexpect("(gs-n) Bash is out of scope (allow)", "allow",
+                tool="Bash", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
+        # ASK: payload fail-safes (non-dict tool_input, missing file_path).
+        gexpect("(gs-o) a non-dict tool_input ASKS", "ask",
+                tool="Write", cwd=gr, tool_input="not-a-dict")
+        gexpect("(gs-p) a missing file_path ASKS", "ask",
+                tool="Write", cwd=gr)
+        # ASK: an UNREADABLE registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
+        # Skipped where the runner can still read a chmod-0 file (root/DAC-bypass), as in gen_hooks
+        # case 5 and conformance.py.
+        gs_reg3.write_text(json.dumps(_gs_registry), encoding="utf-8")
+        os.chmod(gs_reg3, 0)
+        if os.access(gs_reg3, os.R_OK):
+            gs_skipped.append("gs-q unreadable-registry")
+        else:
+            gexpect("(gs-q) an unreadable registry ASKS (unreadable is never absent)", "ask",
+                    tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        os.chmod(gs_reg3, 0o644)  # restore so cleanup can remove it
+        # ASK: a MultiEdit relative file_path is joined onto cwd, then matched.
+        gexpect("(gs-r) a MultiEdit relative file_path is cwd-joined then matched (ASKS)", "ask",
+                tool="MultiEdit", file_path="GEN.md",
+                edits=[{"old_string": "a", "new_string": "b"}], cwd=gr)
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2415,7 +2561,19 @@ def main():
           "Anthropic, AWS access key id), a private key block header, or a credential-named assignment of "
           "a real-length literal DENIES, naming only the pattern label and never the value; a placeholder "
           "value (single-sourced PLACEHOLDER exclusion), ordinary code, an out-of-scope Read, and a Bash "
-          "command with no secret ALLOW; and a missing tool_name or an absent target field fails closed")
+          "command with no secret ALLOW; and a missing tool_name or an absent target field fails closed"
+          ". The generated-artefact edit guard (EN-5 PR-D, gensrc) is proven: a Write/Edit/MultiEdit "
+          "whose file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json "
+          "(read at decision time) ASKS the explicit steering ask (never leaning on the never-rendered "
+          "manifest default), while a source edit, an unregistered path, and a kind=block target ALLOW, "
+          "component-boundary matching keeps gen-extra/ and GEN.md.bak from matching gen/ and GEN.md, and "
+          "Bash is out of scope; every fail branch fails SAFE to ASK (a malformed, unknown-version, "
+          "malformed-entry, or unreadable registry, an unresolvable non-git root, a non-contained target, "
+          "a non-dict tool_input, a missing file_path or cwd, and a cwd-joined relative MultiEdit path), "
+          "an absent registry is the inert ALLOW, and only a missing tool_name DENIES"
+          + ("" if not gs_skipped else
+             " (NOTE: skipped {} gensrc case(s) the runner cannot exercise: {})"
+             .format(len(gs_skipped), ", ".join(gs_skipped))))
     return 0
 
 

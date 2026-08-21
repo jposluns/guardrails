@@ -13,6 +13,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
+  gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -23,11 +24,21 @@ blocking error whose stderr is fed back to Claude. The Stop payload carries the 
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
 Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
-deliberate boundary posture is stated next). A fail-closed control that cannot read the input it is meant
+deliberate boundary posture is stated next) and gensrc_guard (a second stated exception, below). A
+fail-closed control that cannot read the input it is meant
 to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
 string, or an unreadable required field all deny. A detected violation denies the same way. A clean
 pass emits NO decision and exits 0 silently.
+
+gensrc_guard (gensrc) is the SECOND stated exception: it is a registry-driven path ASK whose strongest
+outcome on a confirmed violation is itself an ask (the human approving IS the opt-out), so every branch
+it cannot clear fails SAFE to ASK rather than deny, because a branch that denied on uncertainty would
+punish uncertainty harder than certainty. An unreadable, malformed, or unknown-version registry, an
+unresolvable repo root, a target that canonicalizes outside the repo, and an unreadable payload field
+all ASK; an absent registry is the inert ALLOW; and only a missing tool_name denies (the shared
+fail-closed contract). The ASK still satisfies integ-check-fails-closed-on-unreadable in substance:
+the failure surfaces as a gate the human must clear and can never read as clean.
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
 to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK
@@ -3217,6 +3228,184 @@ def secrets_shift_left(data):
                  "(rule secsec).".format(tool_name, label))
 
 
+# --- gensrc generated-artefact edit guard ------------------------------------------------------------
+# A NEW constant set, deliberately NOT reusing FILE_PATH_TOOLS (aiqt_hooks.py:782), which is
+# ("Read", "Write", "Edit"): it omits MultiEdit and includes Read, so it does not describe this
+# control's matcher. Mirrors the _SECSEC_TOOLS idiom (aiqt_hooks.py:3111-3112).
+_GENSRC_TOOLS = ("Write", "Edit", "MultiEdit")   # MultiEdit carries ONE top-level file_path
+_GENSRC_REGISTRY_REL = os.path.join(".aiqt", "gensrc.json")
+_GENSRC_VERSION = 1
+_GENSRC_MAX_BYTES = 1_000_000  # the real registry is ~5 KB; a larger one is malformed (SECA bound)
+
+
+def _gensrc_fail_ask(detail):
+    """A fail-SAFE ASK shared by every gensrc_guard branch that cannot PROVE no-match. UNLIKE the
+    fail-CLOSED PreToolUse controls above (which deny an unreadable input), gensrc_guard fails to ASK,
+    like git_discard's boundary posture: this control's strongest outcome on a CONFIRMED violation is
+    itself an ask (the human approving IS the opt-out), so a branch that DENIED on uncertainty would
+    punish uncertainty harder than certainty. The ask still satisfies integ-check-fails-closed-on-
+    unreadable in substance: the failure surfaces as a gate the human must clear and can never read as
+    clean. Only a missing tool_name denies (the shared _deny_missing_tool_name contract)."""
+    return _ask(
+        "AIQT rule gensrc (generated-artefact-source-only): {}; failing safe to ask.".format(detail),
+        "AIQT guardrail: asked because the generated-artefact edit guard could not clear this call "
+        "({}) (rule gensrc, fail-safe).".format(detail))
+
+
+def _load_gensrc_registry(root):
+    """Read <root>/.aiqt/gensrc.json AT DECISION TIME and return one of ("absent", None),
+    ("ok", entries), or ("bad", detail). `entries` is the list of (kind, target, sources, regenerate)
+    tuples in registry order with kind=block entries dropped (a path guard cannot see which lines an
+    edit touches; the block drift gates backstop those).
+
+    ABSENT (FileNotFoundError ALONE: ENOENT on the file or a missing .aiqt/ component) is the inert
+    boundary: a repo with no registry gets no coverage (adopters author their own). Every OTHER read
+    fault is BAD, never absent, so an unreadable input can never read as clean (integ-check-fails-
+    closed-on-unreadable): a PermissionError/NotADirectoryError or a UnicodeDecodeError, an oversize
+    file, malformed JSON, an unknown/missing version, a non-list `generated`, or a malformed entry. We
+    do NOT use os.path.exists, which swallows EACCES (the trap gen_hooks documents at gen_hooks.py:79).
+    Per-entry validation mirrors _canonical_target (tools/gen_gensrc.py:193-213), because gen_gensrc's
+    validation only guarantees THIS repo's registry; an adopter-authored or hand-tampered registry the
+    guard cannot fully read is BAD (it cannot prove no-match). Unknown extra keys within version 1 are
+    tolerated: the version field pins the schema, and strictness on additions would break a
+    forward-compatibly authored registry."""
+    path = os.path.join(root, _GENSRC_REGISTRY_REL)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = handle.read(_GENSRC_MAX_BYTES + 1)  # bounded read: over the cap is malformed
+    except FileNotFoundError:
+        return ("absent", None)
+    except (OSError, UnicodeDecodeError) as exc:
+        return ("bad", "the registry could not be read ({})".format(exc))
+    if len(raw) > _GENSRC_MAX_BYTES:
+        return ("bad", "the registry exceeds the {}-byte bound".format(_GENSRC_MAX_BYTES))
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return ("bad", "the registry is malformed JSON")
+    if not isinstance(obj, dict):
+        return ("bad", "the registry is not a JSON object")
+    if obj.get("version") != _GENSRC_VERSION:
+        # A future version 2 schema degrades to a fail-safe ask, never a misread of an unknown shape.
+        return ("bad", "unknown registry version (expected {})".format(_GENSRC_VERSION))
+    generated = obj.get("generated")
+    if not isinstance(generated, list):
+        return ("bad", "the registry carries no generated list")
+    entries = []
+    for item in generated:
+        if not isinstance(item, dict):
+            return ("bad", "a registry entry is not an object")
+        kind = item.get("kind")
+        target = item.get("target")
+        sources = item.get("sources")
+        regenerate = item.get("regenerate")
+        if kind not in ("file", "tree", "block"):
+            return ("bad", "a registry entry has an unknown kind")
+        # target: a clean POSIX-relative path (no backslash, not absolute, no empty/'.'/'..' segment),
+        # trailing '/' ONLY on a tree target (the tree marker); mirrors _canonical_target.
+        if not isinstance(target, str) or not target or "\\" in target or _is_absolute(target):
+            return ("bad", "a registry entry has a malformed target")
+        has_trailing = target.endswith("/")
+        body = target[:-1] if has_trailing else target
+        if any(segment in ("", ".", "..") for segment in body.split("/")):
+            return ("bad", "a registry entry has a malformed target")
+        if has_trailing and kind != "tree":
+            return ("bad", "a non-tree entry target must not end with '/'")
+        if kind == "tree" and not has_trailing:
+            return ("bad", "a tree entry target must end with '/'")
+        if not isinstance(sources, list) or not sources or not all(
+                isinstance(source, str) and source for source in sources):
+            return ("bad", "a registry entry has malformed sources")
+        if not isinstance(regenerate, str) or not regenerate:
+            return ("bad", "a registry entry has a malformed regenerate command")
+        if kind == "block":
+            continue  # blocks are excluded from matching by design; the block drift gates backstop them
+        entries.append((kind, target, sources, regenerate))
+    return ("ok", entries)
+
+
+def _gensrc_match(entries, target, root_c):
+    """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
+    (entry_target, sources, regenerate), or None. A FILE entry matches on realpath EQUALITY; a TREE
+    entry matches when `target` is the tree root or lies under it, by component-boundary containment
+    (_path_is_within), never a raw string prefix, so gen-extra/ never matches gen/ and GEN.md.bak
+    never matches GEN.md. Each entry target is repo-root-relative, so it is joined onto root_c and
+    canonicalized. Block entries were dropped at load. _path_is_within errs True on a resolution fault,
+    the safe direction here too (a fault reads as matched, which routes to the steering ASK)."""
+    for kind, entry_target, sources, regenerate in entries:
+        entry_c = os.path.realpath(os.path.join(root_c, entry_target))
+        if kind == "file":
+            if entry_c == target:
+                return (entry_target, sources, regenerate)
+        elif _path_is_within(target, entry_c):  # tree
+            return (entry_target, sources, regenerate)
+    return None
+
+
+def gensrc_guard(data):
+    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit: ASK before a
+    Write/Edit/MultiEdit that hand-edits a generated artefact registered in the per-repo
+    .aiqt/gensrc.json, read AT DECISION TIME. A REGISTRY-DRIVEN PATH guard, not a content judge: it
+    fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
+    exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
+    EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. The decision
+    is an ASK, never a deny: the human approving the ask IS the opt-out, and an approved hand-edit then
+    fails the drift gate until source and derivative reconcile. Every fail branch fails SAFE to ASK (see
+    _gensrc_fail_ask); only a missing tool_name denies (the shared fail-closed contract). The repo root
+    is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
+    _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("gensrc")
+    if tool_name not in _GENSRC_TOOLS:
+        return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _gensrc_fail_ask("the {} payload carried no readable tool_input".format(tool_name))
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return _gensrc_fail_ask("the {} payload carried no readable file_path".format(tool_name))
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return _gensrc_fail_ask("the payload carried no session cwd, so the repo root cannot be resolved")
+    # The scrubbed rev-parse primitive (every ambient GIT_* removed), so an ambient decoy repo cannot
+    # redirect the registry read; None means the cwd is outside any git work tree (a non-git session).
+    root = _recovery_toplevel(cwd)
+    if root is None:
+        return _gensrc_fail_ask("the session cwd is outside any resolvable git work tree")
+    status, payload = _load_gensrc_registry(root)
+    if status == "absent":
+        return _allow()  # the inert boundary: no registry, no coverage (adopters author their own)
+    if status == "bad":
+        return _gensrc_fail_ask("the .aiqt/gensrc.json registry could not be cleared ({})".format(payload))
+    entries = payload
+    if not entries:
+        return _allow()  # a registry of only block entries has nothing this path guard can match
+    # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto
+    # cwd matches the platform's own resolution. Canonicalize both to realpaths for the match.
+    target = os.path.realpath(file_path if _is_absolute(file_path) else os.path.join(cwd, file_path))
+    root_c = os.path.realpath(root)
+    if not _path_is_within(target, root_c):
+        return _gensrc_fail_ask("the target canonicalizes outside the resolved repo, so it cannot be "
+                                "cleared against the registry of this repo")
+    match = _gensrc_match(entries, target, root_c)
+    if match is None:
+        return _allow()  # not a registered generated artefact
+    entry_target, sources, regenerate = match
+    reason = ("AIQT rule gensrc (generated-artefact-source-only): {} is a generated artefact ({} in "
+              ".aiqt/gensrc.json); it is changed only through its source. Edit {} and regenerate with "
+              "'{}' instead. Approve only to deliberately hand-edit a generated artefact; the drift "
+              "gate will fail until source and derivative are reconciled."
+              .format(file_path, entry_target, ", ".join(sources), regenerate))
+    banner = ("AIQT guardrail: asked before a {} to the generated artefact {} (rule gensrc): edit the "
+              "source and regenerate ({}).".format(tool_name, entry_target, regenerate))
+    return _ask(reason, banner)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -3227,6 +3416,7 @@ HANDLERS = {
     "protected_line": protected_line,
     "gate_weakening": gate_weakening,
     "secrets_shift_left": secrets_shift_left,
+    "gensrc_guard": gensrc_guard,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -3244,6 +3434,7 @@ HANDLER_EVENT = {
     "protected_line": PRETOOL,
     "gate_weakening": PRETOOL,
     "secrets_shift_left": PRETOOL,
+    "gensrc_guard": PRETOOL,
 }
 
 
