@@ -10,9 +10,9 @@ answer what is being asked; when it cannot, change the input rather than harden 
 is handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,
 threshold, or configuration, is itself such an input: measure a passed premise against the real source, and
 treat a malformed, contradictory, or out-of-range control as a failure rather than running the guard
-mis-sized or disabled. When the source cannot answer, the guard reports a distinct cannot-evaluate outcome,
-never the value it uses for a definite no; a two-valued predicate cannot honestly carry this third state, so
-read every failure-returning guard clause as either "no" or "cannot evaluate", and route a cannot-evaluate to
-the safe outcome for that guard, a coverage check reporting failure and an action trigger withholding the
-action, never to a silent clean pass or to a verdict the guard never reached. A guard fails most silently on
-exactly the inputs its author never had examples of.
+mis-sized or disabled. When the source cannot answer, the guard treats that as a distinct cannot-evaluate
+case rather than silently collapsing it into a definite no; a two-valued predicate cannot carry this third
+state, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and
+a consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a
+verdict the guard never reached. Inputs absent from the author's own examples are a particular silent-failure
+risk.

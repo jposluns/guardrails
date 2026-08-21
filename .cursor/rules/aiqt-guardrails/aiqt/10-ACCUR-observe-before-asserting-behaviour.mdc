@@ -14,6 +14,6 @@ observed the expected result, not on a static check that the configuration or re
 Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the
 configuration it rests on and the observation that would confirm it. The same holds for a status a document,
 test, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the
-system, or generate it from an observation, so it cannot silently drift; hand-written prose asserting such a
-status, free to diverge from what the system now does, does not belong in the record as settled fact. A
+system, or generate it from an observation, and refresh it before relying on it as current; hand-written
+prose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact. A
 confident assertion of unobserved behaviour is not made.

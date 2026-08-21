@@ -11,4 +11,4 @@ returns false, is made to surface the error, so an unreadable input can never re
 and pass. A resource the work declares or is expected to cover is held to the same standard: when it is
 absent or unusable, that is a failure, not a silent skip. The presence-test-then-run-or-succeed shape, which
 lets a missing declared input read as nothing to do, is exactly this failure; absence reads as a clean
-result only for an input the work never declared it would cover.
+result only for an input outside the work's declared or expected coverage.
