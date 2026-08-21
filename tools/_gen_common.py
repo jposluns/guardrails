@@ -44,7 +44,9 @@ def reconcile(path, new_text, check):
     """Write new_text to path, or (check mode) return True if it would change. Fail-closed: an OSError
     reading the current file or writing the new one exits 2 with a message rather than a raw traceback,
     so a drift gate or a regeneration never dies unhandled on a read-only fs, a permission error, or a
-    full disk."""
+    full disk. An invalid-UTF-8 (non-decodable) existing target is mapped to the same exit 2: read_text
+    decodes as UTF-8, so a corrupt target raises UnicodeDecodeError, and that is fail-closed too rather
+    than a raw traceback."""
     path = Path(path)
     try:
         current = path.read_text(encoding="utf-8") if path.exists() else None
@@ -52,6 +54,6 @@ def reconcile(path, new_text, check):
             return current != new_text
         path.write_text(new_text, encoding="utf-8")
         return False
-    except OSError as exc:
-        print("error: cannot access {} ({}); fail-closed".format(path, exc), file=sys.stderr)
+    except (OSError, UnicodeError) as exc:
+        print("error: cannot read or write {} ({}); fail-closed".format(path, exc), file=sys.stderr)
         raise SystemExit(2)

@@ -20,7 +20,7 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
 
   gen_skill.py            regenerate every output
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
-  gen_skill.py --self-test  prove the gate fails on drift, on an unknown id, and on an orphan output
+  gen_skill.py --self-test  prove the gate fails on drift, an unknown id, an orphan output, a bad target
 """
 import hashlib
 import io
@@ -413,7 +413,12 @@ def run_gen(root, check):
                         drift.append("orphan " + (reserved_dir / rel).relative_to(root).as_posix())
                         if not check:
                             f.unlink()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
+        # UnicodeError (UnicodeDecodeError) covers the generated-TARGET reads above (the standalone text
+        # output and the reserved-subtree targets): a non-UTF-8 target decodes as UTF-8 there, so a
+        # corrupt target fails closed (exit 2) rather than a raw traceback, the same OSError path (a
+        # read-only fs, a permission error, a full disk) already fails closed on. The binary zip target
+        # reconciles on bytes (read_bytes), so it is untouched by this widening.
         print("error: {}".format(exc))
         return 2
     if check and drift:
@@ -435,7 +440,9 @@ def main():
 #   1. a well-formed source renders and round-trips (regenerate, then --check is clean),
 #   2. a source citing an unknown corpus-id fails closed (exit 2), the anti-fabrication gate,
 #   3. a hand-edited (drifted) SKILL.md makes --check report drift (exit 1),
-#   4. an orphan file in the reserved output subtree is detected (exit 1).
+#   4. an orphan file in the reserved output subtree is detected (exit 1),
+#   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
+#      guards the widened (OSError, UnicodeError) reconcile arm (F-154).
 
 _APEX = """---
 corpus-id: prjint1
@@ -585,6 +592,24 @@ def self_test_main():
         code, out = capture(orphan, True)
         if code != 1 or "orphan" not in out:
             failures.append("orphan output expected --check exit 1 naming the orphan, got {}\n{}".format(code, out))
+
+        # 5. An invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError
+        #    traceback. run_gen reads each standalone/reserved target as UTF-8, so a non-UTF-8 target
+        #    must be caught by the widened (OSError, UnicodeError) arm. A revert to the narrow
+        #    OSError-only arm makes this RAISE instead of returning 2, so the case guards the widening.
+        badenc = tmp / "badenc"
+        badenc.mkdir()
+        _write_fixture(badenc, good_src)
+        capture(badenc, False)  # generate a clean tree first
+        skill_md = badenc.joinpath(*RESERVED_PARTS) / "SKILL.md"
+        skill_md.write_bytes(b"\xff\xfe not utf-8")
+        try:
+            with redirect_stdout(io.StringIO()):
+                code = run_gen(badenc, True)
+        except Exception as exc:  # a reverted narrow arm raises UnicodeDecodeError here
+            code = "raised {}".format(type(exc).__name__)
+        if code != 2:
+            failures.append("invalid-UTF-8 reserved target expected exit 2 (fail-closed), got {}".format(code))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -593,8 +618,9 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: well-formed source round-trips clean; an unknown corpus-id fails closed "
-          "(exit 2); a drifted SKILL.md and an orphan output are caught (exit 1).")
+    print("SELF-TEST PASS: well-formed source round-trips clean; an unknown corpus-id and an "
+          "invalid-UTF-8 target fail closed (exit 2); a drifted SKILL.md and an orphan output are "
+          "caught (exit 1).")
     return 0
 
 

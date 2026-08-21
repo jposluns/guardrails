@@ -330,14 +330,8 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(REGISTRY_REL, exc), file=sys.stderr)
         return 2
-    try:
-        drifted = reconcile(root / REGISTRY_REL, text, check)  # SystemExit(2) on an OSError (fail-closed)
-    except UnicodeError as exc:
-        # Narrow guard: reconcile reads the existing registry as UTF-8, so an invalid-UTF-8 target raises
-        # UnicodeDecodeError there. Map it to a clean exit 2 (fail-closed) rather than a raw traceback.
-        # _gen_common is a shared helper and stays untouched; the helper-side fix is a separate follow-up.
-        print("error: cannot read {} as UTF-8 ({}); fail-closed".format(REGISTRY_REL, exc), file=sys.stderr)
-        return 2
+    drifted = reconcile(root / REGISTRY_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+                                                            # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_gensrc.py".format(REGISTRY_REL), file=sys.stderr)
         return 1
@@ -377,10 +371,12 @@ def main():
 #   (l) a tree-descendant overlap (a tree 'X/' with a file 'X/c' in either order, or a nested tree 'X/Y/')
 #       fails closed (exit 2), while a sibling on a component boundary ('X/' vs 'XYZ') does NOT collide,
 #   (m) zero generators (a tools/ dir with no gen_*.py besides this tool) fails closed (exit 2),
-#   (n) an invalid-UTF-8 existing .aiqt/gensrc.json target fails closed (exit 2) on --check, the narrow
-#       run() UnicodeError guard rather than a raw traceback.
-# A raised SystemExit anywhere in a run() call is caught by run_quiet and recorded as a FAILURE, so the
-# self-test can never itself exit early (green or otherwise) on an unexpected raise.
+#   (n) an invalid-UTF-8 existing .aiqt/gensrc.json target fails closed (exit 2) on --check, via the
+#       shared _gen_common.reconcile guard rather than a raw traceback.
+# A raised SystemExit anywhere in a run() call is caught by run_quiet and returned as a non-int sentinel
+# string, so the self-test can never itself exit early (green or otherwise) on a raise: an UNEXPECTED
+# raise mismatches its case's expected exit code and registers as a FAILURE, while case (n) asserts the
+# sentinel because the shared reconcile guard fails closed by raising SystemExit(2).
 
 _FAKE_GOOD = '''# self-test generator that declares its output
 GENSRC_OUTPUTS = (
@@ -691,13 +687,16 @@ def self_test_main():
             failures.append("zero generators expected exit 2 (fail-closed)")
 
         # (n) An invalid-UTF-8 existing .aiqt/gensrc.json target fails closed (exit 2) on --check: reconcile
-        #     reads the target as UTF-8, and the narrow run() guard maps the decode error to a clean exit 2.
+        #     reads the target as UTF-8, and the shared _gen_common.reconcile guard raises SystemExit(2) on
+        #     the decode error rather than a raw traceback. run() makes the plain reconcile call, so that
+        #     raise propagates and run_quiet records it as the "raised SystemExit(2)" sentinel (the same
+        #     process exit 2 a real CLI run produces).
         unicode_tree = tmp / "unicode"
         _build_from(unicode_tree, "gen_selftestgood.py", _FAKE_GOOD)
         if run_quiet(unicode_tree, check=False) != 0:
             failures.append("unicode case: initial generation expected exit 0")
         (unicode_tree / REGISTRY_REL).write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
-        if run_quiet(unicode_tree, check=True) != 2:
+        if run_quiet(unicode_tree, check=True) != "raised SystemExit(2)":
             failures.append("invalid-UTF-8 registry target expected exit 2 (fail-closed)")
     finally:
         if unread_tools is not None:

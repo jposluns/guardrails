@@ -64,6 +64,7 @@ run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py
 run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py
+run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "mappings-page-drift" python3 tools/gen_mappings.py --check
@@ -72,13 +73,14 @@ run_gate "disclosure-drift"    python3 tools/gen_disclosure.py --check
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
 run_gate "claude-drift"    python3 tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 tools/gen_adapters.py --check
+run_gate "cursor-selftest"  python3 tools/gen_cursor.py --self-test
 run_gate "cursor-drift"  python3 tools/gen_cursor.py --check
 run_gate "hooks-selftest" python3 tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
-run_gate "skill-drift"     python3 tools/gen_skill.py --check
 run_gate "skill-selftest"  python3 tools/gen_skill.py --self-test
+run_gate "skill-drift"     python3 tools/gen_skill.py --check
 run_gate "gensrc-registry-selftest" python3 tools/gen_gensrc.py --self-test
 run_gate "gensrc-registry-drift" python3 tools/gen_gensrc.py --check
 run_gate "enforceability-selftest" python3 tools/gen_enforceability.py --self-test

@@ -6,7 +6,8 @@ path is DERIVED from that frontmatter per the two-axis taxonomy (aiqt/ numbered 
 coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check so the read tree can never
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
-  gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source
+  gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
+  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2)
 """
 import os
 import re
@@ -211,9 +212,11 @@ def load_corpus(src_dir):
     return out
 
 
-def main():
-    check = "--check" in sys.argv[1:]
-    root = repo_root()
+def run(root, check):
+    """Reconcile the .claude/rules/ read tree under root against the .aiqt/core/rules/ corpus. Exit 0 in
+    sync, 1 on drift (check mode), 2 on a malformed source or a read/write failure. Parameterized on root
+    (rather than calling repo_root() inline) so the self-test can drive it against a synthetic tempdir
+    tree, never the real repo."""
     src_dir = root / ".aiqt" / "core" / "rules"
     out_dir = root / ".claude" / "rules"
     desired = {}
@@ -256,13 +259,91 @@ def main():
                             drift.append("orphan " + rel)
                             if not check:
                                 f.unlink()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
+        # UnicodeError (UnicodeDecodeError) covers the generated-TARGET read above: a non-UTF-8 target
+        # decodes as UTF-8 there, so a corrupt target fails closed (exit 2) rather than a raw traceback,
+        # the same OSError path (a read-only fs, a permission error, a full disk) already fails closed on.
         print("error: {}".format(exc))
         return 2
     if check and drift:
         print("drift: " + "; ".join(drift))
         print("run tools/gen_rules.py to regenerate")
         return 1
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--self-test" in argv:
+        return self_test_main()
+    return run(repo_root(), "--check" in argv)
+
+
+# --- self-test ----------------------------------------------------------------------------------------
+# One focused invariant (the sibling generators' idiom): an invalid-UTF-8 GENERATED TARGET fails closed
+# (exit 2) rather than a raw UnicodeDecodeError traceback. The reconcile loop reads each desired target as
+# UTF-8 (the drift compare), so a non-UTF-8 target must be caught by the widened (OSError, UnicodeError)
+# arm (F-154). A revert to the narrow OSError-only arm makes run() RAISE instead of returning 2, so this
+# case fails and guards the widening. Tempdir-only; never touches a real repo file.
+
+_RULE_SRC = """---
+corpus-id: selfr1
+origin: pack
+family: aiqt
+tier: 10
+facet: QUALI
+slug: gen-rules-selftest-target
+---
+# Gen-rules self-test rule
+
+A minimal rule so the reconcile has one desired target to read.
+"""
+_RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
+
+
+def self_test_main():
+    import io
+    import shutil
+    import tempfile
+    from contextlib import redirect_stdout, redirect_stderr
+
+    def run_quiet(root, check):
+        # A reverted narrow (OSError-only) arm raises UnicodeDecodeError out of run(); catch it and
+        # return a non-int sentinel so it registers as a FAILURE against the expected exit code rather
+        # than aborting the self-test or letting it exit early green.
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            try:
+                return run(root, check)
+            except Exception as exc:  # noqa: BLE001  a revert surfaces here as UnicodeDecodeError
+                return "raised {}".format(type(exc).__name__)
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-rules-selftest-"))
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    failures = []
+    try:
+        # A synthetic corpus (one source rule) so `desired` carries exactly one generated target, then
+        # pre-write that target as invalid UTF-8 bytes so the reconcile's drift-compare read hits it.
+        src = tmp / ".aiqt" / "core" / "rules"
+        src.mkdir(parents=True)
+        (src / "gen-rules-selftest-target.md").write_text(_RULE_SRC, encoding="utf-8")
+        target = tmp / ".claude" / "rules" / _RULE_REL
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"\xff\xfe not utf-8")
+        if run_quiet(tmp, check=True) != 2:
+            failures.append("invalid-UTF-8 generated target expected exit 2 (fail-closed)")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if failures:
+        print("SELF-TEST FAIL:")
+        for failure in failures:
+            print("  - " + failure)
+        return 1
+    print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
+          "UnicodeDecodeError traceback (guards the widened reconcile arm).")
     return 0
 
 
