@@ -41,7 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".working"}
-SKIP_NAMES = {"check_secrets.py"}
+# Skip THIS file (it enumerates credential patterns) by its repo-relative PATH, not by basename, so a
+# secret in any OTHER file that happens to be named check_secrets.py elsewhere in the tree is still scanned.
+SKIP_PATHS = {"tools/check_secrets.py"}
 
 # Targeted, documented exemptions. Each is a file whose PURPOSE is to enumerate
 # credential patterns as prohibited examples, so a match there is the document
@@ -57,6 +59,9 @@ TEXT_SUFFIXES = {
     ".md", ".py", ".sh", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg",
     ".env", ".conf", ".tf", ".tfvars", ".ps1", ".rb", ".js", ".ts", ".go",
     ".txt", ".properties", ".xml", ".config",
+    # PEM/PGP-text credential files: a private-key header is caught by PREFIXES; a public cert is inert.
+    # Binary key stores (.p12/.pfx/.jks) are left to the UnicodeDecodeError skip and gitleaks.
+    ".pem", ".key", ".crt", ".cer", ".asc", ".p8", ".pk8",
 }
 
 # Recognizable provider token shapes.
@@ -133,14 +138,15 @@ def _assign_is_secret(match):
 def _is_scan_candidate(path):
     """A file is scanned when it is a dotenv file (name `.env` or starting `.env.`, case-insensitive, such
     as `.env.local` or `.env.production`, which hold real credentials), has a suffix in TEXT_SUFFIXES, or
-    has no suffix at all (an extensionless PEM key like id_rsa). A file whose suffix is NOT in
-    TEXT_SUFFIXES is skipped up front; a suffixless binary is read and skipped later on a
-    UnicodeDecodeError. TEXT_SUFFIXES is a curated allow-list, so a text format not on it is skipped here
-    and left to gitleaks; add it to TEXT_SUFFIXES to cover it."""
+    has no suffix at all (an extensionless PEM key like id_rsa). Suffix matching is case-insensitive, so a
+    `.PEM` or `.TXT` file scans too. A file whose suffix is NOT in TEXT_SUFFIXES is skipped up front; a
+    suffixless file that is NON-UTF-8 binary is read and skipped later on a UnicodeDecodeError (a
+    UTF-8-decodable suffixless file is scanned). TEXT_SUFFIXES is a curated allow-list, so a text format
+    not on it is skipped here and left to gitleaks; add it to TEXT_SUFFIXES to cover it."""
     lowered = path.name.lower()
     if lowered == ".env" or lowered.startswith(".env."):
         return True
-    suffix = path.suffix
+    suffix = path.suffix.lower()
     return not suffix or suffix in TEXT_SUFFIXES
 
 
@@ -149,7 +155,7 @@ def main() -> int:
     findings = []
     try:
         for path in sorted(walk_files(root, SKIP_DIRS)):
-            if path.name in SKIP_NAMES:
+            if path.relative_to(root).as_posix() in SKIP_PATHS:
                 continue
             if path.relative_to(root).as_posix() in EXEMPT_PATHS:
                 continue
@@ -194,8 +200,9 @@ def main() -> int:
 def _self_test() -> int:
     """Exercise the credential-value decision and the scan-candidate predicate against fixtures, so the
     F-127 env-lookup exclusion and the extensionless/dotenv coverage are guarded by a check that fails
-    without them. Secret-shaped fixtures are assembled from parts so no contiguous secret literal appears
-    in this source (SECP). Exit 0 on PASS, 1 on FAIL."""
+    without them. Fixtures that could themselves trip the repo secret-scan (provider-shaped tokens) are
+    assembled from parts (SECP); plain non-scannable literals (a keyword-less value, a dotted config path)
+    stand as-is. Exit 0 on PASS, 1 on FAIL."""
     from pathlib import PurePath
 
     failures = []
@@ -222,6 +229,8 @@ def _self_test() -> int:
         ('secret = "' + real + '"', True),                   # quoted real literal: caught
         ("password = process_env_KEY2", True),               # single identifier, not dotted: caught
         ('password = "xxxxxxxxxxxx"', False),                # quoted placeholder: excluded
+        ('token = "process.env.OPENAI_KEY_V2"', True),       # QUOTED env-ref: caught (exclusion is unquoted-only)
+        ("token = process.env.OPENAI_KEY1" + "+" + "Abcdef1234567890", True),  # + breaks fullmatch: caught
     ]
     for line, want in cases:
         got = assign_hit(line)
@@ -234,6 +243,10 @@ def _self_test() -> int:
     # ("service.properties", True) guard the added text suffixes.
     names = [("id_rsa", True), ("notes.md", True), (".env", True), (".env.local", True),
              (".ENV.local", True), ("creds.txt", True), ("service.properties", True),
+             ("config.xml", True), ("app.config", True),
+             ("server.pem", True), ("id_rsa.key", True), ("cert.crt", True),
+             ("chain.cer", True), ("key.asc", True), ("AuthKey.p8", True),
+             ("SERVER.PEM", True), ("CREDS.TXT", True),
              ("image.png", False), ("doc.pdf", False)]
     for name, want in names:
         got = _is_scan_candidate(PurePath(name))

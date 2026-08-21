@@ -2322,7 +2322,7 @@ def main():
         # assigned a JavaScript-style env lookup (process.env.X) is a CODE REFERENCE, so it ALLOWS; a
         # dotted token that only LOOKS identifier-shaped but carries no env accessor - a HashiCorp Vault
         # hvs.<random> token, a dotted provider secret - is a real credential and still DENIES. Mirrors
-        # check_secrets.py's DOTTED_PATH / _ENV_ACCESSOR. Secret values assembled from parts (SECP).
+        # check_secrets.py's DOTTED_PATH / _ENV_REF. Secret values assembled from parts (SECP).
         sexpect("(ss-ab) F-127 Write env lookup process.env.X allows",
                 "Write", {"file_path": "/tmp/x", "content": _asgn("token", "process.env.OPENAI_KEY_V2")},
                 "allow")
@@ -2334,6 +2334,13 @@ def main():
         sexpect("(ss-ad) F-127 Write dotted provider secret still denies",
                 "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", _fake_dotted)}, "deny",
                 secret=_fake_dotted)
+        _plus_tail = "process.env.OPENAI_KEY1" + "+" + "Abcdef1234567890"
+        sexpect("(ss-ae) F-127 Write +-joined tail after an env-ref still denies (+ breaks the exclusion)",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _plus_tail)}, "deny",
+                secret=_plus_tail)
+        sexpect("(ss-af) F-127 Write QUOTED env-ref still denies (exclusion is unquoted-only)",
+                "Write", {"file_path": "/tmp/x",
+                          "content": _asgn("token", '"' + "process.env.OPENAI_KEY_V2" + '"')}, "deny")
         # secsec F-127 PARITY: the shipped hook (_scan_secret) and the CI gate (check_secrets) must decide
         # every credential line identically. The exclusion is hand-mirrored (the generated region single-
         # sources only the regex strings, not this loop logic), so this guards against future drift.
@@ -2350,7 +2357,7 @@ def main():
             _asgn("secret", '"' + "AbcDef123456ghiJ" + '"'),
             _asgn("token", "myorg.env.production." + "secretkey12345"),   # env not at root: caught by both
             _asgn("token", "process.env.OPENAI_KEY" + "+" + "Abcdef1234567890"),  # + breaks fullmatch: both
-            _asgn("token", '"' + "prod.env.auth.Abcdef1234567890" + '"'),  # quoted env-shaped: both
+            _asgn("token", '"' + "process.env.OPENAI_KEY_V2" + '"'),  # quoted ROOT env-ref: caught by both
         ]
         for _pl in _parity_lines:
             _gate = _cs_line_hit(_pl)
