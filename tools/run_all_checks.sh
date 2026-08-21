@@ -4,14 +4,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-# Keep the local run honest WITHOUT weakening any gate. Two hygiene steps, both confined to regenerable,
-# GITIGNORED Python bytecode a fresh CI checkout never carries: (1) suppress bytecode for every gate below,
-# so this runner never dirties the tree itself; (2) sweep stray __pycache__ a prior run or ad hoc
-# invocation left, via `git clean -X` (IGNORED-only) - by git construction it never removes a TRACKED
-# file, so a committed non-portable file (even inside a __pycache__ dir) still fails the portability gate
-# here exactly as it does in CI. This cannot mask a committed violation (gate-discipline).
+# Never let a gate leave Python bytecode: a stray __pycache__/*.pyc in the shippable surface trips the
+# portability gate as a non-portable file class, a spurious local FAIL a fresh CI checkout never sees.
+# Suppress bytecode for every gate below, so THIS runner never creates one. A gate runner reports the
+# tree, it does not mutate it: a stray cache left by another tool is a real dirty-tree signal the
+# portability gate should surface (clear it with `git clean -fdX` before re-running), never something
+# this runner silently sweeps, since an auto-sweep of ignored paths can delete unrelated local files.
 export PYTHONDONTWRITEBYTECODE=1
-git clean -fdX -- ':(glob)**/__pycache__/**'
 
 failed=0
 notrun=0
