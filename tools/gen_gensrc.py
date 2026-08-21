@@ -64,16 +64,28 @@ def _read_declaration(path, where):
     file to an AST and evaluating ONLY that literal with ast.literal_eval. The module is never imported
     or executed, so an import-time SystemExit, a dynamic __getattr__, or any other side effect cannot
     influence the result. Fail-closed: raises ValueError (naming `where`) when there is no single
-    top-level literal Assign to GENSRC_OUTPUTS, when the name is bound any OTHER way anywhere in the
-    module, when the right-hand side is non-literal, or when the literal is empty; the caller maps that
-    to exit 2. An unreadable file raises OSError, also mapped to exit 2.
+    top-level literal Assign to GENSRC_OUTPUTS, when the right-hand side is non-literal, or when the
+    literal is empty; the caller maps that to exit 2. An unreadable file raises OSError, also mapped to
+    exit 2.
 
-    The single-binding invariant is enforced by BINDING MECHANISM, not a node-type enumeration: the only
-    allowed binding is the_assign's own GENSRC_OUTPUTS Store-Name target(s), tracked by identity. Every
-    other Store- or Del-context Name of GENSRC_OUTPUTS (plain/augmented/annotated assignment, del, walrus,
-    tuple/star unpack, for/with target) is rejected, as is every string-name binder of it (import-as,
-    def/class, except-as, match capture, type alias, global/nonlocal), so no rebind can let the module's
-    effective GENSRC_OUTPUTS diverge from the parsed literal."""
+    Binding invariant (honestly bounded): this rejects the statically-detectable DIRECT binding of
+    GENSRC_OUTPUTS to anything other than the one literal Assign, by walking the parsed tree. That covers
+    a module-level or nested Store/Del-context Name (a second/nested/conditional assignment, an augmented
+    or annotated assignment, a del, a walrus, a tuple/star unpack, a for/with target); an import alias,
+    including a dotted-root `import GENSRC_OUTPUTS.child` and a fail-closed wildcard `from x import *`; a
+    def/class; an except-as; and a match capture, including a MatchMapping `.rest`. A `type GENSRC_OUTPUTS
+    = ...` statement needs no dedicated branch: its `.name` is itself a Store-context Name already caught
+    by the Name rule (and ast.TypeAlias exists only on py3.12+, so referencing it would break the py3.11
+    floor).
+
+    Disclosed residual (this does NOT claim to catch any binding anywhere): (a) GENSRC_OUTPUTS is a
+    RESERVED declaration name, so the walk is CONSERVATIVE and will also reject an unrelated reuse of the
+    name as a local, parameter, loop, or comprehension variable inside a function; that over-catch is
+    harmless and fails in the safe direction (do not reuse the name). (b) Truly-DYNAMIC binding
+    (globals()["GENSRC_OUTPUTS"] = ..., exec, setattr on the module) is beyond static analysis and out of
+    scope; discovery never executes a generator, so such a binding cannot affect the static registry
+    anyway. Per the GD-34 lesson, static enumeration of a dynamic surface is unbounded; this guard covers
+    the realistic and statically-detectable forms and discloses the rest."""
     source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
         tree = ast.parse(source, filename=str(path))
@@ -89,9 +101,9 @@ def _read_declaration(path, where):
     # target node(s), tracked by identity; every other way Python can bind the name is rejected. A single
     # Store-/Del-context Name rule covers plain/augmented/annotated assignment, del, walrus, tuple/star
     # unpack, and for/with targets (all bind through such a Name); a second rule covers the string-name
-    # binders, whose bound name is a str attribute, not a Name node (import-as, def/class, except-as,
-    # match capture, type alias, global/nonlocal). So no rebind can slip a computed value in past the one
-    # literal assignment.
+    # binders, whose bound name is a str attribute, not a Name node (dotted/wildcard import, def/class,
+    # except-as, match capture incl. MatchMapping.rest, global/nonlocal). A `type GENSRC_OUTPUTS = ...`
+    # needs no branch: its target is itself a Store-context Name caught by the first rule.
     allowed = set()
     if the_assign is not None:
         allowed = {id(t) for t in the_assign.targets
@@ -107,7 +119,12 @@ def _read_declaration(path, where):
                                  "tuple/star unpack, or a for/with target); exactly one top-level literal "
                                  "assignment is allowed (fail-closed)".format(where))
         elif isinstance(node, ast.alias):
-            if node.asname == "GENSRC_OUTPUTS" or (node.asname is None and node.name == "GENSRC_OUTPUTS"):
+            # An alias with no asname binds the ROOT of a (possibly dotted) name: `import
+            # GENSRC_OUTPUTS.child` binds `GENSRC_OUTPUTS`, so compare on name.partition('.')[0]. A
+            # wildcard (`from x import *`, name == "*") can bind GENSRC_OUTPUTS and is statically
+            # undecidable, so fail closed. `import GENSRC_OUTPUTS.child as y` binds only `y`, allowed.
+            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
+            if bound == "GENSRC_OUTPUTS" or (node.asname is None and node.name == "*"):
                 raise ValueError(binder.format("an import"))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name == "GENSRC_OUTPUTS":
@@ -118,9 +135,9 @@ def _read_declaration(path, where):
         elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
             if node.name == "GENSRC_OUTPUTS":
                 raise ValueError(binder.format("a match capture"))
-        elif isinstance(node, ast.TypeAlias):
-            if isinstance(node.name, ast.Name) and node.name.id == "GENSRC_OUTPUTS":
-                raise ValueError(binder.format("a type alias"))
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == "GENSRC_OUTPUTS":  # `case {**GENSRC_OUTPUTS}` binds the rest to that name
+                raise ValueError(binder.format("a match capture"))
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             if "GENSRC_OUTPUTS" in node.names:
                 raise ValueError(binder.format("a global/nonlocal declaration"))
@@ -345,7 +362,9 @@ def main():
 #   (h) a malformed literal (a non-str kind such as []) fails closed with ValueError -> exit 2, never a
 #       bare TypeError from a set-membership test,
 #   (i) each single-binding-invariant rebind of GENSRC_OUTPUTS beside a valid decoy literal fails closed
-#       (exit 2), one case per binding mechanism (walrus/tuple-unpack/for/with/except/import-as/def/class),
+#       (exit 2), one case per binding mechanism (walrus/tuple-unpack/for/with/except/import-as/dotted-
+#       import-root/wildcard-import/MatchMapping-rest/def/class), while the positive `import
+#       GENSRC_OUTPUTS.child as y` (binds y only) generates cleanly (exit 0, no false reject),
 #   (j) a non-str entry KEY fails closed with ValueError -> exit 2 (not a bare TypeError),
 #   (k) a trailing '/' on a file or block target, and its absence on a tree target, each fail closed
 #       (exit 2),
@@ -414,8 +433,8 @@ _DECOY = ('GENSRC_OUTPUTS = (\n'
           ')\n')
 
 # One snippet per Python binding mechanism, each appended to the decoy. Every one rebinds GENSRC_OUTPUTS
-# a way the round-3 node-type enumeration missed, and every one must now fail closed (exit 2). Parsed
-# statically, never executed, so the snippets need no runnable names.
+# a way a node-type enumeration can miss, and every one must fail closed (exit 2). Parsed statically,
+# never executed, so the snippets need no runnable names.
 _REBINDS = {
     "walrus (GENSRC_OUTPUTS := [])": "(GENSRC_OUTPUTS := [])\n",
     "tuple-unpack a, GENSRC_OUTPUTS = ...": "a, GENSRC_OUTPUTS = 1, []\n",
@@ -423,9 +442,17 @@ _REBINDS = {
     "with-as rebind": "with a as GENSRC_OUTPUTS:\n    pass\n",
     "except-as rebind": "try:\n    pass\nexcept Exception as GENSRC_OUTPUTS:\n    pass\n",
     "import-as rebind": "import os as GENSRC_OUTPUTS\n",
+    "dotted-import root (import GENSRC_OUTPUTS.child)": "import GENSRC_OUTPUTS.child\n",
+    "wildcard import (from x import *)": "from x import *\n",
+    "MatchMapping rest (case {**GENSRC_OUTPUTS})": "match v:\n    case {**GENSRC_OUTPUTS}:\n        pass\n",
     "def rebind": "def GENSRC_OUTPUTS():\n    pass\n",
     "class rebind": "class GENSRC_OUTPUTS:\n    pass\n",
 }
+
+# The positive counterpart to the dotted-import reject: `import GENSRC_OUTPUTS.child as y` binds only `y`,
+# NOT GENSRC_OUTPUTS, so beside a valid decoy it must generate cleanly (exit 0) - the dotted-root reject
+# must not false-positive on an aliased dotted import.
+_FAKE_IMPORT_ALIAS_OK = _DECOY + "import GENSRC_OUTPUTS.child as y\n"
 
 # A non-str entry KEY (int 1) must fail closed with a ValueError, never a bare TypeError from sorted()/join.
 _FAKE_BADKEY = '''# self-test generator whose entry has a non-str key
@@ -608,6 +635,15 @@ def self_test_main():
             if run_quiet(rbdir, check=True) != 2:
                 failures.append("{} expected exit 2 (single-binding invariant)".format(label))
 
+        # (i+) The positive import case: `import GENSRC_OUTPUTS.child as y` binds only y, NOT
+        #      GENSRC_OUTPUTS, so beside a valid decoy it must generate cleanly (exit 0) - the dotted-root
+        #      reject must not false-positive on an aliased dotted import.
+        aliasok = tmp / "aliasok"
+        _build_from(aliasok, "gen_selftestaliasok.py", _FAKE_IMPORT_ALIAS_OK)
+        if run_quiet(aliasok, check=False) != 0:
+            failures.append("import GENSRC_OUTPUTS.child as y (binds y only) expected exit 0 (no false "
+                            "reject)")
+
         # (j) A non-str entry KEY fails closed with ValueError -> exit 2 (not a bare TypeError).
         badkey = tmp / "badkey"
         _build_from(badkey, "gen_selftestbadkey.py", _FAKE_BADKEY)
@@ -675,7 +711,9 @@ def self_test_main():
           "GENSRC_OUTPUTS=(), a non-literal declaration beside an import-time SystemExit (proving static "
           "parse, no import), an unreadable tools/ dir, zero generators, canonical-duplicate targets (a "
           "file 'X' and a tree 'X/'), every single-binding-invariant rebind (walrus/tuple-unpack/for/with/"
-          "except/import-as/def/class), a non-str kind, a non-str key, each trailing-'/'-by-kind mismatch, "
+          "except/import-as/dotted-import-root/wildcard-import/MatchMapping-rest/def/class; while an "
+          "aliased dotted import binding only y generates cleanly), a non-str kind, a non-str key, each "
+          "trailing-'/'-by-kind mismatch, "
           "a tree-descendant overlap (both orders and a nested tree), and an invalid-UTF-8 registry target "
           "all fail closed (exit 2)" + note)
     return 0
