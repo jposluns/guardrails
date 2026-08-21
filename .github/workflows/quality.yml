@@ -112,6 +112,8 @@ jobs:
             python3 tools/check_version_monotonicity.py
           fi
 
+      - name: Rules self-test
+        run: python3 tools/gen_rules.py --self-test
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
 
@@ -135,6 +137,8 @@ jobs:
 
       - name: Adapters drift
         run: python3 tools/gen_adapters.py --check
+      - name: Cursor self-test
+        run: python3 tools/gen_cursor.py --self-test
       - name: Cursor drift
         run: python3 tools/gen_cursor.py --check
 
@@ -153,10 +157,10 @@ jobs:
       - name: Hooks behaviour self-test
         run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
 
-      - name: Skill drift
-        run: python3 tools/gen_skill.py --check
       - name: Skill self-test
         run: python3 tools/gen_skill.py --self-test
+      - name: Skill drift
+        run: python3 tools/gen_skill.py --check
 
       - name: Gensrc registry self-test
         run: python3 tools/gen_gensrc.py --self-test
