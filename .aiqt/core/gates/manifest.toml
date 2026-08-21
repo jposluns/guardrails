@@ -1,0 +1,319 @@
+# .aiqt/core/gates/manifest.toml: the deterministic-gate manifest (EN-5 PR-E).
+#
+# One [[gate]] per gate SCRIPT in this repo's Quality roster (tools/run_all_checks.sh and its CI mirror
+# .github/workflows/quality.yml). A script whose --self-test and --check both appear in the roster gets
+# ONE entry, keyed on the script. `id` is a stable, unique control identifier (a kebab-case slug);
+# `script` is the repo-relative tools/<name>.py the gate runs, unique across entries and present on disk;
+# `rules` names the corpus-id(s) the gate cites, and every element must resolve to a real corpus-id in
+# .aiqt/core/rules/ (validated by tools/gen_enforceability.py against gen_rules.load_corpus, the same
+# no-orphan pattern the hooks manifest uses). tools/gen_enforceability.py renders this manifest, the hooks
+# manifest, and the corpus into the machine-readable enforceability ledger .aiqt/enforceability.json and
+# drift-gates it in CI; this file is the single edit point for the gate rows, the ledger is generated and
+# never hand-edited.
+#
+# HONEST SCOPE. This manifest names the repo's DETERMINISTIC gate scripts and their UNDENIABLE rule
+# linkage only. A gate's rule linkage is claimed here (a non-empty `rules`) exclusively where it is
+# undeniable: the byte-identity drift gates cite gensrc, and the secret scanner cites secsec. Every gate
+# whose linkage to a single corpus rule
+# is merely arguable ships with an explicit empty `rules`, an open question rather than a coverage
+# statement. The gitleaks binary step is a shell/binary step, not a python3 tools/*.py invocation, so it
+# lives outside the roster protocol this manifest and its ledger reason over and carries NO entry in v1:
+# the roster-reconciliation check cannot verify a claim about a step it cannot see. Its keep-secrets-out linkage,
+# though arguable, is left out for that reason. A known tension, disclosed: this manifest ships inside
+# .aiqt/core (the portability surface) while describing THIS repo's CI gates, not any adopter's install.
+#
+# Fields per [[gate]] (all seven REQUIRED on every entry):
+#   id        a stable, unique control identifier (kebab-case slug)
+#   script    the repo-relative tools/<name>.py the gate runs (unique; must exist on disk)
+#   rules     the corpus-id(s) this gate cites (a list; MAY be empty but must be PRESENT; every
+#             element must resolve to a real corpus-id in .aiqt/core/rules/)
+#   platform  "ci" (the Quality workflow plus its local mirror; a neutrality dimension, not an abstraction)
+#   default   "block" (a failing gate exits nonzero; no roster step carries continue-on-error)
+#   class     the EN-5 enforceability letter, restricted to a (deterministic gate) or c (partial) here;
+#             b is the hook axis and never appears in a gates manifest, d is never authored on a control
+#   residue   REQUIRED, never empty: what this gate does NOT catch, so the ledger stays honest
+#
+# AUTHOR-GRADED LIMIT. The class letter and the residue are maintainer-authored assertions; this
+# generator validates only their PRESENCE and SHAPE (vocabulary and non-emptiness), never their TRUTH - a
+# wrong class or a stale residue survives the gate and is caught only by review.
+#
+# ROSTER-SCAN LIMIT. The inverse roster reconciliation is a line-based lexical scan of trusted, controlled
+# roster files; a `python3 tools/*.py` token embedded in a quoted argument, a heredoc, or an eval string
+# may be miscounted. The authoritative single-source of the roster (generating both runners from this
+# manifest) is deferred.
+
+# --- drift-gate family: byte-identity gates over generated artefacts, rules = ["gensrc"], class "a" ----
+
+[[gate]]
+id = "roadmap-drift"
+script = "tools/gen_roadmap.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_roadmap.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "changelog-drift"
+script = "tools/gen_changelog.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_changelog.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "rules-drift"
+script = "tools/gen_rules.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_rules.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "agents-drift"
+script = "tools/gen_agents.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_agents.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "mappings-page-drift"
+script = "tools/gen_mappings.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_mappings.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "disclosure-drift"
+script = "tools/gen_disclosure.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_disclosure.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "notice-drift"
+script = "tools/gen_notice.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_notice.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "claude-drift"
+script = "tools/gen_claude.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_claude.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "adapters-drift"
+script = "tools/gen_adapters.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_adapters.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "cursor-drift"
+script = "tools/gen_cursor.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_cursor.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "secret-patterns-drift"
+script = "tools/gen_secret_patterns.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_secret_patterns.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "hooks-drift"
+script = "tools/gen_hooks.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_hooks.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "skill-drift"
+script = "tools/gen_skill.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_skill.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "gensrc-registry-drift"
+script = "tools/gen_gensrc.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_gensrc.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
+id = "enforceability-drift"
+script = "tools/gen_enforceability.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_enforceability.py generates from its declared source: it fails when the generated ledger differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+# --- undeniable secsec link -----------------------------------------------------------------------------
+
+[[gate]]
+id = "secrets-scan"
+script = "tools/check_secrets.py"
+rules = ["secsec"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "A pattern scanner for hardcoded credentials: it catches recognizable provider-token prefixes and assignments of a literal to a credential-named variable. It misses a high-entropy string with no telltale name or prefix, an encoded secret, and a secret in a binary (the measured residue of 2026-08-08, shared with gitleaks). Detection here is a compensating control, never a substitute for keeping the secret out of the repository in the first place."
+
+# --- explicit-empty: linkage arguable, none claimed, rules = [], class "a" ------------------------------
+
+[[gate]]
+id = "leaks"
+script = "tools/check_leaks.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A denylist scan for specific known private strings across the repository. Its linkage to any single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
+
+[[gate]]
+id = "portability"
+script = "tools/check_portability.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks that the shippable surface can land on a stranger's machine unchanged: no operator identity outside its attribution, no repo-operational vocabulary, no exemption markers, no unscannable file classes. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "dashes"
+script = "tools/check_no_dashes.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It flags en and em dashes anywhere in the scanned surface. Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
+
+[[gate]]
+id = "links"
+script = "tools/check_links.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks that internal document links resolve to a real target. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "site"
+script = "tools/check_site.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks the published site surface for integrity. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "overclaim"
+script = "tools/check_overclaim.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It lints for overclaiming language in the scanned surface. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "footer"
+script = "tools/check_footer.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks per-file footer coverage across the surface. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "versions"
+script = "tools/check_versions.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks version format and single-sourcing. It arguably serves the change-tracking discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
+
+[[gate]]
+id = "version-monotonicity"
+script = "tools/check_version_monotonicity.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks that the pack version never moves backward across a change. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "placement"
+script = "tools/check_rule_placement.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks that every rule source sits at its taxonomy-derived path. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "mappings"
+script = "tools/check_mappings.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It validates every standards-mapping id against its pinned framework manifest. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "conformance"
+script = "tools/conformance.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It runs the adopter-conformance suite against a reference install. It arguably serves the validation-gates discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
+
+[[gate]]
+id = "standards-currency"
+script = "tools/check_standards_currency.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It runs the deterministic standards-currency self-test. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "hooks-behaviour-selftest"
+script = "tools/selftest_aiqt_hooks.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the shipped hook behaviours end to end. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
