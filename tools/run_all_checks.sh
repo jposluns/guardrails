@@ -64,6 +64,7 @@ run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py
 run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py
+run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "mappings-page-drift" python3 tools/gen_mappings.py --check
@@ -72,6 +73,7 @@ run_gate "disclosure-drift"    python3 tools/gen_disclosure.py --check
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
 run_gate "claude-drift"    python3 tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 tools/gen_adapters.py --check
+run_gate "cursor-selftest"  python3 tools/gen_cursor.py --self-test
 run_gate "cursor-drift"  python3 tools/gen_cursor.py --check
 run_gate "hooks-selftest" python3 tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 tools/gen_secret_patterns.py --check

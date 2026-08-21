@@ -323,13 +323,8 @@ def run(root, check):
     except (ValueError, OSError) as exc:
         print("error: cannot build {} ({}); fail-closed".format(LEDGER_REL, exc), file=sys.stderr)
         return 2
-    try:
-        drifted = reconcile(root / LEDGER_REL, text, check)  # SystemExit(2) on an OSError (fail-closed)
-    except UnicodeError as exc:
-        # reconcile reads the existing ledger as UTF-8, so an invalid-UTF-8 target raises here; map it to
-        # a clean exit 2 (fail-closed) rather than a raw traceback, exactly as gen_gensrc.run does.
-        print("error: cannot read {} as UTF-8 ({}); fail-closed".format(LEDGER_REL, exc), file=sys.stderr)
-        return 2
+    drifted = reconcile(root / LEDGER_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
+                                                          # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_enforceability.py".format(LEDGER_REL),
               file=sys.stderr)

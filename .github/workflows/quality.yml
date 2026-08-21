@@ -112,6 +112,8 @@ jobs:
             python3 tools/check_version_monotonicity.py
           fi
 
+      - name: Rules self-test
+        run: python3 tools/gen_rules.py --self-test
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
 
@@ -135,6 +137,8 @@ jobs:
 
       - name: Adapters drift
         run: python3 tools/gen_adapters.py --check
+      - name: Cursor self-test
+        run: python3 tools/gen_cursor.py --self-test
       - name: Cursor drift
         run: python3 tools/gen_cursor.py --check
 
