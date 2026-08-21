@@ -50,6 +50,7 @@ else
 fi
 echo
 run_gate "leaks"     python3 tools/check_leaks.py
+run_gate "msg-leaks-selftest" python3 tools/check_msg_leaks.py --self-test  # real scan needs CI event context
 run_gate "portability-selftest" python3 tools/check_portability.py --self-test
 run_gate "portability" python3 tools/check_portability.py
 run_gate "dashes"    python3 tools/check_no_dashes.py

@@ -68,7 +68,7 @@ def term_hash(term):   # the generator (store/gen-leak-hashes.py) imports this f
 def load_denylist(root):
     """Return (hashes, maxn, bad_lines). bad_lines names any non-hash entry (integrity failure)."""
     f = root / "tools" / "leak-hashes.txt"
-    hashes, maxn, bad = set(), 3, []
+    hashes, maxn, bad, maxn_set = set(), 3, [], False
     try:
         content = f.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -80,17 +80,41 @@ def load_denylist(root):
         for number, line in enumerate(content.splitlines(), 1):
             s = line.strip()
             if not s or s.startswith("#"):
-                if s.startswith("# maxn"):
-                    parts = s.split()
-                    if len(parts) >= 3 and parts[2].isdigit():
-                        maxn = int(parts[2])
+                parts = s.split()
+                if len(parts) >= 2 and parts[0] == "#" and parts[1] == "maxn":
+                    # exactly ONE "# maxn N", N a bounded positive integer; a duplicate, non-positive,
+                    # oversized, or malformed directive fails closed (each would silently weaken or disable
+                    # the codename layer). len<=3 is checked before int() so an overlong run cannot raise.
+                    if maxn_set:
+                        bad.append("leak-hashes.txt:{}: duplicate '# maxn' directive".format(number))
+                    elif (len(parts) == 3 and parts[2].isascii() and parts[2].isdigit()
+                          and 1 <= len(parts[2]) <= 3 and 1 <= int(parts[2]) <= 100):
+                        maxn, maxn_set = int(parts[2]), True
+                    else:
+                        bad.append("leak-hashes.txt:{}: malformed '# maxn N' (need one integer 1..100)".format(number))
                 continue
-            token = s.split()[0]
-            if _HEX64.match(token):
-                hashes.add(token)
+            if _HEX64.match(s):
+                hashes.add(s)
             else:
-                bad.append("leak-hashes.txt:{}: not a 64-hex hash (possible plaintext)".format(number))
+                bad.append("leak-hashes.txt:{}: not a 64-hex hash (possible plaintext or trailing token)".format(number))
     return hashes, maxn, bad
+
+
+def scan_text(text, hashes, maxn, honor_leak_allow=True):
+    """Shared blob scanner: returns (line_or_None, label) findings (STRUCTURAL carries a 1-based line; a
+    hash match carries None). honor_leak_allow (file gate True, message gate False) exempts a `leak-allow`
+    line from STRUCTURAL. Keeps STRUCTURAL and the hash denylist applied in exactly one place."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if honor_leak_allow and "leak-allow" in line:
+            continue
+        found += [(number, label) for pattern, label in STRUCTURAL if pattern.search(line)]
+    if hashes:
+        for gram in ngram_forms(text, maxn):
+            if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
+                found.append((None, "internal codename (hash match)"))
+                break
+    return found
 
 
 def main():
@@ -110,17 +134,9 @@ def main():
             except UnicodeDecodeError:
                 continue  # binary / non-utf8: a text scanner skips it (gitleaks scans binaries)
             rel = path.relative_to(root)
-            for number, line in enumerate(text.splitlines(), 1):
-                if "leak-allow" in line:
-                    continue
-                for pattern, label in STRUCTURAL:
-                    if pattern.search(line):
-                        findings.append("{}:{}: {}".format(rel, number, label))
-            if hashes:
-                for gram in ngram_forms(text, maxn):
-                    if hashlib.sha256(gram.encode("utf-8")).hexdigest() in hashes:
-                        findings.append("{}: internal codename (hash match)".format(rel))
-                        break
+            for number, label in scan_text(text, hashes, maxn, honor_leak_allow=True):
+                findings.append("{}:{}: {}".format(rel, number, label) if number is not None
+                                else "{}: {}".format(rel, label))
     except (OSError, UnicodeDecodeError) as exc:
         # An unreadable/corrupt denylist OR an unreadable directory/file is a read failure on a required
         # input, not a clean skip: fail closed (exit 2) so a leak gate never reports clean without having
