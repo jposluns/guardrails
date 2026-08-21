@@ -3,6 +3,9 @@ name: Quality
 on:
   pull_request:
     branches: [main]
+    # include `edited` so a PR title/body change re-runs the message/metadata leak scan (check_msg_leaks);
+    # the default types (opened, synchronize, reopened) miss a post-check description edit.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 

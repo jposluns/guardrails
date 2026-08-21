@@ -9,7 +9,7 @@ STRUCTURAL patterns and the codename hashes live in exactly one place. It does N
 marker: a marker cannot be trusted in text bound for a permanent public record.
 
 MODES (auto-detected from GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH; overridable for testing):
-  - pull_request*: scan base..head commit messages + composed PR title/body + head ref. The required PR
+  - pull_request: scan base..head commit messages + composed PR title/body + head ref. The required PR
     check: detection plus (once required) a merge block. It runs AFTER push, so it is detection, not
     prevention, and cannot un-expose already-pushed text.
   - push (to main): scan the messages of the newly landed commits (before..after). The post-merge tripwire,
@@ -53,7 +53,7 @@ def _run_git(args):
     """Run git with an argv array (never a shell); fail closed on any error, without echoing git's stderr or
     the revision values (which may reflect a leaked string)."""
     try:
-        proc = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+        proc = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, encoding="utf-8")
     except (OSError, ValueError) as exc:                       # git missing, or undecodable output
         raise FailClosed("git invocation failed ({})".format(type(exc).__name__))
     if proc.returncode != 0:
@@ -153,8 +153,8 @@ def load_event():
 def gather_channels(event_name, event):
     """Dispatch on the event kind; fail closed on any kind whose channel set we cannot establish. Every
     revision field is validated as a canonical SHA before it reaches git."""
-    if event_name.startswith("pull_request"):
-        base = _require_sha(event, "pull_request", "base", "sha")
+    if event_name == "pull_request":                          # exact match: a pull_request_review or a
+        base = _require_sha(event, "pull_request", "base", "sha")  # typo'd name is an unsupported kind
         head = _require_sha(event, "pull_request", "head", "sha")
         return channels_for_pr(event, commit_messages(base, head)), "pre-merge"
     if event_name == "push":
@@ -262,12 +262,14 @@ def self_test():
     # 8. branch deletion (after == zero): no channels, no git call, no exception
     channels, phase = gather_channels("push", {"before": forty, "after": _ZERO_SHA})
     assert channels == [] and phase == "post-merge", (channels, phase)
-    # 9. unknown event kind fails closed
-    try:
-        gather_channels("issues", {})
-        assert False, "expected FailClosed for an unhandled event kind"
-    except FailClosed:
-        pass
+    # 9. unknown event kind fails closed - including a name that merely PREFIXES "pull_request"
+    for kind in ("issues", "pull_request_review", "pull_request_typo"):
+        try:
+            gather_channels(kind, {"pull_request": {"base": {"sha": forty}, "head": {"sha": forty, "ref": "r"},
+                                                    "title": "t", "body": None}})
+            assert False, "expected FailClosed for unsupported event kind {}".format(kind)
+        except FailClosed:
+            pass
     # 10. denylist-metadata hardening (load_denylist): malformed maxn / trailing tokens fail closed
     def denylist(text):
         with tempfile.TemporaryDirectory() as d:
