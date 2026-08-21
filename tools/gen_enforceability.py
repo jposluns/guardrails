@@ -324,7 +324,7 @@ def run(root, check):
         print("error: cannot build {} ({}); fail-closed".format(LEDGER_REL, exc), file=sys.stderr)
         return 2
     drifted = reconcile(root / LEDGER_REL, text, check)  # shared reconcile fail-closes (exit 2) on an
-                                                          # OSError or an invalid-UTF-8 target
+                                                         # OSError or an invalid-UTF-8 target
     if drifted:
         print("drift: {} is out of date; run tools/gen_enforceability.py".format(LEDGER_REL),
               file=sys.stderr)
