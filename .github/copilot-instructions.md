@@ -50,10 +50,11 @@ A check whose logic is correct is still worthless when its input cannot answer t
 of every consequential guard not whether the value is correct but whether the source can, even in principle,
 answer what is being asked; when it cannot, change the input rather than harden the check. A value the guard
 is handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,
-threshold, or configuration, is itself such an input: measure a passed premise against the real source, and
-treat a malformed, contradictory, or out-of-range control as a failure rather than running the guard
+threshold, or configuration, is itself such an input: validate a passed premise against the real source or
+authoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather
+than running the guard
 mis-sized or disabled. When the source cannot answer, the guard treats that as a distinct cannot-evaluate
-case rather than silently collapsing it into a definite no; a two-valued predicate cannot carry this third
+case rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third
 state, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and
 a consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a
 verdict the guard never reached. Inputs absent from the author's own examples are a particular silent-failure
@@ -133,10 +134,10 @@ A gate, validator, scan, or traversal that cannot access, read, or list an input
 reports that as a failure, never as an absent, empty, or clean input. An operation that silently yields
 nothing on a permission or I/O error, a glob or a listing that returns empty, or an existence check that
 returns false, is made to surface the error, so an unreadable input can never read as nothing to check
-and pass. A resource the work declares or is expected to cover is held to the same standard: when it is
-absent or unusable, that is a failure, not a silent skip. The presence-test-then-run-or-succeed shape, which
+and pass. A resource the work declares, or that its specification or contract requires it to cover, is held to the
+same standard: when it is absent or unusable, that is a failure, not a silent skip. The presence-test-then-run-or-succeed shape, which
 lets a missing declared input read as nothing to do, is exactly this failure; absence reads as a clean
-result only for an input outside the work's declared or expected coverage.
+result only for an input outside what the work declares or its specification or contract requires.
 
 ## Commit identity
 
