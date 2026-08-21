@@ -85,7 +85,10 @@ def _read_declaration(path, where):
     (globals()["GENSRC_OUTPUTS"] = ..., exec, setattr on the module) is beyond static analysis and out of
     scope; discovery never executes a generator, so such a binding cannot affect the static registry
     anyway. Per the GD-34 lesson, static enumeration of a dynamic surface is unbounded; this guard covers
-    the realistic and statically-detectable forms and discloses the rest."""
+    the realistic and statically-detectable forms and discloses the rest. (c) A PEP-695 type
+    parameter (def f[GENSRC_OUTPUTS](), class C[GENSRC_OUTPUTS], type X[GENSRC_OUTPUTS] = ...; py3.12+)
+    binds only in the type-parameter scope, is not inspected, cannot affect the module-level
+    declaration, and is a SyntaxError on the py3.11 floor: an accepted nested-scope residual."""
     source = path.read_text(encoding="utf-8")  # OSError -> caller's fail-closed try
     try:
         tree = ast.parse(source, filename=str(path))
@@ -138,6 +141,9 @@ def _read_declaration(path, where):
         elif isinstance(node, ast.MatchMapping):
             if node.rest == "GENSRC_OUTPUTS":  # `case {**GENSRC_OUTPUTS}` binds the rest to that name
                 raise ValueError(binder.format("a match capture"))
+        elif isinstance(node, ast.arg):
+            if node.arg == "GENSRC_OUTPUTS":  # a function/lambda parameter, incl. */**/kw-only
+                raise ValueError(binder.format("a parameter"))
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             if "GENSRC_OUTPUTS" in node.names:
                 raise ValueError(binder.format("a global/nonlocal declaration"))
@@ -447,6 +453,7 @@ _REBINDS = {
     "MatchMapping rest (case {**GENSRC_OUTPUTS})": "match v:\n    case {**GENSRC_OUTPUTS}:\n        pass\n",
     "def rebind": "def GENSRC_OUTPUTS():\n    pass\n",
     "class rebind": "class GENSRC_OUTPUTS:\n    pass\n",
+    "parameter rebind (def f(GENSRC_OUTPUTS))": "def _f(GENSRC_OUTPUTS):\n    pass\n",
 }
 
 # The positive counterpart to the dotted-import reject: `import GENSRC_OUTPUTS.child as y` binds only `y`,
