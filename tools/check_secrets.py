@@ -89,6 +89,44 @@ PLACEHOLDER = re.compile(
     r"redacted|fake|test|todo|none|null|n/?a|actual_password_here)$"
 )
 
+# A pure dotted-identifier reference such as process.env.OPENAI_KEY_V2 or config.settings.apiKey2:
+# every dot-separated segment is a bare identifier, with at least one dot. It is a CODE REFERENCE, not a
+# literal secret, so it is excluded from the unquoted credential match (F-127) UNLESS it is JWT-shaped.
+DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+_JWT_MIN_LEN = 60
+
+
+def _looks_like_jwt(value):
+    """A dotted-identifier-shaped value that must stay caught: a JWT. Every standard JWT header
+    base64url-encodes a JSON object beginning '{"', which is the prefix eyJ; the length floor is a
+    conservative backstop for an atypical header. A real JWT clears one or the other; a dotted code
+    reference clears neither."""
+    return value.startswith("eyJ") or len(value) >= _JWT_MIN_LEN
+
+
+def _assign_is_secret(match):
+    """True when an ASSIGN match assigns a real (non-placeholder) credential literal. Shared decision
+    logic; the secsec hook (_scan_secret in aiqt_hooks.py) mirrors this EXACTLY. A quoted value keeps the
+    looser bar. An UNQUOTED value must contain both a letter and a digit AND must not be a pure
+    dotted-identifier code reference (F-127). A PLACEHOLDER value is never a secret."""
+    value = (match.group("qvalue") or match.group("value") or "").strip()
+    if not value:
+        return False
+    if match.group("qvalue") is None:  # unquoted
+        if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
+            return False
+        if DOTTED_PATH.fullmatch(value) and not _looks_like_jwt(value):
+            return False
+    return not PLACEHOLDER.match(value)
+
+
+def _is_scan_candidate(suffix):
+    """A file is scanned when it has a known text suffix OR no suffix at all: an extensionless file such
+    as a PEM key or a literal `.env` (whose suffix is empty) must be scanned, not skipped. A binary with
+    no known suffix is still skipped later on a UnicodeDecodeError; only a KNOWN non-text suffix (.png,
+    .pdf) is skipped up front."""
+    return not suffix or suffix in TEXT_SUFFIXES
+
 
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
@@ -99,7 +137,7 @@ def main() -> int:
                 continue
             if path.relative_to(root).as_posix() in EXEMPT_PATHS:
                 continue
-            if path.suffix not in TEXT_SUFFIXES:
+            if not _is_scan_candidate(path.suffix):
                 continue
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
@@ -116,15 +154,7 @@ def main() -> int:
                 # placeholder assignment earlier on the line must not mask a real one after it.
                 # One finding per line suffices, so append on the first real match and stop.
                 for match in ASSIGN.finditer(line):
-                    value = match.group("qvalue") or match.group("value") or ""
-                    value = value.strip()
-                    # An UNQUOTED value must additionally look like a credential (letters AND
-                    # digits), because an unquoted match is far likelier to be ordinary prose
-                    # or code than a quoted one. Quoted values keep the looser bar.
-                    if value and match.group("qvalue") is None:
-                        if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
-                            value = ""
-                    if value and not PLACEHOLDER.match(value):
+                    if _assign_is_secret(match):
                         findings.append(
                             f"{rel}:{number}: credential-named variable assigned a literal"
                         )
@@ -145,5 +175,52 @@ def main() -> int:
     return 0
 
 
+def _self_test() -> int:
+    """Exercise the credential-value decision and the scan-candidate predicate against fixtures, so the
+    F-127 dotted-path exclusion and the extensionless-file coverage are guarded by a check that fails
+    without them. Every secret fixture is synthetic-but-shaped. Exit 0 on PASS, 1 on FAIL."""
+    failures = []
+
+    def assign_hit(line):
+        return any(_assign_is_secret(m) for m in ASSIGN.finditer(line))
+
+    real = "A7bce9f2Xk1mNq8Z"
+    # Assembled from parts so no contiguous JWT literal appears in this source (SECP; a contiguous JWT
+    # would itself trip the repo secret-scan gate). Each dotted segment is a separate string joined by a
+    # bare "." literal, so the three-segment eyJ...  .  ...  .  ... shape never appears end to end.
+    jwt = ("eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+           + "." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U")
+    long_dotted = "a1." + "b2." * 20 + "c3"   # >= _JWT_MIN_LEN, dotted, non-eyJ: caught by the backstop
+    cases = [
+        ("password = " + real, True),                  # unquoted real literal
+        ("token = process.env.OPENAI_KEY_V2", False),   # F-127 dotted path reference
+        ("api_key = config.settings.apiKey2", False),   # dotted path with a digit
+        ("auth_token = " + jwt, True),                  # dotted JWT (eyJ) stays caught
+        ("secret = " + long_dotted, True),              # JWT-length dotted backstop stays caught
+        ('secret = "' + real + '"', True),              # quoted real literal
+        ("password = process_env_KEY2", True),          # single identifier, not dotted: caught
+        ('password = "xxxxxxxxxxxx"', False),           # quoted placeholder
+    ]
+    for line, want in cases:
+        got = assign_hit(line)
+        if got != want:
+            failures.append("ASSIGN {!r}: want {}, got {}".format(line, want, got))
+
+    for suffix, want in [("", True), (".md", True), (".env", True), (".png", False), (".pdf", False)]:
+        got = _is_scan_candidate(suffix)
+        if got != want:
+            failures.append("scan-candidate {!r}: want {}, got {}".format(suffix, want, got))
+
+    if failures:
+        print("SELF-TEST FAIL:")
+        for f in failures:
+            print("  " + f)
+        return 1
+    print("SELF-TEST PASS: {} ASSIGN + 5 scan-candidate cases".format(len(cases)))
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(_self_test())
     sys.exit(main())
