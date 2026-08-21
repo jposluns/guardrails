@@ -60,8 +60,12 @@ TEXT_SUFFIXES = {
     ".env", ".conf", ".tf", ".tfvars", ".ps1", ".rb", ".js", ".ts", ".go",
     ".txt", ".properties", ".xml", ".config",
     # PEM/PGP-text credential files: a private-key header is caught by PREFIXES; a public cert is inert.
-    # Binary key stores (.p12/.pfx/.jks) are left to the UnicodeDecodeError skip and gitleaks.
-    ".pem", ".key", ".crt", ".cer", ".asc", ".p8", ".pk8",
+    # .ovpn is here because an OpenVPN profile can carry an inline PEM private key. Binary key stores
+    # (.p12/.pfx/.jks) are not text: excluded up front by this allow-list and left to gitleaks (never read,
+    # so never a UnicodeDecodeError). This allow-list is CURATED high-signal, NOT an exhaustive list of
+    # credential carriers; an extension not here is left to gitleaks, the exhaustive backstop, and is added
+    # only when a carrier recurs (periodic curation, backlog L12).
+    ".pem", ".key", ".crt", ".cer", ".asc", ".p8", ".pk8", ".ovpn",
 }
 
 # Recognizable provider token shapes.
@@ -200,9 +204,10 @@ def main() -> int:
 def _self_test() -> int:
     """Exercise the credential-value decision and the scan-candidate predicate against fixtures, so the
     F-127 env-lookup exclusion and the extensionless/dotenv coverage are guarded by a check that fails
-    without them. Fixtures that could themselves trip the repo secret-scan (provider-shaped tokens) are
-    assembled from parts (SECP); plain non-scannable literals (a keyword-less value, a dotted config path)
-    stand as-is. Exit 0 on PASS, 1 on FAIL."""
+    without them. Provider-shaped token fixtures are assembled from parts (SECP) so they never appear as a
+    contiguous literal. The credential-ASSIGNMENT fixtures below (e.g. `password = <value>`) DO read as
+    secrets to the scanner, but stay literal because THIS file is path-exempt from the scan (SKIP_PATHS),
+    so they never trip the live gate. Exit 0 on PASS, 1 on FAIL."""
     from pathlib import PurePath
 
     failures = []
@@ -247,11 +252,17 @@ def _self_test() -> int:
              ("server.pem", True), ("id_rsa.key", True), ("cert.crt", True),
              ("chain.cer", True), ("key.asc", True), ("AuthKey.p8", True),
              ("SERVER.PEM", True), ("CREDS.TXT", True),
+             ("client.ovpn", True), ("legacy.pk8", True),
              ("image.png", False), ("doc.pdf", False)]
     for name, want in names:
         got = _is_scan_candidate(PurePath(name))
         if got != want:
             failures.append("scan-candidate {!r}: want {}, got {}".format(name, want, got))
+
+    # Guard the path-scoped self-exemption: a basename revert (SKIP_PATHS = {"check_secrets.py"}) would
+    # skip a same-named file anywhere, so assert the repo-relative PATH form and reject a bare basename.
+    if "tools/check_secrets.py" not in SKIP_PATHS or "check_secrets.py" in SKIP_PATHS:
+        failures.append("SKIP_PATHS must be repo-relative-path-scoped, not basename")
 
     if failures:
         print("SELF-TEST FAIL:")
