@@ -31,6 +31,7 @@ and both are drift-gated in CI.
 - [Evidence-grounded completion](.claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md)
 - [A guard is only as good as its input](.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md)
 - [No fabrication](.claude/rules/aiqt/10-ACCUR-no-fabrication.md)
+- [Observe before asserting behaviour](.claude/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md)
 - [Read before characterizing](.claude/rules/aiqt/10-ACCUR-read-before-characterizing.md)
 - [Capture the reference when the claim is made](.claude/rules/aiqt/10-ACCUR-reference-capture.md)
 - [Reproduce a defect before fixing it](.claude/rules/aiqt/10-ACCUR-reproduce-before-fix.md)

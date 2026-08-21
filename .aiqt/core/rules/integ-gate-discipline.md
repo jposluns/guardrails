@@ -17,4 +17,6 @@ map-iso-42001-broad: [A.6.2.4]
 
 Never weaken a gate to obtain a pass; fix the artefact instead. No bypass flags, no piping a check to a
 truncating sink, no `|| true`, no deleted tests, no lowered thresholds. A failing gate is signal;
-understand why it failed before considering any override.
+understand why it failed before considering any override. A security floor, a deny list, a permission
+floor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only
+through the maintainer's explicit, recorded authorization.
