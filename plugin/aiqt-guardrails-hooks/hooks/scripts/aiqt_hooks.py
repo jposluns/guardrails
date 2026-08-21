@@ -3130,17 +3130,14 @@ _SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}
 _SECSEC_PREFIXES = [(re.compile(_pattern), _label) for _pattern, _label in _SECSEC_PREFIX_SOURCES]
 _SECSEC_ASSIGN = re.compile(_SECSEC_ASSIGN_SOURCE)
 _SECSEC_PLACEHOLDER = re.compile(_SECSEC_PLACEHOLDER_SOURCE)
-# A pure dotted-identifier reference (process.env.OPENAI_KEY_V2) is a code reference, not a literal
-# secret, so it is excluded from the unquoted credential match (F-127) UNLESS it is JWT-shaped (the
-# base64url header prefix eyJ, or JWT length), so a dotted JWT stays caught. Mirrors check_secrets.py's
-# DOTTED_PATH / _looks_like_jwt EXACTLY; this loop logic is hand-mirrored, not part of the generated
-# region above (which carries only the single-sourced pattern strings).
+# A JavaScript-style environment lookup (process.env.X, import.meta.env.X): a pure dotted-identifier
+# path with an `env` accessor segment is a CODE REFERENCE, not a literal secret, so it is excluded from
+# the unquoted credential match (F-127). The env accessor is REQUIRED, so a dotted token that only looks
+# identifier-shaped (a Vault hvs.<random>, a PASETO v2.local.<payload>) stays caught. Mirrors
+# check_secrets.py's DOTTED_PATH / _ENV_ACCESSOR EXACTLY; hand-mirrored loop logic, not part of the
+# generated region above (which carries only the single-sourced pattern strings).
 _SECSEC_DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
-_SECSEC_JWT_MIN_LEN = 60
-
-
-def _secsec_looks_like_jwt(value):
-    return value.startswith("eyJ") or len(value) >= _SECSEC_JWT_MIN_LEN
+_SECSEC_ENV_ACCESSOR = re.compile(r"(?i)(?:^|\.)env\.")
 
 
 # The target field per SINGLE-FIELD tool: the text a Write/Edit would write, or the command a Bash call
@@ -3172,7 +3169,7 @@ def _scan_secret(text):
             if value and match.group("qvalue") is None:
                 if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
                     value = ""
-                elif _SECSEC_DOTTED_PATH.fullmatch(value) and not _secsec_looks_like_jwt(value):
+                elif _SECSEC_DOTTED_PATH.fullmatch(value) and _SECSEC_ENV_ACCESSOR.search(value):
                     value = ""
             if value and not _SECSEC_PLACEHOLDER.match(value):
                 return "credential-named variable assigned a literal"
