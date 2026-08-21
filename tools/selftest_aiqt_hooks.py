@@ -170,7 +170,6 @@ def main():
     for _idk in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
         os.environ.pop(_idk, None)
     failures = []
-    gs_skipped = []  # gensrc gs-q: skipped where a chmod-0 registry stays readable (root/DAC-bypass)
 
     def expect(label, command, want, cwd=None):
         got = _decision(handler, command, cwd=cwd)
@@ -2402,10 +2401,31 @@ def main():
             gs_reg3 = gs_repo3 / ".aiqt" / "gensrc.json"
             gs_nogit = tmp / "gsnogit"                 # plain non-git dir (unresolved root)
             gs_nogit.mkdir(parents=True, exist_ok=True)
+            # Deterministic hardening fixtures (no permission-dependent skips):
+            gs_repo_sp = _gs_init("gsrepo_sp ")        # dir name with a TRAILING SPACE (F-162)
+            (gs_repo_sp / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_repo_sp / ".aiqt" / "gensrc.json").write_text(json.dumps(_gs_registry), encoding="utf-8")
+            gs_link = _gs_init("gslink")               # registry is a DANGLING symlink (F-164)
+            (gs_link / ".aiqt").mkdir(parents=True, exist_ok=True)
+            os.symlink(str(gs_link / ".aiqt" / "nonexistent.json"),
+                       str(gs_link / ".aiqt" / "gensrc.json"))
+            gs_dir = _gs_init("gsdir")                 # registry PATH is a DIRECTORY (deterministic unreadable)
+            (gs_dir / ".aiqt").mkdir(parents=True, exist_ok=True)
+            (gs_dir / ".aiqt" / "gensrc.json").mkdir(parents=True, exist_ok=True)
+            gs_big = _gs_init("gsbig")                 # multibyte OVERSIZE registry: >1M BYTES, <1M chars (F-165)
+            (gs_big / ".aiqt").mkdir(parents=True, exist_ok=True)
+            # ensure_ascii=False so the multibyte pad is written as REAL 2-byte UTF-8 (not the 6-byte
+            # \\uXXXX ASCII escape): the file is then ~1.2M BYTES but only ~600k CHARS, so a char-count
+            # read would slip under the cap (the pre-fix hole) while the byte-bound read rejects it.
+            _big_pad = "é" * 600000               # 600k chars, ~1.2M BYTES ('e' with acute is 2 UTF-8 bytes)
+            (gs_big / ".aiqt" / "gensrc.json").write_text(
+                json.dumps({"version": 1, "generated": [], "pad": _big_pad}, ensure_ascii=False),
+                encoding="utf-8")
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the gensrc fixtures: {}".format(exc), file=sys.stderr)
             return 2
         gr, gr2, gr3, gng = str(gs_repo), str(gs_repo2), str(gs_repo3), str(gs_nogit)
+        grsp, grlink, grdir, grbig = str(gs_repo_sp), str(gs_link), str(gs_dir), str(gs_big)
 
         # ASK: a file match, a tree-member match, and a MultiEdit file match. gs-a proves the EXPLICIT
         # _ask (the manifest default is never rendered, so an ask here cannot be leaning on it).
@@ -2463,20 +2483,81 @@ def main():
         gexpect("(gs-p) a missing file_path ASKS", "ask",
                 tool="Write", cwd=gr)
         # ASK: an UNREADABLE registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
-        # Skipped where the runner can still read a chmod-0 file (root/DAC-bypass), as in gen_hooks
-        # case 5 and conformance.py.
-        gs_reg3.write_text(json.dumps(_gs_registry), encoding="utf-8")
-        os.chmod(gs_reg3, 0)
-        if os.access(gs_reg3, os.R_OK):
-            gs_skipped.append("gs-q unreadable-registry")
-        else:
-            gexpect("(gs-q) an unreadable registry ASKS (unreadable is never absent)", "ask",
-                    tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
-        os.chmod(gs_reg3, 0o644)  # restore so cleanup can remove it
+        # DETERMINISTIC: the registry PATH is a DIRECTORY, so open(path,"rb") raises IsADirectoryError
+        # (an OSError -> bad) on every runner, root included. No os.access/chmod skip (F-166).
+        gexpect("(gs-q) an unreadable (directory-at-path) registry ASKS (unreadable is never absent)", "ask",
+                tool="Write", file_path=os.path.join(grdir, "GEN.md"), cwd=grdir)
         # ASK: a MultiEdit relative file_path is joined onto cwd, then matched.
         gexpect("(gs-r) a MultiEdit relative file_path is cwd-joined then matched (ASKS)", "ask",
                 tool="MultiEdit", file_path="GEN.md",
                 edits=[{"old_string": "a", "new_string": "b"}], cwd=gr)
+
+        # === round-2 hardening: input-validation holes that must fail SAFE to ASK, never silent-allow ===
+        # HARD BLOCK: a mis-wired event (not PreToolUse) fails closed at exit 2 (no structured decision).
+        _hb_code, _hb_out, _hb_err = aiqt_hooks.gensrc_guard(
+            {"hook_event_name": "PostToolUse", "tool_name": "Write",
+             "tool_input": {"file_path": os.path.join(gr, "GEN.md")}, "cwd": gr})
+        if _hb_code != 2:
+            failures.append("(gs-s) a mis-wired event hard-blocks (exit 2): expected 2, got {}"
+                            .format(_hb_code))
+        # ASK: a present-but-unreadable tool_name (empty string, list, bool) cannot be matched -> fail-safe
+        # ask (only a MISSING tool_name denies). Was a silent ALLOW (not in _GENSRC_TOOLS). (F-161)
+        gexpect("(gs-t1) an empty-string tool_name ASKS (unreadable, not a miss)", "ask",
+                tool="", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
+        gexpect("(gs-t2) a list tool_name ASKS (unreadable, not a miss)", "ask",
+                tool=[], file_path=os.path.join(gr, "GEN.md"), cwd=gr)
+        gexpect("(gs-t3) a bool tool_name ASKS (unreadable, not a miss)", "ask",
+                tool=True, file_path=os.path.join(gr, "GEN.md"), cwd=gr)
+        # ASK: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1). (F-159)
+        gs_reg3.write_text(json.dumps({"version": True, "generated": [
+            {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
+        gexpect("(gs-u) a JSON-bool version:true ASKS (type is bool, not int)", "ask",
+                tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # ASK: version:"1" string is not int 1. (both old and new reject; asserts the type contract holds)
+        gs_reg3.write_text(json.dumps({"version": "1", "generated": [
+            {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
+        gexpect("(gs-v) a string version:\"1\" ASKS (not int)", "ask",
+                tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # ASK: a control character (NUL) in a FILE entry target is malformed -> bad. Was ALLOW (target
+        # passed the old validation, no match on an unregistered query). (F-160)
+        gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+            {"kind": "file", "target": "GEN\x00.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
+        gexpect("(gs-w) a NUL in a file-entry target ASKS (control-char rejected)", "ask",
+                tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # ASK: a NON-NUL control char (0x1f) in a file target. Unlike NUL, realpath does NOT raise on it,
+        # so ONLY the control-char rejection (not the realpath-fault wrap) catches it - guards F-160's
+        # independent value. Was ALLOW (target passed old validation; no match on an unregistered query).
+        gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+            {"kind": "file", "target": "GEN\x1f.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
+        gexpect("(gs-w2) a non-NUL control char in a file-entry target ASKS (realpath would not reject)",
+                "ask", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # ASK: a NUL in a BLOCK entry target is rejected BEFORE the block-skip. Was a zero-entry ALLOW
+        # (the block was dropped, leaving no entries). (F-160)
+        gs_reg3.write_text(json.dumps({"version": 1, "generated": [
+            {"kind": "block", "target": "X\x00", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
+        gexpect("(gs-x) a NUL in a block-entry target ASKS (rejected before the block-skip)", "ask",
+                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        # ASK: a NUL in the PAYLOAD file_path is rejected before realpath. Was an uncaught crash
+        # (os.path.realpath raises ValueError on an embedded NUL). (F-160 + F-157)
+        gexpect("(gs-y) a NUL in the payload file_path ASKS (was a crash-to-deny)", "ask",
+                tool="Write", file_path=os.path.join(gr, "GEN\x00.md"), cwd=gr)
+        # ASK: a NON-NUL control char (0x1f) in the payload file_path. realpath would NOT raise on it, so
+        # only the control-char rejection catches it (guards F-160's independent value). Was a silent ALLOW.
+        gexpect("(gs-y2) a non-NUL control char in the payload file_path ASKS (realpath would not reject)",
+                "ask", tool="Write", file_path=os.path.join(gr, "GEN\x1f.md"), cwd=gr)
+        # ASK: a repo dir name with a TRAILING SPACE: the toplevel is preserved (rstrip('\\n'), not
+        # strip()), so the registry IS found and the registered target ASKS. Was ALLOW (strip() dropped
+        # the space -> wrong root -> registry not found -> absent). (F-162)
+        gexpect("(gs-z) a trailing-space repo dir keeps its toplevel; the registered target ASKS", "ask",
+                tool="Write", file_path=os.path.join(grsp, "GEN.md"), cwd=grsp)
+        # ASK: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). Was an inert
+        # ALLOW (open -> FileNotFoundError -> absent). (F-164)
+        gexpect("(gs-aa) a dangling-symlink registry ASKS (a symlink is never absent)", "ask",
+                tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
+        # ASK: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
+        # (a char-count read stayed under the cap and parsed to an empty registry). (F-165)
+        gexpect("(gs-ab) a multibyte-oversize registry ASKS (the bound is on BYTES)", "ask",
+                tool="Write", file_path=os.path.join(grbig, "GEN.md"), cwd=grbig)
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2568,12 +2649,14 @@ def main():
           "manifest default), while a source edit, an unregistered path, and a kind=block target ALLOW, "
           "component-boundary matching keeps gen-extra/ and GEN.md.bak from matching gen/ and GEN.md, and "
           "Bash is out of scope; every fail branch fails SAFE to ASK (a malformed, unknown-version, "
-          "malformed-entry, or unreadable registry, an unresolvable non-git root, a non-contained target, "
-          "a non-dict tool_input, a missing file_path or cwd, and a cwd-joined relative MultiEdit path), "
-          "an absent registry is the inert ALLOW, and only a missing tool_name DENIES"
-          + ("" if not gs_skipped else
-             " (NOTE: skipped {} gensrc case(s) the runner cannot exercise: {})"
-             .format(len(gs_skipped), ", ".join(gs_skipped))))
+          "malformed-entry, symlink, byte-oversize, non-UTF-8, or unreadable registry - the unreadable "
+          "case proven deterministically via a directory-at-path, no permission-skip; a control character "
+          "in an entry target or in the payload file_path; a JSON-bool or string version; an unresolvable "
+          "non-git root or target; a non-contained target or a containment fault; a non-dict tool_input; a "
+          "missing file_path or cwd; an empty/list/bool tool_name; and a cwd-joined relative MultiEdit "
+          "path), a repo dir name with a trailing space keeps its toplevel so the registered target still "
+          "ASKS, an absent registry is the inert ALLOW, a mis-wired event HARD-BLOCKS (exit 2), and only a "
+          "MISSING tool_name DENIES")
     return 0
 
 
