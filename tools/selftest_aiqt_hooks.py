@@ -51,7 +51,9 @@ missing tool_name or an absent target field fails closed. Every secret fixture i
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import contextlib
 import datetime
+import io
 import json
 import os
 import shutil
@@ -2151,9 +2153,15 @@ def main():
         # reads only tool_input, so no cwd is passed.
         ssl = aiqt_hooks.secrets_shift_left
 
-        def sexpect(label, tool, tool_input, want):
+        def sexpect(label, tool, tool_input, want, secret=None):
             data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
-            code, stdout_obj, _stderr = ssl(data)
+            # Capture any DIRECT stdout/stderr the handler might emit, not only its returned tuple, so the
+            # redaction guard covers the FULL emitted surface (a future handler that printed a value instead
+            # of returning it would still be caught). The real secsec path emits only via its return
+            # (no print/log/write), so these buffers are empty today.
+            _cap_out, _cap_err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(_cap_out), contextlib.redirect_stderr(_cap_err):
+                code, stdout_obj, _stderr = ssl(data)
             if code == 0 and stdout_obj is None:
                 got = "allow"
             elif code == 0 and isinstance(stdout_obj, dict):
@@ -2162,6 +2170,15 @@ def main():
                 got = "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
+            # redaction guard (F-131/F-134/F-136): a secsec decision names the pattern label but NEVER
+            # echoes the secret value on ANY emitted surface - permissionDecisionReason, the systemMessage
+            # banner (both in stdout_obj), stderr, or a direct stdout/stderr print. Runs for ANY case that
+            # plants a secret (not only DENYs), so an allow path that echoed a value is caught too.
+            if secret is not None:
+                emitted = ((json.dumps(stdout_obj) if stdout_obj is not None else "") + (_stderr or "")
+                           + _cap_out.getvalue() + _cap_err.getvalue())
+                if secret in emitted:
+                    failures.append("{}: output must not echo the secret value (redaction, F-131/F-134/F-136)".format(label))
 
         # Synthetic secret shapes (NOT real), assembled from PARTS at runtime so the shape never appears
         # as a contiguous literal in THIS source file: it uses the single-sourced check_secrets.py
@@ -2181,24 +2198,31 @@ def main():
 
         # DENY: a Write whose content carries each shape.
         sexpect("(ss-a) Write content with a GitHub token denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _fake_ghp)}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _fake_ghp)}, "deny",
+                secret=_fake_ghp)
         sexpect("(ss-b) Write content with an Anthropic key denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("key", _fake_ant)}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("key", _fake_ant)}, "deny",
+                secret=_fake_ant)
         sexpect("(ss-c) Write content with an AWS access key id denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("aws", _fake_akia)}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("aws", _fake_akia)}, "deny",
+                secret=_fake_akia)
         sexpect("(ss-d) Write content with a private key block header denies",
-                "Write", {"file_path": "/tmp/x", "content": _fake_pkey + "\nMIIB...\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _fake_pkey + "\nMIIB...\n"}, "deny",
+                secret=_fake_pkey)
         sexpect("(ss-e) Write content with a credential assignment denies",
-                "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", '"' + _cred + '"')}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", '"' + _cred + '"')}, "deny",
+                secret=_cred)
         # DENY: an Edit whose new_string introduces a secret.
         sexpect("(ss-f) Edit new_string with a GitHub token denies",
                 "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _asgn("auth", _fake_ghp)},
-                "deny")
+                "deny", secret=_fake_ghp)
         # DENY: a Bash write-form (printf redirect, heredoc) emitting a secret in the command string.
         sexpect("(ss-g) Bash printf > f with a GitHub token denies",
-                "Bash", {"command": "printf '%s' '" + _fake_ghp + "' > /tmp/f"}, "deny")
+                "Bash", {"command": "printf '%s' '" + _fake_ghp + "' > /tmp/f"}, "deny",
+                secret=_fake_ghp)
         sexpect("(ss-h) Bash heredoc writing an AWS key denies",
-                "Bash", {"command": "cat > /tmp/f <<EOF\n" + _fake_akia + "\nEOF"}, "deny")
+                "Bash", {"command": "cat > /tmp/f <<EOF\n" + _fake_akia + "\nEOF"}, "deny",
+                secret=_fake_akia)
 
         # ALLOW: a Write whose only credential-shaped values are PLACEHOLDERS (excluded exactly as
         # check_secrets.py excludes them; the first two are 12+ chars so they exercise the ASSIGN
@@ -2224,7 +2248,7 @@ def main():
                 "Bash", {"command": "ls -la /tmp"}, "allow")
         # Fail-closed: a missing tool_name denies; an in-scope tool whose target field is absent denies.
         sexpect("(ss-n) missing tool_name denies (fail-closed)",
-                None, {"content": _fake_ghp}, "deny")
+                None, {"content": _fake_ghp}, "deny", secret=_fake_ghp)
         sexpect("(ss-o) Write with no readable content denies (fail-closed)",
                 "Write", {"file_path": "/tmp/x"}, "deny")
 
@@ -2236,20 +2260,20 @@ def main():
         _ph_then_real = (_asgn("token", '"<your-key-here>"') + "; "
                          + _asgn("password", '"' + _cred + '"'))
         sexpect("(ss-p) F-124 Write placeholder-then-real on one line denies",
-                "Write", {"file_path": "/tmp/x", "content": _ph_then_real}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _ph_then_real}, "deny", secret=_cred)
         sexpect("(ss-q) F-124 Edit placeholder-then-real on one line denies",
-                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _ph_then_real}, "deny")
+                "Edit", {"file_path": "/tmp/x", "old_string": "a", "new_string": _ph_then_real}, "deny", secret=_cred)
         sexpect("(ss-r) F-124 Bash placeholder-then-real on one line denies",
-                "Bash", {"command": _ph_then_real}, "deny")
+                "Bash", {"command": _ph_then_real}, "deny", secret=_cred)
         # F-125 (broadened private-key block regex): a DSA header and the PGP 'PRIVATE KEY BLOCK' form
         # now match; both were missed by the old (?:RSA |EC |OPENSSH |PGP )? alternation. Split so the
         # header is not a contiguous literal here (mirrors _fake_pkey above).
         _dsa_pkey = "-----BEGIN DSA PRIVATE" + " KEY-----"
         _pgp_pkey = "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----"
         sexpect("(ss-s) F-125 Write DSA private key block header denies",
-                "Write", {"file_path": "/tmp/x", "content": _dsa_pkey + "\nMIIB...\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _dsa_pkey + "\nMIIB...\n"}, "deny", secret=_dsa_pkey)
         sexpect("(ss-t) F-125 Write PGP private key block header denies",
-                "Write", {"file_path": "/tmp/x", "content": _pgp_pkey + "\nmQENB...\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _pgp_pkey + "\nmQENB...\n"}, "deny", secret=_pgp_pkey)
         # Control: a placeholder-only one-liner still ALLOWS (both values are non-secrets: a placeholder
         # and a too-short 'example', so no assignment on the line is real).
         _ph_only = (_asgn("token", '"<your-key-here>"') + "; " + _asgn("api_key", '"example"'))
@@ -2264,15 +2288,15 @@ def main():
         _fake_skproj = "sk-" + "proj-" + "A" * 30           # F-126 OpenAI project key; generic sk- cannot match
         _fake_xapp = "xapp-" + "1-A0123456789-" + "A" * 40  # F-126 Slack app-level token
         sexpect("(ss-v) F-126 Write with a bare sk-proj token denies",
-                "Write", {"file_path": "/tmp/x", "content": _fake_skproj + "\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _fake_skproj + "\n"}, "deny", secret=_fake_skproj)
         sexpect("(ss-w) F-126 Write with a bare xapp token denies",
-                "Write", {"file_path": "/tmp/x", "content": _fake_xapp + "\n"}, "deny")
+                "Write", {"file_path": "/tmp/x", "content": _fake_xapp + "\n"}, "deny", secret=_fake_xapp)
         # MultiEdit (F-128a): the newline-joined new_string values of the edits are scanned. A ghp_ token
         # in any edit's new_string DENIES; an edits list with no secret ALLOWS.
         sexpect("(ss-x) F-128a MultiEdit whose edit introduces a secret denies",
                 "MultiEdit", {"file_path": "/tmp/x",
                               "edits": [{"old_string": "a", "new_string": "hello world"},
-                                        {"old_string": "b", "new_string": _asgn("auth", _fake_ghp)}]}, "deny")
+                                        {"old_string": "b", "new_string": _asgn("auth", _fake_ghp)}]}, "deny", secret=_fake_ghp)
         sexpect("(ss-y) F-128a MultiEdit whose edits carry no secret allows",
                 "MultiEdit", {"file_path": "/tmp/x",
                               "edits": [{"old_string": "a", "new_string": "def add(a, b):"},
@@ -2283,7 +2307,7 @@ def main():
                 "Write", "not-a-dict", "deny")
         # Out of scope (F-128b disclosure): NotebookEdit is not in the matcher set, so it ALLOWS.
         sexpect("(ss-aa) NotebookEdit (out of scope) allows",
-                "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow")
+                "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow", secret=_fake_ghp)
 
         # secsec round-4 (F-129): the pattern drift gate must REJECT a target carrying more than one
         # generated BEGIN..END region. text.find inspects only the FIRST region, so a SECOND region (e.g.
