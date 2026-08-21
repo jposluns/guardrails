@@ -10,6 +10,16 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_enforceability.py",
+      "sources": [
+        ".aiqt/core/rules/",
+        ".aiqt/core/hooks/manifest.toml",
+        ".aiqt/core/gates/manifest.toml"
+      ],
+      "target": ".aiqt/enforceability.json"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_gensrc.py",
       "sources": [
         "tools/"

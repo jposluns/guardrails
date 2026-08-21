@@ -163,6 +163,11 @@ jobs:
       - name: Gensrc registry drift
         run: python3 tools/gen_gensrc.py --check
 
+      - name: Enforceability ledger self-test
+        run: python3 tools/gen_enforceability.py --self-test
+      - name: Enforceability ledger drift
+        run: python3 tools/gen_enforceability.py --check
+
       - name: Rule placement
         run: python3 tools/check_rule_placement.py
 
