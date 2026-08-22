@@ -335,3 +335,12 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "A registry-driven fail-close gate: for every target the gensrc registry declares, it corrupts a disposable sandbox copy (the real tree is never written) and asserts the generator's --check rejects it - a text target fails closed to exit 2, the one binary target drifts to exit 1, and the floor is that a corrupted target never yields exit 0. It is the durable form of the F-142b sweep and catches an F-154-class generator that does not consult its target. It exercises --check not regeneration, models unreadable as invalid UTF-8, probes one representative member per tree, recognizes only the 'python3 tools/gen_<stem>.py' regenerate grammar, and does not judge the semantic correctness of generated content."
+
+[[gate]]
+id = "artifact-checksums"
+script = "tools/check_artifact_checksums.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A published-artefact checksum gate. It ships DORMANT: with no [release.artifacts] recorded it prints NOT APPLICABLE and asserts no active control today, so the release-integrity linkage (secpub) is arguable and deferred until it arms, none claimed here. When armed it hashes only the LATEST artifacts-carrying release against the working tree and checks each digest appears verbatim on the evidence page. Disclosed residuals (the gate docstring carries the full text): disarming the armed release's own artifacts table returns the gate to dormant (B1; the forward ratchet constrains only later releases), an older release's recorded digests are not re-hashed (B2), the recorded artifact SET is not checked for completeness so a release recording an incomplete or unrelated-only set leaves a changed artifact unattested (B3), A1's path check is lexical while hashing follows symlinks so a recorded path symlinked outside the published tree is hashed anyway (B4), and the D1/A5 evidence scan is a lowercase substring test that a digest inside an HTML comment (M1), a bare prefix-less digest (M2), or an uppercase or substring-of-a-longer-run token (M3) can slip. The LA-2 PR-2 arming layer closes B1/B2, with the set-completeness (B3), real-path containment (B4), and evidence-token (M3) hardenings landing at arming too."
