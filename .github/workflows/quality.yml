@@ -128,6 +128,13 @@ jobs:
 
       - name: Rules self-test
         run: python3 tools/gen_rules.py --self-test
+      # Ships DORMANT: no release records a [release.artifacts] table today, so the gate prints NOT
+      # APPLICABLE and passes. It arms fail-closed once the content freeze records the first digests.
+      - name: Artifact checksums self-test
+        run: python3 tools/check_artifact_checksums.py --self-test
+      - name: Artifact checksums
+        run: python3 tools/check_artifact_checksums.py
+
       - name: Rules drift
         run: python3 tools/gen_rules.py --check
 
