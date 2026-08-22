@@ -326,3 +326,12 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "It exercises the shipped hook behaviours end to end. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
+
+[[gate]]
+id = "gensrc-failclose"
+script = "tools/check_gensrc_failclose.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A registry-driven fail-close gate: for every target the gensrc registry declares, it corrupts a disposable sandbox copy (the real tree is never written) and asserts the generator's --check rejects it - a text target fails closed to exit 2, the one binary target drifts to exit 1, and the floor is that a corrupted target never yields exit 0. It is the durable form of the F-142b sweep and catches an F-154-class generator that does not consult its target. It exercises --check not regeneration, models unreadable as invalid UTF-8, probes one representative member per tree, recognizes only the 'python3 tools/gen_<stem>.py' regenerate grammar, and does not judge the semantic correctness of generated content."
