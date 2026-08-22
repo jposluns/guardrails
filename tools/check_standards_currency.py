@@ -27,7 +27,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _standards import load_manifests, ManifestError  # noqa: E402
+from _standards import Manifest, load_manifests, ManifestError  # noqa: E402
 
 try:
     from gen_rules import repo_root  # noqa: E402  reuse the repo's own root finder
@@ -207,6 +207,43 @@ def self_test_main():
     if worst != 0:
         failures.append("audit with only OK expected worst=0, got {}".format(worst))
 
+    # Manifest.url validation (CW-3): the optional canonical url. When present it must be an https://
+    # URL with a host; a malformed or non-string url fails closed with ManifestError, a valid one
+    # passes, and an absent url is None. Deterministic, no network (offline validation only).
+    def _url_data(url=None, with_url=False):
+        data = {
+            "map-key": "map-urltest", "name": "URL test", "publisher": "AIQT self-test",
+            "edition": "2026", "kind": "control", "status": "stable", "citation-unit": "control",
+            "id-pattern": "ST[0-9]{2}", "source-artefact": "self-test fixture",
+            "retrieved": days_ago(1), "id": [{"code": "ST01", "title": "one"}],
+        }
+        if with_url:
+            data["url"] = url
+        return data
+
+    def _parses(url=None, with_url=False):
+        return Manifest(Path("urltest.toml"), _url_data(url, with_url))
+
+    def _rejects(url):
+        try:
+            Manifest(Path("urltest.toml"), _url_data(url, with_url=True))
+        except ManifestError:
+            return True
+        return False
+
+    if _parses(with_url=False).url is not None:
+        failures.append("Manifest with no url expected url None")
+    good = _parses("https://example.org/path", with_url=True)
+    if good.url != "https://example.org/path":
+        failures.append("Manifest with a valid https url expected url preserved, got {!r}".format(
+            good.url))
+    for bad in ("http://x", "ftp://x", "https://", "example.org", "", 123, ["https://x"],
+                "https://exa mple.org", "https://ho\tst.org", "https://h\x01ost.org",
+                "https://:443/path", "https://user@", "https:///path",
+                "https://[broken", "https://example.org:bad"):
+        if not _rejects(bad):
+            failures.append("Manifest with a malformed url {!r} expected ManifestError".format(bad))
+
     # run()-level exit contract, against real manifest files: the actual CLI entry point, including the
     # --warn-only masking behaviour (a FAIL downgrades to 0, a MALFORMED must NOT), absent-dir
     # fail-closed, and current -> 0. Needs a writable tempdir; skipped (not failed) where none exists,
@@ -262,7 +299,8 @@ def self_test_main():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: per-status thresholds, warn-immediately, unparseable/future/unknown "
-          "fail-closed, and audit precedence (MALFORMED > FAIL > OK) all hold")
+          "fail-closed, audit precedence (MALFORMED > FAIL > OK), and url validation (https-with-host "
+          "required, malformed fails closed, absent -> None) all hold")
     return 0
 
 

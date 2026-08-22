@@ -10,6 +10,7 @@ citation-unit = "subcategory"
 id-pattern = "^(GOVERN|MAP|MEASURE|MANAGE) \\d+\\.\\d+$"
 source-artefact = "NIST AI 100-1, AI Risk Management Framework 1.0"
 retrieved = "2026-08-16"
+url = "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10"
 [[id]]
 code = "GOVERN 1.1"
 title = "Legal and regulatory requirements involving AI are understood, managed, and documented."

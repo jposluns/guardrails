@@ -10,6 +10,7 @@ citation-unit = "risk category"
 id-pattern = "^API([1-9]|10)$"
 source-artefact = "OWASP API Security Top 10 2023"
 retrieved = "2026-08-16"
+url = "https://github.com/OWASP/API-Security"
 
 [[id]]
 code = "API1"
