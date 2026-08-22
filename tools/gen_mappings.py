@@ -35,6 +35,19 @@ RELATION = {"risk": "addresses risk", "control": "supports control",
             "guidance": "aligns with guidance", "technique": "mitigates technique"}
 # Reuse the existing site status pills (no colour-only encoding: the word carries the meaning).
 STATUS_PILL = {"stable": "now", "beta": "next", "snapshot": "idea"}
+# Display prose for the methodology relation-kinds bullet, keyed by kind like RELATION (which feeds the
+# exports and must not change shape). RELATION is the terse export wording; this is the reader-facing form.
+RELATION_PROSE = {"risk": "addresses a risk", "control": "supports a control",
+                  "guidance": "aligns with guidance", "technique": "mitigates a technique"}
+# The registry-intro badge meanings, keyed by status like STATUS_PILL.
+STATUS_DESC = {"stable": "a settled published edition", "beta": "a pre-release edition",
+               "snapshot": "a point-in-time capture of a moving source"}
+# Reader-facing badge order: maturity, not alphabetical (a settled edition first, a moving snapshot last).
+STATUS_ORDER = ("stable", "beta", "snapshot")
+# Small-count words for public prose (index is the count). Fail closed past the table: a thirteenth
+# kind is a deliberate wording decision, not a silent fallback.
+COUNT_WORDS = (None, "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+               "Ten", "Eleven", "Twelve")
 BLOB = "https://github.com/jposluns/guardrails/blob/main/.claude/rules/{}"
 NOTICE_URL = "https://github.com/jposluns/guardrails/blob/main/NOTICE"
 EN, EM = "–", "—"
@@ -69,6 +82,29 @@ def _no_dash(value, where):
     if EN in value or EM in value:
         raise ValueError("{}: emitted text contains an en/em dash: {!r}".format(where, value))
     return value
+
+
+def _count_word(n, where):
+    """Small-count word for public prose; fail closed past the table (a thirteenth kind is a
+    deliberate wording decision, not a silent fallback)."""
+    if not 1 <= n < len(COUNT_WORDS):
+        raise ValueError("{}: no count word for {}".format(where, n))
+    return COUNT_WORDS[n]
+
+
+def _oxford(items):
+    """Oxford-comma join of an already-ordered list; fail closed on an empty list (an empty set has no
+    claim to make in the prose)."""
+    if not items:
+        raise ValueError("oxford join of an empty list; fail-closed")
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+def _oxford_lower(items):
+    """Oxford-comma join, lower-cased, for an inline noun list in running prose."""
+    return _oxford([item.lower() for item in items])
 
 
 def rule_title(path):
@@ -187,6 +223,60 @@ def render_registry(reg):
                 cited=r["ids_cited"], total=r["ids_total"]))
     tail = '          </tbody>\n        </table>\n      </div>'
     return "\n".join([head, *body, tail])
+
+
+def render_relkinds(manifests):
+    """The methodology 'relation kinds' bullet: the count and the per-kind phrasings, derived from the
+    kinds actually present so a new or removed kind cannot leave the count or the list stale."""
+    kinds = sorted({m.kind for m in manifests.values()})
+    phrases = ["a rule <em>{}</em>".format(RELATION_PROSE[k]) for k in kinds[:1]] + \
+              ["<em>{}</em>".format(RELATION_PROSE[k]) for k in kinds[1:]]
+    body = ", ".join(phrases[:-1]) + ", or " + phrases[-1] if len(phrases) > 1 else phrases[0]
+    return ('      <li><strong>{n} relation kinds.</strong> The wording of each mapping follows the '
+            "framework's type:\n        {body}.</li>").format(
+        n=_count_word(len(kinds), "relation kinds"), body=body)
+
+
+def render_idkinds(manifests):
+    """The methodology 'identifiers only' bullet: the reproduced identifier-kinds list, derived from the
+    distinct kinds present so it can never again omit a vendored kind."""
+    kinds = _oxford_lower(sorted({m.kind for m in manifests.values()}))
+    return ('      <li><strong>Identifiers and published titles only.</strong> Only {kinds}\n'
+            "        identifiers and the frameworks' own published titles are reproduced, as "
+            'navigational pointers;\n        some frameworks (NIST AI RMF, for example) label an '
+            'item with a full sentence, reproduced\n        verbatim as that item\'s published '
+            'title. No further specification prose, requirement text,\n        control or clause '
+            'bodies, figures, or tables from any framework are reproduced.</li>').format(kinds=kinds)
+
+
+def render_isoentries(manifests):
+    """The methodology 'ISO/IEC entries' bullet: the count of ISO/IEC-published manifests, worded
+    with the right number word and singular/plural agreement. No ISO/IEC manifest renders no bullet
+    (an empty <li> asserting nothing would be wrong)."""
+    n = sum(1 for m in manifests.values() if m.publisher == "ISO/IEC")
+    if n == 0:
+        return ""
+    word = _count_word(n, "ISO/IEC entries").lower()
+    entries = "entry" if n == 1 else "entries"
+    verb = "reproduces" if n == 1 else "reproduce"
+    return ('      <li><strong>ISO/IEC entries.</strong> The {word} ISO/IEC {entries} {verb} clause '
+            'and control numbers\n        with their short headings only, as pointers to a licensed '
+            'copy of the standard, never any clause\n        or Annex body text.</li>').format(
+        word=word, entries=entries, verb=verb)
+
+
+def render_registry_intro():
+    """The registry-intro paragraph: the badge meanings derived from the STATUS_PILL/STATUS_DESC
+    vocabulary, plus the coverage sentence. The coverage sentence states today's full-catalogue wording
+    unconditionally (the catalogue field that would make it conditional is a later change)."""
+    if set(STATUS_ORDER) != set(STATUS_PILL):
+        raise ValueError("STATUS_ORDER must cover STATUS_PILL exactly; a status is unordered")
+    phrases = ['<span class="pill {pill}">{status}</span> for {desc}'.format(
+        pill=_attr(STATUS_PILL[s]), status=_text(s), desc=STATUS_DESC[s])
+        for s in STATUS_ORDER]
+    return ('    <p>Each framework is pinned to a single edition. The edition-stability badge reads '
+            '{pills}. The last column states how many of that edition\'s identifiers the current '
+            'rules reference.</p>').format(pills=_oxford(phrases))
 
 
 def _group_ordered(rows, key):
@@ -323,6 +413,10 @@ def main():
     try:
         text = page.read_text(encoding="utf-8")
         text = replace_block(text, "COVERAGE", render_coverage(reg, rows))
+        text = replace_block(text, "RELKINDS", render_relkinds(manifests))
+        text = replace_block(text, "IDKINDS", render_idkinds(manifests))
+        text = replace_block(text, "ISOENTRIES", render_isoentries(manifests))
+        text = replace_block(text, "REGISTRYINTRO", render_registry_intro())
         text = replace_block(text, "REGISTRY", render_registry(reg))
         text = replace_block(text, "FORWARD", render_forward(rows))
         text = replace_block(text, "REVERSE", render_reverse(rows, reg))

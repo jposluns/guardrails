@@ -5,11 +5,11 @@ This pack is published under the Creative Commons Attribution-ShareAlike 4.0 Int
 crosswalk mappings.
 
 The crosswalk mappings reference third-party security and AI-governance frameworks. Only control,
-clause, and risk IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No
-specification prose, requirement text, control or clause bodies, figures, or tables from any
-framework are reproduced. Each framework's identifiers and titles remain the property of their
-respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is
-affiliated with this pack.
+guidance, risk, and technique IDENTIFIERS and their SHORT TITLES are reproduced, as navigational
+pointers. No specification prose, requirement text, control or clause bodies, figures, or tables
+from any framework are reproduced. Each framework's identifiers and titles remain the property of
+their respective publisher under the terms below, and no publisher listed here endorses, sponsors,
+or is affiliated with this pack.
 
 ==================================================================================================
 
@@ -135,8 +135,8 @@ Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/) (per-fra
 noted above)
 
 Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own
-CC BY-SA 4.0 satisfies ShareAlike. Only control/risk identifiers and short titles are reproduced
-as navigational pointers; the mappings are the pack's own work.
+CC BY-SA 4.0 satisfies ShareAlike. Only framework identifiers and their short titles are
+reproduced as navigational pointers; the mappings are the pack's own work.
 
 Attribution: Framework identifiers and short titles are Copyright the OWASP Foundation, Inc.,
 reused under CC BY-SA 4.0.

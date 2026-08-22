@@ -24,17 +24,27 @@ from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 ATTRIB_REL = Path(".aiqt") / "attribution.toml"
 WRAP = 98  # wrap prose paragraphs at this column for a readable plain-text NOTICE
 
-INTRO = (
+INTRO_TEMPLATE = (
     "This pack is published under the Creative Commons Attribution-ShareAlike 4.0 International "
     "License (CC BY-SA 4.0); see the LICENSE file. That licence covers the pack's own content, "
     "including its crosswalk mappings.\n\n"
-    "The crosswalk mappings reference third-party security and AI-governance frameworks. Only control, "
-    "clause, and risk IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No "
+    "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
+    "{kinds} IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "
     "framework are reproduced. Each framework's identifiers and titles remain the property of their "
     "respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is "
     "affiliated with this pack."
 )
+
+
+def _oxford(items):
+    """Oxford-comma join of an already-sorted list; fail closed on an empty list (an empty manifest
+    set has no reproduction claim to make)."""
+    if not items:
+        raise ValueError("no manifest kinds to render in the NOTICE intro; fail-closed")
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + ", and " + items[-1]
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -69,6 +79,7 @@ def _wrap(text, indent=""):
 def build(root):
     """Return the NOTICE text, or raise SystemExit(2) if a vendored publisher is unverified/unattributed."""
     manifests = load_manifests(root / ".aiqt" / "standards")  # raises ManifestError/OSError -> main exits 2
+    kinds = _oxford(sorted({m.kind for m in manifests.values()}))
     attrib = load_toml(root / ATTRIB_REL)
     publishers = attrib.get("publisher", {})
     per_manifest = attrib.get("manifest", {})
@@ -93,7 +104,7 @@ def build(root):
         raise SystemExit(2)
 
     lines = ["AIQT Guardrails: third-party attribution NOTICE", ""]
-    lines.append(_wrap(INTRO))
+    lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds)))
     lines.append("")
     lines.append("=" * WRAP)
 
