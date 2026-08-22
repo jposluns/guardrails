@@ -71,6 +71,7 @@ and both are drift-gated in CI.
 - [Propose a guardrail when an error reveals a gap](.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md)
 - [Prefer the smallest correct change](.claude/rules/aiqt/10-QUALI-smallest-correct-change.md)
 - [Surface a counterproductive instruction before executing it](.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md)
+- [A degraded verifier delivery is not a verdict](.claude/rules/aiqt/10-QUALI-verifier-delivery-completeness.md)
 - [Verifier diversity](.claude/rules/aiqt/10-QUALI-verifier-diversity.md)
 
 **Trust**
