@@ -182,7 +182,9 @@ def check_json_subset_denominator(root, manifests, findings):
         data = json.loads(text)
     except ValueError as exc:
         raise OSError("site/downloads/mappings.json is not valid JSON: {}".format(exc))
-    frameworks = data.get("frameworks", {})
+    frameworks = data.get("frameworks") if isinstance(data, dict) else None
+    if not isinstance(frameworks, dict):
+        raise OSError("site/downloads/mappings.json: expected a top-level 'frameworks' object")
     for man in manifests.values():
         if man.catalogue != "subset":
             continue
@@ -192,6 +194,9 @@ def check_json_subset_denominator(root, manifests, findings):
             findings.append("site/downloads/mappings.json: subset framework {!r} ({}) missing from "
                             "frameworks".format(man.name, stem))
             continue
+        if not isinstance(entry, dict):
+            raise OSError("site/downloads/mappings.json: framework {!r} entry is not an object "
+                          "(malformed export)".format(stem))
         if "ids_total" in entry:
             findings.append("site/downloads/mappings.json: subset framework {!r} carries an edition "
                             "denominator (ids_total={!r})".format(man.name, entry.get("ids_total")))
@@ -482,6 +487,15 @@ def self_test_main():
             '"catalogue": "subset", "ids_cited": 2, "ids_total": 61'))
         if run_quiet(jsondenom) != 1:
             failures.append("a subset framework carrying ids_total in the JSON export expected exit 1")
+
+        # 13b. a subset framework entry that is valid JSON but NOT an object (a string) -> exit 2
+        #      (malformed structure fails closed, not a clean pass).
+        jsonstr = tmp / "jsonstr"
+        _write_fixture(jsonstr, json_export=_JSON.replace(
+            '"subset": {"name": "Fixture Subset Framework", "catalogue": "subset", "ids_cited": 2}',
+            '"subset": "malformed-but-valid-json"'))
+        if run_quiet(jsonstr) != 2:
+            failures.append("a non-object subset framework entry expected exit 2 (fail-closed)")
 
         # 14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip).
         nojson = tmp / "nojson"
