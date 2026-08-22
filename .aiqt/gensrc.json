@@ -27,6 +27,14 @@
       "target": ".aiqt/gensrc.json"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_claude.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".claude/RULES-INDEX.md"
+    },
+    {
       "kind": "tree",
       "regenerate": "python3 tools/gen_rules.py",
       "sources": [
