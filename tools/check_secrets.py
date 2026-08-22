@@ -63,9 +63,10 @@ TEXT_SUFFIXES = {
     # .ovpn is here because an OpenVPN profile can carry an inline PEM private key. Binary key stores
     # (.p12/.pfx/.jks) are not text: excluded up front by this allow-list (never read, so never a
     # UnicodeDecodeError). This allow-list is CURATED high-signal, NOT an exhaustive list of credential
-    # carriers; an extension not here is left to gitleaks in CI, a BROADER independent scanner - not a
-    # guarantee, since gitleaks has its own coverage limits (it can skip an unknown extension too). A
-    # carrier is added here when it recurs (periodic curation, backlog L12).
+    # carriers; an extension not here is left to gitleaks in CI, a BROADER independent scanner - a stronger
+    # net, NOT a guarantee: gitleaks has its own coverage limits (rule and entropy scope, size caps, and
+    # configured allowlists), so neither layer is exhaustive. A carrier is added here when it recurs
+    # (periodic curation, backlog L12).
     ".pem", ".key", ".crt", ".cer", ".asc", ".p8", ".pk8", ".ovpn",
 }
 
