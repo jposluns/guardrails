@@ -24,6 +24,7 @@ run_gate() {
 }
 
 run_gate "secrets"   python3 tools/check_secrets.py
+run_gate "secrets-selftest" python3 tools/check_secrets.py --self-test
 
 # gitleaks is a second, independent secret gate. If it is not installed locally it is
 # reported NOT RUN rather than skipped silently: a gate that quietly does not run is
