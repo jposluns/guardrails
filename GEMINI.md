@@ -204,12 +204,12 @@ discarded.
 
 ## Stage artefacts and promote only on green
 
-An artefact is never installed, published, or copied to a live or shared location before the verification
-it must pass has passed. It is placed first in a staging location, verified there, and only then is that
-same verified artefact promoted to the live or shared destination, on a recorded pass. Promotion that
-races ahead of verification, or that ships a different artefact than the one verified, is the failure this
-prevents. This governs an artefact reaching a runtime or distribution target, and is distinct from
-integrating a change into the protected line of development.
+An artefact is never installed, published, or promoted to a live or otherwise consumer-accessible
+destination before the verification it must pass has passed. It is placed first in a staging area that is
+not that destination, verified there, and only then is that same verified artefact promoted to the live
+destination, on a recorded pass. Promotion that races ahead of verification, or that ships a different
+artefact than the one verified, is the failure this prevents. This governs an artefact reaching a runtime
+or distribution target, and is distinct from integrating a change into the protected line of development.
 
 ## Validation is a gate on apply
 
@@ -346,13 +346,14 @@ analysis, not execution. Produce the assessment and stop; do not implement, crea
 an explicit instruction to act, even when the recommendation is clear. This is a specific instance of
 requiring express authorization before execution.
 
-## Claim a pooled item atomically under one lock
+## Claim a pooled item atomically
 
-Selecting an item from a shared pool and recording the claim on it are one atomic step, under a single
-lock that spans both, so no gap between choosing and reserving lets two actors take the same item. A claim
-already held by another live actor is not overridden: the operation aborts rather than proceeding or
-merely warning. This extends the concurrency-lease discipline from a single session's lease to selection
-from a shared pool.
+Selecting an item from a shared pool and recording the claim on it are one atomic operation spanning both
+the selection and the reservation, so no gap between choosing and reserving lets two actors take the same
+item. The mechanism can be a transaction, a conditional write, a compare-and-set, or a lock; the
+atomicity is what matters, not the primitive. A claim already held by another live actor is not
+overridden: the operation aborts rather than proceeds or merely warns. This extends the concurrency-lease
+discipline from a single session's lease to selection from a shared pool.
 
 ## Change record
 
