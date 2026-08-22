@@ -17,24 +17,36 @@ zero generators raises) instead of forking a parser that could drift.
 
 Corruption strategy, kind-aware, all under the one "corrupt -> non-zero" assertion:
   - a "file" target, and EVERY regular-file member of a "tree" target, whose pristine bytes decode as
-    UTF-8, is probed twice: once with VALID-BUT-DIFFERENT UTF-8 (the pristine bytes plus a distinctive
-    marker line) and once with INVALID UTF-8. The valid-but-different probe is what proves CONTENT
-    guarding rather than mere decoding: a generator that decodes its target but derives its verdict from
-    sources would pass invalid-UTF-8 corruption yet still be caught here. It also removes the
-    false-violation a tolerant reader (errors="replace") would have drawn from an invalid-UTF-8-only
-    strategy: such a reader legitimately still detects the valid-but-different content and passes.
+    UTF-8, is probed with two VALID-BUT-DIFFERENT UTF-8 shapes and one INVALID UTF-8 shape: the pristine
+    bytes plus a distinctive appended marker line (a length-CHANGING content change); the pristine bytes
+    with one interior byte swapped for a different valid one (a SAME-LENGTH content change, present only
+    when an interior ASCII byte exists to swap); and an invalid-UTF-8 sequence. The valid-but-different
+    probes are what prove CONTENT guarding rather than mere decoding: a generator that decodes its target
+    but derives its verdict from sources would pass invalid-UTF-8 corruption yet still be caught here. The
+    same-length probe further defeats a length-only pseudo-guard, which every length-changing probe would
+    pass. Both valid-but-different probes also remove the false-violation a tolerant reader
+    (errors="replace") would have drawn from an invalid-UTF-8-only strategy: such a reader legitimately
+    still detects the different content and passes.
   - a binary target (pristine that is not UTF-8) is probed once with a one-byte tamper.
   - a "block" target is probed once with INVALID UTF-8 only. The generated REGION inside a block file is
     unknown to this gate, so a content change might land OUTSIDE it (a correct clean pass this gate must
-    not assert on); invalid UTF-8 corrupts the WHOLE file and proves only that the generator reads and
-    decodes it. Block region-content-guarding is therefore NOT tested here; it is covered by that
-    generator's own drift `--check` step. See the disclosed residuals.
+    not assert on); invalid UTF-8 corrupts the WHOLE file and proves only the generator's SENSITIVITY to
+    the invalid-byte replacement (that it reads the file and rejects the corruption), not that it decodes
+    it or guards the region's content. Block region-content-guarding is therefore NOT tested here; it is
+    covered by that generator's own drift `--check` step. See the disclosed residuals.
 
-Isolation. The baseline and EACH corruption probe run in a SEPARATE FRESH sandbox: one pristine TEMPLATE
-copytree is made once, and every baseline/probe copies that template to its own disposable throwaway,
-identical except for the single corrupted target. No generator-written state (a marker file dropped on
-one call) can carry into another call, so a stateful generator cannot distinguish a baseline call from a
-probe call without consulting the target (the F-154-via-state trick).
+Isolation. The baseline and EACH corruption probe run in a SEPARATE FRESH, WHOLLY INDEPENDENT sandbox:
+one pristine TEMPLATE copytree is made once, and every baseline/probe copies that template into its own
+disposable tempdir created by a FRESH mkdtemp (not a child of one shared parent dir), identical to the
+template except for the single corrupted target. Each call's subprocess also gets its OWN unique HOME and
+TMPDIR pointing INSIDE that call's disposable tempdir (so a generator's writes under $HOME or $TMPDIR land
+in the per-call throwaway), and repo_root().parent is that unique disposable tempdir. No generator-written
+state (a marker dropped under the sandbox, $HOME, $TMPDIR, or repo_root().parent on one call) can carry
+into another call, so a stateful generator cannot distinguish a baseline call from a probe call without
+consulting the target (the F-154-via-state trick). Residual: a generator that HARDCODES a fixed absolute
+path OUTSIDE all sandboxes (not reached via $HOME/$TMPDIR/repo_root()) could still share state across
+calls; this gate runs the project's OWN trusted in-repo generators and is not an OS sandbox, so that
+purely-adversarial case is out of scope and is left to code review (see the disclosed residuals).
 
 Safety. All corruption happens in disposable copytree sandboxes; the REAL tree is STRICTLY read-only and
 is never corrupted in place, so a SIGKILL, a full disk, or a power loss mid-run can never leave a corrupt
@@ -47,13 +59,15 @@ re-validates that the target is still a contained regular file, so a generator t
 a symlink escaping the sandbox during `--check` is a containment violation (cannot-evaluate), never a
 real-tree write. Symlinks and special nodes are dropped when copying. Each generator runs as a subprocess
 with shell=False, the interpreter pinned to sys.executable, cwd=sandbox, a sanitized environment (ambient
-GIT_*/PYTHONPATH and the like stripped) carrying PYTHONDONTWRITEBYTECODE=1, a bounded per-probe timeout,
-and a bounded total-runtime backstop. `sys.dont_write_bytecode` is set at import time so importing the
-gen_gensrc loader writes no .pyc into the real tools/ tree. A `sandbox/.git` marker anchors each
-generator's repo_root() on the sandbox so a probe can never walk up into the real repository. A whole-tree
-manifest of the real repo, capturing per regular file its sha256, permission bits, and type (and every
-symlink/special node's type), is compared before and after the sweep; ANY change (content, mode, type, a
-new or removed path, a path becoming a symlink), a sandbox/copy failure, or a cleanup failure is exit 2.
+GIT_*/PYTHONPATH and the like stripped, with HOME and TMPDIR REPLACED by per-call unique disposable dirs)
+carrying PYTHONDONTWRITEBYTECODE=1, a per-probe timeout clamped to the time remaining before the
+total-runtime backstop, and that bounded total-runtime backstop. `sys.dont_write_bytecode` is set at
+import time so importing the gen_gensrc loader writes no .pyc into the real tools/ tree. A `sandbox/.git`
+marker anchors each generator's repo_root() on the sandbox so a probe can never walk up into the real
+repository. A manifest of the tracked/generated real tree (excluding .git, __pycache__, .venv,
+node_modules), capturing per regular file its sha256, permission bits, and type (and every symlink/special
+node's type), is compared before and after the sweep; ANY change (content, mode, type, a new or removed
+path, a path becoming a symlink), a sandbox/copy failure, or a cleanup failure is exit 2.
 
 Exit convention (matches the repo's gates):
   0  every entry's generator returned non-zero on every corrupted target.
@@ -71,17 +85,24 @@ touched the real tree, or could not fully dispose of its sandboxes, cannot be tr
 
 DISCLOSED RESIDUALS. The gate proves DETECTION (the generator refuses a corrupt target via --check), not
 REPAIR (that regen emits correct bytes; the drift gate owns that). For a BLOCK target it corrupts only
-with invalid UTF-8 (whole-file), proving the generator reads and decodes the file but NOT that it guards
-the generated region's CONTENT: a valid-but-different change might land outside the region and correctly
-pass, so region-content-guarding stays on that generator's own drift step and is not asserted here. Only
+with invalid UTF-8 (whole-file), proving the generator is SENSITIVE to the invalid-byte replacement (it
+reads and rejects the file) but NOT that it decodes it or guards the generated region's CONTENT: a
+valid-but-different change might land outside the region and correctly pass, so region-content-guarding
+stays on that generator's own drift step and is not asserted here. The content-guarding proof for a text
+or tree-member target is bounded to the SPECIFIC probed changes (an appended marker line and, where an
+interior ASCII byte exists, one same-length byte swap): passing them shows the generator consults its
+target's content, not that it guards against EVERY possible same-length change beyond the one probed. Only
 the `python3 tools/gen_<stem>.py` grammar is recognized; a wrapper or non-Python generator fails coverage
 (exit 2) until the grammar is extended. Encoding is OBSERVED (a UTF-8 decode of the pristine bytes), so an
 ASCII-only binary would be classified as text (none exists today). The temp copy is corruption isolation,
 NOT an OS security sandbox: a malicious generator could still reach absolute paths or the network (the
 before/after manifest and the post-probe containment re-validation detect a real-tree write or an escaping
-symlink after the fact, they do not prevent an arbitrary side effect). Sources are not swept (a separate
-invariant). The gate tests a copy of the working tree, so it captures local uncommitted edits; on CI, HEAD
-equals the tree.
+symlink after the fact, they do not prevent an arbitrary side effect). Per-call unique HOME/TMPDIR and a
+fresh independent tempdir per call deny cross-call state via $HOME, $TMPDIR, or repo_root().parent, but a
+generator that HARDCODES a fixed absolute path outside all sandboxes could still share state across calls;
+that purely-adversarial case is out of scope (the gate runs the project's own trusted generators) and is
+left to code review. Sources are not swept (a separate invariant). The gate tests a copy of the working
+tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
@@ -121,6 +142,8 @@ REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
 PROBE_TIMEOUT = 120  # seconds per subprocess --check; a hung generator is cannot-evaluate, not a hang
 TOTAL_TIMEOUT = 1800  # seconds backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
+_now = time.monotonic  # module-level indirection so the self-test can inject a monotonic clock (deadline)
+_mkdtemp = tempfile.mkdtemp  # module-level indirection so the self-test can inject a sandbox-setup failure
 
 
 class _ContainmentError(Exception):
@@ -151,6 +174,20 @@ def _tamper(data):
     out = bytearray(data)
     out[0] ^= 0xFF
     return bytes(out)
+
+
+def _same_length_change(data):
+    """Return valid UTF-8 bytes the SAME LENGTH as `data` with one INTERIOR byte swapped for a different
+    valid one, or None when no interior ASCII byte exists to swap. Swapping an ASCII byte (< 0x80, always a
+    standalone code point in UTF-8) for another ASCII byte preserves both the length and UTF-8 validity, so
+    the result is a valid-but-different content change that a length-only pseudo-guard would pass but a
+    content-guarding --check must reject."""
+    out = bytearray(data)
+    for i in range(1, len(out) - 1):  # interior positions only (not the first or last byte)
+        if out[i] < 0x80:
+            out[i] = 0x41 if out[i] != 0x41 else 0x42  # 'A', or 'B' where the byte already is 'A'
+            return bytes(out)
+    return None  # no interior ASCII byte to swap (too short, or all-multibyte interior)
 
 
 def _within(child, parent):
@@ -203,27 +240,34 @@ def _write_bytes_safe(path, data, sandbox_real, where):
         os.close(fd)
 
 
-def _sanitized_env():
+def _sanitized_env(overrides=None):
     """A minimal environment for a probe subprocess: PYTHONDONTWRITEBYTECODE=1 plus a small allowlist of
     safe variables carried from the parent. Ambient GIT_*, PYTHONPATH, and everything else are stripped,
-    so an inherited environment cannot redirect a generator to a decoy repo or inject configuration."""
+    so an inherited environment cannot redirect a generator to a decoy repo or inject configuration. HOME
+    and TMPDIR are DELIBERATELY NOT carried from the parent: a probe subprocess receives per-call unique
+    HOME/TMPDIR through `overrides` (pointing inside its own disposable tempdir), so a generator's writes
+    under $HOME or $TMPDIR land in the per-call throwaway and cannot carry state into another call."""
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
-    for key in ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SYSTEMROOT", "PATHEXT"):
+    for key in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "PATHEXT"):
         value = os.environ.get(key)
         if value is not None:
             env[key] = value
     if "PATH" not in env:
         env["PATH"] = os.defpath
+    if overrides:
+        env.update(overrides)
     return env
 
 
-def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT):
+def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
     """Run `python3 <script_path> --check` as a subprocess and return its exit code. shell=False, the
-    interpreter pinned to sys.executable, a sanitized env, cwd anchored on the sandbox, a bounded timeout.
-    Module-level so the self-test can substitute it. Raises subprocess.TimeoutExpired or OSError on a hung
-    or unlaunchable probe; the caller maps that to cannot-evaluate."""
+    interpreter pinned to sys.executable, a sanitized env carrying the per-call HOME/TMPDIR overrides, cwd
+    anchored on the sandbox, a bounded timeout. Module-level so the self-test can substitute it. Raises
+    subprocess.TimeoutExpired or OSError on a hung or unlaunchable probe; the caller maps that to
+    cannot-evaluate."""
     proc = subprocess.run([sys.executable, str(script_path), "--check"], cwd=str(cwd),
-                          env=_sanitized_env(), capture_output=True, timeout=timeout, shell=False)
+                          env=_sanitized_env(env_overrides), capture_output=True, timeout=timeout,
+                          shell=False)
     return proc.returncode
 
 
@@ -321,24 +365,37 @@ def _tree_members(tree_path):
 def _variants(is_block, pristine):
     """The (shape-label, corrupt-bytes) probes for one target, all under the 'corrupt -> non-zero'
     assertion. A block target is invalid-UTF-8 only (region content is not asserted; see the residuals);
-    a UTF-8 text target is probed valid-but-different AND invalid; a binary target is a one-byte tamper."""
+    a UTF-8 text target is probed with a length-changing valid-but-different shape, a same-length
+    valid-but-different shape (where an interior ASCII byte exists to swap), AND invalid UTF-8; a binary
+    target is a one-byte tamper."""
     if is_block:
         return [("invalid UTF-8", INVALID_UTF8)]
     if _is_utf8(pristine):
-        return [("valid-but-different UTF-8 (an appended marker line)", pristine + VALID_MARKER),
-                ("invalid UTF-8", INVALID_UTF8)]
+        variants = [("valid-but-different UTF-8 (an appended marker line)", pristine + VALID_MARKER)]
+        same_length = _same_length_change(pristine)
+        if same_length is not None and same_length != pristine:
+            variants.append(("valid-but-different UTF-8 (a same-length interior byte swap)", same_length))
+        variants.append(("invalid UTF-8", INVALID_UTF8))
+        return variants
     return [("a one-byte binary tamper", _tamper(pristine))]
 
 
-def _new_sandbox(template, work):
-    """Copy the pristine TEMPLATE to a fresh disposable throwaway under `work` and return
-    (holder_dir, sandbox_dir). The caller removes holder_dir when done. The template already carries the
-    sandbox/.git marker and has had symlinks/special nodes and ignore-dirs dropped, so this is a plain
-    copytree."""
-    holder = Path(tempfile.mkdtemp(dir=str(work)))
+def _new_sandbox(template):
+    """Copy the pristine TEMPLATE to a fresh disposable throwaway in its OWN unique tempdir (a fresh
+    mkdtemp, NOT a child of one shared parent) and return (holder_dir, sandbox_dir, env_overrides). The
+    caller removes holder_dir when done. Inside the same disposable holder it also creates a unique HOME
+    and TMPDIR, returned as `env_overrides` for the probe subprocess, so every call's $HOME, $TMPDIR,
+    sandbox, and repo_root().parent are wholly its own and no path is shared between two calls. The
+    template already carries the sandbox/.git marker and has had symlinks/special nodes and ignore-dirs
+    dropped, so the copy is a plain copytree."""
+    holder = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-call-"))
     sandbox = holder / "repo"
     shutil.copytree(template, sandbox, symlinks=False)
-    return holder, sandbox
+    home = holder / "home"
+    tmp = holder / "tmp"
+    home.mkdir()
+    tmp.mkdir()
+    return holder, sandbox, {"HOME": str(home), "TMPDIR": str(tmp)}
 
 
 def _cleanup(holder, cleanup_errors):
@@ -351,41 +408,51 @@ def _cleanup(holder, cleanup_errors):
         cleanup_errors.append("throwaway cleanup failed for {} ({})".format(holder, exc))
 
 
-def _run_baseline(template, script_rel, work, deadline, cleanup_errors):
-    """Run a generator's `--check` on a FRESH pristine sandbox (no corruption) and return its exit code.
-    Its own separate sandbox, so no state leaks into or out of a probe. Raises the narrow probe errors and
-    _DeadlineExceeded; the caller maps those to cannot-evaluate."""
-    if time.monotonic() > deadline:
+def _remaining_timeout(deadline):
+    """Seconds left until the total-runtime deadline, clamped to at most PROBE_TIMEOUT. Raises
+    _DeadlineExceeded when the backstop has already elapsed, so no subprocess is launched with a
+    non-positive timeout and an overrun becomes cannot-evaluate rather than a fail-open pass."""
+    remaining = deadline - _now()
+    if remaining <= 0:
         raise _DeadlineExceeded()
-    holder, sandbox = _new_sandbox(template, work)
+    return min(PROBE_TIMEOUT, remaining)
+
+
+def _run_baseline(template, script_rel, deadline, cleanup_errors):
+    """Run a generator's `--check` on a FRESH pristine sandbox (no corruption) and return its exit code.
+    Its own separate sandbox, so no state leaks into or out of a probe. The subprocess timeout is clamped
+    to the time remaining before the total-runtime deadline. Raises the narrow probe errors and
+    _DeadlineExceeded; the caller maps those to cannot-evaluate."""
+    timeout = _remaining_timeout(deadline)
+    holder, sandbox, env_overrides = _new_sandbox(template)
     try:
-        return _run_check(sandbox / script_rel, sandbox)
+        return _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
     finally:
         _cleanup(holder, cleanup_errors)
 
 
-def _run_probe(template, script_rel, rel_path, corrupt_bytes, work, deadline, cleanup_errors):
+def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_errors):
     """Copy the template to a FRESH throwaway, corrupt `rel_path` in it, run the generator's `--check`,
-    and return the exit code. Re-validates the target is a contained regular file before the write and
-    again after the probe (a generator that swapped it for an escaping symlink raises _ContainmentError).
-    Raises _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all
-    to cannot-evaluate."""
-    if time.monotonic() > deadline:
-        raise _DeadlineExceeded()
-    holder, sandbox = _new_sandbox(template, work)
+    and return the exit code. The subprocess timeout is clamped to the time remaining before the
+    total-runtime deadline. Re-validates the target is a contained regular file before the write and again
+    after the probe (a generator that swapped it for an escaping symlink raises _ContainmentError). Raises
+    _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all to
+    cannot-evaluate."""
+    timeout = _remaining_timeout(deadline)
+    holder, sandbox, env_overrides = _new_sandbox(template)
     try:
         sandbox_real = os.path.realpath(str(sandbox))
         tpath = str(sandbox / rel_path)
         where = "{} (in the sandbox)".format(rel_path)
         _write_bytes_safe(tpath, corrupt_bytes, sandbox_real, where)  # re-validate + O_NOFOLLOW write
-        rc = _run_check(sandbox / script_rel, sandbox)
+        rc = _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
         _validate_contained_regular(tpath, sandbox_real, where)  # post-probe symlink-swap detection
         return rc
     finally:
         _cleanup(holder, cleanup_errors)
 
 
-def _process_entry(entry, template, work, baselines, deadline, violations, cannot, cleanup_errors):
+def _process_entry(entry, template, baselines, deadline, violations, cannot, cleanup_errors):
     """Probe one registry entry's target(s) and record any finding. Appends to `violations` (a generator
     returned exit 0 on a corrupt target) or `cannot` (a fail-closed cannot-evaluate condition); lets
     _DeadlineExceeded propagate so the sweep can stop. The real tree is never touched: every probe runs in
@@ -434,7 +501,7 @@ def _process_entry(entry, template, work, baselines, deadline, violations, canno
     # corruption signal is unattributable (a broken generator, pre-existing drift, or no --check support).
     if stem not in baselines:
         try:
-            baselines[stem] = _run_baseline(template, script_rel, work, deadline, cleanup_errors)
+            baselines[stem] = _run_baseline(template, script_rel, deadline, cleanup_errors)
         except (subprocess.TimeoutExpired, OSError) as exc:
             baselines[stem] = "error: {}".format(exc)
     baseline = baselines[stem]
@@ -452,7 +519,7 @@ def _process_entry(entry, template, work, baselines, deadline, violations, canno
             continue
         for shape, corrupt in _variants(is_block, pristine):
             try:
-                actual = _run_probe(template, script_rel, rel_path, corrupt, work, deadline,
+                actual = _run_probe(template, script_rel, rel_path, corrupt, deadline,
                                     cleanup_errors)
             except _ContainmentError as exc:
                 cannot.append("{}: probe of {} corrupted with {} left the target uncontained ({}); "
@@ -490,11 +557,12 @@ def sweep(real_root):
 
     violations, cannot, cleanup_errors = [], [], []
     unexpected = None
-    deadline = time.monotonic() + TOTAL_TIMEOUT
-    work = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-"))
-    template = work / "template"
+    work = None  # created inside the try so a mkdtemp/copytree setup failure is cannot-evaluate, not a raise
+    deadline = _now() + TOTAL_TIMEOUT
     try:
         try:
+            work = Path(_mkdtemp(prefix="aiqt-gensrc-failclose-"))
+            template = work / "template"
             shutil.copytree(real_root, template, symlinks=False, ignore=_copy_ignore)
             (template / ".git").write_text("sandbox repo_root marker (not a real git dir)\n",
                                            encoding="utf-8")
@@ -504,8 +572,12 @@ def sweep(real_root):
             baselines = {}
             try:
                 for entry in entries:
-                    _process_entry(entry, template, work, baselines, deadline, violations, cannot,
+                    _process_entry(entry, template, baselines, deadline, violations, cannot,
                                    cleanup_errors)
+                # Check the deadline AFTER the final probe too: a probe that finished exactly at the
+                # backstop must not let the sweep return a fail-open 0 when the total runtime overran.
+                if _now() > deadline:
+                    raise _DeadlineExceeded()
             except _DeadlineExceeded:
                 cannot.append("total-runtime backstop of {}s exceeded; the sweep did not finish "
                               "(fail-closed)".format(TOTAL_TIMEOUT))
@@ -513,10 +585,11 @@ def sweep(real_root):
         unexpected = exc
     finally:
         cleanup_error = None
-        try:
-            shutil.rmtree(work)  # no ignore_errors: a cleanup failure must surface, not hide
-        except OSError as exc:
-            cleanup_error = exc
+        if work is not None:
+            try:
+                shutil.rmtree(work)  # no ignore_errors: a cleanup failure must surface, not hide
+            except OSError as exc:
+                cleanup_error = exc
         try:
             after = _tree_manifest(real_root)
         except OSError as exc:
@@ -583,13 +656,14 @@ def main() -> int:
 #       gen_gensrc's own registry target) passes the sweep (exit 0),
 #   (b) a BYPASS generator that ignores its target is caught (exit 1) via VALID-BUT-DIFFERENT content, not
 #       merely invalid UTF-8 - the F-154 regression, the whole point of the gate,
-#   (c) a STATEFUL generator that drops a marker on one call and keys off it is CAUGHT (exit 1), proving
-#       the per-probe fresh-sandbox isolation denies it the cross-call state it needs to fake a guard,
+#   (c) a STATEFUL generator that drops a marker under $HOME on one call and keys off it is CAUGHT
+#       (exit 1), proving the per-call unique HOME/TMPDIR and fresh independent sandbox deny it the
+#       cross-call state it needs to fake a guard,
 #   (d) a SYMLINK-SWAP generator that replaces its target with a symlink escaping the sandbox during
 #       --check causes NO real-tree write and is cannot-evaluate (exit 2), via the post-probe containment
 #       re-validation,
 #   (e) a TOLERANT-READER generator (errors="replace") that DOES guard content passes (exit 0): the
-#       valid-but-different probe draws no false violation from a reader that never raises on bad bytes,
+#       valid-but-different probes draw no false violation from a reader that never raises on bad bytes,
 #   (f) a TREE generator that guards only SOME members is caught (exit 1): every member is probed,
 #   (g) a malformed registry, a missing declared target, a non-clean baseline, and an off-grammar
 #       regenerate each fail closed (exit 2),
@@ -597,7 +671,15 @@ def main() -> int:
 #       corrupted probe RAISES (the baseline succeeds first, then the probe raises), and that raising run
 #       returns the fail-closed exit 2,
 #   (i) a generator that changes a real-tree file's MODE (via an absolute path out of its sandbox) is
-#       detected by the before/after manifest and is cannot-evaluate (exit 2).
+#       detected by the before/after manifest and is cannot-evaluate (exit 2),
+#   (j) a DECODE-ONLY generator (its --check decodes the target, so it fail-closes on invalid UTF-8, but
+#       derives its verdict from the sources, so it returns 0 on valid-but-different content) is CAUGHT
+#       (exit 1) SPECIFICALLY by a valid-but-different / same-length probe: it returns non-zero on the
+#       invalid-UTF-8 probe, so only a content probe can catch it, which makes those probes load-bearing
+#       (removing them would let this fixture pass and the self-test would fail),
+#   (k) a total-runtime deadline overrun (via an injected monotonic clock) returns cannot-evaluate
+#       (exit 2), never a fail-open 0,
+#   (l) a sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2).
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -672,12 +754,46 @@ if __name__ == "__main__":
     sys.exit(main())
 '''
 
-# STATEFUL: on --check, if a marker file is ABSENT it drops the marker and returns 0 WITHOUT consulting
-# the target (the "first look, assume clean" bypass); only a SECOND call (marker present) would guard
-# content. A shared single sandbox would let the baseline drop the marker and the probe key off it,
-# missing the corruption; per-probe FRESH sandboxes deny that carry-over, so every probe hits the
-# marker-absent path and returns 0 on the corrupt target -> caught. Write mode produces the correct target.
-_STATEFUL = '''import sys
+# DECODE-ONLY: its --check DECODES the target (so it fail-closes to non-zero on invalid UTF-8) but derives
+# its verdict from the SOURCES, ignoring the decoded content, so it returns 0 on valid-but-different (or
+# same-length) content. Thus the invalid-UTF-8 probe alone would pass it (non-zero); only a
+# valid-but-different / same-length content probe catches it (exit 0 on a corrupt target) -> caught. This
+# makes those content probes load-bearing in the self-test.
+_DECODEONLY = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root
+GENSRC_OUTPUTS = (
+    {"target": "out/decode.txt", "kind": "file",
+     "sources": ("src/decode-src.txt",), "regenerate": "python3 tools/gen_decode.py"},
+)
+def run(root, check):
+    text = (root / "src" / "decode-src.txt").read_text(encoding="utf-8")
+    desired = "GENERATED\\n" + text
+    target = root / "out" / "decode.txt"
+    if not check:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(desired, encoding="utf-8")
+        return 0
+    target.read_text(encoding="utf-8")  # decode only: raises on invalid UTF-8 -> fail-closed below
+    return 0  # verdict "from the sources": the decoded target content is never compared
+def main():
+    try:
+        return run(repo_root(), "--check" in sys.argv[1:])
+    except UnicodeError:
+        return 2  # fail-closed on invalid UTF-8
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# STATEFUL: on --check, if a marker file under $HOME is ABSENT it drops the marker and returns 0 WITHOUT
+# consulting the target (the "first look, assume clean" bypass); only a SECOND call (marker present) would
+# guard content. Under the OLD env-passthrough (a shared real $HOME) the baseline would drop the marker and
+# the probe would key off it, missing the corruption; the per-call UNIQUE $HOME (plus fresh independent
+# sandbox) denies that carry-over, so every call hits the marker-absent path and returns 0 on the corrupt
+# target -> caught. Write mode (real env, no override) produces the correct target.
+_STATEFUL = '''import os
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile
@@ -690,7 +806,7 @@ def run(root, check):
     desired = "GENERATED\\n" + text
     if not check:
         return 1 if reconcile(root / "out" / "stateful.txt", desired, False) else 0
-    marker = root / ".aiqt_seen"
+    marker = Path(os.environ["HOME"]) / ".aiqt_seen"  # a $HOME marker: shared under the old passthrough
     if marker.exists():
         return 1 if reconcile(root / "out" / "stateful.txt", desired, True) else 0
     marker.write_text("seen\\n", encoding="utf-8")
@@ -865,7 +981,7 @@ def _build_repo(base, gens):
     (base / "out").mkdir()
     (base / ".aiqt").mkdir()
     (base / ".git").write_text("marker\n", encoding="utf-8")
-    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode"):
+    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode", "decode"):
         (base / "src" / "{}-src.txt".format(name)).write_text("source for {}\n".format(name),
                                                               encoding="utf-8")
     tree_src = base / "src" / "tree"
@@ -901,8 +1017,10 @@ def self_test_main():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
-    global _run_check
+    global _run_check, _now, _mkdtemp
     saved_run_check = _run_check
+    saved_now = _now
+    saved_mkdtemp = _mkdtemp
     cleanup_error = None
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
@@ -981,12 +1099,12 @@ def self_test_main():
 
         calls = {"n": 0}
 
-        def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT):
+        def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
             # Let the first call (a per-generator baseline, run on a pristine sandbox) succeed, then raise
             # on the next call (the first corrupted probe), so restoration-after-raise is exercised.
             calls["n"] += 1
             if calls["n"] == 1:
-                return saved_run_check(script_path, cwd, timeout)
+                return saved_run_check(script_path, cwd, timeout, env_overrides)
             raise RuntimeError("injected probe failure after a clean baseline")
 
         _run_check = _raise_after_baseline
@@ -1005,8 +1123,52 @@ def self_test_main():
         moded = _build_repo(tmp / "modechange", {"mode": _MODECHANGER})
         if sweep_quiet(moded) != 2:
             failures.append("real-tree mode change: expected cannot-evaluate exit 2 (manifest detected)")
+
+        # (j) A DECODE-ONLY generator is caught (exit 1), SPECIFICALLY by a valid-but-different / same-length
+        #     probe: it returns non-zero on the invalid-UTF-8 probe (it decodes and fail-closes there), so
+        #     only a content probe can draw its exit-0 violation. Exit 1 therefore proves the content probe
+        #     caught it, which makes those probes load-bearing: remove them and this fixture would pass.
+        dec = _build_repo(tmp / "decode", {"decode": _DECODEONLY})
+        if sweep_quiet(dec) != 1:
+            failures.append("decode-only generator: expected exit 1 (caught by a valid-but-different / "
+                            "same-length content probe, the invalid-UTF-8 probe alone would pass it)")
+
+        # (k) A total-runtime deadline overrun (injected monotonic clock) returns cannot-evaluate (exit 2),
+        #     never a fail-open 0. The clock returns a base on the first read (deadline setup) then jumps
+        #     past the deadline, so the first baseline/probe deadline check fails closed.
+        dline = _build_repo(tmp / "deadline", {"goodfile": _GOODFILE})
+        clock_calls = {"n": 0}
+
+        def _overrun_clock():
+            clock_calls["n"] += 1
+            if clock_calls["n"] == 1:
+                return 0.0  # deadline := 0 + TOTAL_TIMEOUT
+            return float(TOTAL_TIMEOUT) + 1000.0  # every later read is past the deadline
+
+        _now = _overrun_clock
+        rc_deadline = sweep_quiet(dline)
+        _now = saved_now
+        if rc_deadline != 2:
+            failures.append("total-runtime deadline overrun: expected cannot-evaluate exit 2, got "
+                            "{!r}".format(rc_deadline))
+
+        # (l) A sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), not an
+        #     escaping raise (the work-dir mkdtemp now lives inside the try).
+        setupfail = _build_repo(tmp / "setup-fail", {"goodfile": _GOODFILE})
+
+        def _raise_mkdtemp(*args, **kwargs):
+            raise OSError("injected sandbox-setup failure")
+
+        _mkdtemp = _raise_mkdtemp
+        rc_setup = sweep_quiet(setupfail)
+        _mkdtemp = saved_mkdtemp
+        if rc_setup != 2:
+            failures.append("sandbox-setup mkdtemp failure: expected cannot-evaluate exit 2, got "
+                            "{!r}".format(rc_setup))
     finally:
         _run_check = saved_run_check
+        _now = saved_now
+        _mkdtemp = saved_mkdtemp
         try:
             shutil.rmtree(tmp)  # no ignore_errors: a self-test cleanup failure must surface, not hide
         except OSError as exc:
@@ -1022,14 +1184,17 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: a conformant repo (content-guarding file and tree generators) passes; a bypass "
-          "generator is caught (exit 1) via valid-but-different content; a stateful generator is caught "
-          "(exit 1) because per-probe fresh sandboxes deny cross-call state; a symlink-swap generator is "
-          "cannot-evaluate (exit 2) with no out-of-sandbox write; a tolerant reader that guards content "
-          "passes (exit 0, no false violation); a tree generator guarding only some members is caught "
-          "(exit 1, every member probed); a malformed registry, a missing target, a non-clean baseline, "
-          "and an off-grammar regenerate all fail closed (exit 2); the synthetic real tree is byte-and-mode "
-          "identical after a normal run and after a run whose corrupted probe raises (itself exit 2); and a "
-          "generator changing a real-tree file's mode is detected (exit 2)")
+          "generator is caught (exit 1) via valid-but-different content; a stateful generator keying off a "
+          "$HOME marker is caught (exit 1) because per-call unique HOME/TMPDIR and fresh independent "
+          "sandboxes deny cross-call state; a symlink-swap generator is cannot-evaluate (exit 2) with no "
+          "out-of-sandbox write; a tolerant reader that guards content passes (exit 0, no false violation); "
+          "a tree generator guarding only some members is caught (exit 1, every member probed); a malformed "
+          "registry, a missing target, a non-clean baseline, and an off-grammar regenerate all fail closed "
+          "(exit 2); the synthetic real tree is byte-and-mode identical after a normal run and after a run "
+          "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
+          "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
+          "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
+          "2; and a sandbox-setup mkdtemp failure returns exit 2")
     return 0
 
 
