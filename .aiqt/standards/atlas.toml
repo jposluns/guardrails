@@ -10,6 +10,7 @@ citation-unit = "technique"
 id-pattern = "^AML\\.T\\d{4}(\\.\\d{3})?$"
 source-artefact = "MITRE ATLAS content version 2026.06, techniques.csv"
 retrieved = "2026-08-16"
+url = "https://atlas.mitre.org/"
 [[id]]
 code = "AML.T0000"
 title = "Search Open Technical Databases"

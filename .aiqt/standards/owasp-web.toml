@@ -10,6 +10,7 @@ citation-unit = "risk category"
 id-pattern = "^A(0[1-9]|10)$"
 source-artefact = "OWASP Top 10:2025 (Web Application Security Risks)"
 retrieved = "2026-08-16"
+url = "https://github.com/OWASP/Top10"
 
 [[id]]
 code = "A01"
