@@ -61,10 +61,11 @@ TEXT_SUFFIXES = {
     ".txt", ".properties", ".xml", ".config",
     # PEM/PGP-text credential files: a private-key header is caught by PREFIXES; a public cert is inert.
     # .ovpn is here because an OpenVPN profile can carry an inline PEM private key. Binary key stores
-    # (.p12/.pfx/.jks) are not text: excluded up front by this allow-list and left to gitleaks (never read,
-    # so never a UnicodeDecodeError). This allow-list is CURATED high-signal, NOT an exhaustive list of
-    # credential carriers; an extension not here is left to gitleaks, the exhaustive backstop, and is added
-    # only when a carrier recurs (periodic curation, backlog L12).
+    # (.p12/.pfx/.jks) are not text: excluded up front by this allow-list (never read, so never a
+    # UnicodeDecodeError). This allow-list is CURATED high-signal, NOT an exhaustive list of credential
+    # carriers; an extension not here is left to gitleaks in CI, a BROADER independent scanner - not a
+    # guarantee, since gitleaks has its own coverage limits (it can skip an unknown extension too). A
+    # carrier is added here when it recurs (periodic curation, backlog L12).
     ".pem", ".key", ".crt", ".cer", ".asc", ".p8", ".pk8", ".ovpn",
 }
 
@@ -98,7 +99,9 @@ ASSIGN = re.compile(
        client[_-]?secret|auth[_-]?token|private[_-]?key|credential)
     \s*[:=]\s*
     (?:
-        (?P<q>['"])(?P<qvalue>[^'"\n]{12,})(?P=q)    # quoted
+        (?P<q>['"])(?P<qvalue>(?:(?!(?P=q))[^\n]){12,})(?P=q)  # quoted; qvalue excludes only the OPENING
+                                                     # delimiter (not both quotes), so a value that embeds
+                                                     # the other quote, e.g. "ab'cd...", is not truncated
       | (?P<value>[A-Za-z0-9+/=_.\-]{16,})              # or unquoted; charset excludes {$<( so
                                                      # templates and f-string holes cannot match
     )
@@ -232,6 +235,7 @@ def _self_test() -> int:
         ("token = " + envmid, True),                         # env NOT at root (round-3): CAUGHT
         ("secret = " + longcfg, True),                       # long dotted config, no env root: CAUGHT (safe)
         ('secret = "' + real + '"', True),                   # quoted real literal: caught
+        ('password = "' + ("ab" + chr(39) + "cd456efghij") + '"', True),  # dq value w/ embedded apostrophe: caught
         ("password = process_env_KEY2", True),               # single identifier, not dotted: caught
         ('password = "xxxxxxxxxxxx"', False),                # quoted placeholder: excluded
         ('token = "process.env.OPENAI_KEY_V2"', True),       # QUOTED env-ref: caught (exclusion is unquoted-only)
