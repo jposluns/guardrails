@@ -192,7 +192,7 @@ def check_json_subset_denominator(root, manifests, findings):
             findings.append("site/downloads/mappings.json: subset framework {!r} ({}) missing from "
                             "frameworks".format(man.name, stem))
             continue
-        if entry.get("ids_total") is not None:
+        if "ids_total" in entry:
             findings.append("site/downloads/mappings.json: subset framework {!r} carries an edition "
                             "denominator (ids_total={!r})".format(man.name, entry.get("ids_total")))
 
@@ -387,6 +387,13 @@ def self_test_main():
             "`risk` \\| `control` \\| `guidance` \\| `technique`", "`risk` \\| `control` \\| `guidance`"))
         if run_quiet(enum) != 1:
             failures.append("schema kind row missing a kind expected exit 1")
+
+        # 4b. the schema `catalogue` row missing a value -> finding (guards catalogue-row coverage).
+        cat_enum = tmp / "cat_enum"
+        _write_fixture(cat_enum, readme=_README.replace(
+            "`full` \\| `subset` (complete edition or curated)", "`full` (complete edition or curated)"))
+        if run_quiet(cat_enum) != 1:
+            failures.append("schema catalogue row missing a value expected exit 1")
 
         # 5. a parity break: temporarily remove a POLICY key via a patched module global, then restore.
         parity = tmp / "parity"
