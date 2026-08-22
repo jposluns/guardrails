@@ -62,6 +62,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "atmclm",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/trust-atomic-claim-from-pool.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "bgcwai",
       "family": "aiqt",
       "gates": [],
@@ -995,6 +1003,14 @@
       "gates": [],
       "hooks": [],
       "source": ".aiqt/core/rules/quali-surface-counterproductive-instructions.md",
+      "status": "prose-only"
+    },
+    {
+      "corpus-id": "stgprm",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/integ-stage-then-promote-on-green.md",
       "status": "prose-only"
     },
     {
