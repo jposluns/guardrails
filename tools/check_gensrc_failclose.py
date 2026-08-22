@@ -43,10 +43,13 @@ TMPDIR pointing INSIDE that call's disposable tempdir (so a generator's writes u
 in the per-call throwaway), and repo_root().parent is that unique disposable tempdir. No generator-written
 state (a marker dropped under the sandbox, $HOME, $TMPDIR, or repo_root().parent on one call) can carry
 into another call, so a stateful generator cannot distinguish a baseline call from a probe call without
-consulting the target (the F-154-via-state trick). Residual: a generator that HARDCODES a fixed absolute
-path OUTSIDE all sandboxes (not reached via $HOME/$TMPDIR/repo_root()) could still share state across
-calls; this gate runs the project's OWN trusted in-repo generators and is not an OS sandbox, so that
-purely-adversarial case is out of scope and is left to code review (see the disclosed residuals).
+consulting the target (the F-154-via-state trick). Residual (NOT categorical): per-call unique
+HOME/TMPDIR do not stop state shared through a filesystem location OUTSIDE the per-call sandbox that a
+generator can still reach: a COMMON ANCESTOR of the per-call tempdirs (the system temp root), the parent
+of its own $HOME/$TMPDIR, or any fixed path. Fully isolating a deliberately-adversarial generator would
+require OS-level confinement (a namespace or container), which this gate does not provide. It runs the
+project's OWN trusted in-repo generators, so that purely-adversarial case is out of scope and left to
+code review (see the disclosed residuals).
 
 Safety. All corruption happens in disposable copytree sandboxes; the REAL tree is STRICTLY read-only and
 is never corrupted in place, so a SIGKILL, a full disk, or a power loss mid-run can never leave a corrupt
@@ -98,10 +101,11 @@ ASCII-only binary would be classified as text (none exists today). The temp copy
 NOT an OS security sandbox: a malicious generator could still reach absolute paths or the network (the
 before/after manifest and the post-probe containment re-validation detect a real-tree write or an escaping
 symlink after the fact, they do not prevent an arbitrary side effect). Per-call unique HOME/TMPDIR and a
-fresh independent tempdir per call deny cross-call state via $HOME, $TMPDIR, or repo_root().parent, but a
-generator that HARDCODES a fixed absolute path outside all sandboxes could still share state across calls;
-that purely-adversarial case is out of scope (the gate runs the project's own trusted generators) and is
-left to code review. Sources are not swept (a separate invariant). The gate tests a copy of the working
+fresh independent tempdir per call deny cross-call state via $HOME, $TMPDIR, or repo_root().parent, but
+they cannot deny it categorically: a generator can still share state through a COMMON ANCESTOR of the
+per-call tempdirs, the parent of its own $HOME/$TMPDIR, or any fixed path outside its sandbox. Full
+isolation would require OS-level confinement (a namespace or container); that purely-adversarial case is
+out of scope (the gate runs the project's own trusted generators) and is left to code review. Sources are not swept (a separate invariant). The gate tests a copy of the working
 tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
 
   check_gensrc_failclose.py             sweep the real registry (default)
