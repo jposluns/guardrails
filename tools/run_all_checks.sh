@@ -85,6 +85,8 @@ run_gate "skill-selftest"  python3 tools/gen_skill.py --self-test
 run_gate "skill-drift"     python3 tools/gen_skill.py --check
 run_gate "gensrc-registry-selftest" python3 tools/gen_gensrc.py --self-test
 run_gate "gensrc-registry-drift" python3 tools/gen_gensrc.py --check
+run_gate "gensrc-failclose-selftest" python3 tools/check_gensrc_failclose.py --self-test
+run_gate "gensrc-failclose" python3 tools/check_gensrc_failclose.py
 run_gate "enforceability-selftest" python3 tools/gen_enforceability.py --self-test
 run_gate "enforceability-drift" python3 tools/gen_enforceability.py --check
 run_gate "placement"      python3 tools/check_rule_placement.py
