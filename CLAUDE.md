@@ -54,6 +54,7 @@ and both are drift-gated in CI.
 - [A rerun pass does not erase an earlier failure](.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)
 - [Make retries safe to repeat](.claude/rules/aiqt/10-INTEG-safe-retries.md)
 - [Separate task changes from pre-existing work](.claude/rules/aiqt/10-INTEG-separate-task-changes.md)
+- [Stage artefacts and promote only on green](.claude/rules/aiqt/10-INTEG-stage-then-promote-on-green.md)
 - [Validation is a gate on apply](.claude/rules/aiqt/10-INTEG-validation-gates-apply.md)
 - [Workers produce inert data](.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md)
 
@@ -75,6 +76,7 @@ and both are drift-gated in CI.
 **Trust**
 - [Maintain an AI toolchain register](.claude/rules/aiqt/10-TRUST-ai-toolchain-register.md)
 - [Assess and advise are discussion only](.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md)
+- [Claim a pooled item atomically under one lock](.claude/rules/aiqt/10-TRUST-atomic-claim-from-pool.md)
 - [Change record](.claude/rules/aiqt/10-TRUST-change-record.md)
 - [Change record has a curated public face](.claude/rules/aiqt/10-TRUST-change-tracking-ext.md)
 - [Clarify before acting](.claude/rules/aiqt/10-TRUST-clarify-before-acting.md)

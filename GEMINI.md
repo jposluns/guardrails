@@ -202,6 +202,15 @@ neither absorbed into the change nor swept into its record. Pre-existing work th
 confuses the task is surfaced to the maintainer rather than silently committed, reverted, or
 discarded.
 
+## Stage artefacts and promote only on green
+
+An artefact is never installed, published, or copied to a live or shared location before the verification
+it must pass has passed. It is placed first in a staging location, verified there, and only then is that
+same verified artefact promoted to the live or shared destination, on a recorded pass. Promotion that
+races ahead of verification, or that ships a different artefact than the one verified, is the failure this
+prevents. This governs an artefact reaching a runtime or distribution target, and is distinct from
+integrating a change into the protected line of development.
+
 ## Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
@@ -336,6 +345,14 @@ When asked to assess, advise, consider, evaluate, review, compare, or weigh some
 analysis, not execution. Produce the assessment and stop; do not implement, create, or change anything until
 an explicit instruction to act, even when the recommendation is clear. This is a specific instance of
 requiring express authorization before execution.
+
+## Claim a pooled item atomically under one lock
+
+Selecting an item from a shared pool and recording the claim on it are one atomic step, under a single
+lock that spans both, so no gap between choosing and reserving lets two actors take the same item. A claim
+already held by another live actor is not overridden: the operation aborts rather than proceeding or
+merely warning. This extends the concurrency-lease discipline from a single session's lease to selection
+from a shared pool.
 
 ## Change record
 
