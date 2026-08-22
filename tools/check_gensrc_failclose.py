@@ -323,6 +323,8 @@ def _tree_manifest(root):
             kept.append(name)
         dirnames[:] = kept
         for name in filenames:
+            if name in IGNORE_DIRS:
+                continue  # a linked-worktree '.git' is a FILE, not a dir: exclude it, as the dirnames loop
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
             st = os.lstat(full)  # no-follow
@@ -391,14 +393,21 @@ def _new_sandbox(template):
     and TMPDIR, returned as `env_overrides` for the probe subprocess, so every call's $HOME, $TMPDIR,
     sandbox, and repo_root().parent are wholly its own and no path is shared between two calls. The
     template already carries the sandbox/.git marker and has had symlinks/special nodes and ignore-dirs
-    dropped, so the copy is a plain copytree."""
+    dropped, so the copy is a plain copytree. If any step after the mkdtemp (the copytree or the home/tmp
+    creation) fails, the partial holder is removed here before the exception propagates, so a failed
+    per-call setup leaves no throwaway on disk; the caller's sweep still maps the failure to
+    cannot-evaluate (exit 2)."""
     holder = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-call-"))
-    sandbox = holder / "repo"
-    shutil.copytree(template, sandbox, symlinks=False)
-    home = holder / "home"
-    tmp = holder / "tmp"
-    home.mkdir()
-    tmp.mkdir()
+    try:
+        sandbox = holder / "repo"
+        shutil.copytree(template, sandbox, symlinks=False)
+        home = holder / "home"
+        tmp = holder / "tmp"
+        home.mkdir()
+        tmp.mkdir()
+    except BaseException:  # any setup failure after mkdtemp must not leak the partial holder
+        shutil.rmtree(holder)  # no ignore_errors: a cleanup failure surfaces rather than hides
+        raise
     return holder, sandbox, {"HOME": str(home), "TMPDIR": str(tmp)}
 
 
@@ -425,11 +434,14 @@ def _remaining_timeout(deadline):
 def _run_baseline(template, script_rel, deadline, cleanup_errors):
     """Run a generator's `--check` on a FRESH pristine sandbox (no corruption) and return its exit code.
     Its own separate sandbox, so no state leaks into or out of a probe. The subprocess timeout is clamped
-    to the time remaining before the total-runtime deadline. Raises the narrow probe errors and
-    _DeadlineExceeded; the caller maps those to cannot-evaluate."""
-    timeout = _remaining_timeout(deadline)
+    to the time remaining before the total-runtime deadline IMMEDIATELY before the launch (after the
+    sandbox copy), so the copytree cannot consume the budget while the subprocess still launches with a
+    near-full timeout; an already-elapsed deadline at that point raises _DeadlineExceeded rather than
+    launching. Raises the narrow probe errors and _DeadlineExceeded; the caller maps those to
+    cannot-evaluate."""
     holder, sandbox, env_overrides = _new_sandbox(template)
     try:
+        timeout = _remaining_timeout(deadline)  # clamp AFTER the copy, immediately before the launch
         return _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
     finally:
         _cleanup(holder, cleanup_errors)
@@ -438,17 +450,20 @@ def _run_baseline(template, script_rel, deadline, cleanup_errors):
 def _run_probe(template, script_rel, rel_path, corrupt_bytes, deadline, cleanup_errors):
     """Copy the template to a FRESH throwaway, corrupt `rel_path` in it, run the generator's `--check`,
     and return the exit code. The subprocess timeout is clamped to the time remaining before the
-    total-runtime deadline. Re-validates the target is a contained regular file before the write and again
-    after the probe (a generator that swapped it for an escaping symlink raises _ContainmentError). Raises
+    total-runtime deadline IMMEDIATELY before the launch (after the sandbox copy and the corruption write),
+    so neither the copytree nor the write can consume the budget while the subprocess still launches with a
+    near-full timeout; an already-elapsed deadline at that point raises _DeadlineExceeded rather than
+    launching. Re-validates the target is a contained regular file before the write and again after the
+    probe (a generator that swapped it for an escaping symlink raises _ContainmentError). Raises
     _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all to
     cannot-evaluate."""
-    timeout = _remaining_timeout(deadline)
     holder, sandbox, env_overrides = _new_sandbox(template)
     try:
         sandbox_real = os.path.realpath(str(sandbox))
         tpath = str(sandbox / rel_path)
         where = "{} (in the sandbox)".format(rel_path)
         _write_bytes_safe(tpath, corrupt_bytes, sandbox_real, where)  # re-validate + O_NOFOLLOW write
+        timeout = _remaining_timeout(deadline)  # clamp AFTER the copy+write, immediately before the launch
         rc = _run_check(sandbox / script_rel, sandbox, timeout=timeout, env_overrides=env_overrides)
         _validate_contained_regular(tpath, sandbox_real, where)  # post-probe symlink-swap detection
         return rc
@@ -683,7 +698,10 @@ def main() -> int:
 #       (removing them would let this fixture pass and the self-test would fail),
 #   (k) a total-runtime deadline overrun (via an injected monotonic clock) returns cannot-evaluate
 #       (exit 2), never a fail-open 0,
-#   (l) a sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2).
+#   (l) a sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2),
+#   (m) a BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on invalid
+#       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
+#       generator rejects it, exercising the is_block probe path no other fixture covers.
 # Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
@@ -734,6 +752,41 @@ def main():
     except UnicodeError:
         print("error: invalid utf-8 tree member; fail-closed", file=sys.stderr)
         return 2
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# BLOCK: a kind="block" generator whose --check reads+decodes the WHOLE target and fail-closes (non-zero)
+# on invalid UTF-8, mirroring how a real block generator (gen_secret_patterns) reads its block region. It
+# does not compare region CONTENT (block region-content-guarding is NOT asserted by this gate; see the
+# residuals), so it is the minimal conformant block generator: the gate probes a block target with invalid
+# UTF-8 ONLY, this generator rejects it (non-zero), and the sweep passes (exit 0). It exercises the
+# is_block branch (the invalid-UTF-8-only probe) that no other self-test fixture covers, and would catch a
+# regression that mis-probed a block target as text (a decode-only reader returns 0 on valid-but-different
+# content, which the gate would then flag as a violation). Write mode produces the target clean.
+_BLOCKFILE = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root
+GENSRC_OUTPUTS = (
+    {"target": "out/block.txt", "kind": "block",
+     "sources": ("src/block-src.txt",), "regenerate": "python3 tools/gen_block.py"},
+)
+def run(root, check):
+    text = (root / "src" / "block-src.txt").read_text(encoding="utf-8")
+    desired = "GENERATED\\n" + text
+    target = root / "out" / "block.txt"
+    if not check:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(desired, encoding="utf-8")
+        return 0
+    target.read_text(encoding="utf-8")  # decode the whole block target: raises on invalid UTF-8
+    return 0  # region content is not compared (block content-guarding is not asserted by this gate)
+def main():
+    try:
+        return run(repo_root(), "--check" in sys.argv[1:])
+    except UnicodeError:
+        return 2  # fail-closed on invalid UTF-8, the whole-file corruption the gate applies to a block
 if __name__ == "__main__":
     sys.exit(main())
 '''
@@ -985,7 +1038,7 @@ def _build_repo(base, gens):
     (base / "out").mkdir()
     (base / ".aiqt").mkdir()
     (base / ".git").write_text("marker\n", encoding="utf-8")
-    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode", "decode"):
+    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode", "decode", "block"):
         (base / "src" / "{}-src.txt".format(name)).write_text("source for {}\n".format(name),
                                                               encoding="utf-8")
     tree_src = base / "src" / "tree"
@@ -1169,6 +1222,14 @@ def self_test_main():
         if rc_setup != 2:
             failures.append("sandbox-setup mkdtemp failure: expected cannot-evaluate exit 2, got "
                             "{!r}".format(rc_setup))
+
+        # (m) A BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on
+        #     invalid UTF-8 passes (exit 0): a block target is probed with invalid UTF-8 only, which this
+        #     generator rejects. This exercises the is_block probe path that no other fixture covers.
+        blk = _build_repo(tmp / "block", {"block": _BLOCKFILE})
+        if sweep_quiet(blk) != 0:
+            failures.append("block-kind generator: expected the sweep to pass (exit 0; a block target is "
+                            "probed with invalid UTF-8 only and the generator rejects it)")
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1198,7 +1259,8 @@ def self_test_main():
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
-          "2; and a sandbox-setup mkdtemp failure returns exit 2")
+          "2; a sandbox-setup mkdtemp failure returns exit 2; and a block-kind generator that fail-closes "
+          "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path")
     return 0
 
 
