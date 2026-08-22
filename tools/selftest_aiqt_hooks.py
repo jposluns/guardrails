@@ -2318,6 +2318,52 @@ def main():
         # Out of scope (F-128b disclosure): NotebookEdit is not in the matcher set, so it ALLOWS.
         sexpect("(ss-aa) NotebookEdit (out of scope) allows",
                 "NotebookEdit", {"notebook_path": "/tmp/x.ipynb", "new_source": _fake_ghp}, "allow", secret=_fake_ghp)
+        # secsec F-127 (environment lookup is not a credential literal): a credential-named variable
+        # assigned a JavaScript-style env lookup (process.env.X) is a CODE REFERENCE, so it ALLOWS; a
+        # dotted token that only LOOKS identifier-shaped but carries no env accessor - a HashiCorp Vault
+        # hvs.<random> token, a dotted provider secret - is a real credential and still DENIES. Mirrors
+        # check_secrets.py's DOTTED_PATH / _ENV_REF. Secret values assembled from parts (SECP).
+        sexpect("(ss-ab) F-127 Write env lookup process.env.X allows",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", "process.env.OPENAI_KEY_V2")},
+                "allow")
+        _fake_vault = "hvs." + "CvmS4c0DPTvHv5eJgXWMJg9r"
+        sexpect("(ss-ac) F-127 Write dotted Vault token still denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _fake_vault)}, "deny",
+                secret=_fake_vault)
+        _fake_dotted = "prod.secret.auth." + "a1b2c3d4e5f6"
+        sexpect("(ss-ad) F-127 Write dotted provider secret still denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("api_key", _fake_dotted)}, "deny",
+                secret=_fake_dotted)
+        _plus_tail = "process.env.OPENAI_KEY1" + "+" + "Abcdef1234567890"
+        sexpect("(ss-ae) F-127 Write +-joined tail after an env-ref still denies (+ breaks the exclusion)",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("token", _plus_tail)}, "deny",
+                secret=_plus_tail)
+        sexpect("(ss-af) F-127 Write QUOTED env-ref still denies (exclusion is unquoted-only)",
+                "Write", {"file_path": "/tmp/x",
+                          "content": _asgn("token", '"' + "process.env.OPENAI_KEY_V2" + '"')}, "deny")
+        # secsec F-127 PARITY: the shipped hook (_scan_secret) and the CI gate (check_secrets) must decide
+        # every credential line identically. The exclusion is hand-mirrored (the generated region single-
+        # sources only the regex strings, not this loop logic), so this guards against future drift.
+        import check_secrets as _cs  # same tools/ dir
+        def _cs_line_hit(_line):
+            return any(_cs._assign_is_secret(_m) for _m in _cs.ASSIGN.finditer(_line))
+        _parity_lines = [
+            _asgn("token", "process.env.OPENAI_KEY_V2"),
+            _asgn("api_key", "import.meta.env.VITE_API_KEY2"),
+            _asgn("secret", "env.SECRET_VALUE2"),
+            _asgn("token", "hvs." + "CvmS4c0DPTvHv5eJgXWMJg9r"),
+            _asgn("api_key", "prod.secret.auth." + "a1b2c3d4e5f6"),
+            _asgn("password", "process_env_KEY2"),
+            _asgn("secret", '"' + "AbcDef123456ghiJ" + '"'),
+            _asgn("token", "myorg.env.production." + "secretkey12345"),   # env not at root: caught by both
+            _asgn("token", "process.env.OPENAI_KEY" + "+" + "Abcdef1234567890"),  # + breaks fullmatch: both
+            _asgn("token", '"' + "process.env.OPENAI_KEY_V2" + '"'),  # quoted ROOT env-ref: caught by both
+        ]
+        for _pl in _parity_lines:
+            _gate = _cs_line_hit(_pl)
+            _hook = aiqt_hooks._scan_secret(_pl) is not None
+            if _gate != _hook:
+                failures.append("(ss-parity) gate/hook disagree: gate={} hook={} on a credential line".format(_gate, _hook))
 
         # secsec round-4 (F-129): the pattern drift gate must REJECT a target carrying more than one
         # generated BEGIN..END region. text.find inspects only the FIRST region, so a SECOND region (e.g.

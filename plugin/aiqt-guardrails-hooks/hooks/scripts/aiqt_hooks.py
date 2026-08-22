@@ -3121,7 +3121,7 @@ _SECSEC_PREFIX_SOURCES = [
     ('\\bxapp-[A-Za-z0-9-]{10,}', 'Slack app-level token'),
     ('-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----', 'private key block'),
 ]
-_SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>[^\'"\\n]{12,})(?P=q)    # quoted\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
+_SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>(?:(?!(?P=q))[^\\n]){12,})(?P=q)  # quoted; qvalue excludes only the OPENING\n                                                     # delimiter (not both quotes), so a value that embeds\n                                                     # the other quote, e.g. "ab\'cd...", is not truncated\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
 _SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
 # END generated secret patterns
 # Compiled at module load from the generated source strings (stdlib re only; no runtime import of
@@ -3130,6 +3130,17 @@ _SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}
 _SECSEC_PREFIXES = [(re.compile(_pattern), _label) for _pattern, _label in _SECSEC_PREFIX_SOURCES]
 _SECSEC_ASSIGN = re.compile(_SECSEC_ASSIGN_SOURCE)
 _SECSEC_PLACEHOLDER = re.compile(_SECSEC_PLACEHOLDER_SOURCE)
+# A JavaScript-style environment lookup (process.env.X, import.meta.env.X): a pure dotted-identifier
+# path that BEGINS with a recognized env-access root is a CODE REFERENCE, not a literal secret, so it is
+# excluded from the unquoted credential match (F-127). The root anchor is required, not a mere `env`
+# segment anywhere, so a dotted token that only looks identifier-shaped (a Vault hvs.<random>, a PASETO
+# v2.local.<payload>, or myorg.env.prod.<value> with env not at the root) stays caught. Mirrors
+# check_secrets.py's DOTTED_PATH / _ENV_REF EXACTLY; hand-mirrored loop logic, not part of the generated
+# region above (which carries only the single-sourced pattern strings).
+_SECSEC_DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+_SECSEC_ENV_REF = re.compile(r"(?i)\A(?:process\.env|import\.meta\.env|env)\.")
+
+
 # The target field per SINGLE-FIELD tool: the text a Write/Edit would write, or the command a Bash call
 # would emit. MultiEdit is in scope too but carries a LIST of edits rather than one field, so it is
 # extracted separately (see _secsec_multiedit_text); its name is added to the in-scope tool set here.
@@ -3158,6 +3169,8 @@ def _scan_secret(text):
             # extra bar check_secrets.py applies, because an unquoted match is far likelier to be prose.
             if value and match.group("qvalue") is None:
                 if not (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
+                    value = ""
+                elif _SECSEC_DOTTED_PATH.fullmatch(value) and _SECSEC_ENV_REF.match(value):
                     value = ""
             if value and not _SECSEC_PLACEHOLDER.match(value):
                 return "credential-named variable assigned a literal"
