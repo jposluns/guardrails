@@ -27,6 +27,14 @@
       "target": ".aiqt/gensrc.json"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_reference_facts.py",
+      "sources": [
+        ".aiqt/standards/"
+      ],
+      "target": ".aiqt/standards/README.md"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_claude.py",
       "sources": [

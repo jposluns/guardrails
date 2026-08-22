@@ -691,6 +691,7 @@ citation-unit = "control"
 id-pattern = "ST[0-9]{2}"
 source-artefact = "AIQT self-test fixture"
 retrieved = "2026-01-01"
+catalogue = "full"
 [[id]]
 code = "ST01"
 title = "The one real self-test control"

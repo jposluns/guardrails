@@ -11,6 +11,7 @@ citation-unit = "risk category"
 id-pattern = "^MCP(0[1-9]|10)$"
 source-artefact = "OWASP MCP Top 10 (2025, Beta)"
 retrieved = "2026-08-16"
+catalogue = "full"
 url = "https://github.com/OWASP/www-project-mcp-top-10"
 
 [[id]]

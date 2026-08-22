@@ -11,6 +11,7 @@ citation-unit = "chapter"
 id-pattern = "^V([1-9]|1[0-7])$"
 source-artefact = "OWASP Application Security Verification Standard (ASVS) 5.0.0 (tag v5.0.0_release)"
 retrieved = "2026-08-16"
+catalogue = "full"
 url = "https://github.com/OWASP/ASVS"
 
 [[id]]

@@ -13,6 +13,7 @@ citation-unit = "cheat sheet"
 id-pattern = "^[a-z0-9]+(-[a-z0-9]+)*$"
 source-artefact = "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)"
 retrieved = "2026-08-16"
+catalogue = "subset"
 url = "https://github.com/OWASP/CheatSheetSeries"
 
 [[id]]

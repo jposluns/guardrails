@@ -72,6 +72,10 @@ run_gate "artifact-checksums"          python3 tools/check_artifact_checksums.py
 run_gate "rules-drift"     python3 tools/gen_rules.py --check
 run_gate "agents-drift"    python3 tools/gen_agents.py --check
 run_gate "mappings-page-drift" python3 tools/gen_mappings.py --check
+run_gate "reference-roster-selftest" python3 tools/gen_reference_facts.py --self-test
+run_gate "reference-roster-drift" python3 tools/gen_reference_facts.py --check
+run_gate "reference-facts-selftest" python3 tools/check_reference_facts.py --self-test
+run_gate "reference-facts" python3 tools/check_reference_facts.py
 run_gate "disclosure-selftest" python3 tools/gen_disclosure.py --self-test
 run_gate "disclosure-drift"    python3 tools/gen_disclosure.py --check
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
