@@ -53,8 +53,7 @@
       "source_artefact": "ISO/IEC 23894:2023, clauses 5-6 and Annexes A-B (headings only)",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 14,
-      "ids_total": 61
+      "ids_cited": 14
     },
     "iso-42001": {
       "name": "ISO/IEC 42001:2023 AI management system",
@@ -67,8 +66,7 @@
       "source_artefact": "ISO/IEC 42001:2023, Annex A and clauses 4-10 (headings only)",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 18,
-      "ids_total": 74
+      "ids_cited": 18
     },
     "nist-80053": {
       "name": "NIST SP 800-53 Security and Privacy Controls",
@@ -165,8 +163,7 @@
       "source_artefact": "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 27,
-      "ids_total": 116
+      "ids_cited": 27
     },
     "owasp-llm": {
       "name": "OWASP Top 10 for LLM Applications",

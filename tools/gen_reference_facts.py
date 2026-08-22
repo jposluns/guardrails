@@ -51,11 +51,19 @@ def render_roster(manifests):
 
 def _replace_roster(text, inner):
     """Replace the content between the ROSTER markers, keeping the markers, with clean Markdown spacing
-    (no trailing indent). Fail closed if a marker is missing or misordered."""
+    (no trailing indent). Fail closed if a marker is missing, misordered, or DUPLICATED: exactly one
+    BEGIN and one END must be present. A second roster block would otherwise silently bypass the drift
+    check, because both generate and --check act on the first marker pair only, so a stale duplicate could
+    never be caught or updated. This runs on both paths (build feeds generate and --check alike)."""
+    n_begin = text.count(BEGIN)
+    n_end = text.count(END)
+    if n_begin != 1 or n_end != 1:
+        raise ValueError("ROSTER markers must appear exactly once each in .aiqt/standards/README.md "
+                         "(found {} begin, {} end); fail-closed".format(n_begin, n_end))
     i = text.find(BEGIN)
     j = text.find(END)
-    if i == -1 or j == -1 or j < i:
-        raise ValueError("ROSTER markers not found in .aiqt/standards/README.md")
+    if j < i:
+        raise ValueError("ROSTER markers misordered in .aiqt/standards/README.md")
     return text[:i] + BEGIN + "\n" + inner + "\n" + text[j:]
 
 
@@ -97,7 +105,9 @@ def main():
 #   (b) a hand-desynced count in the committed block is caught by --check (exit 1),
 #   (c) a README missing the ROSTER markers fails closed (exit 2),
 #   (d) an empty .aiqt/standards/ dir fails closed (exit 2), never a false-clean empty roster,
-#   (e) an invalid-UTF-8 README fails closed (exit 2) rather than a raw traceback.
+#   (e) an invalid-UTF-8 README fails closed (exit 2) rather than a raw traceback,
+#   (f) a README with two ROSTER blocks fails closed (exit 2) on BOTH generate and --check, so a
+#       duplicate block can never silently bypass the drift check.
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "AIQT self-test"\nedition = "{ed}"\n'
@@ -183,6 +193,22 @@ def self_test_main():
         (badutf / README_REL).write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
         if run_quiet(badutf, check=True) != 2:
             failures.append("invalid-UTF-8 README expected exit 2 (fail-closed)")
+
+        # (f) a README carrying two ROSTER blocks fails closed on BOTH generate and --check. Without the
+        #     uniqueness guard a second stale block would silently bypass drift (both paths act only on
+        #     the first marker pair).
+        dup_readme = (
+            "# Standards id-manifests\n\nSome hand prose.\n\n"
+            "<!-- ROSTER:BEGIN (generated) -->\n<!-- ROSTER:END -->\n\nMiddle prose.\n\n"
+            "<!-- ROSTER:BEGIN (generated) -->\n<!-- ROSTER:END -->\n\nMore hand prose.\n")
+        dupgen = tmp / "dupgen"
+        _write_fixture(dupgen, two, dup_readme)
+        if run_quiet(dupgen, check=False) != 2:
+            failures.append("duplicated ROSTER blocks expected exit 2 on generate (fail-closed)")
+        dupcheck = tmp / "dupcheck"
+        _write_fixture(dupcheck, two, dup_readme)
+        if run_quiet(dupcheck, check=True) != 2:
+            failures.append("duplicated ROSTER blocks expected exit 2 on --check (fail-closed)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -193,7 +219,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a conformant tree generates the right framework count and roster and "
           "re-checks drift-clean; a hand-desynced count fails --check (exit 1); and a README missing the "
-          "ROSTER markers, an empty standards dir, and an invalid-UTF-8 README all fail closed (exit 2)")
+          "ROSTER markers, a README with duplicated ROSTER blocks (on both generate and --check), an "
+          "empty standards dir, and an invalid-UTF-8 README all fail closed (exit 2)")
     return 0
 
 

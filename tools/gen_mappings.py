@@ -406,13 +406,20 @@ def render_json(reg, rows):
     wall-clock field, so --check stays reproducible."""
     frameworks = {}
     for r in reg:
-        frameworks[r["framework"]] = {
+        entry = {
             "name": r["name"], "publisher": r["publisher"], "edition": r["edition"],
             "kind": r["kind"], "relation": r["relation"], "status": r["status"],
             "citation_unit": r["citation_unit"], "source_artefact": r["source_artefact"],
             "retrieved": r["retrieved"], "catalogue": r["catalogue"],
-            "ids_cited": r["ids_cited"], "ids_total": r["ids_total"],
+            "ids_cited": r["ids_cited"],
         }
+        # Only a full-edition manifest carries an edition denominator. A curated subset omits ids_total
+        # because the manifest cannot state how many identifiers the whole edition holds (the catalogue
+        # invariant); catalogue + ids_cited still tell a consumer it is a curated subset with no total.
+        # This matches the HTML registry and reverse view, which omit the denominator for a subset.
+        if r["catalogue"] == "full":
+            entry["ids_total"] = r["ids_total"]
+        frameworks[r["framework"]] = entry
     mappings = [{
         "rule_id": row["rule_id"], "rule_title": row["rule_title"], "rule_source": row["rule_source"],
         "framework": row["framework"], "relation": row["relation"], "fit": row["fit"],

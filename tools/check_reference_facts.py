@@ -11,9 +11,11 @@ generator alone cannot assert:
   - closed-set parity between _standards.KINDS/STATUSES and their programmatic copies (gen_mappings
     RELATION/RELATION_PROSE/STATUS_PILL/STATUS_DESC and the currency POLICY);
   - the deferred-frameworks negative check (no vendored framework is still listed "Not yet vendored");
-  - the subset-denominator invariant on the rendered registry (a curated-subset manifest never renders an
-    "N of M" edition denominator; the gen_mappings branch is the primary control, this is defence in depth
-    against a hand-edited page).
+  - the subset-denominator invariant, checked structure-aware wherever the coverage of a curated-subset
+    manifest is rendered: the registry row (name and coverage in one <tr>), the reverse view (name in a
+    <summary>, coverage in a later <p> of the same <details>), AND the machine-readable JSON export (a
+    subset framework must not carry an ids_total edition denominator). The gen_mappings branch is the
+    primary control; this is defence in depth against a hand-edited page or export.
 
 BEST-EFFORT RESIDUAL (disclosed per the pack's own rule): this gate checks the specific fact copies
 enumerated above; it is not a semantic-equivalence prover for arbitrary prose, and `catalogue = "full"` is
@@ -24,6 +26,7 @@ no alias, so a stale copy cannot ship silently.
   check_reference_facts.py              exit 0 clean, 1 finding, 2 unreadable/missing input (fail-closed)
   check_reference_facts.py --self-test
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -136,16 +139,62 @@ def check_deferred(root, manifests, findings):
 
 def check_subset_denominator(root, manifests, findings):
     """Defence in depth for the catalogue invariant: a subset manifest must never appear with an 'N of M'
-    coverage form in the rendered registry or reverse view (the gen_mappings branch is the primary control;
-    this catches a hand-edited page)."""
+    edition denominator anywhere it is rendered (the gen_mappings branch is the primary control; this
+    catches a hand-edited page).
+
+    Structure-aware, not same-line: the two render sites place the name and the coverage in different
+    places. A registry row keeps both in one <tr>, but the reverse view renders the name in a <summary>
+    and the coverage in a later <p> of the same <details>, so a same-line scan would miss a subset "N of
+    M" there. The check splits the page into <tr> blocks and <details> blocks and associates a subset name
+    with a denominator across the block, never by line proximity."""
     text = _read(root / "site" / "mappings.html")
+    subset_names = {man.name for man in manifests.values() if man.catalogue == "subset"}
+    # Registry rows: the name cell and the coverage cell live in one <tr>. A subset row must read
+    # "N referenced (curated subset)", never "N of M".
+    for row in re.findall(r"<tr\b.*?</tr>", text, re.S | re.I):
+        if not N_OF_M.search(row):
+            continue
+        for name in subset_names:
+            if name in row:
+                findings.append("site/mappings.html: subset manifest {!r} rendered with an edition "
+                                "denominator in a registry row".format(name))
+    # Reverse view: the framework name is in the <summary>; its coverage is in a later <p> of the same
+    # <details>. Match on the summary so a forward-view block (a rule-title summary) is not caught, then
+    # scan the whole block so the name and the denominator are associated across the line break.
+    for block in re.findall(r"<details\b.*?</details>", text, re.S | re.I):
+        summ = re.search(r"<summary>(.*?)</summary>", block, re.S | re.I)
+        if not summ:
+            continue
+        head = summ.group(1)
+        for name in subset_names:
+            if name in head and N_OF_M.search(block):
+                findings.append("site/mappings.html: subset manifest {!r} rendered with an edition "
+                                "denominator in the reverse view".format(name))
+
+
+def check_json_subset_denominator(root, manifests, findings):
+    """The catalogue invariant in the machine-readable export: a curated-subset framework in
+    site/downloads/mappings.json must not carry an edition denominator (ids_total); only a full-edition
+    manifest does. Fail-closed read (exit 2) on a missing/unreadable/invalid export; a subset key absent
+    from the export, or one carrying a non-null ids_total, is a finding (exit 1)."""
+    text = _read(root / "site" / "downloads" / "mappings.json")
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise OSError("site/downloads/mappings.json is not valid JSON: {}".format(exc))
+    frameworks = data.get("frameworks", {})
     for man in manifests.values():
         if man.catalogue != "subset":
             continue
-        for line in text.splitlines():
-            if man.name in line and N_OF_M.search(line):
-                findings.append("site/mappings.html: subset manifest {!r} rendered with an edition "
-                                "denominator".format(man.name))
+        stem = man.map_key[4:]  # strip the "map-" prefix; the JSON keys frameworks by stem
+        entry = frameworks.get(stem)
+        if entry is None:
+            findings.append("site/downloads/mappings.json: subset framework {!r} ({}) missing from "
+                            "frameworks".format(man.name, stem))
+            continue
+        if entry.get("ids_total") is not None:
+            findings.append("site/downloads/mappings.json: subset framework {!r} carries an edition "
+                            "denominator (ids_total={!r})".format(man.name, entry.get("ids_total")))
 
 
 def run(root):
@@ -162,6 +211,7 @@ def run(root):
         check_parity(findings)
         check_deferred(root, manifests, findings)
         check_subset_denominator(root, manifests, findings)
+        check_json_subset_denominator(root, manifests, findings)
     except (ManifestError, OSError, ValueError, KeyError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -190,13 +240,17 @@ def main():
 #   4. a schema `kind` row missing a kind -> finding,
 #   5. a parity break (a POLICY key removed via a patched dict) -> finding,
 #   6. a manifest whose name appears in the "Not yet vendored" paragraph -> finding,
-#   7. a subset manifest rendered "3 of 3" in the fixture page -> finding (the CWE regression case),
+#   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
 #   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
 #   9. an unreadable standards dir (chmod 0) -> exit 2 via load_manifests/ensure_listable,
 #  10. a manifest without `catalogue`, and one with `catalogue = "partial"` -> ManifestError exit 2
 #      (the loader end of the invariant),
-#  11. a publisher with no FAMILY_ALIAS entry -> exit 2.
-# (1, 7, 10 are the invariant-bearing cases; the rest complete the fail-closed contract.)
+#  11. a publisher with no FAMILY_ALIAS entry -> exit 2,
+#  12. a subset reverse-view <p> coverage mutated to "N of M" -> finding (the structure-aware case: the
+#      name is in the <summary>, the denominator in a later <p>, so a same-line scan would miss it),
+#  13. a subset framework carrying ids_total in the JSON export -> finding (the export invariant),
+#  14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip).
+# (1, 7, 12, 13 are the invariant-bearing cases; the rest complete the fail-closed contract.)
 
 _MANIFEST = (
     'map-key = "map-{k}"\nname = "{name}"\npublisher = "{pub}"\nedition = "{ed}"\n'
@@ -215,7 +269,9 @@ _README = (
     "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and OWASP SCVS.\n"
 )
 
-# Two meta descriptions and a two-row registry; the subset row uses the honest "curated subset" form.
+# Two meta descriptions, a two-row registry, and a two-block reverse view mirroring the real render (the
+# name in a <summary>, the coverage in a later <p>). The subset row and subset reverse block use the
+# honest "curated subset" form; the full block legitimately reads "3 of 3".
 _PAGE = (
     '<!doctype html>\n'
     '<meta name="description" content="A crosswalk to frameworks (ISO/IEC, OWASP). Titles only.">\n'
@@ -223,6 +279,32 @@ _PAGE = (
     '<tr><td>Fixture Full Framework</td><td>OWASP Foundation</td><td>1.0</td><td>3 of 3</td></tr>\n'
     '<tr><td>Fixture Subset Framework</td><td>ISO/IEC</td><td>2023</td>'
     '<td>2 referenced (curated subset)</td></tr>\n'
+    '      <details class="more">\n'
+    '        <summary>Fixture Full Framework (1.0)</summary>\n'
+    '        <div class="inner">\n'
+    '          <p>supports control. 3 of 3 identifiers referenced.</p>\n'
+    '        </div>\n'
+    '      </details>\n'
+    '      <details class="more">\n'
+    '        <summary>Fixture Subset Framework (2023)</summary>\n'
+    '        <div class="inner">\n'
+    '          <p>aligns with guidance. 2 identifiers referenced from a curated subset of the '
+    'edition.</p>\n'
+    '        </div>\n'
+    '      </details>\n'
+)
+
+# The JSON export: a full framework carries ids_total, the subset omits it (the catalogue invariant in
+# machine-readable form). Keys are the framework stems (map-key without the "map-" prefix).
+_JSON = (
+    '{\n'
+    '  "frameworks": {\n'
+    '    "full": {"name": "Fixture Full Framework", "catalogue": "full", "ids_cited": 3, '
+    '"ids_total": 3},\n'
+    '    "subset": {"name": "Fixture Subset Framework", "catalogue": "subset", "ids_cited": 2}\n'
+    '  },\n'
+    '  "mappings": []\n'
+    '}\n'
 )
 
 _DISCLOSURE = (
@@ -234,7 +316,7 @@ _DISCLOSURE = (
 )
 
 
-def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None):
+def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None):
     """Write a complete clean fixture tree, overridable per component for a case's single mutation.
     `manifests` is a list of (stem, name, publisher, edition, kind, catalogue)."""
     if manifests is None:
@@ -249,6 +331,10 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
     site = base / "site"
     site.mkdir(parents=True)
     (site / "mappings.html").write_text(page if page is not None else _PAGE, encoding="utf-8")
+    downloads = site / "downloads"
+    downloads.mkdir()
+    (downloads / "mappings.json").write_text(
+        json_export if json_export is not None else _JSON, encoding="utf-8")
     (base / "disclosure.toml").write_text(
         disclosure if disclosure is not None else _DISCLOSURE, encoding="utf-8")
 
@@ -372,6 +458,30 @@ def self_test_main():
             ("full", "Fixture Full Framework", "Unlisted Publisher", "1.0", "control", "full")])
         if run_quiet(noalias) != 2:
             failures.append("a publisher with no family alias expected exit 2 (fail-closed)")
+
+        # 12. a subset reverse-view coverage mutated to "N of M" -> finding. The denominator lands in the
+        #     reverse-view <p>, on a different line from the framework name in the <summary>, so this
+        #     fails only because the check is structure-aware, not same-line.
+        revsub = tmp / "revsub"
+        _write_fixture(revsub, page=_PAGE.replace(
+            "2 identifiers referenced from a curated subset of the edition", "2 of 61"))
+        if run_quiet(revsub) != 1:
+            failures.append("a subset reverse-view coverage of 'N of M' expected exit 1")
+
+        # 13. a subset framework carrying ids_total in the JSON export -> finding (the export invariant).
+        jsondenom = tmp / "jsondenom"
+        _write_fixture(jsondenom, json_export=_JSON.replace(
+            '"catalogue": "subset", "ids_cited": 2',
+            '"catalogue": "subset", "ids_cited": 2, "ids_total": 61'))
+        if run_quiet(jsondenom) != 1:
+            failures.append("a subset framework carrying ids_total in the JSON export expected exit 1")
+
+        # 14. a missing site/downloads/mappings.json -> exit 2 (fail-closed, not a skip).
+        nojson = tmp / "nojson"
+        _write_fixture(nojson)
+        (nojson / "site" / "downloads" / "mappings.json").unlink()
+        if run_quiet(nojson) != 2:
+            failures.append("a missing mappings.json expected exit 2 (fail-closed)")
     finally:
         if unreadable_std is not None:
             os.chmod(unreadable_std, 0o755)  # restore even on an unexpected early exit
@@ -386,10 +496,11 @@ def self_test_main():
             " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
             .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a clean fixture passes; a meta/disclosure parenthetical mismatch, a schema-enum "
-          "gap, a closed-set parity break, a vendored name in the deferred paragraph, and a subset "
-          "manifest rendered with an edition denominator each report a finding (exit 1); and a missing "
-          "page, an unreadable standards dir, a missing/invalid catalogue, and an unaliased publisher all "
-          "fail closed (exit 2)" + note)
+          "gap, a closed-set parity break, a vendored name in the deferred paragraph, a subset manifest "
+          "rendered with an edition denominator in the registry row or the reverse-view <p>, and a subset "
+          "framework carrying ids_total in the JSON export each report a finding (exit 1); and a missing "
+          "page, a missing JSON export, an unreadable standards dir, a missing/invalid catalogue, and an "
+          "unaliased publisher all fail closed (exit 2)" + note)
     return 0
 
 
