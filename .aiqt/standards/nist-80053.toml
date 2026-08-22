@@ -11,6 +11,7 @@ citation-unit = "control"
 id-pattern = "^[A-Z]{2}-\\d+(\\(\\d+\\))?$"
 source-artefact = "NIST SP 800-53 Rev 5, OSCAL catalog"
 retrieved = "2026-08-16"
+url = "https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final"
 [[id]]
 code = "AC-1"
 title = "Policy and Procedures"

@@ -13,6 +13,7 @@ import re
 import stat
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import tomllib
@@ -49,8 +50,8 @@ def natkey(text):
 
 class Manifest:
     __slots__ = ("path", "map_key", "name", "publisher", "edition", "kind", "status",
-                 "citation_unit", "id_pattern", "source_artefact", "retrieved", "ids", "id_set",
-                 "titles")
+                 "citation_unit", "id_pattern", "source_artefact", "retrieved", "url", "ids",
+                 "id_set", "titles")
 
     def __init__(self, path, data):
         self.path = path
@@ -78,6 +79,31 @@ class Manifest:
         self.citation_unit = _req_str(data, "citation-unit", path)
         self.source_artefact = _req_str(data, "source-artefact", path)
         self.retrieved = str(data["retrieved"])
+        # url is OPTIONAL (not in REQUIRED): the canonical landing page for the standard. When present
+        # it must be an https:// URL with a non-empty host; anything else fails closed here rather than
+        # shipping a malformed or non-https link. Absent -> None. Reachability is a separate, non-blocking
+        # audit (check_standards_urls_live.py), never checked offline here.
+        url = data.get("url")
+        if url is not None:
+            if not isinstance(url, str):
+                raise ManifestError("{}: field 'url' must be a string".format(path.name))
+            if any(ch.isspace() or ord(ch) < 0x20 for ch in url):
+                raise ManifestError(
+                    "{}: field 'url' must not contain whitespace or control characters".format(path.name))
+            # Parse and validate the port inside the guard: urlparse (and .port on a bad port) can raise a
+            # raw ValueError, which fails closed here as a ManifestError rather than crashing. Residual: this
+            # is a best-effort offline check for scheme + host + parseable authority + valid port + no
+            # whitespace/control; it does not confirm the host resolves or is the right page (the separate
+            # non-blocking check_standards_urls_live.py audits reachability), nor every RFC-3986 edge.
+            try:
+                parsed = urlparse(url)
+                _ = parsed.port
+            except ValueError:
+                raise ManifestError("{}: field 'url' is not a parseable URL".format(path.name))
+            if parsed.scheme != "https" or not parsed.hostname:
+                raise ManifestError(
+                    "{}: field 'url' must be an https:// URL with a host".format(path.name))
+        self.url = url
         try:
             self.id_pattern = re.compile(_req_str(data, "id-pattern", path))
         except re.error as exc:
