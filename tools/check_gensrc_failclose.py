@@ -6,85 +6,131 @@ NOT prove the generator actually CONSULTS that target when checking: a generator
 its output (deriving a verdict from sources alone, or short-circuiting to exit 0) passes drift while
 silently failing to guard the shipped artefact. That is the F-154 class. This gate closes it: for every
 entry in the .aiqt/gensrc.json registry it corrupts a throwaway copy of the target and asserts the
-generator's `--check` refuses to pass clean. The uniform invariant, the true anti-F-154 property, is that
-a corruption of a committed target NEVER yields exit 0.
+generator's `--check` refuses to pass clean. The uniform invariant, the true anti-F-154 property, is a
+single assertion for every corruption shape: a corrupted target yields a NON-ZERO `--check`. An exit 0 on
+a corrupt target is the violation; the exact non-zero code (drift, decode-error, crash) is not graded.
 
 Enumeration reuses gen_gensrc's OWN validated in-memory loader (discover_declarations + collect_entries),
 imported, never a second parser of .aiqt/gensrc.json, so this gate inherits every fail-closed enumeration
 guarantee already proven in gen_gensrc --self-test (an unreadable tools/ raises, a bad declaration raises,
 zero generators raises) instead of forking a parser that could drift.
 
-Encoding is OBSERVED, not declared: the gate reads the pristine committed target bytes and attempts a
-UTF-8 decode. Decodes to text (corrupt with invalid UTF-8, expect the fail-closed exit 2); fails to binary
-(tamper one byte, expect drift exit 1). No new registry field is authored or drift-gated; the gate
-measures the artefact it will corrupt.
+Corruption strategy, kind-aware, all under the one "corrupt -> non-zero" assertion:
+  - a "file" target, and EVERY regular-file member of a "tree" target, whose pristine bytes decode as
+    UTF-8, is probed twice: once with VALID-BUT-DIFFERENT UTF-8 (the pristine bytes plus a distinctive
+    marker line) and once with INVALID UTF-8. The valid-but-different probe is what proves CONTENT
+    guarding rather than mere decoding: a generator that decodes its target but derives its verdict from
+    sources would pass invalid-UTF-8 corruption yet still be caught here. It also removes the
+    false-violation a tolerant reader (errors="replace") would have drawn from an invalid-UTF-8-only
+    strategy: such a reader legitimately still detects the valid-but-different content and passes.
+  - a binary target (pristine that is not UTF-8) is probed once with a one-byte tamper.
+  - a "block" target is probed once with INVALID UTF-8 only. The generated REGION inside a block file is
+    unknown to this gate, so a content change might land OUTSIDE it (a correct clean pass this gate must
+    not assert on); invalid UTF-8 corrupts the WHOLE file and proves only that the generator reads and
+    decodes it. Block region-content-guarding is therefore NOT tested here; it is covered by that
+    generator's own drift `--check` step. See the disclosed residuals.
 
-Safety. All corruption happens in a disposable copytree sandbox; the REAL tree is STRICTLY read-only and
+Isolation. The baseline and EACH corruption probe run in a SEPARATE FRESH sandbox: one pristine TEMPLATE
+copytree is made once, and every baseline/probe copies that template to its own disposable throwaway,
+identical except for the single corrupted target. No generator-written state (a marker file dropped on
+one call) can carry into another call, so a stateful generator cannot distinguish a baseline call from a
+probe call without consulting the target (the F-154-via-state trick).
+
+Safety. All corruption happens in disposable copytree sandboxes; the REAL tree is STRICTLY read-only and
 is never corrupted in place, so a SIGKILL, a full disk, or a power loss mid-run can never leave a corrupt
-committed artefact (the worst case is an orphaned tempdir, never a corrupt real file). Symlinks and
-special nodes are skipped when copying. Each generator runs as a subprocess with shell=False, the
-interpreter pinned to sys.executable, cwd=sandbox, a sanitized environment (ambient GIT_*/PYTHONPATH and
-the like stripped) carrying PYTHONDONTWRITEBYTECODE=1, and a bounded timeout. A `sandbox/.git` marker
-anchors each generator's repo_root() on the sandbox so a probe can never walk up into the real repository.
-A whole-tree manifest of the real repo is compared before and after the sweep; ANY change, or a cleanup
-failure, is exit 2 (no ignore_errors that hides a failure).
+committed artefact (the worst case is an orphaned tempdir, never a corrupt real file), and a SIGKILL is
+bounded to the disposable sandbox. No target is ever restored in place (each probe discards its whole
+throwaway), so there is no restore-write to be redirected. Immediately before EVERY read or write of a
+target the gate re-validates, with os.lstat (following no symlink), that the path is a regular file whose
+os.path.realpath is inside the sandbox, and opens it with O_NOFOLLOW; and immediately AFTER each probe it
+re-validates that the target is still a contained regular file, so a generator that swaps its target for
+a symlink escaping the sandbox during `--check` is a containment violation (cannot-evaluate), never a
+real-tree write. Symlinks and special nodes are dropped when copying. Each generator runs as a subprocess
+with shell=False, the interpreter pinned to sys.executable, cwd=sandbox, a sanitized environment (ambient
+GIT_*/PYTHONPATH and the like stripped) carrying PYTHONDONTWRITEBYTECODE=1, a bounded per-probe timeout,
+and a bounded total-runtime backstop. `sys.dont_write_bytecode` is set at import time so importing the
+gen_gensrc loader writes no .pyc into the real tools/ tree. A `sandbox/.git` marker anchors each
+generator's repo_root() on the sandbox so a probe can never walk up into the real repository. A whole-tree
+manifest of the real repo, capturing per regular file its sha256, permission bits, and type (and every
+symlink/special node's type), is compared before and after the sweep; ANY change (content, mode, type, a
+new or removed path, a path becoming a symlink), a sandbox/copy failure, or a cleanup failure is exit 2.
 
 Exit convention (matches the repo's gates):
-  0  every entry's generator honoured its exit contract on a corrupted target.
-  1  a generator VIOLATED its exit contract: it returned exit 0 on a corrupt target (the F-154
-     regression), or a code other than the encoding-appropriate expected code (text -> 2, binary -> 1).
-  2  cannot-evaluate: the registry is unreadable/malformed; the baseline `gen_gensrc --check` is not
-     clean; a declared target is absent (a file/block that is not a regular file, or a tree that is empty
-     or untraversable); a `regenerate` command is not of the grammar `python3 tools/gen_<stem>.py`; a
-     per-generator baseline `--check` is not clean (a corruption signal would be unattributable); a probe
-     times out or cannot be launched; the sandbox setup or cleanup fails; or the real tree changed during
-     the run.
+  0  every entry's generator returned non-zero on every corrupted target.
+  1  a generator VIOLATED the contract: it returned exit 0 on a corrupt target (the F-154 regression).
+  2  cannot-evaluate: the registry is unreadable/malformed; a baseline `--check` is not clean; a declared
+     target is absent (a file/block that is not a regular file, or a tree that is empty or untraversable);
+     a `regenerate` command is not of the grammar `python3 tools/gen_<stem>.py`; a probe times out, cannot
+     be launched, or leaves the target uncontained (a symlink/containment violation); the total-runtime
+     backstop is exceeded; the sandbox setup, copy, or cleanup fails; or the real tree changed during the
+     run.
 When both a confirmed violation and a cannot-evaluate condition are present, the exit code is 1 (the
 confirmed live bug is the higher-signal outcome and we DID evaluate it); every condition is still printed.
 A real-tree integrity breach or a cleanup failure overrides both to exit 2, because a run that may have
-touched the real tree cannot be trusted to certify anything.
+touched the real tree, or could not fully dispose of its sandboxes, cannot be trusted to certify anything.
 
 DISCLOSED RESIDUALS. The gate proves DETECTION (the generator refuses a corrupt target via --check), not
-REPAIR (that regen emits correct bytes; the drift gate owns that). It probes ONE representative leaf per
-tree, not every member. For block targets it corrupts the WHOLE file (whole-file unreadable), never a
-region-internal byte: region drift stays on that generator's own drift step, and a tamper outside a
-block's generated region is correctly a clean pass this gate does not assert on. "Unreadable" is modeled
-as a single invalid-UTF-8 shape, not every encoding, permission, truncation, or race; a future text
-generator that reads its target as latin-1 or with errors="replace" would return drift (exit 1) not
-exit 2, and this gate flags that under the strict contract. Only the `python3 tools/gen_<stem>.py` grammar
-is recognized; a wrapper or non-Python generator fails coverage (exit 2) until the grammar is extended.
-Encoding observation could misclassify an ASCII-only binary as text (none exists today). The temp copy is
-corruption isolation, NOT an OS security sandbox: a malicious generator could still reach absolute paths
-or the network. Sources are not swept (a separate invariant). The gate tests a copy of the working tree,
-so it captures local uncommitted edits; on CI, HEAD equals the tree.
+REPAIR (that regen emits correct bytes; the drift gate owns that). For a BLOCK target it corrupts only
+with invalid UTF-8 (whole-file), proving the generator reads and decodes the file but NOT that it guards
+the generated region's CONTENT: a valid-but-different change might land outside the region and correctly
+pass, so region-content-guarding stays on that generator's own drift step and is not asserted here. Only
+the `python3 tools/gen_<stem>.py` grammar is recognized; a wrapper or non-Python generator fails coverage
+(exit 2) until the grammar is extended. Encoding is OBSERVED (a UTF-8 decode of the pristine bytes), so an
+ASCII-only binary would be classified as text (none exists today). The temp copy is corruption isolation,
+NOT an OS security sandbox: a malicious generator could still reach absolute paths or the network (the
+before/after manifest and the post-probe containment re-validation detect a real-tree write or an escaping
+symlink after the fact, they do not prevent an arbitrary side effect). Sources are not swept (a separate
+invariant). The gate tests a copy of the working tree, so it captures local uncommitted edits; on CI, HEAD
+equals the tree.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
 """
-import hashlib
-import os
-import re
-import shlex
-import shutil
-import stat
-import subprocess
 import sys
-import tempfile
-from pathlib import Path
+
+# Set BEFORE importing gen_gensrc (below): importing the loader must write no .pyc into the real tools/
+# tree. The subprocess env also carries PYTHONDONTWRITEBYTECODE=1 for the generators it runs.
+sys.dont_write_bytecode = True
+
+import hashlib  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import stat  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 import gen_gensrc  # noqa: E402  reuse its validated, fail-closed registry loader (do not re-parse the JSON)
 
-# Directory names never copied into the sandbox and never hashed in the real-tree manifest: version
+# Directory names never copied into a sandbox and never recorded in the real-tree manifest: version
 # control and derived caches, which are not registry targets and would only add noise and cost.
 IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules"}
-# A single invalid-UTF-8 byte sequence: b"\xff" is never a valid UTF-8 start byte, so read_text(utf-8)
-# raises UnicodeDecodeError on it. This is the portable "unreadable text" representative (see residuals).
+# An invalid-UTF-8 byte sequence: b"\xff" is never a valid UTF-8 start byte, so decoding it raises
+# UnicodeDecodeError. The portable "unreadable text" corruption (see the strategy above).
 INVALID_UTF8 = b"\xff\xfe\x00 not-utf8 \x80\x81"
+# The valid-but-different corruption suffix: valid UTF-8 (plain ASCII) that changes the bytes without
+# breaking a decode, so a content-guarding --check must report drift while a tolerant reader still passes.
+VALID_MARKER = b"\n# aiqt-failclose: valid-but-different content marker\n"
 # The regenerate grammar the gate recognizes: exactly `python3 tools/gen_<stem>.py`, validated with shlex.
 REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
 PROBE_TIMEOUT = 120  # seconds per subprocess --check; a hung generator is cannot-evaluate, not a hang
+TOTAL_TIMEOUT = 1800  # seconds backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
+
+
+class _ContainmentError(Exception):
+    """A target is not a contained regular file (a symlink, a special node, or a path whose realpath
+    escapes the sandbox). Mapped to cannot-evaluate (exit 2): a run that read or wrote through it could
+    have touched the real tree, so its result cannot be trusted."""
+
+
+class _DeadlineExceeded(Exception):
+    """The total-runtime backstop elapsed mid-sweep. Mapped to cannot-evaluate (exit 2)."""
 
 
 def _is_utf8(data):
@@ -98,12 +144,63 @@ def _is_utf8(data):
 
 def _tamper(data):
     """Return a byte string guaranteed to differ from data: flip the first byte, or (empty file) add one.
-    A different-bytes tamper is what a byte-reconciled generator must report as drift (exit 1)."""
+    A different-bytes tamper is what a byte-reconciled generator must report as non-zero on a binary
+    target."""
     if not data:
         return b"\x00"
     out = bytearray(data)
     out[0] ^= 0xFF
     return bytes(out)
+
+
+def _within(child, parent):
+    """True if the absolute path `child` is `parent` itself or lies beneath it, compared on whole path
+    components (so '/a/bc' is not treated as beneath '/a/b'). Both are expected already realpath-resolved."""
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:  # different drives / one relative: never contained
+        return False
+
+
+def _validate_contained_regular(path, sandbox_real, where):
+    """Re-validate, following no symlink, that `path` is a regular file whose realpath is inside
+    `sandbox_real`. Raises _ContainmentError (naming `where`) on a symlink, a special node, or an escape;
+    lets OSError (an absent path) propagate to the caller's cannot-evaluate handling."""
+    st = os.lstat(path)  # no-follow; OSError (absent) -> caller maps to cannot-evaluate
+    if not stat.S_ISREG(st.st_mode):
+        raise _ContainmentError("{}: target is not a regular file (mode {:o})".format(where, st.st_mode))
+    real = os.path.realpath(path)
+    if not _within(real, sandbox_real):
+        raise _ContainmentError("{}: target realpath {!r} escapes the sandbox {!r}"
+                                .format(where, real, sandbox_real))
+
+
+def _read_bytes_safe(path, sandbox_real, where):
+    """Read a target's bytes after re-validating it is a contained regular file, opening O_NOFOLLOW so a
+    final-component symlink cannot be followed."""
+    _validate_contained_regular(path, sandbox_real, where)
+    fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+    try:
+        chunks = []
+        while True:
+            block = os.read(fd, 1 << 20)
+            if not block:
+                break
+            chunks.append(block)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _write_bytes_safe(path, data, sandbox_real, where):
+    """Overwrite a target with `data` after re-validating it is a contained regular file, opening
+    O_WRONLY|O_TRUNC|O_NOFOLLOW so a swapped-in symlink cannot redirect the write out of the sandbox."""
+    _validate_contained_regular(path, sandbox_real, where)
+    fd = os.open(path, os.O_WRONLY | os.O_TRUNC | _O_NOFOLLOW)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 def _sanitized_env():
@@ -148,27 +245,48 @@ def _copy_ignore(dir_path, names):
     return ignored
 
 
-def _tree_manifest(root):
-    """Map every regular file under root (excluding IGNORE_DIRS, following no symlink) to a sha256 of its
-    bytes. Used to prove the REAL tree is byte-identical before and after the sweep. Raises OSError on an
-    unreadable input (fail-closed): a manifest that could not be built cannot certify the tree unchanged."""
-    manifest = {}
-    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_oserror):
-        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS
-                       and not os.path.islink(os.path.join(dirpath, d))]
-        for name in filenames:
-            full = os.path.join(dirpath, name)
-            if os.path.islink(full):
-                continue
-            with open(full, "rb") as handle:
-                manifest[os.path.relpath(full, root)] = hashlib.sha256(handle.read()).hexdigest()
-    return manifest
-
-
 def _raise_oserror(exc):
     """os.walk onerror hook: re-raise so an unlistable directory fails closed instead of silently
     yielding nothing."""
     raise exc
+
+
+def _tree_manifest(root):
+    """Map every path under root (excluding IGNORE_DIRS, following no symlink) to a metadata tuple, so the
+    REAL tree can be proven unchanged before and after the sweep. A regular file maps to
+    ('file', permission-bits, sha256); a symlink to ('symlink', permission-bits, link-target); any other
+    special node (FIFO, socket, device) to ('special', permission-bits, format-bits) WITHOUT opening it
+    (a FIFO must never block a read). Any change to content, mode, type, or the set of paths makes two
+    manifests unequal. Raises OSError on an unreadable input (fail-closed): a manifest that could not be
+    built cannot certify the tree unchanged."""
+    manifest = {}
+    root = str(root)
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_oserror):
+        kept = []
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):  # a symlinked dir: record it, do not descend it
+                st = os.lstat(full)
+                manifest[os.path.relpath(full, root)] = ("symlink", stat.S_IMODE(st.st_mode),
+                                                         os.readlink(full))
+                continue
+            if name in IGNORE_DIRS:
+                continue  # not descended, not recorded
+            kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            st = os.lstat(full)  # no-follow
+            mode = stat.S_IMODE(st.st_mode)
+            if stat.S_ISLNK(st.st_mode):
+                manifest[rel] = ("symlink", mode, os.readlink(full))
+            elif stat.S_ISREG(st.st_mode):
+                with open(full, "rb") as handle:  # lstat-gated to a regular file, so this cannot block
+                    manifest[rel] = ("file", mode, hashlib.sha256(handle.read()).hexdigest())
+            else:
+                manifest[rel] = ("special", mode, stat.S_IFMT(st.st_mode))  # do NOT open a FIFO/socket/dev
+    return manifest
 
 
 def _validate_regenerate(regenerate):
@@ -200,101 +318,161 @@ def _tree_members(tree_path):
     return members
 
 
-def _process_entry(entry, sandbox, baseline_cache, violations, cannot):
-    """Corrupt one registry entry's target in the sandbox and assert the generator rejects it. Appends to
-    `violations` (a confirmed exit-contract breach) or `cannot` (a fail-closed cannot-evaluate condition);
-    never raises for an expected condition. The target is always restored to its pristine bytes in a
-    finally, so a later entry driven by the same generator sees a clean tree."""
+def _variants(is_block, pristine):
+    """The (shape-label, corrupt-bytes) probes for one target, all under the 'corrupt -> non-zero'
+    assertion. A block target is invalid-UTF-8 only (region content is not asserted; see the residuals);
+    a UTF-8 text target is probed valid-but-different AND invalid; a binary target is a one-byte tamper."""
+    if is_block:
+        return [("invalid UTF-8", INVALID_UTF8)]
+    if _is_utf8(pristine):
+        return [("valid-but-different UTF-8 (an appended marker line)", pristine + VALID_MARKER),
+                ("invalid UTF-8", INVALID_UTF8)]
+    return [("a one-byte binary tamper", _tamper(pristine))]
+
+
+def _new_sandbox(template, work):
+    """Copy the pristine TEMPLATE to a fresh disposable throwaway under `work` and return
+    (holder_dir, sandbox_dir). The caller removes holder_dir when done. The template already carries the
+    sandbox/.git marker and has had symlinks/special nodes and ignore-dirs dropped, so this is a plain
+    copytree."""
+    holder = Path(tempfile.mkdtemp(dir=str(work)))
+    sandbox = holder / "repo"
+    shutil.copytree(template, sandbox, symlinks=False)
+    return holder, sandbox
+
+
+def _cleanup(holder, cleanup_errors):
+    """Remove a throwaway holder dir; a cleanup failure is recorded (never hidden with ignore_errors) and
+    overrides the sweep to exit 2, because a sandbox that could not be disposed of leaves the run's
+    footprint unaccounted for."""
+    try:
+        shutil.rmtree(holder)
+    except OSError as exc:
+        cleanup_errors.append("throwaway cleanup failed for {} ({})".format(holder, exc))
+
+
+def _run_baseline(template, script_rel, work, deadline, cleanup_errors):
+    """Run a generator's `--check` on a FRESH pristine sandbox (no corruption) and return its exit code.
+    Its own separate sandbox, so no state leaks into or out of a probe. Raises the narrow probe errors and
+    _DeadlineExceeded; the caller maps those to cannot-evaluate."""
+    if time.monotonic() > deadline:
+        raise _DeadlineExceeded()
+    holder, sandbox = _new_sandbox(template, work)
+    try:
+        return _run_check(sandbox / script_rel, sandbox)
+    finally:
+        _cleanup(holder, cleanup_errors)
+
+
+def _run_probe(template, script_rel, rel_path, corrupt_bytes, work, deadline, cleanup_errors):
+    """Copy the template to a FRESH throwaway, corrupt `rel_path` in it, run the generator's `--check`,
+    and return the exit code. Re-validates the target is a contained regular file before the write and
+    again after the probe (a generator that swapped it for an escaping symlink raises _ContainmentError).
+    Raises _ContainmentError, subprocess.TimeoutExpired/OSError, or _DeadlineExceeded; the caller maps all
+    to cannot-evaluate."""
+    if time.monotonic() > deadline:
+        raise _DeadlineExceeded()
+    holder, sandbox = _new_sandbox(template, work)
+    try:
+        sandbox_real = os.path.realpath(str(sandbox))
+        tpath = str(sandbox / rel_path)
+        where = "{} (in the sandbox)".format(rel_path)
+        _write_bytes_safe(tpath, corrupt_bytes, sandbox_real, where)  # re-validate + O_NOFOLLOW write
+        rc = _run_check(sandbox / script_rel, sandbox)
+        _validate_contained_regular(tpath, sandbox_real, where)  # post-probe symlink-swap detection
+        return rc
+    finally:
+        _cleanup(holder, cleanup_errors)
+
+
+def _process_entry(entry, template, work, baselines, deadline, violations, cannot, cleanup_errors):
+    """Probe one registry entry's target(s) and record any finding. Appends to `violations` (a generator
+    returned exit 0 on a corrupt target) or `cannot` (a fail-closed cannot-evaluate condition); lets
+    _DeadlineExceeded propagate so the sweep can stop. The real tree is never touched: every probe runs in
+    its own disposable throwaway copied from the pristine template."""
     target_rel = entry["target"]
     kind = entry["kind"]
     body = target_rel[:-1] if target_rel.endswith("/") else target_rel  # strip the tree marker
+    is_block = kind == "block"
 
     stem = _validate_regenerate(entry["regenerate"])
     if stem is None:
         cannot.append("{}: regenerate {!r} is not of the grammar 'python3 tools/gen_<stem>.py'"
                       .format(target_rel, entry["regenerate"]))
         return
-    script = sandbox / "tools" / "gen_{}.py".format(stem)
-    if not script.is_file():
-        cannot.append("{}: generator {} is absent in the sandbox".format(target_rel, script.name))
+    script_rel = "tools/gen_{}.py".format(stem)
+    if not (template / script_rel).is_file():
+        cannot.append("{}: generator gen_{}.py is absent in the sandbox".format(target_rel, stem))
         return
 
-    tpath = sandbox / body
-    # Target-existence probe (a shippable artefact that is not there cannot be guarded; an empty declared
-    # tree is exactly the presence-test-then-skip shape the fail-closed rule forbids).
+    template_real = os.path.realpath(str(template))
+    tbody = template / body
+    # Target-existence probe on the pristine template (a shippable artefact that is not there cannot be
+    # guarded; an empty declared tree is exactly the presence-test-then-skip shape the fail-closed rule
+    # forbids). Collect the repo-relative path(s) to corrupt: every regular-file member for a tree.
     if kind == "tree":
-        if tpath.is_symlink() or not tpath.is_dir():
+        if tbody.is_symlink() or not tbody.is_dir():
             cannot.append("{}: declared tree target is absent or not a directory".format(target_rel))
             return
         try:
-            members = _tree_members(tpath)
+            members = _tree_members(tbody)
         except OSError as exc:
             cannot.append("{}: declared tree target is untraversable ({})".format(target_rel, exc))
             return
         if not members:
             cannot.append("{}: declared tree target is empty (no members to guard)".format(target_rel))
             return
+        rel_paths = [os.path.relpath(str(m), str(template)) for m in members]
     else:
-        if tpath.is_symlink() or not tpath.is_file():
+        if tbody.is_symlink() or not tbody.is_file():
             cannot.append("{}: declared {} target is absent or not a regular file"
                           .format(target_rel, kind))
             return
+        rel_paths = [body]
 
-    # Per-generator baseline: the pristine sandbox must pass --check, else the corruption signal is
-    # unattributable (a broken generator, pre-existing drift, or no --check support). Cached per stem.
-    if stem not in baseline_cache:
+    # Per-generator baseline (its own fresh sandbox): the pristine tree must pass --check, else a
+    # corruption signal is unattributable (a broken generator, pre-existing drift, or no --check support).
+    if stem not in baselines:
         try:
-            baseline_cache[stem] = _run_check(script, sandbox)
+            baselines[stem] = _run_baseline(template, script_rel, work, deadline, cleanup_errors)
         except (subprocess.TimeoutExpired, OSError) as exc:
-            baseline_cache[stem] = "error: {}".format(exc)
-    baseline = baseline_cache[stem]
+            baselines[stem] = "error: {}".format(exc)
+    baseline = baselines[stem]
     if baseline != 0:
         cannot.append("{}: baseline 'gen_{} --check' on the pristine sandbox returned {!r}, not a clean 0 "
                       "(a corruption signal would be unattributable)".format(target_rel, stem, baseline))
         return
 
-    # Choose the byte string to corrupt: the whole file for file/block, one representative member for a
-    # tree. Observe its encoding to pick the corruption and the expected exit.
-    if kind == "tree":
-        rep = next((m for m in members if _is_utf8(m.read_bytes())), members[0])
-        corrupt_path = rep
-    else:
-        corrupt_path = tpath
-    pristine = corrupt_path.read_bytes()
-    is_text = _is_utf8(pristine)
-    if is_text:
-        corrupt_path.write_bytes(INVALID_UTF8)
-        expected = 2
-        shape = "invalid UTF-8"
-    else:
-        corrupt_path.write_bytes(_tamper(pristine))
-        expected = 1
-        shape = "a one-byte tamper"
-
-    try:
-        actual = _run_check(script, sandbox)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        cannot.append("{}: probe 'gen_{} --check' on the corrupted target failed to complete ({})"
-                      .format(target_rel, stem, exc))
-        return
-    finally:
-        corrupt_path.write_bytes(pristine)  # restore the single mutated path from its pristine bytes
-
-    if actual == expected:
-        return
-    if actual == 0:
-        violations.append("{}: gen_{} --check returned exit 0 on a target corrupted with {} (F-154: the "
-                          "generator does not consult its target)".format(target_rel, stem, shape))
-    else:
-        violations.append("{}: gen_{} --check returned exit {} on a target corrupted with {}, expected {} "
-                          "for a {} target (exit-contract violation)"
-                          .format(target_rel, stem, actual, shape, expected,
-                                  "text" if is_text else "binary"))
+    for rel_path in rel_paths:
+        try:
+            pristine = _read_bytes_safe(str(template / rel_path), template_real,
+                                        "{} (in the template)".format(rel_path))
+        except (OSError, _ContainmentError) as exc:
+            cannot.append("{}: cannot read pristine bytes of {} ({})".format(target_rel, rel_path, exc))
+            continue
+        for shape, corrupt in _variants(is_block, pristine):
+            try:
+                actual = _run_probe(template, script_rel, rel_path, corrupt, work, deadline,
+                                    cleanup_errors)
+            except _ContainmentError as exc:
+                cannot.append("{}: probe of {} corrupted with {} left the target uncontained ({}); "
+                              "fail-closed".format(target_rel, rel_path, shape, exc))
+                continue
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                cannot.append("{}: probe 'gen_{} --check' on {} corrupted with {} failed to complete ({})"
+                              .format(target_rel, stem, rel_path, shape, exc))
+                continue
+            if actual == 0:
+                violations.append("{}: gen_{} --check returned exit 0 on {} corrupted with {} (F-154: the "
+                                  "generator does not consult its target)"
+                                  .format(target_rel, stem, rel_path, shape))
+            # any non-zero actual = the corrupt target was rejected = a pass; nothing recorded
 
 
 def sweep(real_root):
-    """Sweep the real registry: for every entry, corrupt a sandbox copy of the target and assert the
-    generator's --check rejects it. Returns the gate exit code (0/1/2). The real tree is never written."""
+    """Sweep the real registry: for every entry, corrupt a fresh sandbox copy of the target and assert the
+    generator's --check rejects it with a non-zero exit. Returns the gate exit code (0/1/2). The real tree
+    is never written."""
     real_root = Path(real_root).resolve()
     try:
         declarations = gen_gensrc.discover_declarations(real_root / "tools")
@@ -310,35 +488,33 @@ def sweep(real_root):
               file=sys.stderr)
         return 2
 
-    violations, cannot = [], []
+    violations, cannot, cleanup_errors = [], [], []
     unexpected = None
-    tmp = tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-")
-    sandbox = Path(tmp) / "repo"
+    deadline = time.monotonic() + TOTAL_TIMEOUT
+    work = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-"))
+    template = work / "template"
     try:
         try:
-            shutil.copytree(real_root, sandbox, symlinks=False, ignore=_copy_ignore)
-            (sandbox / ".git").write_text("sandbox repo_root marker (not a real git dir)\n",
-                                          encoding="utf-8")
+            shutil.copytree(real_root, template, symlinks=False, ignore=_copy_ignore)
+            (template / ".git").write_text("sandbox repo_root marker (not a real git dir)\n",
+                                           encoding="utf-8")
         except (OSError, shutil.Error) as exc:
-            cannot.append("sandbox setup failed ({})".format(exc))
+            cannot.append("template sandbox setup failed ({})".format(exc))
         else:
+            baselines = {}
             try:
-                gensrc_baseline = _run_check(sandbox / "tools" / "gen_gensrc.py", sandbox)
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                gensrc_baseline = "error: {}".format(exc)
-            if gensrc_baseline != 0:
-                cannot.append("baseline 'gen_gensrc --check' on the pristine sandbox returned {!r}, not a "
-                              "clean 0".format(gensrc_baseline))
-            else:
-                baseline_cache = {"gensrc": 0}
                 for entry in entries:
-                    _process_entry(entry, sandbox, baseline_cache, violations, cannot)
+                    _process_entry(entry, template, work, baselines, deadline, violations, cannot,
+                                   cleanup_errors)
+            except _DeadlineExceeded:
+                cannot.append("total-runtime backstop of {}s exceeded; the sweep did not finish "
+                              "(fail-closed)".format(TOTAL_TIMEOUT))
     except Exception as exc:  # noqa: BLE001  an unexpected error is fail-closed, never a silent pass
         unexpected = exc
     finally:
         cleanup_error = None
         try:
-            shutil.rmtree(tmp)  # no ignore_errors: a cleanup failure must surface, not hide
+            shutil.rmtree(work)  # no ignore_errors: a cleanup failure must surface, not hide
         except OSError as exc:
             cleanup_error = exc
         try:
@@ -358,11 +534,17 @@ def sweep(real_root):
         return 2
     if after != before:
         print("cannot-evaluate: the real tree CHANGED during the sweep; fail-closed (this must never "
-              "happen: the gate corrupts only a disposable copy)", file=sys.stderr)
+              "happen: the gate corrupts only disposable copies)", file=sys.stderr)
         return 2
     if cleanup_error is not None:
-        print("cannot-evaluate: sandbox cleanup failed ({}); fail-closed".format(cleanup_error),
+        print("cannot-evaluate: sandbox work-dir cleanup failed ({}); fail-closed".format(cleanup_error),
               file=sys.stderr)
+        return 2
+    if cleanup_errors:
+        print("cannot-evaluate: {} throwaway sandbox cleanup(s) failed; fail-closed"
+              .format(len(cleanup_errors)), file=sys.stderr)
+        for line in cleanup_errors:
+            print("  " + line, file=sys.stderr)
         return 2
 
     print("swept {} registry entries against their generators".format(len(entries)))
@@ -375,12 +557,12 @@ def sweep(real_root):
             print("  (also could not evaluate) " + line)
         return 1
     if unexpected is not None or cannot:
-        print("CANNOT-EVALUATE: {} entr(y/ies) could not be soundly evaluated".format(len(cannot)))
+        print("CANNOT-EVALUATE: {} condition(s) could not be soundly evaluated".format(len(cannot)))
         for line in cannot:
             print("  " + line)
         return 2
-    print("PASS: every corrupted target was rejected by its generator (no exit 0 on a corrupt target; "
-          "text targets fail closed to exit 2, the one binary target drifts to exit 1)")
+    print("PASS: every corrupted target was rejected by its generator (a non-zero --check on every "
+          "corruption shape; no generator returned exit 0 on a corrupt target)")
     return 0
 
 
@@ -397,17 +579,26 @@ def main() -> int:
 # --- self-test ----------------------------------------------------------------------------------------
 # Proves this gate's own invariants against synthetic mini-repos assembled in a tempdir, each driving the
 # real sweep() over real synthetic generators run as subprocesses (no mock of the mechanism under test):
-#   (a) a conformant repo (a target-consulting file generator and a target-consulting tree generator, plus
+#   (a) a conformant repo (a content-guarding file generator AND a content-guarding tree generator, plus
 #       gen_gensrc's own registry target) passes the sweep (exit 0),
-#   (b) a BYPASS generator that ignores its target (always exit 0 even on a corrupt target) is caught as a
-#       violation (exit 1) - the F-154 regression, the whole point of the gate,
-#   (c) an unreadable/malformed registry (a generator with a non-literal GENSRC_OUTPUTS) fails closed (2),
-#   (d) a declared target absent on disk fails closed (2),
-#   (e) a non-clean per-generator baseline (a source edited so the target is stale) fails closed (2),
-#   (f) a regenerate off the 'python3 tools/gen_<stem>.py' grammar fails closed (2),
-#   (g) the synthetic real tree is byte-identical after a normal run AND after a run whose probe raises
-#       (the restoration/read-only guarantee), and that raising run returns the fail-closed exit 2.
-# Every fixture is synthetic; the invalid-UTF-8 corruption bytes are assembled from non-secret parts so
+#   (b) a BYPASS generator that ignores its target is caught (exit 1) via VALID-BUT-DIFFERENT content, not
+#       merely invalid UTF-8 - the F-154 regression, the whole point of the gate,
+#   (c) a STATEFUL generator that drops a marker on one call and keys off it is CAUGHT (exit 1), proving
+#       the per-probe fresh-sandbox isolation denies it the cross-call state it needs to fake a guard,
+#   (d) a SYMLINK-SWAP generator that replaces its target with a symlink escaping the sandbox during
+#       --check causes NO real-tree write and is cannot-evaluate (exit 2), via the post-probe containment
+#       re-validation,
+#   (e) a TOLERANT-READER generator (errors="replace") that DOES guard content passes (exit 0): the
+#       valid-but-different probe draws no false violation from a reader that never raises on bad bytes,
+#   (f) a TREE generator that guards only SOME members is caught (exit 1): every member is probed,
+#   (g) a malformed registry, a missing declared target, a non-clean baseline, and an off-grammar
+#       regenerate each fail closed (exit 2),
+#   (h) the synthetic real tree is byte-AND-mode identical after a normal run AND after a run whose
+#       corrupted probe RAISES (the baseline succeeds first, then the probe raises), and that raising run
+#       returns the fail-closed exit 2,
+#   (i) a generator that changes a real-tree file's MODE (via an absolute path out of its sandbox) is
+#       detected by the before/after manifest and is cannot-evaluate (exit 2).
+# Every fixture is synthetic; any invalid-UTF-8 corruption bytes are assembled from non-secret parts so
 # this file never trips the repo secret scan.
 
 _GOODFILE = '''import sys
@@ -461,6 +652,8 @@ if __name__ == "__main__":
     sys.exit(main())
 '''
 
+# BYPASS: never consults its target. In write mode it creates it; in --check it always passes, so even
+# valid-but-different content slips through -> caught as a violation.
 _BYPASS = '''import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -470,7 +663,6 @@ GENSRC_OUTPUTS = (
      "sources": ("src/bypass-src.txt",), "regenerate": "python3 tools/gen_bypass.py"},
 )
 def run(root, check):
-    # BYPASS: never consults the target. In write mode it creates it; in --check it always passes.
     if not check:
         (root / "out" / "bypass.txt").write_text("BYPASS\\n", encoding="utf-8")
     return 0
@@ -480,6 +672,122 @@ if __name__ == "__main__":
     sys.exit(main())
 '''
 
+# STATEFUL: on --check, if a marker file is ABSENT it drops the marker and returns 0 WITHOUT consulting
+# the target (the "first look, assume clean" bypass); only a SECOND call (marker present) would guard
+# content. A shared single sandbox would let the baseline drop the marker and the probe key off it,
+# missing the corruption; per-probe FRESH sandboxes deny that carry-over, so every probe hits the
+# marker-absent path and returns 0 on the corrupt target -> caught. Write mode produces the correct target.
+_STATEFUL = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root, reconcile
+GENSRC_OUTPUTS = (
+    {"target": "out/stateful.txt", "kind": "file",
+     "sources": ("src/stateful-src.txt",), "regenerate": "python3 tools/gen_stateful.py"},
+)
+def run(root, check):
+    text = (root / "src" / "stateful-src.txt").read_text(encoding="utf-8")
+    desired = "GENERATED\\n" + text
+    if not check:
+        return 1 if reconcile(root / "out" / "stateful.txt", desired, False) else 0
+    marker = root / ".aiqt_seen"
+    if marker.exists():
+        return 1 if reconcile(root / "out" / "stateful.txt", desired, True) else 0
+    marker.write_text("seen\\n", encoding="utf-8")
+    return 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# SYMLINK-SWAP: on --check it replaces its target with a symlink to a file OUTSIDE the sandbox and returns
+# 0 (a pretend pass). The gate's post-probe containment re-validation sees the target is no longer a
+# contained regular file -> cannot-evaluate (exit 2), and no real-tree write occurs.
+_SYMLINK_SWAP = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root
+GENSRC_OUTPUTS = (
+    {"target": "out/swap.txt", "kind": "file",
+     "sources": ("src/swap-src.txt",), "regenerate": "python3 tools/gen_swap.py"},
+)
+def run(root, check):
+    target = root / "out" / "swap.txt"
+    if not check:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("SWAP\\n", encoding="utf-8")
+        return 0
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    target.symlink_to(sys.executable)  # a symlink to a real file outside the sandbox
+    return 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# TOLERANT-READER: reads its target with errors="replace" (never raising on bad bytes) and DOES guard
+# content against the sources. Valid-but-different corruption differs from desired -> non-zero (pass);
+# invalid-UTF-8 corruption is read as replacement chars, still != desired -> non-zero (pass). So a correct
+# tolerant reader draws NO false violation.
+_TOLERANT = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root
+GENSRC_OUTPUTS = (
+    {"target": "out/tolerant.txt", "kind": "file",
+     "sources": ("src/tolerant-src.txt",), "regenerate": "python3 tools/gen_tolerant.py"},
+)
+def run(root, check):
+    text = (root / "src" / "tolerant-src.txt").read_text(encoding="utf-8")
+    desired = "GENERATED\\n" + text
+    target = root / "out" / "tolerant.txt"
+    if not check:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(desired, encoding="utf-8")
+        return 0
+    current = target.read_text(encoding="utf-8", errors="replace") if target.exists() else None
+    return 1 if current != desired else 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# PARTIAL-TREE: guards only member leaf-a.txt in --check and ignores every other member. Probing leaf-b.txt
+# (corrupt) draws exit 0 -> caught, proving the gate probes EVERY member, not one representative.
+_PARTIALTREE = '''import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root
+GENSRC_OUTPUTS = (
+    {"target": "out/ptree/", "kind": "tree",
+     "sources": ("src/tree/",), "regenerate": "python3 tools/gen_partialtree.py"},
+)
+def run(root, check):
+    src_dir = root / "src" / "tree"
+    out_dir = root / "out" / "ptree"
+    if not check:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for p in sorted(src_dir.glob("*.txt")):
+            (out_dir / p.name).write_text("GEN\\n" + p.read_text(encoding="utf-8"), encoding="utf-8")
+        return 0
+    only = out_dir / "leaf-a.txt"  # guards leaf-a ONLY; leaf-b is ignored (the partial-coverage bug)
+    desired = "GEN\\n" + (src_dir / "leaf-a.txt").read_text(encoding="utf-8")
+    current = only.read_text(encoding="utf-8") if only.exists() else None
+    return 1 if current != desired else 0
+def main():
+    try:
+        return run(repo_root(), "--check" in sys.argv[1:])
+    except UnicodeError:
+        return 2
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# BADCMD: a well-formed content-guard whose regenerate is off-grammar ("sh ...") -> cannot-evaluate.
 _BADCMD = '''import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -491,6 +799,36 @@ GENSRC_OUTPUTS = (
 def run(root, check):
     text = (root / "src" / "badcmd-src.txt").read_text(encoding="utf-8")
     return 1 if reconcile(root / "out" / "badcmd.txt", "GENERATED\\n" + text, check) else 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# MODECHANGER: on --check it reads an absolute victim path from a source file and chmods that REAL-tree
+# file (escaping its sandbox), then guards content normally. It sets a FIXED mode (idempotent across the
+# baseline and probe calls, so the change is not toggled back), which the before/after manifest detects
+# as a real-tree change -> cannot-evaluate (exit 2).
+_MODECHANGER = '''import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root, reconcile
+GENSRC_OUTPUTS = (
+    {"target": "out/mode.txt", "kind": "file",
+     "sources": ("src/mode-src.txt", "src/victim-path.txt"), "regenerate": "python3 tools/gen_mode.py"},
+)
+def run(root, check):
+    text = (root / "src" / "mode-src.txt").read_text(encoding="utf-8")
+    desired = "GENERATED\\n" + text
+    if check:
+        victim = (root / "src" / "victim-path.txt").read_text(encoding="utf-8").strip()
+        try:
+            os.chmod(victim, 0o400)  # a real-tree mode change out of the sandbox
+        except OSError:
+            pass
+        return 1 if reconcile(root / "out" / "mode.txt", desired, True) else 0
+    return 1 if reconcile(root / "out" / "mode.txt", desired, False) else 0
 def main():
     return run(repo_root(), "--check" in sys.argv[1:])
 if __name__ == "__main__":
@@ -513,10 +851,11 @@ def _run_write(root, stem):
                    check=False)
 
 
-def _build_repo(base, gens, extra_sources=True):
+def _build_repo(base, gens):
     """Assemble a synthetic repo under base carrying the named generators plus the real gen_gensrc loader,
     generate every target into a clean state, then write the .aiqt/gensrc.json registry. `gens` maps a
-    stem to its source body."""
+    stem to its source body. A broad set of harmless sources is created so any generator finds its
+    declared inputs; the modechanger fixture also gets a victim file plus the absolute path to it."""
     here = Path(__file__).resolve().parent
     tools = base / "tools"
     tools.mkdir(parents=True)
@@ -526,14 +865,19 @@ def _build_repo(base, gens, extra_sources=True):
     (base / "out").mkdir()
     (base / ".aiqt").mkdir()
     (base / ".git").write_text("marker\n", encoding="utf-8")
-    # Sources every generator kind might reference; harmless extras are ignored by generators not using them.
-    (base / "src" / "goodfile-src.txt").write_text("source one\n", encoding="utf-8")
-    (base / "src" / "bypass-src.txt").write_text("source two\n", encoding="utf-8")
-    (base / "src" / "badcmd-src.txt").write_text("source three\n", encoding="utf-8")
+    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode"):
+        (base / "src" / "{}-src.txt".format(name)).write_text("source for {}\n".format(name),
+                                                              encoding="utf-8")
     tree_src = base / "src" / "tree"
     tree_src.mkdir()
     (tree_src / "leaf-a.txt").write_text("leaf a\n", encoding="utf-8")
     (tree_src / "leaf-b.txt").write_text("leaf b\n", encoding="utf-8")
+    # The modechanger victim: a real-tree file whose mode the generator will change, plus a source file
+    # carrying its absolute path (so the sandbox copy still points at the REAL victim, modelling an escape).
+    victim = base / "victim.txt"
+    victim.write_text("victim\n", encoding="utf-8")
+    os.chmod(victim, 0o644)
+    (base / "src" / "victim-path.txt").write_text(str(victim) + "\n", encoding="utf-8")
     for stem, body in gens.items():
         _write_gen(tools, stem, body)
     # Generate targets clean, then the registry last (it lists tools/ and every target).
@@ -559,19 +903,45 @@ def self_test_main():
     failures = []
     global _run_check
     saved_run_check = _run_check
+    cleanup_error = None
     try:
-        # (a) A conformant repo (target-consulting file + tree generators) passes.
+        # (a) A conformant repo (content-guarding file + tree generators) passes.
         good = _build_repo(tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
         if sweep_quiet(good) != 0:
             failures.append("conformant repo: expected the sweep to pass (exit 0)")
 
-        # (b) A BYPASS generator that ignores its target is caught as a violation (exit 1): the F-154 case.
-        byp = _build_repo(tmp / "bypass",
-                          {"goodfile": _GOODFILE, "bypass": _BYPASS})
+        # (b) A BYPASS generator is caught (exit 1) via valid-but-different content, not just invalid UTF-8.
+        byp = _build_repo(tmp / "bypass", {"goodfile": _GOODFILE, "bypass": _BYPASS})
         if sweep_quiet(byp) != 1:
             failures.append("bypass generator: expected exit 1 (F-154 regression caught)")
 
-        # (c) A non-literal GENSRC_OUTPUTS makes enumeration fail closed (exit 2).
+        # (c) A STATEFUL generator is caught (exit 1): per-probe fresh sandboxes deny cross-call state.
+        stf = _build_repo(tmp / "stateful", {"stateful": _STATEFUL})
+        if sweep_quiet(stf) != 1:
+            failures.append("stateful generator: expected exit 1 (per-probe isolation)")
+
+        # (d) A SYMLINK-SWAP generator is cannot-evaluate (exit 2) and causes no real-tree write. The
+        #     symlink points at sys.executable (outside the sandbox); assert it is untouched afterwards.
+        swp = _build_repo(tmp / "swap", {"swap": _SYMLINK_SWAP})
+        exe_before = os.stat(sys.executable)
+        if sweep_quiet(swp) != 2:
+            failures.append("symlink-swap generator: expected cannot-evaluate exit 2 (containment)")
+        exe_after = os.stat(sys.executable)
+        if (exe_before.st_mode, exe_before.st_size, exe_before.st_mtime_ns) != \
+           (exe_after.st_mode, exe_after.st_size, exe_after.st_mtime_ns):
+            failures.append("symlink-swap generator: the out-of-sandbox symlink target was written")
+
+        # (e) A TOLERANT-READER that guards content passes (exit 0): no false violation.
+        tol = _build_repo(tmp / "tolerant", {"tolerant": _TOLERANT})
+        if sweep_quiet(tol) != 0:
+            failures.append("tolerant-reader generator: expected exit 0 (no false violation)")
+
+        # (f) A TREE generator guarding only SOME members is caught (exit 1): every member is probed.
+        part = _build_repo(tmp / "partial", {"partialtree": _PARTIALTREE})
+        if sweep_quiet(part) != 1:
+            failures.append("partial-coverage tree generator: expected exit 1 (every member probed)")
+
+        # (g) A non-literal GENSRC_OUTPUTS makes enumeration fail closed (exit 2).
         mal = tmp / "malformed"
         (mal / "tools").mkdir(parents=True)
         here = Path(__file__).resolve().parent
@@ -582,57 +952,84 @@ def self_test_main():
         if sweep_quiet(mal) != 2:
             failures.append("malformed registry: expected fail-closed exit 2")
 
-        # (d) A declared target absent on disk fails closed (exit 2).
+        # (g) A declared target absent on disk fails closed (exit 2).
         miss = _build_repo(tmp / "missing-target", {"goodfile": _GOODFILE})
         (miss / "out" / "goodfile.txt").unlink()
         if sweep_quiet(miss) != 2:
             failures.append("missing declared target: expected fail-closed exit 2")
 
-        # (e) A non-clean per-generator baseline (source edited so the target is stale) fails closed (2).
+        # (g) A non-clean per-generator baseline (source edited so the target is stale) fails closed (2).
         stale = _build_repo(tmp / "stale-baseline", {"goodfile": _GOODFILE})
         (stale / "src" / "goodfile-src.txt").write_text("edited after generation\n", encoding="utf-8")
         if sweep_quiet(stale) != 2:
             failures.append("non-clean baseline: expected fail-closed exit 2")
 
-        # (f) A regenerate off the grammar fails closed (exit 2).
+        # (g) A regenerate off the grammar fails closed (exit 2).
         badcmd = _build_repo(tmp / "off-grammar", {"badcmd": _BADCMD})
         if sweep_quiet(badcmd) != 2:
             failures.append("off-grammar regenerate: expected fail-closed exit 2")
 
-        # (g) Restoration guarantee: the synthetic real tree is byte-identical after a normal run and
-        #     after a run whose probe RAISES, and the raising run returns the fail-closed exit 2.
-        rest = _build_repo(tmp / "restoration", {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
+        # (h) Restoration: the synthetic real tree is byte-AND-mode identical after a normal run and after
+        #     a run whose corrupted PROBE raises (the baseline succeeds first), and the raising run returns
+        #     the fail-closed exit 2.
+        rest = _build_repo(tmp / "restoration", {"goodfile": _GOODFILE})
         before = _tree_manifest(rest)
-        sweep_quiet(rest)
+        if sweep_quiet(rest) != 0:
+            failures.append("restoration: expected a clean normal run (exit 0)")
         if _tree_manifest(rest) != before:
             failures.append("restoration: the real tree changed after a normal run")
 
-        def _raising_run_check(*_args, **_kwargs):
-            raise RuntimeError("injected probe failure")
+        calls = {"n": 0}
 
-        _run_check = _raising_run_check
+        def _raise_after_baseline(script_path, cwd, timeout=PROBE_TIMEOUT):
+            # Let the first call (a per-generator baseline, run on a pristine sandbox) succeed, then raise
+            # on the next call (the first corrupted probe), so restoration-after-raise is exercised.
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return saved_run_check(script_path, cwd, timeout)
+            raise RuntimeError("injected probe failure after a clean baseline")
+
+        _run_check = _raise_after_baseline
         rc = sweep_quiet(rest)
         _run_check = saved_run_check
         if rc != 2:
             failures.append("restoration: a run whose probe raises expected fail-closed exit 2, got "
                             "{!r}".format(rc))
+        if calls["n"] < 2:
+            failures.append("restoration: expected a baseline call then a raising probe call, saw "
+                            "{} call(s)".format(calls["n"]))
         if _tree_manifest(rest) != before:
             failures.append("restoration: the real tree changed after a run whose probe raised")
+
+        # (i) A generator that changes a real-tree file's MODE (out of its sandbox) is detected (exit 2).
+        moded = _build_repo(tmp / "modechange", {"mode": _MODECHANGER})
+        if sweep_quiet(moded) != 2:
+            failures.append("real-tree mode change: expected cannot-evaluate exit 2 (manifest detected)")
     finally:
         _run_check = saved_run_check
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            shutil.rmtree(tmp)  # no ignore_errors: a self-test cleanup failure must surface, not hide
+        except OSError as exc:
+            cleanup_error = exc
 
+    if cleanup_error is not None:
+        print("SELF-TEST ERROR: could not remove the self-test tempdir ({}); fail-closed"
+              .format(cleanup_error), file=sys.stderr)
+        return 2
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a conformant repo (target-consulting file and tree generators) passes; a "
-          "bypass generator that ignores its target is caught as exit 1 (the F-154 regression); and a "
-          "malformed registry, a missing declared target, a non-clean per-generator baseline, and a "
-          "regenerate off the 'python3 tools/gen_<stem>.py' grammar all fail closed (exit 2); the "
-          "synthetic real tree is byte-identical after a normal run and after a run whose probe raises "
-          "(which itself returns the fail-closed exit 2)")
+    print("SELF-TEST PASS: a conformant repo (content-guarding file and tree generators) passes; a bypass "
+          "generator is caught (exit 1) via valid-but-different content; a stateful generator is caught "
+          "(exit 1) because per-probe fresh sandboxes deny cross-call state; a symlink-swap generator is "
+          "cannot-evaluate (exit 2) with no out-of-sandbox write; a tolerant reader that guards content "
+          "passes (exit 0, no false violation); a tree generator guarding only some members is caught "
+          "(exit 1, every member probed); a malformed registry, a missing target, a non-clean baseline, "
+          "and an off-grammar regenerate all fail closed (exit 2); the synthetic real tree is byte-and-mode "
+          "identical after a normal run and after a run whose corrupted probe raises (itself exit 2); and a "
+          "generator changing a real-tree file's mode is detected (exit 2)")
     return 0
 
 
