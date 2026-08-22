@@ -173,10 +173,12 @@ def check_subset_denominator(root, manifests, findings):
 
 
 def check_json_subset_denominator(root, manifests, findings):
-    """The catalogue invariant in the machine-readable export: a curated-subset framework in
-    site/downloads/mappings.json must not carry an edition denominator (ids_total); only a full-edition
-    manifest does. Fail-closed read (exit 2) on a missing/unreadable/invalid export; a subset key absent
-    from the export, or one carrying a non-null ids_total, is a finding (exit 1)."""
+    """The catalogue invariant in the machine-readable export (GD-73): a curated-subset framework in
+    site/downloads/mappings.json must carry ids_total: null (the KEY present for schema compatibility,
+    value null = no computable edition denominator); only a full-edition manifest carries a numeric
+    ids_total. Fail-closed read (exit 2) on a missing/unreadable/invalid export or a non-object entry; a
+    subset framework absent from the export, missing ids_total, or carrying a non-null ids_total is a
+    finding (exit 1)."""
     text = _read(root / "site" / "downloads" / "mappings.json")
     try:
         data = json.loads(text)
@@ -197,9 +199,13 @@ def check_json_subset_denominator(root, manifests, findings):
         if not isinstance(entry, dict):
             raise OSError("site/downloads/mappings.json: framework {!r} entry is not an object "
                           "(malformed export)".format(stem))
-        if "ids_total" in entry:
-            findings.append("site/downloads/mappings.json: subset framework {!r} carries an edition "
-                            "denominator (ids_total={!r})".format(man.name, entry.get("ids_total")))
+        if "ids_total" not in entry:
+            findings.append("site/downloads/mappings.json: subset framework {!r} is missing ids_total; a "
+                            "subset must carry ids_total: null (GD-73)".format(man.name))
+        elif entry["ids_total"] is not None:
+            findings.append("site/downloads/mappings.json: subset framework {!r} carries a non-null edition "
+                            "denominator (ids_total={!r}); a subset must be null".format(
+                                man.name, entry["ids_total"]))
 
 
 def run(root):
@@ -306,7 +312,8 @@ _JSON = (
     '  "frameworks": {\n'
     '    "full": {"name": "Fixture Full Framework", "catalogue": "full", "ids_cited": 3, '
     '"ids_total": 3},\n'
-    '    "subset": {"name": "Fixture Subset Framework", "catalogue": "subset", "ids_cited": 2}\n'
+    '    "subset": {"name": "Fixture Subset Framework", "catalogue": "subset", "ids_cited": 2, '
+    '"ids_total": null}\n'
     '  },\n'
     '  "mappings": []\n'
     '}\n'
@@ -480,19 +487,24 @@ def self_test_main():
         if run_quiet(revsub) != 1:
             failures.append("a subset reverse-view coverage of 'N of M' expected exit 1")
 
-        # 13. a subset framework carrying ids_total in the JSON export -> finding (the export invariant).
+        # 13. a subset framework carrying a NON-NULL ids_total in the JSON export -> finding (GD-73).
         jsondenom = tmp / "jsondenom"
-        _write_fixture(jsondenom, json_export=_JSON.replace(
-            '"catalogue": "subset", "ids_cited": 2',
-            '"catalogue": "subset", "ids_cited": 2, "ids_total": 61'))
+        _write_fixture(jsondenom, json_export=_JSON.replace('"ids_total": null}', '"ids_total": 61}'))
         if run_quiet(jsondenom) != 1:
-            failures.append("a subset framework carrying ids_total in the JSON export expected exit 1")
+            failures.append("a subset framework carrying a non-null ids_total expected exit 1")
+
+        # 13c. a subset framework MISSING ids_total (the key must be present and null, GD-73) -> finding.
+        jsonabsent = tmp / "jsonabsent"
+        _write_fixture(jsonabsent, json_export=_JSON.replace(', "ids_total": null}', '}'))
+        if run_quiet(jsonabsent) != 1:
+            failures.append("a subset framework missing ids_total expected exit 1 (must be present and null)")
 
         # 13b. a subset framework entry that is valid JSON but NOT an object (a string) -> exit 2
         #      (malformed structure fails closed, not a clean pass).
         jsonstr = tmp / "jsonstr"
         _write_fixture(jsonstr, json_export=_JSON.replace(
-            '"subset": {"name": "Fixture Subset Framework", "catalogue": "subset", "ids_cited": 2}',
+            '"subset": {"name": "Fixture Subset Framework", "catalogue": "subset", "ids_cited": 2, '
+            '"ids_total": null}',
             '"subset": "malformed-but-valid-json"'))
         if run_quiet(jsonstr) != 2:
             failures.append("a non-object subset framework entry expected exit 2 (fail-closed)")

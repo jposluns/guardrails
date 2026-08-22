@@ -413,12 +413,12 @@ def render_json(reg, rows):
             "retrieved": r["retrieved"], "catalogue": r["catalogue"],
             "ids_cited": r["ids_cited"],
         }
-        # Only a full-edition manifest carries an edition denominator. A curated subset omits ids_total
-        # because the manifest cannot state how many identifiers the whole edition holds (the catalogue
-        # invariant); catalogue + ids_cited still tell a consumer it is a curated subset with no total.
-        # This matches the HTML registry and reverse view, which omit the denominator for a subset.
-        if r["catalogue"] == "full":
-            entry["ids_total"] = r["ids_total"]
+        # A full-edition manifest carries its edition denominator; a curated subset carries
+        # ids_total = null (GD-73): the KEY stays for schema compatibility, and null means no computable
+        # edition denominator, because the manifest cannot state how many identifiers the whole edition
+        # holds (the catalogue invariant). catalogue + this null tell a consumer it is a curated subset;
+        # the HTML registry and reverse view show no denominator for a subset.
+        entry["ids_total"] = r["ids_total"] if r["catalogue"] == "full" else None
         frameworks[r["framework"]] = entry
     mappings = [{
         "rule_id": row["rule_id"], "rule_title": row["rule_title"], "rule_source": row["rule_source"],
