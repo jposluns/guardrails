@@ -1127,8 +1127,8 @@
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
-      "identifier": "A.7",
-      "identifier_title": "Maintainability"
+      "identifier": "A.11",
+      "identifier_title": "Security"
     },
     {
       "rule_id": "dfdpth",

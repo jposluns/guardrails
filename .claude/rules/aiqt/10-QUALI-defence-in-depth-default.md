@@ -7,7 +7,7 @@ facet: QUALI
 secondary: [SECI]
 slug: defence-in-depth-default
 map-nist-80053-broad: [SA-8]
-map-iso-23894-broad: [A.7]
+map-iso-23894-broad: [A.11]
 ---
 
 # Defence in depth by default
