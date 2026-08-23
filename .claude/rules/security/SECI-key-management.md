@@ -5,7 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: key-management
-map-cwe-tight: [CWE-321, CWE-323, CWE-324]
+map-cwe-tight: [CWE-321, CWE-324]
+map-cwe-broad: [CWE-323]
 map-nist-80053-tight: [IA-5(7), SC-12]
 map-nist-ssdf-broad: [PW.5.1]
 map-atlas-tight: [AML.T0055]

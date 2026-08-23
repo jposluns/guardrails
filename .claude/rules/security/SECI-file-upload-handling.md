@@ -4,8 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: file-upload-handling
-map-cwe-tight: [CWE-434]
-map-cwe-broad: [CWE-646]
+map-cwe-tight: [CWE-434, CWE-646]
 map-owasp-asvs-tight: [V5]
 map-owasp-cheatsheet-tight: [file-upload]
 ---

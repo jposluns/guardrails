@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: human-authorization
+map-cwe-tight: [CWE-451]
+map-cwe-broad: [CWE-862]
 map-nist-airmf-tight: [GOVERN 3.2, MAP 3.5]
 map-nist-80053-tight: [CM-3, CM-5]
 map-atlas-tight: [AML.T0081, AML.T0101]

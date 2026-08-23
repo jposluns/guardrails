@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [ACCUR]
 slug: verify-dependency-exists
+map-cwe-broad: [CWE-1357]
 map-nist-airmf-broad: [GOVERN 6.1, MANAGE 3.1]
 map-nist-ssdf-tight: [PW.4.1]
 map-atlas-tight: [AML.T0011.001]
