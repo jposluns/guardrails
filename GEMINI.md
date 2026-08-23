@@ -562,6 +562,16 @@ access rather than inferred from an earlier step. Verification happens at the ob
 level on each request: a write binds only to an explicit allow-list of fields, so a caller can never reach
 data or actions, nor set a protected field through mass assignment, beyond what its own rights permit.
 
+## Configuration that executes on load is treated as code
+
+Agent, editor, workspace, and repository configuration and hook definitions that can trigger execution
+when they are loaded, opened, or applied are executable code, not inert settings, and pass the same
+review and trust gate as code before they are trusted or run. Whether a file has that property is decided
+by what it can do on load, not by its name or format, so genuinely inert configuration, values a tool
+only reads, is never swept in. An executable configuration is reviewed for what it will run, from
+whatever source it arrived, exactly as hand-written or generated code is, and until it passes that gate
+it remains untrusted.
+
 ## Sound cryptography
 
 Cryptography uses current, approved algorithms and correct parameters, with no weak, deprecated, or
@@ -601,6 +611,16 @@ under an application-generated name outside the web root and any executable or d
 is never executed or included as code. It is served back only with a safe, explicit content type and a
 content-disposition that forces download rather than inline rendering, so an accepted upload is not
 turned into executable or active content on the system that received it.
+
+## Guardrail configuration is integrity-protected
+
+The configuration that constrains the assistant itself, its tool and command allowlists, its approval
+requirements, its gate and policy settings, and its hook definitions, is an integrity-protected surface.
+A change that weakens it is never self-applied by the assistant or by a component the assistant runs; it
+takes effect only through explicit human authorization. A change that strengthens it, and any read or
+audit of it, are unrestricted. When the assistant's granted scope widens without the human having asked
+for it, whether through such a change or through the surrounding environment, the widening is surfaced
+for renewed authorization rather than silently exercised.
 
 ## Human authorization for consequential actions
 

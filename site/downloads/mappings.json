@@ -95,7 +95,7 @@
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
       "catalogue": "full",
-      "ids_cited": 65,
+      "ids_cited": 66,
       "ids_total": 1196
     },
     "nist-airmf": {
@@ -3551,6 +3551,36 @@
       "identifier_title": "Broken Access Control"
     },
     {
+      "rule_id": "seccet",
+      "rule_title": "Configuration that executes on load is treated as code",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-829",
+      "identifier_title": "Inclusion of Functionality from Untrusted Control Sphere"
+    },
+    {
+      "rule_id": "seccet",
+      "rule_title": "Configuration that executes on load is treated as code",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SI-7",
+      "identifier_title": "Software, Firmware, and Information Integrity"
+    },
+    {
+      "rule_id": "seccet",
+      "rule_title": "Configuration that executes on load is treated as code",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md",
+      "framework": "owasp-asi",
+      "relation": "addresses risk",
+      "fit": "tight",
+      "identifier": "ASI05",
+      "identifier_title": "Unexpected Code Execution (RCE)"
+    },
+    {
       "rule_id": "seccry",
       "rule_title": "Sound cryptography",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
@@ -4419,6 +4449,56 @@
       "fit": "tight",
       "identifier": "file-upload",
       "identifier_title": "File Upload Cheat Sheet"
+    },
+    {
+      "rule_id": "secgci",
+      "rule_title": "Guardrail configuration is integrity-protected",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "AC-6(1)",
+      "identifier_title": "Authorize Access to Security Functions"
+    },
+    {
+      "rule_id": "secgci",
+      "rule_title": "Guardrail configuration is integrity-protected",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SI-7",
+      "identifier_title": "Software, Firmware, and Information Integrity"
+    },
+    {
+      "rule_id": "secgci",
+      "rule_title": "Guardrail configuration is integrity-protected",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CM-3",
+      "identifier_title": "Configuration Change Control"
+    },
+    {
+      "rule_id": "secgci",
+      "rule_title": "Guardrail configuration is integrity-protected",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CM-5",
+      "identifier_title": "Access Restrictions for Change"
+    },
+    {
+      "rule_id": "secgci",
+      "rule_title": "Guardrail configuration is integrity-protected",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
+      "framework": "owasp-mcp",
+      "relation": "addresses risk",
+      "fit": "tight",
+      "identifier": "MCP02",
+      "identifier_title": "Privilege Escalation via Scope Creep"
     },
     {
       "rule_id": "sechau",

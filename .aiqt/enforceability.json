@@ -675,6 +675,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "seccet",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "seccfg",
       "family": "security",
       "gates": [],
@@ -736,6 +744,14 @@
       "gates": [],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-federated-identity-flow.md",
+      "status": "prose-only"
+    },
+    {
+      "corpus-id": "secgci",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-guardrail-config-integrity.md",
       "status": "prose-only"
     },
     {
