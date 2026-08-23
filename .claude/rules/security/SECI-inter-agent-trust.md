@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: inter-agent-trust
+map-cwe-tight: [CWE-272, CWE-290]
+map-cwe-broad: [CWE-501]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [IA-9, SI-10]
 map-nist-80053-broad: [AC-3, AC-6]

@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [ACCUR]
 slug: poisoning-resistance
+map-cwe-tight: [CWE-345]
+map-cwe-broad: [CWE-348]
 map-nist-airmf-broad: [MANAGE 3.1, MAP 4.2]
 map-nist-80053-tight: [SI-7, SI-10(5)]
 map-atlas-tight: [AML.T0018.000, AML.T0020, AML.T0059, AML.T0070, AML.T0071, AML.T0080, AML.T0099]

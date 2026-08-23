@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: protect-audit-records
+map-cwe-tight: [CWE-471]
+map-cwe-broad: [CWE-732]
 map-nist-80053-tight: [AU-9]
 map-owasp-web-broad: [A09]
 map-owasp-asvs-broad: [V16]

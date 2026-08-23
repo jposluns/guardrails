@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>899</strong> mappings from <strong>95</strong> of the pack's rules to <strong>495</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>921</strong> mappings from <strong>95</strong> of the pack's rules to <strong>510</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -119,7 +119,7 @@
             <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
-            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>57 of 944</td></tr>
+            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 of 944</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
             <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>66 of 1196</td></tr>
@@ -1242,6 +1242,11 @@
                 <li>DSP-04: Data Classification (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (broad)</li>
+              </ul>
+            </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
               <ul>
                 <li>MP-3: Media Marking (tight)</li>
@@ -1634,6 +1639,13 @@
                 <li>IAM-14: Credentials Management (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-306: Missing Authentication for Critical Function (broad)</li>
+                <li>CWE-798: Use of Hard-coded Credentials (broad)</li>
+                <li>CWE-287: Improper Authentication (tight)</li>
+              </ul>
+            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
@@ -2008,6 +2020,13 @@
                 <li>IAM-15: Authorization Mechanisms (broad)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-287: Improper Authentication (broad)</li>
+                <li>CWE-304: Missing Critical Step in Authentication (tight)</li>
+                <li>CWE-347: Improper Verification of Cryptographic Signature (tight)</li>
+              </ul>
+            </li>
             <li>OWASP Application Security Verification Standard (5.0.0): supports control
               <ul>
                 <li>V9: Self-contained Tokens (tight)</li>
@@ -2035,8 +2054,8 @@
           <ul>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
-                <li>CWE-646: Reliance on File Name or Extension of Externally-Supplied File (broad)</li>
                 <li>CWE-434: Unrestricted Upload of File with Dangerous Type (tight)</li>
+                <li>CWE-646: Reliance on File Name or Extension of Externally-Supplied File (tight)</li>
               </ul>
             </li>
             <li>OWASP Application Security Verification Standard (5.0.0): supports control
@@ -2097,6 +2116,12 @@
               <ul>
                 <li>CCC-05: Change Agreements (broad)</li>
                 <li>CCC-04: Unauthorized Change Protection (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-862: Missing Authorization (broad)</li>
+                <li>CWE-451: User Interface (UI) Misrepresentation of Critical Information (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -2229,6 +2254,13 @@
                 <li>IAM-15: Authorization Mechanisms (broad)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-501: Trust Boundary Violation (broad)</li>
+                <li>CWE-272: Least Privilege Violation (tight)</li>
+                <li>CWE-290: Authentication Bypass by Spoofing (tight)</li>
+              </ul>
+            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
@@ -2303,8 +2335,8 @@
             </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
+                <li>CWE-323: Reusing a Nonce, Key Pair in Encryption (broad)</li>
                 <li>CWE-321: Use of Hard-coded Cryptographic Key (tight)</li>
-                <li>CWE-323: Reusing a Nonce, Key Pair in Encryption (tight)</li>
                 <li>CWE-324: Use of a Key Past its Expiration Date (tight)</li>
               </ul>
             </li>
@@ -2480,6 +2512,11 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-operator-deception.md">View this rule on GitHub</a></p>
           <ul>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-807: Reliance on Untrusted Inputs in a Security Decision (tight)</li>
+              </ul>
+            </li>
             <li>OWASP Top 10 for Agentic Applications (2026): addresses risk
               <ul>
                 <li>ASI09: Human-Agent Trust Exploitation (tight)</li>
@@ -2667,6 +2704,12 @@
                 <li>MDS-08: Model Integrity Checks (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-348: Use of Less Trusted Source (broad)</li>
+                <li>CWE-345: Insufficient Verification of Data Authenticity (tight)</li>
+              </ul>
+            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
@@ -2728,6 +2771,12 @@
                 <li>LOG-04: Audit Logs Access and Accountability (broad)</li>
                 <li>LOG-02: Audit Logs Protection (tight)</li>
                 <li>LOG-10: Audit Records Protection (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-732: Incorrect Permission Assignment for Critical Resource (broad)</li>
+                <li>CWE-471: Modification of Assumed-Immutable Data (MAID) (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3096,6 +3145,14 @@
                 <li>IAM-14: Credentials Management (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-522: Insufficiently Protected Credentials (broad)</li>
+                <li>CWE-331: Insufficient Entropy (tight)</li>
+                <li>CWE-352: Cross-Site Request Forgery (CSRF) (tight)</li>
+                <li>CWE-613: Insufficient Session Expiration (tight)</li>
+              </ul>
+            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
@@ -3414,6 +3471,11 @@
                 <li>STA-08: Supply Chain Inventory (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-1357: Reliance on Insufficiently Trustworthy Component (broad)</li>
+              </ul>
+            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
@@ -3712,7 +3774,7 @@
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-359: Exposure of Private Personal Information to an Unauthorized Actor (broad)</li>
-                <li>CWE-531: Inclusion of Sensitive Information in Test Code (tight)</li>
+                <li>CWE-531: Inclusion of Sensitive Information in Test Code (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -4912,7 +4974,7 @@
       <details class="more">
         <summary>MITRE CWE (4.20)</summary>
         <div class="inner">
-          <p>mitigates weakness. 57 of 944 identifiers referenced.</p>
+          <p>mitigates weakness. 72 of 944 identifiers referenced.</p>
           <ul>
             <li>CWE-20: Improper Input Validation
               <ul>
@@ -4954,6 +5016,7 @@
             </li>
             <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-data-boundary.md">Classify content by sensitivity tier</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md">No cross-context bleed</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md">No disclosure of secrets or hidden context</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md">Redact sensitive content from logs</a> (broad)</li>
@@ -4976,6 +5039,7 @@
             </li>
             <li>CWE-272: Least Privilege Violation
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (tight)</li>
               </ul>
             </li>
@@ -4989,9 +5053,30 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md">Retrieval enforces the requester's authorization</a> (broad)</li>
               </ul>
             </li>
+            <li>CWE-287: Improper Authentication
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md">Strong authentication</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md">Validate federated identity and token flows</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-290: Authentication Bypass by Spoofing
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (tight)</li>
+              </ul>
+            </li>
             <li>CWE-295: Improper Certificate Validation
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md">Sound cryptography</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-304: Missing Critical Step in Authentication
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md">Validate federated identity and token flows</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-306: Missing Authentication for Critical Function
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md">Strong authentication</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-311: Missing Encryption of Sensitive Data
@@ -5006,7 +5091,7 @@
             </li>
             <li>CWE-323: Reusing a Nonce, Key Pair in Encryption
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md">Key management</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md">Key management</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-324: Use of a Key Past its Expiration Date
@@ -5019,9 +5104,30 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md">Sound cryptography</a> (tight)</li>
               </ul>
             </li>
+            <li>CWE-331: Insufficient Entropy
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md">Secure session and token handling</a> (tight)</li>
+              </ul>
+            </li>
             <li>CWE-345: Insufficient Verification of Data Authenticity
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md">Publish artefacts with verifiable integrity</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-347: Improper Verification of Cryptographic Signature
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md">Validate federated identity and token flows</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-348: Use of Less Trusted Source
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-352: Cross-Site Request Forgery (CSRF)
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md">Secure session and token handling</a> (tight)</li>
               </ul>
             </li>
             <li>CWE-353: Missing Support for Integrity Check
@@ -5060,6 +5166,16 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md">Retrieval enforces the requester's authorization</a> (tight)</li>
               </ul>
             </li>
+            <li>CWE-451: User Interface (UI) Misrepresentation of Critical Information
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">Human authorization for consequential actions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-471: Modification of Assumed-Immutable Data (MAID)
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-protect-audit-records.md">Protect audit records from the actors they record</a> (tight)</li>
+              </ul>
+            </li>
             <li>CWE-488: Exposure of Data Element to Wrong Session
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md">No cross-context bleed</a> (tight)</li>
@@ -5075,14 +5191,24 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md">No disclosure of secrets or hidden context</a> (broad)</li>
               </ul>
             </li>
+            <li>CWE-501: Trust Boundary Violation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (broad)</li>
+              </ul>
+            </li>
             <li>CWE-502: Deserialization of Untrusted Data
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md">Deserialize untrusted data only as data</a> (tight)</li>
               </ul>
             </li>
+            <li>CWE-522: Insufficiently Protected Credentials
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md">Secure session and token handling</a> (broad)</li>
+              </ul>
+            </li>
             <li>CWE-531: Inclusion of Sensitive Information in Test Code
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md">Fixtures and examples use synthetic data</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md">Fixtures and examples use synthetic data</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-532: Insertion of Sensitive Information into Log File
@@ -5101,6 +5227,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md">Egress goes only to expected destinations</a> (broad)</li>
               </ul>
             </li>
+            <li>CWE-613: Insufficient Session Expiration
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md">Secure session and token handling</a> (tight)</li>
+              </ul>
+            </li>
             <li>CWE-636: Not Failing Securely ('Failing Open')
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md">Fail closed in security-relevant paths</a> (tight)</li>
@@ -5108,7 +5239,7 @@
             </li>
             <li>CWE-646: Reliance on File Name or Extension of Externally-Supplied File
               <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md">Validate and contain uploaded files</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md">Validate and contain uploaded files</a> (tight)</li>
               </ul>
             </li>
             <li>CWE-653: Improper Isolation or Compartmentalization
@@ -5119,6 +5250,11 @@
             <li>CWE-674: Uncontrolled Recursion
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-732: Incorrect Permission Assignment for Critical Resource
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-protect-audit-records.md">Protect audit records from the actors they record</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-770: Allocation of Resources Without Limits or Throttling
@@ -5134,6 +5270,12 @@
             <li>CWE-798: Use of Hard-coded Credentials
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md">Keep secrets out</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md">Strong authentication</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-807: Reliance on Untrusted Inputs in a Security Decision
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-operator-deception.md">Social pressure is not authorization</a> (tight)</li>
               </ul>
             </li>
             <li>CWE-829: Inclusion of Functionality from Untrusted Control Sphere
@@ -5155,6 +5297,7 @@
             <li>CWE-862: Missing Authorization
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md">Least-privilege authorization</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">Human authorization for consequential actions</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-863: Incorrect Authorization
@@ -5190,6 +5333,7 @@
             <li>CWE-1357: Reliance on Insufficiently Trustworthy Component
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md">Trusted, pinned dependency provenance</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md">Verify a dependency exists before adding it</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-1395: Dependency on Vulnerable Third-Party Component
