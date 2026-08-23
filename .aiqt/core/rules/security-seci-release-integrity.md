@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: release-integrity
+map-cwe-tight: [CWE-353]
+map-cwe-broad: [CWE-345]
 map-nist-80053-broad: [SI-7, SR-4]
 map-nist-ssdf-tight: [PS.2.1]
 map-nist-ssdf-broad: [PS.3.2]

@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: secure-configuration
+map-cwe-tight: [CWE-1188, CWE-1269]
 map-nist-80053-tight: [CM-6, CM-7, SI-11]
 map-nist-ssdf-tight: [PW.9.1, PW.9.2]
 map-atlas-broad: [AML.T0049, AML.T0063]

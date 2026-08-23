@@ -5,6 +5,8 @@ family: security
 facet: SECP
 secondary: [SECC]
 slug: synthetic-fixture-data
+map-cwe-tight: [CWE-531]
+map-cwe-broad: [CWE-359]
 map-nist-80053-tight: [SA-3(2), SA-15(9)]
 map-owasp-llm-broad: [LLM02]
 map-owasp-asvs-broad: [V14]

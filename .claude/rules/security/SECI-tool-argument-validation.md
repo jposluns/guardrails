@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: tool-argument-validation
+map-cwe-tight: [CWE-20, CWE-88]
+map-cwe-broad: [CWE-22, CWE-77]
 map-nist-80053-tight: [SI-10, SI-10(6)]
 map-atlas-broad: [AML.T0050, AML.T0102]
 map-iso-23894-broad: [A.11]
