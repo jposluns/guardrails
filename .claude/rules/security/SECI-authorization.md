@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: authorization
+map-cwe-tight: [CWE-862, CWE-863, CWE-915]
+map-cwe-broad: [CWE-284]
 map-nist-80053-tight: [AC-3, AC-6]
 map-nist-ssdf-broad: [PW.5.1]
 map-atlas-broad: [AML.T0053, AML.T0082, AML.T0085]

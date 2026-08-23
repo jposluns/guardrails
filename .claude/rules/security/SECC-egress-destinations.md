@@ -5,6 +5,8 @@ family: security
 facet: SECC
 secondary: [SECI]
 slug: egress-destinations
+map-cwe-tight: [CWE-923]
+map-cwe-broad: [CWE-610]
 map-nist-80053-tight: [AC-4, SC-7(5)]
 map-nist-80053-broad: [SC-7]
 map-atlas-tight: [AML.T0086]

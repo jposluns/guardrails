@@ -53,7 +53,7 @@
       "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
       "retrieved": "2026-08-22",
       "catalogue": "full",
-      "ids_cited": 14,
+      "ids_cited": 43,
       "ids_total": 944
     },
     "iso-23894": {
@@ -2094,6 +2094,26 @@
       "rule_id": "secegr",
       "rule_title": "Egress goes only to expected destinations",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-610",
+      "identifier_title": "Externally Controlled Reference to a Resource in Another Sphere"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-923",
+      "identifier_title": "Improper Restriction of Communication Channel to Intended Endpoints"
+    },
+    {
+      "rule_id": "secegr",
+      "rule_title": "Egress goes only to expected destinations",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md",
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
@@ -2259,6 +2279,36 @@
       "fit": "tight",
       "identifier": "IAM-14",
       "identifier_title": "Credentials Management"
+    },
+    {
+      "rule_id": "secsec",
+      "rule_title": "Keep secrets out",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-798",
+      "identifier_title": "Use of Hard-coded Credentials"
+    },
+    {
+      "rule_id": "secsec",
+      "rule_title": "Keep secrets out",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-532",
+      "identifier_title": "Insertion of Sensitive Information into Log File"
+    },
+    {
+      "rule_id": "secsec",
+      "rule_title": "Keep secrets out",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-540",
+      "identifier_title": "Inclusion of Sensitive Information in Source Code"
     },
     {
       "rule_id": "secsec",
@@ -2434,6 +2484,26 @@
       "rule_id": "seclpr",
       "rule_title": "Retrieval enforces the requester's authorization",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-285",
+      "identifier_title": "Improper Authorization"
+    },
+    {
+      "rule_id": "seclpr",
+      "rule_title": "Retrieval enforces the requester's authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-441",
+      "identifier_title": "Unintended Proxy or Intermediary ('Confused Deputy')"
+    },
+    {
+      "rule_id": "seclpr",
+      "rule_title": "Retrieval enforces the requester's authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -2569,6 +2639,36 @@
       "fit": "tight",
       "identifier": "I&S-06",
       "identifier_title": "Segmentation and Segregation"
+    },
+    {
+      "rule_id": "secncb",
+      "rule_title": "No cross-context bleed",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-200",
+      "identifier_title": "Exposure of Sensitive Information to an Unauthorized Actor"
+    },
+    {
+      "rule_id": "secncb",
+      "rule_title": "No cross-context bleed",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-653",
+      "identifier_title": "Improper Isolation or Compartmentalization"
+    },
+    {
+      "rule_id": "secncb",
+      "rule_title": "No cross-context bleed",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-488",
+      "identifier_title": "Exposure of Data Element to Wrong Session"
     },
     {
       "rule_id": "secncb",
@@ -2739,6 +2839,26 @@
       "fit": "broad",
       "identifier": "DSP-17",
       "identifier_title": "Sensitive Data Protection"
+    },
+    {
+      "rule_id": "secndc",
+      "rule_title": "No disclosure of secrets or hidden context",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-497",
+      "identifier_title": "Exposure of Sensitive System Information to an Unauthorized Control Sphere"
+    },
+    {
+      "rule_id": "secndc",
+      "rule_title": "No disclosure of secrets or hidden context",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-200",
+      "identifier_title": "Exposure of Sensitive Information to an Unauthorized Actor"
     },
     {
       "rule_id": "secndc",
@@ -3254,6 +3374,46 @@
       "rule_id": "secazn",
       "rule_title": "Least-privilege authorization",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-284",
+      "identifier_title": "Improper Access Control"
+    },
+    {
+      "rule_id": "secazn",
+      "rule_title": "Least-privilege authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-862",
+      "identifier_title": "Missing Authorization"
+    },
+    {
+      "rule_id": "secazn",
+      "rule_title": "Least-privilege authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-863",
+      "identifier_title": "Incorrect Authorization"
+    },
+    {
+      "rule_id": "secazn",
+      "rule_title": "Least-privilege authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-915",
+      "identifier_title": "Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+    },
+    {
+      "rule_id": "secazn",
+      "rule_title": "Least-privilege authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -3409,6 +3569,36 @@
       "fit": "tight",
       "identifier": "CEK-04",
       "identifier_title": "Encryption Algorithm"
+    },
+    {
+      "rule_id": "seccry",
+      "rule_title": "Sound cryptography",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-311",
+      "identifier_title": "Missing Encryption of Sensitive Data"
+    },
+    {
+      "rule_id": "seccry",
+      "rule_title": "Sound cryptography",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-295",
+      "identifier_title": "Improper Certificate Validation"
+    },
+    {
+      "rule_id": "seccry",
+      "rule_title": "Sound cryptography",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-327",
+      "identifier_title": "Use of a Broken or Risky Cryptographic Algorithm"
     },
     {
       "rule_id": "seccry",
@@ -3789,6 +3979,36 @@
       "fit": "tight",
       "identifier": "STA-10",
       "identifier_title": "Supply Chain Risk Management"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-1357",
+      "identifier_title": "Reliance on Insufficiently Trustworthy Component"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-494",
+      "identifier_title": "Download of Code Without Integrity Check"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-829",
+      "identifier_title": "Inclusion of Functionality from Untrusted Control Sphere"
     },
     {
       "rule_id": "secsup",
@@ -4914,6 +5134,36 @@
       "rule_id": "seckey",
       "rule_title": "Key management",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-321",
+      "identifier_title": "Use of Hard-coded Cryptographic Key"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-323",
+      "identifier_title": "Reusing a Nonce, Key Pair in Encryption"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-324",
+      "identifier_title": "Use of a Key Past its Expiration Date"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -5099,6 +5349,36 @@
       "fit": "tight",
       "identifier": "IAM-05",
       "identifier_title": "Least Privilege"
+    },
+    {
+      "rule_id": "seclpt",
+      "rule_title": "Least-privilege tool and file access",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-269",
+      "identifier_title": "Improper Privilege Management"
+    },
+    {
+      "rule_id": "seclpt",
+      "rule_title": "Least-privilege tool and file access",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-250",
+      "identifier_title": "Execution with Unnecessary Privileges"
+    },
+    {
+      "rule_id": "seclpt",
+      "rule_title": "Least-privilege tool and file access",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-272",
+      "identifier_title": "Least Privilege Violation"
     },
     {
       "rule_id": "seclpt",
@@ -8059,6 +8339,46 @@
       "fit": "broad",
       "identifier": "I&S-02",
       "identifier_title": "Capacity and Resource Planning"
+    },
+    {
+      "rule_id": "secres",
+      "rule_title": "Bounded consumption and safe failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-674",
+      "identifier_title": "Uncontrolled Recursion"
+    },
+    {
+      "rule_id": "secres",
+      "rule_title": "Bounded consumption and safe failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-834",
+      "identifier_title": "Excessive Iteration"
+    },
+    {
+      "rule_id": "secres",
+      "rule_title": "Bounded consumption and safe failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-400",
+      "identifier_title": "Uncontrolled Resource Consumption"
+    },
+    {
+      "rule_id": "secres",
+      "rule_title": "Bounded consumption and safe failure",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-770",
+      "identifier_title": "Allocation of Resources Without Limits or Throttling"
     },
     {
       "rule_id": "secres",

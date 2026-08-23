@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC, TRUST]
 slug: least-privilege-tools
+map-cwe-tight: [CWE-250, CWE-272]
+map-cwe-broad: [CWE-269]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [AC-6, CM-7]
 map-nist-80053-broad: [SC-39]
