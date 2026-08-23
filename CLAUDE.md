@@ -52,10 +52,10 @@ what is particular to this repo (and has no source rule) lives here.
 
 The pack uses SemVer, single-sourced in `changelog.toml` (the `version` on the latest `[[release]]`); the
 root `VERSION` file is generated from it and drift-gated. The pack is at `1.0.0`, its first public release
-(the chat-assistant skill). Release integrity is checksum-based: each release's artifact SHA-256 digests
-are recorded in `changelog.toml` `[release.artifacts]` and enforced by a CI gate, and the same digests
-appear on the evidence page, so the recorded digest is an authenticated reference independent of the
-download host. The full discipline (bump rules, release process) is in `RELEASING.md` and the private
+(the chat-assistant skill). Release integrity is checksum-based: the release process records each
+release's artifact SHA-256 digests in `changelog.toml` `[release.artifacts]`, which a CI gate then
+enforces and the evidence page shows, so the recorded digest is an authenticated reference independent of
+the download host. The full discipline (bump rules, release process) is in `RELEASING.md` and the private
 design-of-record; this section is its slim public face.
 
 ## Gates and CI
