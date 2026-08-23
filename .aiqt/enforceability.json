@@ -447,6 +447,14 @@
       "status": "gate-linked"
     },
     {
+      "corpus-id": "goalfd",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/quali-goal-fidelity-across-trajectory.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "grdinp",
       "family": "aiqt",
       "gates": [],
@@ -840,6 +848,14 @@
       "gates": [],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-output-handling.md",
+      "status": "prose-only"
+    },
+    {
+      "corpus-id": "secprv",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-preview-has-no-side-effects.md",
       "status": "prose-only"
     },
     {
