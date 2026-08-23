@@ -15,7 +15,11 @@ signed; the independently published digest is the authenticated reference.
 ## Steps
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
-   `bash tools/run_all_checks.sh` is green at the freeze commit. No content changes after this point.
+   `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
+   (`site/downloads/aiqt-skill.zip`, `site/downloads/aiqt-instructions.txt`) and their generating inputs
+   (the corpus and `tools/gen_skill.py`) do not change; the release-metadata edits prescribed below (the
+   recorded digests, the evidence fields, and the tag key) are the only changes permitted after this
+   point.
 2. Compute. From the repository root on the frozen tree, run
    `sha256sum site/downloads/aiqt-skill.zip site/downloads/aiqt-instructions.txt`. These two files are
    the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in the
@@ -32,14 +36,18 @@ signed; the independently published digest is the authenticated reference.
 5. Verify. `python3 tools/check_artifact_checksums.py` must report armed and passing, and
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
    merged on green.
-6. Tag. Apply an annotated tag (for example `v1.0.0`) to the merge commit and push it, AND add
-   `tag = "v1.0.0"` to that release's entry in `changelog.toml` as a separate committed change. The
+6. Tag. The release tag is `vX.Y.Z`, where `X.Y.Z` is the release's `changelog.toml` version (for the
+   1.0.0 release, `v1.0.0`); the tag-monotonicity gate requires exactly this `v` + version form. Apply
+   the annotated tag to the step 5 merge commit and push it, then record `tag = "vX.Y.Z"` in that
+   release's `changelog.toml` entry through a second pull request, merged on green before step 7. The
    tag-monotonicity check arms from the recorded changelog `tag` key, not from the git tag alone, so
-   pushing the git tag without recording the key leaves that check dormant.
+   pushing the git tag without landing the recorded key on the protected branch leaves that check
+   dormant.
 7. Publish. The public flip is a separate, maintainer-owned step; nothing in steps 1 to 6 depends on it.
 
 ## Note on the evidence "Built from" field
 
-The evidence page names the release tag, whose name is fixed by this protocol before the tag is applied
-to the merge commit in step 6. Integrity does not depend on the commit pointer: the digests attest the
-artifact bytes, which do not change between recording them and tagging.
+The evidence page names the release tag, whose name (`vX.Y.Z`) is determined by the release version and
+so is known at step 4, before the tag is applied to the merge commit in step 6. Integrity does not depend
+on the commit pointer: the digests attest the artifact bytes, which do not change between recording them
+and tagging.
