@@ -28,11 +28,16 @@ signed; the independently published digest is the authenticated reference.
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
 3. Record. Add a `[release.artifacts]` sub-table to the latest `[[release]]` in `changelog.toml`,
    listing every release artifact from step 2 with its `sha256:<64 lowercase hex>` digest. This arms the
-   artifact-checksum gate. Recording the complete release-artifact set is this protocol's
-   responsibility: the gate verifies that each recorded entry matches its file, but it does not itself
-   establish that the recorded set is complete.
+   artifact-checksum gate, which hashes the latest recorded release's artifacts and fails if any recorded
+   digest does not match its file. Two things are this protocol's responsibility, not the gate's:
+   recording the complete release-artifact set (the gate does not establish completeness), and the
+   integrity of earlier releases' recorded digests (the gate checks only the latest recorded release, so
+   rewriting an older release's table is outside its scope).
 4. Evidence. Fill the "Built from" and "Checksum" fields on the evidence page with the release tag and
-   the per-artifact digests, each digest reproduced verbatim.
+   the per-artifact digests, each digest reproduced verbatim. This reproduction is a manual step: the
+   gate confirms only that each recorded digest string appears somewhere on the page (a best-effort
+   staleness check), not that it is shown in the correct field or bound to its artifact, so place each
+   digest in its proper Checksum field by hand.
 5. Verify. `python3 tools/check_artifact_checksums.py` must report armed and passing, and
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
    merged on green.
