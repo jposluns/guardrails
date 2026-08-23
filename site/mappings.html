@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>922</strong> mappings from <strong>96</strong> of the pack's rules to <strong>510</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>935</strong> mappings from <strong>98</strong> of the pack's rules to <strong>512</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -116,7 +116,7 @@
         <table class="dtable">
           <thead><tr><th>Framework</th><th>Publisher</th><th>Edition</th><th>Relation</th><th>Edition stability</th><th>Identifiers referenced</th></tr></thead>
           <tbody>
-            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
+            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>67 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
             <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 of 944</td></tr>
@@ -2677,6 +2677,38 @@
         </div>
       </details>
       <details class="more">
+        <summary>Referenced instructions are pinned and re-verified</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0010: AI Supply Chain Compromise (broad)</li>
+                <li>AML.T0051: LLM Prompt Injection (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-353: Missing Support for Integrity Check (broad)</li>
+                <li>CWE-494: Download of Code Without Integrity Check (broad)</li>
+                <li>CWE-829: Inclusion of Functionality from Untrusted Control Sphere (tight)</li>
+              </ul>
+            </li>
+            <li>NIST AI Risk Management Framework (1.0 (NIST AI 100-1)): aligns with guidance
+              <ul>
+                <li>MANAGE 3.1: AI risks and benefits from third-party resources are regularly monitored, and risk controls are applied and documented. (broad)</li>
+                <li>MAP 4.2: Internal risk controls for components of the AI system, including third-party AI technologies, are identified and documented. (broad)</li>
+              </ul>
+            </li>
+            <li>OWASP Top 10 for LLM Applications (2026): addresses risk
+              <ul>
+                <li>LLM03: Excessive Agency (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
         <summary>Resist data, model, and memory poisoning</summary>
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">View this rule on GitHub</a></p>
@@ -2762,6 +2794,35 @@
             <li>OWASP Top 10 for Agentic Applications (2026): addresses risk
               <ul>
                 <li>ASI09: Human-Agent Trust Exploitation (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Higher-trust instructions outrank lower-trust ones</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0051: LLM Prompt Injection (broad)</li>
+                <li>AML.T0054: LLM Jailbreak (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-1427: Improper Neutralization of Input Used for LLM Prompting (broad)</li>
+              </ul>
+            </li>
+            <li>NIST AI Risk Management Framework (1.0 (NIST AI 100-1)): aligns with guidance
+              <ul>
+                <li>MAP 4.2: Internal risk controls for components of the AI system, including third-party AI technologies, are identified and documented. (broad)</li>
+              </ul>
+            </li>
+            <li>OWASP Top 10 for LLM Applications (2026): addresses risk
+              <ul>
+                <li>LLM01: Prompt Injection (broad)</li>
               </ul>
             </li>
           </ul>
@@ -3824,8 +3885,13 @@
       <details class="more">
         <summary>MITRE ATLAS (2026.06)</summary>
         <div class="inner">
-          <p>mitigates technique. 65 of 173 identifiers referenced.</p>
+          <p>mitigates technique. 67 of 173 identifiers referenced.</p>
           <ul>
+            <li>AML.T0010: AI Supply Chain Compromise
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
+              </ul>
+            </li>
             <li>AML.T0010.001: AI Software
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md">Trusted, pinned dependency provenance</a> (tight)</li>
@@ -3938,6 +4004,12 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md">Validate tool arguments before use</a> (broad)</li>
               </ul>
             </li>
+            <li>AML.T0051: LLM Prompt Injection
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
+              </ul>
+            </li>
             <li>AML.T0051.000: Direct
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
@@ -3967,6 +4039,7 @@
             </li>
             <li>AML.T0054: LLM Jailbreak
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
               </ul>
             </li>
@@ -5145,6 +5218,7 @@
             </li>
             <li>CWE-353: Missing Support for Integrity Check
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md">Publish artefacts with verifiable integrity</a> (tight)</li>
               </ul>
             </li>
@@ -5197,6 +5271,7 @@
             <li>CWE-494: Download of Code Without Integrity Check
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md">Trusted, pinned dependency provenance</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-497: Exposure of Sensitive System Information to an Unauthorized Control Sphere
@@ -5295,6 +5370,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md">Configuration that executes on load is treated as code</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md">Trusted, pinned dependency provenance</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (tight)</li>
               </ul>
             </li>
             <li>CWE-834: Excessive Iteration
@@ -5361,6 +5437,7 @@
             </li>
             <li>CWE-1427: Improper Neutralization of Input Used for LLM Prompting
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
               </ul>
             </li>
@@ -6100,6 +6177,7 @@
             <li>MANAGE 3.1: AI risks and benefits from third-party resources are regularly monitored, and risk controls are applied and documented.
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md">Trusted, pinned dependency provenance</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-reject-vulnerable-versions.md">Reject known-vulnerable dependency versions</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md">Verify a dependency exists before adding it</a> (broad)</li>
@@ -6159,7 +6237,9 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md">Redact sensitive content from logs</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md">Generated output is untrusted input</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md">Security logging with traceable context</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md">Bounded consumption and safe failure</a> (broad)</li>
@@ -6676,6 +6756,7 @@
           <ul>
             <li>LLM01: Prompt Injection
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
               </ul>
             </li>
@@ -6693,6 +6774,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">Human authorization for consequential actions</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md">Referenced instructions are pinned and re-verified</a> (broad)</li>
               </ul>
             </li>
             <li>LLM04: Supply Chain
