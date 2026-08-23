@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # Python < 3.11
 # an id verifiable, not to assert a licence.
 REQUIRED = ("map-key", "name", "publisher", "edition", "kind", "status", "citation-unit",
             "id-pattern", "source-artefact", "retrieved", "catalogue")
-KINDS = {"risk", "control", "guidance", "technique"}      # how the public page words the relation
+KINDS = {"risk", "control", "guidance", "technique", "weakness"}   # how the public page words the relation
 STATUSES = {"stable", "beta", "snapshot"}                 # edition stability, surfaced as a badge
 CATALOGUES = {"full", "subset"}   # is the id set the complete pinned-edition catalogue, or curated
 

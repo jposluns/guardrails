@@ -42,6 +42,20 @@
       "ids_cited": 57,
       "ids_total": 207
     },
+    "cwe": {
+      "name": "MITRE CWE",
+      "publisher": "MITRE",
+      "edition": "4.20",
+      "kind": "weakness",
+      "relation": "mitigates weakness",
+      "status": "snapshot",
+      "citation_unit": "weakness",
+      "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
+      "retrieved": "2026-08-22",
+      "catalogue": "full",
+      "ids_cited": 3,
+      "ids_total": 944
+    },
     "iso-23894": {
       "name": "ISO/IEC 23894:2023 AI guidance on risk management",
       "publisher": "ISO/IEC",
@@ -7055,6 +7069,46 @@
       "fit": "tight",
       "identifier": "C10",
       "identifier_title": "Stop Server Side Request Forgery"
+    },
+    {
+      "rule_id": "secspr",
+      "rule_title": "Resolve privileged filesystem paths against symlink races",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-367",
+      "identifier_title": "Time-of-check Time-of-use (TOCTOU) Race Condition"
+    },
+    {
+      "rule_id": "secspr",
+      "rule_title": "Resolve privileged filesystem paths against symlink races",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-59",
+      "identifier_title": "Improper Link Resolution Before File Access ('Link Following')"
+    },
+    {
+      "rule_id": "secspr",
+      "rule_title": "Resolve privileged filesystem paths against symlink races",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-363",
+      "identifier_title": "Race Condition Enabling Link Following"
+    },
+    {
+      "rule_id": "secspr",
+      "rule_title": "Resolve privileged filesystem paths against symlink races",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md",
+      "framework": "owasp-asvs",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "V5",
+      "identifier_title": "File Handling"
     },
     {
       "rule_id": "secthm",

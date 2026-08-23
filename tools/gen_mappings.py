@@ -32,13 +32,15 @@ from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order fo
 # How the public page words each relation, keyed by the manifest's `kind`. One dict, used by every view
 # and both exports, so the wording cannot diverge between them.
 RELATION = {"risk": "addresses risk", "control": "supports control",
-            "guidance": "aligns with guidance", "technique": "mitigates technique"}
+            "guidance": "aligns with guidance", "technique": "mitigates technique",
+            "weakness": "mitigates weakness"}
 # Reuse the existing site status pills (no colour-only encoding: the word carries the meaning).
 STATUS_PILL = {"stable": "now", "beta": "next", "snapshot": "idea"}
 # Display prose for the methodology relation-kinds bullet, keyed by kind like RELATION (which feeds the
 # exports and must not change shape). RELATION is the terse export wording; this is the reader-facing form.
 RELATION_PROSE = {"risk": "addresses a risk", "control": "supports a control",
-                  "guidance": "aligns with guidance", "technique": "mitigates a technique"}
+                  "guidance": "aligns with guidance", "technique": "mitigates a technique",
+                  "weakness": "mitigates a weakness"}
 # The registry-intro badge meanings, keyed by status like STATUS_PILL.
 STATUS_DESC = {"stable": "a settled published edition", "beta": "a pre-release edition",
                "snapshot": "a point-in-time capture of a moving source"}

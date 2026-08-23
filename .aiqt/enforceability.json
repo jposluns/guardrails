@@ -894,6 +894,14 @@
       "status": "gate-linked"
     },
     {
+      "corpus-id": "secspr",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-symlink-resolution.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "secssr",
       "family": "security",
       "gates": [],
