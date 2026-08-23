@@ -11,7 +11,7 @@
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
       "catalogue": "full",
-      "ids_cited": 65,
+      "ids_cited": 67,
       "ids_total": 173
     },
     "csa-aicm": {
@@ -6331,6 +6331,86 @@
       "identifier_title": "Injection"
     },
     {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0010",
+      "identifier_title": "AI Supply Chain Compromise"
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0051",
+      "identifier_title": "LLM Prompt Injection"
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-353",
+      "identifier_title": "Missing Support for Integrity Check"
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-494",
+      "identifier_title": "Download of Code Without Integrity Check"
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-829",
+      "identifier_title": "Inclusion of Functionality from Untrusted Control Sphere"
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "MANAGE 3.1",
+      "identifier_title": "AI risks and benefits from third-party resources are regularly monitored, and risk controls are applied and documented."
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "MAP 4.2",
+      "identifier_title": "Internal risk controls for components of the AI system, including third-party AI technologies, are identified and documented."
+    },
+    {
+      "rule_id": "secpin",
+      "rule_title": "Referenced instructions are pinned and re-verified",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
+      "framework": "owasp-llm",
+      "relation": "addresses risk",
+      "fit": "broad",
+      "identifier": "LLM03",
+      "identifier_title": "Excessive Agency"
+    },
+    {
       "rule_id": "secpsn",
       "rule_title": "Resist data, model, and memory poisoning",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
@@ -6639,6 +6719,56 @@
       "fit": "tight",
       "identifier": "ASI09",
       "identifier_title": "Human-Agent Trust Exploitation"
+    },
+    {
+      "rule_id": "secpth",
+      "rule_title": "Higher-trust instructions outrank lower-trust ones",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0051",
+      "identifier_title": "LLM Prompt Injection"
+    },
+    {
+      "rule_id": "secpth",
+      "rule_title": "Higher-trust instructions outrank lower-trust ones",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0054",
+      "identifier_title": "LLM Jailbreak"
+    },
+    {
+      "rule_id": "secpth",
+      "rule_title": "Higher-trust instructions outrank lower-trust ones",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-1427",
+      "identifier_title": "Improper Neutralization of Input Used for LLM Prompting"
+    },
+    {
+      "rule_id": "secpth",
+      "rule_title": "Higher-trust instructions outrank lower-trust ones",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "MAP 4.2",
+      "identifier_title": "Internal risk controls for components of the AI system, including third-party AI technologies, are identified and documented."
+    },
+    {
+      "rule_id": "secpth",
+      "rule_title": "Higher-trust instructions outrank lower-trust ones",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md",
+      "framework": "owasp-llm",
+      "relation": "addresses risk",
+      "fit": "broad",
+      "identifier": "LLM01",
+      "identifier_title": "Prompt Injection"
     },
     {
       "rule_id": "secaud",

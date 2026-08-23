@@ -851,6 +851,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "secpin",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-pin-referenced-instructions.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "secprv",
       "family": "security",
       "gates": [],
@@ -864,6 +872,14 @@
       "gates": [],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-poisoning-resistance.md",
+      "status": "prose-only"
+    },
+    {
+      "corpus-id": "secpth",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-prompt-trust-hierarchy.md",
       "status": "prose-only"
     },
     {
