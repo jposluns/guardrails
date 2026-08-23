@@ -16,10 +16,17 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. No content changes after this point.
-2. Compute. Run `sha256sum` over each published download artifact on the frozen tree.
+2. Compute. From the repository root on the frozen tree, run
+   `sha256sum site/downloads/aiqt-skill.zip site/downloads/aiqt-instructions.txt`. These two files are
+   the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in the
+   evidence page and the `changelog.toml` reserved-key example. The mapping exports under
+   `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
+   covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
 3. Record. Add a `[release.artifacts]` sub-table to the latest `[[release]]` in `changelog.toml`,
-   listing every published artifact with its `sha256:<64 lowercase hex>` digest. This arms the
-   artifact-checksum gate.
+   listing every release artifact from step 2 with its `sha256:<64 lowercase hex>` digest. This arms the
+   artifact-checksum gate. Recording the complete release-artifact set is this protocol's
+   responsibility: the gate verifies that each recorded entry matches its file, but it does not itself
+   establish that the recorded set is complete.
 4. Evidence. Fill the "Built from" and "Checksum" fields on the evidence page with the release tag and
    the per-artifact digests, each digest reproduced verbatim.
 5. Verify. `python3 tools/check_artifact_checksums.py` must report armed and passing, and
