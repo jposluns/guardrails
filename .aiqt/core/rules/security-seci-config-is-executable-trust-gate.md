@@ -5,7 +5,6 @@ family: security
 facet: SECI
 slug: config-is-executable-trust-gate
 map-cwe-tight: [CWE-829]
-map-cwe-broad: [CWE-94]
 map-nist-80053-broad: [SI-7]
 map-owasp-asi-tight: [ASI05]
 ---

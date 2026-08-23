@@ -53,7 +53,7 @@
       "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
       "retrieved": "2026-08-22",
       "catalogue": "full",
-      "ids_cited": 58,
+      "ids_cited": 57,
       "ids_total": 944
     },
     "iso-23894": {
@@ -3549,16 +3549,6 @@
       "fit": "tight",
       "identifier": "A01",
       "identifier_title": "Broken Access Control"
-    },
-    {
-      "rule_id": "seccet",
-      "rule_title": "Configuration that executes on load is treated as code",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md",
-      "framework": "cwe",
-      "relation": "mitigates weakness",
-      "fit": "broad",
-      "identifier": "CWE-94",
-      "identifier_title": "Improper Control of Generation of Code ('Code Injection')"
     },
     {
       "rule_id": "seccet",
