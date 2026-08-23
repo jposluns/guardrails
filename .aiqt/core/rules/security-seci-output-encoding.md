@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: output-encoding
+map-cwe-tight: [CWE-838]
+map-cwe-broad: [CWE-116]
 map-nist-80053-tight: [SI-10(6)]
 map-nist-ssdf-broad: [PW.5.1]
 map-atlas-tight: [AML.T0077]
