@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: cryptography
+map-cwe-tight: [CWE-295, CWE-327]
+map-cwe-broad: [CWE-311]
 map-nist-80053-tight: [SC-13]
 map-nist-80053-broad: [SC-8, SC-28]
 map-nist-ssdf-broad: [PW.5.1]

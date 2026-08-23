@@ -5,6 +5,8 @@ family: security
 facet: SECA
 secondary: [COST]
 slug: resource-bounds
+map-cwe-tight: [CWE-400, CWE-770]
+map-cwe-broad: [CWE-674, CWE-834]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [SC-5, SC-6]
 map-atlas-tight: [AML.T0029, AML.T0034.000, AML.T0034.001, AML.T0034.002]

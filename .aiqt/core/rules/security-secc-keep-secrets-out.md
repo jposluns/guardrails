@@ -5,6 +5,8 @@ family: security
 facet: SECC
 secondary: [SECI]
 slug: keep-secrets-out
+map-cwe-tight: [CWE-532, CWE-540]
+map-cwe-broad: [CWE-798]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [IA-5(7)]
 map-nist-ssdf-broad: [PW.5.1]
