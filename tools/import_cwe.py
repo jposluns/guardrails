@@ -317,8 +317,27 @@ def render(staging_dir, output, *, expected_member=EXPECTED_MEMBER,
     if total_elements != expected_total or active != expected_active:
         raise ImportError_("staged XML yields total={}, active={}; pinned total={}, active={}; re-acquire"
                            .format(total_elements, active, expected_total, expected_active))
-    _reconcile_count(active, total_elements, prov["published_total_weaknesses"])
-    text = _render_toml(rows, prov)
+    reading = _reconcile_count(active, total_elements, prov["published_total_weaknesses"])
+    retrieved = prov.get("retrieved")
+    if not isinstance(retrieved, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", retrieved):
+        raise ImportError_("provenance retrieved {!r} is not an ISO yyyy-mm-dd date".format(retrieved))
+    # Render provenance from AUTHORITATIVE values (computed XML facts + pinned constants), never the
+    # claimant-controlled sidecar (10-ACCUR-guard-input-soundness): the sidecar cannot forge the
+    # rendered edition, shas, counts, or reading, and a non-ISO retrieved is refused (TOML-injection guard).
+    trusted = {
+        "source_url": expected_source_url,
+        "count_url": expected_count_url,
+        "zip_sha256": EXPECTED_ZIP_SHA256,
+        "xml_sha256": xml_sha,
+        "version": version,
+        "total_weakness_elements": total_elements,
+        "active_after_filter": active,
+        "status_breakdown": dict(sorted(breakdown.items())),
+        "published_total_weaknesses": prov["published_total_weaknesses"],
+        "count_reading": reading,
+        "retrieved": retrieved,
+    }
+    text = _render_toml(rows, trusted)
     # Round-trip: parse the rendered TOML, then a real load_manifests over a temp dir, BEFORE writing.
     parsed = tomllib.loads(text)
     if len(parsed.get("id", [])) != active:
@@ -470,6 +489,27 @@ def self_test():
         finally:
             _verify_with_loader = _orig_vwl
         print("  ok (render adversarial): pin, count, and loader rejections all fail closed and preserve the destination")
+        # forged sidecar metadata must NOT reach the rendered output (render emits from computed facts)
+        _forged = dict(_prov)
+        _forged.update({"version": "9.99-FORGED", "xml_sha256": "deadbeef", "zip_sha256": "cafe",
+                        "total_weakness_elements": -42, "active_after_filter": 1,
+                        "status_breakdown": {"Draft": 999}, "count_reading": "BOGUS"})
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_forged), encoding="utf-8")
+        _outf = _stage / "cwe-forged.toml"
+        render(_stage, _outf, expected_xml_sha256=_sha256(_xml), expected_total=5, expected_active=3,
+               min_elements=1)
+        _r = _outf.read_text(encoding="utf-8")
+        assert 'edition = "4.20"' in _r and "9.99-FORGED" not in _r, "forged edition must not ship"
+        assert _sha256(_xml) in _r and "deadbeef" not in _r, "forged xml sha must not ship"
+        assert "-42" not in _r and "BOGUS" not in _r and "999" not in _r, "forged counts/reading must not ship"
+        print("  ok (metadata authoritative): a forged sidecar's version/sha/counts never reach the render")
+        # a non-ISO retrieved fails closed (blocks a TOML string breakout through that field)
+        _inj = dict(_prov); _inj["retrieved"] = "2026-01-01\"\ninjected = \"x"
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_inj), encoding="utf-8")
+        _expect_fail("render rejects a non-ISO retrieved (TOML-injection guard)",
+                     lambda: render(_stage, _stage / "cwe-inj.toml", expected_xml_sha256=_sha256(_xml),
+                                    expected_total=5, expected_active=3, min_elements=1))
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
     finally:
         shutil.rmtree(_stage, ignore_errors=True)
     print("SELF-TEST: PASS")
