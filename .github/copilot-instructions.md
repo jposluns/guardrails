@@ -325,6 +325,22 @@ account, or environment tier, is re-read and re-verified against the intended ta
 every path, remote, account, and endpoint it carries is confirmed to point at the target, never trusted
 on the strength of having worked at its origin.
 
+## Defence in depth by default
+
+When an overlapping control that guards against the same failure is available at low marginal cost, it is the
+default recommendation, and its marginal cost is stated alongside it. The overlap is the value rather than
+redundancy to trim: a further layer earns its place by catching what an earlier one misses, so a layer is
+not declined on the grounds that a sibling control should already catch the case. This layering applies to a
+capability that is kept: an unneeded capability is removed outright before anything is layered on it, and
+defence in depth then hardens what remains, never justifying the retention of a capability that could be
+removed.
+
+The preference never mandates gold-plating. Where a layer's marginal cost is considerable, it is weighed
+rather than assumed, and omitting an expensive layer on a weighed, recorded judgement is sound, not a
+violation. A layer that over-fires is not cheap: one that raises false alarms trains its own bypass and
+erodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding
+one is not warranted by this rule.
+
 ## A verification finding is fixed, not argued away
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
@@ -754,6 +770,21 @@ Training and fine-tuning data, embeddings, retrieval corpora, and any persisted 
 attack surface. Content that is retrieved or recalled is untrusted and does not silently gain authority over
 later decisions. The sources that feed a model or a knowledge base are vetted and their integrity is checked,
 so a planted document or a corrupted memory cannot quietly steer behaviour.
+
+## Prefer removing a path over constraining or monitoring it
+
+When a tool, connector, data path, or execution path is hardened, a capability the task does not need is
+removed so that it is unavailable, rather than retained for policy or monitoring to police; a path the task
+does need is constrained to the least capability, access, destinations, and data it requires. Removal is
+preferred to constraint and constraint to monitoring, because a capability that is absent cannot be misused
+while one that is merely watched can. Monitoring a capability that could be removed, or constraining one the
+task does not need at all, leaves standing an attack surface that subtraction would have eliminated.
+
+What survives subtraction is needed, so it is then hardened: constrained, monitored, and given overlapping
+controls where they are cheap. This orders the hardening; it does not argue against layered defence of what
+is kept. It is a design-time preference over how a path is hardened, distinct from minimizing dependencies,
+which governs what is brought in, and from least-privilege tool scope, which governs the runtime access a
+retained capability is granted. Using a retained, constrained path is not itself a violation.
 
 ## A preview makes no change
 

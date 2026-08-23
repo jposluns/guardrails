@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>939</strong> mappings from <strong>100</strong> of the pack's rules to <strong>513</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>944</strong> mappings from <strong>102</strong> of the pack's rules to <strong>513</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -702,6 +702,24 @@
             <li>NIST Secure Software Development Framework (1.1 (SP 800-218)): supports control
               <ul>
                 <li>PW.8.2: Perform and document code testing (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Defence in depth by default</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.7: Maintainability (broad)</li>
+              </ul>
+            </li>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>SA-8: Security and Privacy Engineering Principles (broad)</li>
               </ul>
             </li>
           </ul>
@@ -2817,6 +2835,21 @@
             <li>OWASP MCP Top 10 (2025): addresses risk
               <ul>
                 <li>MCP03: Tool Poisoning (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Prefer removing a path over constraining or monitoring it</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>AC-6: Least Privilege (broad)</li>
+                <li>SC-7: Boundary Protection (broad)</li>
+                <li>CM-7: Least Functionality (tight)</li>
               </ul>
             </li>
           </ul>
@@ -5527,6 +5560,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md">Branch and merge only on green</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md">Protected-branch integrity</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md">Defence in depth by default</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-match-surrounding-code.md">Match the surrounding code</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-smallest-correct-change.md">Prefer the smallest correct change</a> (broad)</li>
               </ul>
@@ -5771,6 +5805,7 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md">Least-privilege authorization</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md">Prefer removing a path over constraining or monitoring it</a> (broad)</li>
               </ul>
             </li>
             <li>AC-6(1): Authorize Access to Security Functions
@@ -5849,6 +5884,7 @@
             <li>CM-7: Least Functionality
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md">Prefer removing a path over constraining or monitoring it</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md">Secure by default configuration</a> (tight)</li>
               </ul>
             </li>
@@ -5937,6 +5973,7 @@
             </li>
             <li>SA-8: Security and Privacy Engineering Principles
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md">Defence in depth by default</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-minimize-dependencies.md">Minimize external dependencies in favour of standard libraries</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-threat-model-boundaries.md">Threat-model new trust boundaries before implementation</a> (broad)</li>
               </ul>
@@ -5996,6 +6033,7 @@
             <li>SC-7: Boundary Protection
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md">Egress goes only to expected destinations</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md">Prefer removing a path over constraining or monitoring it</a> (broad)</li>
               </ul>
             </li>
             <li>SC-7(5): Deny by Default - Allow by Exception
