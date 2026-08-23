@@ -841,6 +841,26 @@
       "identifier_title": "Protect stored code with least privilege"
     },
     {
+      "rule_id": "reqstp",
+      "rule_title": "A required step remains required under friction",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-required-step-remains-required.md",
+      "framework": "iso-42001",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "10.2",
+      "identifier_title": "Nonconformity and corrective action"
+    },
+    {
+      "rule_id": "reqstp",
+      "rule_title": "A required step remains required under friction",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-required-step-remains-required.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "MANAGE 4.3",
+      "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
+    },
+    {
       "rule_id": "rerunf",
       "rule_title": "A rerun pass does not erase an earlier failure",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md",

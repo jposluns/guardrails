@@ -603,6 +603,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "reqstp",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/integ-required-step-remains-required.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "rerunf",
       "family": "aiqt",
       "gates": [],
