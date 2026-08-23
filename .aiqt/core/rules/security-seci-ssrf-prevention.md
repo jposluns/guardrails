@@ -4,6 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: ssrf-prevention
+map-cwe-tight: [CWE-918]
 map-owasp-api-tight: [API7]
 map-owasp-proactive-tight: [C10]
 map-owasp-cheatsheet-tight: [server-side-request-forgery-prevention]
