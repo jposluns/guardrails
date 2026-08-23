@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: authentication
+map-cwe-tight: [CWE-287]
+map-cwe-broad: [CWE-306, CWE-798]
 map-nist-80053-tight: [IA-2]
 map-nist-80053-broad: [IA-5(5), IA-5(7)]
 map-nist-ssdf-broad: [PW.1.3, PW.5.1]

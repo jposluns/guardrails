@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC]
 slug: session-token-management
+map-cwe-tight: [CWE-331, CWE-352, CWE-613]
+map-cwe-broad: [CWE-522]
 map-nist-80053-tight: [SC-23, SC-23(1)]
 map-nist-80053-broad: [IA-5]
 map-nist-ssdf-broad: [PW.5.1]

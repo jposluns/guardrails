@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: federated-identity-flow
+map-cwe-tight: [CWE-304, CWE-347]
+map-cwe-broad: [CWE-287]
 map-owasp-asvs-tight: [V9, V10]
 map-owasp-proactive-broad: [C7]
 map-owasp-cheatsheet-tight: [json-web-token, oauth2]

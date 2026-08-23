@@ -53,7 +53,7 @@
       "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
       "retrieved": "2026-08-22",
       "catalogue": "full",
-      "ids_cited": 57,
+      "ids_cited": 72,
       "ids_total": 944
     },
     "iso-23894": {
@@ -2064,6 +2064,16 @@
       "rule_id": "datbnd",
       "rule_title": "Classify content by sensitivity tier",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-data-boundary.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-200",
+      "identifier_title": "Exposure of Sensitive Information to an Unauthorized Actor"
+    },
+    {
+      "rule_id": "datbnd",
+      "rule_title": "Classify content by sensitivity tier",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-data-boundary.md",
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "tight",
@@ -3179,6 +3189,36 @@
       "fit": "tight",
       "identifier": "IAM-14",
       "identifier_title": "Credentials Management"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-306",
+      "identifier_title": "Missing Authentication for Critical Function"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-798",
+      "identifier_title": "Use of Hard-coded Credentials"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-287",
+      "identifier_title": "Improper Authentication"
     },
     {
       "rule_id": "secau1",
@@ -4364,6 +4404,36 @@
       "rule_id": "secfid",
       "rule_title": "Validate federated identity and token flows",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-287",
+      "identifier_title": "Improper Authentication"
+    },
+    {
+      "rule_id": "secfid",
+      "rule_title": "Validate federated identity and token flows",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-304",
+      "identifier_title": "Missing Critical Step in Authentication"
+    },
+    {
+      "rule_id": "secfid",
+      "rule_title": "Validate federated identity and token flows",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-347",
+      "identifier_title": "Improper Verification of Cryptographic Signature"
+    },
+    {
+      "rule_id": "secfid",
+      "rule_title": "Validate federated identity and token flows",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
       "fit": "tight",
@@ -4416,9 +4486,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md",
       "framework": "cwe",
       "relation": "mitigates weakness",
-      "fit": "broad",
-      "identifier": "CWE-646",
-      "identifier_title": "Reliance on File Name or Extension of Externally-Supplied File"
+      "fit": "tight",
+      "identifier": "CWE-434",
+      "identifier_title": "Unrestricted Upload of File with Dangerous Type"
     },
     {
       "rule_id": "secupl",
@@ -4427,8 +4497,8 @@
       "framework": "cwe",
       "relation": "mitigates weakness",
       "fit": "tight",
-      "identifier": "CWE-434",
-      "identifier_title": "Unrestricted Upload of File with Dangerous Type"
+      "identifier": "CWE-646",
+      "identifier_title": "Reliance on File Name or Extension of Externally-Supplied File"
     },
     {
       "rule_id": "secupl",
@@ -4589,6 +4659,26 @@
       "fit": "tight",
       "identifier": "CCC-04",
       "identifier_title": "Unauthorized Change Protection"
+    },
+    {
+      "rule_id": "sechau",
+      "rule_title": "Human authorization for consequential actions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-862",
+      "identifier_title": "Missing Authorization"
+    },
+    {
+      "rule_id": "sechau",
+      "rule_title": "Human authorization for consequential actions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-451",
+      "identifier_title": "User Interface (UI) Misrepresentation of Critical Information"
     },
     {
       "rule_id": "sechau",
@@ -4974,6 +5064,36 @@
       "rule_id": "secagt",
       "rule_title": "Trust between agents is earned, not inherited",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-501",
+      "identifier_title": "Trust Boundary Violation"
+    },
+    {
+      "rule_id": "secagt",
+      "rule_title": "Trust between agents is earned, not inherited",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-272",
+      "identifier_title": "Least Privilege Violation"
+    },
+    {
+      "rule_id": "secagt",
+      "rule_title": "Trust between agents is earned, not inherited",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-290",
+      "identifier_title": "Authentication Bypass by Spoofing"
+    },
+    {
+      "rule_id": "secagt",
+      "rule_title": "Trust between agents is earned, not inherited",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -5256,9 +5376,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "cwe",
       "relation": "mitigates weakness",
-      "fit": "tight",
-      "identifier": "CWE-321",
-      "identifier_title": "Use of Hard-coded Cryptographic Key"
+      "fit": "broad",
+      "identifier": "CWE-323",
+      "identifier_title": "Reusing a Nonce, Key Pair in Encryption"
     },
     {
       "rule_id": "seckey",
@@ -5267,8 +5387,8 @@
       "framework": "cwe",
       "relation": "mitigates weakness",
       "fit": "tight",
-      "identifier": "CWE-323",
-      "identifier_title": "Reusing a Nonce, Key Pair in Encryption"
+      "identifier": "CWE-321",
+      "identifier_title": "Use of Hard-coded Cryptographic Key"
     },
     {
       "rule_id": "seckey",
@@ -5759,6 +5879,16 @@
       "fit": "broad",
       "identifier": "V16",
       "identifier_title": "Security Logging and Error Handling"
+    },
+    {
+      "rule_id": "secopd",
+      "rule_title": "Social pressure is not authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-operator-deception.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-807",
+      "identifier_title": "Reliance on Untrusted Inputs in a Security Decision"
     },
     {
       "rule_id": "secopd",
@@ -6354,6 +6484,26 @@
       "rule_id": "secpsn",
       "rule_title": "Resist data, model, and memory poisoning",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-348",
+      "identifier_title": "Use of Less Trusted Source"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-345",
+      "identifier_title": "Insufficient Verification of Data Authenticity"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -6539,6 +6689,26 @@
       "fit": "tight",
       "identifier": "LOG-10",
       "identifier_title": "Audit Records Protection"
+    },
+    {
+      "rule_id": "secaud",
+      "rule_title": "Protect audit records from the actors they record",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-protect-audit-records.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-732",
+      "identifier_title": "Incorrect Permission Assignment for Critical Resource"
+    },
+    {
+      "rule_id": "secaud",
+      "rule_title": "Protect audit records from the actors they record",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-protect-audit-records.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-471",
+      "identifier_title": "Modification of Assumed-Immutable Data (MAID)"
     },
     {
       "rule_id": "secaud",
@@ -7484,6 +7654,46 @@
       "rule_id": "sectok",
       "rule_title": "Secure session and token handling",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-522",
+      "identifier_title": "Insufficiently Protected Credentials"
+    },
+    {
+      "rule_id": "sectok",
+      "rule_title": "Secure session and token handling",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-331",
+      "identifier_title": "Insufficient Entropy"
+    },
+    {
+      "rule_id": "sectok",
+      "rule_title": "Secure session and token handling",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-352",
+      "identifier_title": "Cross-Site Request Forgery (CSRF)"
+    },
+    {
+      "rule_id": "sectok",
+      "rule_title": "Secure session and token handling",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-613",
+      "identifier_title": "Insufficient Session Expiration"
+    },
+    {
+      "rule_id": "sectok",
+      "rule_title": "Secure session and token handling",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -8424,6 +8634,16 @@
       "rule_id": "secvde",
       "rule_title": "Verify a dependency exists before adding it",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-1357",
+      "identifier_title": "Reliance on Insufficiently Trustworthy Component"
+    },
+    {
+      "rule_id": "secvde",
+      "rule_title": "Verify a dependency exists before adding it",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -9186,7 +9406,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md",
       "framework": "cwe",
       "relation": "mitigates weakness",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CWE-531",
       "identifier_title": "Inclusion of Sensitive Information in Test Code"
     },

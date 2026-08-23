@@ -5,6 +5,7 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: data-boundary
+map-cwe-broad: [CWE-200]
 map-nist-80053-tight: [MP-3]
 map-owasp-asvs-broad: [V14]
 map-owasp-llm-broad: [LLM02]
