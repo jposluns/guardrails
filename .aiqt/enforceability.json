@@ -186,6 +186,14 @@
       "status": "hook-linked"
     },
     {
+      "corpus-id": "cnstpr",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/trust-standing-constraints-persist.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "cntdef",
       "family": "aiqt",
       "gates": [],
