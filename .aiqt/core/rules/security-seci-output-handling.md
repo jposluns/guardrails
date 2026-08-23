@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [QUALI]
 slug: output-handling
+map-cwe-tight: [CWE-1426]
+map-cwe-broad: [CWE-20]
 map-nist-airmf-broad: [GOVERN 4.1, MAP 4.2, MEASURE 2.9]
 map-nist-80053-tight: [SI-10(6), SI-15]
 map-nist-80053-broad: [SA-11]

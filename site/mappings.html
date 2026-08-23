@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>828</strong> mappings from <strong>92</strong> of the pack's rules to <strong>440</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>841</strong> mappings from <strong>92</strong> of the pack's rules to <strong>451</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -119,7 +119,7 @@
             <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
-            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>3 of 944</td></tr>
+            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>14 of 944</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
             <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>65 of 1196</td></tr>
@@ -1876,6 +1876,11 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md">View this rule on GitHub</a></p>
           <ul>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-636: Not Failing Securely ('Failing Open') (tight)</li>
+              </ul>
+            </li>
             <li>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)): aligns with guidance
               <ul>
                 <li>error-handling: Error Handling Cheat Sheet (broad)</li>
@@ -2024,6 +2029,12 @@
             <li>CSA Cloud Controls Matrix (4.1.0): supports control
               <ul>
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-74: Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection') (broad)</li>
+                <li>CWE-20: Improper Input Validation (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -2288,6 +2299,12 @@
                 <li>LOG-09: Log Records (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (broad)</li>
+                <li>CWE-532: Insertion of Sensitive Information into Log File (tight)</li>
+              </ul>
+            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.8: Privacy (broad)</li>
@@ -2415,6 +2432,12 @@
               <ul>
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
                 <li>AIS-05: Application Security Testing (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-20: Improper Input Validation (broad)</li>
+                <li>CWE-1426: Improper Validation of Generative AI Output (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -2610,6 +2633,11 @@
                 <li>TVM-06: External Library Vulnerabilities (tight)</li>
               </ul>
             </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-1395: Dependency on Vulnerable Third-Party Component (tight)</li>
+              </ul>
+            </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
               <ul>
                 <li>RA-5: Vulnerability Monitoring and Scanning (broad)</li>
@@ -2708,6 +2736,12 @@
             <li>CSA Cloud Controls Matrix (4.1.0): supports control
               <ul>
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-20: Improper Input Validation (broad)</li>
+                <li>CWE-502: Deserialization of Untrusted Data (tight)</li>
               </ul>
             </li>
             <li>OWASP Top 10 for Agentic Applications (2026): addresses risk
@@ -2817,6 +2851,11 @@
                 <li>LOG-09: Log Records (tight)</li>
                 <li>LOG-12: Transaction/Activity Logging (tight)</li>
                 <li>LOG-13: Access Control Logs (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-778: Insufficient Logging (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -2950,6 +2989,11 @@
               <ul>
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
                 <li>I&amp;S-09: Network Defense (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-918: Server-Side Request Forgery (SSRF) (tight)</li>
               </ul>
             </li>
             <li>OWASP API Security Top 10 (2023): addresses risk
@@ -3134,6 +3178,11 @@
               <ul>
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
                 <li>TVM-02: Malware and Malicious Instructions Protection Policy and Procedures (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-1427: Improper Neutralization of Input Used for LLM Prompting (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -4681,11 +4730,28 @@
       <details class="more">
         <summary>MITRE CWE (4.20)</summary>
         <div class="inner">
-          <p>mitigates weakness. 3 of 944 identifiers referenced.</p>
+          <p>mitigates weakness. 14 of 944 identifiers referenced.</p>
           <ul>
+            <li>CWE-20: Improper Input Validation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md">Validate external input at the boundary</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md">Generated output is untrusted input</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md">Deserialize untrusted data only as data</a> (broad)</li>
+              </ul>
+            </li>
             <li>CWE-59: Improper Link Resolution Before File Access ('Link Following')
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">Resolve privileged filesystem paths against symlink races</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-74: Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md">Validate external input at the boundary</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md">Redact sensitive content from logs</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-363: Race Condition Enabling Link Following
@@ -4696,6 +4762,46 @@
             <li>CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">Resolve privileged filesystem paths against symlink races</a> (broad)</li>
+              </ul>
+            </li>
+            <li>CWE-502: Deserialization of Untrusted Data
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md">Deserialize untrusted data only as data</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-532: Insertion of Sensitive Information into Log File
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md">Redact sensitive content from logs</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-636: Not Failing Securely ('Failing Open')
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md">Fail closed in security-relevant paths</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-778: Insufficient Logging
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md">Security logging with traceable context</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-918: Server-Side Request Forgery (SSRF)
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-ssrf-prevention.md">Validate server-initiated requests</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-1395: Dependency on Vulnerable Third-Party Component
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-reject-vulnerable-versions.md">Reject known-vulnerable dependency versions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-1426: Improper Validation of Generative AI Output
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md">Generated output is untrusted input</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-1427: Improper Neutralization of Input Used for LLM Prompting
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md">Untrusted content is data, not instructions</a> (tight)</li>
               </ul>
             </li>
           </ul>

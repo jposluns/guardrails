@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: input-validation
+map-cwe-tight: [CWE-20]
+map-cwe-broad: [CWE-74]
 map-nist-80053-tight: [SI-10, SI-10(5), SI-10(6)]
 map-nist-ssdf-broad: [PW.5.1]
 map-atlas-broad: [AML.T0049, AML.T0050]

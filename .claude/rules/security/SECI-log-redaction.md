@@ -5,6 +5,8 @@ family: security
 facet: SECI
 secondary: [SECC, SECP]
 slug: log-redaction
+map-cwe-tight: [CWE-532]
+map-cwe-broad: [CWE-200]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [AU-3(3)]
 map-nist-ssdf-broad: [PW.5.1]
