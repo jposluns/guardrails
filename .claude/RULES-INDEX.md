@@ -70,6 +70,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Records first](rules/aiqt/10-TRUST-records-first.md)
 - [Close each session on green](rules/aiqt/10-TRUST-session-close-on-green.md)
 - [Resume from the durable handoff](rules/aiqt/10-TRUST-session-resume-from-handoff.md)
+- [A standing constraint persists across context loss](rules/aiqt/10-TRUST-standing-constraints-persist.md)
 - [Trust recovery and escalation](rules/aiqt/10-TRUST-trust-recovery-escalation.md)
 - [Autonomy steps down after a confirmed trust loss](rules/aiqt/10-TRUST-trust-recovery-ext.md)
 
