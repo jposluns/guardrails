@@ -27,6 +27,7 @@ silently.
 """
 import argparse
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -103,9 +104,11 @@ def _https_get(url):
             if final.scheme != "https" or final.hostname != SOURCE_HOST:
                 raise ImportError_("a redirect left the pinned host: {!r}".format(resp.geturl()))
             return resp.read()
-    except urllib.error.URLError as exc:
-        # A transport failure (DNS, connection, timeout, HTTP error) is a controlled fail-closed abort,
-        # not an uncaught traceback: main() maps ImportError_ to a concise stderr and exit 2.
+    except (OSError, http.client.HTTPException) as exc:
+        # Any transport failure is a controlled fail-closed abort, not an uncaught traceback: main()
+        # maps ImportError_ to a concise stderr and exit 2. This spans the connection phase (URLError,
+        # an OSError subclass; HTTPError) AND the read phase (a mid-body TimeoutError/ConnectionResetError,
+        # both OSError, and http.client.IncompleteRead/HTTPException, which are not OSError).
         raise ImportError_("network fetch of {} failed: {}".format(url, exc)) from exc
 
 
@@ -455,6 +458,24 @@ def self_test():
     urllib.request.urlopen = _boom_urlopen
     try:
         _expect_fail("network transport failure maps to a controlled abort",
+                     lambda: _https_get(SOURCE_URL))
+    finally:
+        urllib.request.urlopen = _orig_urlopen
+    # a READ-phase failure (mid-body timeout / incomplete read) also maps to a controlled abort, not a
+    # raw traceback: the response opens (status 200) but resp.read() raises after do_open returned.
+    class _StallResp:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_a):
+            return False
+        def geturl(self):
+            return SOURCE_URL
+        def read(self, *_a):
+            raise http.client.IncompleteRead(b"partial body")
+    urllib.request.urlopen = lambda *_a, **_k: _StallResp()
+    try:
+        _expect_fail("read-phase transport failure maps to a controlled abort",
                      lambda: _https_get(SOURCE_URL))
     finally:
         urllib.request.urlopen = _orig_urlopen
