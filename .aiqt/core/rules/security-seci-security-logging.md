@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: security-logging
+map-cwe-tight: [CWE-778]
 map-nist-airmf-broad: [GOVERN 4.3, MAP 4.2]
 map-nist-80053-tight: [AU-2, AU-3, AU-12]
 map-nist-ssdf-broad: [PW.5.1]

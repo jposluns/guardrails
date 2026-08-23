@@ -5,6 +5,7 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: untrusted-content
+map-cwe-tight: [CWE-1427]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [SI-10(6)]
 map-atlas-tight: [AML.T0051.000, AML.T0051.001, AML.T0051.002, AML.T0054, AML.T0093, AML.T0100, AML.T0110]

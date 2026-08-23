@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: safe-deserialization
+map-cwe-tight: [CWE-502]
+map-cwe-broad: [CWE-20]
 map-owasp-web-broad: [A08]
 map-owasp-asi-broad: [ASI05]
 map-owasp-cheatsheet-tight: [deserialization]

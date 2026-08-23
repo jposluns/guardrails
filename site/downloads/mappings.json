@@ -53,7 +53,7 @@
       "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
       "retrieved": "2026-08-22",
       "catalogue": "full",
-      "ids_cited": 3,
+      "ids_cited": 14,
       "ids_total": 944
     },
     "iso-23894": {
@@ -4004,6 +4004,16 @@
       "rule_id": "secfcl",
       "rule_title": "Fail closed in security-relevant paths",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-636",
+      "identifier_title": "Not Failing Securely ('Failing Open')"
+    },
+    {
+      "rule_id": "secfcl",
+      "rule_title": "Fail closed in security-relevant paths",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -4379,6 +4389,26 @@
       "fit": "broad",
       "identifier": "AIS-04",
       "identifier_title": "Secure Application Development Lifecycle"
+    },
+    {
+      "rule_id": "secinp",
+      "rule_title": "Validate external input at the boundary",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-74",
+      "identifier_title": "Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')"
+    },
+    {
+      "rule_id": "secinp",
+      "rule_title": "Validate external input at the boundary",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-20",
+      "identifier_title": "Improper Input Validation"
     },
     {
       "rule_id": "secinp",
@@ -5244,6 +5274,26 @@
       "rule_id": "secred",
       "rule_title": "Redact sensitive content from logs",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-200",
+      "identifier_title": "Exposure of Sensitive Information to an Unauthorized Actor"
+    },
+    {
+      "rule_id": "secred",
+      "rule_title": "Redact sensitive content from logs",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-532",
+      "identifier_title": "Insertion of Sensitive Information into Log File"
+    },
+    {
+      "rule_id": "secred",
+      "rule_title": "Redact sensitive content from logs",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -5529,6 +5579,26 @@
       "fit": "broad",
       "identifier": "AIS-05",
       "identifier_title": "Application Security Testing"
+    },
+    {
+      "rule_id": "secout",
+      "rule_title": "Generated output is untrusted input",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-20",
+      "identifier_title": "Improper Input Validation"
+    },
+    {
+      "rule_id": "secout",
+      "rule_title": "Generated output is untrusted input",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-1426",
+      "identifier_title": "Improper Validation of Generative AI Output"
     },
     {
       "rule_id": "secout",
@@ -6144,6 +6214,16 @@
       "rule_id": "secvln",
       "rule_title": "Reject known-vulnerable dependency versions",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-reject-vulnerable-versions.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-1395",
+      "identifier_title": "Dependency on Vulnerable Third-Party Component"
+    },
+    {
+      "rule_id": "secvln",
+      "rule_title": "Reject known-vulnerable dependency versions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-reject-vulnerable-versions.md",
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
@@ -6339,6 +6419,26 @@
       "fit": "broad",
       "identifier": "AIS-04",
       "identifier_title": "Secure Application Development Lifecycle"
+    },
+    {
+      "rule_id": "secdsz",
+      "rule_title": "Deserialize untrusted data only as data",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-20",
+      "identifier_title": "Improper Input Validation"
+    },
+    {
+      "rule_id": "secdsz",
+      "rule_title": "Deserialize untrusted data only as data",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-502",
+      "identifier_title": "Deserialization of Untrusted Data"
     },
     {
       "rule_id": "secdsz",
@@ -6669,6 +6769,16 @@
       "fit": "tight",
       "identifier": "LOG-13",
       "identifier_title": "Access Control Logs"
+    },
+    {
+      "rule_id": "seclog",
+      "rule_title": "Security logging with traceable context",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-778",
+      "identifier_title": "Insufficient Logging"
     },
     {
       "rule_id": "seclog",
@@ -7039,6 +7149,16 @@
       "fit": "broad",
       "identifier": "I&S-09",
       "identifier_title": "Network Defense"
+    },
+    {
+      "rule_id": "secssr",
+      "rule_title": "Validate server-initiated requests",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-ssrf-prevention.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-918",
+      "identifier_title": "Server-Side Request Forgery (SSRF)"
     },
     {
       "rule_id": "secssr",
@@ -7559,6 +7679,16 @@
       "fit": "broad",
       "identifier": "TVM-02",
       "identifier_title": "Malware and Malicious Instructions Protection Policy and Procedures"
+    },
+    {
+      "rule_id": "secunt",
+      "rule_title": "Untrusted content is data, not instructions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-1427",
+      "identifier_title": "Improper Neutralization of Input Used for LLM Prompting"
     },
     {
       "rule_id": "secunt",

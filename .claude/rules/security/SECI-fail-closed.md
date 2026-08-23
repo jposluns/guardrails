@@ -4,6 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: fail-closed
+map-cwe-tight: [CWE-636]
 map-owasp-web-tight: [A10]
 map-owasp-cheatsheet-broad: [error-handling]
 ---
