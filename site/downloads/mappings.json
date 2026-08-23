@@ -1121,6 +1121,26 @@
       "identifier_title": "Perform and document code testing"
     },
     {
+      "rule_id": "dfdpth",
+      "rule_title": "Defence in depth by default",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md",
+      "framework": "iso-23894",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "A.11",
+      "identifier_title": "Security"
+    },
+    {
+      "rule_id": "dfdpth",
+      "rule_title": "Defence in depth by default",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SA-8",
+      "identifier_title": "Security and Privacy Engineering Principles"
+    },
+    {
       "rule_id": "fndfix",
       "rule_title": "A verification finding is fixed, not argued away",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md",
@@ -6749,6 +6769,36 @@
       "fit": "tight",
       "identifier": "MCP03",
       "identifier_title": "Tool Poisoning"
+    },
+    {
+      "rule_id": "rmvpth",
+      "rule_title": "Prefer removing a path over constraining or monitoring it",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "AC-6",
+      "identifier_title": "Least Privilege"
+    },
+    {
+      "rule_id": "rmvpth",
+      "rule_title": "Prefer removing a path over constraining or monitoring it",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SC-7",
+      "identifier_title": "Boundary Protection"
+    },
+    {
+      "rule_id": "rmvpth",
+      "rule_title": "Prefer removing a path over constraining or monitoring it",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prefer-removing-a-path.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "CM-7",
+      "identifier_title": "Least Functionality"
     },
     {
       "rule_id": "secprv",

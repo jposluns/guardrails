@@ -234,6 +234,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "dfdpth",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/quali-defence-in-depth-default.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "dscres",
       "family": "aiqt",
       "gates": [],
@@ -640,6 +648,14 @@
       "gates": [],
       "hooks": [],
       "source": ".aiqt/core/rules/integ-rerun-pass-is-still-failure.md",
+      "status": "prose-only"
+    },
+    {
+      "corpus-id": "rmvpth",
+      "family": "security",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/security-seci-prefer-removing-a-path.md",
       "status": "prose-only"
     },
     {
