@@ -10,6 +10,7 @@ citation-unit = "risk category"
 id-pattern = "^ASI(0[1-9]|10)$"
 source-artefact = "OWASP Top 10 for Agentic Applications, Version 2026 (December 2025)"
 retrieved = "2026-08-16"
+catalogue = "full"
 url = "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
 
 [[id]]

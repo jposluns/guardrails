@@ -215,7 +215,7 @@ def self_test_main():
             "map-key": "map-urltest", "name": "URL test", "publisher": "AIQT self-test",
             "edition": "2026", "kind": "control", "status": "stable", "citation-unit": "control",
             "id-pattern": "ST[0-9]{2}", "source-artefact": "self-test fixture",
-            "retrieved": days_ago(1), "id": [{"code": "ST01", "title": "one"}],
+            "retrieved": days_ago(1), "catalogue": "full", "id": [{"code": "ST01", "title": "one"}],
         }
         if with_url:
             data["url"] = url
@@ -258,7 +258,7 @@ def self_test_main():
             'map-key = "map-{k}"\nname = "Self-test {k}"\npublisher = "AIQT self-test"\n'
             'edition = "2026"\nkind = "control"\nstatus = "{s}"\ncitation-unit = "control"\n'
             'id-pattern = "ST[0-9]{{2}}"\nsource-artefact = "self-test fixture"\nretrieved = "{r}"\n'
-            '[[id]]\ncode = "ST01"\ntitle = "one"\n'
+            'catalogue = "full"\n[[id]]\ncode = "ST01"\ntitle = "one"\n'
         ).format(k=mk, s=status, r=retrieved)
 
     def _run_quiet(sd, warn_only=False):

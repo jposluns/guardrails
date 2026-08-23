@@ -24,9 +24,10 @@ except ModuleNotFoundError:  # Python < 3.11
 # required here: it is added, per-source verified, with the public NOTICE. This file's job is to make
 # an id verifiable, not to assert a licence.
 REQUIRED = ("map-key", "name", "publisher", "edition", "kind", "status", "citation-unit",
-            "id-pattern", "source-artefact", "retrieved")
+            "id-pattern", "source-artefact", "retrieved", "catalogue")
 KINDS = {"risk", "control", "guidance", "technique"}      # how the public page words the relation
 STATUSES = {"stable", "beta", "snapshot"}                 # edition stability, surfaced as a badge
+CATALOGUES = {"full", "subset"}   # is the id set the complete pinned-edition catalogue, or curated
 
 
 class ManifestError(ValueError):
@@ -50,8 +51,8 @@ def natkey(text):
 
 class Manifest:
     __slots__ = ("path", "map_key", "name", "publisher", "edition", "kind", "status",
-                 "citation_unit", "id_pattern", "source_artefact", "retrieved", "url", "ids",
-                 "id_set", "titles")
+                 "citation_unit", "id_pattern", "source_artefact", "retrieved", "catalogue", "url",
+                 "ids", "id_set", "titles")
 
     def __init__(self, path, data):
         self.path = path
@@ -76,6 +77,14 @@ class Manifest:
         if self.status not in STATUSES:
             raise ManifestError("{}: status '{}' must be one of {}".format(
                 path.name, self.status, "/".join(sorted(STATUSES))))
+        # catalogue declares whether the vendored id set is the COMPLETE catalogue of the pinned edition
+        # at the declared citation-unit ("full") or a curated selection ("subset"). It drives the public
+        # crosswalk's coverage wording: only a "full" manifest may render an "N of M" edition denominator.
+        # Validated against the closed set exactly like kind/status; missing or invalid fails closed.
+        self.catalogue = _req_str(data, "catalogue", path)
+        if self.catalogue not in CATALOGUES:
+            raise ManifestError("{}: catalogue '{}' must be one of {}".format(
+                path.name, self.catalogue, "/".join(sorted(CATALOGUES))))
         self.citation_unit = _req_str(data, "citation-unit", path)
         self.source_artefact = _req_str(data, "source-artefact", path)
         self.retrieved = str(data["retrieved"])

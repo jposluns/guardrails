@@ -11,6 +11,7 @@ citation-unit = "clause or Annex A control"
 id-pattern = "^(A\\.)?\\d+\\.\\d+(\\.\\d+)?$"
 source-artefact = "ISO/IEC 42001:2023, Annex A and clauses 4-10 (headings only)"
 retrieved = "2026-08-16"
+catalogue = "subset"
 url = "https://www.iso.org/standard/81230.html"
 [[id]]
 code = "4.1"

@@ -109,7 +109,7 @@
     <p class="eyebrow">Framework registry</p>
     <h2>The frameworks in the crosswalk</h2>
     <!-- REGISTRYINTRO:BEGIN (generated) -->
-    <p>Each framework is pinned to a single edition. The edition-stability badge reads <span class="pill now">stable</span> for a settled published edition, <span class="pill next">beta</span> for a pre-release edition, and <span class="pill idea">snapshot</span> for a point-in-time capture of a moving source. The last column states how many of that edition's identifiers the current rules reference.</p>
+    <p>Each framework is pinned to a single edition. The edition-stability badge reads <span class="pill now">stable</span> for a settled published edition, <span class="pill next">beta</span> for a pre-release edition, and <span class="pill idea">snapshot</span> for a point-in-time capture of a moving source. For a full-edition manifest the last column states how many of that edition's identifiers the current rules reference; for a curated subset it states the count referenced, with no edition total.</p>
       <!-- REGISTRYINTRO:END -->
     <!-- REGISTRY:BEGIN (generated) -->
       <div class="tablewrap">
@@ -119,15 +119,15 @@
             <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
-            <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 of 61</td></tr>
-            <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 of 74</td></tr>
+            <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
+            <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
             <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>65 of 1196</td></tr>
             <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>23 of 72</td></tr>
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 of 42</td></tr>
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
             <tr><td>OWASP Top 10 for Agentic Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
             <tr><td>OWASP Application Security Verification Standard</td><td>OWASP Foundation</td><td>5.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>13 of 17</td></tr>
-            <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>27 of 116</td></tr>
+            <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>27 referenced (curated subset)</td></tr>
             <tr><td>OWASP Top 10 for LLM Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP MCP Top 10</td><td>OWASP Foundation</td><td>2025</td><td>addresses risk</td><td><span class="pill next">beta</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP Top 10 Proactive Controls</td><td>OWASP Foundation</td><td>4.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
@@ -4660,7 +4660,7 @@
       <details class="more">
         <summary>ISO/IEC 23894:2023 AI guidance on risk management (2023)</summary>
         <div class="inner">
-          <p>aligns with guidance. 14 of 61 identifiers referenced.</p>
+          <p>aligns with guidance. 14 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>6.2: Communication and consultation
               <ul>
@@ -4804,7 +4804,7 @@
       <details class="more">
         <summary>ISO/IEC 42001:2023 AI management system (2023)</summary>
         <div class="inner">
-          <p>supports control. 18 of 74 identifiers referenced.</p>
+          <p>supports control. 18 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>7.5.2: Creating and updating documented information
               <ul>
@@ -5800,7 +5800,7 @@
       <details class="more">
         <summary>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04))</summary>
         <div class="inner">
-          <p>aligns with guidance. 27 of 116 identifiers referenced.</p>
+          <p>aligns with guidance. 27 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>ai-agent-security: AI Agent Security Cheat Sheet
               <ul>

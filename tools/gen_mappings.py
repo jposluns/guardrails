@@ -184,6 +184,7 @@ def registry_rows(manifests, rows):
             "citation_unit": manifest.citation_unit,
             "source_artefact": manifest.source_artefact,
             "retrieved": manifest.retrieved,
+            "catalogue": manifest.catalogue,
             "ids_cited": len(cited.get(stem, ())),
             "ids_total": len(manifest.ids),
         })
@@ -204,6 +205,28 @@ def render_coverage(reg, rows):
             ids=n_ids, distinct=n_distinct, fw=n_frameworks, rules=n_rules))
 
 
+def _coverage_cell(r):
+    """Registry coverage cell, keyed to the manifest's catalogue declaration: a full-edition manifest
+    states 'N of M' (how many of the edition's identifiers the rules reference); a curated subset states
+    'N referenced (curated subset)' with NO edition denominator, because the manifest cannot answer how
+    many identifiers the whole edition has (the catalogue invariant). Fail closed on an unknown catalogue
+    value; the loader validates it against CATALOGUES, so this only catches a hand-edited registry row."""
+    if r["catalogue"] == "full":
+        return "{} of {}".format(r["ids_cited"], r["ids_total"])
+    if r["catalogue"] == "subset":
+        return "{} referenced (curated subset)".format(r["ids_cited"])
+    raise ValueError("{}: unknown catalogue {!r}".format(r["framework"], r["catalogue"]))
+
+
+def _coverage_line(r):
+    """Reverse-view coverage sentence, keyed to catalogue exactly like _coverage_cell."""
+    if r["catalogue"] == "full":
+        return "{} of {} identifiers referenced".format(r["ids_cited"], r["ids_total"])
+    if r["catalogue"] == "subset":
+        return "{} identifiers referenced from a curated subset of the edition".format(r["ids_cited"])
+    raise ValueError("{}: unknown catalogue {!r}".format(r["framework"], r["catalogue"]))
+
+
 def render_registry(reg):
     head = (
         '      <div class="tablewrap">\n'
@@ -214,13 +237,14 @@ def render_registry(reg):
     body = []
     for r in reg:
         pill = STATUS_PILL[r["status"]]
+        coverage = _coverage_cell(r)
         body.append(
             '            <tr><td>{name}</td><td>{pub}</td><td>{edition}</td><td>{relation}</td>'
             '<td><span class="pill {pill}">{status}</span></td>'
-            '<td>{cited} of {total}</td></tr>'.format(
+            '<td>{coverage}</td></tr>'.format(
                 name=_text(r["name"]), pub=_text(r["publisher"]), edition=_text(r["edition"]),
                 relation=_text(r["relation"]), pill=_attr(pill), status=_text(r["status"]),
-                cited=r["ids_cited"], total=r["ids_total"]))
+                coverage=_text(coverage)))
     tail = '          </tbody>\n        </table>\n      </div>'
     return "\n".join([head, *body, tail])
 
@@ -265,18 +289,26 @@ def render_isoentries(manifests):
         word=word, entries=entries, verb=verb)
 
 
-def render_registry_intro():
+def render_registry_intro(reg):
     """The registry-intro paragraph: the badge meanings derived from the STATUS_PILL/STATUS_DESC
-    vocabulary, plus the coverage sentence. The coverage sentence states today's full-catalogue wording
-    unconditionally (the catalogue field that would make it conditional is a later change)."""
+    vocabulary, plus the coverage sentence keyed to the manifests' catalogue declarations. When every
+    manifest is a full edition the last-column sentence states the edition-denominator wording; when any
+    manifest is a curated subset it explains the two forms, so a subset can never imply an edition total
+    it cannot support (the catalogue invariant)."""
     if set(STATUS_ORDER) != set(STATUS_PILL):
         raise ValueError("STATUS_ORDER must cover STATUS_PILL exactly; a status is unordered")
     phrases = ['<span class="pill {pill}">{status}</span> for {desc}'.format(
         pill=_attr(STATUS_PILL[s]), status=_text(s), desc=STATUS_DESC[s])
         for s in STATUS_ORDER]
+    if all(r["catalogue"] == "full" for r in reg):
+        tail = ("The last column states how many of that edition's identifiers the current rules "
+                "reference.")
+    else:
+        tail = ("For a full-edition manifest the last column states how many of that edition's "
+                "identifiers the current rules reference; for a curated subset it states the count "
+                "referenced, with no edition total.")
     return ('    <p>Each framework is pinned to a single edition. The edition-stability badge reads '
-            '{pills}. The last column states how many of that edition\'s identifiers the current '
-            'rules reference.</p>').format(pills=_oxford(phrases))
+            '{pills}. {tail}</p>').format(pills=_oxford(phrases), tail=tail)
 
 
 def _group_ordered(rows, key):
@@ -333,8 +365,8 @@ def render_reverse(rows, reg):
             '        <summary>{name} ({edition})</summary>'.format(
                 name=_text(r["name"]), edition=_text(r["edition"])),
             '        <div class="inner">',
-            '          <p>{relation}. {cited} of {total} identifiers referenced.</p>'.format(
-                relation=_text(r["relation"]), cited=r["ids_cited"], total=r["ids_total"]),
+            '          <p>{relation}. {coverage}.</p>'.format(
+                relation=_text(r["relation"]), coverage=_text(_coverage_line(r))),
             '          <ul>']
         by_id = {}
         for row in frows:
@@ -374,12 +406,20 @@ def render_json(reg, rows):
     wall-clock field, so --check stays reproducible."""
     frameworks = {}
     for r in reg:
-        frameworks[r["framework"]] = {
+        entry = {
             "name": r["name"], "publisher": r["publisher"], "edition": r["edition"],
             "kind": r["kind"], "relation": r["relation"], "status": r["status"],
             "citation_unit": r["citation_unit"], "source_artefact": r["source_artefact"],
-            "retrieved": r["retrieved"], "ids_cited": r["ids_cited"], "ids_total": r["ids_total"],
+            "retrieved": r["retrieved"], "catalogue": r["catalogue"],
+            "ids_cited": r["ids_cited"],
         }
+        # A full-edition manifest carries its edition denominator; a curated subset carries
+        # ids_total = null (GD-73): the KEY stays for schema compatibility, and null means no computable
+        # edition denominator, because the manifest cannot state how many identifiers the whole edition
+        # holds (the catalogue invariant). catalogue + this null tell a consumer it is a curated subset;
+        # the HTML registry and reverse view show no denominator for a subset.
+        entry["ids_total"] = r["ids_total"] if r["catalogue"] == "full" else None
+        frameworks[r["framework"]] = entry
     mappings = [{
         "rule_id": row["rule_id"], "rule_title": row["rule_title"], "rule_source": row["rule_source"],
         "framework": row["framework"], "relation": row["relation"], "fit": row["fit"],
@@ -416,7 +456,7 @@ def main():
         text = replace_block(text, "RELKINDS", render_relkinds(manifests))
         text = replace_block(text, "IDKINDS", render_idkinds(manifests))
         text = replace_block(text, "ISOENTRIES", render_isoentries(manifests))
-        text = replace_block(text, "REGISTRYINTRO", render_registry_intro())
+        text = replace_block(text, "REGISTRYINTRO", render_registry_intro(reg))
         text = replace_block(text, "REGISTRY", render_registry(reg))
         text = replace_block(text, "FORWARD", render_forward(rows))
         text = replace_block(text, "REVERSE", render_reverse(rows, reg))

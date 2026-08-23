@@ -90,6 +90,15 @@ class = "a"
 residue = "A byte-identity drift gate over the artefact tools/gen_mappings.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
 
 [[gate]]
+id = "reference-roster-drift"
+script = "tools/gen_reference_facts.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_reference_facts.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
 id = "disclosure-drift"
 script = "tools/gen_disclosure.py"
 rules = ["gensrc"]
@@ -299,6 +308,15 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "It validates every standards-mapping id against its pinned framework manifest. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "reference-facts"
+script = "tools/check_reference_facts.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks that hand-authored copies of manifest-derived facts (the publisher-family parentheticals, the standards-README schema enum table, the closed-set parity of the programmatic kind/status dicts, the deferred-frameworks negative check, and the subset-denominator invariant) agree with the manifests. It checks only the enumerated fact copies, not arbitrary prose, and it trusts each manifest's catalogue declaration rather than proving edition-completeness offline. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "conformance"

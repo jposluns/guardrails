@@ -144,6 +144,16 @@ jobs:
       - name: Mappings page drift
         run: python3 tools/gen_mappings.py --check
 
+      - name: Reference roster self-test
+        run: python3 tools/gen_reference_facts.py --self-test
+      - name: Reference roster drift
+        run: python3 tools/gen_reference_facts.py --check
+
+      - name: Reference facts self-test
+        run: python3 tools/check_reference_facts.py --self-test
+      - name: Reference facts
+        run: python3 tools/check_reference_facts.py
+
       - name: Disclosure generator self-test
         run: python3 tools/gen_disclosure.py --self-test
 
