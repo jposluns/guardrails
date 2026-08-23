@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -94,13 +95,18 @@ def _https_get(url):
     if parsed.scheme != "https" or parsed.hostname != SOURCE_HOST:
         raise ImportError_("refusing a non-https or off-host URL: {!r}".format(url))
     req = urllib.request.Request(url, headers={"User-Agent": "aiqt-cwe-importer/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:  # nosec - host+scheme pinned above
-        if resp.status != 200:
-            raise ImportError_("{} returned HTTP {}".format(url, resp.status))
-        final = urllib.parse.urlparse(resp.geturl())
-        if final.scheme != "https" or final.hostname != SOURCE_HOST:
-            raise ImportError_("a redirect left the pinned host: {!r}".format(resp.geturl()))
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:  # nosec - host+scheme pinned above
+            if resp.status != 200:
+                raise ImportError_("{} returned HTTP {}".format(url, resp.status))
+            final = urllib.parse.urlparse(resp.geturl())
+            if final.scheme != "https" or final.hostname != SOURCE_HOST:
+                raise ImportError_("a redirect left the pinned host: {!r}".format(resp.geturl()))
+            return resp.read()
+    except urllib.error.URLError as exc:
+        # A transport failure (DNS, connection, timeout, HTTP error) is a controlled fail-closed abort,
+        # not an uncaught traceback: main() maps ImportError_ to a concise stderr and exit 2.
+        raise ImportError_("network fetch of {} failed: {}".format(url, exc)) from exc
 
 
 def _extract_member(zip_bytes):
@@ -330,7 +336,7 @@ def render(staging_dir, output, *, expected_member=EXPECTED_MEMBER,
         raise ImportError_("provenance retrieved {!r} != pinned {!r}".format(retrieved, expected_retrieved))
     # Render provenance from AUTHORITATIVE values (computed XML facts + pinned constants), never the
     # claimant-controlled sidecar (10-ACCUR-guard-input-soundness): the sidecar cannot forge the
-    # rendered edition, shas, counts, or reading, and a non-ISO retrieved is refused (TOML-injection guard).
+    # rendered edition, shas, counts, or reading, and published and retrieved are pinned to exact values.
     trusted = {
         "source_url": expected_source_url,
         "count_url": expected_count_url,
@@ -441,6 +447,17 @@ def self_test():
                                            min_elements=1))
     _expect_fail("unexpected zip member",
                  lambda: _extract_member(_zip_of({"wrong.xml": b"x"})))
+    # a transport failure in _https_get maps to a controlled ImportError_ (concise abort + exit 2 via
+    # main()), never a raw URLError traceback. Monkeypatch urlopen to raise, expect the mapped abort.
+    _orig_urlopen = urllib.request.urlopen
+    def _boom_urlopen(*_a, **_k):
+        raise urllib.error.URLError("simulated transport failure")
+    urllib.request.urlopen = _boom_urlopen
+    try:
+        _expect_fail("network transport failure maps to a controlled abort",
+                     lambda: _https_get(SOURCE_URL))
+    finally:
+        urllib.request.urlopen = _orig_urlopen
     _expect_fail("count reconciles to neither total nor active",
                  lambda: _reconcile_count(944, 969, 111))
     # off-by-one: a published figure equal to active-1 must not reconcile
