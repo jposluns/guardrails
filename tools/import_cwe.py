@@ -69,6 +69,7 @@ EXCLUDED_STATUSES = SCHEMA_STATUSES - LIVE_STATUSES
 # Deprecated/Obsolete), the reading recorded in the manifest header and the provenance sidecar.
 EXPECTED_TOTAL_ELEMENTS = 969
 EXPECTED_ACTIVE = 944
+EXPECTED_PUBLISHED_TOTAL = 944  # MITRE's published "Total Weaknesses" headline for 4.20 (== live count)
 
 PROVENANCE_NAME = "cwe-provenance.json"
 CODE_RE = re.compile(r"^CWE-\d+$")
@@ -292,7 +293,7 @@ def _render_toml(rows, prov):
 def render(staging_dir, output, *, expected_member=EXPECTED_MEMBER,
            expected_xml_sha256=EXPECTED_XML_SHA256, expected_total=EXPECTED_TOTAL_ELEMENTS,
            expected_active=EXPECTED_ACTIVE, expected_source_url=SOURCE_URL,
-           expected_count_url=COUNT_URL, min_elements=100):
+           expected_count_url=COUNT_URL, expected_published=EXPECTED_PUBLISHED_TOTAL, min_elements=100):
     staging = Path(staging_dir)
     prov_path = staging / PROVENANCE_NAME
     if not prov_path.is_file():
@@ -317,10 +318,21 @@ def render(staging_dir, output, *, expected_member=EXPECTED_MEMBER,
     if total_elements != expected_total or active != expected_active:
         raise ImportError_("staged XML yields total={}, active={}; pinned total={}, active={}; re-acquire"
                            .format(total_elements, active, expected_total, expected_active))
-    reading = _reconcile_count(active, total_elements, prov["published_total_weaknesses"])
+    published = prov.get("published_total_weaknesses")
+    if not isinstance(published, int) or isinstance(published, bool) or published != expected_published:
+        raise ImportError_("provenance published_total_weaknesses {!r} != pinned {}"
+                           .format(published, expected_published))
+    reading = _reconcile_count(active, total_elements, expected_published)
     retrieved = prov.get("retrieved")
-    if not isinstance(retrieved, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", retrieved):
-        raise ImportError_("provenance retrieved {!r} is not an ISO yyyy-mm-dd date".format(retrieved))
+    if not isinstance(retrieved, str):
+        raise ImportError_("provenance retrieved {!r} is not a string".format(retrieved))
+    try:
+        _rdate = date.fromisoformat(retrieved)
+    except ValueError:
+        raise ImportError_("provenance retrieved {!r} is not a valid ISO calendar date".format(retrieved))
+    if _rdate < date.fromisoformat(_date):
+        raise ImportError_("provenance retrieved {} precedes the catalogue release date {}"
+                           .format(retrieved, _date))
     # Render provenance from AUTHORITATIVE values (computed XML facts + pinned constants), never the
     # claimant-controlled sidecar (10-ACCUR-guard-input-soundness): the sidecar cannot forge the
     # rendered edition, shas, counts, or reading, and a non-ISO retrieved is refused (TOML-injection guard).
@@ -333,7 +345,7 @@ def render(staging_dir, output, *, expected_member=EXPECTED_MEMBER,
         "total_weakness_elements": total_elements,
         "active_after_filter": active,
         "status_breakdown": dict(sorted(breakdown.items())),
-        "published_total_weaknesses": prov["published_total_weaknesses"],
+        "published_total_weaknesses": expected_published,
         "count_reading": reading,
         "retrieved": retrieved,
     }
@@ -460,7 +472,7 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
         _out = _stage / "cwe.toml"
         render(_stage, _out, expected_xml_sha256=_sha256(_xml), expected_total=5, expected_active=3,
-               min_elements=1)
+               expected_published=3, min_elements=1)
         assert _out.is_file() and 'catalogue = "full"' in _out.read_text(encoding="utf-8")
         print("  ok (render happy path): fixture rendered and loader-verified")
         # forged bytes vs the REAL pinned sha -> rejected, no output written
@@ -483,7 +495,8 @@ def self_test():
         try:
             _expect_fail("render fails closed when the loader rejects the candidate",
                          lambda: render(_stage, _dest2, expected_xml_sha256=_sha256(_xml),
-                                        expected_total=5, expected_active=3, min_elements=1))
+                                        expected_total=5, expected_active=3, expected_published=3,
+                                        min_elements=1))
             assert _dest2.read_text(encoding="utf-8") == "KEEP", "destination preserved on loader rejection"
             assert not list(_stage.glob(".cwe-candidate-*.toml")), "candidate cleaned up on failure"
         finally:
@@ -497,7 +510,7 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_forged), encoding="utf-8")
         _outf = _stage / "cwe-forged.toml"
         render(_stage, _outf, expected_xml_sha256=_sha256(_xml), expected_total=5, expected_active=3,
-               min_elements=1)
+               expected_published=3, min_elements=1)
         _r = _outf.read_text(encoding="utf-8")
         assert 'edition = "4.20"' in _r and "9.99-FORGED" not in _r, "forged edition must not ship"
         assert _sha256(_xml) in _r and "deadbeef" not in _r, "forged xml sha must not ship"
@@ -508,7 +521,26 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_inj), encoding="utf-8")
         _expect_fail("render rejects a non-ISO retrieved (TOML-injection guard)",
                      lambda: render(_stage, _stage / "cwe-inj.toml", expected_xml_sha256=_sha256(_xml),
-                                    expected_total=5, expected_active=3, min_elements=1))
+                                    expected_total=5, expected_active=3, expected_published=3,
+                                    min_elements=1))
+        # forged published headline must fail closed (pinned to the MITRE 4.20 figure)
+        _fp = dict(_prov); _fp["published_total_weaknesses"] = 969
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_fp), encoding="utf-8")
+        _expect_fail("render rejects a forged published headline",
+                     lambda: render(_stage, _stage / "cwe-fp.toml", expected_xml_sha256=_sha256(_xml),
+                                    expected_total=5, expected_active=3, expected_published=3, min_elements=1))
+        # retrieved before the catalogue release date fails closed
+        _rb = dict(_prov); _rb["retrieved"] = "1900-01-01"
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_rb), encoding="utf-8")
+        _expect_fail("render rejects a retrieved date before the release date",
+                     lambda: render(_stage, _stage / "cwe-rb.toml", expected_xml_sha256=_sha256(_xml),
+                                    expected_total=5, expected_active=3, expected_published=3, min_elements=1))
+        # a shaped-but-impossible calendar date fails closed
+        _ri = dict(_prov); _ri["retrieved"] = "2026-99-99"
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_ri), encoding="utf-8")
+        _expect_fail("render rejects an impossible calendar date",
+                     lambda: render(_stage, _stage / "cwe-ri.toml", expected_xml_sha256=_sha256(_xml),
+                                    expected_total=5, expected_active=3, expected_published=3, min_elements=1))
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
     finally:
         shutil.rmtree(_stage, ignore_errors=True)
