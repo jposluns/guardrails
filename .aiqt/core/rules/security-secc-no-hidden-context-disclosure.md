@@ -5,6 +5,8 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: no-hidden-context-disclosure
+map-cwe-tight: [CWE-200]
+map-cwe-broad: [CWE-497]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-broad: [AC-4]
 map-atlas-tight: [AML.T0056, AML.T0057, AML.T0069, AML.T0084]

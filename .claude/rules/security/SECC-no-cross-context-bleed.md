@@ -5,6 +5,8 @@ family: security
 facet: SECC
 secondary: [SECP]
 slug: no-cross-context-bleed
+map-cwe-tight: [CWE-488]
+map-cwe-broad: [CWE-200, CWE-653]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [AC-4, SC-4]
 map-atlas-broad: [AML.T0057, AML.T0080]

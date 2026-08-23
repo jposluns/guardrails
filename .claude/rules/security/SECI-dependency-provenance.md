@@ -4,6 +4,8 @@ origin: pack
 family: security
 facet: SECI
 slug: dependency-provenance
+map-cwe-tight: [CWE-494, CWE-829]
+map-cwe-broad: [CWE-1357]
 map-nist-airmf-broad: [GOVERN 6.1, MANAGE 3.1, MAP 4.2]
 map-nist-80053-tight: [SR-3, SR-4, SR-11]
 map-nist-ssdf-tight: [PW.4.1, PW.4.4]
