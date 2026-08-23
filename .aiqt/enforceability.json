@@ -242,6 +242,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "estsep",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separate.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "evgcmp",
       "family": "aiqt",
       "gates": [],
@@ -1067,6 +1075,14 @@
       "gates": [],
       "hooks": [],
       "source": ".aiqt/core/rules/trust-session-resume-from-handoff.md",
+      "status": "prose-only"
+    },
+    {
+      "corpus-id": "setcmp",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md",
       "status": "prose-only"
     },
     {
