@@ -53,7 +53,7 @@
       "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
       "retrieved": "2026-08-22",
       "catalogue": "full",
-      "ids_cited": 43,
+      "ids_cited": 57,
       "ids_total": 944
     },
     "iso-23894": {
@@ -4364,6 +4364,26 @@
       "rule_id": "secupl",
       "rule_title": "Validate and contain uploaded files",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-646",
+      "identifier_title": "Reliance on File Name or Extension of Externally-Supplied File"
+    },
+    {
+      "rule_id": "secupl",
+      "rule_title": "Validate and contain uploaded files",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-434",
+      "identifier_title": "Unrestricted Upload of File with Dangerous Type"
+    },
+    {
+      "rule_id": "secupl",
+      "rule_title": "Validate and contain uploaded files",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
       "fit": "tight",
@@ -5704,6 +5724,26 @@
       "rule_id": "secenc",
       "rule_title": "Encode output for its sink",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-116",
+      "identifier_title": "Improper Encoding or Escaping of Output"
+    },
+    {
+      "rule_id": "secenc",
+      "rule_title": "Encode output for its sink",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-838",
+      "identifier_title": "Inappropriate Encoding for Output Context"
+    },
+    {
+      "rule_id": "secenc",
+      "rule_title": "Encode output for its sink",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -6604,6 +6644,26 @@
       "rule_id": "secpub",
       "rule_title": "Publish artefacts with verifiable integrity",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-345",
+      "identifier_title": "Insufficient Verification of Data Authenticity"
+    },
+    {
+      "rule_id": "secpub",
+      "rule_title": "Publish artefacts with verifiable integrity",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-353",
+      "identifier_title": "Missing Support for Integrity Check"
+    },
+    {
+      "rule_id": "secpub",
+      "rule_title": "Publish artefacts with verifiable integrity",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md",
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
@@ -6849,6 +6909,26 @@
       "fit": "tight",
       "identifier": "I&S-04",
       "identifier_title": "OS Hardening and Base Controls"
+    },
+    {
+      "rule_id": "seccfg",
+      "rule_title": "Secure by default configuration",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-1188",
+      "identifier_title": "Initialization of a Resource with an Insecure Default"
+    },
+    {
+      "rule_id": "seccfg",
+      "rule_title": "Secure by default configuration",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-1269",
+      "identifier_title": "Product Released in Non-Release Configuration"
     },
     {
       "rule_id": "seccfg",
@@ -7669,6 +7749,46 @@
       "fit": "broad",
       "identifier": "AIS-04",
       "identifier_title": "Secure Application Development Lifecycle"
+    },
+    {
+      "rule_id": "sectvl",
+      "rule_title": "Validate tool arguments before use",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-22",
+      "identifier_title": "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+    },
+    {
+      "rule_id": "sectvl",
+      "rule_title": "Validate tool arguments before use",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-77",
+      "identifier_title": "Improper Neutralization of Special Elements used in a Command ('Command Injection')"
+    },
+    {
+      "rule_id": "sectvl",
+      "rule_title": "Validate tool arguments before use",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-20",
+      "identifier_title": "Improper Input Validation"
+    },
+    {
+      "rule_id": "sectvl",
+      "rule_title": "Validate tool arguments before use",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-88",
+      "identifier_title": "Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')"
     },
     {
       "rule_id": "sectvl",
@@ -8654,6 +8774,26 @@
       "rule_id": "secmin",
       "rule_title": "Minimize personal data sent to AI services",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-359",
+      "identifier_title": "Exposure of Private Personal Information to an Unauthorized Actor"
+    },
+    {
+      "rule_id": "secmin",
+      "rule_title": "Minimize personal data sent to AI services",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-201",
+      "identifier_title": "Insertion of Sensitive Information Into Sent Data"
+    },
+    {
+      "rule_id": "secmin",
+      "rule_title": "Minimize personal data sent to AI services",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -8929,6 +9069,26 @@
       "fit": "tight",
       "identifier": "DSP-15",
       "identifier_title": "Limitation of Production Data Use"
+    },
+    {
+      "rule_id": "secsyn",
+      "rule_title": "Fixtures and examples use synthetic data",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "broad",
+      "identifier": "CWE-359",
+      "identifier_title": "Exposure of Private Personal Information to an Unauthorized Actor"
+    },
+    {
+      "rule_id": "secsyn",
+      "rule_title": "Fixtures and examples use synthetic data",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md",
+      "framework": "cwe",
+      "relation": "mitigates weakness",
+      "fit": "tight",
+      "identifier": "CWE-531",
+      "identifier_title": "Inclusion of Sensitive Information in Test Code"
     },
     {
       "rule_id": "secsyn",

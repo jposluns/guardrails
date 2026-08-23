@@ -5,6 +5,8 @@ family: security
 facet: SECP
 secondary: [SECC]
 slug: data-minimization
+map-cwe-tight: [CWE-201]
+map-cwe-broad: [CWE-359]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [SI-12(1)]
 map-nist-80053-broad: [SI-19]
