@@ -10,6 +10,7 @@
       "citation_unit": "technique",
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 65,
       "ids_total": 173
     },
@@ -23,6 +24,7 @@
       "citation_unit": "control",
       "source_artefact": "CSA AI Controls Matrix v1.1.0",
       "retrieved": "2026-07-07",
+      "catalogue": "full",
       "ids_cited": 79,
       "ids_total": 247
     },
@@ -36,6 +38,7 @@
       "citation_unit": "control",
       "source_artefact": "CSA Cloud Controls Matrix v4.1.0",
       "retrieved": "2026-07-07",
+      "catalogue": "full",
       "ids_cited": 57,
       "ids_total": 207
     },
@@ -49,8 +52,9 @@
       "citation_unit": "clause or annex objective",
       "source_artefact": "ISO/IEC 23894:2023, clauses 5-6 and Annexes A-B (headings only)",
       "retrieved": "2026-08-16",
+      "catalogue": "subset",
       "ids_cited": 14,
-      "ids_total": 61
+      "ids_total": null
     },
     "iso-42001": {
       "name": "ISO/IEC 42001:2023 AI management system",
@@ -62,8 +66,9 @@
       "citation_unit": "clause or Annex A control",
       "source_artefact": "ISO/IEC 42001:2023, Annex A and clauses 4-10 (headings only)",
       "retrieved": "2026-08-16",
+      "catalogue": "subset",
       "ids_cited": 18,
-      "ids_total": 74
+      "ids_total": null
     },
     "nist-80053": {
       "name": "NIST SP 800-53 Security and Privacy Controls",
@@ -75,6 +80,7 @@
       "citation_unit": "control",
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 65,
       "ids_total": 1196
     },
@@ -88,6 +94,7 @@
       "citation_unit": "subcategory",
       "source_artefact": "NIST AI 100-1, AI Risk Management Framework 1.0",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 23,
       "ids_total": 72
     },
@@ -101,6 +108,7 @@
       "citation_unit": "task",
       "source_artefact": "NIST SP 800-218 v1.1 SSDF, OSCAL catalog",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 20,
       "ids_total": 42
     },
@@ -114,6 +122,7 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP API Security Top 10 2023",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 8,
       "ids_total": 10
     },
@@ -127,6 +136,7 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP Top 10 for Agentic Applications, Version 2026 (December 2025)",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 9,
       "ids_total": 10
     },
@@ -140,6 +150,7 @@
       "citation_unit": "chapter",
       "source_artefact": "OWASP Application Security Verification Standard (ASVS) 5.0.0 (tag v5.0.0_release)",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 13,
       "ids_total": 17
     },
@@ -153,8 +164,9 @@
       "citation_unit": "cheat sheet",
       "source_artefact": "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)",
       "retrieved": "2026-08-16",
+      "catalogue": "subset",
       "ids_cited": 27,
-      "ids_total": 116
+      "ids_total": null
     },
     "owasp-llm": {
       "name": "OWASP Top 10 for LLM Applications",
@@ -166,6 +178,7 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP Top 10 for LLM Applications, Version 2026",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 10,
       "ids_total": 10
     },
@@ -179,6 +192,7 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP MCP Top 10 (2025, Beta)",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 10,
       "ids_total": 10
     },
@@ -192,6 +206,7 @@
       "citation_unit": "control",
       "source_artefact": "OWASP Top 10 Proactive Controls v4.0.0 (2024)",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 9,
       "ids_total": 10
     },
@@ -205,6 +220,7 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP Top 10:2025 (Web Application Security Risks)",
       "retrieved": "2026-08-16",
+      "catalogue": "full",
       "ids_cited": 10,
       "ids_total": 10
     }

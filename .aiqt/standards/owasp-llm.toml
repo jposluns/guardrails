@@ -11,6 +11,7 @@ citation-unit = "risk category"
 id-pattern = "^LLM(0[1-9]|10)$"
 source-artefact = "OWASP Top 10 for LLM Applications, Version 2026"
 retrieved = "2026-08-16"
+catalogue = "full"
 url = "https://genai.owasp.org/resource/owasp-genai-llm-top-10-2026/"
 
 [[id]]

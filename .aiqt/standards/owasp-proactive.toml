@@ -11,6 +11,7 @@ citation-unit = "control"
 id-pattern = "^C([1-9]|10)$"
 source-artefact = "OWASP Top 10 Proactive Controls v4.0.0 (2024)"
 retrieved = "2026-08-16"
+catalogue = "full"
 url = "https://github.com/OWASP/www-project-proactive-controls"
 
 [[id]]
