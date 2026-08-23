@@ -29,8 +29,10 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -287,23 +289,34 @@ def _render_toml(rows, prov):
     return "\n".join(lines) + "\n"
 
 
-def render(staging_dir, output):
+def render(staging_dir, output, *, expected_member=EXPECTED_MEMBER,
+           expected_xml_sha256=EXPECTED_XML_SHA256, expected_total=EXPECTED_TOTAL_ELEMENTS,
+           expected_active=EXPECTED_ACTIVE, expected_source_url=SOURCE_URL,
+           expected_count_url=COUNT_URL, min_elements=100):
     staging = Path(staging_dir)
     prov_path = staging / PROVENANCE_NAME
     if not prov_path.is_file():
         raise ImportError_("no {} in staging; run acquire first".format(PROVENANCE_NAME))
     prov = json.loads(prov_path.read_text(encoding="utf-8"))
+    # The provenance sidecar is claimant-controlled, so every load-bearing field is pinned to the
+    # module constants rather than trusted from the record (10-ACCUR-guard-input-soundness).
+    if prov.get("member") != expected_member:
+        raise ImportError_("staged provenance member {!r} != pinned {!r}"
+                           .format(prov.get("member"), expected_member))
+    for key, pinned in (("source_url", expected_source_url), ("count_url", expected_count_url)):
+        if prov.get(key) != pinned:
+            raise ImportError_("provenance {} {!r} != pinned {!r}".format(key, prov.get(key), pinned))
     xml_path = staging / prov["member"]
     xml_bytes = xml_path.read_bytes()
-    if _sha256(xml_bytes) != prov["xml_sha256"]:
-        raise ImportError_("staged {} sha256 does not match the provenance record; re-acquire"
-                           .format(prov["member"]))
-    version, _date, rows, total_elements, breakdown = _parse_weaknesses(xml_bytes)
+    xml_sha = _sha256(xml_bytes)
+    if xml_sha != expected_xml_sha256:
+        raise ImportError_("staged {} sha256 {} != pinned {}; re-acquire from the pinned source"
+                           .format(prov["member"], xml_sha, expected_xml_sha256))
+    version, _date, rows, total_elements, breakdown = _parse_weaknesses(xml_bytes, min_elements=min_elements)
     active = len(rows)
-    # Re-assert the whole chain of evidence on the deterministic render path too, from staged bytes.
-    if version != prov["version"] or total_elements != prov["total_weakness_elements"] \
-            or active != prov["active_after_filter"]:
-        raise ImportError_("staged bytes disagree with the provenance record; re-acquire")
+    if total_elements != expected_total or active != expected_active:
+        raise ImportError_("staged XML yields total={}, active={}; pinned total={}, active={}; re-acquire"
+                           .format(total_elements, active, expected_total, expected_active))
     _reconcile_count(active, total_elements, prov["published_total_weaknesses"])
     text = _render_toml(rows, prov)
     # Round-trip: parse the rendered TOML, then a real load_manifests over a temp dir, BEFORE writing.
@@ -312,8 +325,16 @@ def render(staging_dir, output):
         raise ImportError_("rendered [[id]] count {} != live rows {}".format(len(parsed.get("id", [])), active))
     out = Path(output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8", newline="\n")
-    _verify_with_loader(out)
+    fd, tmp_name = tempfile.mkstemp(dir=str(out.parent), prefix=".cwe-candidate-", suffix=".toml")
+    os.close(fd)
+    candidate = Path(tmp_name)
+    try:
+        candidate.write_text(text, encoding="utf-8", newline="\n")
+        _verify_with_loader(candidate)
+        os.replace(str(candidate), str(out))
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        raise
     print("[render] wrote {} ({} live weakness rows, edition {})".format(out, active, version))
 
 
@@ -406,6 +427,51 @@ def self_test():
     _expect_fail("contradictory published counts",
                  lambda: _published_count('Total Weaknesses: <span>944</span>'
                                           'Total Weaknesses: <span>111</span>'))
+    import shutil
+    # render end-to-end: pins enforced, forged bytes rejected, destination preserved on failure.
+    _stage = Path(tempfile.mkdtemp(prefix="aiqt-cwe-render-"))
+    try:
+        _xml = _fixture()
+        (_stage / EXPECTED_MEMBER).write_bytes(_xml)
+        _prov = {"member": EXPECTED_MEMBER, "xml_sha256": _sha256(_xml), "version": EXPECTED_VERSION,
+                 "total_weakness_elements": 5, "active_after_filter": 3,
+                 "published_total_weaknesses": 3, "source_url": SOURCE_URL, "count_url": COUNT_URL,
+                 "status_breakdown": {"Deprecated": 1, "Draft": 1, "Obsolete": 1, "Stable": 1, "Usable": 1},
+                 "count_reading": "active", "retrieved": "2026-04-30", "zip_sha256": _sha256(b"z")}
+        (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
+        _out = _stage / "cwe.toml"
+        render(_stage, _out, expected_xml_sha256=_sha256(_xml), expected_total=5, expected_active=3,
+               min_elements=1)
+        assert _out.is_file() and 'catalogue = "full"' in _out.read_text(encoding="utf-8")
+        print("  ok (render happy path): fixture rendered and loader-verified")
+        # forged bytes vs the REAL pinned sha -> rejected, no output written
+        _expect_fail("render rejects staged bytes against the pinned sha",
+                     lambda: render(_stage, _stage / "forged.toml"))
+        assert not (_stage / "forged.toml").exists(), "no output on pin rejection"
+        # wrong pinned active count -> rejected before any write; destination sentinel preserved
+        _dest = _stage / "dest.toml"; _dest.write_text("SENTINEL", encoding="utf-8")
+        _expect_fail("render fails closed on a count mismatch",
+                     lambda: render(_stage, _dest, expected_xml_sha256=_sha256(_xml),
+                                    expected_total=5, expected_active=999, min_elements=1))
+        assert _dest.read_text(encoding="utf-8") == "SENTINEL", "destination preserved on count rejection"
+        # loader-stage rejection AFTER the candidate write -> atomic replace must not touch the destination
+        _dest2 = _stage / "dest2.toml"; _dest2.write_text("KEEP", encoding="utf-8")
+        global _verify_with_loader
+        _orig_vwl = _verify_with_loader
+        def _boom(_p):
+            raise ImportError_("forced loader rejection")
+        _verify_with_loader = _boom
+        try:
+            _expect_fail("render fails closed when the loader rejects the candidate",
+                         lambda: render(_stage, _dest2, expected_xml_sha256=_sha256(_xml),
+                                        expected_total=5, expected_active=3, min_elements=1))
+            assert _dest2.read_text(encoding="utf-8") == "KEEP", "destination preserved on loader rejection"
+            assert not list(_stage.glob(".cwe-candidate-*.toml")), "candidate cleaned up on failure"
+        finally:
+            _verify_with_loader = _orig_vwl
+        print("  ok (render adversarial): pin, count, and loader rejections all fail closed and preserve the destination")
+    finally:
+        shutil.rmtree(_stage, ignore_errors=True)
     print("SELF-TEST: PASS")
 
 
