@@ -274,7 +274,7 @@ _MANIFEST = (
 _README = (
     "# Standards id-manifests\n\n## Manifest schema\n\n"
     "| field | meaning |\n| --- | --- |\n"
-    "| `kind` | `risk` \\| `control` \\| `guidance` \\| `technique` (relation wording) |\n"
+    "| `kind` | `risk` \\| `control` \\| `guidance` \\| `technique` \\| `weakness` (relation wording) |\n"
     "| `status` | `stable` \\| `beta` \\| `snapshot` (edition stability) |\n"
     "| `catalogue` | `full` \\| `subset` (complete edition or curated) |\n\n"
     "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and OWASP SCVS.\n"
