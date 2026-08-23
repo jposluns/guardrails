@@ -30,6 +30,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [No concealed failure](rules/aiqt/10-INTEG-no-concealed-failure.md)
 - [Preserve uncommitted work](rules/aiqt/10-INTEG-preserve-uncommitted-work.md)
 - [Protected-branch integrity](rules/aiqt/10-INTEG-protected-branch-integrity.md)
+- [A required step remains required under friction](rules/aiqt/10-INTEG-required-step-remains-required.md)
 - [A rerun pass does not erase an earlier failure](rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)
 - [Make retries safe to repeat](rules/aiqt/10-INTEG-safe-retries.md)
 - [Separate task changes from pre-existing work](rules/aiqt/10-INTEG-separate-task-changes.md)
