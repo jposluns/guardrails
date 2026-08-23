@@ -1,0 +1,13 @@
+---
+alwaysApply: true
+---
+
+# Configuration that executes on load is treated as code
+
+Agent, editor, workspace, and repository configuration and hook definitions that can trigger execution
+when they are loaded, opened, or applied are executable code, not inert settings, and pass the same
+review and trust gate as code before they are trusted or run. Whether a file has that property is decided
+by what it can do on load, not by its name or format, so genuinely inert configuration, values a tool
+only reads, is never swept in. An executable configuration is reviewed for what it will run, from
+whatever source it arrived, exactly as hand-written or generated code is, and until it passes that gate
+it remains untrusted.
