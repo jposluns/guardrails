@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>891</strong> mappings from <strong>93</strong> of the pack's rules to <strong>494</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>900</strong> mappings from <strong>95</strong> of the pack's rules to <strong>496</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -119,10 +119,10 @@
             <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
-            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>57 of 944</td></tr>
+            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>58 of 944</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
-            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>65 of 1196</td></tr>
+            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>66 of 1196</td></tr>
             <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>23 of 72</td></tr>
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 of 42</td></tr>
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
@@ -1759,6 +1759,30 @@
         </div>
       </details>
       <details class="more">
+        <summary>Configuration that executes on load is treated as code</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-94: Improper Control of Generation of Code ('Code Injection') (broad)</li>
+                <li>CWE-829: Inclusion of Functionality from Untrusted Control Sphere (tight)</li>
+              </ul>
+            </li>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>SI-7: Software, Firmware, and Information Integrity (broad)</li>
+              </ul>
+            </li>
+            <li>OWASP Top 10 for Agentic Applications (2026): addresses risk
+              <ul>
+                <li>ASI05: Unexpected Code Execution (RCE) (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
         <summary>Sound cryptography</summary>
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md">View this rule on GitHub</a></p>
@@ -2024,6 +2048,27 @@
             <li>OWASP Cheat Sheet Series (commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)): aligns with guidance
               <ul>
                 <li>file-upload: File Upload Cheat Sheet (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Guardrail configuration is integrity-protected</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>AC-6(1): Authorize Access to Security Functions (broad)</li>
+                <li>SI-7: Software, Firmware, and Information Integrity (broad)</li>
+                <li>CM-3: Configuration Change Control (tight)</li>
+                <li>CM-5: Access Restrictions for Change (tight)</li>
+              </ul>
+            </li>
+            <li>OWASP MCP Top 10 (2025): addresses risk
+              <ul>
+                <li>MCP02: Privilege Escalation via Scope Creep (tight)</li>
               </ul>
             </li>
           </ul>
@@ -4868,7 +4913,7 @@
       <details class="more">
         <summary>MITRE CWE (4.20)</summary>
         <div class="inner">
-          <p>mitigates weakness. 57 of 944 identifiers referenced.</p>
+          <p>mitigates weakness. 58 of 944 identifiers referenced.</p>
           <ul>
             <li>CWE-20: Improper Input Validation
               <ul>
@@ -4901,6 +4946,11 @@
             <li>CWE-88: Improper Neutralization of Argument Delimiters in a Command ('Argument Injection')
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md">Validate tool arguments before use</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-94: Improper Control of Generation of Code ('Code Injection')
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md">Configuration that executes on load is treated as code</a> (broad)</li>
               </ul>
             </li>
             <li>CWE-116: Improper Encoding or Escaping of Output
@@ -5094,6 +5144,7 @@
             </li>
             <li>CWE-829: Inclusion of Functionality from Untrusted Control Sphere
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md">Configuration that executes on load is treated as code</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md">Trusted, pinned dependency provenance</a> (tight)</li>
               </ul>
             </li>
@@ -5431,7 +5482,7 @@
       <details class="more">
         <summary>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0))</summary>
         <div class="inner">
-          <p>supports control. 65 of 1196 identifiers referenced.</p>
+          <p>supports control. 66 of 1196 identifiers referenced.</p>
           <ul>
             <li>AC-3: Access Enforcement
               <ul>
@@ -5454,6 +5505,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md">Least-privilege authorization</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md">Trust between agents is earned, not inherited</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AC-6(1): Authorize Access to Security Functions
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md">Guardrail configuration is integrity-protected</a> (broad)</li>
               </ul>
             </li>
             <li>AU-2: Event Logging
@@ -5497,6 +5553,7 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md">Protected-branch integrity</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-separate-task-changes.md">Separate task changes from pre-existing work</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md">Change record</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md">Guardrail configuration is integrity-protected</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">Human authorization for consequential actions</a> (tight)</li>
               </ul>
             </li>
@@ -5514,6 +5571,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md">Protected-branch integrity</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md">Workers produce inert data</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md">Guardrail configuration is integrity-protected</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md">Human authorization for consequential actions</a> (tight)</li>
               </ul>
             </li>
@@ -5724,6 +5782,8 @@
             </li>
             <li>SI-7: Software, Firmware, and Information Integrity
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md">Configuration that executes on load is treated as code</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md">Guardrail configuration is integrity-protected</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md">Resist data, model, and memory poisoning</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md">Publish artefacts with verifiable integrity</a> (broad)</li>
               </ul>
@@ -6190,6 +6250,7 @@
             </li>
             <li>ASI05: Unexpected Code Execution (RCE)
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md">Configuration that executes on load is treated as code</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md">Deserialize untrusted data only as data</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md">Validate tool arguments before use</a> (broad)</li>
               </ul>
@@ -6536,6 +6597,7 @@
             </li>
             <li>MCP02: Privilege Escalation via Scope Creep
               <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md">Guardrail configuration is integrity-protected</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md">Least-privilege tool and file access</a> (tight)</li>
               </ul>
             </li>
