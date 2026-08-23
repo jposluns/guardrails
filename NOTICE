@@ -5,11 +5,11 @@ This pack is published under the Creative Commons Attribution-ShareAlike 4.0 Int
 crosswalk mappings.
 
 The crosswalk mappings reference third-party security and AI-governance frameworks. Only control,
-guidance, risk, and technique IDENTIFIERS and their SHORT TITLES are reproduced, as navigational
-pointers. No specification prose, requirement text, control or clause bodies, figures, or tables
-from any framework are reproduced. Each framework's identifiers and titles remain the property of
-their respective publisher under the terms below, and no publisher listed here endorses, sponsors,
-or is affiliated with this pack.
+guidance, risk, technique, and weakness IDENTIFIERS and their SHORT TITLES are reproduced, as
+navigational pointers. No specification prose, requirement text, control or clause bodies,
+figures, or tables from any framework are reproduced. Each framework's identifiers and titles
+remain the property of their respective publisher under the terms below, and no publisher listed
+here endorses, sponsors, or is affiliated with this pack.
 
 ==================================================================================================
 
@@ -75,8 +75,17 @@ The MITRE Corporation
 
 Frameworks referenced:
   - MITRE ATLAS (edition 2026.06)
+  - MITRE CWE (edition 4.20) [licensed CWE Terms of Use]
+      CWE Terms of Use (https://cwe.mitre.org/about/termsofuse.html), reproduced as the Terms
+      require: Copyright (c) 2006-2026, The MITRE Corporation. The MITRE Corporation hereby grants
+      you a non-exclusive, royalty-free license to use CWE for research, development, and
+      commercial purposes. Any copy you make for such purposes is authorized on the condition that
+      you reproduce MITRE's copyright designation and this license in any such copy. CWE, CWSS,
+      CWRAF, and the CWE logo are trademarks of The MITRE Corporation. This pack reproduces CWE
+      identifiers and short names only; no weakness description text is reproduced.
 
-Licence: Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+Licence: Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0) (per-framework
+exceptions noted above)
 
 ATLAS data is licensed under the Apache License, Version 2.0. Identifiers and short titles are
 reproduced as navigational pointers with the required copyright notice retained (Apache-2.0

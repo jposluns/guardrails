@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>824</strong> mappings from <strong>91</strong> of the pack's rules to <strong>437</strong> identifiers across <strong>16</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>828</strong> mappings from <strong>92</strong> of the pack's rules to <strong>440</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -79,14 +79,14 @@
       after.</p>
     <ul>
       <!-- RELKINDS:BEGIN (generated) -->
-      <li><strong>Four relation kinds.</strong> The wording of each mapping follows the framework's type:
-        a rule <em>supports a control</em>, <em>aligns with guidance</em>, <em>addresses a risk</em>, or <em>mitigates a technique</em>.</li>
+      <li><strong>Five relation kinds.</strong> The wording of each mapping follows the framework's type:
+        a rule <em>supports a control</em>, <em>aligns with guidance</em>, <em>addresses a risk</em>, <em>mitigates a technique</em>, or <em>mitigates a weakness</em>.</li>
       <!-- RELKINDS:END -->
       <li><strong>Each mapping carries its fit.</strong> A <em>tight</em> mapping is a direct, one-to-one
         correspondence; a <em>broad</em> mapping is a looser, thematic relation. The fit is shown next to
         every identifier and in both exports.</li>
       <!-- IDKINDS:BEGIN (generated) -->
-      <li><strong>Identifiers and published titles only.</strong> Only control, guidance, risk, and technique
+      <li><strong>Identifiers and published titles only.</strong> Only control, guidance, risk, technique, and weakness
         identifiers and the frameworks' own published titles are reproduced, as navigational pointers;
         some frameworks (NIST AI RMF, for example) label an item with a full sentence, reproduced
         verbatim as that item's published title. No further specification prose, requirement text,
@@ -119,6 +119,7 @@
             <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>65 of 173</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
+            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>3 of 944</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
             <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>65 of 1196</td></tr>
@@ -2970,6 +2971,26 @@
         </div>
       </details>
       <details class="more">
+        <summary>Resolve privileged filesystem paths against symlink races</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition (broad)</li>
+                <li>CWE-59: Improper Link Resolution Before File Access ('Link Following') (tight)</li>
+                <li>CWE-363: Race Condition Enabling Link Following (tight)</li>
+              </ul>
+            </li>
+            <li>OWASP Application Security Verification Standard (5.0.0): supports control
+              <ul>
+                <li>V5: File Handling (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
         <summary>Threat-model new trust boundaries before implementation</summary>
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-threat-model-boundaries.md">View this rule on GitHub</a></p>
@@ -4658,6 +4679,29 @@
         </div>
       </details>
       <details class="more">
+        <summary>MITRE CWE (4.20)</summary>
+        <div class="inner">
+          <p>mitigates weakness. 3 of 944 identifiers referenced.</p>
+          <ul>
+            <li>CWE-59: Improper Link Resolution Before File Access ('Link Following')
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">Resolve privileged filesystem paths against symlink races</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-363: Race Condition Enabling Link Following
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">Resolve privileged filesystem paths against symlink races</a> (tight)</li>
+              </ul>
+            </li>
+            <li>CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">Resolve privileged filesystem paths against symlink races</a> (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
         <summary>ISO/IEC 23894:2023 AI guidance on risk management (2023)</summary>
         <div class="inner">
           <p>aligns with guidance. 14 identifiers referenced from a curated subset of the edition.</p>
@@ -5733,6 +5777,7 @@
             <li>V5: File Handling
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-file-upload-handling.md">Validate and contain uploaded files</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-symlink-resolution.md">Resolve privileged filesystem paths against symlink races</a> (broad)</li>
               </ul>
             </li>
             <li>V6: Authentication
