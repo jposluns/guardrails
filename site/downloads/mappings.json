@@ -109,7 +109,7 @@
       "source_artefact": "NIST AI 100-1, AI Risk Management Framework 1.0",
       "retrieved": "2026-08-16",
       "catalogue": "full",
-      "ids_cited": 23,
+      "ids_cited": 24,
       "ids_total": 72
     },
     "nist-ssdf": {
@@ -261,6 +261,26 @@
       "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
     },
     {
+      "rule_id": "setcmp",
+      "rule_title": "A completeness claim enumerates its set",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md",
+      "framework": "iso-23894",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "A.12",
+      "identifier_title": "Transparency and explainability"
+    },
+    {
+      "rule_id": "setcmp",
+      "rule_title": "A completeness claim enumerates its set",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "GOVERN 4.1",
+      "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
+    },
+    {
       "rule_id": "corrob",
       "rule_title": "Corroborate external claims",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md",
@@ -339,6 +359,26 @@
       "fit": "tight",
       "identifier": "MAP 2.3",
       "identifier_title": "Scientific integrity and TEVV considerations are identified and documented, including those related to experimental design, data collection and selection, and construct validation."
+    },
+    {
+      "rule_id": "estsep",
+      "rule_title": "Measured and estimated figures stay separate",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md",
+      "framework": "iso-23894",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "A.12",
+      "identifier_title": "Transparency and explainability"
+    },
+    {
+      "rule_id": "estsep",
+      "rule_title": "Measured and estimated figures stay separate",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "MEASURE 1.1",
+      "identifier_title": "Approaches and metrics for measurement of AI risks enumerated during the MAP function are selected for implementation."
     },
     {
       "rule_id": "nofabr",
