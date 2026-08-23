@@ -6631,6 +6631,16 @@
       "identifier_title": "Tool Poisoning"
     },
     {
+      "rule_id": "secprv",
+      "rule_title": "A preview makes no change",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-preview-has-no-side-effects.md",
+      "framework": "owasp-asi",
+      "relation": "addresses risk",
+      "fit": "tight",
+      "identifier": "ASI09",
+      "identifier_title": "Human-Agent Trust Exploitation"
+    },
+    {
       "rule_id": "secaud",
       "rule_title": "Protect audit records from the actors they record",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-protect-audit-records.md",
