@@ -137,23 +137,35 @@ def is_clause_id(any_id):
     return split_clause_id(any_id) is not None
 
 
+def _valid_register_id(any_id):
+    """True if any_id is a well-formed corpus-id (CID_RE) OR a well-formed clause-id. Used to fail closed
+    on a register id (born/tombstone/successor) that is neither: such an id is malformed input (exit 2),
+    not a content finding."""
+    return isinstance(any_id, str) and (bool(CID_RE.match(any_id)) or is_clause_id(any_id))
+
+
 def check_scheme(rows, rule_corpus_ids):
     """ID SCHEME (7.1). rows is a list of {'clause-id','corpus-id',...} dicts; rule_corpus_ids is the set
     of corpus-ids found in the rule sources. Returns a list of finding strings. Ordinals are validated by
-    ORDINAL_RE (unpadded positive decimal) and never compared as text."""
+    ORDINAL_RE (unpadded positive decimal) and never compared as text. A clause-id that does not parse, or
+    a corpus-id that is missing, non-string, or not a well-formed corpus-id, is malformed input and raises
+    GateError (fail-closed, exit 2). A well-formed-but-mismatched corpus-id, a duplicate clause-id, and a
+    rule corpus with no clause row are genuine content violations, reported as findings (exit 1)."""
     findings = []
     seen = set()
     inventory_corpus_ids = set()
     for i, row in enumerate(rows, 1):
         cid = row.get("clause-id")
-        corpus = row.get("corpus-id")
         parsed = split_clause_id(cid)
         if parsed is None:
-            findings.append("clause row #{}: clause-id {!r} is not <corpus-id>.<ordinal> with an unpadded "
-                            "positive-decimal ordinal".format(i, cid))
-            continue
+            raise GateError("clause row #{}: clause-id {!r} is missing or not <corpus-id>.<ordinal> with "
+                            "an unpadded positive-decimal ordinal".format(i, cid))
         parsed_corpus, _ordinal = parsed
-        if not isinstance(corpus, str) or corpus != parsed_corpus:
+        corpus = row.get("corpus-id")
+        if not isinstance(corpus, str) or not CID_RE.match(corpus):
+            raise GateError("clause row #{}: corpus-id {!r} is missing, non-string, or not a well-formed "
+                            "corpus-id".format(i, corpus))
+        if corpus != parsed_corpus:
             findings.append("clause row #{}: corpus-id {!r} does not match the clause-id's corpus part "
                             "{!r}".format(i, corpus, parsed_corpus))
         if cid in seen:
@@ -165,35 +177,30 @@ def check_scheme(rows, rule_corpus_ids):
     return findings
 
 
-def cumulative_max_before(born_clause_ids, current_release):
-    """Return {corpus-id: max ordinal ever assigned STRICTLY BEFORE current_release}. born_clause_ids is a
-    list of (clause-id, born-release-tuple); current_release is a SemVer tuple. Ordinals compared
-    numerically. Born rows persist for dead ids, so this includes tombstoned ordinals (m-A)."""
-    prior = {}
-    for clause_id, born in born_clause_ids:
-        if born >= current_release:
-            continue
-        corpus, ordinal = split_clause_id(clause_id)
-        if corpus not in prior or ordinal > prior[corpus]:
-            prior[corpus] = ordinal
-    return prior
-
-
-def check_cumulative_max(born_clause_ids, current_release):
-    """CUMULATIVE-MAX (7.1 / m-A). Each clause-id born AT current_release must have an ordinal strictly
-    greater than the cumulative maximum ordinal ever used for its corpus-id before this release. Returns a
-    list of finding strings. Inputs are (clause-id, born-release-tuple) pairs and a SemVer tuple."""
+def check_cumulative_max(born_clause_ids):
+    """CUMULATIVE-MAX (7.1 / m-A). Release-agnostic: for EVERY born clause-id, its ordinal must strictly
+    exceed the maximum ordinal of any same-corpus-id clause-id born STRICTLY BEFORE its OWN born-release.
+    born_clause_ids is a list of (clause-id, born-release-tuple) pairs; ordinals are compared NUMERICALLY.
+    Each clause-id is checked against its own predecessors, never a single global newest release, so an
+    unrelated later-dated row (for example a tombstone) cannot disable the check and a dead ordinal's gap
+    can never be refilled below the historical maximum. Returns a list of finding strings."""
     findings = []
-    prior = cumulative_max_before(born_clause_ids, current_release)
     for clause_id, born in born_clause_ids:
-        if born != current_release:
-            continue
         corpus, ordinal = split_clause_id(clause_id)
-        ceiling = prior.get(corpus)
+        ceiling = None
+        for other_id, other_born in born_clause_ids:
+            if other_born >= born:
+                continue
+            other_corpus, other_ordinal = split_clause_id(other_id)
+            if other_corpus != corpus:
+                continue
+            if ceiling is None or other_ordinal > ceiling:
+                ceiling = other_ordinal
         if ceiling is not None and ordinal <= ceiling:
             findings.append("clause-id {!r} (ordinal {}) does not exceed the cumulative maximum ordinal {} "
-                            "ever used for corpus-id {!r} (a dead ordinal's gap must not be refilled below "
-                            "the historical maximum)".format(clause_id, ordinal, ceiling, corpus))
+                            "ever used for corpus-id {!r} before its born-release (a dead ordinal's gap "
+                            "must not be refilled below the historical maximum)".format(
+                                clause_id, ordinal, ceiling, corpus))
     return findings
 
 
@@ -249,40 +256,54 @@ def _require_release(table, key, where):
 
 
 def load_register(path):
-    """Parse the id-history register. Returns (born, retired_rows, retired_ids, born_clause_ids, newest):
-    born {id: born-release-str}, retired_rows {id: count}, retired_ids set, born_clause_ids list of
-    (clause-id, born-release-tuple) for the ordinal legs, and newest the max SemVer over every born and
-    retired release (the release under build) or None on an empty register. Fail-closed on any malformed
-    row (an unreadable register must never read as an empty history)."""
+    """Parse the id-history register. Returns (born, retired_rows, retired_ids, born_clause_ids):
+    born {id: born-release-str}, retired_rows {id: count}, retired_ids set, and born_clause_ids a list of
+    (clause-id, born-release-tuple) for the ordinal legs. Fail-closed (GateError, exit 2) on any malformed
+    row: a born/tombstone/successor id that is neither a well-formed corpus-id nor clause-id, a born or
+    retired release that is not a bare SemVer, a duplicate born row, or a successor-id that is empty,
+    non-string, malformed, a self-loop, or dangling (no born row). An unreadable or malformed register
+    must never read as an empty history."""
     try:
         data = load_toml(path)
     except (OSError, ValueError) as exc:
         raise GateError("cannot read the id-history register {} ({})".format(path, exc))
-    born, releases = {}, []
+    born = {}
     for row in data.get("born", []):
         if not isinstance(row, dict):
             raise GateError("id-history born row is not a table: {!r}".format(row))
         rid = _require_str(row, "id", "id-history born row")
+        if not _valid_register_id(rid):
+            raise GateError("id-history born row: id {!r} is neither a well-formed corpus-id nor a "
+                            "well-formed clause-id".format(rid))
         rel = _require_release(row, "born-release", "id-history born row {!r}".format(rid))
         if rid in born:
             raise GateError("id-history: duplicate born row for {!r}".format(rid))
         born[rid] = rel
-        releases.append(rel)
     retired_rows, retired_ids = {}, set()
     for kind in ("tombstone", "successor"):
         for row in data.get(kind, []):
             if not isinstance(row, dict):
                 raise GateError("id-history {} row is not a table: {!r}".format(kind, row))
             rid = _require_str(row, "id", "id-history {} row".format(kind))
-            rel = _require_release(row, "retired-release", "id-history {} row {!r}".format(kind, rid))
+            if not _valid_register_id(rid):
+                raise GateError("id-history {} row: id {!r} is neither a well-formed corpus-id nor a "
+                                "well-formed clause-id".format(kind, rid))
+            _require_release(row, "retired-release", "id-history {} row {!r}".format(kind, rid))
             if kind == "successor":
-                _require_str(row, "successor-id", "id-history successor row {!r}".format(rid))
+                succ = _require_str(row, "successor-id", "id-history successor row {!r}".format(rid))
+                if not _valid_register_id(succ):
+                    raise GateError("id-history successor row {!r}: successor-id {!r} is neither a "
+                                    "well-formed corpus-id nor a well-formed clause-id".format(rid, succ))
+                if succ == rid:
+                    raise GateError("id-history successor row {!r}: successor-id equals its own id "
+                                    "(self-loop)".format(rid))
+                if succ not in born:
+                    raise GateError("id-history successor row {!r}: successor-id {!r} has no born row "
+                                    "(dangling)".format(rid, succ))
             retired_rows[rid] = retired_rows.get(rid, 0) + 1
             retired_ids.add(rid)
-            releases.append(rel)
     born_clause_ids = [(rid, _semver(rel)) for rid, rel in born.items() if is_clause_id(rid)]
-    newest = max((_semver(r) for r in releases), default=None)
-    return born, retired_rows, retired_ids, born_clause_ids, newest
+    return born, retired_rows, retired_ids, born_clause_ids
 
 
 def _clause_rows(data, where):
@@ -361,17 +382,22 @@ def _span_content(text, start, end):
     return "\n".join(lines[start - 1:end])
 
 
-def check_rows(root, rows, manifest_sources):
+def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     """PER-ROW (7.2), Model C. For each row: the source file is read (its whole raw bytes hashed for the
     digest and its text sliced for the window); the [start,end] block resolves inside the file and is
     treated as a locating WINDOW of whole lines; canonical-text occurs EXACTLY ONCE as a contiguous
     byte-exact substring within that window (an embedded line-wrap LF retained verbatim, no normalization,
     per 3.2 byte-literal), and that one occurrence begins on start-line and ends on end-line (a tight
     window); source-digest equals the file digest; the row's corpus-id equals the source file's frontmatter
-    corpus-id. An empty or whitespace-only canonical-text never passes. Zero or more than one occurrence, an
-    untight occurrence, or a digest disagreement is a finding. When manifest_sources is not None (the
-    DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES entry. Returns a
-    list of finding strings; a required field of the wrong type is a GateError (fail-closed)."""
+    corpus-id. rule_sources is the loader's {corpus-id: scanned source Path} map: the row's source-path must
+    resolve to a file under rules_dir and equal the scanned source for the row's corpus-id, else it is a
+    finding (an out-of-rules-dir or wrong-file path). An empty or whitespace-only canonical-text never
+    passes, and a canonical-text that begins or ends with whitespace is a finding (a leading or trailing
+    space, tab, or newline would otherwise falsely satisfy the tight begin/end-line check). Zero or more
+    than one occurrence, an untight occurrence, or a digest disagreement is a finding. When manifest_sources
+    is not None (the DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES
+    entry. Returns a list of finding strings; a required field of the wrong type, including a non-integer or
+    boolean start-line/end-line, is a GateError (fail-closed)."""
     findings = []
     digest_cache = {}
     for i, row in enumerate(rows, 1):
@@ -386,7 +412,19 @@ def check_rows(root, rows, manifest_sources):
             raise GateError("{}: missing or non-string canonical-text".format(where))
         if not isinstance(digest_field, str):
             raise GateError("{}: missing or non-string source-digest".format(where))
+        for _name, _val in (("start-line", start), ("end-line", end)):
+            if isinstance(_val, bool) or not isinstance(_val, int):
+                raise GateError("{}: {} must be an integer, not {!r}".format(where, _name, _val))
         abs_path = root / source_path
+        resolved = abs_path.resolve()
+        if not resolved.is_relative_to(rules_dir.resolve()):
+            findings.append("{}: source-path {} does not resolve to a file under the rules dir {}"
+                            .format(where, source_path, rules_dir))
+        else:
+            expected = rule_sources.get(row.get("corpus-id"))
+            if expected is None or resolved != expected.resolve():
+                findings.append("{}: source-path {} is not the scanned rule source for corpus-id {!r}"
+                                .format(where, source_path, row.get("corpus-id")))
         if source_path not in digest_cache:
             try:
                 raw = abs_path.read_bytes()
@@ -415,6 +453,10 @@ def check_rows(root, rows, manifest_sources):
         elif not text_field.strip():
             findings.append("{}: canonical-text is empty or whitespace-only in {}"
                             .format(where, source_path))
+        elif text_field[0].isspace() or text_field[-1].isspace():
+            findings.append("{}: canonical-text begins or ends with whitespace; a tight window requires "
+                            "non-whitespace boundaries (a leading or trailing space, tab, or newline would "
+                            "falsely satisfy the begin/end-line check) in {}".format(where, source_path))
         else:
             # Model C: canonical-text must occur EXACTLY ONCE as a contiguous byte-exact substring within
             # the window, and that one occurrence must begin on start-line and end on end-line (a tight
@@ -487,7 +529,7 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
     try:
         rule_corpus_ids = load_rule_corpus_ids(rules_dir)
         rows = load_inventory(inventory_path)
-        born, retired_rows, retired_ids, born_clause_ids, newest = load_register(register_path)
+        born, retired_rows, retired_ids, born_clause_ids = load_register(register_path)
         prev_ids = load_prev_ids(prev_inventory_path) if prev_inventory_path is not None else None
         manifest_sources = load_manifest_sources(manifest_path) if manifest_path is not None else None
 
@@ -515,9 +557,8 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
 
         findings = []
         findings += check_scheme(rows, set(rule_corpus_ids))
-        findings += check_rows(root, rows, manifest_sources)
-        if newest is not None:
-            findings += check_cumulative_max(born_clause_ids, newest)
+        findings += check_rows(root, rows, manifest_sources, rule_corpus_ids, rules_dir)
+        findings += check_cumulative_max(born_clause_ids)
         findings += check_resurrection(inventory_ids, retired_ids)
         completeness, na = check_completeness(inventory_ids, set(born), retired_rows, live_ids, prev_ids)
         findings += completeness
@@ -665,11 +706,16 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
 
     # Numeric, not lexicographic, ordinal comparison in cumulative-max, both directions.
     lex_trap_pass = [("calpha.9", (1, 1, 0)), ("calpha.10", (1, 2, 0))]  # 10 > 9 numerically -> clean
-    if check_cumulative_max(lex_trap_pass, (1, 2, 0)):
+    if check_cumulative_max(lex_trap_pass):
         failures.append("cumulative-max wrongly flagged ordinal 10 vs prior 9 (lexicographic trap)")
     lex_trap_fail = [("calpha.10", (1, 1, 0)), ("calpha.2", (1, 2, 0))]  # 2 <= 10 numerically -> finding
-    if not check_cumulative_max(lex_trap_fail, (1, 2, 0)):
+    if not check_cumulative_max(lex_trap_fail):
         failures.append("cumulative-max missed ordinal 2 not exceeding prior 10")
+    # Release-agnostic: a later-release clause-id below the historical maximum is caught regardless of any
+    # unrelated newer row; no single global newest can disable the check.
+    if not check_cumulative_max([("calpha.10", (1, 0, 0)), ("calpha.2", (1, 5, 0))]):
+        failures.append("cumulative-max missed a later-release ordinal 2 below historical max 10 "
+                        "(release-agnostic)")
 
     if check_resurrection({"calpha", "calpha.1"}, {"cbeta1.9"}):
         failures.append("resurrection wrongly flagged a disjoint retired set")
@@ -749,12 +795,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             if _run_quiet(**_paths(base, genesis=True, manifest_path=bad_manifest)) != 1:
                 failures.append("manifest leg: a mismatching manifest expected exit 1 when armed")
 
-            # (1) padded ordinal -> scheme FAIL.
+            # (1) padded ordinal: a clause-id that does not parse is malformed input -> fail-closed exit 2
+            # (not a valid-but-wrong ordinal, which stays an exit-1 finding).
             rules, rows, born = _good_genesis()
             rows[0]["clause-id"] = "calpha.01"
             base = _fresh(rules, rows, born)
-            if _run_quiet(**_paths(base, genesis=True)) != 1:
-                failures.append("padded ordinal: expected exit 1")
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("padded ordinal (malformed clause-id): expected fail-closed exit 2")
 
             # (2) duplicate clause-id -> scheme FAIL.
             rules, rows, born = _good_genesis()
@@ -900,6 +947,157 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # rejects it rather than passing -> FAIL.
             if _model_c_case("cempty", ["a real obligation line"], "", 0, 0) != 1:
                 failures.append("Model C empty canonical-text: expected exit 1")
+
+            # (20) cumulative-max unrelated-tombstone bypass now FAILS. A later-dated UNRELATED tombstone
+            # (coldid.1 retired at 2.0.0) must not lift a global "newest" that disables the check: calpha.2
+            # born at 1.5.0 is still below the historical max 10 (calpha.10 born at 1.0.0) -> exit 1.
+            lines, line_of = _rule_lines("calpha", ["ob two", "ob ten"])
+            digest = _sha_of(lines)
+            sp = ".aiqt/core/rules/calpha.md"
+            rows = [
+                {"clause-id": "calpha.2", "corpus-id": "calpha", "source-path": sp,
+                 "start-line": line_of[0], "end-line": line_of[0], "canonical-text": "ob two",
+                 "source-digest": digest},
+                {"clause-id": "calpha.10", "corpus-id": "calpha", "source-path": sp,
+                 "start-line": line_of[1], "end-line": line_of[1], "canonical-text": "ob ten",
+                 "source-digest": digest},
+            ]
+            born = [("calpha", "1.0.0"), ("calpha.10", "1.0.0"), ("calpha.2", "1.5.0"),
+                    ("coldid", "1.0.0"), ("coldid.1", "1.0.0")]
+            base = _fresh({"calpha": lines}, rows, born, tombstones=[("coldid.1", "2.0.0")])
+            if _run_quiet(**_paths(base)) != 1:
+                failures.append("cumulative-max unrelated-tombstone bypass: expected exit 1")
+
+            # (21) tightness: a TRAILING newline in canonical-text no longer falsely satisfies end-on-end
+            # (before the fix "actual obligation\n" spanning lines 8-9 passed) -> exit 1.
+            if _model_c_case("ctailn", ["actual obligation", "noise"],
+                             "actual obligation\n", 0, 1) != 1:
+                failures.append("tightness trailing-newline canonical-text: expected exit 1")
+
+            # (22) tightness: a LEADING newline in canonical-text no longer falsely satisfies begin-on-start
+            # -> exit 1.
+            if _model_c_case("cleadn", ["noise", "actual obligation"],
+                             "\nactual obligation", 0, 1) != 1:
+                failures.append("tightness leading-newline canonical-text: expected exit 1")
+
+            # (23) source-path outside the rules dir now FAILS. The row points at a copy under .aiqt/ (not
+            # under .aiqt/core/rules/) with matching digest and frontmatter, so only the containment /
+            # identity check can catch it -> exit 1 (before the fix this passed).
+            lines, line_of = _rule_lines("coutsd", ["the only obligation"])
+            digest = _sha_of(lines)
+            row = {"clause-id": "coutsd.1", "corpus-id": "coutsd", "source-path": ".aiqt/outside.md",
+                   "start-line": line_of[0], "end-line": line_of[0],
+                   "canonical-text": "the only obligation", "source-digest": digest}
+            base = _fresh({"coutsd": lines}, [row], [("coutsd", "1.1.0"), ("coutsd.1", "1.1.0")])
+            (base / ".aiqt" / "outside.md").write_text(_canon(lines), encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True)) != 1:
+                failures.append("source-path outside rules dir: expected exit 1")
+
+            # (24) inventory clause-id of the wrong type (a raw non-string) is malformed input -> exit 2.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born)
+            (base / ".aiqt" / "core" / "clauses.toml").write_text(
+                '[[clause]]\nclause-id = 7\ncorpus-id = "calpha"\n'
+                'source-path = ".aiqt/core/rules/calpha.md"\nstart-line = 8\nend-line = 8\n'
+                'canonical-text = "x"\nsource-digest = "x"\n', encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("non-string clause-id: expected fail-closed exit 2")
+
+            # (25) inventory corpus-id failing CID_RE is malformed input -> exit 2.
+            rules, rows, born = _good_genesis()
+            rows[0]["corpus-id"] = "ab"
+            base = _fresh(rules, rows, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("corpus-id failing CID_RE: expected fail-closed exit 2")
+
+            # (26) inventory corpus-id well-formed but not matching the clause-id's corpus part stays a
+            # genuine content finding -> exit 1 (not fail-closed).
+            rules, rows, born = _good_genesis()
+            rows[0]["corpus-id"] = "cbeta1"
+            base = _fresh(rules, rows, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 1:
+                failures.append("mismatched (well-formed) corpus-id: expected exit 1")
+
+            # (27) register born id that is neither a well-formed corpus-id nor clause-id -> exit 2.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born + [("bad!!!", "1.1.0")])
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("malformed born id: expected fail-closed exit 2")
+
+            # (28) register successor-id that is malformed -> exit 2.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born, successors=[("calpha.1", "1.4.0", "!!!")])
+            if _run_quiet(**_paths(base)) != 2:
+                failures.append("malformed successor-id: expected fail-closed exit 2")
+
+            # (29) register successor-id equal to its own id (self-loop) -> exit 2.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born, successors=[("calpha.1", "1.4.0", "calpha.1")])
+            if _run_quiet(**_paths(base)) != 2:
+                failures.append("self-loop successor-id: expected fail-closed exit 2")
+
+            # (30) register successor-id with no born row (dangling) -> exit 2.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born, successors=[("calpha.1", "1.4.0", "cbeta1.9")])
+            if _run_quiet(**_paths(base)) != 2:
+                failures.append("dangling successor-id: expected fail-closed exit 2")
+
+            # (31) boolean line numbers (bool is an int subclass) are the wrong type -> fail-closed exit 2.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born)
+            digest = _sha_of(rules["calpha"])
+            (base / ".aiqt" / "core" / "clauses.toml").write_text(
+                '[[clause]]\nclause-id = "calpha.1"\ncorpus-id = "calpha"\n'
+                'source-path = ".aiqt/core/rules/calpha.md"\nstart-line = true\nend-line = true\n'
+                'canonical-text = "x"\nsource-digest = "{}"\n'.format(digest), encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("boolean line numbers: expected fail-closed exit 2")
+
+            # (32) a SUCCESSOR row loads and a successor-retired id that is still live is caught as a
+            # resurrection -> exit 1 (calpha.1 retired via a successor to calpha.2, yet live in inventory).
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born, successors=[("calpha.1", "1.4.0", "calpha.2")])
+            if _run_quiet(**_paths(base)) != 1:
+                failures.append("successor-retired id resurrection: expected exit 1")
+
+            # (33) explained disappearance PASSES: an id in the predecessor and absent now, WITH a
+            # retirement row, clears the cross-release leg -> exit 0. A whole corpus (cgamma + cgamma.1) is
+            # retired, so both its ids carry a tombstone.
+            rules, rows, born = _good_genesis()
+            born = born + [("cgamma", "1.0.0"), ("cgamma.1", "1.0.0")]
+            tombs = [("cgamma", "1.4.0"), ("cgamma.1", "1.4.0")]
+            current = _fresh(rules, rows, born, tombstones=tombs)
+            prev = current / ".aiqt" / "core" / "prev-clauses.toml"
+            prev_rows = copy.deepcopy(rows) + [{"clause-id": "cgamma.1", "corpus-id": "cgamma",
+                                                "source-path": ".aiqt/core/rules/cgamma.md",
+                                                "start-line": 8, "end-line": 8,
+                                                "canonical-text": "gone", "source-digest": "0" * 64}]
+            prev.write_text("".join(_toml_clause(r) + "\n" for r in prev_rows), encoding="utf-8")
+            if _run_quiet(**_paths(current, prev_inventory_path=prev)) != 0:
+                failures.append("explained disappearance: expected exit 0")
+
+            # (34) whitespace-only canonical-text is rejected (never a trivial substring match) -> exit 1.
+            if _model_c_case("cwsonl", ["a real obligation line"], "   ", 0, 0) != 1:
+                failures.append("Model C whitespace-only canonical-text: expected exit 1")
+
+            # (35) legitimate shared-window rows PASS: two distinct clause-ids with identical canonical-text
+            # in the same one-line window are clean (uniqueness is within each row's own window) -> exit 0.
+            lines, line_of = _rule_lines("cshare", ["the shared obligation sentence"])
+            digest = _sha_of(lines)
+            sp = ".aiqt/core/rules/cshare.md"
+            ln = line_of[0]
+            shared = [
+                {"clause-id": "cshare.1", "corpus-id": "cshare", "source-path": sp,
+                 "start-line": ln, "end-line": ln, "canonical-text": "the shared obligation sentence",
+                 "source-digest": digest},
+                {"clause-id": "cshare.2", "corpus-id": "cshare", "source-path": sp,
+                 "start-line": ln, "end-line": ln, "canonical-text": "the shared obligation sentence",
+                 "source-digest": digest},
+            ]
+            born = [("cshare", "1.1.0"), ("cshare.1", "1.1.0"), ("cshare.2", "1.1.0")]
+            base = _fresh({"cshare": lines}, shared, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 0:
+                failures.append("legitimate shared-window rows: expected exit 0")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -912,11 +1110,17 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             "resurrection and completeness set logic")
     if e2e_ran:
         print("SELF-TEST PASS: {}; and the end-to-end fixtures hold (passing genesis, deferred/armed "
-              "manifest leg, padded ordinal, duplicate id, missing corpus-id, span out of range, text "
-              "mismatch, digest mismatch, missing born row, resurrected id, cumulative-max fail, "
-              "lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, and the "
-              "Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window fail, "
-              "untight-window fail, and empty-canonical-text fail)".format(core))
+              "manifest leg, padded-ordinal fail-closed, duplicate id, missing corpus-id, span out of "
+              "range, text mismatch, digest mismatch, missing born row, resurrected id, cumulative-max "
+              "fail, lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, "
+              "the Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window "
+              "fail, untight-window fail, and empty-canonical-text fail; and the round-2 fixes: "
+              "cumulative-max unrelated-tombstone bypass fail, leading/trailing-newline tightness fails, "
+              "out-of-rules-dir source-path fail, non-string clause-id / corpus-id-failing-CID_RE / "
+              "malformed-born-id / malformed-, self-loop-, and dangling-successor-id / boolean-line-number "
+              "fail-closed exit 2, well-formed corpus-id mismatch exit 1, successor-row load with "
+              "successor-retired resurrection, explained-disappearance pass, whitespace-only canonical-text "
+              "fail, and legitimate shared-window rows pass)".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
               "directory), so those invariants are UNVERIFIED this run".format(core))
