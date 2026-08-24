@@ -89,7 +89,7 @@ REQUIRED_FILE_ROOTS = [
     "AGENTS.md",                         # generated adapter
     "GEMINI.md",                         # generated adapter
     ".github/copilot-instructions.md",   # generated adapter
-    "barebones-claude.md",               # a shipped starter file, in scope (GD-46)
+    "aiqt-barebones.md",                 # a shipped starter file, in scope (GD-46)
 ]
 
 # The single source of the operator identity (the same file the hooks generator renders from). Read at
