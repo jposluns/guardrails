@@ -52,6 +52,8 @@ CORPUS_PARTS = (".aiqt", "core", "rules")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
+# Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
+RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 1}
 GENSRC_OUTPUTS = (
     {"target": "site/downloads/aiqt/", "kind": "tree",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),

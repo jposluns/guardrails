@@ -10,6 +10,14 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_renderers.py",
+      "sources": [
+        "tools/"
+      ],
+      "target": ".aiqt/core/renderers.toml"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_enforceability.py",
       "sources": [
         ".aiqt/core/rules/",
@@ -25,6 +33,42 @@
         "tools/"
       ],
       "target": ".aiqt/gensrc.json"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_manifest.py",
+      "sources": [
+        ".aiqt/core/ownership.toml",
+        "VERSION",
+        ".aiqt/core/releases.toml",
+        ".aiqt/core/renderers.toml",
+        "CLAUDE.md"
+      ],
+      "target": ".aiqt/manifest.toml"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_manifest.py",
+      "sources": [
+        ".aiqt/core/ownership.toml",
+        "VERSION",
+        ".aiqt/core/releases.toml",
+        ".aiqt/core/renderers.toml",
+        "CLAUDE.md"
+      ],
+      "target": ".aiqt/release/announce-snippet.txt"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_manifest.py",
+      "sources": [
+        ".aiqt/core/ownership.toml",
+        "VERSION",
+        ".aiqt/core/releases.toml",
+        ".aiqt/core/renderers.toml",
+        "CLAUDE.md"
+      ],
+      "target": ".aiqt/release/root.txt"
     },
     {
       "kind": "block",
@@ -65,6 +109,14 @@
         ".aiqt/core/rules/"
       ],
       "target": ".cursor/rules/aiqt-guardrails/"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_manifest.py",
+      "sources": [
+        ".aiqt/core/ownership.toml"
+      ],
+      "target": ".gitattributes"
     },
     {
       "kind": "file",

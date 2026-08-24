@@ -1,0 +1,14 @@
+# .aiqt/core/references.toml: the INDEPENDENT-REFERENCE REGISTRY (VER-CORE 5.3). Independence is a
+# pack-defined fact recorded per entry; dedup is by PIPELINE IDENTITY, never by entry or root value; a
+# mirror never counts toward the quorum. Two independent entries sharing a pipeline-id are a schema
+# FAIL (the alias gate). Quorum default 1 at first release: exactly one independent pipeline exists.
+
+format-version = 1
+quorum = 1
+
+[[reference]]
+location = "https://github.com/jposluns/guardrails"
+retrieval-method = "git-tag"
+derivation = "independent"
+pipeline-id = "github-jposluns-guardrails"
+independence-basis = "The authoring repository itself: source repo, build system, and publishing origin are one pipeline. Recorded as the single first-release pipeline; a mirror, when added, counts for nothing (HUMAN-JUDGMENT, recorded here)."

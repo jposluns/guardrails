@@ -639,9 +639,10 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
 
 
 def load_manifest_sources(path):
-    """The DEFERRED leg's input: {repo-relative path: sha256} from the manifest's SOURCES section (assumed
-    shape: an array of `[[sources]]` tables with `path` and `sha256`). Fail-closed on an unreadable or
-    malformed manifest. Reconciled with gen_manifest.py at finalize."""
+    """The DEFERRED leg's input: {repo-relative path: sha256} from the manifest's SOURCES section
+    (reconciled with gen_manifest.py: an array of [[sources]] tables carrying exactly path, bytes, and
+    sha256). Fail-closed on an unreadable or malformed manifest, a duplicate path (never a silent
+    dict-overwrite), a non-64-lowercase-hex digest, or a negative or non-integer size."""
     try:
         data = load_toml(path)
     except (OSError, ValueError) as exc:
@@ -651,9 +652,18 @@ def load_manifest_sources(path):
         raise GateError("manifest {}: no [[sources]] array".format(path))
     out = {}
     for row in sources:
-        if not isinstance(row, dict):
-            raise GateError("manifest {}: a sources row is not a table".format(path))
-        out[_require_str(row, "path", "manifest sources row")] = _require_str(row, "sha256", "manifest sources row")
+        if not isinstance(row, dict) or set(row) != {"path", "bytes", "sha256"}:
+            raise GateError("manifest {}: a sources row's keys are not exactly path/bytes/sha256"
+                            .format(path))
+        p = _require_str(row, "path", "manifest sources row")
+        digest = _require_str(row, "sha256", "manifest sources row")
+        if len(digest) != 64 or not all(c in "0123456789abcdef" for c in digest):
+            raise GateError("manifest {}: sha256 for {!r} is not 64 lowercase hex".format(path, p))
+        if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] < 0:
+            raise GateError("manifest {}: bytes for {!r} is not a non-negative integer".format(path, p))
+        if p in out:
+            raise GateError("manifest {}: duplicate sources path {!r}".format(path, p))
+        out[p] = digest
     return out
 
 
@@ -976,20 +986,37 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             # mismatching manifest fails; the default invocation reads no manifest at all.
             digest_alpha = _sha_of(rules["calpha"])
             digest_beta = _sha_of(rules["cbeta1"])
+            bytes_alpha = (base / ".aiqt" / "core" / "rules" / "calpha.md").stat().st_size
+            bytes_beta = (base / ".aiqt" / "core" / "rules" / "cbeta1.md").stat().st_size
             manifest = base / ".aiqt" / "manifest.toml"
             manifest.write_text(
-                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nsha256 = "{}"\n\n'
-                '[[sources]]\npath = ".aiqt/core/rules/cbeta1.md"\nsha256 = "{}"\n'.format(
-                    digest_alpha, digest_beta), encoding="utf-8")
+                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nbytes = {}\nsha256 = "{}"\n\n'
+                '[[sources]]\npath = ".aiqt/core/rules/cbeta1.md"\nbytes = {}\nsha256 = "{}"\n'.format(
+                    bytes_alpha, digest_alpha, bytes_beta, digest_beta), encoding="utf-8")
             if _run_quiet(**_paths(base, genesis=True, manifest_path=manifest)) != 0:
                 failures.append("manifest leg: a matching manifest expected exit 0 when armed")
             bad_manifest = base / ".aiqt" / "manifest-bad.toml"
             bad_manifest.write_text(
-                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nsha256 = "{}"\n\n'
-                '[[sources]]\npath = ".aiqt/core/rules/cbeta1.md"\nsha256 = "{}"\n'.format(
-                    "0" * 64, digest_beta), encoding="utf-8")
+                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nbytes = {}\nsha256 = "{}"\n\n'
+                '[[sources]]\npath = ".aiqt/core/rules/cbeta1.md"\nbytes = {}\nsha256 = "{}"\n'.format(
+                    bytes_alpha, "0" * 64, bytes_beta, digest_beta), encoding="utf-8")
             if _run_quiet(**_paths(base, genesis=True, manifest_path=bad_manifest)) != 1:
                 failures.append("manifest leg: a mismatching manifest expected exit 1 when armed")
+            # The hardened loader (D10) fails closed on a duplicate path and on a row whose keys are not
+            # exactly path/bytes/sha256.
+            dup_manifest = base / ".aiqt" / "manifest-dup.toml"
+            dup_manifest.write_text(
+                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nbytes = {}\nsha256 = "{}"\n\n'
+                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nbytes = {}\nsha256 = "{}"\n'.format(
+                    bytes_alpha, digest_alpha, bytes_alpha, digest_alpha), encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True, manifest_path=dup_manifest)) != 2:
+                failures.append("manifest leg: a duplicate sources path expected fail-closed exit 2")
+            extra_manifest = base / ".aiqt" / "manifest-extra.toml"
+            extra_manifest.write_text(
+                '[[sources]]\npath = ".aiqt/core/rules/calpha.md"\nbytes = {}\nsha256 = "{}"\nextra = 1\n'
+                .format(bytes_alpha, digest_alpha), encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True, manifest_path=extra_manifest)) != 2:
+                failures.append("manifest leg: an extra-key sources row expected fail-closed exit 2")
 
             # (1) padded ordinal: a clause-id that does not parse is malformed input -> fail-closed exit 2
             # (not a valid-but-wrong ordinal, which stays an exit-1 finding).

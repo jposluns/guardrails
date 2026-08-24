@@ -1,0 +1,8 @@
+# .aiqt/core/releases.toml: the RELEASE-ORDER RECORD (VER-CORE 2.4). Header-only and ZERO-ROW at
+# creation: at release N's tag this file carries exactly rows 1..N-1; the post-tag ATTESTATION COMMIT
+# appends row N. A [[release]] row carries: version, candidate SHA, QA-attestation digest and store
+# path, tag name, tag_object_sha, commit_sha, and UTC timestamps. Append-only under the
+# check_version_monotonicity.py prefix-identity discipline (Step 4). The genesis manifest requires this
+# record to be header-only (2.5); gen_manifest.py derives the manifest genesis flag from the row count.
+
+format-version = 1

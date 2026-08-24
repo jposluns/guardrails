@@ -1,0 +1,10 @@
+# .aiqt/core/dispositions.toml: the PUBLIC DISPOSITIONS RECORD (VER-CORE 6.5). Every disposition row the
+# release delta gate consumes ships HERE; a disposition existing only in a private QA record is, to the
+# gate, no disposition at all. Kinds: behaviour-neutral (patch), strengthened (minor),
+# default-correction (minor, with captured evidence per 6.6), class-change (minor/major),
+# version-impact, renderer-semantics. Schema validated by check_manifest.py; consumed by
+# check_release_delta.py (Step 4). Zero rows until the first dispositioned change; the GD-95
+# default-correction row is authored at the release that flips the default, with evidence captured then
+# (never invented now).
+
+format-version = 1
