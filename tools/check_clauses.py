@@ -18,11 +18,16 @@ gen_manifest.py at build time).
     source-path     = "repo/relative/path.md"   the rule SOURCE file (under .aiqt/core/rules/)
     start-line      = <int>                      1-based first line of the clause span in that file
     end-line        = <int>                      1-based last line of the clause span (>= start-line)
-    canonical-text  = "..."                      the span's content verbatim, canonical bytes (3.1)
+    canonical-text  = "..."                      the obligation's own text, LF-preserving byte-exact (3.2)
     source-digest   = "<64 hex>"                 SHA-256 of the WHOLE rule source file's raw bytes (3.2)
-  The span content is defined as the source file's lines[start-line-1 : end-line] joined with LF, with no
-  trailing newline; canonical-text must equal it exactly. (3.1 canonicalization of the source file itself
-  is check_byte_canon.py's job, not re-scanned here.)
+  Model C: the [start-line, end-line] block is a LOCATING WINDOW of whole lines (the source file's
+  lines[start-line-1 : end-line] joined with LF, no trailing newline). canonical-text must occur EXACTLY
+  ONCE as a contiguous byte-exact substring within that window, and that one occurrence must BEGIN on
+  start-line and END on end-line (a tight window). An embedded line-wrap LF in canonical-text is retained
+  verbatim, with no normalization of any kind (3.2 byte-literal). Zero or more than one occurrence is a
+  FAIL; the gate never picks the first occurrence. Uniqueness is within THAT ROW'S window only, not global,
+  so several clause-ids may legitimately share one source sentence. (3.1 canonicalization of the source
+  file itself is check_byte_canon.py's job, not re-scanned here.)
 
   `.aiqt/core/id-history.toml` (7.3), the pack-owned, append-only, cumulative register of every corpus-id
   AND clause-id ever assigned. Three arrays:
@@ -37,9 +42,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         `<corpus-id>.<ordinal>` with an UNPADDED positive-decimal ordinal (no leading
                         zero); the row's corpus-id matches the frontmatter corpus-id of its source file;
                         no duplicate clause-id. Ordinals are compared NUMERICALLY, never lexicographically.
-  PER-ROW (7.2):        the span resolves inside the named file; the canonical text is byte-identical to
-                        the span content; the source digest is the SHA-256 of the whole source file. Any
-                        disagreement among span/text/digest in any pairing is a FAIL.
+  PER-ROW (7.2):        the [start,end] block resolves inside the named file and is treated as a locating
+                        WINDOW of whole lines; canonical-text occurs exactly once as a contiguous
+                        byte-exact substring within that window, beginning on start-line and ending on
+                        end-line (a tight window); the source digest is the SHA-256 of the whole source
+                        file. Zero or more than one occurrence, an untight occurrence, an empty
+                        canonical-text, or a digest disagreement is a FAIL.
   CUMULATIVE-MAX (7.1): each ordinal newly assigned this release (a born row at the newest release in the
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
@@ -354,12 +362,16 @@ def _span_content(text, start, end):
 
 
 def check_rows(root, rows, manifest_sources):
-    """PER-ROW (7.2). For each row: the source file is read (its whole raw bytes hashed for the digest and
-    its text sliced for the span); the span resolves inside the file; canonical-text equals the span
-    content byte-for-byte; source-digest equals the file digest; the row's corpus-id equals the source
-    file's frontmatter corpus-id. When manifest_sources is not None (the DEFERRED leg armed) the digest is
-    also cross-checked against the manifest's SOURCES entry. Returns a list of finding strings; a required
-    field of the wrong type is a GateError (fail-closed)."""
+    """PER-ROW (7.2), Model C. For each row: the source file is read (its whole raw bytes hashed for the
+    digest and its text sliced for the window); the [start,end] block resolves inside the file and is
+    treated as a locating WINDOW of whole lines; canonical-text occurs EXACTLY ONCE as a contiguous
+    byte-exact substring within that window (an embedded line-wrap LF retained verbatim, no normalization,
+    per 3.2 byte-literal), and that one occurrence begins on start-line and ends on end-line (a tight
+    window); source-digest equals the file digest; the row's corpus-id equals the source file's frontmatter
+    corpus-id. An empty or whitespace-only canonical-text never passes. Zero or more than one occurrence, an
+    untight occurrence, or a digest disagreement is a finding. When manifest_sources is not None (the
+    DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES entry. Returns a
+    list of finding strings; a required field of the wrong type is a GateError (fail-closed)."""
     findings = []
     digest_cache = {}
     for i, row in enumerate(rows, 1):
@@ -396,13 +408,37 @@ def check_rows(root, rows, manifest_sources):
         if status == "non-utf8":
             findings.append("{}: source file {} is not valid UTF-8".format(where, source_path))
             continue
-        span = _span_content(decoded, start, end)
-        if span is None:
+        window = _span_content(decoded, start, end)
+        if window is None:
             findings.append("{}: source span (start-line {!r}, end-line {!r}) does not resolve inside {}"
                             .format(where, start, end, source_path))
-        elif span != text_field:
-            findings.append("{}: canonical-text does not match the source span content in {}"
+        elif not text_field.strip():
+            findings.append("{}: canonical-text is empty or whitespace-only in {}"
                             .format(where, source_path))
+        else:
+            # Model C: canonical-text must occur EXACTLY ONCE as a contiguous byte-exact substring within
+            # the window, and that one occurrence must begin on start-line and end on end-line (a tight
+            # window). Count with find(sub, idx + 1) so overlapping occurrences are counted too (str.count
+            # misses them); the gate never picks the first occurrence.
+            first = window.find(text_field)
+            count, idx = 0, first
+            while idx != -1:
+                count += 1
+                idx = window.find(text_field, idx + 1)
+            if count == 0:
+                findings.append("{}: canonical-text not found as a contiguous substring within the "
+                                "[start,end] window of {}".format(where, source_path))
+            elif count > 1:
+                findings.append("{}: canonical-text occurs {} times within the [start,end] window of {}; "
+                                "narrow the window or reword the source (the gate never picks the first "
+                                "occurrence)".format(where, count, source_path))
+            else:
+                begins = window[:first].count("\n") == 0
+                ends = window[:first + len(text_field)].count("\n") == (end - start)
+                if not (begins and ends):
+                    findings.append("{}: canonical-text resolves inside the window but does not begin on "
+                                    "start-line and end on end-line (window not tight) in {}"
+                                    .format(where, source_path))
         if digest_field != digest:
             findings.append("{}: source-digest does not match the SHA-256 of {}".format(where, source_path))
         try:
@@ -528,6 +564,13 @@ def _rule_lines(corpus_id, obligations):
     return lines, line_of
 
 
+def _toml_escape(value):
+    """Escape a string for a TOML basic string. Only canonical-text needs it: an embedded line-wrap LF is
+    emitted as a \\n escape that tomllib round-trips back to a real LF, so a multi-line Model C obligation
+    can be expressed in a single-line TOML value."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 def _toml_clause(row):
     out = ["[[clause]]",
            'clause-id = "{}"'.format(row["clause-id"]),
@@ -535,7 +578,7 @@ def _toml_clause(row):
            'source-path = "{}"'.format(row["source-path"]),
            "start-line = {}".format(row["start-line"]),
            "end-line = {}".format(row["end-line"]),
-           'canonical-text = "{}"'.format(row["canonical-text"]),
+           'canonical-text = "{}"'.format(_toml_escape(row["canonical-text"])),
            'source-digest = "{}"'.format(row["source-digest"]),
            ""]
     return "\n".join(out)
@@ -663,6 +706,22 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _write_corpus(base_tmp / "case{}".format(n[0]), rules, clause_rows,
                                  list(born), list(tombstones), list(successors))
             return base
+
+        def _model_c_case(corpus, obligations, clause_text, start_off, end_off):
+            """Build a one-corpus, one-clause genesis corpus whose single row spans the obligation lines
+            [start_off, end_off] (0-based indices into obligations) with canonical-text clause_text, then
+            run the gate under --genesis and return its exit code. Exercises the Model C window/substring
+            resolution for a sub-line or multi-line obligation."""
+            lines, line_of = _rule_lines(corpus, obligations)
+            digest = _sha_of(lines)
+            clause_id = "{}.1".format(corpus)
+            row = {"clause-id": clause_id, "corpus-id": corpus,
+                   "source-path": ".aiqt/core/rules/{}.md".format(corpus),
+                   "start-line": line_of[start_off], "end-line": line_of[end_off],
+                   "canonical-text": clause_text, "source-digest": digest}
+            born = [(corpus, "1.1.0"), (clause_id, "1.1.0")]
+            base = _fresh({corpus: lines}, [row], born)
+            return _run_quiet(**_paths(base, genesis=True))
 
         try:
             # (0) the passing genesis corpus, with --genesis, is clean (exit 0).
@@ -809,6 +868,38 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh(rules, rows, born, tombstones=[("calpha.1", "1.4.0")])
             if _run_quiet(**_paths(base, genesis=True)) != 2:
                 failures.append("genesis with a tombstone: expected fail-closed exit 2")
+
+            # (14) Model C sub-line obligation: canonical-text is a byte-exact substring of a wider source
+            # line, in a tight 1-line window -> PASS.
+            if _model_c_case("csubln", ["PREAMBLE. Obligation text here. TRAILER."],
+                             "Obligation text here.", 0, 0) != 0:
+                failures.append("Model C sub-line obligation: expected exit 0")
+
+            # (15) Model C multi-line obligation: canonical-text carries an embedded line-wrap LF and spans
+            # two source lines, in a tight 2-line window -> PASS (verifies the LF round-trips through TOML).
+            if _model_c_case("cmulti", ["first half of the obligation", "second half of the obligation"],
+                             "first half of the obligation\nsecond half of the obligation", 0, 1) != 0:
+                failures.append("Model C multi-line embedded-LF obligation: expected exit 0")
+
+            # (16) Model C canonical-text absent from its window -> FAIL.
+            if _model_c_case("cabsnt", ["the source line does not carry it"], "absent text", 0, 0) != 1:
+                failures.append("Model C canonical-text absent from window: expected exit 1")
+
+            # (17) Model C canonical-text occurring twice within the window (overlapping: 'aa' in 'aaa',
+            # which str.count would miscount as one) -> FAIL on uniqueness.
+            if _model_c_case("cdupdp", ["aaa"], "aa", 0, 0) != 1:
+                failures.append("Model C canonical-text occurring twice in window: expected exit 1")
+
+            # (18) Model C window too wide: the occurrence is present but does not begin on start-line (a
+            # noise line precedes it inside the 3-line window) -> FAIL on tightness.
+            if _model_c_case("cwidew", ["noise before", "the obligation", "noise after"],
+                             "the obligation", 0, 2) != 1:
+                failures.append("Model C window not tight: expected exit 1")
+
+            # (19) Model C empty canonical-text: an empty string trivially substring-matches, so the gate
+            # rejects it rather than passing -> FAIL.
+            if _model_c_case("cempty", ["a real obligation line"], "", 0, 0) != 1:
+                failures.append("Model C empty canonical-text: expected exit 1")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -823,8 +914,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
         print("SELF-TEST PASS: {}; and the end-to-end fixtures hold (passing genesis, deferred/armed "
               "manifest leg, padded ordinal, duplicate id, missing corpus-id, span out of range, text "
               "mismatch, digest mismatch, missing born row, resurrected id, cumulative-max fail, "
-              "lexicographic-trap pass, unexplained disappearance, and the fail-closed register cases)"
-              .format(core))
+              "lexicographic-trap pass, unexplained disappearance, the fail-closed register cases, and the "
+              "Model C sub-line pass, multi-line embedded-LF pass, absent-text fail, twice-in-window fail, "
+              "untight-window fail, and empty-canonical-text fail)".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
               "directory), so those invariants are UNVERIFIED this run".format(core))
