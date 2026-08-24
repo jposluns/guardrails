@@ -225,6 +225,10 @@ jobs:
         run: python3 tools/check_manifest.py --self-test
       - name: Manifest integrity
         run: python3 tools/check_manifest.py
+      - name: Byte canon self-test
+        run: python3 tools/check_byte_canon.py --self-test
+      - name: Byte canon
+        run: python3 tools/check_byte_canon.py
       - name: Clause inventory (manifest-SOURCES leg, armed)
         run: python3 tools/check_clauses.py --genesis --with-manifest
 
@@ -244,3 +248,27 @@ jobs:
       # the scheduled currency.yml, never on the PR path (see that workflow's header).
       - name: Standards currency self-test
         run: python3 tools/check_standards_currency.py --self-test
+
+  # The 3.6 checkout-byte-stability matrix: prove the .gitattributes eol=lf pinning defeats the worst
+  # adopter setting on each supported platform. core.autocrlf true is set BEFORE the checkout, so the
+  # fresh working tree below is materialized under the hostile setting; the byte-canon gate then runs
+  # its own scan (LF only, no BOM, one trailing newline) over that tree. A CRLF conversion on checkout
+  # would surface as a carriage-return finding, failing the job.
+  byte-canon-matrix:
+    name: Byte canon vectors (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Hostile checkout line-ending setting (before checkout)
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Byte canon self-test (vectors)
+        run: python3 tools/check_byte_canon.py --self-test
+      - name: Byte canon (full gate on this platform)
+        run: python3 tools/check_byte_canon.py
