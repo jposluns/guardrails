@@ -371,3 +371,30 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "A published-artefact checksum gate. It ships DORMANT: with no [release.artifacts] recorded it prints NOT APPLICABLE and asserts no active control today, so the release-integrity linkage (secpub) is arguable and deferred until it arms, none claimed here. When armed it hashes only the LATEST artifacts-carrying release against the working tree and checks each digest appears verbatim on the evidence page. Disclosed residuals (the gate docstring carries the full text): disarming the armed release's own artifacts table returns the gate to dormant (B1; the forward ratchet constrains only later releases), an older release's recorded digests are not re-hashed (B2), the recorded artifact SET is not checked for completeness so a release recording an incomplete or unrelated-only set leaves a changed artifact unattested (B3), A1's path check is lexical while hashing follows symlinks so a recorded path symlinked outside the published tree is hashed anyway (B4), and the D1/A5 evidence scan is a lowercase substring test that a digest inside an HTML comment (M1), a bare prefix-less digest (M2), or an uppercase or substring-of-a-longer-run token (M3) can slip. The LA-2 PR-2 arming layer closes B1/B2, with the set-completeness (B3), real-path containment (B4), and evidence-token (M3) hardenings landing at arming too."
+
+[[gate]]
+id = "renderers-drift"
+script = "tools/gen_renderers.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the renderer/generator declaration rendered from each adapter generator's statically parsed RENDERER_DECL and GENSRC_OUTPUTS plus its computed pack-local import closure and framed code digest. It proves the declaration matches the code as bytes; it does not judge whether a semantics-revision bump is honest, and the obligation-altering versus byte-only classification of a renderer change remains a human disposition at the release delta gate. The closure is computed from statically parsed imports, so a truly dynamic pack-local import is out of scope and disclosed at the tool."
+
+[[gate]]
+id = "manifest-gen-drift"
+script = "tools/gen_manifest.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the four release-integrity outputs (manifest, .gitattributes, ROOT, announce snippet) regenerated from the ownership map and the git-tracked surface. It proves the committed outputs equal a fresh regeneration and that the inversion assertion holds; it does not prove a class ASSIGNMENT is semantically right (a wrong but consistent class survives to review), and it cannot see a file hidden by an existing concrete exclusion pattern (the disclosed bounded residual of 4.2)."
+
+[[gate]]
+id = "manifest-integrity"
+script = "tools/check_manifest.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "The independent release-side manifest verifier: scope-by-inversion completeness and no-strays, exact SOURCES set equality with raw-byte re-hashing, per-class verification including the CLAUDE.md managed block, TREE and ROOT and snippet recomputation, minimum-class floors, the filesystem-semantics fail-closed walk, and the 6.5 record schemas. It verifies bytes and sets against the anchored map; it does not judge whether a path's declared class matches its true ownership, does not recompute the site/downloads outputs (their own drift gates in this roster do), and detects accident, not tamper (4.4)."

@@ -213,6 +213,21 @@ jobs:
       - name: Enforceability ledger drift
         run: python3 tools/gen_enforceability.py --check
 
+      - name: Renderer declaration self-test
+        run: python3 tools/gen_renderers.py --self-test
+      - name: Renderer declaration drift
+        run: python3 tools/gen_renderers.py --check
+      - name: Manifest generator self-test
+        run: python3 tools/gen_manifest.py --self-test
+      - name: Manifest generation drift
+        run: python3 tools/gen_manifest.py --check
+      - name: Manifest integrity self-test
+        run: python3 tools/check_manifest.py --self-test
+      - name: Manifest integrity
+        run: python3 tools/check_manifest.py
+      - name: Clause inventory (manifest-SOURCES leg, armed)
+        run: python3 tools/check_clauses.py --genesis --with-manifest
+
       - name: Rule placement
         run: python3 tools/check_rule_placement.py
 

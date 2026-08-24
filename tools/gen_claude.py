@@ -46,6 +46,8 @@ GROUP_LABEL = {key: label for key, label in GROUPS}
 # it does not affect what this generator produces. The standalone index .claude/RULES-INDEX.md is a whole
 # generated file (kind file); the CLAUDE.md pointer is a generated region inside the hand-authored
 # governance file (kind block, the RULES-INDEX markers).
+# Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
+RENDERER_DECL = {"renderer-id": "claude", "semantics-revision": 1}
 GENSRC_OUTPUTS = (
     {"target": ".claude/RULES-INDEX.md", "kind": "file",
      "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_claude.py"},

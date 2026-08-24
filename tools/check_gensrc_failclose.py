@@ -263,6 +263,78 @@ def _sanitized_env(overrides=None):
     return env
 
 
+def _materialize_git(template, real_root):
+    """D6: materialize a REAL minimal git repository in the sandbox TEMPLATE so a git-reading generator
+    (for example gen_manifest.py, whose `git ls-files` enumerates the tracked surface) runs its baseline
+    --check under the sweep. Identity is pinned per-call with -c (never user config), the template dir is
+    forced empty so no user hooks load, and the environment is sanitized (ambient GIT_* stripped,
+    global/system config sent to os.devnull).
+
+    The template's PATH SET is EXACTLY real_root's tracked set, so a git-reading generator sees the same
+    tracked surface the release-side --check saw (an on-disk but untracked build output stays untracked in
+    the sandbox too). Two hardenings (F-234):
+    (a) The real_root probe runs `-c core.fsmonitor=false --no-optional-locks` (both top-level options
+        PRECEDE the ls-files subcommand, so the -c override beats real_root's own repo-LOCAL config): a
+        repo-local core.fsmonitor is an arbitrary program git would otherwise EXECUTE during ls-files, and
+        that program could read or write OUTSIDE the sandbox. The override refuses to run it.
+    (b) A genuine probe FAILURE (a nonzero exit or an undecodable result) RAISES OSError, which the caller
+        maps to cannot-evaluate (exit 2). There is no `git add -A` fallback: a fallback would certify a
+        bogus baseline from a repository we could not enumerate. Every synthetic self-test fixture is a
+        REAL git repo, so real_root enumeration always succeeds or is cannot-evaluate. After the add and
+        commit the materialized index MUST equal real_root's tracked set: a tracked path missing from the
+        template (a symlink copytree dropped, a tracked-but-deleted file) means the sandbox does not mirror
+        the real tracked surface, so a git-reading baseline could not be trusted and the run raises."""
+    env = _sanitized_env({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
+             "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+             "-c", "init.defaultBranch=main", *args],
+            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+
+    if git(template, "init", "-q", "--template=").returncode != 0:
+        raise OSError("cannot git-init the failclose sandbox template")
+    # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
+    # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh (F-234a).
+    probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
+                            "--no-optional-locks", "ls-files", "-z"],
+                           capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+    if probe.returncode != 0:
+        raise OSError("cannot enumerate real_root's tracked set (git ls-files exit {}); fail-closed"
+                      .format(probe.returncode))
+    try:
+        tracked = [p for p in probe.stdout.decode("utf-8").split("\x00") if p]
+    except UnicodeDecodeError as exc:
+        raise OSError("cannot decode real_root's tracked set ({}); fail-closed".format(exc))
+    for rel in tracked:
+        # A tracked path is always a clean repo-relative POSIX path; reject anything else rather than add it.
+        if os.path.isabs(rel) or os.pardir in rel.split("/"):
+            raise OSError("real_root reported an unexpected tracked path {!r}; fail-closed".format(rel))
+    present = [p for p in tracked if (template / p).is_file()]
+    if present and git(template, "add", "--", *present).returncode != 0:
+        raise OSError("cannot git-add the tracked set into the failclose template")
+    if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
+        raise OSError("cannot commit the failclose sandbox template")
+    # The materialized index MUST equal real_root's tracked set (F-234b): any missing member is fail-closed.
+    readback = git(template, "ls-files", "-z")
+    if readback.returncode != 0:
+        raise OSError("cannot read back the materialized template index (git ls-files exit {})"
+                      .format(readback.returncode))
+    try:
+        materialized = {p for p in readback.stdout.decode("utf-8").split("\x00") if p}
+    except UnicodeDecodeError as exc:
+        raise OSError("cannot decode the materialized template index ({}); fail-closed".format(exc))
+    if materialized != set(tracked):
+        missing = sorted(set(tracked) - materialized)
+        raise OSError("the materialized template index does not equal real_root's tracked set "
+                      "({} member(s) missing, e.g. {}); fail-closed".format(len(missing), missing[:3]))
+    # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
+    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). A
+    # gc failure is non-fatal: the repo still works with loose objects, only slower.
+    git(template, "gc", "--quiet")
+
+
 def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
     """Run `python3 <script_path> --check` as a subprocess and return its exit code. shell=False, the
     interpreter pinned to sys.executable, a sanitized env carrying the per-call HOME/TMPDIR overrides, cwd
@@ -583,8 +655,7 @@ def sweep(real_root):
             work = Path(_mkdtemp(prefix="aiqt-gensrc-failclose-"))
             template = work / "template"
             shutil.copytree(real_root, template, symlinks=False, ignore=_copy_ignore)
-            (template / ".git").write_text("sandbox repo_root marker (not a real git dir)\n",
-                                           encoding="utf-8")
+            _materialize_git(template, real_root)  # D6: a real repo so git-reading generators baseline
         except (OSError, shutil.Error) as exc:
             cannot.append("template sandbox setup failed ({})".format(exc))
         else:
@@ -1008,6 +1079,40 @@ if __name__ == "__main__":
     sys.exit(main())
 '''
 
+# GITREADER: a git-reading generator whose --check runs `git ls-files` and fail-closes (exit 2) when no
+# usable repository is present, then guards its target content against the source. It models gen_manifest:
+# under the D6 real-git template its baseline passes (a real repo is present), and a valid-but-different
+# corruption of its target drifts to non-zero. Under the OLD bare-.git-marker template its baseline would
+# have fail-closed (exit 2, no usable repo), so this fixture passing the sweep proves D6 materialized a
+# real repository.
+_GITREADER = '''import subprocess
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _gen_common import repo_root, reconcile
+GENSRC_OUTPUTS = (
+    {"target": "out/gitreader.txt", "kind": "file",
+     "sources": ("src/gitreader-src.txt",), "regenerate": "python3 tools/gen_gitreader.py"},
+)
+def run(root, check):
+    text = (root / "src" / "gitreader-src.txt").read_text(encoding="utf-8")
+    desired = "GEN\\n" + text
+    target = root / "out" / "gitreader.txt"
+    if not check:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(desired, encoding="utf-8")
+        return 0
+    proc = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return 2  # no usable repository: fail closed, exactly what D6 must prevent for the baseline
+    current = target.read_text(encoding="utf-8") if target.exists() else None
+    return 1 if current != desired else 0
+def main():
+    return run(repo_root(), "--check" in sys.argv[1:])
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
 # A non-literal GENSRC_OUTPUTS (a bare Name): gen_gensrc's loader recovers the declaration with
 # ast.literal_eval, which raises ValueError on a non-literal RHS, so enumeration fails closed.
 _MALFORMED = "GENSRC_OUTPUTS = some_undefined_symbol\n"
@@ -1024,6 +1129,17 @@ def _run_write(root, stem):
                    check=False)
 
 
+def _git_fixture(repo, *args):
+    """Run git in a fixture repo with a pinned identity and no user config, matching _materialize_git.
+    check=True: a setup failure surfaces loudly rather than a silently broken fixture."""
+    env = _sanitized_env({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
+         "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+         "-c", "init.defaultBranch=main", *args],
+        capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False, check=True)
+
+
 def _build_repo(base, gens):
     """Assemble a synthetic repo under base carrying the named generators plus the real gen_gensrc loader,
     generate every target into a clean state, then write the .aiqt/gensrc.json registry. `gens` maps a
@@ -1037,8 +1153,8 @@ def _build_repo(base, gens):
     (base / "src").mkdir()
     (base / "out").mkdir()
     (base / ".aiqt").mkdir()
-    (base / ".git").write_text("marker\n", encoding="utf-8")
-    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode", "decode", "block"):
+    for name in ("goodfile", "bypass", "badcmd", "stateful", "swap", "tolerant", "mode", "decode",
+                 "block", "gitreader"):
         (base / "src" / "{}-src.txt".format(name)).write_text("source for {}\n".format(name),
                                                               encoding="utf-8")
     tree_src = base / "src" / "tree"
@@ -1057,6 +1173,12 @@ def _build_repo(base, gens):
     for stem in gens:
         _run_write(base, stem)
     _run_write(base, "gensrc")
+    # Make the fixture a REAL git repository (F-234): _materialize_git enumerates real_root's tracked set
+    # via `git ls-files` and no longer falls back to `git add -A` on a bare .git marker, so every fixture
+    # that reaches materialization must be a genuine repo whose tracked set mirrors its on-disk files.
+    _git_fixture(base, "init", "-q", "--template=")
+    _git_fixture(base, "add", "-A")
+    _git_fixture(base, "commit", "-q", "-m", "fixture baseline", "--no-verify")
     return base
 
 
@@ -1127,9 +1249,13 @@ def self_test_main():
         if sweep_quiet(mal) != 2:
             failures.append("malformed registry: expected fail-closed exit 2")
 
-        # (g) A declared target absent on disk fails closed (exit 2).
+        # (g) A declared target absent on disk fails closed (exit 2). Untrack it too, so real_root's
+        #     tracked set still mirrors its on-disk files (the F-234 materialization equality stays clean)
+        #     and the ABSENT-DECLARED-TARGET leg of _process_entry is what fails closed, not the new
+        #     tracked-set guard (which the dedicated case below covers).
         miss = _build_repo(tmp / "missing-target", {"goodfile": _GOODFILE})
         (miss / "out" / "goodfile.txt").unlink()
+        _git_fixture(miss, "rm", "-q", "--cached", "out/goodfile.txt")
         if sweep_quiet(miss) != 2:
             failures.append("missing declared target: expected fail-closed exit 2")
 
@@ -1230,6 +1356,57 @@ def self_test_main():
         if sweep_quiet(blk) != 0:
             failures.append("block-kind generator: expected the sweep to pass (exit 0; a block target is "
                             "probed with invalid UTF-8 only and the generator rejects it)")
+
+        # (n) D6: a git-reading generator whose --check runs `git ls-files` and fail-closes without a
+        #     usable repo passes the sweep (exit 0), because the D6 template materialization plants a real
+        #     git repository (its baseline succeeds and a corrupt target drifts to non-zero). Under the old
+        #     bare-.git-marker template its baseline would have fail-closed (exit 2), so this proves D6.
+        gitr = _build_repo(tmp / "gitreader", {"gitreader": _GITREADER})
+        if sweep_quiet(gitr) != 0:
+            failures.append("git-reading generator: expected the sweep to pass (exit 0; D6 materializes a "
+                            "real git repo so the baseline git ls-files succeeds)")
+
+        # (o) F-234a: a real_root whose repo-LOCAL core.fsmonitor points at a hook that writes an outside
+        #     marker. The probe runs `-c core.fsmonitor=false --no-optional-locks`, so git NEVER executes
+        #     the hook and the marker is never written; the sweep still completes (the goodfile fixture is
+        #     otherwise clean). Without the override git would run the hook (arbitrary code out of scope).
+        fsm = _build_repo(tmp / "fsmonitor", {"goodfile": _GOODFILE})
+        fsmon_marker = tmp / "fsmonitor-executed.marker"
+        hook = fsm / "fsmon-hook.sh"
+        hook.write_text("#!/bin/sh\necho executed > '{}'\n".format(fsmon_marker), encoding="utf-8")
+        os.chmod(hook, 0o755)
+        _git_fixture(fsm, "config", "core.fsmonitor", str(hook))
+        rc_fsm = sweep_quiet(fsm)
+        if fsmon_marker.exists():
+            failures.append("fsmonitor probe: the repo-local core.fsmonitor hook EXECUTED and wrote an "
+                            "outside marker (the probe is missing -c core.fsmonitor=false)")
+        if rc_fsm != 0:
+            failures.append("fsmonitor probe: expected a clean sweep (exit 0) with the fsmonitor override "
+                            "suppressing the hook, got {!r}".format(rc_fsm))
+
+        # (p) F-234b: a FORCED probe failure (real_root's .git replaced by a bare marker, so `git ls-files`
+        #     exits nonzero) is cannot-evaluate (exit 2), NEVER a silent `git add -A` fallback that would
+        #     certify a bogus baseline. Without the fix the old fallback would materialize a repo and the
+        #     goodfile fixture would sweep to exit 0.
+        probefail = _build_repo(tmp / "probe-fail", {"goodfile": _GOODFILE})
+        shutil.rmtree(probefail / ".git")
+        (probefail / ".git").write_text("marker\n", encoding="utf-8")
+        if sweep_quiet(probefail) != 2:
+            failures.append("forced probe failure: expected cannot-evaluate exit 2 (no git add -A "
+                            "fallback), a nonzero real_root ls-files must fail closed")
+
+        # (q) F-234b: a TRACKED-SET MISMATCH (a file tracked in real_root's index but absent from the
+        #     template) is detected as cannot-evaluate (exit 2). extra.txt is committed then deleted from
+        #     disk, so copytree never copies it and the materialized template index lacks it. Without the
+        #     equality guard the mismatch is unnoticed and the goodfile fixture sweeps to exit 0.
+        mism = _build_repo(tmp / "tracked-mismatch", {"goodfile": _GOODFILE})
+        (mism / "extra.txt").write_text("tracked extra\n", encoding="utf-8")
+        _git_fixture(mism, "add", "extra.txt")
+        _git_fixture(mism, "commit", "-q", "-m", "add extra", "--no-verify")
+        (mism / "extra.txt").unlink()
+        if sweep_quiet(mism) != 2:
+            failures.append("tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
+                            "template index must equal real_root's tracked set)")
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1259,8 +1436,12 @@ def self_test_main():
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
-          "2; a sandbox-setup mkdtemp failure returns exit 2; and a block-kind generator that fail-closes "
-          "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path")
+          "2; a sandbox-setup mkdtemp failure returns exit 2; a block-kind generator that fail-closes "
+          "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
+          "git-reading generator passes (exit 0) because the D6 template materializes a real git "
+          "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
+          "executed by the probe (no outside write) thanks to -c core.fsmonitor=false; and a forced probe "
+          "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback")
     return 0
 
 

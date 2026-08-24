@@ -50,6 +50,8 @@ ADAPTERS = (
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
+# Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
+RENDERER_DECL = {"renderer-id": "adapters", "semantics-revision": 1}
 GENSRC_OUTPUTS = (
     {"target": "GEMINI.md", "kind": "file",
      "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_adapters.py"},

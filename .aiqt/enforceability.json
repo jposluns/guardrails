@@ -394,6 +394,14 @@
         {
           "class": "a",
           "default": "block",
+          "id": "manifest-gen-drift",
+          "platform": "ci",
+          "residue": "A byte-identity drift gate over the four release-integrity outputs (manifest, .gitattributes, ROOT, announce snippet) regenerated from the ownership map and the git-tracked surface. It proves the committed outputs equal a fresh regeneration and that the inversion assertion holds; it does not prove a class ASSIGNMENT is semantically right (a wrong but consistent class survives to review), and it cannot see a file hidden by an existing concrete exclusion pattern (the disclosed bounded residual of 4.2).",
+          "script": "tools/gen_manifest.py"
+        },
+        {
+          "class": "a",
+          "default": "block",
           "id": "mappings-page-drift",
           "platform": "ci",
           "residue": "A byte-identity drift gate over the artefact tools/gen_mappings.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",
@@ -414,6 +422,14 @@
           "platform": "ci",
           "residue": "A byte-identity drift gate over the artefact tools/gen_reference_facts.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",
           "script": "tools/gen_reference_facts.py"
+        },
+        {
+          "class": "a",
+          "default": "block",
+          "id": "renderers-drift",
+          "platform": "ci",
+          "residue": "A byte-identity drift gate over the renderer/generator declaration rendered from each adapter generator's statically parsed RENDERER_DECL and GENSRC_OUTPUTS plus its computed pack-local import closure and framed code digest. It proves the declaration matches the code as bytes; it does not judge whether a semantics-revision bump is honest, and the obligation-altering versus byte-only classification of a renderer change remains a human disposition at the release delta gate. The closure is computed from statically parsed imports, so a truly dynamic pack-local import is out of scope and disclosed at the tool.",
+          "script": "tools/gen_renderers.py"
         },
         {
           "class": "a",
