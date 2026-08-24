@@ -177,6 +177,31 @@ def check_scheme(rows, rule_corpus_ids):
     return findings
 
 
+def check_no_nesting(rows):
+    """NO NESTED CLAUSES (enforces the shared-sentence decomposition model). Within one corpus-id, no
+    clause's canonical-text may be a PROPER substring of another clause's canonical-text. Two clauses MAY
+    carry identical canonical-text (the spec-intended form where one sentence holds several independently
+    testable obligations, distinguished by clause-id, quoted per 8.4 by the excerpt that carries each);
+    what is forbidden is a strict containment, which means one clause conflates into its span an obligation
+    another isolates, a redundant or mis-bounded decomposition the per-row byte-substring leg cannot
+    otherwise catch. Returns a list of finding strings."""
+    findings = []
+    by_corpus = {}
+    for row in rows:
+        cid = row.get("clause-id")
+        text = row.get("canonical-text")
+        if isinstance(cid, str) and isinstance(text, str):
+            by_corpus.setdefault(cid.split(".", 1)[0], []).append((cid, text))
+    for corpus, items in sorted(by_corpus.items()):
+        for a_id, a_text in items:
+            for b_id, b_text in items:
+                if a_id != b_id and a_text != b_text and a_text in b_text:
+                    findings.append("clause-id {!r} canonical-text is a proper substring of clause-id {!r} "
+                                    "within corpus-id {!r}: a nested or redundant decomposition (two "
+                                    "clauses may share identical text but never nest)".format(a_id, b_id, corpus))
+    return findings
+
+
 def check_cumulative_max(born_clause_ids):
     """CUMULATIVE-MAX (7.1 / m-A). Release-agnostic: for EVERY born clause-id, its ordinal must strictly
     exceed the maximum ordinal of any same-corpus-id clause-id born STRICTLY BEFORE its OWN born-release.
@@ -557,6 +582,7 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
 
         findings = []
         findings += check_scheme(rows, set(rule_corpus_ids))
+        findings += check_no_nesting(rows)
         findings += check_rows(root, rows, manifest_sources, rule_corpus_ids, rules_dir)
         findings += check_cumulative_max(born_clause_ids)
         findings += check_resurrection(inventory_ids, retired_ids)
@@ -721,6 +747,18 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
         failures.append("resurrection wrongly flagged a disjoint retired set")
     if not check_resurrection({"calpha.2"}, {"calpha.2"}):
         failures.append("resurrection missed a live id equal to a tombstoned id")
+
+    # check_no_nesting: identical sibling text is allowed (Model A); a proper substring is not; and
+    # containment across DIFFERENT corpus-ids is ignored (the invariant is within-rule only).
+    if check_no_nesting([{"clause-id": "calpha.1", "canonical-text": "same whole sentence"},
+                         {"clause-id": "calpha.2", "canonical-text": "same whole sentence"}]):
+        failures.append("no-nesting wrongly flagged two clauses sharing identical canonical-text")
+    if not check_no_nesting([{"clause-id": "calpha.1", "canonical-text": "a fragment"},
+                             {"clause-id": "calpha.2", "canonical-text": "a fragment plus more"}]):
+        failures.append("no-nesting missed a clause whose text is a proper substring of another's")
+    if check_no_nesting([{"clause-id": "calpha.1", "canonical-text": "alpha one"},
+                         {"clause-id": "cbeta1.1", "canonical-text": "alpha"}]):
+        failures.append("no-nesting wrongly flagged a substring across different corpus-ids")
 
     comp, na = check_completeness({"calpha.1"}, set(), {}, {"calpha.1"}, None)
     if not comp or not na:
