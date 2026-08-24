@@ -292,6 +292,15 @@ class = "a"
 residue = "It checks that the pack version never moves backward across a change. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "clauses"
+script = "tools/check_clauses.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks the frozen clause inventory: every rule corpus-id has a clause row, each clause-id follows the corpus-id.ordinal scheme with an ordinal strictly above the cumulative maximum ever used for that corpus-id, each clause canonical text is a unique byte-exact substring within its source line window with a matching whole-file digest, and no tombstoned or retired id is resurrected. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "placement"
 script = "tools/check_rule_placement.py"
 rules = []

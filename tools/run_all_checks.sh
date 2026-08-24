@@ -66,6 +66,8 @@ run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py
 run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py
+run_gate "clauses-selftest" python3 tools/check_clauses.py --self-test
+run_gate "clauses"          python3 tools/check_clauses.py --genesis
 run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 tools/check_artifact_checksums.py
