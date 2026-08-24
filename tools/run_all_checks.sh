@@ -97,6 +97,13 @@ run_gate "gensrc-failclose-selftest" python3 tools/check_gensrc_failclose.py --s
 run_gate "gensrc-failclose" python3 tools/check_gensrc_failclose.py
 run_gate "enforceability-selftest" python3 tools/gen_enforceability.py --self-test
 run_gate "enforceability-drift" python3 tools/gen_enforceability.py --check
+run_gate "renderers-selftest"    python3 tools/gen_renderers.py --self-test
+run_gate "renderers-drift"       python3 tools/gen_renderers.py --check
+run_gate "manifest-gen-selftest" python3 tools/gen_manifest.py --self-test
+run_gate "manifest-gen-drift"    python3 tools/gen_manifest.py --check
+run_gate "manifest-selftest"     python3 tools/check_manifest.py --self-test
+run_gate "manifest"              python3 tools/check_manifest.py
+run_gate "clauses-manifest-sources" python3 tools/check_clauses.py --genesis --with-manifest
 run_gate "placement"      python3 tools/check_rule_placement.py
 run_gate "mappings"       python3 tools/check_mappings.py
 run_gate "conformance-selftest" python3 tools/conformance.py --self-test
