@@ -108,6 +108,7 @@ from check_versions import _parse as _semver  # noqa: E402  reuse the shipped ba
 from gen_rules import parse_source, CID_RE  # noqa: E402  reuse the frontmatter parser and corpus-id regex
 
 ORDINAL_RE = re.compile(r"^[1-9][0-9]*$")  # unpadded positive decimal: no leading zero, no sign, no zero
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")  # the source-digest syntax: 64 lowercase hex characters
 
 
 class GateError(Exception):
@@ -122,13 +123,21 @@ def split_clause_id(clause_id):
     """Split a clause-id into (corpus-id, ordinal_int), or return None if it is not a well-formed
     clause-id. A corpus-id is `[a-z0-9]{6,}` with no dot, so a clause-id carries exactly one dot; the
     ordinal is an UNPADDED positive decimal compared NUMERICALLY. A padded ordinal ('01'), a zero, a
-    sign, extra dots, or a bad corpus-id all return None (the caller reports the scheme finding)."""
+    sign, extra dots, or a bad corpus-id all return None (the caller reports the scheme finding).
+    RESIDUAL: the scheme sets no upper bound on an ordinal, but CPython's int() refuses to convert an
+    integer string of more than 4300 digits (a ValueError). A pathological ordinal that long is treated
+    as malformed input here (return None, so the caller reports a scheme finding and the gate fails closed
+    with exit 2) rather than crashing with an unhandled ValueError. Real ordinals are tiny, so this bound
+    never touches a legitimate id."""
     if not isinstance(clause_id, str) or clause_id.count(".") != 1:
         return None
     corpus, _dot, ordinal = clause_id.partition(".")
     if not CID_RE.fullmatch(corpus) or not ORDINAL_RE.fullmatch(ordinal):
         return None
-    return corpus, int(ordinal)
+    try:
+        return corpus, int(ordinal)
+    except ValueError:
+        return None
 
 
 def is_clause_id(any_id):
@@ -245,7 +254,9 @@ def check_completeness(inventory_ids, born_ids, retired_rows, live_ids, prev_ids
     rows}; live_ids is the set of ids the inventory asserts live; prev_ids is the predecessor inventory id
     set or None. Every born id must be accounted for: it is either live in the inventory or carried by a
     retirement row; a born id that is neither is a phantom the register never assigned to a live obligation
-    and never retired. Returns (findings, na) where na is True when the cross-release disappearance leg did
+    and never retired. Every born clause-id's owning corpus-id (the part before the dot) must ALSO have a
+    born row; a born clause-id whose corpus was never born is an orphan (7.3 requires one born row per
+    corpus-id and clause-id ever assigned). Returns (findings, na) where na is True when the cross-release leg did
     not run (no predecessor)."""
     findings = []
     for iid in sorted(inventory_ids - born_ids):
@@ -254,6 +265,11 @@ def check_completeness(inventory_ids, born_ids, retired_rows, live_ids, prev_ids
         if retired_rows.get(bid, 0) == 0:
             findings.append("id {!r} has a born row but is neither live in the inventory nor carried by a "
                             "retirement row (a phantom born id)".format(bid))
+    for bid in sorted(born_ids):
+        parsed = split_clause_id(bid)
+        if parsed is not None and parsed[0] not in born_ids:
+            findings.append("id {!r} is a born clause-id but its owning corpus-id {!r} has no born row in "
+                            "the register (an orphan clause-id with no born corpus)".format(bid, parsed[0]))
     for rid, count in sorted(retired_rows.items()):
         if rid not in born_ids:
             findings.append("id {!r} has a retirement row but no born row in the register".format(rid))
@@ -347,7 +363,10 @@ def _require_str(table, key, where):
 
 def _require_release(table, key, where):
     value = _require_str(table, key, where)
-    if _semver(value) is None:
+    # The shipped SemVer parser uses match() with a `$` anchor, so a trailing newline slips past it
+    # ("1.1.0\n" parses). Reject any whitespace here before/around _semver so a newline- or space-tainted
+    # release is malformed input (exit 2), never a silently accepted bare SemVer.
+    if any(ch.isspace() for ch in value) or _semver(value) is None:
         raise GateError("{}: {!r} {!r} is not a bare SemVer".format(where, key, value))
     return value
 
@@ -507,7 +526,8 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
     than one occurrence, an untight occurrence, or a digest disagreement is a finding. When manifest_sources
     is not None (the DEFERRED leg armed) the digest is also cross-checked against the manifest's SOURCES
     entry. Returns a list of finding strings; a required field of the wrong type, including a non-integer or
-    boolean start-line/end-line, is a GateError (fail-closed)."""
+    boolean start-line/end-line or a source-digest that is not 64 lowercase hex characters, is a GateError
+    (fail-closed). A well-formed-but-wrong digest (correct syntax, wrong value) stays an exit-1 finding."""
     findings = []
     digest_cache = {}
     for i, row in enumerate(rows, 1):
@@ -522,6 +542,9 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
             raise GateError("{}: missing or non-string canonical-text".format(where))
         if not isinstance(digest_field, str):
             raise GateError("{}: missing or non-string source-digest".format(where))
+        if not SHA256_RE.fullmatch(digest_field):
+            raise GateError("{}: source-digest {!r} is not 64 lowercase hex characters (malformed digest "
+                            "syntax)".format(where, digest_field))
         for _name, _val in (("start-line", start), ("end-line", end)):
             if isinstance(_val, bool) or not isinstance(_val, int):
                 raise GateError("{}: {} must be an integer, not {!r}".format(where, _name, _val))
@@ -824,6 +847,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     for bad in ["calpha\n", "calpha.1\n"]:
         if _valid_register_id(bad):
             failures.append("_valid_register_id({!r}) should be False (trailing newline)".format(bad))
+    # An unbounded (>4300-digit) ordinal is treated as malformed rather than crashing CPython's int() guard:
+    # split_clause_id returns None (the caller reports a scheme finding) instead of raising ValueError.
+    if split_clause_id("calpha." + ("1" * 5000)) is not None:
+        failures.append("split_clause_id should treat a >4300-digit ordinal as malformed (None), not crash")
 
     # Numeric, not lexicographic, ordinal comparison in cumulative-max, both directions.
     lex_trap_pass = [("calpha.9", (1, 1, 0)), ("calpha.10", (1, 2, 0))]  # 10 > 9 numerically -> clean
@@ -870,6 +897,15 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     comp, _na = check_completeness({"calpha.1"}, {"calpha.1"}, {}, {"calpha.1"}, None)
     if any("phantom born id" in f for f in comp):
         failures.append("completeness: a live born id was wrongly flagged as phantom")
+
+    # A born clause-id whose owning corpus-id has no born row is an orphan; one whose corpus DOES have a
+    # born row is not. (corphn.1 is retired, so it is neither live nor a phantom: only the orphan leg fires.)
+    comp, _na = check_completeness(set(), {"corphn.1"}, {"corphn.1": 1}, set(), None)
+    if not any("orphan clause-id" in f for f in comp):
+        failures.append("completeness: an orphan-corpus born clause-id (no born corpus) was not flagged")
+    comp, _na = check_completeness(set(), {"corphn", "corphn.1"}, {"corphn": 1, "corphn.1": 1}, set(), None)
+    if any("orphan clause-id" in f for f in comp):
+        failures.append("completeness: a born clause-id with a born corpus was wrongly flagged as orphan")
 
     # check_register_integrity: retirement before birth, a successor born after the retirement pointing to
     # it, and a multi-node successor cycle are findings; a valid retirement and an acyclic edge are not.
@@ -1318,6 +1354,45 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             reg.write_text(reg.read_text(encoding="utf-8") + "\n[tombstone]\n", encoding="utf-8")
             if _run_quiet(**_paths(base)) != 2:
                 failures.append("tombstone section as a table: expected fail-closed exit 2")
+
+            # (42) round-4 A: a newline-tainted born-release is malformed input -> fail-closed exit 2. The
+            # shipped SemVer parser's match()/`$` slips a trailing LF past ("1.1.0\n" parses); the register
+            # value carries a REAL LF via the TOML \n escape (as the codex repro did), so this exercises the
+            # whitespace guard in _require_release, not a TOML parse error. A clean release passes (case 0).
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born)
+            reg = base / ".aiqt" / "core" / "id-history.toml"
+            reg.write_text(reg.read_text(encoding="utf-8").replace(
+                'born-release = "1.1.0"', 'born-release = "1.1.0\\n"', 1), encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("newline-tainted born-release: expected fail-closed exit 2")
+
+            # (43) round-4 B: an orphan-corpus born id -> completeness FAIL. corphan.1 has a born row but its
+            # owning corpus-id corphan has none; it is retired (so neither live nor a phantom), so only the
+            # orphan-corpus leg fires -> exit 1. A born clause-id whose corpus IS born passes (case 0).
+            rules, rows, born = _good_genesis()
+            born = born + [("corphan.1", "1.0.0")]
+            base = _fresh(rules, rows, born, tombstones=[("corphan.1", "1.4.0")])
+            if _run_quiet(**_paths(base)) != 1:
+                failures.append("orphan-corpus born id: expected exit 1")
+
+            # (44) round-4 C: an unbounded (5000-digit) ordinal is treated as malformed input -> fail-closed
+            # exit 2, never an uncaught ValueError from CPython's int-conversion guard. A normal ordinal
+            # passes (case 0). split_clause_id returns None so check_scheme reports a scheme finding.
+            rules, rows, born = _good_genesis()
+            rows[0]["clause-id"] = "calpha." + ("1" * 5000)
+            base = _fresh(rules, rows, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("unbounded ordinal: expected fail-closed exit 2 (no crash)")
+
+            # (45) round-4 D: a malformed source-digest syntax ("not-a-sha256") is malformed input ->
+            # fail-closed exit 2, distinct from the exit-1 finding a well-formed-but-wrong digest gets
+            # (case 6, "0" * 64). A valid 64-hex digest passes (case 0).
+            rules, rows, born = _good_genesis()
+            rows[0]["source-digest"] = "not-a-sha256"
+            base = _fresh(rules, rows, born)
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("malformed source-digest syntax: expected fail-closed exit 2")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -1342,7 +1417,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "successor-retired resurrection, explained-disappearance pass, whitespace-only canonical-text "
               "fail, and legitimate shared-window rows pass; and the round-3 fixes: trailing-LF clause-id "
               "reject, absolute source-path fail, phantom-born-id fail, retirement-before-birth fail, "
-              "two-node successor-cycle fail, and born-scalar / tombstone-table fail-closed exit 2)"
+              "two-node successor-cycle fail, and born-scalar / tombstone-table fail-closed exit 2; and "
+              "the round-4 fixes: newline-tainted born-release fail-closed exit 2, orphan-corpus born-id "
+              "fail, unbounded-ordinal fail-closed exit 2, and malformed-digest-syntax fail-closed exit 2)"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
