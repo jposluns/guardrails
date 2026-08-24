@@ -2319,30 +2319,6 @@ id = "secpur.6"
 born-release = "1.1.0"
 
 [[born]]
-id = "secfid"
-born-release = "1.1.0"
-
-[[born]]
-id = "secfid.1"
-born-release = "1.1.0"
-
-[[born]]
-id = "secfid.2"
-born-release = "1.1.0"
-
-[[born]]
-id = "secfid.3"
-born-release = "1.1.0"
-
-[[born]]
-id = "secfid.4"
-born-release = "1.1.0"
-
-[[born]]
-id = "secfid.5"
-born-release = "1.1.0"
-
-[[born]]
 id = "chgtrk"
 born-release = "1.1.0"
 
@@ -2400,4 +2376,48 @@ born-release = "1.1.0"
 
 [[born]]
 id = "sescls.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.1"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.3"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.5"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.6"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.7"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.8"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.9"
+born-release = "1.1.0"
+
+[[born]]
+id = "secfid.10"
 born-release = "1.1.0"

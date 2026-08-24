@@ -4175,51 +4175,6 @@ canonical-text = "Accessibility is not authority;\ndata already in hand is not t
 source-digest = "b87293e42be693284e441088b0810b3aec17b5c403ad16bc7b606b49d0e94316"
 
 [[clause]]
-clause-id = "secfid.1"
-corpus-id = "secfid"
-source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
-start-line = 18
-end-line = 21
-canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
-source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
-
-[[clause]]
-clause-id = "secfid.2"
-corpus-id = "secfid"
-source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
-start-line = 18
-end-line = 21
-canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
-source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
-
-[[clause]]
-clause-id = "secfid.3"
-corpus-id = "secfid"
-source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
-start-line = 18
-end-line = 21
-canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
-source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
-
-[[clause]]
-clause-id = "secfid.4"
-corpus-id = "secfid"
-source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
-start-line = 18
-end-line = 21
-canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
-source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
-
-[[clause]]
-clause-id = "secfid.5"
-corpus-id = "secfid"
-source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
-start-line = 21
-end-line = 21
-canonical-text = "A token is trusted only after every one of these checks passes."
-source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
-
-[[clause]]
 clause-id = "chgtrk.1"
 corpus-id = "chgtrk"
 source-path = ".aiqt/core/rules/trust-change-tracking-ext.md"
@@ -4326,3 +4281,93 @@ start-line = 15
 end-line = 15
 canonical-text = "On git that close is a green merge onto the protected branch."
 source-digest = "888ecba6a01eceddf160c102b1f9434f9ef16f7e18e775dbd9ce1bb5b2ff1e56"
+
+[[clause]]
+clause-id = "secfid.1"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.2"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.3"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.4"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.5"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.6"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.7"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.8"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.9"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 18
+end-line = 21
+canonical-text = "Code the assistant writes that implements OAuth, OIDC, or JWT-based authentication validates the full\nprotocol flow before granting access: the token issuer, audience, signature, and expiry; the state and\nnonce; the redirect binding and PKCE where applicable; and that the granted scopes match what the exact\nrelying party requested."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "secfid.10"
+corpus-id = "secfid"
+source-path = ".aiqt/core/rules/security-seci-federated-identity-flow.md"
+start-line = 21
+end-line = 21
+canonical-text = "A token is trusted only after every one of these checks passes."
+source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"

@@ -126,7 +126,7 @@ def split_clause_id(clause_id):
     if not isinstance(clause_id, str) or clause_id.count(".") != 1:
         return None
     corpus, _dot, ordinal = clause_id.partition(".")
-    if not CID_RE.match(corpus) or not ORDINAL_RE.match(ordinal):
+    if not CID_RE.fullmatch(corpus) or not ORDINAL_RE.fullmatch(ordinal):
         return None
     return corpus, int(ordinal)
 
@@ -141,7 +141,7 @@ def _valid_register_id(any_id):
     """True if any_id is a well-formed corpus-id (CID_RE) OR a well-formed clause-id. Used to fail closed
     on a register id (born/tombstone/successor) that is neither: such an id is malformed input (exit 2),
     not a content finding."""
-    return isinstance(any_id, str) and (bool(CID_RE.match(any_id)) or is_clause_id(any_id))
+    return isinstance(any_id, str) and (bool(CID_RE.fullmatch(any_id)) or is_clause_id(any_id))
 
 
 def check_scheme(rows, rule_corpus_ids):
@@ -162,7 +162,7 @@ def check_scheme(rows, rule_corpus_ids):
                             "an unpadded positive-decimal ordinal".format(i, cid))
         parsed_corpus, _ordinal = parsed
         corpus = row.get("corpus-id")
-        if not isinstance(corpus, str) or not CID_RE.match(corpus):
+        if not isinstance(corpus, str) or not CID_RE.fullmatch(corpus):
             raise GateError("clause row #{}: corpus-id {!r} is missing, non-string, or not a well-formed "
                             "corpus-id".format(i, corpus))
         if corpus != parsed_corpus:
@@ -243,11 +243,17 @@ def check_resurrection(inventory_ids, retired_ids):
 def check_completeness(inventory_ids, born_ids, retired_rows, live_ids, prev_ids):
     """COMPLETENESS (7.3). born_ids is the set with a born row; retired_rows is {id: count of retirement
     rows}; live_ids is the set of ids the inventory asserts live; prev_ids is the predecessor inventory id
-    set or None. Returns (findings, na) where na is True when the cross-release disappearance leg did not
-    run (no predecessor)."""
+    set or None. Every born id must be accounted for: it is either live in the inventory or carried by a
+    retirement row; a born id that is neither is a phantom the register never assigned to a live obligation
+    and never retired. Returns (findings, na) where na is True when the cross-release disappearance leg did
+    not run (no predecessor)."""
     findings = []
     for iid in sorted(inventory_ids - born_ids):
         findings.append("id {!r} appears in the inventory but has no born row in the register".format(iid))
+    for bid in sorted(born_ids - live_ids):
+        if retired_rows.get(bid, 0) == 0:
+            findings.append("id {!r} has a born row but is neither live in the inventory nor carried by a "
+                            "retirement row (a phantom born id)".format(bid))
     for rid, count in sorted(retired_rows.items()):
         if rid not in born_ids:
             findings.append("id {!r} has a retirement row but no born row in the register".format(rid))
@@ -262,6 +268,72 @@ def check_completeness(inventory_ids, born_ids, retired_rows, live_ids, prev_ids
                 findings.append("id {!r} disappeared since the predecessor inventory with no tombstone or "
                                 "successor row (unexplained disappearance)".format(gone))
     return findings, na
+
+
+def _successor_cycle_findings(edges):
+    """Report each cycle in the successor graph. edges is {id: [successor-id, ...]}. A cycle means a chain
+    of renames/folds/splits that loops back on itself, which the forward-only register semantics forbid;
+    the per-row self-loop check catches only the single-edge case (id -> itself), so a multi-node cycle
+    (a -> b -> a) needs this leg. Iterative depth-first search with a grey/black colouring: a node goes
+    grey on entry and black only once all its descendants are explored (the explicit path mirrors the
+    recursion stack), so a back-edge to a grey node on the current path is a cycle. Iterative rather than
+    recursive so a long successor chain cannot overflow the stack. Returns a list of finding strings, one
+    per distinct cycle found."""
+    findings = []
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {}
+    for start in sorted(edges):
+        if colour.get(start, WHITE) != WHITE:
+            continue
+        colour[start] = GREY
+        path = [start]
+        stack = [(start, iter(edges.get(start, [])))]
+        while stack:
+            node, it = stack[-1]
+            advanced = False
+            for nxt in it:
+                state = colour.get(nxt, WHITE)
+                if state == GREY:
+                    cycle = path[path.index(nxt):] + [nxt]
+                    findings.append("id-history successor graph contains a cycle: {} (a rename/fold/split "
+                                    "chain must not loop back on itself)".format(" -> ".join(cycle)))
+                elif state == WHITE:
+                    colour[nxt] = GREY
+                    path.append(nxt)
+                    stack.append((nxt, iter(edges.get(nxt, []))))
+                    advanced = True
+                    break
+            if not advanced:
+                colour[node] = BLACK
+                path.pop()
+                stack.pop()
+    return findings
+
+
+def check_register_integrity(born, retirements, successors):
+    """REGISTER TEMPORAL + GRAPH INTEGRITY (7.3, forward-only semantics). born is {id: born-release-str};
+    retirements is a list of (id, retired-release-tuple) for every tombstone and successor row; successors
+    is a list of (id, successor-id, retired-release-tuple). Returns findings (exit 1) for: a retirement
+    strictly before the id's own born-release; a successor-id born after the retirement-release of the row
+    that points to it; and a cycle in the successor graph. Releases are compared as the SemVer tuples the
+    register already parsed."""
+    findings = []
+    born_release = {rid: _semver(rel) for rid, rel in born.items()}
+    for rid, retired_at in retirements:
+        born_at = born_release.get(rid)
+        if born_at is not None and retired_at < born_at:
+            findings.append("id {!r} carries a retirement-release before its born-release (a retirement "
+                            "cannot precede the birth)".format(rid))
+    for rid, succ, retired_at in successors:
+        succ_born = born_release.get(succ)
+        if succ_born is not None and succ_born > retired_at:
+            findings.append("id-history successor row {!r}: successor-id {!r} is born after the retirement "
+                            "that points to it (a successor cannot postdate its retirement)".format(rid, succ))
+    edges = {}
+    for rid, succ, _retired_at in successors:
+        edges.setdefault(rid, []).append(succ)
+    findings += _successor_cycle_findings(edges)
+    return findings
 
 
 # --- register and inventory loading -----------------------------------------------------------------
@@ -281,19 +353,25 @@ def _require_release(table, key, where):
 
 
 def load_register(path):
-    """Parse the id-history register. Returns (born, retired_rows, retired_ids, born_clause_ids):
-    born {id: born-release-str}, retired_rows {id: count}, retired_ids set, and born_clause_ids a list of
-    (clause-id, born-release-tuple) for the ordinal legs. Fail-closed (GateError, exit 2) on any malformed
-    row: a born/tombstone/successor id that is neither a well-formed corpus-id nor clause-id, a born or
-    retired release that is not a bare SemVer, a duplicate born row, or a successor-id that is empty,
-    non-string, malformed, a self-loop, or dangling (no born row). An unreadable or malformed register
-    must never read as an empty history."""
+    """Parse the id-history register. Returns (born, retired_rows, retired_ids, born_clause_ids,
+    retirements, successors): born {id: born-release-str}, retired_rows {id: count}, retired_ids set,
+    born_clause_ids a list of (clause-id, born-release-tuple) for the ordinal legs, retirements a list of
+    (id, retired-release-tuple) for every tombstone and successor row, and successors a list of
+    (id, successor-id, retired-release-tuple) for the successor-graph legs. Fail-closed (GateError, exit 2)
+    on any malformed input: a born/tombstone/successor section that is present but not an array of tables, a
+    row that is not a table, a born/tombstone/successor id that is neither a well-formed corpus-id nor
+    clause-id, a born or retired release that is not a bare SemVer, a duplicate born row, or a successor-id
+    that is empty, non-string, malformed, a self-loop, or dangling (no born row). An unreadable or malformed
+    register must never read as an empty history."""
     try:
         data = load_toml(path)
     except (OSError, ValueError) as exc:
         raise GateError("cannot read the id-history register {} ({})".format(path, exc))
     born = {}
-    for row in data.get("born", []):
+    born_section = data.get("born", [])
+    if not isinstance(born_section, list):
+        raise GateError("id-history: the born section is not an array of tables")
+    for row in born_section:
         if not isinstance(row, dict):
             raise GateError("id-history born row is not a table: {!r}".format(row))
         rid = _require_str(row, "id", "id-history born row")
@@ -305,15 +383,20 @@ def load_register(path):
             raise GateError("id-history: duplicate born row for {!r}".format(rid))
         born[rid] = rel
     retired_rows, retired_ids = {}, set()
+    retirements, successors = [], []
     for kind in ("tombstone", "successor"):
-        for row in data.get(kind, []):
+        section = data.get(kind, [])
+        if not isinstance(section, list):
+            raise GateError("id-history: the {} section is not an array of tables".format(kind))
+        for row in section:
             if not isinstance(row, dict):
                 raise GateError("id-history {} row is not a table: {!r}".format(kind, row))
             rid = _require_str(row, "id", "id-history {} row".format(kind))
             if not _valid_register_id(rid):
                 raise GateError("id-history {} row: id {!r} is neither a well-formed corpus-id nor a "
                                 "well-formed clause-id".format(kind, rid))
-            _require_release(row, "retired-release", "id-history {} row {!r}".format(kind, rid))
+            rel = _require_release(row, "retired-release", "id-history {} row {!r}".format(kind, rid))
+            retired_at = _semver(rel)
             if kind == "successor":
                 succ = _require_str(row, "successor-id", "id-history successor row {!r}".format(rid))
                 if not _valid_register_id(succ):
@@ -325,10 +408,12 @@ def load_register(path):
                 if succ not in born:
                     raise GateError("id-history successor row {!r}: successor-id {!r} has no born row "
                                     "(dangling)".format(rid, succ))
+                successors.append((rid, succ, retired_at))
+            retirements.append((rid, retired_at))
             retired_rows[rid] = retired_rows.get(rid, 0) + 1
             retired_ids.add(rid)
     born_clause_ids = [(rid, _semver(rel)) for rid, rel in born.items() if is_clause_id(rid)]
-    return born, retired_rows, retired_ids, born_clause_ids
+    return born, retired_rows, retired_ids, born_clause_ids, retirements, successors
 
 
 def _clause_rows(data, where):
@@ -385,7 +470,7 @@ def load_rule_corpus_ids(rules_dir):
         except (OSError, ValueError) as exc:
             raise GateError("cannot parse rule source {} ({})".format(src, exc))
         corpus = fm.get("corpus-id")
-        if not isinstance(corpus, str) or not CID_RE.match(corpus):
+        if not isinstance(corpus, str) or not CID_RE.fullmatch(corpus):
             raise GateError("rule source {} has a missing or malformed corpus-id".format(src))
         if corpus in out:
             raise GateError("rule corpus-id {!r} used by both {} and {}".format(corpus, out[corpus], src))
@@ -442,7 +527,11 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                 raise GateError("{}: {} must be an integer, not {!r}".format(where, _name, _val))
         abs_path = root / source_path
         resolved = abs_path.resolve()
-        if not resolved.is_relative_to(rules_dir.resolve()):
+        if Path(source_path).is_absolute():
+            findings.append("{}: source-path {} is absolute; the schema requires a repo-relative path "
+                            "under the rules dir {} (an absolute path discards the root and bypasses "
+                            "containment)".format(where, source_path, rules_dir))
+        elif not resolved.is_relative_to(rules_dir.resolve()):
             findings.append("{}: source-path {} does not resolve to a file under the rules dir {}"
                             .format(where, source_path, rules_dir))
         else:
@@ -554,7 +643,7 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
     try:
         rule_corpus_ids = load_rule_corpus_ids(rules_dir)
         rows = load_inventory(inventory_path)
-        born, retired_rows, retired_ids, born_clause_ids = load_register(register_path)
+        born, retired_rows, retired_ids, born_clause_ids, retirements, successors = load_register(register_path)
         prev_ids = load_prev_ids(prev_inventory_path) if prev_inventory_path is not None else None
         manifest_sources = load_manifest_sources(manifest_path) if manifest_path is not None else None
 
@@ -585,6 +674,7 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         findings += check_no_nesting(rows)
         findings += check_rows(root, rows, manifest_sources, rule_corpus_ids, rules_dir)
         findings += check_cumulative_max(born_clause_ids)
+        findings += check_register_integrity(born, retirements, successors)
         findings += check_resurrection(inventory_ids, retired_ids)
         completeness, na = check_completeness(inventory_ids, set(born), retired_rows, live_ids, prev_ids)
         findings += completeness
@@ -726,9 +816,14 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     for cid, expect in scheme_ok:
         if split_clause_id(cid) != expect:
             failures.append("split_clause_id({!r}) != {!r}".format(cid, expect))
-    for bad in ["calpha.01", "calpha.0", "calpha.-1", "calpha.1.2", "calpha", "short.1", "calpha.", "calpha.1a"]:
+    for bad in ["calpha.01", "calpha.0", "calpha.-1", "calpha.1.2", "calpha", "short.1", "calpha.", "calpha.1a",
+                "calpha.1\n", "calpha\n.1", "calpha\n"]:
         if split_clause_id(bad) is not None:
             failures.append("split_clause_id({!r}) should be None (malformed)".format(bad))
+    # A trailing-LF id is not a well-formed register id either (fullmatch, not $-anchored match).
+    for bad in ["calpha\n", "calpha.1\n"]:
+        if _valid_register_id(bad):
+            failures.append("_valid_register_id({!r}) should be False (trailing newline)".format(bad))
 
     # Numeric, not lexicographic, ordinal comparison in cumulative-max, both directions.
     lex_trap_pass = [("calpha.9", (1, 1, 0)), ("calpha.10", (1, 2, 0))]  # 10 > 9 numerically -> clean
@@ -766,6 +861,33 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     comp, _na = check_completeness({"calpha.1"}, {"calpha.1"}, {}, {"calpha.1"}, {"calpha.1", "cbeta1.2"})
     if not any("unexplained disappearance" in f for f in comp):
         failures.append("completeness: an unexplained disappearance was not flagged with a predecessor")
+
+    # A born id that is neither live in the inventory nor carried by a retirement row is a phantom; a
+    # born id that is live is not.
+    comp, _na = check_completeness(set(), {"cghost.1"}, {}, set(), None)
+    if not any("phantom born id" in f for f in comp):
+        failures.append("completeness: a phantom born id (not live, not retired) was not flagged")
+    comp, _na = check_completeness({"calpha.1"}, {"calpha.1"}, {}, {"calpha.1"}, None)
+    if any("phantom born id" in f for f in comp):
+        failures.append("completeness: a live born id was wrongly flagged as phantom")
+
+    # check_register_integrity: retirement before birth, a successor born after the retirement pointing to
+    # it, and a multi-node successor cycle are findings; a valid retirement and an acyclic edge are not.
+    if not check_register_integrity({"calpha.1": "2.0.0"}, [("calpha.1", _semver("1.0.0"))], []):
+        failures.append("register-integrity missed a retirement-release before the born-release")
+    if check_register_integrity({"calpha.1": "1.0.0"}, [("calpha.1", _semver("1.4.0"))], []):
+        failures.append("register-integrity wrongly flagged a retirement at or after the born-release")
+    if not check_register_integrity({"calpha.1": "1.0.0", "cbeta1.1": "2.0.0"},
+                                    [("calpha.1", _semver("1.5.0"))],
+                                    [("calpha.1", "cbeta1.1", _semver("1.5.0"))]):
+        failures.append("register-integrity missed a successor born after the retirement pointing to it")
+    if not check_register_integrity({"calpha.1": "1.0.0", "cbeta1.1": "1.0.0"}, [],
+                                    [("calpha.1", "cbeta1.1", _semver("1.4.0")),
+                                     ("cbeta1.1", "calpha.1", _semver("1.4.0"))]):
+        failures.append("register-integrity missed a two-node successor cycle")
+    if check_register_integrity({"calpha.1": "1.0.0", "cbeta1.1": "1.0.0"}, [],
+                                [("calpha.1", "cbeta1.1", _semver("1.4.0"))]):
+        failures.append("register-integrity wrongly flagged an acyclic successor edge")
 
     # --- end-to-end fixture cases (a synthetic corpus per fail mode in a private tempdir) ----------
     import copy
@@ -1136,6 +1258,66 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh({"cshare": lines}, shared, born)
             if _run_quiet(**_paths(base, genesis=True)) != 0:
                 failures.append("legitimate shared-window rows: expected exit 0")
+
+            # (36) absolute source-path now FAILS. The row points at the ABSOLUTE path of its real scanned
+            # source (matching digest and frontmatter), so pathlib would discard the root and only the
+            # absolute-path check can catch it -> exit 1 (before the fix this passed).
+            lines, line_of = _rule_lines("cabspt", ["the only obligation"])
+            digest = _sha_of(lines)
+            good_row = {"clause-id": "cabspt.1", "corpus-id": "cabspt",
+                        "source-path": ".aiqt/core/rules/cabspt.md",
+                        "start-line": line_of[0], "end-line": line_of[0],
+                        "canonical-text": "the only obligation", "source-digest": digest}
+            base = _fresh({"cabspt": lines}, [dict(good_row)], [("cabspt", "1.1.0"), ("cabspt.1", "1.1.0")])
+            abs_src = str((base / ".aiqt" / "core" / "rules" / "cabspt.md").resolve())
+            (base / ".aiqt" / "core" / "clauses.toml").write_text(
+                _toml_clause(dict(good_row, **{"source-path": abs_src})) + "\n", encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True)) != 1:
+                failures.append("absolute source-path: expected exit 1")
+
+            # (37) phantom born id -> completeness FAIL. A born id absent from the inventory and carried by
+            # no retirement row is neither live nor retired -> exit 1.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born + [("cghost", "1.1.0"), ("cghost.1", "1.1.0")])
+            if _run_quiet(**_paths(base, genesis=True)) != 1:
+                failures.append("phantom born id: expected exit 1")
+
+            # (38) register temporal integrity: an id retired at a release BEFORE its born-release -> exit 1.
+            # cretire / cretire.1 are born at 2.0.0 yet tombstoned at 1.0.0 (retired, not live -> no
+            # resurrection or phantom finding, so the temporal leg is what fires).
+            rules, rows, born = _good_genesis()
+            born = born + [("cretire", "2.0.0"), ("cretire.1", "2.0.0")]
+            tombs = [("cretire", "1.0.0"), ("cretire.1", "1.0.0")]
+            base = _fresh(rules, rows, born, tombstones=tombs)
+            if _run_quiet(**_paths(base)) != 1:
+                failures.append("retirement-release before born-release: expected exit 1")
+
+            # (39) register graph integrity: a two-node successor cycle (a -> b, b -> a; both born, both
+            # absent from the inventory and retired via their successor rows) evades the per-row self-loop
+            # check but the graph leg catches it -> exit 1.
+            rules, rows, born = _good_genesis()
+            born = born + [("ccyclea.1", "1.0.0"), ("ccycleb.1", "1.0.0")]
+            succs = [("ccyclea.1", "1.4.0", "ccycleb.1"), ("ccycleb.1", "1.4.0", "ccyclea.1")]
+            base = _fresh(rules, rows, born, successors=succs)
+            if _run_quiet(**_paths(base)) != 1:
+                failures.append("two-node successor cycle: expected exit 1")
+
+            # (40) a born section that is a scalar (born = 7) is malformed input -> fail-closed exit 2, never
+            # an uncaught TypeError crash.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born)
+            (base / ".aiqt" / "core" / "id-history.toml").write_text("born = 7\n", encoding="utf-8")
+            if _run_quiet(**_paths(base, genesis=True)) != 2:
+                failures.append("born section as a scalar: expected fail-closed exit 2")
+
+            # (41) a tombstone section written as a table ([tombstone], not [[tombstone]]) is malformed input
+            # -> fail-closed exit 2, never a silent empty read.
+            rules, rows, born = _good_genesis()
+            base = _fresh(rules, rows, born)
+            reg = base / ".aiqt" / "core" / "id-history.toml"
+            reg.write_text(reg.read_text(encoding="utf-8") + "\n[tombstone]\n", encoding="utf-8")
+            if _run_quiet(**_paths(base)) != 2:
+                failures.append("tombstone section as a table: expected fail-closed exit 2")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -1158,7 +1340,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "malformed-born-id / malformed-, self-loop-, and dangling-successor-id / boolean-line-number "
               "fail-closed exit 2, well-formed corpus-id mismatch exit 1, successor-row load with "
               "successor-retired resurrection, explained-disappearance pass, whitespace-only canonical-text "
-              "fail, and legitimate shared-window rows pass)".format(core))
+              "fail, and legitimate shared-window rows pass; and the round-3 fixes: trailing-LF clause-id "
+              "reject, absolute source-path fail, phantom-born-id fail, retirement-before-birth fail, "
+              "two-node successor-cycle fail, and born-scalar / tombstone-table fail-closed exit 2)"
+              .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
               "directory), so those invariants are UNVERIFIED this run".format(core))
