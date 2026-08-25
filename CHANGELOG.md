@@ -1,4 +1,4 @@
-# Changelog: AIQT Guardrails
+# Changelog: AIQT Guardrails™
 
 The user-facing changes for each public release.
 

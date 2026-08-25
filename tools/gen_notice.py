@@ -28,12 +28,22 @@ INTRO_TEMPLATE = (
     "This pack is published under the Creative Commons Attribution-ShareAlike 4.0 International "
     "License (CC BY-SA 4.0); see the LICENSE file. That licence covers the pack's own content, "
     "including its crosswalk mappings.\n\n"
+    "The Creative Commons licence covers the pack's copyrightable material and does not grant any "
+    "trademark rights. AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns. These "
+    "marks are unregistered.\n\n"
     "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
     "{kinds} IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "
     "framework are reproduced. Each framework's identifiers and titles remain the property of their "
     "respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is "
-    "affiliated with this pack."
+    "affiliated with this pack.\n\n"
+    "AIQT Guardrails reproduces only each referenced control's identifier and the publisher's official "
+    "title or heading, to help adopters align their own compliance and audit programs across frameworks. "
+    "It reproduces no requirement text, control descriptions, or other body content, and it lists only "
+    "the controls it maps to its own rules, not a complete framework catalogue. To use the full "
+    "standards, adopters must obtain them directly from the publisher and accept that publisher's own "
+    "licence. AIQT Guardrails is not a substitute for, and does not relicense, any standard, and links "
+    "adopters to each publisher's source."
 )
 
 
@@ -103,7 +113,7 @@ def build(root):
             print("error: " + err + "; fail-closed (NOTICE not rendered)", file=sys.stderr)
         raise SystemExit(2)
 
-    lines = ["AIQT Guardrails: third-party attribution NOTICE", ""]
+    lines = ["AIQT Guardrails™: third-party attribution NOTICE", ""]
     lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds)))
     lines.append("")
     lines.append("=" * WRAP)

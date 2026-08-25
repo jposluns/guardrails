@@ -1,4 +1,4 @@
-AIQT: a standard for your AI assistant
+AIQT™: a standard for your AI assistant
 Version 1.0.0 . Licensed under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
 AIQT Guardrails by Jeff Posluns, https://github.com/jposluns/guardrails, CC BY-SA 4.0
 
