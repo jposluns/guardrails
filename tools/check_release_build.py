@@ -267,8 +267,17 @@ def _all_release_tags(root):
         try:
             _rev_parse(root, oid + "^{commit}")
         except GateError:
+            # Report the TERMINAL target type (the tree/blob the tag ultimately names) rather than the
+            # OUTER object kind: an annotated tag's own type is always 'tag', so `oid^{}` peels through
+            # the annotation to the ultimate non-tag object for a precise diagnostic. Fall back to the
+            # outer kind if the peel itself cannot resolve.
+            try:
+                target_kind = _tag_kind(root, oid + "^{}")
+            except GateError:
+                target_kind = kind
             raise GateError("release tag {} does not peel to a commit (its target is a {}; a tree- or "
-                            "blob-targeted tag cannot name a release commit); fail-closed".format(tag, kind))
+                            "blob-targeted tag cannot name a release commit); fail-closed".format(
+                                tag, target_kind))
         out[tag[1:]] = (tag, kind)
     return out
 
@@ -995,6 +1004,19 @@ def run_post_tag(root, attestation_commit, qa_path):
                             .format(commit_oid, candidate))
         else:
             findings += _attestation_delta_findings(root, candidate, commit_oid)
+        # (round-11 finding 7) EXIT-CODE PRECEDENCE: a conclusive STRUCTURAL finding (a failed ancestry
+        # check, or an attestation-delta finding such as a mode/type/scope tamper) is a definite CONTENT
+        # finding (exit 1) and is reported BEFORE _recompute_branch_integrity materializes the tree. A
+        # symlink (120000), gitlink (160000), delete (000000), or file-to-tree change on an allowed path
+        # makes materialization RAISE (a symlink/gitlink is rejected at materialize; gen_manifest --check
+        # cannot evaluate a deleted/replaced artifact), which the outer handler would otherwise reclassify
+        # to cannot-evaluate (exit 2), OVERRIDING the content finding the delta already produced. Any
+        # finding accrued to this point is conclusive, so short-circuit to exit 1; ONLY a within-scope,
+        # canonical-100644 delta (no findings yet) proceeds to the recompute, where a byte-level artifact
+        # tamper still yields exit 1 (gen_manifest mismatch) and a tree un-evaluable for some OTHER reason
+        # yields exit 2.
+        if findings:
+            return _report(findings, "post-tag")
         # (round-8 #2) RECOMPUTE the regenerated branch-integrity artifacts on the attestation commit: a
         # tampered manifest/root/snippet is rejected, not merely schema-validated.
         findings += _recompute_branch_integrity(root, commit_oid)
@@ -2159,6 +2181,73 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             failures.append("(finding 3) an attestation commit that chmods releases.toml to "
                                             "0o755 must be rejected by the raw mode/type delta check "
                                             "(exit 1); a name-only delta missed the executable-bit smuggle")
+
+                        # (round-11 finding 7) EXIT-CODE PRECEDENCE: a symlink (120000), gitlink (160000),
+                        # delete (000000), or file-to-tree tamper on an ALLOWED branch-integrity artifact is
+                        # a definite CONTENT finding (exit 1), reported by the raw mode/type delta BEFORE the
+                        # branch-integrity recompute can materialize the tree. Pre-fix, materialization
+                        # RAISED (a symlink/gitlink is rejected at materialize; gen_manifest --check cannot
+                        # evaluate a deleted/replaced artifact) and the caught GateError reclassified the
+                        # verdict to cannot-evaluate (exit 2), OVERRIDING the delta's exit-1 content finding.
+                        # The tamper targets root.txt (an allowed artifact NOT loaded before the delta, so
+                        # the early strict loads stay clean and the delta leg drives the verdict); each is
+                        # constructed purely in the index (cacheinfo/force-remove), so it is hermetic. With
+                        # the short-circuit removed, the symlink/gitlink cases return 2 and these fail.
+                        root_rel = gen_manifest.ROOT_REL
+
+                        def _run_precedence_tamper(index_ops, msg):
+                            subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                           capture_output=True, env=ge)
+                            for op in index_ops:
+                                subprocess.run(["git", "-C", str(ac), *op], capture_output=True, env=ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", msg, "--no-verify"],
+                                           capture_output=True, env=ge)
+                            return subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                  capture_output=True, text=True).stdout.strip()
+
+                        # symlink (120000): the blob content is the link target; only the raw dst mode drives
+                        # the finding, so the target text is immaterial.
+                        link_blob = subprocess.run(
+                            ["git", "-C", str(ac), "hash-object", "-w", "--stdin"],
+                            input=b"root.txt.target", capture_output=True, env=ge).stdout.strip().decode()
+                        sym_oid = _run_precedence_tamper(
+                            [["update-index", "--cacheinfo",
+                              "120000,{},{}".format(link_blob, root_rel)]], "symlink root.txt")
+                        if _run_post_tag_quiet(ac, sym_oid, str(a_qa)) != 1:
+                            failures.append("(finding 7) a symlink (120000) on an allowed artifact is a "
+                                            "content finding (exit 1); the branch-integrity recompute must "
+                                            "not reclassify it to cannot-evaluate (exit 2)")
+
+                        # gitlink (160000): mode-160000 tree entry naming a commit (a_csha is a real commit).
+                        glink_oid = _run_precedence_tamper(
+                            [["update-index", "--cacheinfo",
+                              "160000,{},{}".format(a_csha, root_rel)]], "gitlink root.txt")
+                        if _run_post_tag_quiet(ac, glink_oid, str(a_qa)) != 1:
+                            failures.append("(finding 7) a gitlink (160000) on an allowed artifact is a "
+                                            "content finding (exit 1); the branch-integrity recompute must "
+                                            "not reclassify it to cannot-evaluate (exit 2)")
+
+                        # delete (000000): the allowed artifact is removed from the tree.
+                        del_oid = _run_precedence_tamper(
+                            [["update-index", "--force-remove", root_rel]], "delete root.txt")
+                        if _run_post_tag_quiet(ac, del_oid, str(a_qa)) != 1:
+                            failures.append("(finding 7) a delete (000000) of an allowed artifact is a "
+                                            "content finding (exit 1); the branch-integrity recompute must "
+                                            "not reclassify it to cannot-evaluate (exit 2)")
+
+                        # file-to-tree: the allowed FILE is replaced by a TREE (a child blob under its path),
+                        # so its own dst mode is a delete and an out-of-scope path appears; both are findings.
+                        child_blob = subprocess.run(
+                            ["git", "-C", str(ac), "hash-object", "-w", "--stdin"],
+                            input=b"child\n", capture_output=True, env=ge).stdout.strip().decode()
+                        f2t_oid = _run_precedence_tamper(
+                            [["update-index", "--force-remove", root_rel],
+                             ["update-index", "--add", "--cacheinfo",
+                              "100644,{},{}/child".format(child_blob, root_rel)]], "file-to-tree root.txt")
+                        if _run_post_tag_quiet(ac, f2t_oid, str(a_qa)) != 1:
+                            failures.append("(finding 7) a file-to-tree change on an allowed artifact is a "
+                                            "content finding (exit 1); the branch-integrity recompute must "
+                                            "not reclassify it to cannot-evaluate (exit 2)")
                     else:
                         # (round-9 finding 2) the archive candidate could not be staged (git init/add/commit
                         # or tag failed): the archive-backed cases cannot be verified, so the self-test fails
