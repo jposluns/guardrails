@@ -38,8 +38,13 @@ SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 def _parse(version):
-    """Return the (major, minor, patch) int tuple for a well-formed version, or None if malformed."""
-    m = SEMVER.match(version)
+    """Return the (major, minor, patch) int tuple for a well-formed version, or None if malformed. Uses
+    fullmatch, not match: the `$`-anchored SEMVER pattern otherwise accepts a trailing newline (Python's
+    `$` matches before a final newline), so `_parse("1.0.0\\n")` was truthy. fullmatch requires the whole
+    string to match, closing that trailing-whitespace acceptance. This helper feeds every version
+    comparison the release gates make, so the tightening is load-bearing; no legitimate caller passes
+    trailing whitespace."""
+    m = SEMVER.fullmatch(version)
     return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
