@@ -942,7 +942,11 @@ def run(root):
         if claimed < floor:
             findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
                 BUMP_NAME[claimed], prev_row["version"], head_version, BUMP_NAME[floor]))
-    except (GateError, OSError, UnicodeError, KeyError, TypeError) as exc:
+    except (GateError, OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        # ValueError is the defensive backstop for an oversized SemVer component: _parse guards its int()
+        # conversion and returns None, but a component that exceeds CPython's integer-string digit limit is
+        # mapped to a cannot-evaluate here too, never a traceback exit 1. (UnicodeError is a ValueError
+        # subclass, kept explicit for the decode-error intent it documents.)
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     if findings:
@@ -1229,6 +1233,17 @@ def _real_pack_e2e(tmp, failures):
         failures.append("real full-pack run(): a changelog head version disagreeing with the head manifest "
                         "release-version must fail closed exit 2 (round-7 finding 2)")
     (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
+    # (round-4 codex finding 1) an OVERSIZED head SemVer component: a 5000-digit major matches the bare-SemVer
+    # grammar but exceeds CPython's integer-string digit limit. WITHOUT the _parse int() guard the conversion
+    # raises ValueError and (pre-fix) escapes run()'s boundary as a traceback exit 1; WITH it _parse returns
+    # None and the head-version malformation check fails closed exit 2. The releases row still anchors the
+    # real predecessor, so the oversized changelog version is the sole thing under test. CHANGELOG restored.
+    (repo / CHANGELOG_REL).write_text(
+        '[[release]]\nversion = "{}.0.0"\n'.format("1" * 5000), encoding="utf-8")
+    if _run_quiet_root(repo) != 2:
+        failures.append("real full-pack run(): an oversized head SemVer component (5000-digit major) must "
+                        "fail closed exit 2, not raise a ValueError traceback (round-4 codex finding 1)")
+    (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
     # (finding 1) releases.toml / dispositions.toml format-version = 999: the loader fails closed exit 2.
     (repo / RELEASES_REL).write_text(_releases(999), encoding="utf-8")
     if _run_quiet_root(repo) != 2:
@@ -1333,18 +1348,23 @@ def _real_pack_e2e(tmp, failures):
                            check=True, capture_output=True, env=env)
             tobj3 = subprocess.run(["git", "-C", str(repo3), "rev-parse", "refs/tags/v1.0.0"],
                                    capture_output=True, text=True).stdout.strip()
-            # HEAD restores a CONSISTENT manifest (regenerate) and bumps to 1.0.1, so the ONLY inconsistency
-            # under test is the predecessor manifest's omitted NOTICE row.
+            # HEAD restores a CONSISTENT manifest and bumps to 1.0.1, so the ONLY inconsistency under test is
+            # the predecessor manifest's omitted NOTICE row.
             (repo3 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
             (repo3 / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
             (repo3 / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
-            subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo3)],
-                           capture_output=True, env=env)
             (repo3 / RELEASES_REL).write_text(
                 'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
                 'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
                 'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
                     t=tobj3, c=commit1c, h="a" * 64), encoding="utf-8")
+            # Regenerate the HEAD manifest AFTER the one-row releases write so it is FRESH (round-4 codex
+            # finding 2): the head manifest freshness/integrity check (line ~905) then PASSES, so the ONLY
+            # thing supplying exit 2 is the predecessor manifest guard under test. Regenerating before the
+            # releases write left HEAD stale, and that stale HEAD independently gave exit 2 and MASKED the
+            # predecessor guard (neutering it still left the fixture passing).
+            subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo3)],
+                           capture_output=True, env=env)
             if _run_quiet_root(repo3) != 2:
                 failures.append("real full-pack run(): a predecessor manifest that under-claims a covered "
                                 "pack path (NOTICE) must be caught by gen_manifest --check/check_manifest on "
@@ -2157,6 +2177,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
         failures.append("_claimed_rank: expected GateError when head does not increase")
     except GateError:
         pass
+    # (round-4 codex finding 1) _parse GUARDS its int() conversion: a component within the SemVer grammar can
+    # still exceed CPython's integer-string-conversion digit limit (default 4300) and raise ValueError. An
+    # oversized component is malformed input, so _parse returns None (a cannot-evaluate every gate handles as
+    # fail-closed), never a propagating ValueError that would escape run()'s boundary as a traceback exit 1.
+    if _parse("1" * 5000 + ".0.0") is not None:
+        failures.append("_parse: an oversized major component (5000 digits) must return None, not raise")
 
     # --- combined multi-leg delta: dispositions consumed ACROSS legs, floor = max, no residue --------
     # A single release that both strengthens a clause and strengthens an ownership class: each leg consumes

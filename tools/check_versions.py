@@ -43,9 +43,19 @@ def _parse(version):
     `$` matches before a final newline), so `_parse("1.0.0\\n")` was truthy. fullmatch requires the whole
     string to match, closing that trailing-whitespace acceptance. This helper feeds every version
     comparison the release gates make, so the tightening is load-bearing; no legitimate caller passes
-    trailing whitespace."""
+    trailing whitespace.
+
+    The int() conversions are guarded: a component within the SemVer grammar can still exceed CPython's
+    integer-string-conversion digit limit (default 4300) and raise ValueError. An oversized component is
+    malformed input, so it returns None (a cannot-evaluate that every caller already handles as a
+    fail-closed malformation) rather than propagating a ValueError up through the release gates."""
     m = SEMVER.fullmatch(version)
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+    if m is None:
+        return None
+    try:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
 def main():

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "19adf2e6dc4309df978dd796a784dcdf09c21c6f777648b98daa33e1c032a131"
+tree-sha256 = "8be80e1a3b8b68058be82b3c35fd052adaa61ecc1585545c05715e9f896dc4b9"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2386,8 +2386,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 163234
-sha256 = "e6eded160783581fc88ed601b1921f1cc31d4d713e856f25a7d5ba9795b7af74"
+bytes = 165732
+sha256 = "f698627786406f4a23ef3fce4db3c987d918e11dc786ab03fd9a7855dec919ed"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -2421,8 +2421,8 @@ sha256 = "24b3a3821e2aaf499f6141bc52356b17906ab11e6834fac08c3cbd4b723fcfb6"
 
 [[sources]]
 path = "tools/check_versions.py"
-bytes = 5430
-sha256 = "a22afeb672fb762677e41331ff4061192f5bba45fcb464c8703c6999defa4dd8"
+bytes = 5914
+sha256 = "a399d3707cf8a8e8ab47929cfdbf263822a98a294d5d3bca4d4c6d9fc62496cb"
 
 [[sources]]
 path = "tools/ci-status.sh"
