@@ -31,6 +31,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -66,10 +67,29 @@ class GateError(Exception):
 # --- git plumbing (every return code checked) -------------------------------------------------------
 
 def _git(root, args, binary=False):
+    """Run git, always capturing stdout/stderr as BYTES (round-5 finding 3: text-mode capture raised an
+    uncaught UnicodeDecodeError on invalid-UTF-8 git output). The `binary` flag is retained for call-site
+    readability but no longer changes the capture; callers decode explicitly via _git_out/_git_err. A launch
+    failure is a GateError (cannot-evaluate)."""
     try:
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=not binary)
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True)
     except OSError as exc:
         raise GateError("git is not available: {}".format(exc))
+
+
+def _git_out(proc, what):
+    """Decode git stdout under an EXPLICIT UnicodeDecodeError -> GateError boundary (round-5 finding 3):
+    output the gate must interpret (a tag name, an object id, a type) that is not valid UTF-8 is
+    cannot-evaluate (exit 2), never an uncaught crash or a silently replaced value."""
+    try:
+        return proc.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GateError("{}: git output is not valid UTF-8 ({}); fail-closed".format(what, exc))
+
+
+def _git_err(proc):
+    """git stderr for a DIAGNOSTIC message only; replacement decoding is safe here (never interpreted)."""
+    return proc.stderr.decode("utf-8", "replace").strip()
 
 
 def _tag_kind(root, tag):
@@ -79,14 +99,14 @@ def _tag_kind(root, tag):
     proc = _git(root, ["cat-file", "-t", "refs/tags/" + tag])
     if proc.returncode != 0:
         raise GateError("tag {} does not resolve (unfetched or deleted; fetch tags)".format(tag))
-    return proc.stdout.strip()
+    return _git_out(proc, "cat-file -t {}".format(tag)).strip()
 
 
 def _rev_parse(root, ref):
     proc = _git(root, ["rev-parse", "--verify", "--quiet", ref])
     if proc.returncode != 0:
         raise GateError("cannot resolve {!r}".format(ref))
-    return proc.stdout.strip()
+    return _git_out(proc, "rev-parse {}".format(ref)).strip()
 
 
 def _object_exists(root, oid):
@@ -216,42 +236,40 @@ def ordering_findings(versions):
     return findings
 
 
-def _release_tags(root):
-    """The annotated release tags in the repo: {version: tag} for every tag named 'v<bare SemVer>' that
-    resolves to an ANNOTATED tag object (2.1). Lightweight or non-release tags are ignored here (each
-    recorded row validates its own tag); this answers only 'is a tagged release missing its row'."""
+def _all_release_tags(root):
+    """EVERY tag named 'v<bare SemVer>' in the repo, mapped to its object kind: {version: (tag, kind)} where
+    kind is 'tag' (annotated) or 'commit' (lightweight). Round-5 finding 2: a release tag is enumerated
+    regardless of kind, so a LIGHTWEIGHT release tag is neither silently discarded (which hid it from
+    dormancy and coverage) nor treated as valid. The `git tag -l` output is decoded under the finding-3
+    strict boundary, so an invalid-UTF-8 ref is cannot-evaluate (exit 2), not a crash."""
     proc = _git(root, ["tag", "-l", "v*"])
     if proc.returncode != 0:
-        raise GateError("cannot list release tags ({})".format(proc.stderr.strip()))
+        raise GateError("cannot list release tags ({})".format(_git_err(proc)))
     out = {}
-    for line in proc.stdout.splitlines():
+    for line in _git_out(proc, "git tag -l").splitlines():
         tag = line.strip()
         if not tag.startswith("v") or _parse(tag[1:]) is None:
             continue
-        if _tag_kind(root, tag) == "tag":
-            out[tag[1:]] = tag
+        out[tag[1:]] = (tag, _tag_kind(root, tag))
     return out
 
 
-def predecessor_completeness_findings(root, rows):
-    """2.4 / VER-CORE-SPEC.md:273 PREDECESSOR COMPLETENESS. Strictly-increasing SemVer over the recorded
-    rows cannot prove no TAGGED release was skipped (rows 1.0.0, 1.2.0 both increase while a tagged 1.1.0 is
-    missing). Enumerate the annotated release tags and require every tagged release AT OR BELOW the newest
-    recorded row to carry a row: a tagged predecessor lacking its attestation row is a FAIL (release N+1 is
-    not accepted before row N exists). A tag ABOVE the newest recorded row is the in-flight release (its row
-    is appended post-tag) and is allowed."""
+def release_tag_findings(root, rows):
+    """2.4 / VER-CORE-SPEC.md:231-235,273 RELEASE-TAG COVERAGE. Over EVERY v<SemVer> tag (round-5 finding 2):
+    (a) a LIGHTWEIGHT release tag is disallowed (2.1) and is a finding; (b) an ANNOTATED release tag AT OR
+    BELOW the newest recorded row that has no attestation row is a missing-predecessor finding (a tagged
+    release must carry its row before the next release is accepted). A tag ABOVE the newest recorded row (or
+    any tag when there are zero rows) is the in-flight release whose row is appended post-tag, so it is not a
+    missing-row finding, but a lightweight in-flight tag is still disallowed."""
     findings = []
-    recorded = {}
-    for r in rows:
-        t = _parse(r["version"])
-        if t is not None:
-            recorded[t] = r["version"]
-    if not recorded:
-        return findings
-    newest = max(recorded)
-    for ver, tag in sorted(_release_tags(root).items()):
+    recorded = {_parse(r["version"]): r["version"] for r in rows if _parse(r["version"]) is not None}
+    newest = max(recorded) if recorded else None
+    for ver, (tag, kind) in sorted(_all_release_tags(root).items()):
         t = _parse(ver)
-        if t is not None and t <= newest and t not in recorded:
+        if kind != "tag":
+            findings.append("release tag {} is LIGHTWEIGHT; release tags must be annotated (2.1); a "
+                            "lightweight release tag is disallowed".format(tag))
+        if t is not None and newest is not None and t <= newest and t not in recorded:
             findings.append("release {} is tagged ({}) at or below the newest attested release {} but has "
                             "no attestation row; a predecessor missing its row blocks the next release "
                             "(2.4/L273)".format(ver, tag, recorded[newest]))
@@ -348,9 +366,12 @@ def reproduce_gate(root, sha):
     have a repository. --check IS a byte comparison against fresh regeneration, so any drift is exit 1.
     A child exit 2 or a launch failure is cannot-evaluate and raises GateError -> exit 2 (round-4 finding
     4), never downgraded to a drift finding. Returns findings."""
-    tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-reproduce-"))
-    co = tmp / "co"
-    co.mkdir()
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-reproduce-"))
+        co = tmp / "co"
+        co.mkdir()
+    except OSError as exc:
+        raise GateError("reproduce: cannot create a temporary directory ({}); fail-closed".format(exc))
     env = _fresh_git_env()
     try:
         try:
@@ -374,13 +395,16 @@ def reproduce_gate(root, sha):
         findings = []
         for argv in commands:
             try:
-                r = subprocess.run(argv, cwd=str(co), capture_output=True, text=True, env=env)
+                # BYTES capture (round-5 finding 3): a generator emitting invalid UTF-8 must not crash the
+                # gate; the returncode drives the verdict and the tail is decoded with replacement.
+                r = subprocess.run(argv, cwd=str(co), capture_output=True, env=env)
             except OSError as exc:
                 raise GateError("reproduce: {!r} could not launch ({}); fail-closed".format(
                     " ".join(argv), exc))
             if r.returncode < 0 or r.returncode > 1:
+                diag = (r.stderr or r.stdout).decode("utf-8", "replace").strip()[:300]
                 raise GateError("reproduce: {!r} could not evaluate (rc={}): {}".format(
-                    " ".join(argv), r.returncode, (r.stderr or r.stdout).strip()[:300]))
+                    " ".join(argv), r.returncode, diag))
             if r.returncode == 1:
                 findings.append("reproduce drift: {!r} rc=1".format(" ".join(argv)))
         return findings
@@ -452,35 +476,40 @@ def _validate_tag_row(root, row):
 # --- run stages -------------------------------------------------------------------------------------
 
 def run_audit(root):
-    """Default AUDIT (2.6): validate whatever exists; dormancy keys off the record's rows, never a git
-    tag probe. Zero rows: every armed layer prints NOT APPLICABLE and the run is clean."""
+    """Default AUDIT (2.6): validate whatever exists. Dormancy requires ZERO release TAGS AND ZERO rows
+    (round-5 finding 2, spec 2.6/L324-329): each layer arms when its first tag OR row exists, so a zero-row
+    tree that already carries a v<SemVer> tag is armed, and a lightweight or unrecorded tag is caught."""
     try:
         rows = load_build_rows(root)
-        if not rows:
+        tags = _all_release_tags(root)
+        if not rows and not tags:
             for layer in ("tag-resolution", "genesis-uniqueness", "ordering", "chronology"):
-                print("release-build: {} NOT APPLICABLE (releases.toml is zero-row; arms at the first "
-                      "attestation row)".format(layer))
+                print("release-build: {} NOT APPLICABLE (zero release tags AND zero rows; arms at the "
+                      "first tag or attestation row)".format(layer))
             print("release-build: qa-retrieval MAINTAINER-SIDE (runs under --pre-tag/--post-tag; the "
                   "private store is unreachable from CI, 2.2 residual)")
             return 0
         findings = []
         findings += ordering_findings([r["version"] for r in rows])
-        findings += predecessor_completeness_findings(root, rows)  # finding 7: no skipped tagged release
+        findings += release_tag_findings(root, rows)  # finding 2: lightweight + missing-row tagged releases
         genesis_flags = []
         for row in rows:
             row_findings, is_genesis = _validate_tag_row(root, row)
             findings += row_findings
             genesis_flags.append(is_genesis)
         findings += genesis_findings(genesis_flags)
-        # Chronology on the newest row, from the row's recorded timestamps vs its tagger date; the strict
-        # loader already guarantees the timestamps are present and non-empty (finding 4), so this is a real
-        # comparison, never a vacuous clean.
-        newest = rows[-1]
-        findings += chronology_findings(newest["attestation-timestamps"],
-                                        _tagger_epoch(root, newest["tag"]))
+        # Chronology on the newest row (only when a row exists; a tree armed by a TAG but carrying ZERO rows
+        # has no attestation row to compare, round-5 finding 2). The strict loader guarantees a present row's
+        # timestamps are non-empty (finding 4), so this is a real comparison, never a vacuous clean.
+        if rows:
+            newest = rows[-1]
+            findings += chronology_findings(newest["attestation-timestamps"],
+                                            _tagger_epoch(root, newest["tag"]))
         print("release-build: qa-retrieval MAINTAINER-SIDE (runs under --pre-tag/--post-tag; the "
               "private store is unreachable from CI, 2.2 residual)")
-    except GateError as exc:
+    except (GateError, OSError, UnicodeError) as exc:
+        # A GateError, a stray filesystem OSError, or a stray decode error at a stage boundary is
+        # cannot-evaluate, exit 2 (round-5 findings 3/4), never a crash-to-exit-1.
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     return _report(findings, "audit")
@@ -513,7 +542,7 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         # prior tag in the candidate). Ordering, predecessor completeness, tag resolution, and genesis
         # uniqueness all run over cand_rows.
         findings += ordering_findings([r["version"] for r in cand_rows])
-        findings += predecessor_completeness_findings(root, cand_rows)
+        findings += release_tag_findings(root, cand_rows)
         cand_genesis_flags = []
         for row in cand_rows:
             row_findings, g = _validate_tag_row(root, row)
@@ -525,7 +554,9 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         # release, spec L1051). --first-pin forces it for a non-genesis candidate too.
         if first_pin or is_genesis:
             findings += _first_pin_findings(root, candidate_sha, evidence)
-    except GateError as exc:
+    except (GateError, OSError, UnicodeError) as exc:
+        # A GateError, a stray filesystem OSError, or a stray decode error at a stage boundary is
+        # cannot-evaluate, exit 2 (round-5 findings 3/4), never a crash-to-exit-1.
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     return _report(findings, "pre-tag")
@@ -546,9 +577,8 @@ def _show_bytes(root, ref, path):
     _rev_parse(root, ref + "^{commit}")   # resolution failure -> GateError (cannot-evaluate)
     ls = _git(root, ["ls-tree", "-r", "-z", "--name-only", ref, "--", path])
     if ls.returncode != 0:
-        raise GateError("git ls-tree {}:{} failed ({})".format(
-            ref, path, (ls.stderr or "").strip()))
-    if not ls.stdout.replace("\x00", "").strip():
+        raise GateError("git ls-tree {}:{} failed ({})".format(ref, path, _git_err(ls)))
+    if not ls.stdout.replace(b"\x00", b"").strip():
         return None   # the ref resolves and the tree lists cleanly, but this path is absent
     proc = _git(root, ["show", "{}:{}".format(ref, path)], binary=True)
     if proc.returncode != 0:
@@ -599,13 +629,29 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
     if evidence is None:
         return ["first-pin: --evidence is REQUIRED in --first-pin mode (the first-pin precondition is owed "
                 "delivered evidence, not asserted; L1034)"]
+    # lstat first (round-5 finding 5): ONLY a genuine FileNotFoundError (no such path entry) establishes
+    # absence, a finding. A path that exists but is a SYMLINK (including a loop), a non-regular file, or is
+    # otherwise unusable is cannot-evaluate -> GateError exit 2, never a "does not exist" finding.
     ev_path = Path(evidence)
-    if not ev_path.is_file():
-        return ["first-pin: the named evidence artifact {} does not exist".format(evidence)]
     try:
-        data = tomllib.loads(ev_path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise GateError("first-pin: evidence artifact {} is unreadable or does not parse ({})".format(
+        st = os.lstat(ev_path)
+    except FileNotFoundError:
+        return ["first-pin: the named evidence artifact {} does not exist".format(evidence)]
+    except OSError as exc:
+        raise GateError("first-pin: cannot stat the evidence artifact {} ({}); fail-closed".format(
+            evidence, exc))
+    if not stat.S_ISREG(st.st_mode):
+        raise GateError("first-pin: the evidence artifact {} is not a regular file (a symlink or special "
+                        "entry); fail-closed".format(evidence))
+    try:
+        raw = ev_path.read_bytes()
+    except OSError as exc:
+        raise GateError("first-pin: evidence artifact {} is unreadable ({}); fail-closed".format(
+            evidence, exc))
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise GateError("first-pin: evidence artifact {} does not parse ({}); fail-closed".format(
             evidence, exc))
     agents = _show_bytes(root, candidate_sha, "AGENTS.md")
     if agents is None:
@@ -667,22 +713,27 @@ def _first_pin_findings(root, candidate_sha, evidence):
     checkout, so no smudge/clean filter can restore old bytes), and a check_clauses child exit 2 or a launch
     failure is cannot-evaluate -> GateError exit 2 (round-4 finding 4), never downgraded to a finding."""
     findings = list(_first_pin_evidence_findings(root, candidate_sha, evidence))
-    tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-firstpin-"))
-    co = tmp / "co"
-    co.mkdir()
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-firstpin-"))
+        co = tmp / "co"
+        co.mkdir()
+    except OSError as exc:
+        raise GateError("first-pin: cannot create a temporary directory ({}); fail-closed".format(exc))
     try:
         try:
             _release_schema.materialize_tree_raw(root, candidate_sha, co)
         except SchemaError as exc:
             raise GateError("cannot materialize the candidate for first-pin: {}".format(exc))
         try:
+            # BYTES capture (round-5 finding 3): a check_clauses child emitting invalid UTF-8 must not crash.
             r = subprocess.run(["python3", "tools/check_clauses.py", "--genesis", "--root", str(co)],
-                               cwd=str(co), capture_output=True, text=True)
+                               cwd=str(co), capture_output=True)
         except OSError as exc:
             raise GateError("first-pin: cannot launch check_clauses.py ({}); fail-closed".format(exc))
         if r.returncode < 0 or r.returncode > 1:
+            diag = (r.stderr or r.stdout).decode("utf-8", "replace").strip()[:300]
             raise GateError("first-pin: check_clauses.py --genesis could not evaluate the candidate "
-                            "(rc={}): {}".format(r.returncode, (r.stderr or r.stdout).strip()[:300]))
+                            "(rc={}): {}".format(r.returncode, diag))
         if r.returncode == 1:
             findings.append("first-pin: check_clauses.py --genesis fails in the candidate (rc=1); the "
                             "step-1 freeze is not clean")
@@ -711,7 +762,7 @@ def run_post_tag(root, attestation_commit, qa_path):
             raise GateError("--post-tag: the proposed attestation commit {} has no release rows to "
                             "validate".format(ref))
         findings = ordering_findings([r["version"] for r in norm])
-        findings += predecessor_completeness_findings(root, norm)  # finding 7
+        findings += release_tag_findings(root, norm)  # findings 2/7: lightweight + missing-row
         genesis_flags = []
         for row in norm:
             row_findings, is_genesis = _validate_tag_row(root, row)
@@ -736,7 +787,9 @@ def run_post_tag(root, attestation_commit, qa_path):
             findings.append("newest release row attestation-timestamps {} do not equal the normalized "
                             "timestamps {} retrieved from the hashed QA object (no forging; finding 6)"
                             .format(sorted(set(newest["attestation-timestamps"])), sorted(set(epochs))))
-    except GateError as exc:
+    except (GateError, OSError, UnicodeError) as exc:
+        # A GateError, a stray filesystem OSError, or a stray decode error at a stage boundary is
+        # cannot-evaluate, exit 2 (round-5 findings 3/4), never a crash-to-exit-1.
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     return _report(findings, "post-tag")
@@ -973,10 +1026,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
 
         def _valid_manifest(genesis="true", release_version="1.0.0"):
-            # A STRUCTURALLY valid manifest (round-4 finding 3: tagged/candidate manifests are now strict-
-            # validated before any field is read, so a fixture's committed manifest must be well-formed).
+            # A STRUCTURALLY valid manifest with the EXACT mandatory top-level keyset (round-5 finding 1:
+            # strict_manifest now requires sources and artifacts present); tagged/candidate manifests are
+            # strict-validated before any field is read.
             return ('format-version = 1\nrelease-version = "{}"\ngenesis = {}\n'
-                    'tree-sha256 = "{}"\n'.format(release_version, genesis, "a" * 64))
+                    'tree-sha256 = "{}"\nsources = []\nartifacts = []\n'.format(
+                        release_version, genesis, "a" * 64))
 
         def _write_records(path, releases_body, manifest_body=None):
             (path / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
@@ -1245,14 +1300,14 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                check=True, capture_output=True, text=True,
                                env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
             skipped = [{"version": "1.0.0"}, {"version": "1.2.0"}]
-            if not any("no attestation row" in f for f in predecessor_completeness_findings(pc, skipped)):
+            if not any("no attestation row" in f for f in release_tag_findings(pc, skipped)):
                 failures.append("predecessor completeness: a tagged 1.1.0 skipped between rows 1.0.0 and "
                                 "1.2.0 expected a finding (finding 7)")
             complete = [{"version": "1.0.0"}, {"version": "1.1.0"}, {"version": "1.2.0"}]
-            if predecessor_completeness_findings(pc, complete):
+            if release_tag_findings(pc, complete):
                 failures.append("predecessor completeness: a complete record expected no finding")
             inflight = [{"version": "1.0.0"}, {"version": "1.1.0"}]  # 1.2.0 tagged but not yet attested
-            if predecessor_completeness_findings(pc, inflight):
+            if release_tag_findings(pc, inflight):
                 failures.append("predecessor completeness: an in-flight tag above the newest row must be "
                                 "allowed (no finding)")
 
@@ -1402,6 +1457,131 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                 "GateError (exit 2), not append a finding (finding 4)")
             except GateError:
                 pass
+
+            # === ROUND-5 build fixtures ==============================================================
+            # (finding 2) dormancy requires zero TAGS and zero rows, and a lightweight release tag is
+            # disallowed. Zero rows + a LIGHTWEIGHT v1.0.0 arms the gate and is flagged (was exit 0).
+            lwz = tmp / "lightweight-zero"
+            _init(lwz)
+            (lwz / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
+            (lwz / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+            _commit(lwz, "zero-row")
+            subprocess.run(["git", "-C", str(lwz), "tag", "v1.0.0"],  # lightweight
+                           check=True, capture_output=True, text=True)
+            if _run_audit_quiet(lwz) != 1:
+                failures.append("audit zero-row + lightweight v1.0.0 must arm and flag exit 1 (round-5 "
+                                "finding 2), not dormant NOT APPLICABLE")
+
+            # (finding 2) a valid attested v1.0.0 row PLUS an UNRECORDED lightweight v0.9.0 -> flagged.
+            un = tmp / "unrecorded-lightweight"
+            _init(un)
+            _write_records(un, "format-version = 1\n")
+            _commit(un, "genesis release tree")
+            subprocess.run(["git", "-C", str(un), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
+                           check=True, capture_output=True, text=True,
+                           env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            subprocess.run(["git", "-C", str(un), "tag", "v0.9.0"],  # unrecorded lightweight
+                           check=True, capture_output=True, text=True)
+            un_tag = subprocess.run(["git", "-C", str(un), "rev-parse", "refs/tags/v1.0.0"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            un_commit = subprocess.run(["git", "-C", str(un), "rev-parse", "refs/tags/v1.0.0^{commit}"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            un_tagger = _tagger_epoch(un, "v1.0.0")
+            (un / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
+                    un_tag, un_commit, "c" * 64, un_tagger - 100), encoding="utf-8")
+            if _run_audit_quiet(un) != 1:
+                failures.append("audit valid row + unrecorded lightweight v0.9.0 must flag exit 1 "
+                                "(round-5 finding 2)")
+
+            # (finding 3) a RAW invalid-UTF-8 release tag ref: git tag -l is decoded under a strict boundary,
+            # so cannot-evaluate is exit 2, never an uncaught UnicodeDecodeError crash. Skipped (no false
+            # pass) where git rejects the raw byte in a ref name.
+            u8 = tmp / "invalid-utf8-tag"
+            _init(u8)
+            (u8 / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
+            (u8 / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+            _commit(u8, "zero-row")
+            u8_commit = subprocess.run(["git", "-C", str(u8), "rev-parse", "HEAD"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            ur = subprocess.run([b"git", b"-C", str(u8).encode(), b"update-ref",
+                                 b"refs/tags/v1.0.0\xff", u8_commit.encode()],
+                                capture_output=True, env={"GIT_CONFIG_GLOBAL": os.devnull,
+                                                          "GIT_CONFIG_SYSTEM": os.devnull})
+            if ur.returncode == 0:
+                if _run_audit_quiet(u8) != 2:
+                    failures.append("audit invalid-UTF-8 release tag must fail closed exit 2, not crash "
+                                    "(round-5 finding 3)")
+            else:
+                print("SELF-TEST NOTE: git rejected a raw invalid-UTF-8 ref; that finding-3 case was "
+                      "SKIPPED", file=sys.stderr)
+            # _git_out decode boundary (round-5 finding 3): invalid-UTF-8 git output raises GateError.
+            class _FakeProc:
+                returncode = 0
+                stdout = b"\xff\xfe not utf-8"
+            try:
+                _git_out(_FakeProc(), "unit")
+                failures.append("_git_out: invalid-UTF-8 git output must raise GateError (round-5 finding 3)")
+            except GateError:
+                pass
+
+            # (finding 1) a TAGGED tree whose manifest carries a bogus artifact-row key -> strict_manifest
+            # rejects the exact kind-specific keyset, audit exit 2 (was exit 0).
+            bm = tmp / "bogus-tagged-manifest"
+            _init(bm)
+            (bm / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
+            (bm / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+            (bm / MANIFEST_REL).write_text(
+                'format-version = 1\nrelease-version = "1.0.0"\ngenesis = true\ntree-sha256 = "{h}"\n'
+                'sources = []\n\n[[artifacts]]\nartifact-id = "x"\npath = "p"\nkind = "file"\n'
+                'sha256 = "{h}"\nbogus = "y"\n'.format(h="a" * 64), encoding="utf-8")
+            _commit(bm, "genesis tree with a bogus artifact key")
+            subprocess.run(["git", "-C", str(bm), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
+                           check=True, capture_output=True, text=True,
+                           env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            bm_tag = subprocess.run(["git", "-C", str(bm), "rev-parse", "refs/tags/v1.0.0"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            bm_commit = subprocess.run(["git", "-C", str(bm), "rev-parse", "refs/tags/v1.0.0^{commit}"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            bm_tagger = _tagger_epoch(bm, "v1.0.0")
+            (bm / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
+                    bm_tag, bm_commit, "c" * 64, bm_tagger - 100), encoding="utf-8")
+            if _run_audit_quiet(bm) != 2:
+                failures.append("audit tagged manifest with a bogus artifact key must fail closed exit 2 "
+                                "(round-5 finding 1)")
+
+            # (finding 4) an injected mkdtemp failure in reproduce_gate is cannot-evaluate -> GateError.
+            import tempfile as _tf
+            _orig_mkdtemp = _tf.mkdtemp
+            _tf.mkdtemp = lambda *a, **k: (_ for _ in ()).throw(OSError("injected: no temp dir"))
+            try:
+                reproduce_gate(repo_root(), "HEAD")
+                failures.append("reproduce_gate: an mkdtemp OSError must raise GateError (round-5 finding 4)")
+            except GateError:
+                pass
+            finally:
+                _tf.mkdtemp = _orig_mkdtemp
+
+            # (finding 5) a symlink-LOOP --evidence path is unusable -> GateError (exit 2), not a "does not
+            # exist" finding. Only a genuine FileNotFoundError establishes absence.
+            loop = tmp / "evidence-loop.toml"
+            try:
+                os.symlink(loop, loop)   # self-referential loop
+                loop_made = True
+            except OSError:
+                loop_made = False
+            if loop_made:
+                try:
+                    _first_pin_evidence_findings(bm, bm_commit, str(loop))
+                    failures.append("first-pin evidence: a symlink-loop path must raise GateError (exit 2), "
+                                    "not a finding (round-5 finding 5)")
+                except GateError:
+                    pass
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -1430,8 +1610,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
               "check on every tagged/candidate manifest (round-4 finding 3), _show_bytes absent-vs-git-error "
               "(round-4 finding 7), a genesis run_pre_tag auto-requiring first-pin evidence (round-4 finding "
               "5), and a first-pin cannot-evaluate raising exit 2 (round-4 finding 4), all over "
-              "RAW-materialized (no-worktree) candidate trees (round-4 finding 1)) hold".format(
-                  core))
+              "RAW-materialized (no-worktree) candidate trees (round-4 finding 1); and the round-5 cases "
+              "(dormancy needs zero tags AND zero rows with a lightweight/unrecorded tag flagged (finding "
+              "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "
+              "tagged manifest with a bogus artifact key exit 2 (finding 1), an injected mkdtemp OSError "
+              "raising GateError (finding 4), and a symlink-loop --evidence raising GateError (finding "
+              "5))) hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))

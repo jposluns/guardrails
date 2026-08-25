@@ -307,7 +307,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It validates the release build order, the annotated release tags and their resolution to the recorded object and commit SHAs, the genesis uniqueness declaration, the release-order ordering gate, and the attestation chronology against the tagger date. The chronology layer is keyless tamper-evident ordering within the anchored history, not cryptographic proof; the QA-store retrieval, success, and family-set layers run maintainer-side only (the private store is unreachable from CI, which validates the anchored chain instead); and every tag- and row-dependent layer is dormant until the first attestation row exists."
+residue = "It validates the release build order, the annotated release tags and their resolution to the recorded object and commit SHAs, the genesis uniqueness declaration, the release-order ordering gate, and the attestation chronology against the tagger date. The chronology layer is keyless tamper-evident ordering within the anchored history, not cryptographic proof; the QA-store retrieval, success, and family-set layers run maintainer-side only (the private store is unreachable from CI, which validates the anchored chain instead); and every tag- and row-dependent layer is dormant only while the repository carries zero release tags AND zero attestation rows, arming when the first release tag or row exists, with a lightweight release tag disallowed."
 
 [[gate]]
 id = "clauses"

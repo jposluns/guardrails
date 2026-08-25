@@ -36,6 +36,7 @@ change, an unconsumed or wrong row, a register incompleteness); 2 malformed or u
 (a predecessor artifact, the dispositions record, a stale renderer declaration, a git failure).
 """
 import io
+import os
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
@@ -414,8 +415,10 @@ def _renderer_freshness(root, label):
     """Run gen_renderers.py --check against the tree at `root` (its own repo, resolved by the copied
     gen_renderers via repo_root). Drift or an incomplete closure is exit 2."""
     try:
+        # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must never crash the gate; only
+        # the returncode is interpreted, and stderr is decoded with replacement for a diagnostic message.
         proc = subprocess.run([sys.executable, str(root / "tools" / "gen_renderers.py"), "--check",
-                               "--root", str(root)], capture_output=True, text=True)
+                               "--root", str(root)], capture_output=True)
     except OSError as exc:
         raise GateError("{} renderer freshness could not launch ({}); fail-closed".format(label, exc))
     if proc.returncode != 0:
@@ -555,13 +558,15 @@ def _validate_via_tool(root, script, args, what):
     passing (VC-4 QA #1; round-4 finding 4 launch propagation). The tool is located beside this gate and
     pointed at the target via its args."""
     try:
+        # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must not crash the gate; the
+        # returncode is interpreted, and the diagnostic tail is decoded with replacement.
         proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / script), *args],
-                              capture_output=True, text=True)
+                              capture_output=True)
     except OSError as exc:
         raise GateError("{}: cannot launch {} ({}); fail-closed".format(what, script, exc))
     if proc.returncode != 0:
-        raise GateError("{}: {} rc={} ({})".format(what, script, proc.returncode,
-                                                   (proc.stderr or proc.stdout).strip()[:400]))
+        diag = (proc.stderr or proc.stdout).decode("utf-8", "replace").strip()[:400]
+        raise GateError("{}: {} rc={} ({})".format(what, script, proc.returncode, diag))
 
 
 def _genesis_structural(root):
@@ -590,10 +595,21 @@ def run(root):
         # Profiles/groups (2.6 arm-or-fail-closed): the real diff leg is not built. While the artifact is
         # ABSENT the leg is legitimately NOT APPLICABLE; the moment it SHIPS a gate that cannot diff it must
         # FAIL CLOSED, never silently pass a change on the profile surface (VC-4 QA #4). Checked in BOTH
-        # genesis and delta modes.
-        if (root / PROFILES_REL).is_file():
-            raise GateError("profiles/groups artifact {} has shipped but its delta leg is not implemented; "
-                            "fail-closed until the diff lands (2.6)".format(PROFILES_REL))
+        # genesis and delta modes. lstat (round-5 finding 5): the path existing as ANY tree entry, including
+        # a symlink or a broken/loop symlink, means the artifact has shipped -> fail-closed. ONLY a genuine
+        # FileNotFoundError establishes absence; any other OSError is cannot-evaluate.
+        try:
+            os.lstat(root / PROFILES_REL)
+            _profiles_present = True
+        except FileNotFoundError:
+            _profiles_present = False
+        except OSError as exc:
+            raise GateError("cannot stat the profiles/groups artifact {} ({}); fail-closed".format(
+                PROFILES_REL, exc))
+        if _profiles_present:
+            raise GateError("profiles/groups artifact {} has shipped (present as a tree entry) but its "
+                            "delta leg is not implemented; fail-closed until the diff lands (2.6)".format(
+                                PROFILES_REL))
         if not release_rows:
             if head_manifest.get("genesis") is not True:
                 raise GateError("releases.toml is zero-row but the manifest does not declare "
@@ -688,7 +704,7 @@ def run(root):
         if claimed < floor:
             findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
                 BUMP_NAME[claimed], prev_row["version"], head_version, BUMP_NAME[floor]))
-    except (GateError, OSError, KeyError, TypeError) as exc:
+    except (GateError, OSError, UnicodeError, KeyError, TypeError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     if findings:
@@ -816,8 +832,10 @@ def _real_pack_e2e(tmp, failures):
     """Build REAL full-pack two-release git repos from `git archive HEAD` of THIS repo and drive the real
     run() through the delta path: a clean CONSISTENTLY-edited id-keyed PATCH (finding 2), malformed-loader
     variants (findings 1/3), a wrong-version disposition (round-3 finding 3), and a smudge-filter predecessor
-    renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4). Returns True if
-    it ran, False if skipped (archive unavailable). Hermetic: private temp git repos, neutralized identity."""
+    renderer-closure attack that the raw-blob materialization defeats (round-4 findings 1/4), and genesis
+    full-pack manifest/profiles/invalid-UTF-8 mutations (round-5 findings 1/3/5). Returns True if it ran,
+    False if skipped (archive unavailable). Hermetic: private temp git repos, neutralized identity."""
+    import re
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
@@ -926,6 +944,75 @@ def _real_pack_e2e(tmp, failures):
         if _run_quiet_root(repo2) != 2:
             failures.append("real full-pack run(): a smudge-filter-hidden predecessor renderer-closure edit "
                             "must be caught by the raw materialization, exit 2 (round-4 findings 1/4)")
+
+    # === REAL GENESIS FULL-PACK run() (round-5 findings 1 and 5) ==================================
+    # The archived HEAD is a genesis tree (zero-row releases, manifest genesis = true); run() takes the
+    # genesis path where every structural validator PASSES on the real tree, so a mutation to ONE record is
+    # the sole thing under test (no git needed for the genesis path). On the pre-round-5 gate each mutation
+    # passed exit 0; the fix fails each closed exit 2.
+    def _extract_genesis(name):
+        dest = tmp / name
+        try:
+            _extract(arch, dest)
+        except Exception:  # noqa: BLE001
+            return None
+        return dest
+
+    gclean = _extract_genesis("genesis-clean")
+    if gclean is not None and _run_quiet_root(gclean) != 0:
+        failures.append("real genesis full-pack run(): the unmutated real tree expected a clean exit 0")
+    # (finding 1) a manifest with a bogus ARTIFACT-row key: strict_manifest rejects the exact kind-specific
+    # keyset -> exit 2 (the pre-round-5 validator accepted unknown artifact keys and returned exit 0).
+    gart = _extract_genesis("genesis-bogus-artifact")
+    if gart is not None:
+        mp = gart / ".aiqt" / "manifest.toml"
+        mp.write_text(mp.read_text(encoding="utf-8").replace(
+            "[[artifacts]]\n", "[[artifacts]]\nbogus = \"x\"\n", 1), encoding="utf-8")
+        if _run_quiet_root(gart) != 2:
+            failures.append("real genesis full-pack run(): a bogus artifact-row key must fail closed exit 2 "
+                            "(round-5 finding 1)")
+    # (finding 1) a manifest with EVERY [[sources]] row deleted: the mandatory `sources` section is absent,
+    # so the exact top-level keyset is violated -> exit 2 (the pre-round-5 validator defaulted a missing
+    # section to an empty list and returned exit 0).
+    gsrc = _extract_genesis("genesis-no-sources")
+    if gsrc is not None:
+        mp = gsrc / ".aiqt" / "manifest.toml"
+        stripped = re.sub(r'\[\[sources\]\]\npath = [^\n]*\nbytes = [^\n]*\nsha256 = [^\n]*\n\n', '',
+                          mp.read_text(encoding="utf-8"))
+        mp.write_text(stripped, encoding="utf-8")
+        if _run_quiet_root(gsrc) != 2:
+            failures.append("real genesis full-pack run(): a manifest missing its [[sources]] section must "
+                            "fail closed exit 2 (round-5 finding 1)")
+    # (finding 5) a SELF-REFERENTIAL profiles.toml symlink (a loop): the artifact is present as a tree
+    # entry, so the unbuilt-profiles leg must fail closed exit 2. The pre-round-5 is_file() saw a broken
+    # loop as absent and returned NOT APPLICABLE -> exit 0.
+    gprof = _extract_genesis("genesis-profiles-loop")
+    if gprof is not None:
+        try:
+            os.symlink("profiles.toml", gprof / ".aiqt" / "core" / "profiles.toml")
+            made = True
+        except OSError:
+            made = False
+        if made and _run_quiet_root(gprof) != 2:
+            failures.append("real genesis full-pack run(): a self-referential profiles.toml symlink must "
+                            "fail closed exit 2 (round-5 finding 5)")
+
+    # (round-5 finding 3) a subprocess child emitting INVALID UTF-8 with a nonzero exit is captured as
+    # BYTES: _renderer_freshness raises a clean GateError (exit 2), never an uncaught UnicodeDecodeError
+    # (the pre-round-5 text=True capture crashed to exit 1). A tiny stub stands in for the generator.
+    stubroot = tmp / "utf8-stub"
+    (stubroot / "tools").mkdir(parents=True, exist_ok=True)
+    (stubroot / "tools" / "gen_renderers.py").write_text(
+        "import sys\nsys.stderr.buffer.write(b'\\xff\\xfe not utf-8\\n')\nsys.exit(1)\n", encoding="utf-8")
+    try:
+        _renderer_freshness(stubroot, "utf8-stub")
+        failures.append("_renderer_freshness: an invalid-UTF-8 child must raise GateError, not crash "
+                        "(round-5 finding 3)")
+    except GateError:
+        pass
+    except UnicodeDecodeError:
+        failures.append("_renderer_freshness: invalid-UTF-8 child output crashed with UnicodeDecodeError "
+                        "(round-5 finding 3 regression)")
     return True
 
 
@@ -1231,12 +1318,11 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
         e2e_ran = True
 
         def _valid_manifest(genesis):
-            # A STRUCTURALLY valid manifest (round-3 finding 1: strict_manifest now runs before the
-            # genesis/delta branch, so a fixture testing another record needs a well-formed manifest to
-            # reach it). Empty sources/artifacts are structurally valid here (the full set-equality is
-            # check_manifest's, not this gate's).
+            # A STRUCTURALLY valid manifest carrying the EXACT mandatory top-level keyset (round-5 finding
+            # 1: strict_manifest now requires sources and artifacts to be PRESENT). Empty arrays are
+            # structurally valid here; the full set-equality against the tracked tree is check_manifest's.
             return ('format-version = 1\nrelease-version = "1.0.0"\ngenesis = {}\n'
-                    'tree-sha256 = "{}"\n'.format(genesis, "a" * 64))
+                    'tree-sha256 = "{}"\nsources = []\nartifacts = []\n'.format(genesis, "a" * 64))
 
         try:
             # (genesis structural, VC-4 QA #1) zero-row releases + a valid manifest genesis=true, but a
@@ -1468,8 +1554,11 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
     if e2e_ran:
         full_pack = ("; and the REAL FULL-PACK two-release run() clean CONSISTENTLY-edited id-keyed PATCH "
                      "(exit 0, finding 2), its format-version variants (exit 2, finding 1), a wrong-version "
-                     "disposition (exit 1, round-3 finding 3), and a SMUDGE-FILTER predecessor closure "
-                     "attack defeated by raw materialization (exit 2, round-4 findings 1/4) hold") \
+                     "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
+                     "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
+                     "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
+                     "self-referential profiles symlink (exit 2, round-5 finding 5), and an invalid-UTF-8 "
+                     "child capture (round-5 finding 3) hold") \
                     if real_ran else \
                     "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
         print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "

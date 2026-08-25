@@ -127,39 +127,51 @@ def strict_releases(data, where):
     return rows
 
 
-MANIFEST_TOP_ALLOWED = {"format-version", "release-version", "genesis", "tree-sha256", "sources",
-                        "artifacts"}
-MANIFEST_ARTIFACT_KINDS = ("file", "managed-block")
+# The complete manifest schema, MIRRORED from check_manifest.load_manifest (the authoritative single home,
+# not editable here): the EXACT mandatory top-level keyset, exact sources-row keyset, and the artifact-row
+# keysets. MANIFEST_ARTIFACT_KEYS is kind-specific (round-5 finding 1): a file row carries exactly the base
+# four, a managed-block row those four PLUS block-id; check_manifest allows block-id on any row, this gate
+# is the stricter kind-specific form gen_manifest actually emits.
+MANIFEST_TOP_KEYS = frozenset({"format-version", "release-version", "genesis", "tree-sha256", "sources",
+                               "artifacts"})
+MANIFEST_SOURCES_KEYS = frozenset({"path", "bytes", "sha256"})
+MANIFEST_ARTIFACT_BASE = frozenset({"artifact-id", "path", "kind", "sha256"})
+MANIFEST_ARTIFACT_KEYS = {"file": MANIFEST_ARTIFACT_BASE,
+                          "managed-block": MANIFEST_ARTIFACT_BASE | {"block-id"}}
 
 
 def strict_manifest(data, where):
-    """Strict structural schema of a release manifest (4.1), on head AND predecessor objects (round-3
-    finding 1: genesis previously accepted a malformed manifest as clean). format-version == 1; the exact
-    top-level keyset; release-version a bare SemVer; genesis a real boolean; tree-sha256 64 lowercase hex;
-    [[sources]] an array of exactly {path, bytes, sha256} rows (a non-empty logical path, a non-negative
-    integer byte count, a 64-hex digest, no duplicate path); [[artifacts]] an array of tables each carrying
-    a non-empty artifact-id (unique), path, a known kind, and a 64-hex sha256. The full SOURCES-set-equality
-    and re-hash stay check_manifest's; this closes the structural hole the delta gate branched on."""
-    _require_format_version(data, where)
-    extra = set(data) - MANIFEST_TOP_ALLOWED
-    if extra:
-        raise SchemaError("{}: unknown top-level key(s): {}".format(where, ", ".join(sorted(extra))))
-    rv = data.get("release-version")
-    if not isinstance(rv, str) or _parse(rv) is None:
-        raise SchemaError("{}: release-version {!r} is not a bare SemVer".format(where, rv))
-    if not isinstance(data.get("genesis"), bool):
-        raise SchemaError("{}: genesis must be a boolean".format(where))
-    tree = data.get("tree-sha256")
-    if not isinstance(tree, str) or not HEX64_RE.fullmatch(tree):
+    """The COMPLETE manifest schema (4.1), mirrored from check_manifest.load_manifest and run on head AND
+    predecessor objects in genesis, non-genesis, audit, pre-tag, and post-tag (round-5 finding 1: the prior
+    validator rejected extra top-level keys but did not REQUIRE the exact keyset, so a missing [[sources]]/
+    [[artifacts]] section defaulted to an empty list and a bogus artifact key slipped through). Requires the
+    EXACT mandatory top-level keyset (a deleted-all-sources manifest omits the `sources` key and is rejected);
+    format-version == 1; release-version a bare SemVer; genesis a real boolean; tree-sha256 64 lowercase hex;
+    [[sources]] rows EXACTLY {path, bytes, sha256} (non-empty logical path, non-negative integer bytes,
+    64-hex digest, no duplicate path, sorted bytewise); [[artifacts]] rows the EXACT kind-specific keyset
+    (file: the base four; managed-block: the base four plus block-id) with a 64-hex sha256 and unique
+    artifact-id. The full SOURCES-set-equality against the tracked tree stays check_manifest's."""
+    if not isinstance(data, dict):
+        raise SchemaError("{}: manifest is not a table".format(where))
+    if set(data) != MANIFEST_TOP_KEYS:
+        raise SchemaError("{}: top-level keys must be EXACTLY {} (found {})".format(
+            where, sorted(MANIFEST_TOP_KEYS), sorted(data)))
+    if data["format-version"] != 1:
+        raise SchemaError("{}: format-version must be exactly 1".format(where))
+    if not isinstance(data["release-version"], str) or _parse(data["release-version"]) is None:
+        raise SchemaError("{}: release-version {!r} is not a bare SemVer".format(
+            where, data["release-version"]))
+    if not isinstance(data["genesis"], bool):
+        raise SchemaError("{}: genesis must be a real boolean".format(where))
+    if not isinstance(data["tree-sha256"], str) or not HEX64_RE.fullmatch(data["tree-sha256"]):
         raise SchemaError("{}: tree-sha256 is not 64 lowercase hex".format(where))
-    sources = data.get("sources", [])
-    if not isinstance(sources, list):
+    if not isinstance(data["sources"], list):
         raise SchemaError("{}: [[sources]] is not an array".format(where))
-    seen_paths = set()
-    for i, row in enumerate(sources, 1):
+    seen_paths = []
+    for i, row in enumerate(data["sources"], 1):
         rw = "{} sources row #{}".format(where, i)
-        if not isinstance(row, dict) or set(row) != {"path", "bytes", "sha256"}:
-            raise SchemaError("{}: keys are not exactly path/bytes/sha256".format(rw))
+        if not isinstance(row, dict) or set(row) != MANIFEST_SOURCES_KEYS:
+            raise SchemaError("{}: keys are not exactly {}".format(rw, sorted(MANIFEST_SOURCES_KEYS)))
         if not isinstance(row["path"], str) or not row["path"]:
             raise SchemaError("{}: missing or non-string path".format(rw))
         if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] < 0:
@@ -168,26 +180,30 @@ def strict_manifest(data, where):
             raise SchemaError("{}: sha256 is not 64 lowercase hex".format(rw))
         if row["path"] in seen_paths:
             raise SchemaError("{}: duplicate sources path {!r}".format(rw, row["path"]))
-        seen_paths.add(row["path"])
-    artifacts = data.get("artifacts", [])
-    if not isinstance(artifacts, list):
+        seen_paths.append(row["path"])
+    if seen_paths != sorted(seen_paths):
+        raise SchemaError("{}: sources are not sorted bytewise by path".format(where))
+    if not isinstance(data["artifacts"], list):
         raise SchemaError("{}: [[artifacts]] is not an array".format(where))
     seen_ids = set()
-    for i, row in enumerate(artifacts, 1):
+    for i, row in enumerate(data["artifacts"], 1):
         rw = "{} artifacts row #{}".format(where, i)
         if not isinstance(row, dict):
             raise SchemaError("{}: not a table".format(rw))
-        aid = row.get("artifact-id")
-        if not isinstance(aid, str) or not aid:
+        kind = row.get("kind")
+        if kind not in MANIFEST_ARTIFACT_KEYS:
+            raise SchemaError("{}: kind must be one of {}".format(rw, sorted(MANIFEST_ARTIFACT_KEYS)))
+        if set(row) != MANIFEST_ARTIFACT_KEYS[kind]:
+            raise SchemaError("{}: {} row keys must be EXACTLY {} (found {})".format(
+                rw, kind, sorted(MANIFEST_ARTIFACT_KEYS[kind]), sorted(row)))
+        if not isinstance(row["artifact-id"], str) or not row["artifact-id"]:
             raise SchemaError("{}: missing or non-string artifact-id".format(rw))
-        if aid in seen_ids:
-            raise SchemaError("{}: duplicate artifact-id {!r}".format(rw, aid))
-        seen_ids.add(aid)
-        if not isinstance(row.get("path"), str) or not row["path"]:
+        if row["artifact-id"] in seen_ids:
+            raise SchemaError("{}: duplicate artifact-id {!r}".format(rw, row["artifact-id"]))
+        seen_ids.add(row["artifact-id"])
+        if not isinstance(row["path"], str) or not row["path"]:
             raise SchemaError("{}: missing or non-string path".format(rw))
-        if row.get("kind") not in MANIFEST_ARTIFACT_KINDS:
-            raise SchemaError("{}: kind must be one of {}".format(rw, list(MANIFEST_ARTIFACT_KINDS)))
-        if not isinstance(row.get("sha256"), str) or not HEX64_RE.fullmatch(row["sha256"]):
+        if not isinstance(row["sha256"], str) or not HEX64_RE.fullmatch(row["sha256"]):
             raise SchemaError("{}: sha256 is not 64 lowercase hex".format(rw))
     return data
 
@@ -485,7 +501,11 @@ def materialize_tree_raw(root, commit, dest):
         target = (Path(dest) / path).resolve()
         if target != dest_root and dest_root not in target.parents:
             raise SchemaError("path {!r} escapes the materialization root".format(path))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(blobs[osha])
+        # A filesystem error writing the raw tree is cannot-evaluate, not a clean result (round-5 finding 4).
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blobs[osha])
+        except OSError as exc:
+            raise SchemaError("cannot materialize {!r} ({})".format(path, exc))
         written.add(path)
     return written

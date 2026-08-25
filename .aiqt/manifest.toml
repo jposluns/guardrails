@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "05bb8e99668f96c6aaaf27bf23ebd1a588d477836fc4959805b200ab4eed012e"
+tree-sha256 = "af4e1e4f4a67d54c86f4d6ab7330eb98c1c0254359a6d1525313c09511a6c9aa"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 27058
-sha256 = "278b12e517b7dd5694a3a33d373d763669483d1e0262571e59b12e767e6d6ab0"
+bytes = 27189
+sha256 = "bb518a8f6bf5e77379438a720c0d055a91bdb416c42e183b5119757be4602d71"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
@@ -2281,8 +2281,8 @@ sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 28042
-sha256 = "5a53c5a0d20b5036c17bead7088c01a8a8da0384aa3dc415bf2c818a4eb0baed"
+bytes = 29944
+sha256 = "453c12462ec15d86f90edef3a0652c1dd290a21267718e122a77ce892f3806a1"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -2366,13 +2366,13 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 93853
-sha256 = "a651480cf2fdfd6a54a6ae1ce8c445a914bc9b0caaa814dcdf37b316fc9a7b31"
+bytes = 106417
+sha256 = "1c6fdee4e78900ed4647020d2406749996313573ef7590c4dace69fbedbcc9a2"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 96188
-sha256 = "cc038225695cedd20547412e420ba5332a10129b3dbfe1132b720e03ed881477"
+bytes = 101755
+sha256 = "ff68ffbb6759394169a75c0a2df2e471c77cdcd0ab6a10250a70dd2aa25fe839"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
