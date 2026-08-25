@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "286784fd0f94320ed9a76bd3537bc3cacdd84d6b02475842e42479221e38f1a6"
+tree-sha256 = "c97f2b56a166bcefeaf20e114c8df27668ab3b5698bcf5a592d963fbe40c0023"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -25,9 +25,19 @@ bytes = 716
 sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
+path = ".aiqt/core/gates/byte-canon.toml"
+bytes = 1270
+sha256 = "8660711940e60d442c8ba47c32feaba077bfa014c51fe0cec0f479e665a2f353"
+
+[[sources]]
+path = ".aiqt/core/gates/canon-vectors/vectors.toml"
+bytes = 2146
+sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
+
+[[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 24353
-sha256 = "a72d3760fdebc8a5ac3e5a14e8c9beec37f9e1a8a11486505b0775c69758c8c5"
+bytes = 24951
+sha256 = "4eafb98a9bb597403d2b397f9bb226a656930737abe517c8d567d568ceea6346"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
@@ -1986,8 +1996,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 30762
-sha256 = "436f1dd5dbd0ee63fd5e4204e6ff6f1aab3a07bb661a175b84c8e827893de262"
+bytes = 30935
+sha256 = "d6e06c7dceb8a97ffefd1dca5ff329b575a67979aa639b46383138cb9ee7ef60"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2016,8 +2026,8 @@ sha256 = "ee817b93317fdee8d557058d36580a185da273f99b3571ebb4da6cb199349999"
 
 [[sources]]
 path = "LICENSE"
-bytes = 20138
-sha256 = "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5"
+bytes = 20137
+sha256 = "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2"
 
 [[sources]]
 path = "NOTICE"
@@ -2245,6 +2255,11 @@ bytes = 1122
 sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
+path = "tools/_containment.py"
+bytes = 2365
+sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
+
+[[sources]]
 path = "tools/_gen_common.py"
 bytes = 2179
 sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
@@ -2263,6 +2278,11 @@ sha256 = "08ea73b8873bdb0871e9e449303d5c176a0c64863ae0a7feafe96c6c75f29a54"
 path = "tools/check_artifact_checksums.py"
 bytes = 24163
 sha256 = "77935712d4d450aa55b2b4319f89fddbb9180b87cc7e691110f1c92f7787eec9"
+
+[[sources]]
+path = "tools/check_byte_canon.py"
+bytes = 35131
+sha256 = "a6ee87d52ec3957993562174bb9402a8ae7b744cc2f47a19ef687070ebd636dd"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -2471,8 +2491,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 6802
-sha256 = "33a399fb73b45c956f52c6bb811ac78b33e49bde568001edc6e1e26cdb1857aa"
+bytes = 6948
+sha256 = "98f29fbe4248e79961da5247ed93838b0f2fdf90d5a24911c9f544ec9c868436"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"

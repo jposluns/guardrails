@@ -1,0 +1,23 @@
+# .aiqt/core/gates/byte-canon.toml: the byte-canon platform policy and control-character allowances
+# (VER-CORE 3.1/3.6). check_byte_canon.py carries the same platform sets as constants and fails closed
+# on any disagreement, so this shipped artifact and the enforcing gate cannot drift apart.
+format-version = 1
+
+[platforms]
+supported = ["linux", "macos"]   # both expose the race-free containment primitive (3.6, S13-4)
+roadmap = ["windows"]            # not supported at this release
+
+# Allowances for the forbidden code spans (3.1 "per-file allowlisted code spans"). The enforced sets
+# are the zero-width characters U+200B, U+200C, U+200D, U+2060, U+FEFF and the complete Unicode
+# Bidi_Control set U+061C, U+200E, U+200F, U+202A..U+202E, U+2066..U+2069. EMPTY at genesis: no shipped
+# file legitimately carries these characters today. Each future row must bind: the exact repo-relative
+# path, the file's current raw-byte sha256 (stale digest = fail-closed), the byte start/end of the
+# span, the exact permitted codepoints ("U+200B" form), and a rationale. Narrow, non-overlapping,
+# each used at least once; never a glob or whole-file allowance.
+# [[allowance]]
+# path = "..."
+# sha256 = "..."
+# start = 0
+# end = 0
+# codepoints = ["U+200B"]
+# rationale = "..."

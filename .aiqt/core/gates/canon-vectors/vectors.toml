@@ -1,0 +1,67 @@
+# .aiqt/core/gates/canon-vectors/vectors.toml: the published 3.4 canonicalization vectors. Payloads are
+# base64 of each vector's raw bytes, so the vectors file itself stays byte-canonical and the byte gate
+# can scan the whole tree. check_byte_canon.py --self-test decodes each payload and runs the SAME scan
+# legs the real gate runs; a passing vector that flags, or a failing vector that passes, fails the
+# self-test. The pass vector also carries its raw-byte sha256 (the 3.4 "expected digest").
+format-version = 1
+
+[[vector]]
+name = "pass-minimal"
+class = "pass"
+payload-base64 = "aGVsbG8K"                      # b"hello\n"
+sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+
+[[vector]]
+name = "fail-crlf"
+class = "crlf"
+payload-base64 = "YmFkDQo="                      # b"bad\r\n"
+
+[[vector]]
+name = "fail-trailing-whitespace"
+class = "trailing-whitespace"
+payload-base64 = "YmFkIAo="                      # b"bad \n"
+
+[[vector]]
+name = "fail-zero-width"
+class = "zero-width"
+payload-base64 = "YeKAi2IK"                      # b"a" + U+200B + b"b\n"
+
+[[vector]]
+name = "fail-bidi"
+class = "bidi"
+payload-base64 = "YeKArmIK"                      # b"a" + U+202E + b"b\n"
+
+[[vector]]
+name = "fail-bidi-mark"
+class = "bidi-mark"
+payload-base64 = "YeKAjmIK"                      # b"a" + U+200E (LRM) + b"b\n"
+
+[[vector]]
+name = "fail-word-joiner"
+class = "word-joiner"
+payload-base64 = "YeKBoGIK"                      # b"a" + U+2060 (WORD JOINER) + b"b\n"
+
+[[vector]]
+name = "fail-invalid-utf8"
+class = "invalid-utf8"
+payload-base64 = "//4K"                          # b"\xff\xfe\n" (not valid UTF-8)
+
+[[vector]]
+name = "fail-empty"
+class = "empty"
+payload-base64 = ""                              # b"" (an empty file is a finding)
+
+[[vector]]
+name = "fail-bom"
+class = "bom"
+payload-base64 = "77u/YQo="                      # UTF-8 BOM + b"a\n"
+
+[[vector]]
+name = "fail-no-final-newline"
+class = "no-final-newline"
+payload-base64 = "YWJj"                          # b"abc"
+
+[[vector]]
+name = "fail-double-final-newline"
+class = "double-final-newline"
+payload-base64 = "YWJjCgo="                      # b"abc\n\n"
