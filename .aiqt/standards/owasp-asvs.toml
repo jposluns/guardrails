@@ -11,7 +11,7 @@ citation-unit = "chapter"
 id-pattern = "^V([1-9]|1[0-7])$"
 source-artefact = "OWASP Application Security Verification Standard (ASVS) 5.0.0 (tag v5.0.0_release)"
 retrieved = "2026-08-16"
-catalogue = "full"
+catalogue = "subset"
 url = "https://github.com/OWASP/ASVS"
 
 [[id]]
@@ -20,12 +20,6 @@ title = "Encoding and Sanitization"
 [[id]]
 code = "V2"
 title = "Validation and Business Logic"
-[[id]]
-code = "V3"
-title = "Web Frontend Security"
-[[id]]
-code = "V4"
-title = "API and Web Service"
 [[id]]
 code = "V5"
 title = "File Handling"
@@ -57,11 +51,5 @@ title = "Configuration"
 code = "V14"
 title = "Data Protection"
 [[id]]
-code = "V15"
-title = "Secure Coding and Architecture"
-[[id]]
 code = "V16"
 title = "Security Logging and Error Handling"
-[[id]]
-code = "V17"
-title = "WebRTC"

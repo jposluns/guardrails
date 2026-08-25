@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "f209658652e0275a804ea7190d3e695fc9c53fdcfda31700bcaa899b0f0af3fe"
+tree-sha256 = "9531b862f7256b364fc14c1c64c231fc697923064a9b081d5f623b8b0433921e"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -711,68 +711,68 @@ sha256 = "b9419ce575e2661ba65a71982130c03a6e29de966741fba53d2c96f20aa44677"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
-bytes = 10925
-sha256 = "0775bb12225e0de2e5f72fb5591c6fe2eca5754202d5cb99a96253dd798a62de"
+bytes = 4592
+sha256 = "05e124da99a920283ef51380e1ee682e71d94b81b4f8a2329af3de7c2bb8c497"
 
 [[sources]]
 path = ".aiqt/standards/csa-aicm.toml"
-bytes = 16031
-sha256 = "599dc0f90d535479bab3b08a69dbca26bdfcf37f4740c7d7640866c4b16da72d"
+bytes = 5495
+sha256 = "73c3f7a10c7898539f555f11ecef86130578fe76a87211f6c5178f61f13716c2"
 
 [[sources]]
 path = ".aiqt/standards/csa-ccm.toml"
-bytes = 13683
-sha256 = "d840b4666a9fcd8bcc57d6a600d9bc85123457c1a3007d27666a520754e8cf84"
+bytes = 4212
+sha256 = "abc01795b72a8e8d83368fb2a72e300614deaa7cef2e97e00b021fe7e26023bf"
 
 [[sources]]
 path = ".aiqt/standards/cwe.toml"
-bytes = 77600
-sha256 = "18d638ef55e192ed54c5f05f7f8a33a94fcabb913f13389f9b6acd7a59992254"
+bytes = 6967
+sha256 = "a6469dabb99aa078452d5f0b27bb22359c3a9d798a72a16f81240eb210735ce3"
 
 [[sources]]
 path = ".aiqt/standards/iso-23894.toml"
-bytes = 4024
-sha256 = "57f746f1da022de3584436f23ebda2ff4e83481247a844cbef81e5eba4246437"
+bytes = 1473
+sha256 = "b9192108ed0b9a43f732171f152d8965b5e854aa37499130fd8ee3e94e56a5cd"
 
 [[sources]]
 path = ".aiqt/standards/iso-42001.toml"
-bytes = 5188
-sha256 = "92b9830c345c87deb50bdfa07dfa1e53f55cef8e62667a6484e423a48eca40bb"
+bytes = 1847
+sha256 = "5f3c34bb3443779abd76cf184c9b7bcb856bdc71ad9d969f89d8e5e58817abb6"
 
 [[sources]]
 path = ".aiqt/standards/nist-80053.toml"
-bytes = 77577
-sha256 = "45ea19c2a3a3f53a7279041019a8b2fb348237ae73651add751f4b606d1c5c64"
+bytes = 4974
+sha256 = "274e65a255222582ba2d69a6f928da048623ee8870f61b2c7ee2d496b7694617"
 
 [[sources]]
 path = ".aiqt/standards/nist-airmf.toml"
-bytes = 12479
-sha256 = "25b24a704837ff3cf2fba11409ab2bc5c67b2970a9761300ccb28d055d9b4ee5"
+bytes = 4508
+sha256 = "9b90c4f1aa41846f35e0daa3bdf03e312fd636071c3053ebdb9dbbdddb85f1ae"
 
 [[sources]]
 path = ".aiqt/standards/nist-ssdf.toml"
-bytes = 3872
-sha256 = "52d1dc116f45674b4a9b3d45f15d9eaaab3ceff2dfaa96fdfa0f51ecb79061ea"
+bytes = 2183
+sha256 = "7c5286f6678946ff54555eb3a20750a08b5e448cd7856f9f8a423c7c0f701eb8"
 
 [[sources]]
 path = ".aiqt/standards/owasp-api.toml"
-bytes = 1148
-sha256 = "6a01d45deee641952e4ac74df7f6f8e9779418e17913cdf243a9015aba62b2e9"
+bytes = 1012
+sha256 = "7fb5a7f9ed381608654e8b12ce09f80b8ce55e7e802bbb5d217f9ca820f68e0c"
 
 [[sources]]
 path = ".aiqt/standards/owasp-asi.toml"
-bytes = 1163
-sha256 = "2650bbbd00467c3945284ee3457ff5230ec57b331dbc95eff16d117c39195246"
+bytes = 1115
+sha256 = "207ae6dfb0a36a8beb7040e8c99c8babb754fc8fdd0cb64256e1c2be6c46ead1"
 
 [[sources]]
 path = ".aiqt/standards/owasp-asvs.toml"
-bytes = 1561
-sha256 = "3171645da5f8d3e72fb4cae967049d1a0adc96334f444d898dbd14c689c53e40"
+bytes = 1365
+sha256 = "46bf169fc50d937d08d81c612cf9d2033b40844a660110ea1ea21e87e9200e1e"
 
 [[sources]]
 path = ".aiqt/standards/owasp-cheatsheet.toml"
-bytes = 10388
-sha256 = "20a6d4985fed93920fbb8a1f3b89c7861e215e5e7fd3732eed4cc255e31393ae"
+bytes = 3086
+sha256 = "baa1c678625781ec5397092dc06ab43a30a1228893fe96b2edad8ed6ef751e7b"
 
 [[sources]]
 path = ".aiqt/standards/owasp-llm.toml"
@@ -786,8 +786,8 @@ sha256 = "d7a585d0d8554c06a7215b9018a97d874c7428d43221ddce59669facacac9af3"
 
 [[sources]]
 path = ".aiqt/standards/owasp-proactive.toml"
-bytes = 1235
-sha256 = "d1ed179d91d18a1b7efe0be561b4b1d222234ad10800ab3ae758a331e67ff3b9"
+bytes = 1173
+sha256 = "ab335cc0cfa8dd06d98131378a92dd8a54d6c552b30221410988a2e3d7dff33d"
 
 [[sources]]
 path = ".aiqt/standards/owasp-web.toml"
@@ -2061,8 +2061,8 @@ sha256 = "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2"
 
 [[sources]]
 path = "NOTICE"
-bytes = 8177
-sha256 = "4e1904a6e597b8bde207acd2089fd388477d1d76940002895a9582689cb08c0d"
+bytes = 8797
+sha256 = "2407123bc04e8efae7f772ecaaca6289d7fa4fc932ed43f88ecb6f5c58191d09"
 
 [[sources]]
 path = "README.md"
@@ -2186,8 +2186,8 @@ sha256 = "f1be6ca7bf067a849bdbdaf491fc13a48c0939241af497d9435abd1f0221eec7"
 
 [[sources]]
 path = "site/downloads/mappings.json"
-bytes = 401575
-sha256 = "6a1ebed7db49f871bc09b163f4af306ef9d6c4be7433730361bcfb2e0d9c6cc0"
+bytes = 401613
+sha256 = "f6b4177e52fe9347c81a27d6ae38c2e33c0a3db85a37edd3bce63177b8534c7e"
 
 [[sources]]
 path = "site/draft.html"
@@ -2251,8 +2251,8 @@ sha256 = "060f46657ff6d8aa35d527f20f749796eb78f9892398267b6bb3f839cf4e3613"
 
 [[sources]]
 path = "site/mappings.html"
-bytes = 439143
-sha256 = "d9a4b85d0873ab5ada5a29cb2726466eed29b199baf1fd2083c90ddd25862a3d"
+bytes = 439714
+sha256 = "6c6a419cd2713bdc69c5c6a052113eb58fe507a3429a29e8348f7da60f801d5e"
 
 [[sources]]
 path = "site/roadmap.html"
@@ -2481,8 +2481,8 @@ sha256 = "51366904aab2e9c6f9f9a34a5e3340908b47256f5ddf519f8d2fceeb770efdb0"
 
 [[sources]]
 path = "tools/gen_notice.py"
-bytes = 7955
-sha256 = "eadd5692675d9a4edf07623cb9202adec657237ca8bbb9b6c9620e5b0c67cc00"
+bytes = 8626
+sha256 = "a8a5fb7a96abc12a9bb6a4ff9b7139af4dba7c6f1d47246fde2d577f6ac004d0"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
@@ -2516,8 +2516,8 @@ sha256 = "248532c6aaa8371d34eaaebbda9dffe30055a3b8b8bdb2311a97ab2d91e8eeb6"
 
 [[sources]]
 path = "tools/import_cwe.py"
-bytes = 36134
-sha256 = "109cb1c37de84064a56d6a2249ebbd887436a4f91f3bcb6234ff02cec06a9c31"
+bytes = 40598
+sha256 = "26903b5f57fb530b0311460291eae16c8d6aaafc04237115b4a04dec9fe87a71"
 
 [[sources]]
 path = "tools/leak-hashes.txt"
