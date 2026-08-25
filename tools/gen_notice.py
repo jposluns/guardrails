@@ -28,6 +28,9 @@ INTRO_TEMPLATE = (
     "This pack is published under the Creative Commons Attribution-ShareAlike 4.0 International "
     "License (CC BY-SA 4.0); see the LICENSE file. That licence covers the pack's own content, "
     "including its crosswalk mappings.\n\n"
+    "The Creative Commons licence covers the pack's copyrightable material and does not grant any "
+    "trademark rights. AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns. These "
+    "marks are unregistered.\n\n"
     "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
     "{kinds} IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "
@@ -103,7 +106,7 @@ def build(root):
             print("error: " + err + "; fail-closed (NOTICE not rendered)", file=sys.stderr)
         raise SystemExit(2)
 
-    lines = ["AIQT Guardrails: third-party attribution NOTICE", ""]
+    lines = ["AIQT Guardrails™: third-party attribution NOTICE", ""]
     lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds)))
     lines.append("")
     lines.append("=" * WRAP)

@@ -281,7 +281,7 @@ def _security_block(data):
 def render_skill(data):
     blocks = [
         _frontmatter(data),
-        "# AIQT\n\n" + data["body_aiqt"],
+        "# AIQT™\n\n" + data["body_aiqt"],
         "# Rules\n\n" + data["body_rules"],
         _security_block(data),
         # Public attribution footer (GD-56): attributes both the project and the maintainer under the
@@ -309,7 +309,7 @@ def render_zip(data):
 
 
 def render_instructions(data):
-    header = ("AIQT: a standard for your AI assistant\n"
+    header = ("AIQT™: a standard for your AI assistant\n"
               "Version {v} . Licensed under CC BY-SA 4.0 "
               "(https://creativecommons.org/licenses/by-sa/4.0/)\n"
               "{attr}").format(v=data["meta"]["version"], attr=data["attribution"])

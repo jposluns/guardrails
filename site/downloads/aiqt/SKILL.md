@@ -10,7 +10,7 @@ license: CC-BY-SA-4.0
 version: 1.0.0
 ---
 
-# AIQT
+# AIQT™
 
 The one priority ordering, decided in advance:
 
