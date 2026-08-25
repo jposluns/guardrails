@@ -37,6 +37,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Make retries safe to repeat](rules/aiqt/10-INTEG-safe-retries.md)
 - [Separate task changes from pre-existing work](rules/aiqt/10-INTEG-separate-task-changes.md)
 - [Stage artefacts and promote only on green](rules/aiqt/10-INTEG-stage-then-promote-on-green.md)
+- [A launched task stays observable](rules/aiqt/10-INTEG-track-launched-work.md)
 - [Validation is a gate on apply](rules/aiqt/10-INTEG-validation-gates-apply.md)
 - [Workers produce inert data](rules/aiqt/10-INTEG-workers-produce-inert-data.md)
 
