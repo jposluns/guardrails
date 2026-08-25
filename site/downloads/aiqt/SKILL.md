@@ -123,3 +123,7 @@ session where you can actually browse, call tools, retrieve, or reach a filesyst
 where you cannot, they are not silently dropped, they simply do not arise. The pack's fuller development-time guardrails (how code is
 branched, reviewed, and merged, how commits are attributed, how a repository is changed) are out of
 scope for a chat assistant that changes no files, and load with the development install instead.
+
+---
+
+AIQT Guardrails by Jeff Posluns, https://github.com/jposluns/guardrails, CC BY-SA 4.0

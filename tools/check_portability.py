@@ -15,6 +15,10 @@ What portability adds beyond the leak gate (nothing here duplicates it):
      scanned normally: the identity in a description, a comment, or a filename is a finding. Both the name
      and the email are matched through the leak gate's n-gram normalization, so a case-folded, spaced, or
      hyphenated spelling all match, and email matching is scoped to the OPERATOR address, not any address.
+     A second, NARROW attribution exemption (GD-56) permits the operator NAME in one exact public
+     attribution line, and only in the two published chat artefacts (the generated SKILL.md and the
+     aiqt-instructions.txt fallback): mask_attribution_line() blanks ONLY that exact string there, so a
+     different wording, the email, or the name anywhere else in the surface still trips C1.
   C2 repo-operational vocabulary: the terms are public (they appear in the repo CLAUDE.md), so obscurity is
      the wrong tool; a small in-gate plaintext list is matched with the SAME n-gram normalization the leak
      gate uses (imported _tokens/ngram_forms), so spaced/hyphenated/camelCase variants all match one term.
@@ -108,6 +112,36 @@ PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
 # an unreadable copy fails closed rather than passing silently.
 BINARY_ALLOW = {"site/downloads/aiqt-skill.zip"}
+
+# GD-56 attribution exemption (NARROW and REVIEWED; NOT a general operator-identity allowance). The
+# maintainer deliberately attributes both the project and himself, by name, on the two PUBLISHED chat
+# artefacts, under the CC BY-SA the pack ships. That one exact line therefore carries the operator NAME by
+# design. attribution_line() rebuilds it from the loaded operator name plus the pack's public source URL
+# (so no personal data is hardcoded here, the same reason load_identity reads the name at runtime), and
+# mask_attribution_line() blanks ONLY that exact string, and ONLY in ATTRIBUTION_EXEMPT_FILES, before the
+# C1 identity scan. The email is never part of the line and is never exempt anywhere; the identity in any
+# OTHER wording, field, pathname, or file in the surface still trips C1; a DIFFERENT operator string in
+# these same two files still trips C1. The mask is value-span-exact, like the manifest/plugin.json masks.
+# The source URL is the pack's public origin, the same one the reference registry and shipped mappings use.
+ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
+ATTRIBUTION_EXEMPT_FILES = {
+    "site/downloads/aiqt/SKILL.md",           # the generated skill body the download zip carries
+    "site/downloads/aiqt-instructions.txt",   # the same body wrapped for platforms with no Skills feature
+}
+
+
+def attribution_line(name):
+    """The single public attribution string GD-56 permits, built from the loaded operator NAME and the
+    pack's public source URL. Exactly this string, and only in ATTRIBUTION_EXEMPT_FILES, is masked before
+    the C1 scan; nothing else is exempted."""
+    return "AIQT Guardrails by {}, {}, CC BY-SA 4.0".format(name, ATTRIBUTION_SOURCE_URL)
+
+
+def mask_attribution_line(text, line):
+    """Blank every exact occurrence of the attribution line with equal-length spaces (line and column
+    offsets preserved), so the operator identity WITHIN that one exact string is not a C1 finding. Any
+    other occurrence of the identity survives untouched. Only ever applied to ATTRIBUTION_EXEMPT_FILES."""
+    return text.replace(line, " " * len(line))
 
 # Repo-operational vocabulary. Each term is public but names this repo's own operating machinery, so a
 # stranger's install must not carry it. Normalized through the leak gate's _tokens, so a spaced, hyphenated,
@@ -256,17 +290,21 @@ def _mask_plugin_json_identity(text):
     return "".join(out)
 
 
-def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn):
+def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=None):
     """Scan one file's text for C1 (operator identity), C2 (operational vocabulary), and C5 (exemption
     marker). For the two attribution files the operator-identity VALUE spans are masked first (that identity
     ships by design); the identity is then matched over the WHOLE remaining document, so a same-line comment,
     an extra or nested-author field, or a value split across lines still trips C1. A non-attribution file is
-    scanned whole with no masking. A per-line pass names the exact line for a match sitting on one line; a
-    whole-document pass then adds any form that only appears split across lines. C2 and C5 apply to the whole
-    document. Masking a malformed attribution file is fail-closed (GateError -> exit 2). Returns a list of
-    finding strings."""
+    scanned whole with no masking. When attribution is given (the exact GD-56 line) and rel is one of the
+    ATTRIBUTION_EXEMPT_FILES, that one exact string is additionally blanked, so the operator name in that
+    public attribution line is not a finding while the same name in any other wording still is. A per-line
+    pass names the exact line for a match sitting on one line; a whole-document pass then adds any form that
+    only appears split across lines. C2 and C5 apply to the whole document. Masking a malformed attribution
+    file is fail-closed (GateError -> exit 2). Returns a list of finding strings."""
     findings = []
     masked = mask_identity_attribution(rel, text)
+    if attribution and rel in ATTRIBUTION_EXEMPT_FILES:
+        masked = mask_attribution_line(masked, attribution)
     seen = set()
     for number, line in enumerate(masked.splitlines(), 1):
         for hit in find_identity(line, ident_forms, ident_maxn):
@@ -385,13 +423,14 @@ def gather_surface(root):
     return files, findings
 
 
-def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open):
+def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open, attribution=None):
     """Scan one surface file: its relative PATHNAME always (C1/C2), and its CONTENT unless it is an
     allow-listed binary. An allow-listed binary is OPENED and read (opener, builtin open by default;
     injectable for the self-test) so an unreadable one fails closed (GateError -> exit 2), never a silent
     clean pass. A non-text suffix or a UTF-8 decode failure off the allow-list is a C3 finding (exit 1),
-    never fail-closed exit 2: an unscannable shipped file is exactly what this gate asserts against. Returns
-    a list of finding strings."""
+    never fail-closed exit 2: an unscannable shipped file is exactly what this gate asserts against. The
+    attribution line (GD-56) is threaded to the content scan, where it is honoured only for the two
+    exempt artefacts and never for a pathname. Returns a list of finding strings."""
     rel = path.relative_to(root).as_posix()
     findings = scan_pathname(rel, ident_forms, ident_maxn, term_grams, maxn)
     if rel in BINARY_ALLOW:
@@ -411,7 +450,7 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open
         findings.append("{}: shipped text file is not valid UTF-8 and is not on the binary allow-list "
                         "(portability C3)".format(rel))
         return findings
-    findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn))
+    findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=attribution))
     return findings
 
 
@@ -423,9 +462,11 @@ def run(root):
         ident_maxn = max(len(_tokens(name)), len(_tokens(email)))
         term_grams = {normalize_term(t) for t in OPERATIONAL_TERMS}
         maxn = max(len(_tokens(t)) for t in OPERATIONAL_TERMS)
+        attribution = attribution_line(name)  # GD-56 exempt line, from the same runtime identity source
         files, findings = gather_surface(root)
         for path in sorted(files):
-            findings.extend(scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn))
+            findings.extend(scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn,
+                                      attribution=attribution))
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -628,6 +669,30 @@ def self_test_main():
     if scan_text(".claude/rules/x.md", "reach user@example.com anytime", ident_forms, ident_maxn,
                  term_grams, maxn):
         failures.append("finding 2: a non-operator email was flagged (email scope too broad)")
+
+    # GD-56 attribution exemption (NARROW): the ONE exact attribution line is masked in the two exempt
+    # artefacts, but the exemption is value-span-exact and never a blanket site/downloads operator-identity
+    # allowance. (a) the exact line in an exempt artefact is NOT flagged; (b) a DIFFERENT operator wording
+    # in the SAME artefact still trips C1; (c) the exact line in a NON-exempt file still trips C1; (d) the
+    # operator email in an exempt artefact still trips C1 (the email is never part of the line, never
+    # exempt). A regression that widened the mask to any operator identity in site/downloads fails (b)-(d).
+    attr = attribution_line(name)
+    exempt_rel = "site/downloads/aiqt-instructions.txt"
+    if [f for f in scan_text(exempt_rel, "header\n\n" + attr + "\ncontent\n", ident_forms, ident_maxn,
+                             term_grams, maxn, attribution=attr) if "portability C1" in f]:
+        failures.append("GD-56: the exact attribution line was flagged in an exempt artefact")
+    if not [f for f in scan_text(exempt_rel, "governance authored personally by {}\n".format(name),
+                                 ident_forms, ident_maxn, term_grams, maxn, attribution=attr)
+            if "portability C1" in f]:
+        failures.append("GD-56: a DIFFERENT operator string in an exempt artefact was not flagged "
+                        "(exemption too broad)")
+    if not [f for f in scan_text(".claude/rules/x.md", attr + "\n", ident_forms, ident_maxn,
+                                 term_grams, maxn, attribution=attr) if "portability C1" in f]:
+        failures.append("GD-56: the attribution line was exempted in a NON-exempt file "
+                        "(exemption not scoped to the two artefacts)")
+    if not [f for f in scan_text(exempt_rel, "contact {}\n".format(email), ident_forms, ident_maxn,
+                                 term_grams, maxn, attribution=attr) if "portability C1" in f]:
+        failures.append("GD-56: the operator email was exempted in an exempt artefact (email never exempt)")
 
     # Finding 3: a pathname operational term fails even with clean bytes; a clean pathname passes; and the
     # symlink/type classification rejects a symlink and an unsupported type while descending a dir.
