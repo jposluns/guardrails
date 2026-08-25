@@ -17,68 +17,14 @@ catalogue = "subset"
 url = "https://github.com/OWASP/CheatSheetSeries"
 
 [[id]]
-code = "abuse-case"
-title = "Abuse Case Cheat Sheet"
-[[id]]
 code = "ai-agent-security"
 title = "AI Agent Security Cheat Sheet"
-[[id]]
-code = "ajax-security"
-title = "AJAX Security Cheat Sheet"
-[[id]]
-code = "aml-sanctions-ai-agent-payments"
-title = "AML Sanctions AI Agent Payments Cheat Sheet"
-[[id]]
-code = "attack-surface-analysis"
-title = "Attack Surface Analysis Cheat Sheet"
 [[id]]
 code = "authentication"
 title = "Authentication Cheat Sheet"
 [[id]]
 code = "authorization"
 title = "Authorization Cheat Sheet"
-[[id]]
-code = "authorization-regression-testing"
-title = "Authorization Regression Testing Cheat Sheet"
-[[id]]
-code = "authorization-testing-automation"
-title = "Authorization Testing Automation Cheat Sheet"
-[[id]]
-code = "automotive-security"
-title = "Automotive Security Cheat Sheet"
-[[id]]
-code = "bean-validation"
-title = "Bean Validation Cheat Sheet"
-[[id]]
-code = "bot-management-and-anti-automation"
-title = "Bot Management and Anti-Automation Cheat Sheet"
-[[id]]
-code = "browser-extension-vulnerabilities"
-title = "Browser Extension Vulnerabilities Cheat Sheet"
-[[id]]
-code = "business-logic-security"
-title = "Business Logic Security Cheat Sheet"
-[[id]]
-code = "c-based-toolchain-hardening"
-title = "C-Based Toolchain Hardening Cheat Sheet"
-[[id]]
-code = "choosing-and-using-security-questions"
-title = "Choosing and Using Security Questions Cheat Sheet"
-[[id]]
-code = "ci-cd-security"
-title = "CI/CD Security Cheat Sheet"
-[[id]]
-code = "clickjacking-defense"
-title = "Clickjacking Defense Cheat Sheet"
-[[id]]
-code = "content-security-policy"
-title = "Content Security Policy Cheat Sheet"
-[[id]]
-code = "cookie-theft-mitigation"
-title = "Cookie Theft Mitigation Cheat Sheet"
-[[id]]
-code = "credential-stuffing-prevention"
-title = "Credential Stuffing Prevention Cheat Sheet"
 [[id]]
 code = "cross-site-request-forgery-prevention"
 title = "Cross-Site Request Forgery Prevention Cheat Sheet"
@@ -89,41 +35,11 @@ title = "Cross Site Scripting Prevention Cheat Sheet"
 code = "cryptographic-storage"
 title = "Cryptographic Storage Cheat Sheet"
 [[id]]
-code = "database-security"
-title = "Database Security Cheat Sheet"
-[[id]]
 code = "denial-of-service"
 title = "Denial of Service Cheat Sheet"
 [[id]]
-code = "dependency-graph-sbom"
-title = "Dependency Graph SBOM Cheat Sheet"
-[[id]]
 code = "deserialization"
 title = "Deserialization Cheat Sheet"
-[[id]]
-code = "django-rest-framework"
-title = "Django REST Framework Cheat Sheet"
-[[id]]
-code = "django-security"
-title = "Django Security Cheat Sheet"
-[[id]]
-code = "docker-security"
-title = "Docker Security Cheat Sheet"
-[[id]]
-code = "dom-based-xss-prevention"
-title = "DOM based XSS Prevention Cheat Sheet"
-[[id]]
-code = "dom-clobbering-prevention"
-title = "DOM Clobbering Prevention Cheat Sheet"
-[[id]]
-code = "dotnet-security"
-title = "DotNet Security Cheat Sheet"
-[[id]]
-code = "drone-security"
-title = "Drone Security Cheat Sheet"
-[[id]]
-code = "email-validation-and-verification"
-title = "Email Validation and Verification Cheat Sheet"
 [[id]]
 code = "error-handling"
 title = "Error Handling Cheat Sheet"
@@ -131,44 +47,11 @@ title = "Error Handling Cheat Sheet"
 code = "file-upload"
 title = "File Upload Cheat Sheet"
 [[id]]
-code = "forgot-password"
-title = "Forgot Password Cheat Sheet"
-[[id]]
-code = "github-actions-security"
-title = "GitHub Actions Security Cheat Sheet"
-[[id]]
-code = "graphql"
-title = "GraphQL Cheat Sheet"
-[[id]]
-code = "grpc-security"
-title = "gRPC Security Cheat Sheet"
-[[id]]
-code = "html5-security"
-title = "HTML5 Security Cheat Sheet"
-[[id]]
-code = "http-headers"
-title = "HTTP Headers Cheat Sheet"
-[[id]]
-code = "http-strict-transport-security"
-title = "HTTP Strict Transport Security Cheat Sheet"
-[[id]]
-code = "infrastructure-as-code-security"
-title = "Infrastructure as Code Security Cheat Sheet"
-[[id]]
 code = "injection-prevention"
 title = "Injection Prevention Cheat Sheet"
 [[id]]
 code = "input-validation"
 title = "Input Validation Cheat Sheet"
-[[id]]
-code = "insecure-direct-object-reference-prevention"
-title = "Insecure Direct Object Reference Prevention Cheat Sheet"
-[[id]]
-code = "jaas"
-title = "JAAS Cheat Sheet"
-[[id]]
-code = "java-security"
-title = "Java Security Cheat Sheet"
 [[id]]
 code = "json-web-token"
 title = "JSON Web Token Cheat Sheet"
@@ -176,26 +59,11 @@ title = "JSON Web Token Cheat Sheet"
 code = "key-management"
 title = "Key Management Cheat Sheet"
 [[id]]
-code = "kubernetes-security"
-title = "Kubernetes Security Cheat Sheet"
-[[id]]
-code = "laravel"
-title = "Laravel Cheat Sheet"
-[[id]]
-code = "ldap-injection-prevention"
-title = "LDAP Injection Prevention Cheat Sheet"
-[[id]]
-code = "legacy-application-management"
-title = "Legacy Application Management Cheat Sheet"
-[[id]]
 code = "llm-prompt-injection-prevention"
 title = "LLM Prompt Injection Prevention Cheat Sheet"
 [[id]]
 code = "logging"
 title = "Logging Cheat Sheet"
-[[id]]
-code = "logging-vocabulary"
-title = "Logging Vocabulary Cheat Sheet"
 [[id]]
 code = "mass-assignment"
 title = "Mass Assignment Cheat Sheet"
@@ -203,101 +71,17 @@ title = "Mass Assignment Cheat Sheet"
 code = "mcp-security"
 title = "MCP Security Cheat Sheet"
 [[id]]
-code = "microservices-based-security-arch-doc"
-title = "Microservices based Security Arch Doc Cheat Sheet"
-[[id]]
-code = "microservices-security"
-title = "Microservices Security Cheat Sheet"
-[[id]]
-code = "mobile-application-security"
-title = "Mobile Application Security Cheat Sheet"
-[[id]]
-code = "multi-tenant-security"
-title = "Multi Tenant Security Cheat Sheet"
-[[id]]
 code = "multifactor-authentication"
 title = "Multifactor Authentication Cheat Sheet"
-[[id]]
-code = "network-segmentation"
-title = "Network Segmentation Cheat Sheet"
-[[id]]
-code = "nodejs-docker"
-title = "NodeJS Docker Cheat Sheet"
-[[id]]
-code = "nodejs-security"
-title = "Nodejs Security Cheat Sheet"
-[[id]]
-code = "nosql-security"
-title = "NoSQL Security Cheat Sheet"
-[[id]]
-code = "npm-security"
-title = "NPM Security Cheat Sheet"
 [[id]]
 code = "oauth2"
 title = "OAuth2 Cheat Sheet"
 [[id]]
-code = "os-command-injection-defense"
-title = "OS Command Injection Defense Cheat Sheet"
-[[id]]
-code = "password-storage"
-title = "Password Storage Cheat Sheet"
-[[id]]
-code = "php-configuration"
-title = "PHP Configuration Cheat Sheet"
-[[id]]
-code = "pinning"
-title = "Pinning Cheat Sheet"
-[[id]]
-code = "prototype-pollution-prevention"
-title = "Prototype Pollution Prevention Cheat Sheet"
-[[id]]
-code = "query-parameterization"
-title = "Query Parameterization Cheat Sheet"
-[[id]]
-code = "rag-security"
-title = "RAG Security Cheat Sheet"
-[[id]]
-code = "rest-assessment"
-title = "REST Assessment Cheat Sheet"
-[[id]]
-code = "rest-security"
-title = "REST Security Cheat Sheet"
-[[id]]
-code = "ruby-on-rails"
-title = "Ruby on Rails Cheat Sheet"
-[[id]]
-code = "saml-security"
-title = "SAML Security Cheat Sheet"
-[[id]]
 code = "secrets-management"
 title = "Secrets Management Cheat Sheet"
 [[id]]
-code = "secure-ai-model-ops"
-title = "Secure AI Model Ops Cheat Sheet"
-[[id]]
-code = "secure-cloud-architecture"
-title = "Secure Cloud Architecture Cheat Sheet"
-[[id]]
-code = "secure-code-review"
-title = "Secure Code Review Cheat Sheet"
-[[id]]
-code = "secure-coding-with-ai"
-title = "Secure Coding with AI Cheat Sheet"
-[[id]]
-code = "secure-product-design"
-title = "Secure Product Design Cheat Sheet"
-[[id]]
-code = "securing-cascading-style-sheets"
-title = "Securing Cascading Style Sheets Cheat Sheet"
-[[id]]
-code = "security-terminology"
-title = "Security Terminology Cheat Sheet"
-[[id]]
 code = "server-side-request-forgery-prevention"
 title = "Server Side Request Forgery Prevention Cheat Sheet"
-[[id]]
-code = "serverless-faas-security"
-title = "Serverless FaaS Security Cheat Sheet"
 [[id]]
 code = "session-management"
 title = "Session Management Cheat Sheet"
@@ -305,62 +89,11 @@ title = "Session Management Cheat Sheet"
 code = "software-supply-chain-security"
 title = "Software Supply Chain Security Cheat Sheet"
 [[id]]
-code = "sql-injection-prevention"
-title = "SQL Injection Prevention Cheat Sheet"
-[[id]]
-code = "subdomain-takeover-prevention"
-title = "Subdomain Takeover Prevention Cheat Sheet"
-[[id]]
-code = "symfony"
-title = "Symfony Cheat Sheet"
-[[id]]
-code = "third-party-javascript-management"
-title = "Third Party Javascript Management Cheat Sheet"
-[[id]]
-code = "third-party-payment-gateway-integration"
-title = "Third Party Payment Gateway Integration Cheat Sheet"
-[[id]]
 code = "threat-modeling"
 title = "Threat Modeling Cheat Sheet"
-[[id]]
-code = "transaction-authorization"
-title = "Transaction Authorization Cheat Sheet"
 [[id]]
 code = "transport-layer-security"
 title = "Transport Layer Security Cheat Sheet"
 [[id]]
-code = "unvalidated-redirects-and-forwards"
-title = "Unvalidated Redirects and Forwards Cheat Sheet"
-[[id]]
-code = "user-privacy-protection"
-title = "User Privacy Protection Cheat Sheet"
-[[id]]
-code = "virtual-patching"
-title = "Virtual Patching Cheat Sheet"
-[[id]]
-code = "vulnerability-disclosure"
-title = "Vulnerability Disclosure Cheat Sheet"
-[[id]]
 code = "vulnerable-dependency-management"
 title = "Vulnerable Dependency Management Cheat Sheet"
-[[id]]
-code = "web-service-security"
-title = "Web Service Security Cheat Sheet"
-[[id]]
-code = "websocket-security"
-title = "WebSocket Security Cheat Sheet"
-[[id]]
-code = "xml-external-entity-prevention"
-title = "XML External Entity Prevention Cheat Sheet"
-[[id]]
-code = "xml-security"
-title = "XML Security Cheat Sheet"
-[[id]]
-code = "xs-leaks"
-title = "XS Leaks Cheat Sheet"
-[[id]]
-code = "xss-filter-evasion"
-title = "XSS Filter Evasion Cheat Sheet"
-[[id]]
-code = "zero-trust-architecture"
-title = "Zero Trust Architecture Cheat Sheet"

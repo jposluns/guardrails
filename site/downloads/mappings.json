@@ -10,9 +10,9 @@
       "citation_unit": "technique",
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 67,
-      "ids_total": 173
+      "ids_total": null
     },
     "csa-aicm": {
       "name": "CSA AI Controls Matrix",
@@ -24,9 +24,9 @@
       "citation_unit": "control",
       "source_artefact": "CSA AI Controls Matrix v1.1.0",
       "retrieved": "2026-07-07",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 79,
-      "ids_total": 247
+      "ids_total": null
     },
     "csa-ccm": {
       "name": "CSA Cloud Controls Matrix",
@@ -38,9 +38,9 @@
       "citation_unit": "control",
       "source_artefact": "CSA Cloud Controls Matrix v4.1.0",
       "retrieved": "2026-07-07",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 57,
-      "ids_total": 207
+      "ids_total": null
     },
     "cwe": {
       "name": "MITRE CWE",
@@ -52,9 +52,9 @@
       "citation_unit": "weakness",
       "source_artefact": "CWE List Version 4.20 (cwec_v4.20.xml, Weakness entries; Deprecated/Obsolete excluded)",
       "retrieved": "2026-08-22",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 72,
-      "ids_total": 944
+      "ids_total": null
     },
     "iso-23894": {
       "name": "ISO/IEC 23894:2023 AI guidance on risk management",
@@ -94,9 +94,9 @@
       "citation_unit": "control",
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 67,
-      "ids_total": 1196
+      "ids_total": null
     },
     "nist-airmf": {
       "name": "NIST AI Risk Management Framework",
@@ -108,9 +108,9 @@
       "citation_unit": "subcategory",
       "source_artefact": "NIST AI 100-1, AI Risk Management Framework 1.0",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 24,
-      "ids_total": 72
+      "ids_total": null
     },
     "nist-ssdf": {
       "name": "NIST Secure Software Development Framework",
@@ -122,9 +122,9 @@
       "citation_unit": "task",
       "source_artefact": "NIST SP 800-218 v1.1 SSDF, OSCAL catalog",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 20,
-      "ids_total": 42
+      "ids_total": null
     },
     "owasp-api": {
       "name": "OWASP API Security Top 10",
@@ -136,9 +136,9 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP API Security Top 10 2023",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 8,
-      "ids_total": 10
+      "ids_total": null
     },
     "owasp-asi": {
       "name": "OWASP Top 10 for Agentic Applications",
@@ -150,9 +150,9 @@
       "citation_unit": "risk category",
       "source_artefact": "OWASP Top 10 for Agentic Applications, Version 2026 (December 2025)",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 9,
-      "ids_total": 10
+      "ids_total": null
     },
     "owasp-asvs": {
       "name": "OWASP Application Security Verification Standard",
@@ -164,9 +164,9 @@
       "citation_unit": "chapter",
       "source_artefact": "OWASP Application Security Verification Standard (ASVS) 5.0.0 (tag v5.0.0_release)",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 13,
-      "ids_total": 17
+      "ids_total": null
     },
     "owasp-cheatsheet": {
       "name": "OWASP Cheat Sheet Series",
@@ -220,9 +220,9 @@
       "citation_unit": "control",
       "source_artefact": "OWASP Top 10 Proactive Controls v4.0.0 (2024)",
       "retrieved": "2026-08-16",
-      "catalogue": "full",
+      "catalogue": "subset",
       "ids_cited": 9,
-      "ids_total": 10
+      "ids_total": null
     },
     "owasp-web": {
       "name": "OWASP Top 10 (Web Application Security Risks)",

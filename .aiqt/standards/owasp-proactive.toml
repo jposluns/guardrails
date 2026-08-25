@@ -11,7 +11,7 @@ citation-unit = "control"
 id-pattern = "^C([1-9]|10)$"
 source-artefact = "OWASP Top 10 Proactive Controls v4.0.0 (2024)"
 retrieved = "2026-08-16"
-catalogue = "full"
+catalogue = "subset"
 url = "https://github.com/OWASP/www-project-proactive-controls"
 
 [[id]]
@@ -35,9 +35,6 @@ title = "Keep your Components Secure"
 [[id]]
 code = "C7"
 title = "Secure Digital Identities"
-[[id]]
-code = "C8"
-title = "Leverage Browser Security Features"
 [[id]]
 code = "C9"
 title = "Implement Security Logging and Monitoring"
