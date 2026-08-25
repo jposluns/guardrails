@@ -49,6 +49,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+import check_versions  # noqa: E402  the ONE shared ASCII SemVer validator the release gates use
 
 # Static content-bearing inputs shared by manifest.toml/root.txt/announce-snippet.txt (VERSION ->
 # release-version + snippet; releases.toml -> genesis; renderers.toml + CLAUDE.md -> artifact roster).
@@ -365,11 +366,25 @@ def cross_check_exclusions(root, exclusions):
 
 
 def read_version(root):
-    text = (root / VERSION_REL).read_text(encoding="utf-8").strip()
-    parts = text.split(".")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
-        raise GateError("VERSION {!r} is not a bare SemVer".format(text))
-    return text
+    # Validate the RAW VERSION file grammar FIRST, then parse. Read the raw BYTES (not read_text): read_text
+    # applies universal-newline translation, which silently rewrites a CR-terminated "1.0.0\r\n" to "1.0.0\n"
+    # and masks the CR. Do NOT .strip() either: .strip() masks surrounding Unicode whitespace, so an
+    # NBSP-wrapped " 1.0.0 \n" would collapse to "1.0.0" and seed release-version at exit 0. The canonical
+    # VERSION file is exactly `X.Y.Z` followed by a single trailing LF and nothing else (no leading/trailing/
+    # embedded whitespace, no NBSP, no CR, exactly one final "\n"), the same standard check_versions holds the
+    # on-disk VERSION to (both read raw bytes and reject anything but `latest + "\n"`); the two gates agree.
+    try:
+        raw = (root / VERSION_REL).read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GateError("VERSION is not valid UTF-8 ({})".format(exc))
+    if not raw.endswith("\n") or raw.count("\n") != 1:
+        raise GateError("VERSION {!r} is not a bare SemVer with a single trailing newline".format(raw))
+    version = raw[:-1]
+    # Parse the X.Y.Z body with the SHARED ASCII SemVer validator, never a second grammar: it rejects a
+    # Unicode digit, a leading zero, and any surrounding or embedded whitespace (an NBSP/CR body fails here).
+    if check_versions._parse(version) is None:
+        raise GateError("VERSION {!r} is not a bare SemVer".format(raw))
+    return version
 
 
 def read_genesis(root):

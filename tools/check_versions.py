@@ -33,8 +33,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 
-# Bare SemVer only: no leading zeros, no pre-release/build identifiers (policy R5).
-SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+# Bare SemVer only: no leading zeros, no pre-release/build identifiers (policy R5). The digit class is the
+# explicit ASCII [0-9], never `\d`, and the pattern is compiled with re.ASCII (belt-and-suspenders): `\d`
+# matches Unicode decimal digits, so `1٢.0.0` (an Arabic-Indic two) matched `[1-9]\d*` and int() then
+# read it as 12, letting a non-ASCII-digit version pass every SemVer parse path. ASCII-only closes that gap.
+SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$", re.ASCII)
 
 
 def _parse(version):
@@ -97,14 +100,21 @@ def main():
                 "release #{} version {} is not strictly greater than the preceding {}".format(
                     i + 1, parsed[i][0], parsed[i - 1][0]))
 
-    # 3: the root VERSION file equals the latest release version (single-source).
+    # 3: the root VERSION file equals the latest release version (single-source). Read the raw BYTES, not
+    # read_text: read_text applies universal-newline translation, which silently rewrites a CR-terminated
+    # "1.0.0\r\n" to "1.0.0\n" and would let a non-canonical VERSION compare equal to `latest + "\n"` and
+    # pass. Reading bytes keeps this on-disk check exact, matching gen_manifest.read_version so the two gates
+    # agree that only `latest + "\n"` (no CR, no surrounding whitespace) is the canonical VERSION.
     latest = parsed[-1][0]
     version_path = root / "VERSION"
     try:
-        on_disk = version_path.read_text(encoding="utf-8")
+        on_disk = version_path.read_bytes().decode("utf-8")
     except FileNotFoundError:
         findings.append("VERSION file is missing; run tools/gen_changelog.py to generate it")
         on_disk = None
+    except UnicodeDecodeError as exc:
+        print("error: cannot read VERSION (not valid UTF-8: {}); fail-closed".format(exc), file=sys.stderr)
+        return 2
     except OSError as exc:
         print("error: cannot read VERSION ({}); fail-closed".format(exc), file=sys.stderr)
         return 2

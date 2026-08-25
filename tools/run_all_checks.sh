@@ -68,6 +68,8 @@ run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicit
 run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py
 run_gate "release-delta-selftest" python3 tools/check_release_delta.py --self-test
 run_gate "release-delta"          python3 tools/check_release_delta.py
+run_gate "release-build-selftest" python3 tools/check_release_build.py --self-test
+run_gate "release-build"          python3 tools/check_release_build.py
 run_gate "clauses-selftest" python3 tools/check_clauses.py --self-test
 run_gate "clauses"          python3 tools/check_clauses.py --genesis
 run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
