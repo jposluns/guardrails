@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "87265cac193bc3fa13564c34bfd799f57c4421a9cbc1bfb9d0c325ae293e5b15"
+tree-sha256 = "5d01bf70eb9b8645a5144ff86dffd73c7d22efdc39b7ad5b27a244a3aac38b7f"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2011,8 +2011,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31209
-sha256 = "316448282ca17c25695667d35418518a1d8e846d69de44639c365b8c435dd17c"
+bytes = 31246
+sha256 = "414eb8aaff51dd7accde723fb0c9a9520faa616cb3ac267c1e08329b17348db0"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2280,6 +2280,11 @@ bytes = 2179
 sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
+path = "tools/_release_schema.py"
+bytes = 12038
+sha256 = "3e1b1e131b8e5e3cc0e9f5a3c140ada1ba56bdfc496a0627bfa2abe195182900"
+
+[[sources]]
 path = "tools/_standards.py"
 bytes = 15963
 sha256 = "bb78210a828dd29909a53aa393618a54b8dedd55687b96b9083d7da2c9e2eb4f"
@@ -2361,13 +2366,13 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 47829
-sha256 = "5183ed4c31cfbdb8dc769cbbfeec803b3808f2bc9f1592a8bb694444cfcec56a"
+bytes = 62833
+sha256 = "6de20b3527c8e783435a5074a44382abe95740ea0f30aaae169d4113e06e0a96"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 61344
-sha256 = "55c09b86b7144714769812f9aa78d3a2bfe9da6d791b051fcbacffb41763a717"
+bytes = 81966
+sha256 = "c47442bfa9cb83fadaaaf414881153fd529134d0b8f775626340dc53a3f2b2af"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

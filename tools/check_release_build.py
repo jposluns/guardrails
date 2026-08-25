@@ -45,11 +45,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 from check_versions import _parse             # noqa: E402
 import gen_manifest                           # noqa: E402  the single shared release-row schema (QA #6)
+import _release_schema                        # noqa: E402  the ONE shared strict validator set
+from _release_schema import SchemaError       # noqa: E402  (round-2 findings 4)
 
 RELEASES_REL = ".aiqt/core/releases.toml"
 MANIFEST_REL = ".aiqt/manifest.toml"
 FAMILIES = ("claude", "codex", "gemini")
-HEX64 = frozenset("0123456789abcdef")
 # The keys this gate validates for a release-order row: the four anchor fields plus the three attestation
 # fields a row gains once QA'd. A self-test binds this to gen_manifest.RELEASE_ROW_ALLOWED so the full
 # per-field validator here, read_genesis, and check_release_delta cannot diverge on the schema (QA #6).
@@ -118,23 +119,41 @@ def _show_toml(root, ref, path):
 
 # --- pure layers (always in --self-test) ------------------------------------------------------------
 
+FAMILY_KEYS = frozenset({"name", "finished-signal", "verdict", "unresolved-blockers", "timestamps-utc"})
+
+
 def success_findings(families):
-    """2.2 SUCCESS + FAMILY-SET. families is a list of {name, finished-signal, verdict,
-    unresolved-blockers} dicts. A present-but-failed verdict is a FAIL, never a pass."""
+    """2.2 SUCCESS + FAMILY-SET, STRICT (finding 5). families is a list of family tables. Each MUST carry
+    exactly the FAMILY_KEYS (no unknown or missing field); finished-signal MUST be a real boolean True (the
+    string "yes" is rejected, a truthy non-bool no longer passes); verdict MUST be PASS/clean;
+    unresolved-blockers MUST be present and a real integer zero; timestamps-utc MUST be a non-empty list of
+    integer epochs. A permissive or malformed attestation is a FAIL, never a false clean."""
     findings = []
     names = [f.get("name") for f in families]
     if sorted(str(n) for n in names) != sorted(FAMILIES) or len(set(names)) != len(names):
         findings.append("family set {} != required tri-family set {} (each exactly once)".format(
             sorted(str(n) for n in names), list(FAMILIES)))
     for fam in families:
-        if not fam.get("finished-signal"):
-            findings.append("family {}: no finished-result signal (a degraded delivery is not a "
-                            "verdict)".format(fam.get("name")))
+        who = fam.get("name")
+        extra = set(fam) - FAMILY_KEYS
+        missing = FAMILY_KEYS - set(fam)
+        if extra or missing:
+            findings.append("family {}: keys are not exactly {} (unexpected {}, missing {})".format(
+                who, sorted(FAMILY_KEYS), sorted(extra), sorted(missing)))
+        if fam.get("finished-signal") is not True:
+            findings.append("family {}: finished-signal must be a real boolean true, not {!r} (a degraded "
+                            "or forged delivery is not a verdict)".format(who, fam.get("finished-signal")))
         if fam.get("verdict") not in ("PASS", "clean"):
-            findings.append("family {}: verdict {!r} is not clean".format(
-                fam.get("name"), fam.get("verdict")))
-        if fam.get("unresolved-blockers", 0) != 0:
-            findings.append("family {}: unresolved blocker(s)".format(fam.get("name")))
+            findings.append("family {}: verdict {!r} is not clean".format(who, fam.get("verdict")))
+        blk = fam.get("unresolved-blockers")
+        if not isinstance(blk, int) or isinstance(blk, bool) or blk != 0:
+            findings.append("family {}: unresolved-blockers must be the integer 0, not {!r}".format(
+                who, blk))
+        ts = fam.get("timestamps-utc")
+        if not isinstance(ts, list) or not ts or not all(isinstance(t, int) and not isinstance(t, bool)
+                                                         for t in ts):
+            findings.append("family {}: timestamps-utc must be a non-empty list of integer epochs".format(
+                who))
     return findings
 
 
@@ -146,16 +165,6 @@ def chronology_findings(attestation_epochs, tagger_epoch):
                 "annotated tag)"]
     return ["attestation timestamp {} is not strictly earlier than the tagger date {}".format(
         t, tagger_epoch) for t in attestation_epochs if not (t < tagger_epoch)]
-
-
-def chronology_input_findings(row):
-    """2.2, QA #8: the newest anchored row must carry its attestation-timestamps, so the chronology layer
-    is a real comparison rather than vacuously clean over an empty list. An absent or empty list is a
-    finding, never a silent default-to-clean."""
-    if not row.get("attestation-timestamps"):
-        return ["newest release row carries no attestation-timestamps; chronology cannot be evaluated and "
-                "is not defaulted clean (2.2 fail-closed)"]
-    return []
 
 
 def genesis_findings(rows_by_tag_genesis):
@@ -191,27 +200,72 @@ def ordering_findings(versions):
     return findings
 
 
+def _release_tags(root):
+    """The annotated release tags in the repo: {version: tag} for every tag named 'v<bare SemVer>' that
+    resolves to an ANNOTATED tag object (2.1). Lightweight or non-release tags are ignored here (each
+    recorded row validates its own tag); this answers only 'is a tagged release missing its row'."""
+    proc = _git(root, ["tag", "-l", "v*"])
+    if proc.returncode != 0:
+        raise GateError("cannot list release tags ({})".format(proc.stderr.strip()))
+    out = {}
+    for line in proc.stdout.splitlines():
+        tag = line.strip()
+        if not tag.startswith("v") or _parse(tag[1:]) is None:
+            continue
+        if _tag_kind(root, tag) == "tag":
+            out[tag[1:]] = tag
+    return out
+
+
+def predecessor_completeness_findings(root, rows):
+    """2.4 / VER-CORE-SPEC.md:273 PREDECESSOR COMPLETENESS. Strictly-increasing SemVer over the recorded
+    rows cannot prove no TAGGED release was skipped (rows 1.0.0, 1.2.0 both increase while a tagged 1.1.0 is
+    missing). Enumerate the annotated release tags and require every tagged release AT OR BELOW the newest
+    recorded row to carry a row: a tagged predecessor lacking its attestation row is a FAIL (release N+1 is
+    not accepted before row N exists). A tag ABOVE the newest recorded row is the in-flight release (its row
+    is appended post-tag) and is allowed."""
+    findings = []
+    recorded = {}
+    for r in rows:
+        t = _parse(r["version"])
+        if t is not None:
+            recorded[t] = r["version"]
+    if not recorded:
+        return findings
+    newest = max(recorded)
+    for ver, tag in sorted(_release_tags(root).items()):
+        t = _parse(ver)
+        if t is not None and t <= newest and t not in recorded:
+            findings.append("release {} is tagged ({}) at or below the newest attested release {} but has "
+                            "no attestation row; a predecessor missing its row blocks the next release "
+                            "(2.4/L273)".format(ver, tag, recorded[newest]))
+    return findings
+
+
 def validate_qa_obj(obj, expect_candidate_sha):
-    """The pure QA-object validation (2.2): candidate-sha match, success, and family-set. Returns
-    (findings, attestation_epochs)."""
+    """The pure QA-object validation (2.2), STRICT (finding 5): the object carries exactly candidate-sha and
+    family (no unknown or missing top-level key), candidate-sha matches, family is an array of tables, and
+    each family passes the strict success/schema check. Returns (findings, attestation_epochs) where the
+    epochs are the integer timestamps-utc entries retrieved FROM the object (finding 6: the caller compares
+    THESE, not the row's, against the tagger date)."""
     findings = []
     if not isinstance(obj, dict):
         return ["QA attestation is not a table"], []
+    extra = set(obj) - {"candidate-sha", "family"}
+    if extra:
+        findings.append("QA attestation carries unknown top-level key(s): {}".format(", ".join(sorted(extra))))
     if obj.get("candidate-sha") != expect_candidate_sha:
         findings.append("QA attestation candidate SHA {!r} != expected {!r}".format(
             obj.get("candidate-sha"), expect_candidate_sha))
     fams = obj.get("family", [])
-    if not isinstance(fams, list) or not all(isinstance(f, dict) for f in fams):
-        return findings + ["QA attestation [[family]] is not an array of tables"], []
+    if not isinstance(fams, list) or not fams or not all(isinstance(f, dict) for f in fams):
+        return findings + ["QA attestation [[family]] is not a non-empty array of tables"], []
     findings += success_findings(fams)
     epochs = []
     for f in fams:
-        for t in f.get("timestamps-utc", []):
-            if isinstance(t, int) and not isinstance(t, bool):
-                epochs.append(t)
-            else:
-                findings.append("family {}: a timestamps-utc entry {!r} is not an integer epoch".format(
-                    f.get("name"), t))
+        ts = f.get("timestamps-utc")
+        if isinstance(ts, list):
+            epochs += [t for t in ts if isinstance(t, int) and not isinstance(t, bool)]
     return findings, epochs
 
 
@@ -283,61 +337,28 @@ def reproduce_gate(root, sha):
 
 # --- row loading ------------------------------------------------------------------------------------
 
-def _req_str(row, key, where):
-    v = row.get(key)
-    if not isinstance(v, str) or not v:
-        raise GateError("{}: missing or non-string {!r}".format(where, key))
-    return v
-
-
-def _validate_row_fields(row, where):
-    """The FULL per-field validation of one release-order row, the single validator shared by
-    load_build_rows (working tree) and _normalize_rows (an arbitrary commit's record), so --post-tag gets
-    exactly the same strict schema as the working-tree loader (QA #8: post-tag no longer validates only the
-    anchor fields). Unknown keys are rejected against the shared schema (QA #6). Raises GateError."""
-    if not isinstance(row, dict):
-        raise GateError(where + ": not a table")
-    extra = set(row) - gen_manifest.RELEASE_ROW_ALLOWED
-    if extra:
-        raise GateError(where + ": unknown key(s): {} (not in the shared release-row schema)".format(
-            ", ".join(sorted(extra))))
-    for key in BUILD_ROW_ANCHOR:
-        _req_str(row, key, where)
-    if _parse(row["version"]) is None:
-        raise GateError(where + ": malformed version {!r}".format(row["version"]))
-    if "qa-sha256" in row:
-        d = row["qa-sha256"]
-        if not isinstance(d, str) or len(d) != 64 or set(d) - HEX64:
-            raise GateError(where + ": qa-sha256 is not 64 lowercase hex")
-    if "qa-store-path" in row:
-        p = row["qa-store-path"]
-        if not isinstance(p, str) or not p:
-            raise GateError(where + ": qa-store-path is not a non-empty string")
-        if p.startswith("/") or (len(p) > 1 and p[1] == ":"):
-            raise GateError(where + ": qa-store-path {!r} is host-absolute; the row records a "
-                            "logical store path (portability)".format(p))
-    if "attestation-timestamps" in row:
-        ts = row["attestation-timestamps"]
-        if not isinstance(ts, list) or not all(isinstance(t, int) and not isinstance(t, bool)
-                                               for t in ts):
-            raise GateError(where + ": attestation-timestamps must be a list of integer epochs")
+def _strict_releases(data, where):
+    """Run the shared strict releases validator and map its SchemaError to this gate's fail-closed
+    GateError (exit 2). One conversion point for the working-tree loader AND the arbitrary-commit
+    (--post-tag) loader, so both get identical strict validation (round-2 finding 4): format-version == 1,
+    the exact top-level keyset, and every complete-record attestation field on every present row, in audit,
+    prior-row pre-tag, and post-tag. A present row missing qa-sha256/qa-store-path/attestation-timestamps
+    (the round-2 permissive schema) is now exit 2, not a clean pass."""
+    try:
+        return _release_schema.strict_releases(data, where)
+    except SchemaError as exc:
+        raise GateError(str(exc))
 
 
 def load_build_rows(root):
-    """The release-order rows the build gate validates. Zero rows is the genesis/dormant state. A present
-    row must carry the four anchor fields; qa-sha256 (64 hex), qa-store-path (a logical path), and
-    attestation-timestamps (a list of integer epochs) are validated when present. Fail-closed on any
-    malformed row."""
+    """The release-order rows the build gate validates, through the ONE shared strict validator. Zero rows
+    is the genesis/dormant state; every PRESENT row is a complete post-QA attestation record (2.4/L254).
+    Fail-closed on any malformed record, including format-version and unknown top-level keys (finding 4)."""
     try:
         data = load_toml(root / RELEASES_REL)
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(RELEASES_REL, exc))
-    rows = data.get("release", [])
-    if not isinstance(rows, list):
-        raise GateError("{}: [[release]] is not an array".format(RELEASES_REL))
-    for i, row in enumerate(rows, 1):
-        _validate_row_fields(row, "{} row #{}".format(RELEASES_REL, i))
-    return rows
+    return _strict_releases(data, RELEASES_REL)
 
 
 def _validate_tag_row(root, row):
@@ -377,17 +398,18 @@ def run_audit(root):
             return 0
         findings = []
         findings += ordering_findings([r["version"] for r in rows])
+        findings += predecessor_completeness_findings(root, rows)  # finding 7: no skipped tagged release
         genesis_flags = []
         for row in rows:
             row_findings, is_genesis = _validate_tag_row(root, row)
             findings += row_findings
             genesis_flags.append(is_genesis)
         findings += genesis_findings(genesis_flags)
-        # Chronology on the newest row, from the row's recorded timestamps vs its tagger date; the
-        # timestamps must be present (no default-to-clean, QA #8).
+        # Chronology on the newest row, from the row's recorded timestamps vs its tagger date; the strict
+        # loader already guarantees the timestamps are present and non-empty (finding 4), so this is a real
+        # comparison, never a vacuous clean.
         newest = rows[-1]
-        findings += chronology_input_findings(newest)
-        findings += chronology_findings(newest.get("attestation-timestamps", []),
+        findings += chronology_findings(newest["attestation-timestamps"],
                                         _tagger_epoch(root, newest["tag"]))
         print("release-build: qa-retrieval MAINTAINER-SIDE (runs under --pre-tag/--post-tag; the "
               "private store is unreachable from CI, 2.2 residual)")
@@ -405,10 +427,11 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         findings += reproduce_gate(root, candidate_sha)
         qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
         findings += qa_findings
-        # genesis declaration of the candidate tree.
+        # genesis declaration of the candidate tree; the candidate releases record is strict-validated
+        # too (finding 4: format-version + top-level + full rows on the candidate object).
         cand_manifest = _show_toml(root, candidate_sha, MANIFEST_REL)
-        cand_releases = _show_toml(root, candidate_sha, RELEASES_REL)
-        cand_rows = cand_releases.get("release", [])
+        cand_rows = _strict_releases(_show_toml(root, candidate_sha, RELEASES_REL),
+                                     "candidate " + RELEASES_REL)
         is_genesis = cand_manifest.get("genesis") is True
         if is_genesis and cand_rows:
             findings.append("candidate declares genesis = true but its releases.toml is not header-only "
@@ -418,18 +441,69 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
             row_findings, _g = _validate_tag_row(root, row)
             findings += row_findings
         if first_pin:
-            findings += _first_pin_findings(root, candidate_sha, evidence, is_genesis)
+            findings += _first_pin_findings(root, candidate_sha, evidence)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     return _report(findings, "pre-tag")
 
 
-def _first_pin_findings(root, candidate_sha, evidence, is_genesis):
-    """--first-pin (2.1/6.6): the step-1 freeze holds in the candidate checkout (check_clauses --genesis
-    passes) and, when this is the genesis release, the evidence artifact the first-pin precondition
-    names is present. The prefix-superset demonstration itself is adopter-experience-owned."""
+FIRST_PIN_EVIDENCE_KEYS = frozenset({"candidate-sha", "observed-measurement", "cap-bytes",
+                                     "prefix-superset", "demonstration", "agents-sha256"})
+
+
+def _first_pin_evidence_findings(candidate_sha, evidence):
+    """Validate the --first-pin EVIDENCE artifact (2.1/6.6/VER-CORE-SPEC.md:1034), not merely is_file()
+    (finding 8). --evidence is REQUIRED in --first-pin mode. The artifact (a TOML file, schema a [VERIFY]
+    defined here) carries EXACTLY FIRST_PIN_EVIDENCE_KEYS: candidate-sha (bound to the candidate commit),
+    agents-sha256 (the 64-hex digest of the shipped AGENTS.md bytes demonstrated against), observed-
+    measurement and cap-bytes (positive integers with observed-measurement STRICTLY exceeding cap-bytes, the
+    61,117 > 32,768 premise of L1017/L1028), prefix-superset (a real boolean true: the delivered-prefix-
+    superset demonstration succeeded, L1029), and demonstration (a non-empty reference). An unreadable or
+    unparseable artifact is exit 2. DISCLOSED RESIDUAL (disclose-guard-residuals): offline, this validates
+    the artifact's schema, candidate binding, digest SYNTAX, and asserted superset OUTCOME; it does not
+    re-derive the byte-superset against the live AGENTS.md (adopter-experience-owned) nor test reachability."""
+    if evidence is None:
+        return ["first-pin: --evidence is REQUIRED in --first-pin mode (the first-pin precondition is owed "
+                "delivered evidence, not asserted; L1034)"]
+    ev_path = Path(evidence)
+    if not ev_path.is_file():
+        return ["first-pin: the named evidence artifact {} does not exist".format(evidence)]
+    try:
+        data = tomllib.loads(ev_path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise GateError("first-pin: evidence artifact {} is unreadable or does not parse ({})".format(
+            evidence, exc))
     findings = []
+    extra, missing = set(data) - FIRST_PIN_EVIDENCE_KEYS, FIRST_PIN_EVIDENCE_KEYS - set(data)
+    if extra or missing:
+        findings.append("first-pin: evidence keys are not exactly {} (unexpected {}, missing {})".format(
+            sorted(FIRST_PIN_EVIDENCE_KEYS), sorted(extra), sorted(missing)))
+    if data.get("candidate-sha") != candidate_sha:
+        findings.append("first-pin: evidence candidate-sha {!r} is not bound to the candidate commit "
+                        "{!r}".format(data.get("candidate-sha"), candidate_sha))
+    dg = data.get("agents-sha256")
+    if not isinstance(dg, str) or not _release_schema.HEX64_RE.fullmatch(dg):
+        findings.append("first-pin: evidence agents-sha256 is not a 64-hex digest")
+    meas, cap = data.get("observed-measurement"), data.get("cap-bytes")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (meas, cap)):
+        findings.append("first-pin: observed-measurement and cap-bytes must be positive integers")
+    elif not meas > cap:
+        findings.append("first-pin: observed-measurement {} does not exceed cap-bytes {} (the default-cap "
+                        "premise, L1028)".format(meas, cap))
+    if data.get("prefix-superset") is not True:
+        findings.append("first-pin: prefix-superset must be true (the delivered-prefix-superset "
+                        "demonstration must succeed, L1029)")
+    if not isinstance(data.get("demonstration"), str) or not data.get("demonstration"):
+        findings.append("first-pin: demonstration must be a non-empty reference")
+    return findings
+
+
+def _first_pin_findings(root, candidate_sha, evidence):
+    """--first-pin (2.1/6.6): the step-1 freeze holds in the candidate checkout (check_clauses --genesis
+    passes) AND the delivered prefix-superset EVIDENCE is present and valid (finding 8), required in
+    first-pin mode regardless of genesis."""
+    findings = list(_first_pin_evidence_findings(candidate_sha, evidence))
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-firstpin-"))
     co = tmp / "co"
     try:
@@ -444,8 +518,6 @@ def _first_pin_findings(root, candidate_sha, evidence, is_genesis):
     finally:
         _git(root, ["worktree", "remove", "--force", str(co)])
         shutil.rmtree(tmp, ignore_errors=True)
-    if evidence is not None and not Path(evidence).is_file():
-        findings.append("first-pin: the named evidence artifact {} does not exist".format(evidence))
     return findings
 
 
@@ -460,13 +532,16 @@ def run_post_tag(root, attestation_commit, qa_path):
     try:
         ref = attestation_commit or "HEAD"
         releases = _show_toml(root, ref, RELEASES_REL)
-        rows = releases.get("release", [])
-        if not isinstance(rows, list) or not rows:
+        # Re-validate through the ONE shared strict validator, exactly as the working-tree loader: every
+        # present row is a complete attestation record, so post-tag gets the full schema, not just anchor
+        # fields (finding 4). A newest row missing qa-sha256/qa-store-path/attestation-timestamps is now
+        # exit 2 here, never a default-to-clean.
+        norm = _strict_releases(releases, "attestation " + RELEASES_REL)
+        if not norm:
             raise GateError("--post-tag: the proposed attestation commit {} has no release rows to "
                             "validate".format(ref))
-        # Re-validate through the SAME strict full-row validator as the working-tree loader (QA #8).
-        norm = _normalize_rows(rows)
         findings = ordering_findings([r["version"] for r in norm])
+        findings += predecessor_completeness_findings(root, norm)  # finding 7
         genesis_flags = []
         for row in norm:
             row_findings, is_genesis = _validate_tag_row(root, row)
@@ -474,36 +549,27 @@ def run_post_tag(root, attestation_commit, qa_path):
             genesis_flags.append(is_genesis)
         findings += genesis_findings(genesis_flags)
         newest = norm[-1]
-        # The newest row is THE attestation row and must carry every attestation field; a missing field is
-        # a finding, never a default-to-clean (QA #8).
-        for key in ("qa-sha256", "qa-store-path"):
-            if key not in newest:
-                findings.append("newest release row is not fully attested: missing {} (2.2)".format(key))
-        findings += chronology_input_findings(newest)
-        findings += chronology_findings(newest.get("attestation-timestamps", []),
-                                        _tagger_epoch(root, newest["tag"]))
-        # Retrieve, re-hash, and validate the recorded QA object against the newest candidate commit.
+        # Retrieve, re-hash, and validate the recorded QA object against the newest candidate commit, and
+        # derive the chronology from the RETRIEVED object (finding 6): the retrieved timestamps are compared
+        # against the tagger date, and the row's timestamp list MUST EQUAL the retrieved timestamps, so an
+        # early row timestamp cannot forge chronology over a QA object whose real timestamps postdate the tag.
         if qa_path is None:
             raise GateError("--post-tag requires --qa-path to retrieve and re-hash the newest row's "
                             "attestation QA object; the armed gate never certifies without it")
-        if "qa-sha256" in newest:
-            qa_findings, _epochs = qa_layers(qa_path, newest["qa-sha256"], newest["commit_sha"])
-            findings += qa_findings
+        qa_findings, epochs = qa_layers(qa_path, newest["qa-sha256"], newest["commit_sha"])
+        findings += qa_findings
+        findings += chronology_findings(epochs, _tagger_epoch(root, newest["tag"]))
+        # The row's timestamp list must EQUAL the NORMALIZED (sorted, de-duplicated) timestamps retrieved
+        # from the hashed QA object, so an early row timestamp cannot forge chronology over a QA object
+        # whose real timestamps postdate the tag (finding 6).
+        if sorted(set(newest["attestation-timestamps"])) != sorted(set(epochs)):
+            findings.append("newest release row attestation-timestamps {} do not equal the normalized "
+                            "timestamps {} retrieved from the hashed QA object (no forging; finding 6)"
+                            .format(sorted(set(newest["attestation-timestamps"])), sorted(set(epochs))))
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     return _report(findings, "post-tag")
-
-
-def _normalize_rows(rows):
-    """Validate rows parsed from an arbitrary commit's releases.toml through the SAME strict full-row
-    validator as load_build_rows (working tree), so --post-tag applies the full schema, not just the
-    anchor fields (QA #8)."""
-    out = []
-    for i, row in enumerate(rows, 1):
-        _validate_row_fields(row, "attestation releases row #{}".format(i))
-        out.append(row)
-    return out
 
 
 def _report(findings, stage):
@@ -534,8 +600,8 @@ def _run_post_tag_quiet(root, attestation_commit, qa_path):
 def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
     failures = []
 
-    ok_fams = [{"name": n, "finished-signal": True, "verdict": "PASS", "unresolved-blockers": 0}
-               for n in FAMILIES]
+    ok_fams = [{"name": n, "finished-signal": True, "verdict": "PASS", "unresolved-blockers": 0,
+                "timestamps-utc": [5]} for n in FAMILIES]
     if success_findings(ok_fams):
         failures.append("success_findings: a clean tri-family set expected no finding")
     # missing a family.
@@ -555,11 +621,30 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
     blk[1]["unresolved-blockers"] = 1
     if not success_findings(blk):
         failures.append("success_findings: an unresolved blocker expected a finding")
-    # a missing finished-signal (a degraded delivery is not a verdict).
+    # a false finished-signal (a degraded delivery is not a verdict).
     deg = [dict(f) for f in ok_fams]
     deg[2]["finished-signal"] = False
     if not success_findings(deg):
-        failures.append("success_findings: a missing finished-signal expected a finding")
+        failures.append("success_findings: a false finished-signal expected a finding")
+    # (finding 5) a STRING "yes" finished-signal is not a real boolean and must be rejected.
+    yes = [dict(f) for f in ok_fams]
+    yes[0]["finished-signal"] = "yes"
+    if not any("real boolean" in f for f in success_findings(yes)):
+        failures.append("success_findings: a string 'yes' finished-signal must be rejected (finding 5)")
+    # (finding 5) a family missing timestamps-utc, and an unknown family key, are each rejected.
+    nots = [dict(f) for f in ok_fams]
+    del nots[1]["timestamps-utc"]
+    if not any("timestamps-utc" in f for f in success_findings(nots)):
+        failures.append("success_findings: a family without timestamps-utc must be rejected (finding 5)")
+    unk = [dict(f) for f in ok_fams]
+    unk[2]["bogus"] = 1
+    if not any("keys are not exactly" in f for f in success_findings(unk)):
+        failures.append("success_findings: an unknown family key must be rejected (finding 5)")
+    # (finding 5) unresolved-blockers must be a real integer 0, not a bool or a non-zero.
+    boolblk = [dict(f) for f in ok_fams]
+    boolblk[0]["unresolved-blockers"] = True
+    if not any("integer 0" in f for f in success_findings(boolblk)):
+        failures.append("success_findings: a boolean unresolved-blockers must be rejected (finding 5)")
 
     # chronology.
     if chronology_findings([10, 20], 30):
@@ -597,13 +682,19 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
     fnds, _e = validate_qa_obj(good_obj, "different")
     if not any("candidate SHA" in f for f in fnds):
         failures.append("validate_qa_obj: a candidate-sha mismatch expected a finding")
-
-    # chronology-input guard (QA #8): a newest row without attestation-timestamps is a finding, never a
-    # vacuously-clean chronology.
-    if chronology_input_findings({"attestation-timestamps": [1]}):
-        failures.append("chronology_input: a row with timestamps expected no finding")
-    if not chronology_input_findings({}) or not chronology_input_findings({"attestation-timestamps": []}):
-        failures.append("chronology_input: a row with no/empty timestamps expected a finding (QA #8)")
+    # (finding 5) an unknown top-level key on the QA object is rejected.
+    fnds, _e = validate_qa_obj(dict(good_obj, bogus=1), "abc")
+    if not any("unknown top-level key" in f for f in fnds):
+        failures.append("validate_qa_obj: an unknown object key must be rejected (finding 5)")
+    # (finding 5) the permissive attestation the round-2 QA flagged: string 'yes' signals and no
+    # timestamps must NOT clean.
+    permissive = {"candidate-sha": "abc", "family": [
+        {"name": n, "finished-signal": "yes", "verdict": "PASS", "unresolved-blockers": 0}
+        for n in FAMILIES]}
+    fnds, _e = validate_qa_obj(permissive, "abc")
+    if not fnds:
+        failures.append("validate_qa_obj: a string-'yes'/no-timestamps attestation must not clean "
+                        "(finding 5)")
 
     # --- shared release-row schema drift (QA #6) --------------------------------------------------
     # This gate's validated key universe must EQUAL the single shared schema, so read_genesis,
@@ -688,18 +779,35 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             commit_sha = subprocess.run(["git", "-C", str(a), "rev-parse", "refs/tags/v1.0.0^{commit}"],
                                         check=True, capture_output=True, text=True).stdout.strip()
             tagger = _tagger_epoch(a, "v1.0.0")
-            row = ('format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                   'tag_object_sha = "{}"\ncommit_sha = "{}"\nattestation-timestamps = [{}]\n'.format(
-                       tag_obj, commit_sha, tagger - 100))
-            (a / RELEASES_REL).write_text(row, encoding="utf-8")
+
+            def _full_row(tobj, csha, ts, version="1.0.0", tag="v1.0.0", fmt=1):
+                # A COMPLETE attestation row (finding 4): every present row carries all seven fields.
+                return ('format-version = {}\n\n[[release]]\nversion = "{}"\ntag = "{}"\n'
+                        'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                        'qa-store-path = "qa/{}.toml"\nattestation-timestamps = [{}]\n'.format(
+                            fmt, version, tag, tobj, csha, "c" * 64, version, ts))
+
+            (a / RELEASES_REL).write_text(_full_row(tag_obj, commit_sha, tagger - 100), encoding="utf-8")
             if _run_audit_quiet(a) != 0:
                 failures.append("audit annotated-tag row: expected a clean exit 0")
 
+            # (finding 4) a committed row missing qa-sha256/qa-store-path is no longer a complete record ->
+            # exit 2, not the round-2 clean audit.
+            (a / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{}"\ncommit_sha = "{}"\nattestation-timestamps = [{}]\n'.format(
+                    tag_obj, commit_sha, tagger - 100), encoding="utf-8")
+            if _run_audit_quiet(a) != 2:
+                failures.append("audit row missing qa-sha256/qa-store-path: expected fail-closed exit 2 "
+                                "(finding 4, complete-record schema)")
+            # (finding 4) a zero-row releases.toml with an invalid format-version -> exit 2, not NOT
+            # APPLICABLE clean.
+            (a / RELEASES_REL).write_text("format-version = 999\n", encoding="utf-8")
+            if _run_audit_quiet(a) != 2:
+                failures.append("audit zero-row format-version=999: expected fail-closed exit 2 (finding 4)")
+
             # (chronology violation) a timestamp not strictly earlier than the tagger date -> exit 1.
-            row_bad = ('format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                       'tag_object_sha = "{}"\ncommit_sha = "{}"\nattestation-timestamps = [{}]\n'.format(
-                           tag_obj, commit_sha, tagger + 100))
-            (a / RELEASES_REL).write_text(row_bad, encoding="utf-8")
+            (a / RELEASES_REL).write_text(_full_row(tag_obj, commit_sha, tagger + 100), encoding="utf-8")
             if _run_audit_quiet(a) != 1:
                 failures.append("audit chronology violation: expected exit 1")
 
@@ -714,7 +822,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                     check=True, capture_output=True, text=True).stdout.strip()
             (lw / RELEASES_REL).write_text(
                 'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                'tag_object_sha = "{}"\ncommit_sha = "{}"\n'.format(lw_obj, lw_obj), encoding="utf-8")
+                'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
+                    lw_obj, lw_obj, "c" * 64), encoding="utf-8")
             if _run_audit_quiet(lw) != 1:
                 failures.append("audit lightweight tag: expected exit 1 (annotated tags mandatory)")
 
@@ -725,7 +835,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             _commit(nr, "genesis tree")
             (nr / RELEASES_REL).write_text(
                 'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                'tag_object_sha = "dead"\ncommit_sha = "beef"\n', encoding="utf-8")
+                'tag_object_sha = "dead"\ncommit_sha = "beef"\nqa-sha256 = "{}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format("c" * 64),
+                encoding="utf-8")
             if _run_audit_quiet(nr) != 2:
                 failures.append("audit unresolvable tag: expected fail-closed exit 2")
 
@@ -792,13 +904,85 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             bad_qa.write_text(qa_body + "# tampered\n", encoding="utf-8")
             if _run_post_tag_quiet(pt, None, str(bad_qa)) != 1:
                 failures.append("post-tag: a QA object not matching the recorded digest expected exit 1")
+            # (finding 4) a newest row missing attestation-timestamps is no longer a complete record ->
+            # the strict loader fails closed exit 2 (was the round-2 exit-1 default-to-clean chronology).
             nots_row = good_row.replace(
                 'attestation-timestamps = [{}]\n'.format(pt_tagger - 100), "")
             (pt / RELEASES_REL).write_text(nots_row, encoding="utf-8")
             _commit(pt, "drop timestamps")
-            if _run_post_tag_quiet(pt, None, str(qa_file)) != 1:
-                failures.append("post-tag: a newest row without attestation-timestamps must fail exit 1 "
-                                "(QA #8 no default-to-clean chronology)")
+            if _run_post_tag_quiet(pt, None, str(qa_file)) != 2:
+                failures.append("post-tag: a newest row without attestation-timestamps must fail closed "
+                                "exit 2 (finding 4, complete-record schema)")
+
+            # (finding 6) CHRONOLOGY FORGING: a QA object whose retrieved timestamps POSTDATE the tag, but a
+            # row that lies with an early timestamp. The armed gate now compares the RETRIEVED epochs against
+            # the tag AND requires the row list to equal them, so it fails exit 1 (the pre-fix gate discarded
+            # the retrieved epochs and cleaned on the row's early timestamp).
+            forge_body = ('candidate-sha = "{}"\n\n'.format(pt_commit) + "".join(
+                '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
+                'unresolved-blockers = 0\ntimestamps-utc = [{}]\n\n'.format(n, pt_tagger + 500)
+                for n in FAMILIES))
+            forge_file = pt / "forge.toml"
+            forge_file.write_text(forge_body, encoding="utf-8")
+            forge_sha = hashlib.sha256(forge_body.encode("utf-8")).hexdigest()
+            forge_row = ('format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                         'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                         'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
+                             pt_tag, pt_commit, forge_sha, pt_tagger - 100))
+            (pt / RELEASES_REL).write_text(forge_row, encoding="utf-8")
+            _commit(pt, "forged chronology")
+            if _run_post_tag_quiet(pt, None, str(forge_file)) != 1:
+                failures.append("post-tag: a QA object whose retrieved timestamps postdate the tag while "
+                                "the row lists an early timestamp must fail exit 1 (finding 6)")
+
+            # (finding 7) PREDECESSOR COMPLETENESS via a real 3-annotated-tag repo: a record covering only
+            # 1.0.0 and 1.2.0 (skipping the tagged 1.1.0) is flagged; a complete record is not; an in-flight
+            # tag ABOVE the newest row is allowed. Driven through the new leg on the real tag enumeration.
+            pc = tmp / "predcomplete"
+            _init(pc)
+            _write_records(pc, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _commit(pc, "tree")
+            for v in ("1.0.0", "1.1.0", "1.2.0"):
+                subprocess.run(["git", "-C", str(pc), "tag", "-a", "v" + v, "-m", v],
+                               check=True, capture_output=True, text=True,
+                               env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            skipped = [{"version": "1.0.0"}, {"version": "1.2.0"}]
+            if not any("no attestation row" in f for f in predecessor_completeness_findings(pc, skipped)):
+                failures.append("predecessor completeness: a tagged 1.1.0 skipped between rows 1.0.0 and "
+                                "1.2.0 expected a finding (finding 7)")
+            complete = [{"version": "1.0.0"}, {"version": "1.1.0"}, {"version": "1.2.0"}]
+            if predecessor_completeness_findings(pc, complete):
+                failures.append("predecessor completeness: a complete record expected no finding")
+            inflight = [{"version": "1.0.0"}, {"version": "1.1.0"}]  # 1.2.0 tagged but not yet attested
+            if predecessor_completeness_findings(pc, inflight):
+                failures.append("predecessor completeness: an in-flight tag above the newest row must be "
+                                "allowed (no finding)")
+
+            # (finding 8) FIRST-PIN EVIDENCE schema. A well-formed evidence artifact bound to the candidate
+            # clears; a missing --evidence, a candidate-binding mismatch, a bad digest, an observed<=cap, and
+            # a false prefix-superset each produce findings.
+            ev_ok = pt / "evidence.toml"
+            ev_ok.write_text(
+                'candidate-sha = "{}"\nobserved-measurement = 61117\ncap-bytes = 32768\n'
+                'prefix-superset = true\ndemonstration = "qa/prefix-superset.md"\n'
+                'agents-sha256 = "{}"\n'.format(pt_commit, "d" * 64), encoding="utf-8")
+            if _first_pin_evidence_findings(pt_commit, str(ev_ok)):
+                failures.append("first-pin evidence: a well-formed bound artifact expected no finding")
+            if not any("REQUIRED" in f for f in _first_pin_evidence_findings(pt_commit, None)):
+                failures.append("first-pin evidence: a missing --evidence must be flagged (finding 8)")
+            if not any("not bound" in f for f in _first_pin_evidence_findings("OTHER-SHA", str(ev_ok))):
+                failures.append("first-pin evidence: a candidate-binding mismatch must be flagged")
+            ev_bad = pt / "evidence-bad.toml"
+            ev_bad.write_text(
+                'candidate-sha = "{}"\nobserved-measurement = 100\ncap-bytes = 32768\n'
+                'prefix-superset = false\ndemonstration = "x"\nagents-sha256 = "nothex"\n'.format(pt_commit),
+                encoding="utf-8")
+            bad_findings = _first_pin_evidence_findings(pt_commit, str(ev_bad))
+            if not (any("agents-sha256" in f for f in bad_findings)
+                    and any("does not exceed" in f for f in bad_findings)
+                    and any("prefix-superset must be true" in f for f in bad_findings)):
+                failures.append("first-pin evidence: a bad digest, observed<=cap, and false prefix-superset "
+                                "must each be flagged (finding 8)")
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -807,16 +991,19 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
         for f in failures:
             print("  - " + f)
         return 1
-    core = ("the 2.2 success/family-set predicates (clean, missing/duplicate family, failed verdict, "
-            "unresolved blocker, missing finished-signal), the chronology predicate and its input guard "
-            "(#8), genesis uniqueness, the 2.4 ordering predicate, QA-object validation, the shared "
-            "release-row schema drift binding (#6), and the reproduce-command enumeration (#7)")
+    core = ("the 2.2 STRICT success/family-set predicates (clean, missing/duplicate family, failed verdict, "
+            "unresolved blocker, false/string finished-signal, unknown/missing family key, boolean blocker "
+            "count, finding 5), genesis uniqueness, the 2.4 ordering predicate, strict QA-object validation "
+            "(finding 5), the shared release-row schema drift binding (#6), and the reproduce-command "
+            "enumeration (#7)")
     if git_ran:
-        print("SELF-TEST PASS: {}; and the git-level cases (zero-row audit NOT APPLICABLE, a clean "
-              "annotated-tag row, a chronology violation exit 1, a lightweight tag exit 1, an "
-              "unresolvable tag exit 2, read_genesis accepting a full attestation row (#6), and the "
-              "post-tag end-to-end clean/no-qa-path/digest-mismatch/no-timestamps cases (#8)) hold".format(
-                  core))
+        print("SELF-TEST PASS: {}; and the git-level cases (zero-row audit NOT APPLICABLE, a zero-row "
+              "format-version=999 exit 2 and a row missing qa-sha256/qa-store-path exit 2 (finding 4), a "
+              "clean full attestation row, a chronology violation exit 1, a lightweight tag exit 1, an "
+              "unresolvable tag exit 2, read_genesis accepting a full attestation row (#6), the post-tag "
+              "end-to-end clean/no-qa-path/digest-mismatch cases and a no-timestamps row exit 2 (finding 4), "
+              "the chronology-FORGING exit 1 (finding 6), predecessor-completeness on a real 3-tag repo "
+              "(finding 7), and the first-pin evidence schema (finding 8)) hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))
@@ -874,6 +1061,10 @@ def main():
         if not (opts["candidate_sha"] and opts["qa_path"] and opts["qa_sha256"]):
             print("error: --pre-tag requires --candidate-sha, --qa-path, and --qa-sha256",
                   file=sys.stderr)
+            return 2
+        if opts["first_pin"] and not opts["evidence"]:
+            print("error: --first-pin requires --evidence (the first-pin precondition is owed delivered "
+                  "evidence; finding 8)", file=sys.stderr)
             return 2
         return run_pre_tag(root, opts["candidate_sha"], opts["qa_path"], opts["qa_sha256"],
                            opts["first_pin"], opts["evidence"])
