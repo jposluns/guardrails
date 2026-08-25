@@ -1,22 +1,56 @@
 #!/usr/bin/env python3
-"""Site-wide overclaim lint for site/*.html.
+"""Overclaim lint across the site, the hand-authored repo prose, and every generated textual output.
 
 AIQT's public copy is deliberately guidance-not-guarantee: it says what your assistant is asked and
 required to do, never what AIQT itself guarantees the model will do. This gate catches a regression of
 the guarantee-flavoured class the F-59/F-67 pass softened, so a reintroduced overclaim fails CI rather
-than shipping. It scans the VISIBLE TEXT of each page (tags, <script>, and <style> stripped; entities
-unescaped; whitespace collapsed), so a phrase that wraps across source lines is still one string and an
-overclaim hidden in an attribute is not falsely flagged. Text from two SEPARATE block elements is kept
-apart by a space (see BLOCK_TAGS): "<p>guarantees</p><p>secure</p>" reads as two phrases, not the
-phantom token "guaranteessecure", so an overclaim cannot hide by straddling a block boundary; inline
-markup ("<b>guar</b>antee") still joins into one word.
+than shipping. On the SITE pages it scans the VISIBLE TEXT of each page (tags, <script>, and <style>
+stripped; entities unescaped; whitespace collapsed), so a phrase that wraps across source lines is still
+one string and an overclaim hidden in an attribute is not falsely flagged. Text from two SEPARATE block
+elements is kept apart by a space (see BLOCK_TAGS): "<p>guarantees</p><p>secure</p>" reads as two
+phrases, not the phantom token "guaranteessecure", so an overclaim cannot hide by straddling a block
+boundary; inline markup ("<b>guar</b>antee") still joins into one word.
+
+TWO SURFACE CLASSES, TWO PATTERN SETS (VER-CORE 4.4). The guarantee-flavoured MARKETING patterns
+(SITE_PATTERNS) are calibrated for the public site copy and run on the SITE PAGES ONLY: the rule corpus,
+the generated adapters, and the hooks legitimately discuss "guarantee", "ensure", and "every" as
+governance language ("that inert guarantee is BOUNDED, not categorical"), so running the marketing
+deny-list over them would false-positive on honest text. The RELEASE-INTEGRITY patterns (RELEASE_PATTERNS:
+tamper evidence/detection/resistance, an independent integrity channel/anchor, a stale signing claim) run
+on EVERY scanned surface, because a release-integrity overclaim ships just as surely from a generated
+adapter or a shipped doc as from a site page (4.4: at first release no surface may claim tamper detection,
+tamper evidence, or an independent channel while the 5.7 upgrade condition is unmet; tamper-resistance
+wording may appear only as explicitly future-tense roadmap).
+
+THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
+  1. site/*.html: visible-text + meta scanning, SITE_PATTERNS + RELEASE_PATTERNS. site/ is a REQUIRED
+     surface: an absent, unwalkable, or non-directory site/ is a fail-closed exit 2, never a silent PASS
+     (the 4.4c correction of the old "no site/ directory -> PASS" shape).
+  2. The hand-authored repo prose roster (README.md, SCOPE.md, SYSTEM-HARDENING.md): RELEASE_PATTERNS.
+     The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md, CLAUDE.md) are
+     gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster carries only the
+     hand-authored remainder. Every rostered path is REQUIRED; an absent one is exit 2. Nothing is dormant
+     today (every rostered surface exists), so the roster is a single declared constant with no idle
+     dormant/armed machinery, per the spec's dormant/armed single-source discipline.
+  3. Every TEXTUAL generated output, enumerated FROM THE GENSRC REGISTRY by recomputing it in memory
+     (gen_gensrc.build_registry): a `file` target is scanned whole; a `tree` target is walked fail-closed
+     (walk_files, os.walk not rglob) and every member scanned; a `block` target is scanned as the FULL
+     rendered file (generated text is not contiguous in any source, so the whole rendered surface is
+     scanned, including the hand-authored bytes around a managed block such as CLAUDE.md's, per 4.4c);
+     a `binary` target (the [checkout].binary roster from gen_manifest.load_ownership) is skipped.
+     Overlapping collectors dedupe by resolved path WITHOUT dropping errors (the block-registered site
+     pages are already scanned as visible text by collector 1 and are not re-scanned as raw HTML here).
+     A registered surface that is absent, unwalkable, or of the wrong type is exit 2, never a silent skip;
+     a UTF-8 decode failure on a scanned file is a finding.
 
 BEST-EFFORT, NOT COMPLETE. This lint is a compensating control, a hand-maintained DENY-LIST of the
-overclaim phrasings seen so far. It CANNOT catch every paraphrase: a novel wording that dodges the
-vocabulary below will pass. It is not a complete overclaim detector, and it does not replace human
-review of public copy for honesty; it exists to fail CI on a REGRESSION of a known class, not to
-certify that no overclaim exists. Grow the vocabulary when a new class is found; do not read a PASS as
-proof the copy is free of overclaims.
+overclaim phrasings seen so far, now over the site HTML, the repo prose roster, and every
+registry-enumerated textual generated output. It CANNOT catch every paraphrase: a novel wording that
+dodges the vocabulary below will pass. The third-party title allowlist and the tense guards are
+maintainer-calibrated against the live surfaces. It is not a complete overclaim detector, and it does not
+replace human review of public copy for honesty; it polices wording, not whether the underlying integrity
+mechanism actually works. Grow the vocabulary when a new class is found; do not read a PASS as proof the
+copy is free of overclaims.
 
 Negation binds to the GUARANTEE PHRASE, not the whole clause (see NEGATOR / CLAUSE_BOUNDARY): a negator
 marks a match honest only when it sits in the same window as the match, where the window begins after
@@ -91,16 +125,51 @@ clean; a pattern that flagged a legitimate line would be too broad):
     does not even match, and the LICENSE's own full wording matches but is cleared.
   - "foolproof": a bare guarantee-of-perfection adjective.
 
+The RELEASE-INTEGRITY vocabulary (VER-CORE 4.4a, runs on every surface), and why each pattern is shaped
+the way it is:
+
+  - "tamper evidence/resistance/proof" and "tamper detection": achieved-tense claims that the interim
+    keyless manifest-plus-ROOT layer resists or detects tampering, which it does not (5.2: it detects
+    accident, not tamper). FUTURE-guarded, so the approved roadmap wording ("an independent,
+    tamper-evident anchor is planned for a future release") and 5.6's own roadmap text stay clean while a
+    present-tense assertion trips. The narrow shape (only the CLAIM forms evident/evidence/resistant/
+    resistance/proof and "tamper detect...") deliberately does NOT match the attack-noun "tampering" or
+    "tampered", so an honest control TITLE ("Dependency Tampering") or an honest attack description ("a
+    hand-tampered registry") does not false-positive; the third-party title allowlist below is the
+    forward-safety layer for a shipped title that carries a CLAIM-form phrase.
+  - "independent ... channel/anchor/reference": an achieved claim of the independent integrity channel or
+    anchor that 5.6 defers. FUTURE-guarded. The word order matters: "a digest published through an
+    authenticated channel independent of artefact delivery" (SECI-release-integrity) reads
+    "channel ... independent", not "independent ... channel", so the obligation prose stays clean by
+    construction (pinned as a NEGATIVE below so a future edit cannot regress it).
+  - "releases are signed" / "signed with minisign": the stale keyed-signing claim D1's keyless decision
+    retired (the corrected CLAUDE.md wording lands in the same change, 4.4d). FUTURE-guarded.
+
+RELEASE-INTEGRITY clearing, three ways (see _guard_clears "future"):
+  - a shipped third-party control TITLE (THIRD_PARTY_TITLES, enumerated from the live site/mappings.html)
+    present verbatim in the match's sentence clears it, so a framework/control title that carries the
+    vocabulary is not read as an AIQT claim;
+  - a residual-DISCLOSURE negator anywhere in the sentence-or-contrastive window clears it, so a quoted
+    residual ("keyless tamper-evident ordering within the anchored history, not cryptographic proof",
+    "This layer does not provide tamper evidence") stays clean even when the negator follows the phrase
+    past a plain comma, while a CONTRASTIVE ("does not merely detect accidents but provides tamper
+    evidence") still cuts the earlier negator off so the laundered claim trips;
+  - an explicitly FUTURE-tense hedge (FUTURE_HEDGE) in the TIGHT symmetric clause window clears it, so
+    roadmap tense that FOLLOWS the noun phrase clears while a hedge in a separate clause after a comma
+    ("The anchor is tamper-evident, and a further channel is planned") cannot launder a present claim.
+
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
 the instruction loading each turn ("AIQT is on for every turn", "applied to every response") is a
 mechanism claim and is deliberately NOT matched (no "works", no efficacy verb governing all/every).
 
-  gen: python3 tools/check_overclaim.py             scan site/*.html
-       python3 tools/check_overclaim.py --self-test  run the adversarial positive/negative corpus
+  gen: python3 tools/check_overclaim.py             scan the site, the repo prose roster, and every
+                                                    registry-enumerated textual generated output
+       python3 tools/check_overclaim.py --self-test  run the adversarial positive/negative/collector corpus
 
-Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
+Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required surface, fail-closed).
 """
 import html
+import json
 import re
 import sys
 from html.parser import HTMLParser
@@ -108,6 +177,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
+import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
 
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
@@ -123,6 +194,15 @@ NEGATOR = re.compile(
 CLAUSE_BOUNDARY = re.compile(
     r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
     re.IGNORECASE)
+# The residual-DISCLOSURE window for the future guard is bounded by SENTENCE punctuation OR a CONTRASTIVE
+# conjunction, but NOT by a plain comma/semicolon/colon: a residual disclosure downgrades the claim in a
+# trailing clause after a comma ("keyless tamper-evident ordering within the anchored history, not
+# cryptographic proof"), so the negator must be reachable past the comma; a CONTRASTIVE still cuts an
+# earlier negator off, so "does not merely detect accidents but provides tamper evidence" is not laundered
+# by its pre-"but" negator. Sentence punctuation keeps a negator in a prior/next sentence from leaking in.
+SENTENCE_OR_CONTRASTIVE = re.compile(
+    r"[.!?]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
+    re.IGNORECASE)
 
 # An INTENT HEDGE marks a COMPATIBILITY claim honest: the decided softening frames cross-assistant reach
 # as an aim, not a verified result ("intended/designed to be portable across ...", "is meant to work to
@@ -136,6 +216,14 @@ CLAUSE_BOUNDARY = re.compile(
 INTENT_HEDGE = re.compile(
     r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?|intent)\b",
     re.IGNORECASE)
+# A FUTURE HEDGE marks a RELEASE-INTEGRITY claim honest by casting it as explicit roadmap/future tense
+# (VER-CORE 4.4/5.6: tamper-resistance wording may appear only as explicitly future-tense roadmap). It
+# clears a tamper/independent-channel/signing match in the TIGHT symmetric clause window, so "an
+# independent, tamper-evident anchor is planned for a future release" stays clean while a present-tense
+# assertion trips.
+FUTURE_HEDGE = re.compile(
+    r"\b(?:planned|plan(?:s|ned)?\s+to|will|future\s+release|roadmap|upcoming|deferred|"
+    r"not\s+yet|next\s+release)\b", re.IGNORECASE)
 # The SHAREALIKE clean form names the full permitted set from LICENSE clause 3(b)(1): a CC license with
 # the same License Elements, THIS VERSION OR LATER, OR a BY-SA Compatible License. A "the same ... licence"
 # claim is honest only when BOTH the later-version alternative AND the BY-SA-compatible alternative are
@@ -147,10 +235,38 @@ INTENT_HEDGE = re.compile(
 LATER_ALT = re.compile(r"\blater\b", re.IGNORECASE)
 COMPAT_ALT = re.compile(r"\bcompatible\b", re.IGNORECASE)
 
+# Shipped third-party control TITLES that legitimately carry release-integrity vocabulary, enumerated
+# from the live site/mappings.html at build (never guessed). RECONCILED 2026-08-25: mappings.html carries
+# framework/control titles with the vocabulary stems, but only ONE carries a tamper stem: the OWASP MCP
+# Top 10 control "MCP04: Software Supply Chain Attacks & Dependency Tampering" (the visible-text form, with
+# the HTML "&amp;" entity unescaped to "&"). Under the calibrated narrow CLAIM-form tamper patterns it does
+# NOT itself trip (the patterns match tamper-evident/evidence/resistance/proof/detection, not the
+# attack-noun "Tampering"), so the live surfaces already pass without needing this clear; the allowlist is
+# the forward-safety layer required by 4.4a, clearing a CLAIM-form hit that shares a sentence with this
+# exact shipped title. (The SA-11(3) title "Independent Verification of Assessment Plans and Evidence"
+# carries "Independent" but no channel/anchor/reference noun, so it does not match the independent-channel
+# pattern and needs no entry.) An exact case-sensitive substring match in the match's sentence clears.
+THIRD_PARTY_TITLES = (
+    "Software Supply Chain Attacks & Dependency Tampering",
+)
+
+# The hand-authored repo prose roster (collector 2): the spec's named prose surfaces that are NOT
+# gensrc-registered generated outputs. DISCLOSURE.md/CHANGELOG.md/ROADMAP.md/CLAUDE.md are registered and
+# arrive through collector 3; these three are the hand-authored remainder. Every path is REQUIRED (absent
+# = exit 2). Nothing is dormant today, so this is a single declared constant, not idle dormant/armed
+# machinery.
+REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md")
+
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
-# window), "intent" (skip when a negator OR an intent hedge is in that window), or "sharealike" (skip only
-# when the later-version AND BY-SA-compatible alternatives are both named in the surrounding sentence).
-PATTERNS = [
+# window), "intent" (skip when a negator OR an intent hedge is in that window), "sharealike" (skip only
+# when the later-version AND BY-SA-compatible alternatives are both named in the surrounding sentence), or
+# "future" (skip when an allowlisted third-party title, a residual-disclosure negator, or a future hedge
+# clears it; see _guard_clears).
+#
+# SITE_PATTERNS: the guarantee-flavoured MARKETING deny-list. Calibrated for the public site copy and run
+# on the SITE PAGES ONLY, because the rule corpus and generated adapters legitimately use "guarantee",
+# "ensure", and "every" as governance language.
+SITE_PATTERNS = [
     # guarantee/ensure incl. gerunds ("guaranteeing", "ensuring"): the bare guarantee verbs. An honest
     # in-clause negation ("does not guarantee that generated code is secure") is not an overclaim.
     ("ensures", re.compile(r"\bensur(?:e|es|ed|ing)\b", re.IGNORECASE), "neg"),
@@ -266,6 +382,35 @@ PATTERNS = [
     ("foolproof", re.compile(r"\bfool-?proof\b", re.IGNORECASE), ""),
 ]
 
+# RELEASE_PATTERNS: the release-integrity deny-list (VER-CORE 4.4a). Runs on EVERY scanned surface. All
+# four are FUTURE-guarded (an allowlisted title, a residual-disclosure negator, or an explicit future
+# hedge clears; see _guard_clears "future").
+RELEASE_PATTERNS = [
+    # Achieved-tense tamper evidence/resistance/proof. The narrow CLAIM-form shape (evident/evidence/
+    # resistant/resistance/proof) deliberately does NOT match the attack-noun "tampering"/"tampered", so an
+    # honest control title ("Dependency Tampering") or attack description ("a hand-tampered registry") is
+    # not flagged. FUTURE-guarded: "an independent, tamper-evident anchor is planned for a future release"
+    # clears; "This layer does not provide tamper evidence" clears via the residual-disclosure negator.
+    ("tamper evidence/resistance/proof (achieved)", re.compile(
+        r"\btamper[- ]?(?:evident|evidence|resistant|resistance|proof)\b", re.IGNORECASE), "future"),
+    # Achieved-tense "tamper detection". Requires "tamper" immediately followed by a "detect..." form, so
+    # the attack-noun "tampering" and "detects accident, not tamper" (detect BEFORE tamper) do not match.
+    ("tamper detection (achieved)", re.compile(
+        r"\btamper\s+detect(?:ion|s|ed|ing)?\b", re.IGNORECASE), "future"),
+    # Achieved-tense independent integrity channel/anchor/reference (the 5.6-deferred anchor). Requires the
+    # word order "independent ... channel|anchor|reference" within two words, so "a channel independent of
+    # artefact delivery" (SECI-release-integrity) does not match. FUTURE-guarded.
+    ("independent channel/anchor/reference (achieved)", re.compile(
+        r"\bindependent,?\s+(?:\w+[- ]){0,2}?(?:channel|anchor|reference)\b",
+        re.IGNORECASE), "future"),
+    # The stale keyed-signing claim D1 retired: "releases are/is/get signed" or "signed with minisign".
+    # FUTURE-guarded. The corrected CLAUDE.md wording (4.4d) lands in the same change, so this pattern's
+    # only current hit is removed together with the pattern's introduction.
+    ("releases are signed (stale signing claim)", re.compile(
+        r"\breleases?\s+(?:are|is|get|gets)\s+signed\b|\bsigned\s+with\s+minisign\b",
+        re.IGNORECASE), "future"),
+]
+
 SKIP_TEXT_TAGS = {"script", "style"}
 
 # Block-level (and line-breaking) elements separate their text content: "<p>guarantees</p><p>secure</p>"
@@ -352,7 +497,7 @@ def _sentence_window(text, start, end):
     """The whole sentence around the match: from the last sentence-ending punctuation (.!?) before the
     match to the next one after it. Used by the SHAREALIKE guard, whose exonerating alternatives ("this
     version or later, or a BY-SA Compatible License") follow the licence noun and so fall outside the
-    pre-match clause window."""
+    pre-match clause window, and by the future guard's third-party title allowlist."""
     left = 0
     for m in re.finditer(r"[.!?]", text[:start]):
         left = m.end()
@@ -360,11 +505,50 @@ def _sentence_window(text, start, end):
     return text[left:end + right.start()] if right else text[left:]
 
 
+def _symmetric_clause_window(text, start, end):
+    """The clause CONTAINING the match: from the last CLAUSE_BOUNDARY before it to the first after it.
+    The future guard's FUTURE_HEDGE check needs the forward half because roadmap tense typically FOLLOWS
+    the noun phrase ("an independent, tamper-evident anchor is planned for a future release"): the
+    pre-match window of the other guards would flag the approved 4.4d sentence itself. Cutting forward at
+    the next boundary keeps a trailing hedge from laundering a separate clause ("The anchor is
+    tamper-evident, and a further channel is planned": the comma cuts "planned" out of the window)."""
+    left = 0
+    for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
+        left = m.end()
+    nxt = CLAUSE_BOUNDARY.search(text, end)
+    return text[left:nxt.start() if nxt else len(text)]
+
+
+def _disclosure_window(text, start, end):
+    """The window a residual-DISCLOSURE negator must sit in to clear a future-guarded match: from the last
+    SENTENCE_OR_CONTRASTIVE boundary before the match to the first after it. Unlike the tight symmetric
+    clause window, a plain comma/semicolon does NOT bound it, so a residual that downgrades the claim in a
+    trailing clause ("keyless tamper-evident ordering within the anchored history, not cryptographic
+    proof") is reachable; unlike the whole sentence, a CONTRASTIVE bounds it, so a pre-"but" negator cannot
+    launder a claim after it ("does not merely detect accidents but provides tamper evidence" still trips),
+    and a prior/next sentence's negator cannot leak in."""
+    left = 0
+    for m in SENTENCE_OR_CONTRASTIVE.finditer(text, 0, start):
+        left = m.end()
+    nxt = SENTENCE_OR_CONTRASTIVE.search(text, end)
+    return text[left:nxt.start() if nxt else len(text)]
+
+
+def _title_allowlisted(text, start, end):
+    """True when the match's sentence contains a shipped third-party control title verbatim (exact,
+    case-sensitive), so a framework/control title that carries release-integrity vocabulary is not read
+    as an AIQT claim."""
+    window = _sentence_window(text, start, end)
+    return any(title in window for title in THIRD_PARTY_TITLES)
+
+
 def _guard_clears(guard, text, m):
     """True when the pattern's guard exonerates this match. "neg": an in-clause negator. "intent": an
     in-clause negator OR intent hedge (the compat softening frames reach as an aim). "sharealike": the
     surrounding sentence names BOTH the later-version and the BY-SA-compatible alternatives, the full
-    permitted set from LICENSE 3(b)(1). "" never clears."""
+    permitted set from LICENSE 3(b)(1). "future" (release-integrity): a shipped third-party control TITLE
+    in the match's sentence, OR a residual-disclosure negator in the sentence-or-contrastive window, OR a
+    FUTURE_HEDGE in the tight symmetric clause window. "" never clears."""
     if guard == "neg":
         return bool(NEGATOR.search(_clause_window(text, m.start())))
     if guard == "intent":
@@ -373,13 +557,23 @@ def _guard_clears(guard, text, m):
     if guard == "sharealike":
         window = _sentence_window(text, m.start(), m.end())
         return bool(LATER_ALT.search(window) and COMPAT_ALT.search(window))
+    if guard == "future":
+        if _title_allowlisted(text, m.start(), m.end()):
+            return True
+        if NEGATOR.search(_disclosure_window(text, m.start(), m.end())):
+            return True
+        return bool(FUTURE_HEDGE.search(_symmetric_clause_window(text, m.start(), m.end())))
     return False
 
 
-def scan(text):
-    """Return a list of (pattern_name, snippet) overclaim findings in one page's visible text."""
+def scan(text, site=True):
+    """Return a list of (pattern_name, snippet) overclaim findings in one surface's text. RELEASE_PATTERNS
+    (release-integrity) always run; the guarantee-flavoured SITE_PATTERNS run only when `site` is True (the
+    site pages), because the rule corpus and generated adapters legitimately carry that governance
+    vocabulary."""
     findings = []
-    for name, pat, guard in PATTERNS:
+    patterns = (SITE_PATTERNS + RELEASE_PATTERNS) if site else RELEASE_PATTERNS
+    for name, pat, guard in patterns:
         for m in pat.finditer(text):
             if _guard_clears(guard, text, m):
                 continue
@@ -387,8 +581,121 @@ def scan(text):
     return findings
 
 
+class _FailClosed(Exception):
+    """A required surface is absent, unwalkable, or of the wrong type; the caller maps this to exit 2."""
+
+
+def _scan_surface(path, rel, site, findings):
+    """Read a required non-HTML surface as UTF-8 and scan it. A UTF-8 decode failure is a FINDING (the
+    surface exists but is unreadable as text); any other OSError propagates for the caller to fail closed."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        findings.append("{}: could not read as UTF-8".format(rel))
+        return
+    for name, snip in scan(text, site=site):
+        findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
+
+
+def _collect(root, registry, binary_set):
+    """Run the three surface collectors against `root`, returning the list of finding strings. Raises
+    _FailClosed on an absent/unwalkable/wrong-type required surface (caller -> exit 2); an OSError from a
+    fail-closed walk or read likewise propagates. `registry` is the list of gensrc entries (target/kind/
+    ...); `binary_set` is the [checkout].binary roster to skip. A resolved path scanned by an earlier
+    collector is not re-scanned by a later one (dedupe without dropping errors)."""
+    findings = []
+    scanned = set()
+
+    # Collector 1: site/*.html visible text + meta (SITE_PATTERNS + RELEASE_PATTERNS). site/ is REQUIRED.
+    site = root / "site"
+    if not site.is_dir():
+        raise _FailClosed("site/ is a required surface but is absent or not a directory")
+    for f in sorted(walk_files(site, suffixes={".html"})):
+        rel = f.relative_to(root)
+        scanned.add(f.resolve())
+        try:
+            raw = f.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            findings.append("{}: could not read as UTF-8".format(rel))
+            continue
+        parser = VisibleText()
+        try:
+            parser.feed(raw)
+        except (ValueError, AssertionError):
+            findings.append("{}: could not parse as HTML".format(rel))
+            continue
+        for name, snip in scan(parser.text(), site=True):
+            findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
+        for meta in parser.meta:
+            for name, snip in scan(meta, site=True):
+                findings.append("{} (meta): overclaim [{}] -> {}".format(rel, name, snip))
+
+    # Collector 2: the hand-authored repo prose roster (RELEASE_PATTERNS). Every path REQUIRED.
+    for name in REPO_PROSE_ROSTER:
+        p = root / name
+        if not p.is_file():
+            raise _FailClosed("required repo-prose surface {} is absent".format(name))
+        scanned.add(p.resolve())
+        _scan_surface(p, p.relative_to(root), False, findings)
+
+    # Collector 3: every textual generated output enumerated from the gensrc registry (RELEASE_PATTERNS).
+    for entry in registry:
+        target = entry["target"]
+        if target in binary_set:  # a binary generated artefact carries no scannable prose
+            continue
+        p = root / target
+        if entry["kind"] == "tree":
+            if not p.is_dir():
+                raise _FailClosed("registered tree {} is absent or not a directory".format(target))
+            members = sorted(walk_files(p))
+        else:  # "file" or "block": the whole rendered file, block generators included (4.4c)
+            if not p.is_file():
+                raise _FailClosed("registered output {} is absent or not a file".format(target))
+            members = [p]
+        for f in members:
+            resolved = f.resolve()
+            if resolved in scanned:  # already scanned by an earlier collector (e.g. a site page)
+                continue
+            scanned.add(resolved)
+            rel = f.relative_to(root)
+            if str(rel) in binary_set:  # a binary member inside a registered tree
+                continue
+            _scan_surface(f, rel, False, findings)
+
+    return findings
+
+
+def main():
+    if "--self-test" in sys.argv[1:]:
+        return _self_test()
+    root = Path(__file__).resolve().parents[1]
+    try:
+        registry = json.loads(gen_gensrc.build_registry(root))["generated"]
+        _, _, _, binary_set = gen_manifest.load_ownership(root)
+        findings = _collect(root, registry, binary_set)
+    except _FailClosed as exc:
+        print("error: {}; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    except gen_manifest.GateError as exc:
+        print("error: cannot load the ownership binary roster ({}); fail-closed".format(exc),
+              file=sys.stderr)
+        return 2
+    except (ValueError, OSError) as exc:
+        print("error: overclaim scan failed closed ({})".format(exc), file=sys.stderr)
+        return 2
+    if findings:
+        print("FAIL: {} overclaim issue(s)".format(len(findings)))
+        for finding in sorted(set(findings)):
+            print("  " + finding)
+        return 1
+    print("PASS: no guarantee-flavoured or release-integrity overclaim in the scanned surfaces")
+    return 0
+
+
 # Adversarial corpus. POSITIVE lines MUST flag (the F-92 misses a prior lint let through); NEGATIVE
-# lines MUST stay clean (honest copy, including the two borderline MECHANISM lines on the live site).
+# lines MUST stay clean (honest copy, including the two borderline MECHANISM lines on the live site and
+# the release-integrity residual disclosures the corrected copy relies on). The site-marketing lines are
+# scanned with site=True; the release-integrity lines below it are exercised on both surface classes.
 POSITIVE = [
     "AIQT does not sandbox anything. It guarantees secure output.",   # clause-aware: prior-sentence negator must not launder
     "With AIQT installed this cannot fail.",
@@ -416,6 +723,13 @@ POSITIVE = [
     "The result is one standard applied the same way wherever the work runs and whichever model does the reviewing.",  # F-108 live tech-details:293 regression: reach by whichever model
     "The same rules apply whichever assistant you use.",              # F-108 reach-by-whichever paraphrase
     "All assistants work to the same rules.",                        # F-108 bare-work plural-subject assertion (no hedge)
+    # RELEASE-INTEGRITY positives (VER-CORE 4.4): achieved-tense claims with no future hedge / negator / title.
+    "The release is tamper-evident.",                                 # bare tamper-evident claim
+    "AIQT provides tamper detection for every release.",             # tamper detection
+    "Adopters verify through an independent channel.",               # independent channel
+    "Releases are signed with minisign.",                            # stale signing claim (the CLAUDE.md line 4.4d removes)
+    "The anchor is tamper-evident, and a further channel is planned.",  # trailing-hedge laundering: "planned" is a SEPARATE clause after the comma
+    "The anchor is planned for a future release. It is tamper-evident today.",  # prior-sentence future hedge must not launder a fresh present-tense claim
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",
@@ -437,70 +751,139 @@ NEGATIVE = [
     "The Adapter's License You apply must be a Creative Commons license with the same License Elements, this version or later, or a BY-SA Compatible License.",  # LICENSE 3(b)(1): names "the same" but the full permitted set clears it
     "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
     "The 1.1.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:293 (intent hedge + which tool, not whichever)
+    # RELEASE-INTEGRITY negatives (VER-CORE 4.4): the corrected copy the gate must NOT flag.
+    "Releases ship with a per-file manifest and a published ROOT digest so an adopter can verify their copy is intact; an independent, tamper-evident anchor is planned for a future release.",  # CRITICAL: the exact approved 4.4d sentence -- a gate that fails on its own corrected text is the failure mode this pins
+    "This layer does not provide tamper evidence; it detects accidents.",                # residual-disclosure negator (pre-match)
+    "The chronology layer is keyless tamper-evident ordering within the anchored history, not cryptographic proof.",  # the release-build gate residual disclosure: negator "not" past a plain comma clears it
+    "A released or published artefact ships with a signature verifiable against an authenticated maintainer key, or a digest published through an authenticated channel independent of artefact delivery.",  # SECI-release-integrity: "channel ... independent", not "independent ... channel"; no tamper token
+    "The independent anchor will be implemented in the next release.",                   # 5.2/5.6 future-tense roadmap disclosure
+    "an independent, tamper-evident anchor is planned for a future release",             # the 4.4d clause embedded mid-paragraph
+    "The controls that address Software Supply Chain Attacks & Dependency Tampering also provide tamper detection.",  # allowlisted title in the sentence clears the tamper-detection hit
+    "MCP04: Software Supply Chain Attacks & Dependency Tampering (tight) is one mapped risk.",  # the shipped mappings title in context stays clean (narrow patterns do not match the attack-noun)
 ]
 
 
 def _self_test():
     failures = []
     for line in POSITIVE:
-        if not scan(line):
+        if not scan(line, site=True):
             failures.append("MISS (should flag): {!r}".format(line))
     for line in NEGATIVE:
-        hits = scan(line)
+        hits = scan(line, site=True)
         if hits:
             failures.append("FALSE POSITIVE: {!r} -> {}".format(line, [h[0] for h in hits]))
+
+    # SURFACE-SCOPING: the guarantee-flavoured governance line legitimately appears in the rule corpus and
+    # generated adapters; it MUST flag as site copy (site=True) but MUST stay clean as a generated surface
+    # (site=False), proving SITE_PATTERNS are scoped to the site.
+    governance = "That inert guarantee is BOUNDED, not categorical."
+    if not scan(governance, site=True):
+        failures.append("SCOPING: governance line should flag as site copy: {!r}".format(governance))
+    if scan(governance, site=False):
+        failures.append("SCOPING: governance line should be clean as a generated surface: {!r}"
+                        .format(governance))
+    # A release-integrity claim MUST flag on both surface classes.
+    if not scan("Releases are signed with minisign.", site=False):
+        failures.append("SCOPING: a release-integrity claim should flag on a generated surface too")
+
+    failures.extend(_collector_self_test())
+
     if failures:
         print("FAIL: check_overclaim self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_overclaim self-test ({} positive, {} negative)".format(
-        len(POSITIVE), len(NEGATIVE)))
+    print("PASS: check_overclaim self-test ({} positive, {} negative, plus scoping and collector cases)"
+          .format(len(POSITIVE), len(NEGATIVE)))
     return 0
 
 
-def main():
-    if "--self-test" in sys.argv[1:]:
-        return _self_test()
-    root = Path(__file__).resolve().parents[1]
-    site = root / "site"
-    if not site.is_dir():
-        print("PASS: no site/ directory")
-        return 0
+def _collector_self_test():
+    """Exercise the three surface collectors against synthetic trees, bypassing gen_gensrc (a synthetic
+    registry is passed to _collect directly): a required absent surface fails closed (exit 2 via
+    _FailClosed), a registered file / block / tree finding is reported, a binary target is skipped, and an
+    invalid-UTF-8 registered output is a finding. This pins the 4.4c corrected behaviour (site/ absent is
+    exit 2, never the old silent PASS)."""
+    import shutil
+    import tempfile
+    failures = []
     try:
-        html_files = sorted(walk_files(site, suffixes={".html"}))
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-overclaim-selftest-"))
     except OSError as exc:
-        print("error: cannot scan site/ ({}); fail-closed".format(exc), file=sys.stderr)
-        return 2
-    findings = []
-    for f in html_files:
-        rel = f.relative_to(root)
+        return ["COLLECTOR: no writable temporary directory: {}".format(exc)]
+
+    def _make_root(name, with_site=True, with_roster=True):
+        r = tmp / name
+        (r / "site").mkdir(parents=True) if with_site else r.mkdir(parents=True)
+        if with_roster:
+            for f in REPO_PROSE_ROSTER:
+                (r / f).write_text("clean prose.\n", encoding="utf-8")
+        return r
+
+    try:
+        # (a) site/ absent -> _FailClosed (the 4.4c fix: never the old silent PASS).
+        r = _make_root("nosite", with_site=False)
         try:
-            raw = f.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            findings.append("{}: could not read as UTF-8".format(rel))
-            continue
-        except OSError as exc:
-            print("error: cannot read {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
-            return 2
-        parser = VisibleText()
+            _collect(r, [], set())
+            failures.append("COLLECTOR: absent site/ should fail closed (_FailClosed)")
+        except _FailClosed:
+            pass
+
+        # (b) a required roster surface absent -> _FailClosed.
+        r = _make_root("noroster")
+        (r / "README.md").unlink()
         try:
-            parser.feed(raw)
-        except (ValueError, AssertionError):
-            findings.append("{}: could not parse as HTML".format(rel))
-            continue
-        for name, snip in scan(parser.text()):
-            findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
-        for meta in parser.meta:
-            for name, snip in scan(meta):
-                findings.append("{} (meta): overclaim [{}] -> {}".format(rel, name, snip))
-    if findings:
-        print("FAIL: {} overclaim issue(s)".format(len(findings)))
-        for finding in sorted(set(findings)):
-            print("  " + finding)
-        return 1
-    print("PASS: site prose carries no guarantee-flavoured overclaim")
-    return 0
+            _collect(r, [], set())
+            failures.append("COLLECTOR: absent roster surface should fail closed (_FailClosed)")
+        except _FailClosed:
+            pass
+
+        # (c) a registered file target absent -> _FailClosed.
+        r = _make_root("absentfile")
+        try:
+            _collect(r, [{"target": "GONE.md", "kind": "file"}], set())
+            failures.append("COLLECTOR: absent registered file should fail closed (_FailClosed)")
+        except _FailClosed:
+            pass
+
+        # (d) a tree target with a nested generated file carrying a positive line -> finding.
+        r = _make_root("tree")
+        (r / "gen" / "sub").mkdir(parents=True)
+        (r / "gen" / "sub" / "x.md").write_text("Releases are signed with minisign.\n", encoding="utf-8")
+        f = _collect(r, [{"target": "gen/", "kind": "tree"}], set())
+        if not any("gen/sub/x.md" in x for x in f):
+            failures.append("COLLECTOR: a nested generated tree file with an overclaim should be a finding")
+
+        # (e) a block target scanned as the FULL file -> a finding outside any managed block still trips.
+        r = _make_root("block")
+        (r / "BLK.md").write_text("Intro. The release is tamper-evident. Outro.\n", encoding="utf-8")
+        f = _collect(r, [{"target": "BLK.md", "kind": "block"}], set())
+        if not any("BLK.md" in x for x in f):
+            failures.append("COLLECTOR: a block target's full file should be scanned (overclaim outside a block)")
+
+        # (f) an invalid-UTF-8 registered output -> a finding, not a fail-closed skip.
+        r = _make_root("badutf8")
+        (r / "bad.txt").write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+        f = _collect(r, [{"target": "bad.txt", "kind": "file"}], set())
+        if not any("bad.txt: could not read as UTF-8" in x for x in f):
+            failures.append("COLLECTOR: an invalid-UTF-8 registered output should be a finding")
+
+        # (g) a binary target is skipped (not read, not a finding), even with non-UTF-8 bytes.
+        r = _make_root("binary")
+        (r / "blob.bin").write_bytes(b"\xff\xfe tamper-evident \x80")
+        f = _collect(r, [{"target": "blob.bin", "kind": "file"}], {"blob.bin"})
+        if f:
+            failures.append("COLLECTOR: a [checkout].binary target should be skipped, got {}".format(f))
+
+        # (h) a clean synthetic repo produces NO findings.
+        r = _make_root("clean")
+        (r / "CLEAN.md").write_text("This layer detects accidents, not tamper evidence.\n", encoding="utf-8")
+        f = _collect(r, [{"target": "CLEAN.md", "kind": "file"}], set())
+        if f:
+            failures.append("COLLECTOR: a clean synthetic repo should have no findings, got {}".format(f))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
 
 
 if __name__ == "__main__":

@@ -262,7 +262,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It lints for overclaiming language in the scanned surface. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "A negation-, intent-, and future-tense-aware deny-list of known overclaim and release-integrity vocabulary over site HTML, the hand-authored repo prose roster, and every registry-enumerated textual generated output. It cannot catch a novel paraphrase; the third-party title allowlist and the tense guards are maintainer-calibrated; it polices wording, not whether the underlying integrity mechanism works. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "footer"
