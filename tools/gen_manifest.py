@@ -113,12 +113,12 @@ def _sha256(data):
 
 def _check_rel_path(path, where):
     """Canonical repo-relative POSIX path or GateError. No absolute, backslash, empty/'.'/'..' segment,
-    control characters (NUL, tab, LF, CR), or trailing slash."""
+    control character (the FULL C0 range 0x00-0x1F and DEL 0x7F), or trailing slash."""
     if not isinstance(path, str) or not path:
         raise GateError("{}: path must be a non-empty string".format(where))
     if "\\" in path or path.startswith("/") or path.endswith("/"):
         raise GateError("{}: {!r} must be a clean POSIX repo-relative path".format(where, path))
-    if any(ch in path for ch in ("\x00", "\t", "\n", "\r")):
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in path):
         raise GateError("{}: {!r} carries a control character".format(where, path))
     if any(seg in ("", ".", "..") for seg in path.split("/")):
         raise GateError("{}: {!r} has an empty, '.', or '..' segment".format(where, path))

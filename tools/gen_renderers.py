@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
+from gen_rules import SLUG_RE  # noqa: E402  the authoritative renderer-id slug syntax
 import gen_gensrc  # noqa: E402  reuse its validated GENSRC_OUTPUTS loader, never a second parser
 
 GENSRC_OUTPUTS = (
@@ -85,8 +86,10 @@ def _read_renderer_decl(path, where):
         raise GateError("{}: RENDERER_DECL keys must be exactly renderer-id/semantics-revision".format(where))
     rid = decl["renderer-id"]
     rev = decl["semantics-revision"]
-    if not isinstance(rid, str) or not rid:
-        raise GateError("{}: renderer-id must be a non-empty string".format(where))
+    # renderer-id is the authoritative slug (this round's #3): reject a non-slug (e.g. "Bad ID") at the
+    # source RENDERER_DECL, so a malformed id can never be rendered into a "fresh" renderers.toml.
+    if not isinstance(rid, str) or not SLUG_RE.fullmatch(rid):
+        raise GateError("{}: renderer-id {!r} is not a valid slug".format(where, rid))
     if not isinstance(rev, int) or isinstance(rev, bool) or rev < 0:
         raise GateError("{}: semantics-revision must be a non-negative integer".format(where))
     return rid, rev
@@ -266,6 +269,13 @@ _ENTRY_WILDCARD = ('from selfhelper import *\n'
                    '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_alpha.py"},\n'
                    ')\n')
 
+_ENTRY_BADID = ('from selfhelper import VALUE\n'
+                'RENDERER_DECL = {"renderer-id": "Bad ID", "semantics-revision": 1}\n'
+                'GENSRC_OUTPUTS = (\n'
+                '    {"target": "OUT.md", "kind": "file",\n'
+                '     "sources": ("src.txt",), "regenerate": "python3 tools/gen_alpha.py"},\n'
+                ')\n')
+
 
 def _fixture(base, entry_body, helper_body=_HELPER):
     tools = base / "tools"
@@ -337,6 +347,13 @@ def self_test_main():
         _fixture(nodecl, _ENTRY_NODECL)
         if run_quiet(nodecl, check=False) != 2:
             failures.append("missing RENDERER_DECL expected exit 2 (fail-closed)")
+
+        # (f) a non-slug renderer-id in RENDERER_DECL ("Bad ID") fails closed (exit 2), so a malformed id
+        # can never be rendered into a fresh renderers.toml (this round's #3).
+        badid = tmp / "badid"
+        _fixture(badid, _ENTRY_BADID)
+        if run_quiet(badid, check=False) != 2:
+            failures.append("non-slug renderer-id 'Bad ID' expected exit 2 (fail-closed, this round's #3)")
     finally:
         RENDERERS = saved
         shutil.rmtree(tmp, ignore_errors=True)
@@ -348,8 +365,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a conformant renderer set generates and regenerates drift-clean and is "
           "deterministic; a helper edit inside a closure changes the framed code-digest; a mutated "
-          "renderers.toml fails --check (exit 1); and a wildcard pack-local import and a missing "
-          "RENDERER_DECL each fail closed (exit 2)")
+          "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
+          "RENDERER_DECL, and a non-slug renderer-id each fail closed (exit 2)")
     return 0
 
 

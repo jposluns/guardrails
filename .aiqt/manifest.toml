@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "9cf4e128cf529c368b744b64046f8ed13956d85618be5289111d22457ad51ea6"
+tree-sha256 = "d1f87f7c2d5e5c7231b319ea3f1210180d29661657f4072e03db12801d1f0f2b"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2301,8 +2301,8 @@ sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 39302
-sha256 = "77dbd3b4dfad1184ee16728930b11f6c88ce72f32791fbfacf3e72fc5ac66e79"
+bytes = 41014
+sha256 = "5f62f75564f02d698c45ef18ff15b1d49af84ab1e0d0c119b043d4114d9da7d8"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -2386,8 +2386,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 143455
-sha256 = "07ddafa881cdc28b595b7347e495236d7221eff64df477079f2fc476e3fa6d1d"
+bytes = 155476
+sha256 = "f4ed19b86c24d48e28e837fa77aac2f22385ea9a98e86cf44c28f3bb012cdd11"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -2481,8 +2481,8 @@ sha256 = "ab1d5efe7499c2e1ff068daac952f1d6a9606cd628549a7e362b39f24b7e5df1"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 51615
-sha256 = "e3520bdc0e569fd946e19ddc7e1fdeec72e61cad74af031251c9869390aa329e"
+bytes = 51639
+sha256 = "fc8114c04ece57094a0e489dde62b0d34a600a7f21089dee099a16e230176aea"
 
 [[sources]]
 path = "tools/gen_mappings.py"
@@ -2501,8 +2501,8 @@ sha256 = "e11c54da27d193671c0b6631ae2fb66756d21b5f7f5f3bb75c975ba991957909"
 
 [[sources]]
 path = "tools/gen_renderers.py"
-bytes = 17198
-sha256 = "6042c435146485ff2c2b1b27f3b3a0ffa2e003ab0d28de7c801151ebc1438270"
+bytes = 18299
+sha256 = "7556db4481e58822bf0dcd35f66ecf5f96a1e9a5c250c1d1260b3114894d3e98"
 
 [[sources]]
 path = "tools/gen_roadmap.py"

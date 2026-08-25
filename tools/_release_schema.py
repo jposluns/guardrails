@@ -29,8 +29,9 @@ from check_versions import _parse                    # noqa: E402  the shipped b
 from gen_manifest import RELEASE_ROW_ALLOWED          # noqa: E402  the single shared allowed keyset
 from check_clauses import split_clause_id, _valid_register_id, SHA256_RE  # noqa: E402  authoritative
 #                                       clause-id / register-id syntax and the source-digest regex (7.1/7.2)
-from gen_rules import CID_RE, TIER_FACETS, CIA_FACETS  # noqa: E402  the authoritative corpus-id regex and
-#                              the operative facet vocabularies (order controlled-vocab, this round's #4)
+from gen_rules import CID_RE, TIER_FACETS, CIA_FACETS, SLUG_RE  # noqa: E402  the authoritative corpus-id
+#                              regex, the operative facet vocabularies (order controlled-vocab), and the
+#                              authoritative slug syntax (renderer-id / artifact-id prefix)
 
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # A recorded git object id is a full lowercase hex sha1 (40) or sha256 (64); an abbreviated or
@@ -54,12 +55,12 @@ def _is_host_absolute(p):
 
 def is_canonical_relpath(p, allow_trailing_slash=False):
     """True if p is a CANONICAL repo-relative POSIX path (spec 4.1/L425): a non-empty string, not
-    host-absolute, no backslash, no control character (NUL/tab/LF/CR), and no empty, '.' or '..' segment
-    (so '../escape' is rejected). A trailing slash is permitted only for a directory target when
-    allow_trailing_slash is set (renderer tree targets)."""
+    host-absolute, no backslash, no control character (the FULL C0 range 0x00-0x1F and DEL 0x7F, this
+    round's #2), and no empty, '.' or '..' segment (so '../escape' is rejected). A trailing slash is
+    permitted only for a directory target when allow_trailing_slash is set (renderer tree targets)."""
     if not isinstance(p, str) or not p or _is_host_absolute(p):
         return False
-    if "\\" in p or any(ch in p for ch in ("\x00", "\t", "\n", "\r")):
+    if "\\" in p or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in p):
         return False
     body = p[:-1] if (allow_trailing_slash and p.endswith("/")) else p
     if not body or body.endswith("/"):
@@ -246,6 +247,16 @@ def strict_manifest(data, where):
             if row["path"] != MANAGED_BLOCK_PATH:
                 raise SchemaError("{}: managed-block path must be {!r}, not {!r}".format(
                     rw, MANAGED_BLOCK_PATH, row["path"]))
+        # artifact-id is the GENERATED grammar '<renderer-id>:<path>' (a managed-block adds '#<block-id>'),
+        # bound to the row's own path/block fields (this round's #4): a bare non-empty check let an embedded
+        # newline through. Partition on the FIRST ':' (a renderer-id is a slug and never contains ':'); the
+        # prefix must be a slug and the remainder must equal the row's own path (plus '#<block-id>' for the
+        # managed block), so the id cannot carry a stray control character or drift from its binding.
+        rid_prefix, sep, suffix = row["artifact-id"].partition(":")
+        expected_suffix = (row["path"] + "#" + row["block-id"]) if kind == "managed-block" else row["path"]
+        if sep != ":" or not SLUG_RE.fullmatch(rid_prefix) or suffix != expected_suffix:
+            raise SchemaError("{}: artifact-id {!r} must be '<renderer-id-slug>:{}' bound to its "
+                              "fields".format(rw, row["artifact-id"], expected_suffix))
     return data
 
 
@@ -276,8 +287,11 @@ def strict_renderers(data, where):
             raise SchemaError("{}: keys are not EXACTLY {} (found {})".format(
                 rw, sorted(RENDERER_ROW_KEYS), sorted(row) if isinstance(row, dict) else type(row).__name__))
         rid = row["renderer-id"]
-        if not isinstance(rid, str) or not rid:
-            raise SchemaError("{}: missing or non-string renderer-id".format(rw))
+        # renderer-id is the authoritative slug (this round's #3): SLUG_RE is the gate's authoritative
+        # renderer-id syntax, so validate the DECLARATION against it rather than accept any non-empty string
+        # (a value like "Bad ID" with a space or capital must fail on head AND predecessor objects).
+        if not isinstance(rid, str) or not SLUG_RE.fullmatch(rid):
+            raise SchemaError("{}: renderer-id {!r} is not a valid slug".format(rw, rid))
         if rid in seen:
             raise SchemaError("{}: duplicate renderer-id {!r}".format(rw, rid))
         seen.add(rid)
@@ -344,6 +358,7 @@ def strict_order(data, where):
     if not isinstance(tiers, list) or not tiers:
         raise SchemaError("{}: [[precedence-tier]] must be a non-empty array".format(where))
     seen_ranks = set()
+    seen_members = set()
     for i, t in enumerate(tiers, 1):
         tw = "{} precedence-tier #{}".format(where, i)
         if not isinstance(t, dict) or set(t) != {"rank", "members", "members-are-equal"}:
@@ -356,10 +371,14 @@ def strict_order(data, where):
         if not isinstance(t["members"], list) or not t["members"] \
                 or not all(isinstance(m, str) and m for m in t["members"]):
             raise SchemaError("{}: members must be a non-empty list of strings".format(tw))
-        # tier members are AIQT facet codes, unique within the tier and drawn from the controlled vocab
-        # (this round's #4): a duplicate or an out-of-vocabulary member is a malformed record, exit 2.
-        if len(set(t["members"])) != len(t["members"]):
-            raise SchemaError("{}: a member is repeated in the precedence tier".format(tw))
+        # tier members are AIQT facet codes drawn from the controlled vocab (this round's #4) and each
+        # facet has EXACTLY ONE rank: a GLOBAL seen_members set across ALL tiers rejects a facet placed in
+        # two tiers as well as a repeat within one tier (this round's #5), never a MINOR finding.
+        for m in t["members"]:
+            if m in seen_members:
+                raise SchemaError("{}: facet {!r} appears in more than one precedence tier (a facet has "
+                                  "exactly one rank)".format(tw, m))
+            seen_members.add(m)
         bad = [m for m in t["members"] if m not in AIQT_FACET_VOCAB]
         if bad:
             raise SchemaError("{}: member(s) {} are not AIQT facet codes {}".format(

@@ -142,37 +142,44 @@ def _rev_parse(root, ref):
         raise GateError("git rev-parse output for {!r} is not valid ASCII; fail-closed".format(ref))
 
 
-def _tag_kind(root, tag):
-    """'tag' for an annotated tag, 'commit' for a lightweight one; GateError if the tag does not resolve."""
-    proc = _git(root, ["cat-file", "-t", "refs/tags/" + tag], binary=True)
+def _object_type(root, oid):
+    """The git object type ('tag' for an annotated tag, 'commit', 'tree', 'blob') of an IMMUTABLE object id,
+    or GateError. Reads the object BY ITS OID (never a named ref), so the type inspection cannot race a
+    moving tag: the anchor resolves the named ref once and inspects the recorded object here (this round's
+    #1)."""
+    proc = _git(root, ["cat-file", "-t", oid], binary=True)
     if proc.returncode != 0:
-        raise GateError("tag {} does not resolve (unfetched or deleted)".format(tag))
+        raise GateError("git cat-file -t {} failed (object unreachable)".format(oid))
     try:
         return proc.stdout.decode("ascii").strip()
     except UnicodeDecodeError:
-        raise GateError("git cat-file output for tag {} is not valid ASCII; fail-closed".format(tag))
+        raise GateError("git cat-file output for {} is not valid ASCII; fail-closed".format(oid))
 
 
 def _anchor_predecessor(root, prev_row):
     """Establish that the predecessor row names an ANCHORED release (round-7 finding 2): its commit_sha is a
     full object id resolving to a COMMIT equal to itself, and its annotated tag resolves to the recorded
     tag_object_sha and peels to that commit. A malformed/unanchored predecessor is cannot-evaluate, exit 2,
-    never a silent delta over an unverifiable base."""
+    never a silent delta over an unverifiable base.
+
+    The NAMED ref refs/tags/<tag> is read EXACTLY ONCE (this round's #1): it is resolved to its immutable
+    OID, that OID is required to equal the recorded tag_object_sha, and every further check (the object's
+    type, its peel to a commit) reads the IMMUTABLE recorded OID BY ID, never the named ref again. Reading
+    the named ref a second time (for the type OR the peel) let a tag MOVED between the reads present a split
+    view: one read seeing the recorded object and the other a different, now-current object."""
     commit, tag, tag_obj = prev_row["commit_sha"], prev_row["tag"], prev_row["tag_object_sha"]
     if not _release_schema.OBJECTID_RE.fullmatch(commit):
         raise GateError("predecessor commit_sha {!r} is not a full lowercase object id".format(commit))
     if _rev_parse(root, commit + "^{commit}") != commit:
         raise GateError("predecessor commit_sha {!r} does not resolve to a commit equal to itself "
                         "(a tree or non-commit is rejected)".format(commit))
-    if _tag_kind(root, tag) != "tag":
-        raise GateError("predecessor tag {} is not an annotated tag (2.1)".format(tag))
-    # Resolve the NAMED ref ONCE to an immutable OID, require it to equal the recorded tag_object_sha, then
-    # peel THAT recorded object (never the named ref a second time) for the commit (round-8 finding 6).
-    # Reading the ref twice let a tag MOVED between the reads present a split view: the first read matching
-    # tag_object_sha while the second peeled a different, now-current object.
+    # The ONE and ONLY read of the named ref: resolve refs/tags/<tag> to its immutable OID.
     resolved = _rev_parse(root, "refs/tags/" + tag)
     if resolved != tag_obj:
         raise GateError("predecessor tag {} does not resolve to the recorded tag_object_sha".format(tag))
+    # Everything below reads the IMMUTABLE recorded OID by id, never the named ref again.
+    if _object_type(root, tag_obj) != "tag":
+        raise GateError("predecessor tag {} is not an annotated tag (2.1)".format(tag))
     if _rev_parse(root, tag_obj + "^{commit}") != commit:
         raise GateError("predecessor tag {} peels to a commit other than the recorded commit_sha".format(
             tag))
@@ -291,15 +298,28 @@ def _validate_disposition_target_syntax(rows):
                                 "slug".format(DISPOSITIONS_REL, rid))
 
 
-def _assert_renderer_targets_declared(rows, renderers_data):
+def _renderer_ids(renderers_data):
+    """The set of renderer-ids in a strict-validated renderer declaration."""
+    return {r["renderer-id"] for r in renderers_data.get("renderer", []) if isinstance(r, dict)}
+
+
+def _nongenesis_renderer_target_scope(prev_renderers, head_renderers):
+    """The renderer-ids a NON-GENESIS renderer-semantics disposition may target: the UNION of the strict-
+    validated PREDECESSOR and HEAD declarations (this round's #6). A renderer REMOVED between the releases is
+    declared only in the predecessor, and its removal is dispositioned by a renderer-semantics row; scoping
+    the existence check to HEAD alone wrongly rejected that valid removal row. Genesis, having no
+    predecessor, keeps HEAD-only."""
+    return _renderer_ids(prev_renderers) | _renderer_ids(head_renderers)
+
+
+def _assert_renderer_targets_declared(rows, declared_ids):
     """Every renderer-semantics disposition's `id` names a DECLARED renderer (this round's #3): a row that
-    targets a renderer-id absent from the strict-validated renderer declaration is a mis-stated control,
-    exit 2, never a silently unconsumed row. Called on BOTH the genesis and non-genesis paths."""
-    declared = {r["renderer-id"] for r in renderers_data.get("renderer", []) if isinstance(r, dict)}
+    targets a renderer-id absent from `declared_ids` (the genesis HEAD set, or the non-genesis predecessor-
+    plus-HEAD union) is a mis-stated control, exit 2, never a silently unconsumed row."""
     for r in rows:
-        if r["kind"] == "renderer-semantics" and r["id"] not in declared:
+        if r["kind"] == "renderer-semantics" and r["id"] not in declared_ids:
             raise GateError("{}: renderer-semantics disposition id {!r} names no declared renderer-id "
-                            "({})".format(DISPOSITIONS_REL, r["id"], sorted(declared)))
+                            "({})".format(DISPOSITIONS_REL, r["id"], sorted(declared_ids)))
 
 
 def load_dispositions(root):
@@ -773,7 +793,7 @@ def run(root):
             # A genesis renderer-semantics disposition must still name a DECLARED renderer (this round's #3):
             # genesis normalizes dispositions but runs no consumption leg, so this is the only place a
             # malformed renderer target is caught before a clean genesis return.
-            _assert_renderer_targets_declared(rows, genesis_renderers)
+            _assert_renderer_targets_declared(rows, _renderer_ids(genesis_renderers))
             _genesis_structural(root)
             print("release-delta: GENESIS (zero release rows, manifest genesis = true); consumed records "
                   "validate their internal structure (dispositions, inventory, id-history register, "
@@ -832,9 +852,12 @@ def run(root):
         head_renderers = _load(root, RENDERERS_REL)
         _strict(_release_schema.strict_renderers, prev_renderers, "predecessor " + RENDERERS_REL)
         _strict(_release_schema.strict_renderers, head_renderers, RENDERERS_REL)
-        # Every renderer-semantics disposition names a DECLARED head renderer (this round's #3): a target
-        # absent from the strict-validated head declaration is a mis-stated control, exit 2.
-        _assert_renderer_targets_declared(rows, head_renderers)
+        # Every renderer-semantics disposition names a DECLARED renderer, scoped to the UNION of the strict-
+        # validated PREDECESSOR and HEAD declarations (this round's #3 and #6): a valid disposition for a
+        # renderer REMOVED between the releases (declared only in the predecessor) is accepted, while a
+        # target in neither declaration is a mis-stated control, exit 2.
+        _assert_renderer_targets_declared(
+            rows, _nongenesis_renderer_target_scope(prev_renderers, head_renderers))
         # Run the FULL AUTHORITATIVE validators in non-genesis mode too (round-4 finding 2), not only in
         # genesis: check_clauses over the HEAD tree's own sources (the 7.2 span/text/digest legs and the
         # 7.3 register semantics), and the same over the RAW-materialized predecessor tree together with
@@ -1088,6 +1111,15 @@ def _real_pack_e2e(tmp, failures):
         failures.append("real full-pack run(): an out-of-vocabulary head order family must fail closed "
                         "exit 2 in the non-genesis delta path (this round's #4)")
     (repo / ORDER_REL).write_text(_orig_order, encoding="utf-8")
+    # (this round's #5) a HEAD order.toml placing ACCUR in two precedence tiers in the NON-GENESIS path:
+    # strict_order's GLOBAL member-uniqueness rejects the duplicate facet at exit 2 (pre-fix the global
+    # duplicate slipped through and the gate reached the order_leg MAJOR-vs-claimed-PATCH finding, exit 1).
+    (repo / ORDER_REL).write_text(_orig_order.replace(
+        'members = ["PROGR"]', 'members = ["PROGR", "ACCUR"]', 1), encoding="utf-8")
+    if _run_quiet_root(repo) != 2:
+        failures.append("real full-pack run(): a HEAD order facet in two precedence tiers must fail closed "
+                        "exit 2 in the non-genesis delta path (this round's #5)")
+    (repo / ORDER_REL).write_text(_orig_order, encoding="utf-8")
     # === this round's #2: RELEASE-ROW VALUE VALIDATION. The HEAD releases row anchors the REAL predecessor
     # (valid commit_sha/tag), so WITHOUT the fix the row is accepted and the delta computes a clean PATCH
     # (exit 0); the single malformed VALUE is the only thing that flips it to exit 2, isolating the value
@@ -1108,6 +1140,10 @@ def _real_pack_e2e(tmp, failures):
     _val_cases = [
         (_releases_val(qapath="../escape"), "a qa-store-path traversal ('../escape')"),
         (_releases_val(qapath="qa//record"), "a non-canonical qa-store-path ('qa//record')"),
+        # a 0x01 control character in the path, written as a TOML unicode escape so tomllib parses it to
+        # the control byte (a raw byte would trip the TOML parser for the wrong reason): this round's #2.
+        (_releases_val(qapath="qa/\\u0001record.toml"),
+         "a qa-store-path with a 0x01 control character"),
         (_releases_val(ts="[-1]"), "a negative attestation epoch"),
         (_releases_val(tag="rel-1.0.0", tobj=tobj_rel),
          "a tag that does not equal 'v' + version (but still resolves)")]
@@ -1323,6 +1359,16 @@ def _real_pack_e2e(tmp, failures):
             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [1]\n'.format(
                 h="a" * 40, q="c" * 64), encoding="utf-8")
 
+    def _mut_releases_ctrlpath(rp):
+        # a predecessor release row whose qa-store-path carries a 0x01 control byte (a TOML unicode escape).
+        # read_genesis accepts it (keyset/presence only); strict_releases via is_canonical_relpath now
+        # rejects the FULL control range (this round's #2, predecessor object).
+        (rp / RELEASES_REL).write_text(
+            'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+            'tag_object_sha = "{h}"\ncommit_sha = "{h}"\nqa-sha256 = "{q}"\n'
+            'qa-store-path = "qa/\\u0001rec.toml"\nattestation-timestamps = [1]\n'.format(
+                h="a" * 40, q="c" * 64), encoding="utf-8")
+
     _pred_record_fixture(
         "real-pack-pred-idhist", _mut_idhist_topkey,
         "real full-pack run(): an unknown top-level key in the PREDECESSOR id-history must fail closed "
@@ -1331,6 +1377,14 @@ def _real_pack_e2e(tmp, failures):
         "real-pack-pred-rel-badrow", _mut_releases_badrow,
         "real full-pack run(): a malformed row (integer commit_sha) in the PREDECESSOR releases record must "
         "fail closed exit 2 (this round's #1)")
+    _pred_record_fixture(
+        "real-pack-pred-rel-ctrlpath", _mut_releases_ctrlpath,
+        "real full-pack run(): a 0x01 control character in the PREDECESSOR releases qa-store-path must fail "
+        "closed exit 2 (this round's #2)")
+    # NOTE: a predecessor ORDER facet-duplication is NOT given a run() fixture: strict_order runs on the
+    # predecessor object too (the same validator the genesis and head #5 fixtures exercise), but any facet
+    # duplication also breaks operative TIER_FACETS equality, which check_manifest.check_order_record catches
+    # inside _predecessor_tree_checks regardless of this fix, so such a fixture would not discriminate.
 
     # === REAL GENESIS FULL-PACK run() (round-5 findings 1 and 5) ==================================
     # The archived HEAD is a genesis tree (zero-row releases, manifest genesis = true); run() takes the
@@ -1443,6 +1497,41 @@ def _real_pack_e2e(tmp, failures):
         if _run_quiet_root(gof) != 2:
             failures.append("real genesis full-pack run(): an out-of-vocabulary order family must fail "
                             "closed exit 2 (this round's #4)")
+    # (this round's #2) an artifact whose PATH carries a 0x01 control character: is_canonical_relpath now
+    # rejects the full control range, exit 2 (pre-fix only NUL/tab/LF/CR were rejected, so 0x01 passed). The
+    # artifact-id is bound to the same path so ONLY the control character is under test.
+    gctl = _extract_genesis("genesis-artifact-ctrlpath")
+    if gctl is not None:
+        mp = gctl / MANIFEST_REL
+        mp.write_text(mp.read_text(encoding="utf-8")
+                      + '\n[[artifacts]]\nartifact-id = "genx:qa/\\u0001rec.toml"\n'
+                      'path = "qa/\\u0001rec.toml"\nkind = "file"\nsha256 = "{}"\n'.format("a" * 64),
+                      encoding="utf-8")
+        if _run_quiet_root(gctl) != 2:
+            failures.append("real genesis full-pack run(): an artifact path with a 0x01 control character "
+                            "must fail closed exit 2 (this round's #2)")
+    # (this round's #4) an artifact-id carrying a parsed NEWLINE (so it no longer binds to '<rid>:<path>'):
+    # the artifact-id grammar/binding check rejects it, exit 2 (pre-fix any non-empty string was accepted).
+    gaid = _extract_genesis("genesis-artifact-id-newline")
+    if gaid is not None:
+        mp = gaid / MANIFEST_REL
+        mp.write_text(mp.read_text(encoding="utf-8")
+                      + '\n[[artifacts]]\nartifact-id = "geny:qa/rec.toml\\n"\n'
+                      'path = "qa/rec.toml"\nkind = "file"\nsha256 = "{}"\n'.format("b" * 64),
+                      encoding="utf-8")
+        if _run_quiet_root(gaid) != 2:
+            failures.append("real genesis full-pack run(): an artifact-id carrying a newline (unbound from "
+                            "its path) must fail closed exit 2 (this round's #4)")
+    # (this round's #5) an order record placing ACCUR in TWO precedence tiers: the GLOBAL member-uniqueness
+    # check rejects a facet at more than one rank, exit 2 (pre-fix uniqueness was only within each tier).
+    godup = _extract_genesis("genesis-order-dupfacet")
+    if godup is not None:
+        op = godup / ORDER_REL
+        op.write_text(op.read_text(encoding="utf-8").replace(
+            'members = ["PROGR"]', 'members = ["PROGR", "ACCUR"]', 1), encoding="utf-8")
+        if _run_quiet_root(godup) != 2:
+            failures.append("real genesis full-pack run(): a facet placed in two precedence tiers must fail "
+                            "closed exit 2 (this round's #5)")
     # (round-7 finding 1) a manifest source PATH that escapes the repo root ("../escape"): the canonical
     # logical-path validator rejects it, exit 2 (the pre-round-7 validator accepted any non-empty string).
     gesc = _extract_genesis("genesis-manifest-escape")
@@ -1782,41 +1871,141 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
             failures.append("main({}): a duplicate CLI option must be rejected exit 2 (round-7 finding "
                             "7)".format(argv))
 
-    # --- split-view predecessor tag anchor (round-8 finding 6) ------------------------------------
-    # The tag is resolved to an OID ONCE and the RECORDED immutable object is peeled for the commit, so a
-    # tag that MOVES between reads cannot present a first read matching tag_object_sha while a second (ref)
-    # peel reports the recorded commit. The race is simulated deterministically: the ref-peel returns the
-    # recorded commit (what the pre-fix second ref read saw after the move) while the RECORDED object truly
-    # peels elsewhere. The pre-fix gate peeled the ref and PASSED; the fix peels the recorded object and
-    # rejects (GateError, exit 2).
-    _A, _C, _X = "a" * 40, "c" * 40, "b" * 40
-    _split_row = {"commit_sha": _C, "tag": "v9.9.9", "tag_object_sha": _A}
+    # --- single-named-ref-read predecessor tag anchor (this round's #1) ---------------------------
+    # The named ref refs/tags/<tag> is read EXACTLY ONCE (resolved to an OID); its recorded OID is then
+    # inspected for TYPE and PEELED BY ID, never the named ref again, so a tag moving between reads cannot
+    # present a split view. Each scenario counts the named-ref reads and asserts exactly one; a revert that
+    # reads the ref a second time (for the type or the peel) trips the count, and each move direction is
+    # rejected. _rev_parse and _object_type are stubbed deterministically.
+    _A, _B, _C, _X = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    _named_ref_reads = [0]
 
-    def _split_rev_parse(_root, ref):
-        if ref == _C + "^{commit}":
-            return _C                       # commit_sha self-check passes
-        if ref == "refs/tags/v9.9.9":
-            return _A                        # the ref resolves to the recorded tag object (read 1)
-        if ref == "refs/tags/v9.9.9^{commit}":
-            return _C                        # PRE-FIX second ref read: the moved tag peels to the recorded commit
-        if ref == _A + "^{commit}":
-            return _X                        # the RECORDED object truly peels ELSEWHERE (the split the fix catches)
-        return "0" * 40
+    def _make_rev_parse(resolver):
+        def rp(_root, ref):
+            if ref.startswith("refs/tags/"):
+                _named_ref_reads[0] += 1
+            return resolver(ref)
+        return rp
 
-    _saved_rp, _saved_tk = _rev_parse, _tag_kind
-    try:
-        globals()["_rev_parse"] = _split_rev_parse
-        globals()["_tag_kind"] = lambda _root, _tag: "tag"
+    _saved_rp, _saved_ot = _rev_parse, _object_type
+
+    def _run_anchor(resolver, obj_type):
+        _named_ref_reads[0] = 0
+        globals()["_rev_parse"] = _make_rev_parse(resolver)
+
+        def _ot(_r, oid):
+            if oid.startswith("refs/"):   # a revert that types the NAMED ref (not the recorded OID) is counted
+                _named_ref_reads[0] += 1
+            return obj_type
+        globals()["_object_type"] = _ot
         try:
-            _anchor_predecessor(".", _split_row)
-            failures.append("_anchor_predecessor: a split-view moved tag whose recorded object peels "
-                            "elsewhere must be rejected by peeling the RECORDED object, not the ref "
-                            "(round-8 finding 6)")
+            _anchor_predecessor(".", {"commit_sha": _C, "tag": "v9.9.9", "tag_object_sha": _A})
+            return None
         except GateError:
+            return "rejected"
+        finally:
+            globals()["_rev_parse"] = _saved_rp
+            globals()["_object_type"] = _saved_ot
+
+    # direction 1: the tag MOVED AWAY so the named ref resolves to B, not the recorded A -> rejected at the
+    # resolved-vs-recorded comparison.
+    def _resolver_moved(ref):
+        return _C if ref == _C + "^{commit}" else (_B if ref == "refs/tags/v9.9.9" else "0" * 40)
+    if _run_anchor(_resolver_moved, "tag") != "rejected":
+        failures.append("_anchor_predecessor: a tag that resolves to a DIFFERENT oid than the recorded "
+                        "tag_object_sha must be rejected (this round's #1)")
+    if _named_ref_reads[0] != 1:
+        failures.append("_anchor_predecessor read the named ref {} times (moved-away case); exactly ONE is "
+                        "allowed (this round's #1)".format(_named_ref_reads[0]))
+    # direction 2 (the inverse race): the ref resolves to the recorded A and A even peels to the recorded
+    # commit, but the RECORDED object A is NOT an annotated tag (a lightweight tag / commit substituted).
+    # Inspecting the recorded OID's type (not the ref's) rejects it; a two-read impl that typed the ref
+    # after a move could be fooled.
+    def _resolver_typematch(ref):
+        if ref == _C + "^{commit}":
+            return _C
+        if ref == "refs/tags/v9.9.9":
+            return _A
+        if ref == _A + "^{commit}":
+            return _C
+        return "0" * 40
+    if _run_anchor(_resolver_typematch, "commit") != "rejected":
+        failures.append("_anchor_predecessor: a recorded tag_object that is not an annotated tag must be "
+                        "rejected by inspecting the RECORDED oid's type, not the ref's (this round's #1)")
+    if _named_ref_reads[0] != 1:
+        failures.append("_anchor_predecessor read the named ref {} times (type-mismatch case); exactly ONE "
+                        "is allowed (this round's #1)".format(_named_ref_reads[0]))
+    # the recorded object is an annotated tag AND matches, but peels ELSEWHERE than the recorded commit
+    # (the round-8 split): peeling the recorded OID rejects it.
+    def _resolver_peel_elsewhere(ref):
+        if ref == _C + "^{commit}":
+            return _C
+        if ref == "refs/tags/v9.9.9":
+            return _A
+        if ref == _A + "^{commit}":
+            return _X
+        return "0" * 40
+    if _run_anchor(_resolver_peel_elsewhere, "tag") != "rejected":
+        failures.append("_anchor_predecessor: a recorded tag object that peels elsewhere than the recorded "
+                        "commit must be rejected (this round's #1)")
+    if _named_ref_reads[0] != 1:
+        failures.append("_anchor_predecessor read the named ref {} times (peel case); exactly ONE is "
+                        "allowed (this round's #1)".format(_named_ref_reads[0]))
+
+    # --- this round's #2 / #3 / #6 unit checks ----------------------------------------------------
+    import gen_manifest as _gm
+    # #2: is_canonical_relpath and gen_manifest._check_rel_path reject the FULL control range (0x00-0x1F and
+    # DEL 0x7F), not only NUL/tab/LF/CR; a clean path still passes both.
+    for _bad in ("qa/\x01record.toml", "qa/\x1frecord.toml", "qa/\x7frecord.toml"):
+        if _release_schema.is_canonical_relpath(_bad):
+            failures.append("is_canonical_relpath accepted a control character in {!r} (this round's "
+                            "#2)".format(_bad))
+        try:
+            _gm._check_rel_path(_bad, "unit")
+            failures.append("gen_manifest._check_rel_path accepted a control character in {!r} (this "
+                            "round's #2)".format(_bad))
+        except _gm.GateError:
             pass
-    finally:
-        globals()["_rev_parse"] = _saved_rp
-        globals()["_tag_kind"] = _saved_tk
+    if not _release_schema.is_canonical_relpath("qa/record.toml"):
+        failures.append("is_canonical_relpath wrongly rejected a clean path (this round's #2)")
+    # #3: strict_renderers rejects a non-slug renderer-id ("Bad ID") on ANY object (head/predecessor share
+    # this validator). A hand-crafted fresh renderers.toml cannot reach run() once gen_renderers rejects the
+    # source RENDERER_DECL (gen_renderers self-test covers that), so this defence-in-depth layer is asserted
+    # directly on the shared strict validator.
+    def _rdecl(rid):
+        return {"format-version": 1, "renderer": [{
+            "renderer-id": rid, "entrypoint": "tools/x.py", "semantics-revision": 1,
+            "targets": ["OUT.md"], "closure": ["tools/x.py"], "code-digest": "a" * 64}]}
+    try:
+        _release_schema.strict_renderers(_rdecl("Bad ID"), "unit renderers")
+        failures.append("strict_renderers accepted a non-slug renderer-id 'Bad ID' (this round's #3)")
+    except _release_schema.SchemaError:
+        pass
+    try:
+        _release_schema.strict_renderers(_rdecl("good-id"), "unit renderers")
+    except _release_schema.SchemaError as exc:
+        failures.append("strict_renderers wrongly rejected a valid slug renderer-id ({}, this round's "
+                        "#3)".format(exc))
+    # #6: a NON-GENESIS renderer-semantics disposition may target a renderer declared ONLY in the
+    # predecessor (a removal): the union scope accepts it while HEAD-only would reject it.
+    _prev_dec = {"renderer": [{"renderer-id": "gonernd"}, {"renderer-id": "keeprnd"}]}
+    _head_dec = {"renderer": [{"renderer-id": "keeprnd"}]}
+    _scope = _nongenesis_renderer_target_scope(_prev_dec, _head_dec)
+    if "gonernd" not in _scope:
+        failures.append("_nongenesis_renderer_target_scope omits a PREDECESSOR-only renderer (this round's "
+                        "#6)")
+    _rmrow = _rows(("renderer-semantics", "gonernd", "1.1.0", "byte-only"))
+    try:
+        _assert_renderer_targets_declared(_rmrow, _scope)
+    except GateError:
+        failures.append("a disposition for a predecessor-only REMOVED renderer must be accepted under the "
+                        "union (this round's #6)")
+    try:
+        _assert_renderer_targets_declared(_rmrow, _renderer_ids(_head_dec))
+        failures.append("HEAD-only renderer scope wrongly ACCEPTED a predecessor-only renderer (proves the "
+                        "union is required, this round's #6)")
+    except GateError:
+        pass
 
     # --- _cat_file_batch grammar (round-7 finding 3) ----------------------------------------------
     class _FakeProc:
