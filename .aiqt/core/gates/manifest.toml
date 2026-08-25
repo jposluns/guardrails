@@ -301,6 +301,15 @@ class = "a"
 residue = "It computes the minimum required SemVer bump from machine-readable deltas over the whole governance surface (clause canonical text, the full pack-owned path keyset, ownership classes with the absolute-minimum cap, the declared order record, and the renderer/generator declaration) and fails a claimed bump below it, forcing a public disposition row for every dispositioned change. It forces the disposition row mechanically but cannot judge whether the human classification a row records is correct; the profiles/groups leg is dormant until the adopter-experience artifact ships; dispositions are trusted as authored once schema-valid; and it runs in genesis mode (no delta computed) until the first anchored release exists."
 
 [[gate]]
+id = "release-build"
+script = "tools/check_release_build.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It validates the release build order, the annotated release tags and their resolution to the recorded object and commit SHAs, the genesis uniqueness declaration, the release-order ordering gate, and the attestation chronology against the tagger date. The chronology layer is keyless tamper-evident ordering within the anchored history, not cryptographic proof; the QA-store retrieval, success, and family-set layers run maintainer-side only (the private store is unreachable from CI, which validates the anchored chain instead); and every tag- and row-dependent layer is dormant only while the repository carries zero release tags AND zero attestation rows, arming when the first release tag or row exists, with a lightweight release tag disallowed."
+
+[[gate]]
 id = "clauses"
 script = "tools/check_clauses.py"
 rules = []

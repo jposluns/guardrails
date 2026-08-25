@@ -479,6 +479,7 @@ tools/check_no_dashes.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
 tools/check_reference_facts.py text eol=lf
+tools/check_release_build.py text eol=lf
 tools/check_release_delta.py text eol=lf
 tools/check_rule_placement.py text eol=lf
 tools/check_secrets.py text eol=lf
