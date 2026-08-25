@@ -2,7 +2,7 @@
 """Generate the root NOTICE file from .aiqt/attribution.toml plus the live standards manifests.
 
 The pack itself is published under CC BY-SA 4.0 (see the LICENSE file). The pack's crosswalk mappings
-reproduce third-party framework control/clause IDENTIFIERS and SHORT TITLES as navigational pointers
+reproduce third-party framework control/clause IDENTIFIERS and TITLES as navigational pointers
 only; no specification prose, requirement text, control or clause bodies, figures, or tables are
 reproduced. This generator renders the third-party attribution NOTICE from a single checked-in source
 of truth so it cannot drift from the vendored manifest set.
@@ -32,15 +32,17 @@ INTRO_TEMPLATE = (
     "trademark rights. AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns. These "
     "marks are unregistered.\n\n"
     "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
-    "{kinds} IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No "
+    "{kinds} IDENTIFIERS and their TITLES are reproduced, as navigational pointers. No "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "
     "framework are reproduced. Each framework's identifiers and titles remain the property of their "
     "respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is "
     "affiliated with this pack.\n\n"
     "AIQT Guardrails reproduces only each referenced control's identifier and the publisher's official "
-    "title or heading, to help adopters align their own compliance and audit programs across frameworks. "
+    "title or heading (or a brief AIQT-authored descriptor where the publisher publishes no title of its "
+    "own), to help adopters align their own compliance and audit programs across frameworks. "
     "It reproduces no requirement text, control descriptions, or other body content, and it lists only "
-    "the controls it maps to its own rules, not a complete framework catalogue. To use the full "
+    "the controls it maps to its own rules. For most frameworks this is a subset of the framework; for the "
+    "three OWASP Top 10 lists it maps (MCP, Web, and LLM) it lists all ten entries. To use the full "
     "standards, adopters must obtain them directly from the publisher and accept that publisher's own "
     "licence. AIQT Guardrails is not a substitute for, and does not relicense, any standard, and links "
     "adopters to each publisher's source."
