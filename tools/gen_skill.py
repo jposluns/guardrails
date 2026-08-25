@@ -65,15 +65,22 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # only, it does not affect what this generator produces.
 # Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
 RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 1}
+# GENSRC_OUTPUTS is STATICALLY parsed by gen_gensrc.py and must be a LITERAL (a tuple of dict literals),
+# so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
+# source: the public attribution line (GD-56) is rendered from its [plugin] author-name, so a change to that
+# name changes these outputs and must re-trigger regeneration.
 GENSRC_OUTPUTS = (
     {"target": "site/downloads/aiqt/", "kind": "tree",
-     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
     {"target": "site/downloads/aiqt-instructions.txt", "kind": "file",
-     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
     {"target": "site/downloads/aiqt-skill.zip", "kind": "file",
-     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
 )
 
