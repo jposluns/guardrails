@@ -33,8 +33,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 
-# Bare SemVer only: no leading zeros, no pre-release/build identifiers (policy R5).
-SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+# Bare SemVer only: no leading zeros, no pre-release/build identifiers (policy R5). The digit class is the
+# explicit ASCII [0-9], never `\d`, and the pattern is compiled with re.ASCII (belt-and-suspenders): `\d`
+# matches Unicode decimal digits, so `1٢.0.0` (an Arabic-Indic two) matched `[1-9]\d*` and int() then
+# read it as 12, letting a non-ASCII-digit version pass every SemVer parse path. ASCII-only closes that gap.
+SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$", re.ASCII)
 
 
 def _parse(version):

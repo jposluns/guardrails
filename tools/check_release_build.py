@@ -255,7 +255,21 @@ def _all_release_tags(root):
         tag = line.strip()
         if not tag.startswith("v") or _parse(tag[1:]) is None:
             continue
-        out[tag[1:]] = (tag, _tag_kind(root, "refs/tags/" + tag))
+        # (round-9 finding 4) Resolve the ref ONCE to its immutable OID and read the kind FROM that OID
+        # (round-8 #6 resolve-once), then REQUIRE the OID to peel to a COMMIT. `git tag -a v<x> <tree>`
+        # creates an annotated tag whose target is a TREE (cat-file -t still reports 'tag'), which every
+        # downstream kind/peel/chronology check treated as a valid in-flight annotated release: the audit
+        # returned clean while `refs/tags/v<x>^{commit}` could never resolve. A release ref that names a
+        # tree or blob (annotated or lightweight) cannot peel to a commit and is cannot-evaluate (exit 2),
+        # never a silent clean audit.
+        oid = _rev_parse(root, "refs/tags/" + tag)
+        kind = _tag_kind(root, oid)
+        try:
+            _rev_parse(root, oid + "^{commit}")
+        except GateError:
+            raise GateError("release tag {} does not peel to a commit (its target is a {}; a tree- or "
+                            "blob-targeted tag cannot name a release commit); fail-closed".format(tag, kind))
+        out[tag[1:]] = (tag, kind)
     return out
 
 
@@ -461,14 +475,44 @@ def _attestation_delta_findings(root, candidate_sha, commit_oid):
     """(round-8 #4) The tree delta between the tagged candidate and the attestation commit must touch ONLY
     the appended release row (releases.toml) and the regenerated branch-integrity artifacts (manifest, ROOT,
     announce-snippet); any other changed path is an out-of-scope attestation commit. releases.toml itself
-    MUST change (the row is appended). A git failure computing the delta is cannot-evaluate (GateError)."""
-    proc = _git(root, ["diff", "--name-only", candidate_sha, commit_oid])
+    MUST change (the row is appended). A git failure computing the delta is cannot-evaluate (GateError).
+
+    (round-9 finding 3) The delta is read from a RAW tree diff that carries the src/dst FILE MODES and object
+    types (`git diff-tree -r --no-renames --raw -z`), not `git diff --name-only` which lists paths only. A
+    name-only delta let a MODE or TYPE change ride an allowed path undetected: `os.chmod(releases.toml,
+    0o755)` on the attestation commit changed the mode (100644 -> 100755) while the path stayed within the
+    allowed set, so the delta passed post-tag. Each changed allowed path must retain the canonical
+    regular-file blob mode 100644; an executable-bit, symlink (120000), gitlink (160000), type, or delete
+    (000000) change on an allowed path is a content finding (exit 1)."""
+    proc = _git(root, ["diff-tree", "-r", "--no-renames", "--raw", "-z", candidate_sha, commit_oid])
     if proc.returncode != 0:
         raise GateError("cannot diff the tagged candidate {} against the attestation commit {} ({})".format(
             candidate_sha, commit_oid, _git_err(proc)))
-    changed = [p for p in _git_out(proc, "git diff --name-only").splitlines() if p.strip()]
+    # The -z raw stream is a flat NUL-delimited sequence: for each changed path a metadata token
+    # ":<src_mode> <dst_mode> <src_sha> <dst_sha> <status>" is followed by exactly one path token
+    # (--no-renames guarantees a single path per record, never the rename/copy two-path form). dst_mode
+    # is the mode the path holds ON the attestation commit ("000000" for a deletion).
+    tokens = _git_out(proc, "git diff-tree --raw").split("\x00")
+    changed_dst_mode = {}
+    idx = 0
+    while idx < len(tokens):
+        meta = tokens[idx]
+        if not meta:
+            idx += 1
+            continue
+        if not meta.startswith(":"):
+            raise GateError("unexpected git diff-tree --raw record {!r}; fail-closed".format(meta))
+        fields = meta[1:].split(" ")
+        if len(fields) != 5:
+            raise GateError("malformed git diff-tree --raw metadata {!r}; fail-closed".format(meta))
+        _src_mode, dst_mode = fields[0], fields[1]
+        if idx + 1 >= len(tokens):
+            raise GateError("git diff-tree --raw: missing path for record {!r}; fail-closed".format(meta))
+        changed_dst_mode[tokens[idx + 1]] = dst_mode
+        idx += 2
+    changed = set(changed_dst_mode)
     findings = []
-    extra = sorted(set(changed) - ALLOWED_ATTESTATION_DELTA)
+    extra = sorted(changed - ALLOWED_ATTESTATION_DELTA)
     if extra:
         findings.append("attestation commit changes paths outside the appended release row and the "
                         "regenerated branch-integrity artifacts {}: {}".format(
@@ -476,6 +520,12 @@ def _attestation_delta_findings(root, candidate_sha, commit_oid):
     if RELEASES_REL not in changed:
         findings.append("attestation commit does not modify {} (it must append exactly the release "
                         "row)".format(RELEASES_REL))
+    for path in sorted(changed & ALLOWED_ATTESTATION_DELTA):
+        if changed_dst_mode[path] != "100644":
+            findings.append("attestation commit changes {} to mode {} (an allowed path must remain a "
+                            "regular-file blob at mode 100644; an executable-bit, symlink, gitlink, type, "
+                            "or delete change on an allowed path is out of scope)".format(
+                                path, changed_dst_mode[path]))
     return findings
 
 
@@ -986,6 +1036,11 @@ def _run_pre_tag_quiet(root, candidate_sha, qa_path, qa_sha256, first_pin, evide
         return run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence)
 
 
+# Re-entrancy guard for the finding-2 archive fail-closed regression, which runs self_test_main recursively
+# under a `git archive`-failing subprocess.run; the nested run must not re-enter that regression.
+_ARCHIVE_FAILCLOSED_REENTRANT = False
+
+
 def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
     failures = []
 
@@ -1062,6 +1117,15 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
         failures.append("ordering: a duplicate version expected a finding")
     if not ordering_findings(["1.1.0", "1.0.0"]):
         failures.append("ordering: a reorder/decrease expected a finding")
+
+    # (round-9 finding 1) Unicode-digit SemVer: the shared ASCII-only parser rejects a non-ASCII decimal
+    # digit, so a version such as "1٢.0.0" (an Arabic-Indic two) is malformed, never (12, 0, 0). A plain
+    # ASCII version still parses. This is the direct-parser leg; the end-to-end zero-row audit leg is a
+    # git fixture below.
+    if _parse("1٢.0.0") is not None:
+        failures.append("(finding 1) _parse must reject a Unicode-digit version (\"1٢.0.0\") as malformed")
+    if _parse("1.0.0") is None:
+        failures.append("(finding 1) _parse must still accept a plain ASCII bare SemVer")
 
     # QA-object validation.
     good_obj = {"candidate-sha": "abc", "family": [dict(f, **{"timestamps-utc": [5]}) for f in ok_fams]}
@@ -1531,7 +1595,14 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # on the RAW-materialized + fresh-init candidate (finding 1, no worktree). The raw materialization
             # and reproduce both exercise the round-4 cannot-evaluate propagation on the real toolchain.
             arch = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
-            if arch.returncode == 0 and arch.stdout:
+            if arch.returncode != 0 or not arch.stdout:
+                # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
+                # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
+                failures.append("(finding 2) `git archive HEAD` returned rc={} / {} bytes; the genesis "
+                                "run_pre_tag archive-backed case cannot be verified, so the self-test fails "
+                                "closed rather than silently skipping it".format(
+                                    arch.returncode, len(arch.stdout or b"")))
+            else:
                 import tarfile
                 gcand = tmp / "genesis-candidate"
                 gcand.mkdir()
@@ -1560,9 +1631,16 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         if rc != 1:
                             failures.append("genesis run_pre_tag without --first-pin must AUTO-REQUIRE "
                                             "evidence and fail exit 1 (finding 5), got {}".format(rc))
-                except Exception as exc:  # noqa: BLE001  a build/archive hiccup is a skip, not a false pass
-                    print("SELF-TEST NOTE: genesis run_pre_tag case skipped ({})".format(exc),
-                          file=sys.stderr)
+                    else:
+                        failures.append("(finding 2) the genesis archive candidate could not be built "
+                                        "(git init/add/commit failed); the archive-backed case cannot be "
+                                        "verified, so the self-test fails closed rather than skipping it")
+                except Exception as exc:  # noqa: BLE001
+                    # (round-9 finding 2) a caught fixture exception is a SELF-TEST FAILURE, never a silent
+                    # skip: the archive-backed case did not reach its verdict.
+                    failures.append("(finding 2) the genesis run_pre_tag archive-backed case raised and "
+                                    "could not be verified ({}); the self-test fails closed rather than "
+                                    "silently skipping it".format(exc))
 
             # (round-4 finding 4) a first-pin candidate whose check_clauses --genesis is CANNOT-EVALUATE
             # (a corrupt inventory, child exit 2) must raise GateError -> exit 2, not append a finding. The
@@ -1875,6 +1953,54 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 failures.append("post-tag with a symbolic --attestation-commit (HEAD) must be rejected "
                                 "exit 2 (round-7 finding 5)")
 
+            # === ROUND-9 build fixtures ==============================================================
+            # (finding 1, end-to-end) a zero-row audit whose WORKING-TREE manifest carries a Unicode-digit
+            # release-version ("1٢.0.0", an Arabic-Indic two) is malformed at the shared ASCII-only SemVer
+            # parser -> exit 2, BEFORE the dormancy short-circuit. The pre-fix `\d`-based parser read it as
+            # 12 and the zero-row audit returned clean exit 0.
+            ud = tmp / "unicode-digit-manifest"
+            _init(ud)
+            _write_records(ud, "format-version = 1\n", _valid_manifest(release_version="1٢.0.0"))
+            _commit(ud, "zero-row with a Unicode-digit release-version")
+            if _run_audit_quiet(ud) != 2:
+                failures.append("(finding 1) a zero-row audit with a Unicode-digit manifest release-version "
+                                "must fail closed exit 2, not a clean dormant audit")
+
+            # (finding 1, read_version) gen_manifest.read_version rejects a non-ASCII-digit VERSION too
+            # (str.isdigit() is Unicode-true; .isascii() closes the gap), so a Unicode-digit version can
+            # never seed the manifest release-version.
+            rv = tmp / "read-version"
+            rv.mkdir(parents=True, exist_ok=True)
+            (rv / "VERSION").write_text("1٢.0.0\n", encoding="utf-8")
+            try:
+                gen_manifest.read_version(rv)
+                failures.append("(finding 1) read_version must reject a Unicode-digit VERSION (GateError)")
+            except gen_manifest.GateError:
+                pass
+            (rv / "VERSION").write_text("1.2.0\n", encoding="utf-8")
+            try:
+                if gen_manifest.read_version(rv) != "1.2.0":
+                    failures.append("(finding 1) read_version must still accept a plain ASCII bare SemVer")
+            except gen_manifest.GateError:
+                failures.append("(finding 1) read_version must still accept a plain ASCII bare SemVer")
+
+            # (finding 4) a release tag whose ANNOTATED tag object targets a TREE (git tag -a v1.0.0 <tree>)
+            # cannot peel to a commit. The pre-fix enumeration read only cat-file -t (still "tag") and the
+            # zero-row audit returned clean exit 0 while `refs/tags/v1.0.0^{commit}` could never resolve;
+            # the fix resolves the ref once and REQUIRES a commit peel, so this is cannot-evaluate exit 2.
+            tt = tmp / "tree-targeted-tag"
+            _init(tt)
+            _write_records(tt, "format-version = 1\n")
+            _commit(tt, "zero-row genesis tree")
+            tt_tree = subprocess.run(["git", "-C", str(tt), "rev-parse", "HEAD^{tree}"],
+                                     check=True, capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "-C", str(tt), "tag", "-a", "v1.0.0", tt_tree, "-m", "tree-targeted"],
+                           check=True, capture_output=True, text=True,
+                           env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            if _run_audit_quiet(tt) != 2:
+                failures.append("(finding 4) a release tag whose annotated object targets a tree must fail "
+                                "closed exit 2 (it cannot peel to a commit), not a clean audit")
+
             # (finding 6) THE ATTESTATION-COMMIT MODEL (Architect-approved): tag the pre-attestation release
             # tree (immutable ROOT), then in a FOLLOW-UP commit append the attestation row AND regenerate the
             # branch-integrity manifest/root/snippet. Confirm gen_manifest --check AND check_manifest are
@@ -1882,7 +2008,14 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # post-tag validates the REGENERATED artifacts. The QA object lives OUTSIDE the tree so it is not
             # a tracked pack path. Skipped (no false pass) if the archive is unavailable.
             arch6 = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
-            if arch6.returncode == 0 and arch6.stdout:
+            if arch6.returncode != 0 or not arch6.stdout:
+                # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
+                # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
+                failures.append("(finding 2) `git archive HEAD` returned rc={} / {} bytes; the "
+                                "attestation-commit archive-backed cases cannot be verified, so the "
+                                "self-test fails closed rather than silently skipping them".format(
+                                    arch6.returncode, len(arch6.stdout or b"")))
+            else:
                 import tarfile
                 ac = tmp / "attestation-commit"
                 ac.mkdir()
@@ -2000,11 +2133,72 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         if _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
                             failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
                                             "tag while the row lists an early timestamp must exit 1 (#6)")
-                except Exception as exc:  # noqa: BLE001  a build hiccup is a skip, not a false pass
-                    print("SELF-TEST NOTE: attestation-commit case skipped ({})".format(exc),
-                          file=sys.stderr)
+
+                        # (round-9 finding 3) EXECUTABLE-BIT / MODE SMUGGLE: an attestation commit that
+                        # chmods releases.toml to 0o755 rides the ALLOWED releases.toml path under a
+                        # name-only delta, but the raw mode/type delta check flags mode 100755 -> exit 1.
+                        # The mode is not part of the manifest, so the branch-integrity recompute stays
+                        # green and the MODE leg alone drives the verdict. update-index --chmod sets the
+                        # index mode explicitly, so the case does not depend on core.fileMode (hermetic).
+                        subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                       capture_output=True, env=ge)
+                        subprocess.run(["git", "-C", str(ac), "update-index", "--chmod=+x", RELEASES_REL],
+                                       capture_output=True, env=ge)
+                        subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m",
+                                        "chmod releases.toml 0o755", "--no-verify"],
+                                       capture_output=True, env=ge)
+                        chmod_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                   capture_output=True, text=True).stdout.strip()
+                        if _run_post_tag_quiet(ac, chmod_oid, str(a_qa)) != 1:
+                            failures.append("(finding 3) an attestation commit that chmods releases.toml to "
+                                            "0o755 must be rejected by the raw mode/type delta check "
+                                            "(exit 1); a name-only delta missed the executable-bit smuggle")
+                    else:
+                        # (round-9 finding 2) the archive candidate could not be staged (git init/add/commit
+                        # or tag failed): the archive-backed cases cannot be verified, so the self-test fails
+                        # closed rather than silently skipping them.
+                        failures.append("(finding 2) the attestation-commit archive candidate could not be "
+                                        "staged (git init/add/commit failed); the archive-backed cases "
+                                        "cannot be verified, so the self-test fails closed rather than "
+                                        "silently skipping them")
+                except Exception as exc:  # noqa: BLE001
+                    # (round-9 finding 2) a caught fixture exception is a SELF-TEST FAILURE, never a silent
+                    # skip: the archive-backed cases did not reach their verdict.
+                    failures.append("(finding 2) the attestation-commit archive-backed cases raised and "
+                                    "could not be verified ({}); the self-test fails closed rather than "
+                                    "silently skipping them".format(exc))
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
+
+    # (round-9 finding 2) ARCHIVE FAIL-CLOSED regression: `git archive HEAD` is always available in-repo, so
+    # an unavailable/empty archive (or a caught fixture exception) in the archive-backed blocks above must
+    # FAIL the self-test, never silently skip while still reporting full PASS. Force every `git archive` to
+    # return nonzero and confirm a nested self_test_main FAILS closed: nonzero exit AND no "SELF-TEST PASS"
+    # line. A module-level guard stops the nested run re-entering this regression. Runs only under git_ran (a
+    # genuinely git-less host skips the archive cases legitimately, so the regression cannot fire there).
+    global _ARCHIVE_FAILCLOSED_REENTRANT
+    if git_ran and not _ARCHIVE_FAILCLOSED_REENTRANT:
+        _real_run = subprocess.run
+
+        def _archive_failing_run(_argv, *_a, **_k):
+            _toks = [str(x) for x in _argv] if isinstance(_argv, (list, tuple)) else [str(_argv)]
+            if _toks[:1] == ["git"] and "archive" in _toks:
+                return subprocess.CompletedProcess(_argv, 1, b"", b"forced archive failure (finding 2)")
+            return _real_run(_argv, *_a, **_k)
+
+        _buf = io.StringIO()
+        _ARCHIVE_FAILCLOSED_REENTRANT = True
+        subprocess.run = _archive_failing_run
+        try:
+            with redirect_stdout(_buf), redirect_stderr(io.StringIO()):
+                _nested_rc = self_test_main()
+        finally:
+            subprocess.run = _real_run
+            _ARCHIVE_FAILCLOSED_REENTRANT = False
+        if _nested_rc == 0 or "SELF-TEST PASS" in _buf.getvalue():
+            failures.append("(finding 2) with `git archive HEAD` forced to fail, the self-test must FAIL "
+                            "closed (nonzero exit, no PASS line) instead of silently skipping the "
+                            "archive-backed cases; got rc={}".format(_nested_rc))
 
     if failures:
         print("SELF-TEST FAIL:")

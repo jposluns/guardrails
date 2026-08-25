@@ -367,7 +367,10 @@ def cross_check_exclusions(root, exclusions):
 def read_version(root):
     text = (root / VERSION_REL).read_text(encoding="utf-8").strip()
     parts = text.split(".")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+    # str.isdigit() is Unicode-true (an Arabic-Indic or superscript digit passes), so pair it with
+    # .isascii() to reject a non-ASCII-digit VERSION here too, matching the ASCII-only SemVer parser the
+    # release gates share; a Unicode-digit version can never seed the manifest release-version.
+    if len(parts) != 3 or not all(p.isdigit() and p.isascii() for p in parts):
         raise GateError("VERSION {!r} is not a bare SemVer".format(text))
     return text
 
