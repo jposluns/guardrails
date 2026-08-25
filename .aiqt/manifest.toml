@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "6bc170fb43039dc15f40d94e6471e5dc7539c13011db62b8bdf1307d243fcd6b"
+tree-sha256 = "08d48f5f878787bdc5403b46a0bb282c419ce28f94a27aff226a65c18846685c"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2386,8 +2386,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 154351
-sha256 = "0c1f22a077f86b81d6201b225028705cd6c7858f6a4169f37854cce361f06072"
+bytes = 155497
+sha256 = "51b102fca71bb620360f9d3fb593f7ecf777de899cf2b2a3cbee2fab6d2e2f00"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -2426,8 +2426,8 @@ sha256 = "24b3a3821e2aaf499f6141bc52356b17906ab11e6834fac08c3cbd4b723fcfb6"
 
 [[sources]]
 path = "tools/check_versions.py"
-bytes = 6274
-sha256 = "775a72b0cda0b347e42c4fb2b22a59b7632ea3b1c873fea2f00f3b402e5e22e0"
+bytes = 6883
+sha256 = "ea5c3f7a44f3ec2d3ffd2e2652e475e51325c196214162320497a484ee594e36"
 
 [[sources]]
 path = "tools/ci-status.sh"
@@ -2486,8 +2486,8 @@ sha256 = "ab1d5efe7499c2e1ff068daac952f1d6a9606cd628549a7e362b39f24b7e5df1"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 51955
-sha256 = "02e14c5610a9dc32bad265b41a24214f336488c08c70e880370254b4339f0f15"
+bytes = 52961
+sha256 = "609d391e9a3dc849730afd858867bfe5169f9b7353aa318bda7c9d3650f4a4cc"
 
 [[sources]]
 path = "tools/gen_mappings.py"

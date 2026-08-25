@@ -1043,6 +1043,12 @@ _ARCHIVE_FAILCLOSED_REENTRANT = False
 
 def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
     failures = []
+    # CANNOT-EVALUATE collection, kept DISTINCT from `failures` (round-10 finding 6): an unavailable/empty
+    # `git archive`, a setup/fixture that could not be staged, or a caught setup/fixture exception did not
+    # reach the case's verdict, so it is a cannot-evaluate, not a content failure. A non-empty `errors`
+    # makes the terminal path return 2 (cannot-evaluate, precedence over the 1 that `failures` yields),
+    # never a false PASS. An unavailable toolchain is exit 2, never exit 1.
+    errors = []
 
     ok_fams = [{"name": n, "finished-signal": True, "verdict": "PASS", "unresolved-blockers": 0,
                 "timestamps-utc": [5]} for n in FAMILIES]
@@ -1598,10 +1604,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             if arch.returncode != 0 or not arch.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
                 # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
-                failures.append("(finding 2) `git archive HEAD` returned rc={} / {} bytes; the genesis "
-                                "run_pre_tag archive-backed case cannot be verified, so the self-test fails "
-                                "closed rather than silently skipping it".format(
-                                    arch.returncode, len(arch.stdout or b"")))
+                errors.append("(finding 2) `git archive HEAD` returned rc={} / {} bytes; the genesis "
+                              "run_pre_tag archive-backed case cannot be verified, so the self-test is "
+                              "cannot-evaluate (exit 2) rather than silently skipping it".format(
+                                  arch.returncode, len(arch.stdout or b"")))
             else:
                 import tarfile
                 gcand = tmp / "genesis-candidate"
@@ -1632,15 +1638,15 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             failures.append("genesis run_pre_tag without --first-pin must AUTO-REQUIRE "
                                             "evidence and fail exit 1 (finding 5), got {}".format(rc))
                     else:
-                        failures.append("(finding 2) the genesis archive candidate could not be built "
-                                        "(git init/add/commit failed); the archive-backed case cannot be "
-                                        "verified, so the self-test fails closed rather than skipping it")
+                        errors.append("(finding 2) the genesis archive candidate could not be built "
+                                      "(git init/add/commit failed); the archive-backed case cannot be "
+                                      "verified, so the self-test is cannot-evaluate (exit 2)")
                 except Exception as exc:  # noqa: BLE001
                     # (round-9 finding 2) a caught fixture exception is a SELF-TEST FAILURE, never a silent
                     # skip: the archive-backed case did not reach its verdict.
-                    failures.append("(finding 2) the genesis run_pre_tag archive-backed case raised and "
-                                    "could not be verified ({}); the self-test fails closed rather than "
-                                    "silently skipping it".format(exc))
+                    errors.append("(finding 2) the genesis run_pre_tag archive-backed case raised and "
+                                  "could not be verified ({}); the self-test is cannot-evaluate (exit 2) "
+                                  "rather than silently skipping it".format(exc))
 
             # (round-4 finding 4) a first-pin candidate whose check_clauses --genesis is CANNOT-EVALUATE
             # (a corrupt inventory, child exit 2) must raise GateError -> exit 2, not append a finding. The
@@ -2011,10 +2017,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             if arch6.returncode != 0 or not arch6.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
                 # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
-                failures.append("(finding 2) `git archive HEAD` returned rc={} / {} bytes; the "
-                                "attestation-commit archive-backed cases cannot be verified, so the "
-                                "self-test fails closed rather than silently skipping them".format(
-                                    arch6.returncode, len(arch6.stdout or b"")))
+                errors.append("(finding 2) `git archive HEAD` returned rc={} / {} bytes; the "
+                              "attestation-commit archive-backed cases cannot be verified, so the "
+                              "self-test is cannot-evaluate (exit 2) rather than silently skipping "
+                              "them".format(arch6.returncode, len(arch6.stdout or b"")))
             else:
                 import tarfile
                 ac = tmp / "attestation-commit"
@@ -2157,16 +2163,16 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         # (round-9 finding 2) the archive candidate could not be staged (git init/add/commit
                         # or tag failed): the archive-backed cases cannot be verified, so the self-test fails
                         # closed rather than silently skipping them.
-                        failures.append("(finding 2) the attestation-commit archive candidate could not be "
-                                        "staged (git init/add/commit failed); the archive-backed cases "
-                                        "cannot be verified, so the self-test fails closed rather than "
-                                        "silently skipping them")
+                        errors.append("(finding 2) the attestation-commit archive candidate could not be "
+                                      "staged (git init/add/commit failed); the archive-backed cases "
+                                      "cannot be verified, so the self-test is cannot-evaluate (exit 2) "
+                                      "rather than silently skipping them")
                 except Exception as exc:  # noqa: BLE001
                     # (round-9 finding 2) a caught fixture exception is a SELF-TEST FAILURE, never a silent
                     # skip: the archive-backed cases did not reach their verdict.
-                    failures.append("(finding 2) the attestation-commit archive-backed cases raised and "
-                                    "could not be verified ({}); the self-test fails closed rather than "
-                                    "silently skipping them".format(exc))
+                    errors.append("(finding 2) the attestation-commit archive-backed cases raised and "
+                                  "could not be verified ({}); the self-test is cannot-evaluate (exit 2) "
+                                  "rather than silently skipping them".format(exc))
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -2195,16 +2201,23 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
         finally:
             subprocess.run = _real_run
             _ARCHIVE_FAILCLOSED_REENTRANT = False
-        if _nested_rc == 0 or "SELF-TEST PASS" in _buf.getvalue():
-            failures.append("(finding 2) with `git archive HEAD` forced to fail, the self-test must FAIL "
-                            "closed (nonzero exit, no PASS line) instead of silently skipping the "
-                            "archive-backed cases; got rc={}".format(_nested_rc))
+        # (round-10 finding 6) an unavailable toolchain is CANNOT-EVALUATE, so the masked-archive self-test
+        # must exit EXACTLY 2 (not merely nonzero: a content-failure exit 1 would misreport an unavailable
+        # archive as a content failure), and it must print no PASS line.
+        if _nested_rc != 2 or "SELF-TEST PASS" in _buf.getvalue():
+            failures.append("(finding 6) with `git archive HEAD` forced to fail, the self-test must be "
+                            "CANNOT-EVALUATE exit 2 (no PASS line) instead of exit 1 or a silent skip of "
+                            "the archive-backed cases; got rc={}".format(_nested_rc))
 
-    if failures:
+    if errors or failures:
         print("SELF-TEST FAIL:")
+        for f in errors:
+            print("  - [cannot-evaluate] " + f)
         for f in failures:
             print("  - " + f)
-        return 1
+        # A cannot-evaluate (errors) takes precedence: exit 2 outranks the exit 1 that content failures
+        # yield, so an unavailable toolchain is never reported as a content failure. Either way, never PASS.
+        return 2 if errors else 1
     core = ("the 2.2 STRICT success/family-set predicates (clean, missing/duplicate family, failed verdict, "
             "unresolved blocker, false/string finished-signal, unknown/missing family key, boolean blocker "
             "count, round-2 finding 5), genesis uniqueness, the 2.4 ordering predicate, strict QA-object "
