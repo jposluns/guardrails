@@ -29,7 +29,8 @@ from check_versions import _parse                    # noqa: E402  the shipped b
 from gen_manifest import RELEASE_ROW_ALLOWED          # noqa: E402  the single shared allowed keyset
 from check_clauses import split_clause_id, _valid_register_id, SHA256_RE  # noqa: E402  authoritative
 #                                       clause-id / register-id syntax and the source-digest regex (7.1/7.2)
-from gen_rules import CID_RE                          # noqa: E402  the authoritative corpus-id regex
+from gen_rules import CID_RE, TIER_FACETS, CIA_FACETS  # noqa: E402  the authoritative corpus-id regex and
+#                              the operative facet vocabularies (order controlled-vocab, this round's #4)
 
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # A recorded git object id is a full lowercase hex sha1 (40) or sha256 (64); an abbreviated or
@@ -107,6 +108,11 @@ def strict_release_row(row, where):
             raise SchemaError("{}: {!r} must be a non-empty string".format(where, key))
     if _parse(row["version"]) is None:
         raise SchemaError("{}: malformed version {!r}".format(where, row["version"]))
+    # tag is EXACTLY "v" + version (2.1), carrying no control character: a tag that does not match its
+    # version, or one with an embedded newline/tab, is a malformed row, not a valid ref (this round's #2).
+    if any(ch in row["tag"] for ch in ("\x00", "\t", "\n", "\r")) or row["tag"] != "v" + row["version"]:
+        raise SchemaError("{}: tag {!r} must be exactly 'v' + version ({!r}) with no control character".format(
+            where, row["tag"], "v" + row["version"]))
     # tag_object_sha / commit_sha carry a full lowercase git object id; an abbreviated or mixed-case value
     # is malformed input, exit 2 (finding 8). Resolution (does the object exist, does it match the tag) is
     # the build gate's, downstream.
@@ -117,15 +123,18 @@ def strict_release_row(row, where):
     qa = row["qa-sha256"]
     if not isinstance(qa, str) or not HEX64_RE.fullmatch(qa):
         raise SchemaError("{}: qa-sha256 is not 64 lowercase hex".format(where))
-    if _is_host_absolute(row["qa-store-path"]):
-        raise SchemaError("{}: qa-store-path {!r} is host-absolute (POSIX, drive-letter, or Windows "
-                          "UNC/device); the row records a logical store path (portability)".format(
+    # qa-store-path is a CANONICAL repo-relative logical path (this round's #2): not merely non-host-
+    # absolute, but with no '..', no './', no '//', no backslash, and no control character, so a traversal
+    # ("../escape") or a non-canonical form ("qa/./record", "qa//record") cannot slip through.
+    if not is_canonical_relpath(row["qa-store-path"]):
+        raise SchemaError("{}: qa-store-path {!r} is not a canonical repo-relative path (no '.', '..', "
+                          "'//', backslash, control character, or host-absolute form; 4.1/L425)".format(
                               where, row["qa-store-path"]))
     ts = row["attestation-timestamps"]
-    if not isinstance(ts, list) or not ts or not all(isinstance(t, int) and not isinstance(t, bool)
-                                                     for t in ts):
-        raise SchemaError("{}: attestation-timestamps must be a NON-EMPTY list of integer epochs".format(
-            where))
+    if not isinstance(ts, list) or not ts or not all(
+            isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in ts):
+        raise SchemaError("{}: attestation-timestamps must be a NON-EMPTY list of NON-NEGATIVE integer "
+                          "epochs".format(where))
 
 
 def strict_releases(data, where):
@@ -298,6 +307,16 @@ def strict_renderers(data, where):
 
 
 ORDER_PRESENTATION_KEYS = {"families", "aiqt-facets", "security-facets", "tie-breaker"}
+# The CONTROLLED presentation vocabularies (this round's #4), sourced from the authoritative operative
+# constants: the AIQT facet codes are the union of gen_rules.TIER_FACETS, the security facet codes are
+# gen_rules.CIA_FACETS, the three rule families are apex/aiqt/security, and the declared tie-break
+# strategy is slug-bytewise. strict_order rejects an out-of-vocabulary entry or a duplicate here (exit 2);
+# the operative-EQUALITY comparison (does the record list the WHOLE vocab, in order) stays check_manifest's
+# exit-1 leg.
+AIQT_FACET_VOCAB = frozenset().union(*TIER_FACETS.values())
+SECURITY_FACET_VOCAB = frozenset(CIA_FACETS)
+ORDER_FAMILY_VOCAB = frozenset({"apex", "aiqt", "security"})
+ORDER_TIE_BREAKERS = frozenset({"slug-bytewise"})
 CLAUSE_ROW_KEYS = frozenset({"clause-id", "corpus-id", "source-path", "start-line", "end-line",
                              "canonical-text", "source-digest"})
 IDHISTORY_ROW_KEYS = {"born": {"id", "born-release"}, "tombstone": {"id", "retired-release"},
@@ -324,26 +343,51 @@ def strict_order(data, where):
     tiers = data.get("precedence-tier")
     if not isinstance(tiers, list) or not tiers:
         raise SchemaError("{}: [[precedence-tier]] must be a non-empty array".format(where))
+    seen_ranks = set()
     for i, t in enumerate(tiers, 1):
         tw = "{} precedence-tier #{}".format(where, i)
         if not isinstance(t, dict) or set(t) != {"rank", "members", "members-are-equal"}:
             raise SchemaError("{}: keys are not exactly rank/members/members-are-equal".format(tw))
         if not _is_int(t["rank"]):
             raise SchemaError("{}: rank must be an integer".format(tw))
+        if t["rank"] in seen_ranks:
+            raise SchemaError("{}: duplicate precedence rank {}".format(tw, t["rank"]))
+        seen_ranks.add(t["rank"])
         if not isinstance(t["members"], list) or not t["members"] \
                 or not all(isinstance(m, str) and m for m in t["members"]):
             raise SchemaError("{}: members must be a non-empty list of strings".format(tw))
+        # tier members are AIQT facet codes, unique within the tier and drawn from the controlled vocab
+        # (this round's #4): a duplicate or an out-of-vocabulary member is a malformed record, exit 2.
+        if len(set(t["members"])) != len(t["members"]):
+            raise SchemaError("{}: a member is repeated in the precedence tier".format(tw))
+        bad = [m for m in t["members"] if m not in AIQT_FACET_VOCAB]
+        if bad:
+            raise SchemaError("{}: member(s) {} are not AIQT facet codes {}".format(
+                tw, sorted(bad), sorted(AIQT_FACET_VOCAB)))
         if not isinstance(t["members-are-equal"], bool):
             raise SchemaError("{}: members-are-equal must be a boolean".format(tw))
     pres = data.get("presentation-order")
     if not isinstance(pres, dict) or set(pres) != ORDER_PRESENTATION_KEYS:
         raise SchemaError("{}: [presentation-order] keys are not exactly {}".format(
             where, sorted(ORDER_PRESENTATION_KEYS)))
-    for key in ("families", "aiqt-facets", "security-facets"):
-        if not isinstance(pres[key], list) or not all(isinstance(x, str) and x for x in pres[key]):
-            raise SchemaError("{}: presentation-order.{} must be a list of strings".format(where, key))
-    if not isinstance(pres["tie-breaker"], str) or not pres["tie-breaker"]:
-        raise SchemaError("{}: presentation-order.tie-breaker must be a non-empty string".format(where))
+    # Each presentation list draws from its CONTROLLED vocabulary with no duplicate and no out-of-vocab
+    # entry (this round's #4): families from apex/aiqt/security, aiqt-facets from the AIQT facet codes,
+    # security-facets from the CIA facet codes. tie-breaker is one of the declared strategies.
+    for key, vocab in (("families", ORDER_FAMILY_VOCAB), ("aiqt-facets", AIQT_FACET_VOCAB),
+                       ("security-facets", SECURITY_FACET_VOCAB)):
+        val = pres[key]
+        if not isinstance(val, list) or not val or not all(isinstance(x, str) and x for x in val):
+            raise SchemaError("{}: presentation-order.{} must be a non-empty list of strings".format(
+                where, key))
+        if len(set(val)) != len(val):
+            raise SchemaError("{}: presentation-order.{} has a duplicate entry".format(where, key))
+        bad = [x for x in val if x not in vocab]
+        if bad:
+            raise SchemaError("{}: presentation-order.{} out-of-vocabulary entr(y/ies) {} (valid: {})".format(
+                where, key, sorted(bad), sorted(vocab)))
+    if pres["tie-breaker"] not in ORDER_TIE_BREAKERS:
+        raise SchemaError("{}: presentation-order.tie-breaker {!r} is not one of {}".format(
+            where, pres["tie-breaker"], sorted(ORDER_TIE_BREAKERS)))
 
 
 def strict_clause_inventory(data, where):

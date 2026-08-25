@@ -50,6 +50,8 @@ except ModuleNotFoundError:  # Python < 3.11
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
 from check_versions import _parse                        # noqa: E402  bare-SemVer (sibling idiom)
+from check_clauses import split_clause_id                # noqa: E402  authoritative clause-id syntax (7.1)
+from gen_rules import SLUG_RE                             # noqa: E402  the authoritative renderer-id slug syntax
 from check_manifest import _min_for, CLASS_STRENGTH, DISPOSITION_KINDS  # noqa: E402  minimum table + the
 #                              single-source disposition kind vocabulary (VC-4 QA #5; a self-test binds it)
 import gen_manifest                                      # noqa: E402  ownership loader (single source)
@@ -260,10 +262,50 @@ def normalize_dispositions(rows):
     return out
 
 
+# Which target SYNTAX each disposition kind's `id` must satisfy (this round's #3): the clause kinds target
+# a canonical clause-id, class-change targets a canonical repo-relative path, renderer-semantics targets a
+# renderer-id slug (existence against the declared renderers is checked separately in run()). version-impact
+# is not consumed by any leg and names no on-disk target, so it keeps only the common non-empty check.
+_CLAUSE_DISPOSITION_KINDS = frozenset({"behaviour-neutral", "strengthened", "default-correction"})
+
+
+def _validate_disposition_target_syntax(rows):
+    """Validate each disposition's `id` (its TARGET) by KIND (this round's #3), so a malformed target (a
+    path-traversal class-change id like '../escape', a non-clause-id clause target, or a non-slug renderer
+    target) is a malformed control, exit 2, not a row that silently matches nothing. Renderer EXISTENCE (the
+    id names a DECLARED renderer) is checked in run() where the strict-validated renderer set is available."""
+    for r in rows:
+        kind, rid = r["kind"], r["id"]
+        if kind in _CLAUSE_DISPOSITION_KINDS:
+            if split_clause_id(rid) is None:
+                raise GateError("{}: {} disposition id {!r} is not a canonical clause-id (7.1)".format(
+                    DISPOSITIONS_REL, kind, rid))
+        elif kind == "class-change":
+            if not _release_schema.is_canonical_relpath(rid):
+                raise GateError("{}: class-change disposition id {!r} is not a canonical repo-relative path "
+                                "(no '.', '..', '//', backslash, control character, or host-absolute "
+                                "form)".format(DISPOSITIONS_REL, rid))
+        elif kind == "renderer-semantics":
+            if not SLUG_RE.fullmatch(rid):
+                raise GateError("{}: renderer-semantics disposition id {!r} is not a valid renderer-id "
+                                "slug".format(DISPOSITIONS_REL, rid))
+
+
+def _assert_renderer_targets_declared(rows, renderers_data):
+    """Every renderer-semantics disposition's `id` names a DECLARED renderer (this round's #3): a row that
+    targets a renderer-id absent from the strict-validated renderer declaration is a mis-stated control,
+    exit 2, never a silently unconsumed row. Called on BOTH the genesis and non-genesis paths."""
+    declared = {r["renderer-id"] for r in renderers_data.get("renderer", []) if isinstance(r, dict)}
+    for r in rows:
+        if r["kind"] == "renderer-semantics" and r["id"] not in declared:
+            raise GateError("{}: renderer-semantics disposition id {!r} names no declared renderer-id "
+                            "({})".format(DISPOSITIONS_REL, r["id"], sorted(declared)))
+
+
 def load_dispositions(root):
     """The public record, strictly validated (6.5): format-version == 1 and the exact top-level keyset
-    {format-version, disposition} (round-2 finding 1), then the full per-row/per-kind normalization. Returns
-    a list of normalized rows."""
+    {format-version, disposition} (round-2 finding 1), then the full per-row/per-kind normalization AND the
+    per-kind target-syntax validation (this round's #3). Returns a list of normalized rows."""
     data = _load(root, DISPOSITIONS_REL)
     if data.get("format-version") != 1:
         raise GateError("{}: format-version must be exactly 1".format(DISPOSITIONS_REL))
@@ -271,7 +313,9 @@ def load_dispositions(root):
     if extra:
         raise GateError("{}: unknown top-level key(s): {}".format(
             DISPOSITIONS_REL, ", ".join(sorted(extra))))
-    return normalize_dispositions(data.get("disposition", []))
+    rows = normalize_dispositions(data.get("disposition", []))
+    _validate_disposition_target_syntax(rows)
+    return rows
 
 
 def _strict(fn, data, rel):
@@ -722,9 +766,14 @@ def run(root):
             # and renderer records parse; the inventory + id-history register and renderer freshness are
             # validated through their single-home validators (VC-4 QA #1).
             _strict(_release_schema.strict_order, _load(root, ORDER_REL), ORDER_REL)
-            _strict(_release_schema.strict_renderers, _load(root, RENDERERS_REL), RENDERERS_REL)
+            genesis_renderers = _strict(_release_schema.strict_renderers, _load(root, RENDERERS_REL),
+                                        RENDERERS_REL)
             _strict(_release_schema.strict_clause_inventory, _load(root, CLAUSES_REL), CLAUSES_REL)
             _strict(_release_schema.strict_id_history, _load(root, IDHISTORY_REL), IDHISTORY_REL)
+            # A genesis renderer-semantics disposition must still name a DECLARED renderer (this round's #3):
+            # genesis normalizes dispositions but runs no consumption leg, so this is the only place a
+            # malformed renderer target is caught before a clean genesis return.
+            _assert_renderer_targets_declared(rows, genesis_renderers)
             _genesis_structural(root)
             print("release-delta: GENESIS (zero release rows, manifest genesis = true); consumed records "
                   "validate their internal structure (dispositions, inventory, id-history register, "
@@ -757,6 +806,17 @@ def run(root):
                            _show_toml(root, commit, CLAUSES_REL), "predecessor " + CLAUSES_REL)
         head_inv = _strict(_release_schema.strict_clause_inventory, _load(root, CLAUSES_REL), CLAUSES_REL)
         register = _strict(_release_schema.strict_id_history, _load(root, IDHISTORY_REL), IDHISTORY_REL)
+        # Strict-validate the PREDECESSOR's OWN releases-order and id-history records too (this round's #1),
+        # read via git show and run through the SAME shared strict validators (exact top-level keyset AND
+        # values) BEFORE the predecessor-tree checks or any delta computation. The head releases record was
+        # validated by load_release_rows and the head id-history just above; the predecessor's were NOT: a
+        # malformed predecessor release row (e.g. an integer commit_sha) or an unknown id-history top-level
+        # key (which the delegated clause loader in _predecessor_tree_checks ignores) is exit 2, never a
+        # silent delta over an unvalidated predecessor.
+        _strict(_release_schema.strict_releases, _show_toml(root, commit, RELEASES_REL),
+                "predecessor " + RELEASES_REL)
+        _strict(_release_schema.strict_id_history, _show_toml(root, commit, IDHISTORY_REL),
+                "predecessor " + IDHISTORY_REL)
         _strict(_release_schema.strict_order, _show_toml(root, commit, ORDER_REL),
                 "predecessor " + ORDER_REL)
         _strict(_release_schema.strict_order, _load(root, ORDER_REL), ORDER_REL)
@@ -772,6 +832,9 @@ def run(root):
         head_renderers = _load(root, RENDERERS_REL)
         _strict(_release_schema.strict_renderers, prev_renderers, "predecessor " + RENDERERS_REL)
         _strict(_release_schema.strict_renderers, head_renderers, RENDERERS_REL)
+        # Every renderer-semantics disposition names a DECLARED head renderer (this round's #3): a target
+        # absent from the strict-validated head declaration is a mis-stated control, exit 2.
+        _assert_renderer_targets_declared(rows, head_renderers)
         # Run the FULL AUTHORITATIVE validators in non-genesis mode too (round-4 finding 2), not only in
         # genesis: check_clauses over the HEAD tree's own sources (the 7.2 span/text/digest legs and the
         # 7.3 register semantics), and the same over the RAW-materialized predecessor tree together with
@@ -1015,6 +1078,45 @@ def _real_pack_e2e(tmp, failures):
     if _run_quiet_root(repo) != 0:
         failures.append("real full-pack run(): a consistently-edited dispositioned id-keyed PATCH change "
                         "expected exit 0 (finding 2)")
+    # (this round's #4) a HEAD order.toml with an out-of-vocabulary presentation family in the NON-GENESIS
+    # delta path: strict_order on the head object rejects it, exit 2 (pre-fix presentation-order entries
+    # were validated only as strings). order.toml is restored so the later cases see the clean tree.
+    _orig_order = (repo / ORDER_REL).read_text(encoding="utf-8")
+    (repo / ORDER_REL).write_text(_orig_order.replace(
+        'families = ["apex", "aiqt", "security"]', 'families = ["bogus"]', 1), encoding="utf-8")
+    if _run_quiet_root(repo) != 2:
+        failures.append("real full-pack run(): an out-of-vocabulary head order family must fail closed "
+                        "exit 2 in the non-genesis delta path (this round's #4)")
+    (repo / ORDER_REL).write_text(_orig_order, encoding="utf-8")
+    # === this round's #2: RELEASE-ROW VALUE VALIDATION. The HEAD releases row anchors the REAL predecessor
+    # (valid commit_sha/tag), so WITHOUT the fix the row is accepted and the delta computes a clean PATCH
+    # (exit 0); the single malformed VALUE is the only thing that flips it to exit 2, isolating the value
+    # check from the anchoring path. Each case mutates one field of the otherwise-valid row and restores it.
+    def _releases_val(**over):
+        row = {"version": "1.0.0", "tag": "v1.0.0", "tobj": tobj, "csha": commit1,
+               "qa": "a" * 64, "qapath": "qa/1.0.0.toml", "ts": "[100]"}
+        row.update(over)
+        return ('format-version = 1\n\n[[release]]\nversion = "{version}"\ntag = "{tag}"\n'
+                'tag_object_sha = "{tobj}"\ncommit_sha = "{csha}"\nqa-sha256 = "{qa}"\n'
+                'qa-store-path = "{qapath}"\nattestation-timestamps = {ts}\n').format(**row)
+    # a non-'v' ANNOTATED tag on the SAME predecessor commit, so the tag field still RESOLVES in anchoring
+    # while violating tag == 'v' + version (isolating the tag check from the anchoring path).
+    subprocess.run(["git", "-C", str(repo), "tag", "-a", "rel-1.0.0", "-m", "1.0.0", commit1],
+                   check=True, capture_output=True, env=env)
+    tobj_rel = subprocess.run(["git", "-C", str(repo), "rev-parse", "refs/tags/rel-1.0.0"],
+                              capture_output=True, text=True).stdout.strip()
+    _val_cases = [
+        (_releases_val(qapath="../escape"), "a qa-store-path traversal ('../escape')"),
+        (_releases_val(qapath="qa//record"), "a non-canonical qa-store-path ('qa//record')"),
+        (_releases_val(ts="[-1]"), "a negative attestation epoch"),
+        (_releases_val(tag="rel-1.0.0", tobj=tobj_rel),
+         "a tag that does not equal 'v' + version (but still resolves)")]
+    for body, desc in _val_cases:
+        (repo / RELEASES_REL).write_text(body, encoding="utf-8")
+        if _run_quiet_root(repo) != 2:
+            failures.append("real full-pack run(): {} in the HEAD releases row must fail closed exit 2 "
+                            "(this round's #2)".format(desc))
+    (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")   # restore the valid row
     # (round-7 finding 2) a predecessor commit_sha that is a TREE oid (not a commit) fails the anchoring,
     # exit 2 (the pre-round-7 gate used it directly and PASSED).
     tree_oid = subprocess.run(["git", "-C", str(repo), "rev-parse", commit1 + "^{tree}"],
@@ -1155,6 +1257,81 @@ def _real_pack_e2e(tmp, failures):
                                 "pack path (NOTICE) must be caught by gen_manifest --check/check_manifest on "
                                 "the raw predecessor, exit 2 (round-8 finding 1)")
 
+    # (this round's #1) The PREDECESSOR's OWN releases and id-history records are now strict-validated. Each
+    # fixture below mutates ONE predecessor record and REGENERATES the predecessor manifest so the mutated
+    # record's digest matches (the predecessor manifest re-hash in _predecessor_tree_checks then PASSES),
+    # isolating the fix: WITHOUT the new predecessor strict_releases / strict_id_history the predecessor
+    # validates and the delta computes a clean PATCH (exit 0). The delegated clause loader ignores unknown
+    # id-history top-level keys and never sees the releases record at all, so only the new checks catch these.
+    def _pred_record_fixture(dirname, mutate, want_msg):
+        rp = tmp / dirname
+        try:
+            _extract(arch, rp)
+        except Exception:  # noqa: BLE001  the primary cases already ran
+            return
+        mutate(rp)
+        # Regenerate the predecessor manifest so its source digests match the mutated tree (the predecessor
+        # manifest re-hash then PASSES). gen_manifest reads `git ls-files`, so the repo must be INITIALIZED
+        # and the tree ADDED first; then regenerate, re-stage, and commit BOTH together (genesis stays true:
+        # the predecessor releases record is header-only / zero-row).
+        for args in (["init", "-q"], ["add", "-A"]):
+            if subprocess.run(["git", "-C", str(rp), *args], capture_output=True, env=env).returncode != 0:
+                return
+        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(rp)], capture_output=True, env=env)
+        for args in (["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
+            if subprocess.run(["git", "-C", str(rp), *args], capture_output=True, env=env).returncode != 0:
+                return
+        pcommit = subprocess.run(["git", "-C", str(rp), "rev-parse", "HEAD"], capture_output=True,
+                                 text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(rp), "tag", "-a", "v1.0.0", "-m", "1.0.0"], check=True,
+                       capture_output=True, env=env)
+        ptobj = subprocess.run(["git", "-C", str(rp), "rev-parse", "refs/tags/v1.0.0"],
+                               capture_output=True, text=True).stdout.strip()
+        # HEAD restores VALID records (the SOLE malformation under test is the committed predecessor's),
+        # bumps to 1.0.1, empties dispositions, regenerates the head manifest, and points a valid one-row
+        # releases record at the predecessor.
+        (rp / IDHISTORY_REL).write_text(orig_idh_ref[0], encoding="utf-8")
+        (rp / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+        (rp / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+        (rp / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
+        (rp / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
+        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(rp)], capture_output=True, env=env)
+        (rp / RELEASES_REL).write_text(
+            'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+            'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
+            'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
+                t=ptobj, c=pcommit, h="a" * 64), encoding="utf-8")
+        if _run_quiet_root(rp) != 2:
+            failures.append(want_msg)
+
+    # capture the real id-history so each fixture can restore a VALID head copy after mutating the predecessor.
+    orig_idh_ref = [(repo_root() / IDHISTORY_REL).read_text(encoding="utf-8")]
+
+    def _mut_idhist_topkey(rp):
+        p = rp / IDHISTORY_REL
+        p.write_text("bogus = 1\n" + p.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def _mut_releases_badrow(rp):
+        # the finding's repro: a predecessor release ROW with an INTEGER commit_sha. read_genesis (used by
+        # the predecessor tree checks) validates only the row KEYSET and presence, so it accepts this row
+        # (genesis derives false from the row count); strict_releases is the only validator that type-checks
+        # the field and rejects it. gen_manifest is regenerated AFTER the mutation, so the predecessor tree
+        # stays consistent and the fix is isolated.
+        (rp / RELEASES_REL).write_text(
+            'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+            'tag_object_sha = "{h}"\ncommit_sha = 7\nqa-sha256 = "{q}"\n'
+            'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [1]\n'.format(
+                h="a" * 40, q="c" * 64), encoding="utf-8")
+
+    _pred_record_fixture(
+        "real-pack-pred-idhist", _mut_idhist_topkey,
+        "real full-pack run(): an unknown top-level key in the PREDECESSOR id-history must fail closed "
+        "exit 2 (this round's #1)")
+    _pred_record_fixture(
+        "real-pack-pred-rel-badrow", _mut_releases_badrow,
+        "real full-pack run(): a malformed row (integer commit_sha) in the PREDECESSOR releases record must "
+        "fail closed exit 2 (this round's #1)")
+
     # === REAL GENESIS FULL-PACK run() (round-5 findings 1 and 5) ==================================
     # The archived HEAD is a genesis tree (zero-row releases, manifest genesis = true); run() takes the
     # genesis path where every structural validator PASSES on the real tree, so a mutation to ONE record is
@@ -1224,6 +1401,48 @@ def _real_pack_e2e(tmp, failures):
         if _run_quiet_root(gcc) != 2:
             failures.append("real genesis full-pack run(): a class-change with a non-vocabulary old-class "
                             "must fail closed exit 2 (round-6 finding 6)")
+    # (this round's #3) a class-change disposition whose TARGET id is a path-traversal ('../escape'): the
+    # per-kind target-syntax validator rejects it at load, exit 2 (pre-fix any non-empty id was accepted and
+    # genesis returned clean). old/new class are valid so the SOLE malformation is the target path.
+    gdte = _extract_genesis("genesis-disp-target-escape")
+    if gdte is not None:
+        (gdte / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "../escape"\nrelease = "1.0.0"\n'
+            'kind = "class-change"\nimpact = "x"\nrationale = "r"\nold-class = "pack-immutable"\n'
+            'new-class = "derived"\n', encoding="utf-8")
+        if _run_quiet_root(gdte) != 2:
+            failures.append("real genesis full-pack run(): a class-change disposition id '../escape' must "
+                            "fail closed exit 2 (this round's #3)")
+    # (this round's #3) a behaviour-neutral disposition whose target is NOT a canonical clause-id: exit 2.
+    gdtc = _extract_genesis("genesis-disp-badclauseid")
+    if gdtc is not None:
+        (gdtc / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "notaclauseid"\nrelease = "1.0.0"\n'
+            'kind = "behaviour-neutral"\nimpact = "x"\nrationale = "r"\n', encoding="utf-8")
+        if _run_quiet_root(gdtc) != 2:
+            failures.append("real genesis full-pack run(): a behaviour-neutral disposition with a "
+                            "non-clause-id target must fail closed exit 2 (this round's #3)")
+    # (this round's #3) a renderer-semantics disposition whose target is a valid slug but names NO declared
+    # renderer: the existence check rejects it, exit 2 (pre-fix an undeclared target went silently
+    # unconsumed, and genesis returned clean).
+    gdtr = _extract_genesis("genesis-disp-renderer-undeclared")
+    if gdtr is not None:
+        (gdtr / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "nosuchrenderer"\nrelease = "1.0.0"\n'
+            'kind = "renderer-semantics"\nimpact = "byte-only"\nrationale = "r"\n', encoding="utf-8")
+        if _run_quiet_root(gdtr) != 2:
+            failures.append("real genesis full-pack run(): a renderer-semantics disposition naming an "
+                            "undeclared renderer must fail closed exit 2 (this round's #3)")
+    # (this round's #4) an order.toml with an out-of-vocabulary presentation family ('bogus'): strict_order
+    # rejects it, exit 2 (pre-fix presentation-order entries were validated only as strings).
+    gof = _extract_genesis("genesis-order-badfamily")
+    if gof is not None:
+        op = gof / ORDER_REL
+        op.write_text(op.read_text(encoding="utf-8").replace(
+            'families = ["apex", "aiqt", "security"]', 'families = ["bogus"]', 1), encoding="utf-8")
+        if _run_quiet_root(gof) != 2:
+            failures.append("real genesis full-pack run(): an out-of-vocabulary order family must fail "
+                            "closed exit 2 (this round's #4)")
     # (round-7 finding 1) a manifest source PATH that escapes the repo root ("../escape"): the canonical
     # logical-path validator rejects it, exit 2 (the pre-round-7 validator accepted any non-empty string).
     gesc = _extract_genesis("genesis-manifest-escape")
