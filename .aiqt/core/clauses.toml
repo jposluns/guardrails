@@ -4371,3 +4371,84 @@ start-line = 21
 end-line = 21
 canonical-text = "A token is trusted only after every one of these checks passes."
 source-digest = "e1c0dae14b1204be462169b81743f010708c40e6277a396783d23154ab2e1855"
+
+[[clause]]
+clause-id = "tsthrm.1"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 17
+end-line = 18
+canonical-text = "A test is built so its pass or fail is caused by the behaviour under test, not by ambient state the test\ndoes not control."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.2"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 18
+end-line = 22
+canonical-text = "State that varies between machines, runs, users, or working directories, the process\numask and inherited filesystem default permissions, the locale, timezone, and clock, environment variables\nand the executable search path, and the order in which other tests run, is pinned to a known value,\nneutralized, or kept out of what the assertion depends on, so the same code yields the same verdict\neverywhere."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.3"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 22
+end-line = 23
+canonical-text = "An assertion narrows to the property the code itself establishes rather than a composite the\nenvironment can perturb;"
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.4"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 23
+end-line = 25
+canonical-text = "but where a system-created property can carry more than the code sets, the\nassertion covers the whole of it rather than only the convenient part, so an unintended widening is caught\nrather than concealed."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.5"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 25
+end-line = 26
+canonical-text = "A failure that traces to such uncontrolled state is a defect in the test, fixed at\nthe test, not a finding against the code;"
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.6"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 26
+end-line = 27
+canonical-text = "a pass that rests on a convenient local default is not evidence\nthe code is correct."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.7"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 29
+end-line = 29
+canonical-text = "A test also leaves the host as it found it."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.8"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 29
+end-line = 31
+canonical-text = "It creates, moves, deletes, or changes the permissions or\nownership of only paths within a temporary location it made for itself and removes afterwards, and it never\nmutates state outside that location."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "tsthrm.9"
+corpus-id = "tsthrm"
+source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
+start-line = 31
+end-line = 33
+canonical-text = "Where a test must walk real parent directories, it bounds the walk by\nthat fixture root, never by a host property such as ownership, which can reach far past the fixture and\ndisturb unrelated state."
+source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"

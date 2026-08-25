@@ -95,7 +95,7 @@
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
       "catalogue": "full",
-      "ids_cited": 66,
+      "ids_cited": 67,
       "ids_total": 1196
     },
     "nist-airmf": {
@@ -1419,6 +1419,46 @@
       "fit": "tight",
       "identifier": "GOVERN 4.1",
       "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
+    },
+    {
+      "rule_id": "tsthrm",
+      "rule_title": "A test's verdict comes from the code, not its surroundings",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md",
+      "framework": "iso-42001",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "A.6.2.4",
+      "identifier_title": "AI system verification and validation"
+    },
+    {
+      "rule_id": "tsthrm",
+      "rule_title": "A test's verdict comes from the code, not its surroundings",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SA-8(29)",
+      "identifier_title": "Repeatable and Documented Procedures"
+    },
+    {
+      "rule_id": "tsthrm",
+      "rule_title": "A test's verdict comes from the code, not its surroundings",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "tight",
+      "identifier": "SA-11",
+      "identifier_title": "Developer Testing and Evaluation"
+    },
+    {
+      "rule_id": "tsthrm",
+      "rule_title": "A test's verdict comes from the code, not its surroundings",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md",
+      "framework": "nist-ssdf",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "PW.8.2",
+      "identifier_title": "Perform and document code testing"
     },
     {
       "rule_id": "vrfdiv",
