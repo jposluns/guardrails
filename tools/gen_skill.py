@@ -31,6 +31,11 @@ import sys
 import zipfile
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 from _standards import dir_present  # noqa: E402
@@ -49,20 +54,33 @@ INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standal
 ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
+# The single canonical operator-identity source (the same file the hooks generator and the portability
+# gate read from). The public attribution line (GD-56) is built from the [plugin] author-name here plus
+# the pack's public source URL, so the maintainer's name is never a literal in any scanned source file;
+# it enters the two download artefacts only, where the portability gate carries its narrow exemption.
+IDENTITY_MANIFEST_PARTS = (".aiqt", "core", "hooks", "manifest.toml")
+ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
 # Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
 RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 1}
+# GENSRC_OUTPUTS is STATICALLY parsed by gen_gensrc.py and must be a LITERAL (a tuple of dict literals),
+# so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
+# source: the public attribution line (GD-56) is rendered from its [plugin] author-name, so a change to that
+# name changes these outputs and must re-trigger regeneration.
 GENSRC_OUTPUTS = (
     {"target": "site/downloads/aiqt/", "kind": "tree",
-     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
     {"target": "site/downloads/aiqt-instructions.txt", "kind": "file",
-     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
     {"target": "site/downloads/aiqt-skill.zip", "kind": "file",
-     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/"),
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
 )
 
@@ -266,6 +284,9 @@ def render_skill(data):
         "# AIQT\n\n" + data["body_aiqt"],
         "# Rules\n\n" + data["body_rules"],
         _security_block(data),
+        # Public attribution footer (GD-56): attributes both the project and the maintainer under the
+        # pack's CC BY-SA. The portability gate carries a narrow, reviewed exemption for exactly this line.
+        "---\n\n" + data["attribution"],
     ]
     return "\n\n".join(blocks) + "\n"
 
@@ -290,7 +311,8 @@ def render_zip(data):
 def render_instructions(data):
     header = ("AIQT: a standard for your AI assistant\n"
               "Version {v} . Licensed under CC BY-SA 4.0 "
-              "(https://creativecommons.org/licenses/by-sa/4.0/)").format(v=data["meta"]["version"])
+              "(https://creativecommons.org/licenses/by-sa/4.0/)\n"
+              "{attr}").format(v=data["meta"]["version"], attr=data["attribution"])
     blocks = [
         header,
         data["preamble"],
@@ -337,6 +359,21 @@ def render_provenance(data):
     return "\n".join(lines) + "\n"
 
 
+def attribution_string(root):
+    """The public attribution line (GD-56), built from the [plugin] author-name in the canonical identity
+    manifest plus the pack's public source URL, so the maintainer's name is never a literal in a scanned
+    source file. An absent, unparseable, or name-less manifest is fail-closed (OSError/ValueError, which
+    build_outputs surfaces as exit 2). The exact string must match the portability gate's exempt line."""
+    path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    plugin = data.get("plugin") if isinstance(data, dict) else None
+    name = plugin.get("author-name") if isinstance(plugin, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("identity manifest {} has no [plugin] author-name".format(
+            "/".join(IDENTITY_MANIFEST_PARTS)))
+    return "AIQT Guardrails by {}, {}, CC BY-SA 4.0".format(name, ATTRIBUTION_SOURCE_URL)
+
+
 def build_outputs(root):
     """Load the corpus and skill source under root and render every output. Returns
     (reserved_map, standalone, binary): reserved_map is {filename: text} for the reserved
@@ -347,6 +384,7 @@ def build_outputs(root):
     corpus = load_corpus(root.joinpath(*CORPUS_PARTS))
     source = parse_source(root.joinpath(*SKILL_SRC_PARTS))
     data = resolve(source, corpus)
+    data["attribution"] = attribution_string(root)
     reserved_map = {
         "SKILL.md": render_skill(data),
         "manifest.json": render_manifest(data),
@@ -527,6 +565,9 @@ def _write_fixture(root, skill_src_text):
     (src / "security" / "resource-bounds.md").write_text(_SEC2, encoding="utf-8")
     (root.joinpath(*SKILL_SRC_PARTS)).parent.mkdir(parents=True)
     (root.joinpath(*SKILL_SRC_PARTS)).write_text(skill_src_text, encoding="utf-8")
+    manifest = root.joinpath(*IDENTITY_MANIFEST_PARTS)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\n', encoding="utf-8")
 
 
 def self_test_main():
