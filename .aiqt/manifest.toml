@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "32a983a4e61fa9cd80eade5f969b3461afe53b96aba24f64c1582c87d3f99e29"
+tree-sha256 = "3e93a7c7d89a776d0a75fe3bd23d95bf0041108e54b2a5af9c5a412c7e442ce4"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -11,8 +11,8 @@ sha256 = "34c3ca0cce9a026371012f1fe61bc2756474e3c1cf355bb82784eddc11a3af30"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 218573
-sha256 = "9c8abc05e84297e3e8a1ef0eeac671dc9b19794a1c4bf86a7a33114afbc06882"
+bytes = 220069
+sha256 = "5f32f8ba854e71543690c37cfeeb0dbdf2744ca8f4ed5ceccc030f7f3d78c763"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -51,8 +51,8 @@ sha256 = "2fb613c921e03e5323f117324e32cca57142ea671182a9e6c31b737c4f9e2cbf"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 29954
-sha256 = "eaee7c3d802a59b993d9f54a7c1e7148c57472cf675a92742c5a1ba851211827"
+bytes = 30197
+sha256 = "f745ae5a8ca0036d093e15c9683198b101790ed931d7876f845dcf9347be72f0"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
@@ -238,6 +238,11 @@ sha256 = "a2e1df7edebc43fc90bf023efe316a2e3fc0aded3af28cc00936fcd50b513d52"
 path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 bytes = 796
 sha256 = "63e9d9d79d38c31e27f5720b85ab47c5222cf9f6428da67a3d699c31a42bd20e"
+
+[[sources]]
+path = ".aiqt/core/rules/integ-track-launched-work.md"
+bytes = 995
+sha256 = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"
 
 [[sources]]
 path = ".aiqt/core/rules/integ-validation-gates-apply.md"
@@ -691,8 +696,8 @@ sha256 = "98ea7328c9e8df8df6c072ea8baff692aeca02fe4acf3b278fd8038750d15858"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 95355
-sha256 = "c00d22486c293fc229f536337cf7cf75a41c8dd3e9ae1eeea64dec355ac3b6a9"
+bytes = 95553
+sha256 = "05869e33794f8c7b906cc687714e5a4be8c6d1a27b7ab655895175b90147d20d"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
@@ -791,8 +796,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
-bytes = 11211
-sha256 = "94c16442d01bd1170ad7a8c8aa990af4c3384b9ed3e0f832d907cfa136991c61"
+bytes = 11292
+sha256 = "30701be3819f7971fb9be4eeb82de4dad76f112bca67a6ba5fbab57f1ab346b3"
 
 [[sources]]
 path = ".claude/rules/README.md"
@@ -953,6 +958,11 @@ sha256 = "a2e1df7edebc43fc90bf023efe316a2e3fc0aded3af28cc00936fcd50b513d52"
 path = ".claude/rules/aiqt/10-INTEG-stage-then-promote-on-green.md"
 bytes = 796
 sha256 = "63e9d9d79d38c31e27f5720b85ab47c5222cf9f6428da67a3d699c31a42bd20e"
+
+[[sources]]
+path = ".claude/rules/aiqt/10-INTEG-track-launched-work.md"
+bytes = 995
+sha256 = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-INTEG-validation-gates-apply.md"
@@ -1560,6 +1570,11 @@ bytes = 695
 sha256 = "7887ac3481f3990a4ec69f82e3997ae5630ad87d1f28756b2cfccc5498dfb9d6"
 
 [[sources]]
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-track-launched-work.mdc"
+bytes = 809
+sha256 = "6c9d06bb619c2bb1bbfaa674c1719bc5ead28e46698ecacffad8dafeb5f505d9"
+
+[[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc"
 bytes = 215
 sha256 = "10cdc2c6335cb684fed54357a747fedcf670df806da75f18feae2fac6ef1dc35"
@@ -2011,18 +2026,18 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31152
-sha256 = "b6f79936d41299457164d52cc10d578f07a8fefbfb006f9eef71f2bd10cec1e6"
+bytes = 31353
+sha256 = "06f222b9eb01110d4ab3a76be9f728e3f3591a928fb5d04f49cc5480657f7a98"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 62699
-sha256 = "51a6a65baf4248173a1cd42a3a229b705bdd54db4e3cd999ceb4ad59d0a103a1"
+bytes = 63483
+sha256 = "a4ce2988ce5666e63ab5bf5a96bf4696853a6ae1db8e42e70e0932ea7d2c6644"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 62688
-sha256 = "152e3e0bda8982aa53b460e565813ee1d268f4ddbf0fcb5452a5d1327207fc36"
+bytes = 63472
+sha256 = "b17f4343d237bb17531b24dc64591e1ffb2b40418780ec5c2de24c179ff6e1cb"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2036,8 +2051,8 @@ sha256 = "db49d1da96fbf936b8645c5125560fafa6f47b4c0942ebcb67c7359daddf2b3b"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 62695
-sha256 = "260fc60b56eb76d08e46ec3b5d7720399e956727ffb1fd7dd4a409bb9840c06b"
+bytes = 63479
+sha256 = "c09dcee40367f431f11148b1083e140dac8af26680665f9623cec25fc9b4b9c1"
 
 [[sources]]
 path = "LICENSE"
@@ -2166,13 +2181,13 @@ sha256 = "dfddb16b8fe8ea93c5ad1f11d561d25fe3afb85c8f6a88c3befad327c50165c3"
 
 [[sources]]
 path = "site/downloads/mappings.csv"
-bytes = 252503
-sha256 = "4b5c7d137633b581afa68747d6daa050f57d8f4502d453d3214dceafb7ce64b9"
+bytes = 253471
+sha256 = "f1be6ca7bf067a849bdbdaf491fc13a48c0939241af497d9435abd1f0221eec7"
 
 [[sources]]
 path = "site/downloads/mappings.json"
-bytes = 400193
-sha256 = "31beb175dd430959e42a662c93235b586e72fd4464db523b4fdce3ef73daee90"
+bytes = 401575
+sha256 = "6a1ebed7db49f871bc09b163f4af306ef9d6c4be7433730361bcfb2e0d9c6cc0"
 
 [[sources]]
 path = "site/draft.html"
@@ -2236,8 +2251,8 @@ sha256 = "38affac368f5a2c91bafc9aa709491b2ec664593fc3a35462bf2a7505d8a97ec"
 
 [[sources]]
 path = "site/mappings.html"
-bytes = 437437
-sha256 = "69135383359e92708a674272f85b78cc115f0dbd685dee94adbcf9118ea415f0"
+bytes = 439140
+sha256 = "e11b03ef046befed30b4f2d98cf910b1c7e44f411a8736fa1568adf1565b1163"
 
 [[sources]]
 path = "site/roadmap.html"
@@ -2523,7 +2538,7 @@ sha256 = "0872a2a1ca87af08d94c41c80909095a65ccee5140d32bd000306519fb0294b2"
 artifact-id = "claude:.claude/RULES-INDEX.md"
 path = ".claude/RULES-INDEX.md"
 kind = "file"
-sha256 = "94c16442d01bd1170ad7a8c8aa990af4c3384b9ed3e0f832d907cfa136991c61"
+sha256 = "30701be3819f7971fb9be4eeb82de4dad76f112bca67a6ba5fbab57f1ab346b3"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/00-project-integrity.md"
@@ -2710,6 +2725,12 @@ artifact-id = "rules:.claude/rules/aiqt/10-INTEG-stage-then-promote-on-green.md"
 path = ".claude/rules/aiqt/10-INTEG-stage-then-promote-on-green.md"
 kind = "file"
 sha256 = "63e9d9d79d38c31e27f5720b85ab47c5222cf9f6428da67a3d699c31a42bd20e"
+
+[[artifacts]]
+artifact-id = "rules:.claude/rules/aiqt/10-INTEG-track-launched-work.md"
+path = ".claude/rules/aiqt/10-INTEG-track-launched-work.md"
+kind = "file"
+sha256 = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-INTEG-validation-gates-apply.md"
@@ -3438,6 +3459,12 @@ kind = "file"
 sha256 = "7887ac3481f3990a4ec69f82e3997ae5630ad87d1f28756b2cfccc5498dfb9d6"
 
 [[artifacts]]
+artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-track-launched-work.mdc"
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-track-launched-work.mdc"
+kind = "file"
+sha256 = "6c9d06bb619c2bb1bbfaa674c1719bc5ead28e46698ecacffad8dafeb5f505d9"
+
+[[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc"
 kind = "file"
@@ -3981,13 +4008,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "51a6a65baf4248173a1cd42a3a229b705bdd54db4e3cd999ceb4ad59d0a103a1"
+sha256 = "a4ce2988ce5666e63ab5bf5a96bf4696853a6ae1db8e42e70e0932ea7d2c6644"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "152e3e0bda8982aa53b460e565813ee1d268f4ddbf0fcb5452a5d1327207fc36"
+sha256 = "b17f4343d237bb17531b24dc64591e1ffb2b40418780ec5c2de24c179ff6e1cb"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -4000,7 +4027,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "260fc60b56eb76d08e46ec3b5d7720399e956727ffb1fd7dd4a409bb9840c06b"
+sha256 = "c09dcee40367f431f11148b1083e140dac8af26680665f9623cec25fc9b4b9c1"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

@@ -46,6 +46,7 @@
 .aiqt/core/rules/integ-safe-retries.md text eol=lf
 .aiqt/core/rules/integ-separate-task-changes.md text eol=lf
 .aiqt/core/rules/integ-stage-then-promote-on-green.md text eol=lf
+.aiqt/core/rules/integ-track-launched-work.md text eol=lf
 .aiqt/core/rules/integ-validation-gates-apply.md text eol=lf
 .aiqt/core/rules/integ-workers-produce-inert-data.md text eol=lf
 .aiqt/core/rules/progr-decision.md text eol=lf
@@ -192,6 +193,7 @@
 .claude/rules/aiqt/10-INTEG-safe-retries.md text eol=lf
 .claude/rules/aiqt/10-INTEG-separate-task-changes.md text eol=lf
 .claude/rules/aiqt/10-INTEG-stage-then-promote-on-green.md text eol=lf
+.claude/rules/aiqt/10-INTEG-track-launched-work.md text eol=lf
 .claude/rules/aiqt/10-INTEG-validation-gates-apply.md text eol=lf
 .claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md text eol=lf
 .claude/rules/aiqt/10-QUALI-absolute-paths.md text eol=lf
@@ -313,6 +315,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-safe-retries.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-separate-task-changes.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-stage-then-promote-on-green.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-track-launched-work.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-validation-gates-apply.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-workers-produce-inert-data.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-absolute-paths.mdc text eol=lf

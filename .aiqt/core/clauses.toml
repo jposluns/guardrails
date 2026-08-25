@@ -4452,3 +4452,39 @@ start-line = 31
 end-line = 33
 canonical-text = "Where a test must walk real parent directories, it bounds the walk by\nthat fixture root, never by a host property such as ownership, which can reach far past the fixture and\ndisturb unrelated state."
 source-digest = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
+
+[[clause]]
+clause-id = "trkasy.1"
+corpus-id = "trkasy"
+source-path = ".aiqt/core/rules/integ-track-launched-work.md"
+start-line = 16
+end-line = 17
+canonical-text = "A unit of work whose result or completion the caller depends on is launched so its outcome stays observable,\nnever discarded at the moment it starts."
+source-digest = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"
+
+[[clause]]
+clause-id = "trkasy.2"
+corpus-id = "trkasy"
+source-path = ".aiqt/core/rules/integ-track-launched-work.md"
+start-line = 19
+end-line = 20
+canonical-text = "Such work is launched through a\nmechanism that tracks it to completion and surfaces both its result and its failures;"
+source-digest = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"
+
+[[clause]]
+clause-id = "trkasy.3"
+corpus-id = "trkasy"
+source-path = ".aiqt/core/rules/integ-track-launched-work.md"
+start-line = 20
+end-line = 21
+canonical-text = "a launch that drops the\ncompletion signal is not a safe way to start work the caller relies on."
+source-digest = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"
+
+[[clause]]
+clause-id = "trkasy.4"
+corpus-id = "trkasy"
+source-path = ".aiqt/core/rules/integ-track-launched-work.md"
+start-line = 21
+end-line = 22
+canonical-text = "Where a result is genuinely not\nneeded, running the task without tracking it is a deliberate, recorded choice, not the default."
+source-digest = "a52ec4c04a2892738e675126c95524e72f713507d58257ec22ac208bed20ceab"

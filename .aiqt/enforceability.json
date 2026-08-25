@@ -1150,6 +1150,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "trkasy",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/integ-track-launched-work.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "trsrcv",
       "family": "aiqt",
       "gates": [],

@@ -931,6 +931,36 @@
       "identifier_title": "Configuration Change Control"
     },
     {
+      "rule_id": "trkasy",
+      "rule_title": "A launched task stays observable",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md",
+      "framework": "iso-23894",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "6.7",
+      "identifier_title": "Recording and reporting"
+    },
+    {
+      "rule_id": "trkasy",
+      "rule_title": "A launched task stays observable",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md",
+      "framework": "iso-42001",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "A.6.2.6",
+      "identifier_title": "AI system operation and monitoring"
+    },
+    {
+      "rule_id": "trkasy",
+      "rule_title": "A launched task stays observable",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md",
+      "framework": "nist-airmf",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "MANAGE 4.3",
+      "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
+    },
+    {
       "rule_id": "valgat",
       "rule_title": "Validation is a gate on apply",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md",
