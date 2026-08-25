@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "9f0af098d473a0680f9730876f26ae6a8898e735b19890624f75619a41f3a451"
+tree-sha256 = "17aa2e5a4ef22c152b33cd170c5c4ed5a80e9ec8e218a101159c026e7003a0be"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2371,8 +2371,8 @@ sha256 = "f64934bd8d6522f9c01f804b0722d31d2708c4e6f89007be5200e5bbb9a3bb85"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 62054
-sha256 = "dda75c7a3cedd8c9ff89d14111912ce793f9f19a2cf2660d26153f0db2c9988b"
+bytes = 69496
+sha256 = "15475df219e63e830a8c171bc0ab2b5ce9f0195859df8629c221c6fe4259bdb2"
 
 [[sources]]
 path = "tools/check_portability.py"
