@@ -1,15 +1,30 @@
-AIQT Guardrails: third-party attribution NOTICE
+AIQT Guardrails™: third-party attribution NOTICE
 
 This pack is published under the Creative Commons Attribution-ShareAlike 4.0 International License
 (CC BY-SA 4.0); see the LICENSE file. That licence covers the pack's own content, including its
 crosswalk mappings.
 
+The Creative Commons licence covers the pack's copyrightable material and does not grant any
+trademark rights. AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns. These marks are
+unregistered.
+
 The crosswalk mappings reference third-party security and AI-governance frameworks. Only control,
-guidance, risk, technique, and weakness IDENTIFIERS and their SHORT TITLES are reproduced, as
+guidance, risk, technique, and weakness IDENTIFIERS and their TITLES are reproduced, as
 navigational pointers. No specification prose, requirement text, control or clause bodies,
 figures, or tables from any framework are reproduced. Each framework's identifiers and titles
 remain the property of their respective publisher under the terms below, and no publisher listed
 here endorses, sponsors, or is affiliated with this pack.
+
+AIQT Guardrails reproduces only each referenced control's identifier and the publisher's official
+title or heading (or a brief AIQT-authored descriptor where the publisher publishes no title of
+its own), to help adopters align their own compliance and audit programs across frameworks. It
+reproduces no requirement text, control descriptions, or other body content, and it lists only the
+controls it maps to its own rules. For OWASP MCP Top 10, OWASP Top 10 (Web Application Security
+Risks), and OWASP Top 10 for LLM Applications it lists all 10 entries (the complete list); for
+every other referenced framework it lists a subset. To use the full standards, adopters must
+obtain them directly from the publisher and accept that publisher's own licence. AIQT Guardrails
+is not a substitute for, and does not relicense, any standard, and links adopters to each
+publisher's source.
 
 ==================================================================================================
 
@@ -29,12 +44,12 @@ Licence: Proprietary CSA copyright licence (non-commercial, no-redistribution re
 
 The CSA matrices are copyright the Cloud Security Alliance under a non-commercial,
 no-redistribution, no-modification reference licence. This pack reproduces only control
-identifiers and short titles as uncopyrightable factual pointers, with CSA attributed; it does NOT
+identifiers and titles as uncopyrightable factual pointers, with CSA attributed; it does NOT
 redistribute or relicense the CSA matrices, and reproduces no control-specification text. This
 pack's CC BY-SA 4.0 covers its own mappings, not the CSA catalogue.
 
-Attribution: Control identifiers and short titles are Copyright the Cloud Security Alliance, used
-as factual references with attribution.
+Attribution: Control identifiers and titles are Copyright the Cloud Security Alliance, used as
+factual references with attribution.
 
 CCM, AICM, and Cloud Security Alliance are works and marks of the Cloud Security Alliance.
 
@@ -87,7 +102,7 @@ Frameworks referenced:
 Licence: Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0) (per-framework
 exceptions noted above)
 
-ATLAS data is licensed under the Apache License, Version 2.0. Identifiers and short titles are
+ATLAS data is licensed under the Apache License, Version 2.0. Identifiers and titles are
 reproduced as navigational pointers with the required copyright notice retained (Apache-2.0
 section 4).
 
@@ -132,7 +147,7 @@ Frameworks referenced:
   - OWASP Cheat Sheet Series (edition commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04))
   - OWASP MCP Top 10 (edition 2025) [licensed CC BY-NC-SA 4.0]
       The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial), which is not compatible
-      with this pack's CC BY-SA 4.0. Its risk identifiers and short titles are reproduced only as
+      with this pack's CC BY-SA 4.0. Its risk identifiers and titles are reproduced only as
       uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is
       reproduced.
   - OWASP Top 10 (Web Application Security Risks) (edition 2025)
@@ -144,11 +159,11 @@ Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/) (per-fra
 noted above)
 
 Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own
-CC BY-SA 4.0 satisfies ShareAlike. Only framework identifiers and their short titles are
-reproduced as navigational pointers; the mappings are the pack's own work.
+CC BY-SA 4.0 satisfies ShareAlike. Only framework identifiers and their titles are reproduced as
+navigational pointers; the mappings are the pack's own work.
 
-Attribution: Framework identifiers and short titles are Copyright the OWASP Foundation, Inc.,
-reused under CC BY-SA 4.0.
+Attribution: Framework identifiers and titles are Copyright the OWASP Foundation, Inc., reused
+under CC BY-SA 4.0.
 
 OWASP is a registered trademark of the OWASP Foundation, Inc.
 

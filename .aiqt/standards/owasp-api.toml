@@ -10,7 +10,7 @@ citation-unit = "risk category"
 id-pattern = "^API([1-9]|10)$"
 source-artefact = "OWASP API Security Top 10 2023"
 retrieved = "2026-08-16"
-catalogue = "full"
+catalogue = "subset"
 url = "https://github.com/OWASP/API-Security"
 
 [[id]]
@@ -29,9 +29,6 @@ title = "Unrestricted Resource Consumption"
 code = "API5"
 title = "Broken Function Level Authorization"
 [[id]]
-code = "API6"
-title = "Unrestricted Access to Sensitive Business Flows"
-[[id]]
 code = "API7"
 title = "Server Side Request Forgery"
 [[id]]
@@ -40,6 +37,3 @@ title = "Security Misconfiguration"
 [[id]]
 code = "API9"
 title = "Improper Inventory Management"
-[[id]]
-code = "API10"
-title = "Unsafe Consumption of APIs"

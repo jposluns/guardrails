@@ -21,7 +21,7 @@
 
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
-  <a class="logo" href="/draft" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT</span></a>
+  <a class="logo" href="/draft" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT™</span></a>
   <div class="topformula" aria-label="AIQT priority ordering: Accuracy Integrity Quality Trust first, then Progress, Speed, Cost">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; <span class="t2">Progress</span> &gt; <span class="t3">Speed</span> &gt; <span class="t4">Cost</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
@@ -116,22 +116,22 @@
         <table class="dtable">
           <thead><tr><th>Framework</th><th>Publisher</th><th>Edition</th><th>Relation</th><th>Edition stability</th><th>Identifiers referenced</th></tr></thead>
           <tbody>
-            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>67 of 173</td></tr>
-            <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 of 247</td></tr>
-            <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 of 207</td></tr>
-            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 of 944</td></tr>
+            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>67 referenced (curated subset)</td></tr>
+            <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 referenced (curated subset)</td></tr>
+            <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 referenced (curated subset)</td></tr>
+            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
-            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>67 of 1196</td></tr>
-            <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>24 of 72</td></tr>
-            <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 of 42</td></tr>
-            <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
-            <tr><td>OWASP Top 10 for Agentic Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
-            <tr><td>OWASP Application Security Verification Standard</td><td>OWASP Foundation</td><td>5.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>13 of 17</td></tr>
+            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>67 referenced (curated subset)</td></tr>
+            <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>24 referenced (curated subset)</td></tr>
+            <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 referenced (curated subset)</td></tr>
+            <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 referenced (curated subset)</td></tr>
+            <tr><td>OWASP Top 10 for Agentic Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>9 referenced (curated subset)</td></tr>
+            <tr><td>OWASP Application Security Verification Standard</td><td>OWASP Foundation</td><td>5.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>13 referenced (curated subset)</td></tr>
             <tr><td>OWASP Cheat Sheet Series</td><td>OWASP Foundation</td><td>commit f54d8ded2764010ecacd0deb87e1586da32d41dd (2026-07-04)</td><td>aligns with guidance</td><td><span class="pill idea">snapshot</span></td><td>27 referenced (curated subset)</td></tr>
             <tr><td>OWASP Top 10 for LLM Applications</td><td>OWASP Foundation</td><td>2026</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>10 of 10</td></tr>
             <tr><td>OWASP MCP Top 10</td><td>OWASP Foundation</td><td>2025</td><td>addresses risk</td><td><span class="pill next">beta</span></td><td>10 of 10</td></tr>
-            <tr><td>OWASP Top 10 Proactive Controls</td><td>OWASP Foundation</td><td>4.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>9 of 10</td></tr>
+            <tr><td>OWASP Top 10 Proactive Controls</td><td>OWASP Foundation</td><td>4.0.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>9 referenced (curated subset)</td></tr>
             <tr><td>OWASP Top 10 (Web Application Security Risks)</td><td>OWASP Foundation</td><td>2025</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>10 of 10</td></tr>
           </tbody>
         </table>
@@ -4001,7 +4001,7 @@
       <details class="more">
         <summary>MITRE ATLAS (2026.06)</summary>
         <div class="inner">
-          <p>mitigates technique. 67 of 173 identifiers referenced.</p>
+          <p>mitigates technique. 67 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>AML.T0010: AI Supply Chain Compromise
               <ul>
@@ -4387,7 +4387,7 @@
       <details class="more">
         <summary>CSA AI Controls Matrix (1.1.0)</summary>
         <div class="inner">
-          <p>supports control. 79 of 247 identifiers referenced.</p>
+          <p>supports control. 79 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>AIS-02: Application Security Baseline Requirements
               <ul>
@@ -4847,7 +4847,7 @@
       <details class="more">
         <summary>CSA Cloud Controls Matrix (4.1.0)</summary>
         <div class="inner">
-          <p>supports control. 57 of 207 identifiers referenced.</p>
+          <p>supports control. 57 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>AIS-02: Application Security Baseline Requirements
               <ul>
@@ -5176,7 +5176,7 @@
       <details class="more">
         <summary>MITRE CWE (4.20)</summary>
         <div class="inner">
-          <p>mitigates weakness. 72 of 944 identifiers referenced.</p>
+          <p>mitigates weakness. 72 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>CWE-20: Improper Input Validation
               <ul>
@@ -5832,7 +5832,7 @@
       <details class="more">
         <summary>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0))</summary>
         <div class="inner">
-          <p>supports control. 67 of 1196 identifiers referenced.</p>
+          <p>supports control. 67 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>AC-3: Access Enforcement
               <ul>
@@ -6227,7 +6227,7 @@
       <details class="more">
         <summary>NIST AI Risk Management Framework (1.0 (NIST AI 100-1))</summary>
         <div class="inner">
-          <p>aligns with guidance. 24 of 72 identifiers referenced.</p>
+          <p>aligns with guidance. 24 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>GOVERN 1.1: Legal and regulatory requirements involving AI are understood, managed, and documented.
               <ul>
@@ -6417,7 +6417,7 @@
       <details class="more">
         <summary>NIST Secure Software Development Framework (1.1 (SP 800-218))</summary>
         <div class="inner">
-          <p>supports control. 20 of 42 identifiers referenced.</p>
+          <p>supports control. 20 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>PO.3.2: Securely deploy and maintain toolchains
               <ul>
@@ -6551,7 +6551,7 @@
       <details class="more">
         <summary>OWASP API Security Top 10 (2023)</summary>
         <div class="inner">
-          <p>addresses risk. 8 of 10 identifiers referenced.</p>
+          <p>addresses risk. 8 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>API1: Broken Object Level Authorization
               <ul>
@@ -6599,7 +6599,7 @@
       <details class="more">
         <summary>OWASP Top 10 for Agentic Applications (2026)</summary>
         <div class="inner">
-          <p>addresses risk. 9 of 10 identifiers referenced.</p>
+          <p>addresses risk. 9 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>ASI02: Tool Misuse and Exploitation
               <ul>
@@ -6658,7 +6658,7 @@
       <details class="more">
         <summary>OWASP Application Security Verification Standard (5.0.0)</summary>
         <div class="inner">
-          <p>supports control. 13 of 17 identifiers referenced.</p>
+          <p>supports control. 13 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>V1: Encoding and Sanitization
               <ul>
@@ -7025,7 +7025,7 @@
       <details class="more">
         <summary>OWASP Top 10 Proactive Controls (4.0.0)</summary>
         <div class="inner">
-          <p>supports control. 9 of 10 identifiers referenced.</p>
+          <p>supports control. 9 identifiers referenced from a curated subset of the edition.</p>
           <ul>
             <li>C1: Implement Access Control
               <ul>
