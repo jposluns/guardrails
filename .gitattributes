@@ -64,6 +64,7 @@
 .aiqt/core/rules/quali-self-guardrail-from-error.md text eol=lf
 .aiqt/core/rules/quali-smallest-correct-change.md text eol=lf
 .aiqt/core/rules/quali-surface-counterproductive-instructions.md text eol=lf
+.aiqt/core/rules/quali-test-hermeticity.md text eol=lf
 .aiqt/core/rules/quali-verifier-delivery-completeness.md text eol=lf
 .aiqt/core/rules/quali-verifier-diversity.md text eol=lf
 .aiqt/core/rules/security-seca-resource-bounds.md text eol=lf
@@ -207,6 +208,7 @@
 .claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md text eol=lf
 .claude/rules/aiqt/10-QUALI-smallest-correct-change.md text eol=lf
 .claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md text eol=lf
+.claude/rules/aiqt/10-QUALI-test-hermeticity.md text eol=lf
 .claude/rules/aiqt/10-QUALI-verifier-delivery-completeness.md text eol=lf
 .claude/rules/aiqt/10-QUALI-verifier-diversity.md text eol=lf
 .claude/rules/aiqt/10-TRUST-ai-toolchain-register.md text eol=lf
@@ -327,6 +329,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-self-guardrail-from-error.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-smallest-correct-change.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-surface-counterproductive-instructions.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-delivery-completeness.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-diversity.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-TRUST-ai-toolchain-register.mdc text eol=lf

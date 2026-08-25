@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c97f2b56a166bcefeaf20e114c8df27668ab3b5698bcf5a592d963fbe40c0023"
+tree-sha256 = "3fbb67398a504b3c8028872ba2fda2099c1c18915e7b0427c569853bae55dab7"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -11,8 +11,8 @@ sha256 = "34c3ca0cce9a026371012f1fe61bc2756474e3c1cf355bb82784eddc11a3af30"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 214830
-sha256 = "cec89dfd9715627df86a49fa493d90c1ca248418a543db2805cb644918d2c347"
+bytes = 218573
+sha256 = "9c8abc05e84297e3e8a1ef0eeac671dc9b19794a1c4bf86a7a33114afbc06882"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -51,8 +51,8 @@ sha256 = "2fb613c921e03e5323f117324e32cca57142ea671182a9e6c31b737c4f9e2cbf"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 29466
-sha256 = "7cd425c82ffc96211771e0bc397fc319796dbd9192b770628323e1594aec0658"
+bytes = 29954
+sha256 = "eaee7c3d802a59b993d9f54a7c1e7148c57472cf675a92742c5a1ba851211827"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
@@ -328,6 +328,11 @@ sha256 = "52d59eb0d79af9a80aa6c529c197925f19d55c65bf730d32da4057fb547865c7"
 path = ".aiqt/core/rules/quali-surface-counterproductive-instructions.md"
 bytes = 638
 sha256 = "ed3443fb13e8dd7d19719c83d747153d27cc782ba278831180a817ede477bf4d"
+
+[[sources]]
+path = ".aiqt/core/rules/quali-test-hermeticity.md"
+bytes = 1817
+sha256 = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
@@ -686,8 +691,8 @@ sha256 = "98ea7328c9e8df8df6c072ea8baff692aeca02fe4acf3b278fd8038750d15858"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 95160
-sha256 = "c663efea38967a2775970fc0de2e59305160d1d6eb4be43a82cd5cbb97f88549"
+bytes = 95355
+sha256 = "c00d22486c293fc229f536337cf7cf75a41c8dd3e9ae1eeea64dec355ac3b6a9"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
@@ -786,8 +791,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
-bytes = 11107
-sha256 = "cf9491e231f469723a6e45dd2ac8e536e0d2fae31e1220cbf2179be409571791"
+bytes = 11211
+sha256 = "94c16442d01bd1170ad7a8c8aa990af4c3384b9ed3e0f832d907cfa136991c61"
 
 [[sources]]
 path = ".claude/rules/README.md"
@@ -1028,6 +1033,11 @@ sha256 = "52d59eb0d79af9a80aa6c529c197925f19d55c65bf730d32da4057fb547865c7"
 path = ".claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 bytes = 638
 sha256 = "ed3443fb13e8dd7d19719c83d747153d27cc782ba278831180a817ede477bf4d"
+
+[[sources]]
+path = ".claude/rules/aiqt/10-QUALI-test-hermeticity.md"
+bytes = 1817
+sha256 = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
@@ -1630,6 +1640,11 @@ bytes = 395
 sha256 = "0bc9851b63c4fe7c4536585013f0f3c822d80ddee7d5f59d627be8ae913301eb"
 
 [[sources]]
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc"
+bytes = 1596
+sha256 = "d5f6b3aefade81bb48e801810dd6b47f35976352327046bbfeb45cfa569ef885"
+
+[[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-delivery-completeness.mdc"
 bytes = 1262
 sha256 = "9104337164b6ded508739657569eccfc8c7676e40f9feab9c2c3808d995c6fd9"
@@ -1996,18 +2011,18 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 30935
-sha256 = "d6e06c7dceb8a97ffefd1dca5ff329b575a67979aa639b46383138cb9ee7ef60"
+bytes = 31127
+sha256 = "a38446aeeee97178bcdc6aad79a0612692c4927f30cd03aefc62ebd0670c94b5"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 61128
-sha256 = "e802b58a0a5b94cb836752b6339f727b1a8e8f00a1c574602c6afcbb946fb775"
+bytes = 62699
+sha256 = "51a6a65baf4248173a1cd42a3a229b705bdd54db4e3cd999ceb4ad59d0a103a1"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 61117
-sha256 = "b678a851a395a888d374870751792b7e2bf7eaa67d6d0ad6665e474c1de795bc"
+bytes = 62688
+sha256 = "152e3e0bda8982aa53b460e565813ee1d268f4ddbf0fcb5452a5d1327207fc36"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2021,8 +2036,8 @@ sha256 = "db49d1da96fbf936b8645c5125560fafa6f47b4c0942ebcb67c7359daddf2b3b"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 61124
-sha256 = "ee817b93317fdee8d557058d36580a185da273f99b3571ebb4da6cb199349999"
+bytes = 62695
+sha256 = "260fc60b56eb76d08e46ec3b5d7720399e956727ffb1fd7dd4a409bb9840c06b"
 
 [[sources]]
 path = "LICENSE"
@@ -2146,13 +2161,13 @@ sha256 = "dfddb16b8fe8ea93c5ad1f11d561d25fe3afb85c8f6a88c3befad327c50165c3"
 
 [[sources]]
 path = "site/downloads/mappings.csv"
-bytes = 251298
-sha256 = "a480f0930462f72c865f50a77d064b545b68e5055ececaa607b80480819a7313"
+bytes = 252503
+sha256 = "4b5c7d137633b581afa68747d6daa050f57d8f4502d453d3214dceafb7ce64b9"
 
 [[sources]]
 path = "site/downloads/mappings.json"
-bytes = 398475
-sha256 = "56227d1597f1a79cb1990fd787a9d94cacef01635d78ae6bd6e964e8eb267726"
+bytes = 400193
+sha256 = "31beb175dd430959e42a662c93235b586e72fd4464db523b4fdce3ef73daee90"
 
 [[sources]]
 path = "site/draft.html"
@@ -2216,8 +2231,8 @@ sha256 = "38affac368f5a2c91bafc9aa709491b2ec664593fc3a35462bf2a7505d8a97ec"
 
 [[sources]]
 path = "site/mappings.html"
-bytes = 435387
-sha256 = "eea797878995e8aac559f56a8f3bf90392a4310749950ce05513da232525a329"
+bytes = 437437
+sha256 = "69135383359e92708a674272f85b78cc115f0dbd685dee94adbcf9118ea415f0"
 
 [[sources]]
 path = "site/roadmap.html"
@@ -2503,7 +2518,7 @@ sha256 = "0872a2a1ca87af08d94c41c80909095a65ccee5140d32bd000306519fb0294b2"
 artifact-id = "claude:.claude/RULES-INDEX.md"
 path = ".claude/RULES-INDEX.md"
 kind = "file"
-sha256 = "cf9491e231f469723a6e45dd2ac8e536e0d2fae31e1220cbf2179be409571791"
+sha256 = "94c16442d01bd1170ad7a8c8aa990af4c3384b9ed3e0f832d907cfa136991c61"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/00-project-integrity.md"
@@ -2786,6 +2801,12 @@ artifact-id = "rules:.claude/rules/aiqt/10-QUALI-surface-counterproductive-instr
 path = ".claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 kind = "file"
 sha256 = "ed3443fb13e8dd7d19719c83d747153d27cc782ba278831180a817ede477bf4d"
+
+[[artifacts]]
+artifact-id = "rules:.claude/rules/aiqt/10-QUALI-test-hermeticity.md"
+path = ".claude/rules/aiqt/10-QUALI-test-hermeticity.md"
+kind = "file"
+sha256 = "15269ab01ade8d07f86a043fd9cc7bc918913fc2b038de09acd096c2f6c642be"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
@@ -3508,6 +3529,12 @@ kind = "file"
 sha256 = "0bc9851b63c4fe7c4536585013f0f3c822d80ddee7d5f59d627be8ae913301eb"
 
 [[artifacts]]
+artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc"
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc"
+kind = "file"
+sha256 = "d5f6b3aefade81bb48e801810dd6b47f35976352327046bbfeb45cfa569ef885"
+
+[[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-delivery-completeness.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-delivery-completeness.mdc"
 kind = "file"
@@ -3949,13 +3976,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "e802b58a0a5b94cb836752b6339f727b1a8e8f00a1c574602c6afcbb946fb775"
+sha256 = "51a6a65baf4248173a1cd42a3a229b705bdd54db4e3cd999ceb4ad59d0a103a1"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "b678a851a395a888d374870751792b7e2bf7eaa67d6d0ad6665e474c1de795bc"
+sha256 = "152e3e0bda8982aa53b460e565813ee1d268f4ddbf0fcb5452a5d1327207fc36"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -3968,7 +3995,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "ee817b93317fdee8d557058d36580a185da273f99b3571ebb4da6cb199349999"
+sha256 = "260fc60b56eb76d08e46ec3b5d7720399e956727ffb1fd7dd4a409bb9840c06b"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

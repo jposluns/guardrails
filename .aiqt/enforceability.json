@@ -1174,6 +1174,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "tsthrm",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/quali-test-hermeticity.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "valgat",
       "family": "aiqt",
       "gates": [],

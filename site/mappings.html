@@ -64,7 +64,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>944</strong> mappings from <strong>102</strong> of the pack's rules to <strong>513</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>948</strong> mappings from <strong>103</strong> of the pack's rules to <strong>514</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -122,7 +122,7 @@
             <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 of 944</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
-            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>66 of 1196</td></tr>
+            <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>67 of 1196</td></tr>
             <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>24 of 72</td></tr>
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 of 42</td></tr>
             <tr><td>OWASP API Security Top 10</td><td>OWASP Foundation</td><td>2023</td><td>addresses risk</td><td><span class="pill now">stable</span></td><td>8 of 10</td></tr>
@@ -892,6 +892,30 @@
               <ul>
                 <li>GOVERN 3.2: Policies and procedures are in place to define and differentiate roles and responsibilities for human-AI configurations and oversight. (broad)</li>
                 <li>GOVERN 4.1: Organizational policies and practices are in place to foster a critical thinking and safety-first mindset. (tight)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>A test's verdict comes from the code, not its surroundings</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md">View this rule on GitHub</a></p>
+          <ul>
+            <li>ISO/IEC 42001:2023 AI management system (2023): supports control
+              <ul>
+                <li>A.6.2.4: AI system verification and validation (broad)</li>
+              </ul>
+            </li>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>SA-8(29): Repeatable and Documented Procedures (broad)</li>
+                <li>SA-11: Developer Testing and Evaluation (tight)</li>
+              </ul>
+            </li>
+            <li>NIST Secure Software Development Framework (1.1 (SP 800-218)): supports control
+              <ul>
+                <li>PW.8.2: Perform and document code testing (broad)</li>
               </ul>
             </li>
           </ul>
@@ -5723,6 +5747,7 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md">A verification finding is fixed, not argued away</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-high-assurance-verification.md">High-assurance verification</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md">Isolate verifiers and judge by their result signal</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md">A test's verdict comes from the code, not its surroundings</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-verifier-diversity.md">Verifier diversity</a> (broad)</li>
               </ul>
             </li>
@@ -5782,7 +5807,7 @@
       <details class="more">
         <summary>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0))</summary>
         <div class="inner">
-          <p>supports control. 66 of 1196 identifiers referenced.</p>
+          <p>supports control. 67 of 1196 identifiers referenced.</p>
           <ul>
             <li>AC-3: Access Enforcement
               <ul>
@@ -5978,6 +6003,11 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-threat-model-boundaries.md">Threat-model new trust boundaries before implementation</a> (broad)</li>
               </ul>
             </li>
+            <li>SA-8(29): Repeatable and Documented Procedures
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md">A test's verdict comes from the code, not its surroundings</a> (broad)</li>
+              </ul>
+            </li>
             <li>SA-9(5): Processing, Storage, and Service Location
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md">Honour residency, retention, and deletion</a> (tight)</li>
@@ -5995,6 +6025,7 @@
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md">Validation is a gate on apply</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-change-carries-check.md">A behavioural change carries a check that fails without it</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md">A verification finding is fixed, not argued away</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md">A test's verdict comes from the code, not its surroundings</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md">Generated output is untrusted input</a> (broad)</li>
               </ul>
             </li>
@@ -6470,6 +6501,7 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-gate-discipline.md">Gate discipline</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-change-carries-check.md">A behavioural change carries a check that fails without it</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md">A test's verdict comes from the code, not its surroundings</a> (broad)</li>
               </ul>
             </li>
             <li>PW.9.1: Define a secure default configuration baseline

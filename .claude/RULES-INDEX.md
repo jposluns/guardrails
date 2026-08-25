@@ -55,6 +55,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Propose a guardrail when an error reveals a gap](rules/aiqt/10-QUALI-self-guardrail-from-error.md)
 - [Prefer the smallest correct change](rules/aiqt/10-QUALI-smallest-correct-change.md)
 - [Surface a counterproductive instruction before executing it](rules/aiqt/10-QUALI-surface-counterproductive-instructions.md)
+- [A test's verdict comes from the code, not its surroundings](rules/aiqt/10-QUALI-test-hermeticity.md)
 - [A degraded verifier delivery is not a verdict](rules/aiqt/10-QUALI-verifier-delivery-completeness.md)
 - [Verifier diversity](rules/aiqt/10-QUALI-verifier-diversity.md)
 
