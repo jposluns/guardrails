@@ -479,6 +479,15 @@ def _recompute_branch_integrity(root, commit_oid):
 ALLOWED_ATTESTATION_DELTA = frozenset({RELEASES_REL, MANIFEST_REL, gen_manifest.ROOT_REL,
                                        gen_manifest.SNIPPET_REL})
 
+# (round-4 finding 8) The four required attestation artifacts whose SHAPE is pre-flight-checked at
+# the attestation commit before any of them is parsed: the manifest and the releases record (both
+# parsed EARLY by load_strict_manifest / _show_toml, before the attestation-delta short-circuit) plus
+# the regenerated ROOT and announce-snippet. A tampered shape (symlink, gitlink, delete, or
+# file-to-tree) on any of them is a content finding (exit 1), never a parse-time raise reclassified
+# to cannot-evaluate (exit 2).
+REQUIRED_ATTESTATION_ARTIFACTS = (MANIFEST_REL, RELEASES_REL, gen_manifest.ROOT_REL,
+                                  gen_manifest.SNIPPET_REL)
+
 
 def _attestation_delta_findings(root, candidate_sha, commit_oid):
     """(round-8 #4) The tree delta between the tagged candidate and the attestation commit must touch ONLY
@@ -535,6 +544,45 @@ def _attestation_delta_findings(root, candidate_sha, commit_oid):
                             "regular-file blob at mode 100644; an executable-bit, symlink, gitlink, type, "
                             "or delete change on an allowed path is out of scope)".format(
                                 path, changed_dst_mode[path]))
+    return findings
+
+
+def _attestation_shape_findings(root, commit_oid):
+    """(round-4 finding 8) PRE-FLIGHT shape check of the four required attestation artifacts at the
+    immutable attestation commit, run BEFORE any of them is parsed. manifest.toml and releases.toml are
+    parsed EARLY by load_strict_manifest / _show_toml (before the attestation-delta short-circuit), so a
+    symlink (120000), gitlink (160000), delete, or file-to-tree tamper on either made that early parse
+    RAISE, which the outer handler reclassified to cannot-evaluate (exit 2), OVERRIDING the exit-1
+    content finding the tamper actually is. root.txt and announce-snippet.txt were already correct
+    (checked after the delta), but all four are shape-checked here for one uniform content verdict. Each
+    required artifact MUST be present as a canonical regular-file blob (mode 100644, type blob) at
+    commit_oid; a MISSING entry, or any entry whose mode is not 100644 or whose type is not blob, is a
+    CONTENT finding (exit 1). Only an ACTUAL git-inspection failure (ls-tree rc nonzero) is
+    cannot-evaluate (GateError, exit 2)."""
+    findings = []
+    for path in REQUIRED_ATTESTATION_ARTIFACTS:
+        proc = _git(root, ["ls-tree", "-z", commit_oid, "--", path])
+        if proc.returncode != 0:
+            raise GateError("cannot inspect the shape of {} at the attestation commit {} ({}); "
+                            "fail-closed".format(path, commit_oid, _git_err(proc)))
+        # The -z stream is NUL-terminated "<mode> <type> <object>\t<path>" records; a MISSING path
+        # yields an EMPTY stream at rc 0 (the deleted/absent content finding, never a git failure).
+        record = _git_out(proc, "git ls-tree {}".format(path)).split("\x00")[0]
+        if not record:
+            findings.append("attestation commit {} is missing the required attestation artifact {} (a "
+                            "deleted or absent required artifact is a content finding, not "
+                            "cannot-evaluate)".format(commit_oid, path))
+            continue
+        meta = record.partition("\t")[0]
+        fields = meta.split(" ")
+        if len(fields) < 2:
+            raise GateError("malformed git ls-tree record {!r} for {}; fail-closed".format(record, path))
+        mode, obj_type = fields[0], fields[1]
+        if mode != "100644" or obj_type != "blob":
+            findings.append("attestation commit {} carries the required attestation artifact {} as mode "
+                            "{} type {} (a required attestation artifact must be a regular-file blob at "
+                            "mode 100644; a symlink, gitlink, delete, or file-to-tree change is a content "
+                            "finding)".format(commit_oid, path, mode, obj_type))
     return findings
 
 
@@ -952,6 +1000,16 @@ def run_post_tag(root, attestation_commit, qa_path):
             commit_oid = attestation_commit
         else:
             commit_oid = _rev_parse(root, "HEAD^{commit}")
+        # (round-4 finding 8) PRE-FLIGHT: shape-check all four required attestation artifacts BEFORE
+        # any is parsed. manifest.toml and releases.toml are parsed early (load_strict_manifest /
+        # _show_toml, just below) before the attestation-delta short-circuit, so a
+        # symlink/gitlink/delete/file-to-tree tamper on either would make that early parse RAISE and
+        # be reclassified to cannot-evaluate (exit 2), hiding the exit-1 content finding. A shape
+        # finding here is conclusive: report it and return 1 before the parse. Only a genuine
+        # git-inspection failure inside the check is cannot-evaluate (exit 2).
+        shape_findings = _attestation_shape_findings(root, commit_oid)
+        if shape_findings:
+            return _report(shape_findings, "post-tag")
         # THE INVARIANT: strict-validate the attestation-commit manifest before any verdict.
         load_strict_manifest(root, commit_oid, "attestation " + MANIFEST_REL)
         releases = _show_toml(root, commit_oid, RELEASES_REL)
@@ -1478,6 +1536,14 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             pt = tmp / "posttag"
             _init(pt)
             _write_records(pt, "format-version = 1\n")
+            # (round-4 finding 8) The pre-flight shape check requires ALL FOUR attestation artifacts
+            # present as canonical 100644 blobs, so a shape-valid synthetic attestation commit
+            # carries root.txt and announce-snippet.txt too. Their CONTENT is never validated on this
+            # synthetic tree (these legs fail closed BEFORE the branch-integrity recompute); the two
+            # files exist only to pass the shape gate so the intended fail-closed legs are reached.
+            (pt / ".aiqt" / "release").mkdir(parents=True, exist_ok=True)
+            (pt / gen_manifest.ROOT_REL).write_text("0" * 64 + "\n", encoding="utf-8")
+            (pt / gen_manifest.SNIPPET_REL).write_text("announce\n", encoding="utf-8")
             _commit(pt, "genesis release tree")
             subprocess.run(["git", "-C", str(pt), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
                            check=True, capture_output=True, text=True,
@@ -2248,6 +2314,52 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             failures.append("(finding 7) a file-to-tree change on an allowed artifact is a "
                                             "content finding (exit 1); the branch-integrity recompute must "
                                             "not reclassify it to cannot-evaluate (exit 2)")
+
+                        # (round-4 finding 8) EARLY-PARSED ARTIFACTS: the SAME four shape tampers on
+                        # manifest.toml AND releases.toml. Pre-fix, these two are parsed EARLY
+                        # (load_strict_manifest / _show_toml) BEFORE the attestation-delta short-circuit,
+                        # so a symlink/gitlink/delete/file-to-tree tamper made the early parse RAISE and
+                        # the caught GateError reclassified the exit-1 content finding to cannot-evaluate
+                        # (exit 2). The pre-flight shape check now reports each as a content finding
+                        # (exit 1) before the parse. Mutation: with the pre-flight removed, at least one
+                        # of these manifest.toml/releases.toml mode-type cases returns 2 and fails here.
+                        for _early_rel in (MANIFEST_REL, RELEASES_REL):
+                            _e_sym = _run_precedence_tamper(
+                                [["update-index", "--cacheinfo",
+                                  "120000,{},{}".format(link_blob, _early_rel)]],
+                                "symlink " + _early_rel)
+                            if _run_post_tag_quiet(ac, _e_sym, str(a_qa)) != 1:
+                                failures.append("(finding 8) a symlink (120000) on the early-parsed {} "
+                                                "must be a content finding (exit 1); the early parse "
+                                                "must not reclassify it to cannot-evaluate (exit "
+                                                "2)".format(_early_rel))
+                            _e_glink = _run_precedence_tamper(
+                                [["update-index", "--cacheinfo",
+                                  "160000,{},{}".format(a_csha, _early_rel)]],
+                                "gitlink " + _early_rel)
+                            if _run_post_tag_quiet(ac, _e_glink, str(a_qa)) != 1:
+                                failures.append("(finding 8) a gitlink (160000) on the early-parsed {} "
+                                                "must be a content finding (exit 1); the early parse "
+                                                "must not reclassify it to cannot-evaluate (exit "
+                                                "2)".format(_early_rel))
+                            _e_del = _run_precedence_tamper(
+                                [["update-index", "--force-remove", _early_rel]],
+                                "delete " + _early_rel)
+                            if _run_post_tag_quiet(ac, _e_del, str(a_qa)) != 1:
+                                failures.append("(finding 8) a delete (000000) of the early-parsed {} "
+                                                "must be a content finding (exit 1); the early parse "
+                                                "must not reclassify it to cannot-evaluate (exit "
+                                                "2)".format(_early_rel))
+                            _e_f2t = _run_precedence_tamper(
+                                [["update-index", "--force-remove", _early_rel],
+                                 ["update-index", "--add", "--cacheinfo",
+                                  "100644,{},{}/child".format(child_blob, _early_rel)]],
+                                "file-to-tree " + _early_rel)
+                            if _run_post_tag_quiet(ac, _e_f2t, str(a_qa)) != 1:
+                                failures.append("(finding 8) a file-to-tree change on the early-parsed "
+                                                "{} must be a content finding (exit 1); the early parse "
+                                                "must not reclassify it to cannot-evaluate (exit "
+                                                "2)".format(_early_rel))
                     else:
                         # (round-9 finding 2) the archive candidate could not be staged (git init/add/commit
                         # or tag failed): the archive-backed cases cannot be verified, so the self-test fails

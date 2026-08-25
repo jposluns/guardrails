@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "3d644751ff613c6b50f4d71e193c967024e9820079c8f0ade290a1adb0c752ac"
+tree-sha256 = "9c9acf37042a9de711721cd5e11594e93d9b2996f6a93dcfd68be30c31b4ffa7"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2386,8 +2386,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 162721
-sha256 = "b8d6a01cf724d9fa913f7159011435fefdecda86c417f68353a33a9182db7519"
+bytes = 171553
+sha256 = "05cac0fcd7debe644cf7958f54bdef651473972bf037e10f098f1011588801a9"
 
 [[sources]]
 path = "tools/check_release_delta.py"
