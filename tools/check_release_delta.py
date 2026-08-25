@@ -208,9 +208,11 @@ def load_release_rows(root):
         raise GateError(str(exc))
 
 
-def normalize_dispositions(rows):
+def normalize_dispositions(rows, where_rel=DISPOSITIONS_REL):
     """Validate a list of disposition row dicts to full per-kind depth (6.5/6.6). Returns a list of
-    normalized rows each carrying a private _consumed flag. A malformed row raises GateError.
+    normalized rows each carrying a private _consumed flag. A malformed row raises GateError. `where_rel`
+    labels the record in error messages so the HEAD and the predecessor records are distinguishable (this
+    round's #2, the predecessor now runs the same Step-4 validation).
 
     The COMMON mandatory fields are exactly DISPOSITION_COMMON_FIELDS = {id, release, kind, impact,
     rationale} (matching check_manifest.check_dispositions, the Step-2 record), and `id` IS the record's
@@ -224,10 +226,10 @@ def normalize_dispositions(rows):
     measurement, a prefix-superset reference), not merely checked nonempty; a renderer-semantics row's
     impact is alters-obligations or byte-only."""
     if not isinstance(rows, list):
-        raise GateError("{}: [[disposition]] is not an array".format(DISPOSITIONS_REL))
+        raise GateError("{}: [[disposition]] is not an array".format(where_rel))
     out, seen_ids = [], set()
     for i, row in enumerate(rows, 1):
-        where = "{} row #{}".format(DISPOSITIONS_REL, i)
+        where = "{} row #{}".format(where_rel, i)
         if not isinstance(row, dict):
             raise GateError(where + ": not a table")
         for field in DISPOSITION_COMMON_FIELDS:
@@ -276,7 +278,7 @@ def normalize_dispositions(rows):
 _CLAUSE_DISPOSITION_KINDS = frozenset({"behaviour-neutral", "strengthened", "default-correction"})
 
 
-def _validate_disposition_target_syntax(rows):
+def _validate_disposition_target_syntax(rows, where_rel=DISPOSITIONS_REL):
     """Validate each disposition's `id` (its TARGET) by KIND (this round's #3), so a malformed target (a
     path-traversal class-change id like '../escape', a non-clause-id clause target, or a non-slug renderer
     target) is a malformed control, exit 2, not a row that silently matches nothing. Renderer EXISTENCE (the
@@ -286,16 +288,32 @@ def _validate_disposition_target_syntax(rows):
         if kind in _CLAUSE_DISPOSITION_KINDS:
             if split_clause_id(rid) is None:
                 raise GateError("{}: {} disposition id {!r} is not a canonical clause-id (7.1)".format(
-                    DISPOSITIONS_REL, kind, rid))
+                    where_rel, kind, rid))
         elif kind == "class-change":
             if not _release_schema.is_canonical_relpath(rid):
                 raise GateError("{}: class-change disposition id {!r} is not a canonical repo-relative path "
                                 "(no '.', '..', '//', backslash, control character, or host-absolute "
-                                "form)".format(DISPOSITIONS_REL, rid))
+                                "form)".format(where_rel, rid))
         elif kind == "renderer-semantics":
             if not SLUG_RE.fullmatch(rid):
                 raise GateError("{}: renderer-semantics disposition id {!r} is not a valid renderer-id "
-                                "slug".format(DISPOSITIONS_REL, rid))
+                                "slug".format(where_rel, rid))
+
+
+def _validate_dispositions_data(data, where_rel):
+    """Full Step-4 per-kind validation of a PARSED dispositions record, applied to BOTH the HEAD and the
+    PREDECESSOR objects (this round's #2): format-version == 1, the exact top-level keyset, per-row/per-kind
+    normalization (exact keysets, values, 6.6 evidence), and per-kind target SYNTAX. Returns the normalized
+    rows. Renderer-id EXISTENCE is NOT checked here (it is a consumption concern validated in run() against
+    the appropriate declaration scope), so the predecessor record is not held to the current renderer set."""
+    if data.get("format-version") != 1:
+        raise GateError("{}: format-version must be exactly 1".format(where_rel))
+    extra = set(data) - {"format-version", "disposition"}
+    if extra:
+        raise GateError("{}: unknown top-level key(s): {}".format(where_rel, ", ".join(sorted(extra))))
+    rows = normalize_dispositions(data.get("disposition", []), where_rel)
+    _validate_disposition_target_syntax(rows, where_rel)
+    return rows
 
 
 def _renderer_ids(renderers_data):
@@ -323,19 +341,11 @@ def _assert_renderer_targets_declared(rows, declared_ids):
 
 
 def load_dispositions(root):
-    """The public record, strictly validated (6.5): format-version == 1 and the exact top-level keyset
-    {format-version, disposition} (round-2 finding 1), then the full per-row/per-kind normalization AND the
-    per-kind target-syntax validation (this round's #3). Returns a list of normalized rows."""
-    data = _load(root, DISPOSITIONS_REL)
-    if data.get("format-version") != 1:
-        raise GateError("{}: format-version must be exactly 1".format(DISPOSITIONS_REL))
-    extra = set(data) - {"format-version", "disposition"}
-    if extra:
-        raise GateError("{}: unknown top-level key(s): {}".format(
-            DISPOSITIONS_REL, ", ".join(sorted(extra))))
-    rows = normalize_dispositions(data.get("disposition", []))
-    _validate_disposition_target_syntax(rows)
-    return rows
+    """The public HEAD record, strictly validated (6.5) through the shared parsed-data validator: format-
+    version == 1, the exact top-level keyset, full per-row/per-kind normalization, and per-kind target
+    syntax. Returns a list of normalized rows. The predecessor record is validated by the same function in
+    run() (this round's #2)."""
+    return _validate_dispositions_data(_load(root, DISPOSITIONS_REL), DISPOSITIONS_REL)
 
 
 def _strict(fn, data, rel):
@@ -736,16 +746,30 @@ def _validate_via_tool(root, script, args, what):
         raise GateError("{}: {} rc={} ({})".format(what, script, proc.returncode, diag))
 
 
+def _head_manifest_integrity(root):
+    """Validate the HEAD manifest with the SAME strictness as the predecessor (this round's #1): the schema
+    is strict-validated by the caller; here run the AUTHORITATIVE freshness (gen_manifest --check) and
+    integrity (check_manifest SOURCES set-equality + raw re-hash) against the HEAD working tree, so a stale
+    HEAD manifest that omits a staged pack path is exit 2. Mirrors _predecessor_tree_checks' manifest legs.
+    HEAD is the real git working tree, so no materialization or throwaway index is needed."""
+    _validate_via_tool(root, "gen_manifest.py", ["--check", "--root", str(root)],
+                       "head manifest freshness (gen_manifest --check)")
+    _validate_via_tool(root, "check_manifest.py", ["--root", str(root)],
+                       "head manifest integrity (check_manifest SOURCES set-equality)")
+
+
 def _genesis_structural(root):
     """Validate the internal structure of the consumed records at genesis (2.5/6.5), reusing each record's
     authoritative single-home validator so this gate never re-implements or drifts from them: check_clauses
     --genesis asserts the clause inventory (7.2) and the id-history register (7.3, born rows only covering
-    the whole inventory), and gen_renderers --check re-derives every renderer closure and framed digest
-    (6.5). Dispositions are validated separately by load_dispositions (normalize) in run()."""
+    the whole inventory), gen_renderers --check re-derives every renderer closure and framed digest (6.5),
+    and the HEAD manifest freshness + integrity are validated too (this round's #1: HEAD is held to the same
+    strictness in genesis as in non-genesis). Dispositions are validated separately by load_dispositions."""
     _validate_via_tool(root, "check_clauses.py", ["--root", str(root), "--genesis"],
                        "genesis clause inventory / id-history register structure (7.2/7.3)")
     _validate_via_tool(root, "gen_renderers.py", ["--check", "--root", str(root)],
                        "renderer declaration freshness (6.5)")
+    _head_manifest_integrity(root)
 
 
 # --- run --------------------------------------------------------------------------------------------
@@ -840,6 +864,12 @@ def run(root):
         _strict(_release_schema.strict_order, _show_toml(root, commit, ORDER_REL),
                 "predecessor " + ORDER_REL)
         _strict(_release_schema.strict_order, _load(root, ORDER_REL), ORDER_REL)
+        # Full Step-4 per-kind validation of the PREDECESSOR dispositions record too (this round's #2), the
+        # SAME parsed-data validator load_dispositions applies to HEAD: the predecessor tree checks reach
+        # only check_manifest's Step-2 common-field validator, so a predecessor default-correction row
+        # missing its 6.6 evidence (valid at Step 2) is exit 2 here, symmetric with HEAD.
+        _validate_dispositions_data(_show_toml(root, commit, DISPOSITIONS_REL),
+                                    "predecessor " + DISPOSITIONS_REL)
         # Manifest and renderer declaration schemas on BOTH objects (round-3 findings 1/4).
         prev_manifest = _show_toml(root, commit, MANIFEST_REL)
         _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
@@ -868,6 +898,11 @@ def run(root):
                                                     else []),
                            "head clause inventory / id-history structure (7.2/7.3)")
         _predecessor_tree_checks(root, commit, prev_manifest.get("genesis") is True)
+        # Validate the HEAD manifest with the SAME strictness as the predecessor (this round's #1): the
+        # schema was strict-validated above; now run the AUTHORITATIVE freshness + integrity on the HEAD
+        # working tree, so a stale HEAD manifest that omits a staged pack path (an under-claimed path-add
+        # the schema-only check passed as PATCH) is exit 2 before classification.
+        _head_manifest_integrity(root)
         events, findings = [], []
         for ev, fs in (clause_text_leg(prev_inv, head_inv, register, rows, head_version),
                        path_keyset_leg(prev_manifest, head_manifest),
@@ -1078,6 +1113,14 @@ def _real_pack_e2e(tmp, failures):
         return subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
                               capture_output=True, env=env).returncode == 0
 
+    def _regen_manifest():
+        # Regenerate the HEAD manifest so it is FRESH after later writes to source records (dispositions,
+        # releases): the HEAD manifest freshness check (this round's #1) now runs on it, so a case meant to
+        # PROCEED past the manifest stage must present a fresh manifest. The records are already tracked, so
+        # gen_manifest (which reads content from disk) sees the new bytes without a restage.
+        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)], capture_output=True,
+                       env=env)
+
     def _disp(release):
         (repo / DISPOSITIONS_REL).write_text(
             'format-version = 1\n\n[[disposition]]\nid = "{}"\nrelease = "{}"\n'
@@ -1096,11 +1139,24 @@ def _real_pack_e2e(tmp, failures):
         return False
     _disp("1.0.1")
     (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
+    _regen_manifest()   # FRESH head manifest after the disposition + release-row writes (this round's #1)
     # (finding 2) a CONSISTENTLY-edited id-keyed PATCH change, fully dispositioned, with an ANCHORED
     # predecessor and a VERSION-BOUND head: clean exit 0.
     if _run_quiet_root(repo) != 0:
         failures.append("real full-pack run(): a consistently-edited dispositioned id-keyed PATCH change "
                         "expected exit 0 (finding 2)")
+    # (this round's #1) a STALE HEAD manifest: stage a NEW pack-owned path but do NOT regenerate the
+    # manifest. Without the head manifest freshness/integrity check the path leg reads the stale manifest
+    # keyset (missing the new path) and passes an under-claimed MINOR path-add as PATCH (exit 0); with it,
+    # gen_manifest --check / check_manifest see the tracked-but-unlisted path and fail closed exit 2. The
+    # file is removed afterward so the later cases see the clean tree.
+    (repo / "tools" / "qa_new_path.txt").write_text("new pack path\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tools/qa_new_path.txt"], capture_output=True, env=env)
+    if _run_quiet_root(repo) != 2:
+        failures.append("real full-pack run(): a staged pack path omitted from a stale HEAD manifest must "
+                        "fail closed exit 2 (this round's #1)")
+    (repo / "tools" / "qa_new_path.txt").unlink()
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, env=env)
     # (this round's #4) a HEAD order.toml with an out-of-vocabulary presentation family in the NON-GENESIS
     # delta path: strict_order on the head object rejects it, exit 2 (pre-fix presentation-order entries
     # were validated only as strings). order.toml is restored so the later cases see the clean tree.
@@ -1190,6 +1246,7 @@ def _real_pack_e2e(tmp, failures):
     if _set_head_version("2.0.0"):
         _disp("1.0.1")   # mis-dated for the 2.0.0 change
         (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
+        _regen_manifest()   # FRESH head manifest after the disposition + release-row writes (this round's #1)
         if _run_quiet_root(repo) != 1:
             failures.append("real full-pack run(): a wrong-version disposition for the detected change must "
                             "be flagged exit 1 (round-3 finding 3)")
@@ -1337,6 +1394,11 @@ def _real_pack_e2e(tmp, failures):
             'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
                 t=ptobj, c=pcommit, h="a" * 64), encoding="utf-8")
+        # Regenerate the HEAD manifest AFTER the one-row releases so it is FRESH (genesis=false): the head
+        # manifest freshness check (this round's #1) must PASS, so the committed PREDECESSOR record under
+        # test is the sole failure. Without this the stale head manifest would fail #1's check and mask the
+        # predecessor check each fixture targets.
+        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(rp)], capture_output=True, env=env)
         if _run_quiet_root(rp) != 2:
             failures.append(want_msg)
 
@@ -1377,10 +1439,23 @@ def _real_pack_e2e(tmp, failures):
         "real-pack-pred-rel-badrow", _mut_releases_badrow,
         "real full-pack run(): a malformed row (integer commit_sha) in the PREDECESSOR releases record must "
         "fail closed exit 2 (this round's #1)")
+    def _mut_disp_missing_evidence(rp):
+        # a predecessor default-correction row with ONLY the Step-2 common fields (id/release/kind/impact/
+        # rationale) and NONE of the 6.6 evidence fields. check_manifest's Step-2 validator (reached via
+        # _predecessor_tree_checks) accepts it (common fields present); the Step-4 per-kind validator, now
+        # applied to the PREDECESSOR too (this round's #2), rejects the incomplete keyset, exit 2.
+        (rp / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "clause.1"\nrelease = "1.0.0"\n'
+            'kind = "default-correction"\nimpact = "x"\nrationale = "r"\n', encoding="utf-8")
+
     _pred_record_fixture(
         "real-pack-pred-rel-ctrlpath", _mut_releases_ctrlpath,
         "real full-pack run(): a 0x01 control character in the PREDECESSOR releases qa-store-path must fail "
         "closed exit 2 (this round's #2)")
+    _pred_record_fixture(
+        "real-pack-pred-disp-noevidence", _mut_disp_missing_evidence,
+        "real full-pack run(): a predecessor default-correction row missing its 6.6 evidence (valid at "
+        "Step 2) must fail closed exit 2 (this round's #2)")
     # NOTE: a predecessor ORDER facet-duplication is NOT given a run() fixture: strict_order runs on the
     # predecessor object too (the same validator the genesis and head #5 fixtures exercise), but any facet
     # duplication also breaks operative TIER_FACETS equality, which check_manifest.check_order_record catches
@@ -1397,11 +1472,31 @@ def _real_pack_e2e(tmp, failures):
             _extract(arch, dest)
         except Exception:  # noqa: BLE001
             return None
+        # git-init + add so the HEAD manifest freshness/integrity checks (this round's #1, now run in the
+        # genesis path too) have a tracked path set to read; no commit or identity is needed. A malformation
+        # fixture still exits at its earlier strict validator, before the genesis-structural manifest legs.
+        for argv in (["init", "-q"], ["add", "-A"]):
+            if subprocess.run(["git", "-C", str(dest), *argv], capture_output=True,
+                              env=_selftest_env()).returncode != 0:
+                return None
         return dest
 
     gclean = _extract_genesis("genesis-clean")
     if gclean is not None and _run_quiet_root(gclean) != 0:
         failures.append("real genesis full-pack run(): the unmutated real tree expected a clean exit 0")
+    # (this round's #1, genesis) a STALE genesis HEAD manifest: stage a NEW pack-owned path but do NOT
+    # regenerate the manifest. The genesis structural checks (schema, clauses, renderers) still pass, so
+    # WITHOUT the head manifest freshness check genesis returns clean (exit 0); WITH it gen_manifest --check
+    # sees the tracked-but-unlisted path and fails closed exit 2 (HEAD is held to the same manifest
+    # strictness in genesis as in non-genesis).
+    gstale = _extract_genesis("genesis-stale-manifest")
+    if gstale is not None:
+        (gstale / "tools" / "qa_new_path.txt").write_text("new pack path\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(gstale), "add", "tools/qa_new_path.txt"],
+                       capture_output=True, env=_selftest_env())
+        if _run_quiet_root(gstale) != 2:
+            failures.append("real genesis full-pack run(): a staged pack path omitted from a stale genesis "
+                            "HEAD manifest must fail closed exit 2 (this round's #1)")
     # (finding 1) a manifest with a bogus ARTIFACT-row key: strict_manifest rejects the exact kind-specific
     # keyset -> exit 2 (the pre-round-5 validator accepted unknown artifact keys and returned exit 0).
     gart = _extract_genesis("genesis-bogus-artifact")
