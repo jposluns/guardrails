@@ -16,7 +16,9 @@ unaffected: a header-only record at Step 2 is not yet a complete attestation rec
 gates run AFTER attestation, where every PRESENT release row is a post-QA attestation row carrying the
 complete record (spec 2.4 / releases.toml header / VER-CORE-SPEC.md:254), so here every field is required.
 """
+import os
 import re
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -25,6 +27,9 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_versions import _parse                    # noqa: E402  the shipped bare-SemVer parser
 from gen_manifest import RELEASE_ROW_ALLOWED          # noqa: E402  the single shared allowed keyset
+from check_clauses import split_clause_id, _valid_register_id, SHA256_RE  # noqa: E402  authoritative
+#                                       clause-id / register-id syntax and the source-digest regex (7.1/7.2)
+from gen_rules import CID_RE                          # noqa: E402  the authoritative corpus-id regex
 
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # A recorded git object id is a full lowercase hex sha1 (40) or sha256 (64); an abbreviated or
@@ -224,22 +229,63 @@ def strict_renderers(data, where):
     return data
 
 
+ORDER_PRESENTATION_KEYS = {"families", "aiqt-facets", "security-facets", "tie-breaker"}
+CLAUSE_ROW_KEYS = frozenset({"clause-id", "corpus-id", "source-path", "start-line", "end-line",
+                             "canonical-text", "source-digest"})
+IDHISTORY_ROW_KEYS = {"born": {"id", "born-release"}, "tombstone": {"id", "retired-release"},
+                      "successor": {"id", "retired-release", "successor-id"}}
+
+
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def strict_order(data, where):
-    """format-version == 1, apex-corpus-id 'prjint1', and the exact top-level keyset (structural only; the
-    operative-constant comparison stays check_manifest's, on head)."""
+    """EXHAUSTIVE order-record schema (round-4 finding 2): format-version == 1, apex-corpus-id 'prjint1',
+    the exact top-level keyset, a NON-EMPTY [[precedence-tier]] array whose every row is exactly
+    {rank:int, members:non-empty list of str, members-are-equal:bool}, and a [presentation-order] table
+    carrying exactly {families, aiqt-facets, security-facets} lists of str plus a string tie-breaker. The
+    operative-constant comparison (against gen_rules) stays check_manifest's; this asserts the structural
+    shape on BOTH head and predecessor objects."""
     _require_format_version(data, where)
     if data.get("apex-corpus-id") != "prjint1":
         raise SchemaError("{}: apex-corpus-id must be 'prjint1'".format(where))
     extra = set(data) - ORDER_TOP_ALLOWED
     if extra:
         raise SchemaError("{}: unknown top-level key(s): {}".format(where, ", ".join(sorted(extra))))
+    tiers = data.get("precedence-tier")
+    if not isinstance(tiers, list) or not tiers:
+        raise SchemaError("{}: [[precedence-tier]] must be a non-empty array".format(where))
+    for i, t in enumerate(tiers, 1):
+        tw = "{} precedence-tier #{}".format(where, i)
+        if not isinstance(t, dict) or set(t) != {"rank", "members", "members-are-equal"}:
+            raise SchemaError("{}: keys are not exactly rank/members/members-are-equal".format(tw))
+        if not _is_int(t["rank"]):
+            raise SchemaError("{}: rank must be an integer".format(tw))
+        if not isinstance(t["members"], list) or not t["members"] \
+                or not all(isinstance(m, str) and m for m in t["members"]):
+            raise SchemaError("{}: members must be a non-empty list of strings".format(tw))
+        if not isinstance(t["members-are-equal"], bool):
+            raise SchemaError("{}: members-are-equal must be a boolean".format(tw))
+    pres = data.get("presentation-order")
+    if not isinstance(pres, dict) or set(pres) != ORDER_PRESENTATION_KEYS:
+        raise SchemaError("{}: [presentation-order] keys are not exactly {}".format(
+            where, sorted(ORDER_PRESENTATION_KEYS)))
+    for key in ("families", "aiqt-facets", "security-facets"):
+        if not isinstance(pres[key], list) or not all(isinstance(x, str) and x for x in pres[key]):
+            raise SchemaError("{}: presentation-order.{} must be a list of strings".format(where, key))
+    if not isinstance(pres["tie-breaker"], str) or not pres["tie-breaker"]:
+        raise SchemaError("{}: presentation-order.tie-breaker must be a non-empty string".format(where))
 
 
 def strict_clause_inventory(data, where):
-    """Structural integrity of a clause inventory: a [[clause]] array of tables, each carrying a non-empty
-    string clause-id (UNIQUE across the inventory), corpus-id, and canonical-text. Returns the rows list.
-    The full 7.2 span/text/digest legs stay check_clauses'; this closes the round-2 hole where a duplicate
-    or incomplete clause row silently collapsed in the delta gate's dict comprehension."""
+    """EXHAUSTIVE 7.2 clause-inventory schema (round-4 finding 2): a [[clause]] array of tables, each with
+    EXACTLY the 7.2 keyset; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
+    corpus-id field; a non-empty source-path; positive integer start-line/end-line with end >= start; a
+    non-empty canonical-text; and a 64-lowercase-hex source-digest. The full source-file span/text/digest
+    CONSISTENCY (reading the rule sources) stays check_clauses'; this validates the record's own structure
+    exhaustively on BOTH objects (the round-2/3 three-field guard accepted malformed ids and missing span/
+    digest fields). Returns the rows list."""
     rows = data.get("clause")
     if not isinstance(rows, list):
         raise SchemaError("{}: no [[clause]] array".format(where))
@@ -249,48 +295,72 @@ def strict_clause_inventory(data, where):
         rw = "{} clause row #{}".format(where, i)
         if not isinstance(row, dict):
             raise SchemaError("{}: not a table".format(rw))
-        cid = row.get("clause-id")
-        if not isinstance(cid, str) or not cid:
-            raise SchemaError("{}: missing or non-string clause-id".format(rw))
+        if set(row) != CLAUSE_ROW_KEYS:
+            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {}".format(
+                rw, sorted(CLAUSE_ROW_KEYS)))
+        cid = row["clause-id"]
+        parsed = split_clause_id(cid) if isinstance(cid, str) else None
+        if parsed is None:
+            raise SchemaError("{}: clause-id {!r} is not <corpus-id>.<unpadded-ordinal> (7.1)".format(
+                rw, cid))
         if cid in seen:
             raise SchemaError("{}: duplicate clause-id {!r}".format(rw, cid))
         seen.add(cid)
-        if not isinstance(row.get("corpus-id"), str) or not row["corpus-id"]:
-            raise SchemaError("{}: missing or non-string corpus-id".format(rw))
-        if not isinstance(row.get("canonical-text"), str):
-            raise SchemaError("{}: missing or non-string canonical-text".format(rw))
+        corpus = row["corpus-id"]
+        if not isinstance(corpus, str) or not CID_RE.fullmatch(corpus):
+            raise SchemaError("{}: corpus-id {!r} is not a well-formed corpus-id".format(rw, corpus))
+        if corpus != parsed[0]:
+            raise SchemaError("{}: corpus-id {!r} does not match the clause-id corpus part {!r}".format(
+                rw, corpus, parsed[0]))
+        if not isinstance(row["source-path"], str) or not row["source-path"].strip():
+            raise SchemaError("{}: missing or non-string source-path".format(rw))
+        if not _is_int(row["start-line"]) or not _is_int(row["end-line"]) \
+                or row["start-line"] < 1 or row["end-line"] < row["start-line"]:
+            raise SchemaError("{}: start-line/end-line must be positive integers with end >= start".format(
+                rw))
+        if not isinstance(row["canonical-text"], str) or not row["canonical-text"]:
+            raise SchemaError("{}: canonical-text must be a non-empty string".format(rw))
+        if not isinstance(row["source-digest"], str) or not SHA256_RE.fullmatch(row["source-digest"]):
+            raise SchemaError("{}: source-digest is not 64 lowercase hex".format(rw))
         out.append(row)
     return out
 
 
 def strict_id_history(data, where):
-    """Structural integrity of the id-history register: only the born/tombstone/successor sections, each an
-    array of tables with a non-empty string id and a bare-SemVer release field (born-release for born,
-    retired-release for the two retirement sections), and a non-empty string successor-id on successor rows.
-    Returns the parsed dict. The full 7.3 semantics stay check_clauses'; this closes the round-2 hole where
-    a malformed register row was silently skipped by the delta gate's isinstance guards."""
+    """EXHAUSTIVE 7.3 id-history schema (round-4 finding 2): only the born/tombstone/successor sections,
+    each an array of tables with EXACTLY that section's keyset; every id a well-formed corpus-id or
+    clause-id; every release a bare SemVer; a well-formed successor-id on successor rows; and NO duplicate
+    born id. The full temporal/graph semantics stay check_clauses'; this closes the hole where a malformed
+    id or a duplicate born row was accepted. Returns the parsed dict."""
     if not isinstance(data, dict):
         raise SchemaError("{}: not a table".format(where))
-    extra = set(data) - {"born", "tombstone", "successor"}
+    extra = set(data) - set(IDHISTORY_ROW_KEYS)
     if extra:
         raise SchemaError("{}: unknown top-level key(s): {}".format(where, ", ".join(sorted(extra))))
     rel_key = {"born": "born-release", "tombstone": "retired-release", "successor": "retired-release"}
+    born_ids = set()
     for section in ("born", "tombstone", "successor"):
         rows = data.get(section, [])
         if not isinstance(rows, list):
             raise SchemaError("{}: the {} section is not an array of tables".format(where, section))
         for i, row in enumerate(rows, 1):
             rw = "{} {} row #{}".format(where, section, i)
-            if not isinstance(row, dict):
-                raise SchemaError("{}: not a table".format(rw))
-            if not isinstance(row.get("id"), str) or not row["id"]:
-                raise SchemaError("{}: missing or non-string id".format(rw))
+            if not isinstance(row, dict) or set(row) != IDHISTORY_ROW_KEYS[section]:
+                raise SchemaError("{}: keys are not exactly {}".format(
+                    rw, sorted(IDHISTORY_ROW_KEYS[section])))
+            if not _valid_register_id(row["id"]):
+                raise SchemaError("{}: id {!r} is neither a well-formed corpus-id nor clause-id".format(
+                    rw, row["id"]))
             key = rel_key[section]
-            if not isinstance(row.get(key), str) or _parse(row[key]) is None:
+            if not isinstance(row[key], str) or _parse(row[key]) is None:
                 raise SchemaError("{}: {} is not a bare SemVer".format(rw, key))
-            if section == "successor" and (not isinstance(row.get("successor-id"), str)
-                                           or not row["successor-id"]):
-                raise SchemaError("{}: missing or non-string successor-id".format(rw))
+            if section == "born":
+                if row["id"] in born_ids:
+                    raise SchemaError("{}: duplicate born row for {!r}".format(rw, row["id"]))
+                born_ids.add(row["id"])
+            if section == "successor" and not _valid_register_id(row["successor-id"]):
+                raise SchemaError("{}: successor-id {!r} is not a well-formed id".format(
+                    rw, row["successor-id"]))
     return data
 
 
@@ -341,3 +411,81 @@ def default_correction_evidence_findings(row, where):
     if not isinstance(ref, str) or not ref:
         raise SchemaError("{}: default-correction prefix-superset-reference is missing or empty "
                           "(6.6/L1039)".format(where))
+
+
+# --- filter-free tree materialization (round-4 finding 1) -------------------------------------------
+
+def _cat_file_batch(root, shas):
+    """{sha: raw bytes} for the given blob shas via ONE `git cat-file --batch` process (no checkout, so no
+    smudge/clean filter and no gitattributes transformation runs). SchemaError on any git or protocol
+    failure or a missing object (cannot-evaluate)."""
+    uniq = list(dict.fromkeys(shas))
+    if not uniq:
+        return {}
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"],
+                              input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True)
+    except OSError as exc:
+        raise SchemaError("cannot launch git cat-file --batch ({})".format(exc))
+    if proc.returncode != 0:
+        raise SchemaError("git cat-file --batch failed: {}".format(
+            proc.stderr.decode("utf-8", "replace").strip()))
+    out, i, result = proc.stdout, 0, {}
+    for _ in uniq:
+        nl = out.find(b"\n", i)
+        if nl == -1:
+            raise SchemaError("truncated git cat-file --batch output")
+        header = out[i:nl].decode("ascii", "replace")
+        i = nl + 1
+        parts = header.split(" ")
+        if len(parts) < 2 or parts[1] == "missing":
+            raise SchemaError("git cat-file --batch: object not found ({})".format(header))
+        osha, size = parts[0], int(parts[2])
+        result[osha] = out[i:i + size]
+        i += size + 1  # skip the trailing newline the protocol appends
+    return result
+
+
+def materialize_tree_raw(root, commit, dest):
+    """Write the committed tree at `commit` into `dest` from RAW blob bytes only (git ls-tree + cat-file),
+    applying NO checkout smudge/clean filter and NO gitattributes transformation, so a hostile filter cannot
+    substitute old bytes during a checkout the way `git worktree add`/`git checkout` would (round-4 finding
+    1). Symlinks and gitlinks are rejected. Returns the set of written repo-relative paths. SchemaError on
+    any git/materialization failure (cannot-evaluate)."""
+    try:
+        ls = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "-z", commit], capture_output=True)
+    except OSError as exc:
+        raise SchemaError("cannot launch git ls-tree ({})".format(exc))
+    if ls.returncode != 0:
+        raise SchemaError("cannot list tree {}: {}".format(
+            commit, ls.stderr.decode("utf-8", "replace").strip()))
+    entries = []
+    for rec in ls.stdout.split(b"\x00"):
+        if not rec:
+            continue
+        meta, _tab, path_b = rec.partition(b"\t")
+        fields = meta.split(b" ")
+        if len(fields) != 3:
+            raise SchemaError("malformed ls-tree record in {}".format(commit))
+        mode, otype, osha = fields[0].decode("ascii"), fields[1].decode("ascii"), fields[2].decode("ascii")
+        if mode in ("120000", "160000"):
+            raise SchemaError("tree {} contains a symlink/gitlink {!r}; rejected".format(
+                commit, path_b.decode("utf-8", "replace")))
+        if otype != "blob":
+            continue
+        try:
+            path = path_b.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SchemaError("non-UTF-8 path in tree {}".format(commit))
+        entries.append((osha, path))
+    blobs = _cat_file_batch(root, [osha for osha, _ in entries])
+    dest_root = Path(dest).resolve()
+    written = set()
+    for osha, path in entries:
+        target = (Path(dest) / path).resolve()
+        if target != dest_root and dest_root not in target.parents:
+            raise SchemaError("path {!r} escapes the materialization root".format(path))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(blobs[osha])
+        written.add(path)
+    return written

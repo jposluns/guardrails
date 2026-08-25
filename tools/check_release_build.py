@@ -29,6 +29,7 @@ unreachable store, an unresolvable tag or SHA, unreadable records, or a git fail
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -288,7 +289,11 @@ def validate_qa_obj(obj, expect_candidate_sha):
 
 def qa_layers(qa_path, qa_sha256, expect_candidate_sha):
     """Retrieve, hash, parse, and validate the private-store QA object (2.2). Unreachable or unreadable
-    is exit 2 (GateError); content mismatches are findings. Returns (findings, attestation_epochs)."""
+    is exit 2 (GateError); content mismatches are findings. Returns (findings, attestation_epochs). The
+    recorded/supplied qa-sha256 is SYNTAX-validated first (round-4 finding 4): a value that is not 64
+    lowercase hex is a malformed control, exit 2, never a mere content mismatch."""
+    if not isinstance(qa_sha256, str) or not _release_schema.HEX64_RE.fullmatch(qa_sha256):
+        raise GateError("qa-sha256 {!r} is not 64 lowercase hex (malformed control input)".format(qa_sha256))
     try:
         blob = Path(qa_path).read_bytes()
     except OSError as exc:
@@ -325,28 +330,61 @@ def _regenerate_check_commands(co):
     return commands
 
 
+def _fresh_git_env():
+    """A neutralized environment plus a FRESH-repo posture: no inherited GIT_* and no user/global/system
+    config, so a re-init'd materialized tree carries NO filter/attribute drivers from the source repo."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
 def reproduce_gate(root, sha):
-    """2.1 step 4: a disposable detached worktree of the exact candidate SHA; every registry generator's
-    --check plus gen_manifest --check plus check_manifest run inside it. --check IS a byte comparison
-    against fresh regeneration, so any drift is a FAIL and the release is invalid. Returns findings."""
+    """2.1 step 4: reproduce the exact candidate SHA and run every registry generator's --check plus
+    gen_manifest --check plus check_manifest against it. The candidate is materialized from RAW blob bytes
+    (git ls-tree + cat-file, round-4 finding 1: NO worktree checkout, so no smudge/clean filter can restore
+    old bytes and hide a change), then re-init'd as a FRESH git repo (empty config, so the source repo's
+    filter drivers cannot run) purely so the git-based reproduce commands (gen_manifest, check_manifest)
+    have a repository. --check IS a byte comparison against fresh regeneration, so any drift is exit 1.
+    A child exit 2 or a launch failure is cannot-evaluate and raises GateError -> exit 2 (round-4 finding
+    4), never downgraded to a drift finding. Returns findings."""
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-reproduce-"))
     co = tmp / "co"
+    co.mkdir()
+    env = _fresh_git_env()
     try:
-        proc = _git(root, ["worktree", "add", "--detach", str(co), sha])
-        if proc.returncode != 0:
-            raise GateError("cannot materialize candidate checkout: " + proc.stderr.strip())
+        try:
+            _release_schema.materialize_tree_raw(root, sha, co)
+        except SchemaError as exc:
+            raise GateError("cannot materialize the candidate tree: {}".format(exc))
+        for args in (["init", "-q"], ["-c", "user.name=aiqt", "-c", "user.email=a@b.invalid", "add", "-A"],
+                     ["-c", "user.name=aiqt", "-c", "user.email=a@b.invalid", "commit", "-q", "-m",
+                      "reproduce", "--no-verify"]):
+            try:
+                r = subprocess.run(["git", "-C", str(co), *args], capture_output=True, env=env)
+            except OSError as exc:
+                raise GateError("cannot launch git to stage the candidate tree ({}); fail-closed".format(exc))
+            if r.returncode != 0:
+                raise GateError("cannot stage the candidate tree for reproduction: {}".format(
+                    r.stderr.decode("utf-8", "replace").strip()))
         try:
             commands = _regenerate_check_commands(co)
         except Exception as exc:  # noqa: BLE001  a bad registry is cannot-evaluate, not clean
             raise GateError("cannot enumerate the reproduce command set ({})".format(exc))
         findings = []
         for argv in commands:
-            r = subprocess.run(argv, cwd=str(co), capture_output=True, text=True)
-            if r.returncode != 0:
-                findings.append("reproduce drift: {!r} rc={}".format(" ".join(argv), r.returncode))
+            try:
+                r = subprocess.run(argv, cwd=str(co), capture_output=True, text=True, env=env)
+            except OSError as exc:
+                raise GateError("reproduce: {!r} could not launch ({}); fail-closed".format(
+                    " ".join(argv), exc))
+            if r.returncode < 0 or r.returncode > 1:
+                raise GateError("reproduce: {!r} could not evaluate (rc={}): {}".format(
+                    " ".join(argv), r.returncode, (r.stderr or r.stdout).strip()[:300]))
+            if r.returncode == 1:
+                findings.append("reproduce drift: {!r} rc=1".format(" ".join(argv)))
         return findings
     finally:
-        _git(root, ["worktree", "remove", "--force", str(co)])
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -398,6 +436,13 @@ def _validate_tag_row(root, row):
     if _rev_parse(root, "refs/tags/" + tag + "^{commit}") != row["commit_sha"]:
         findings.append("release {} commit_sha does not match the tag's peeled commit".format(version))
     tagged_manifest = _show_toml(root, tag + "^{commit}", MANIFEST_REL)
+    # Strict-validate the tagged tree's manifest BEFORE reading any field (round-4 finding 3): a
+    # format-version=999 or an unknown top-level key in a tagged manifest is a schema fault, exit 2, not a
+    # clean audit.
+    try:
+        _release_schema.strict_manifest(tagged_manifest, "tagged manifest for release {}".format(version))
+    except SchemaError as exc:
+        raise GateError(str(exc))
     if tagged_manifest.get("release-version") != version:
         findings.append("release {} tag points at a tree whose manifest release-version is {!r}".format(
             version, tagged_manifest.get("release-version")))
@@ -449,9 +494,14 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         findings += reproduce_gate(root, candidate_sha)
         qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
         findings += qa_findings
-        # genesis declaration of the candidate tree; the candidate releases record is strict-validated
-        # too (round-2 finding 4: format-version + top-level + full rows on the candidate object).
+        # genesis declaration of the candidate tree; the candidate manifest AND releases record are
+        # strict-validated before any field is read (round-2 finding 4 + round-3 finding 3): a bad
+        # format-version or unknown key on the candidate manifest is exit 2.
         cand_manifest = _show_toml(root, candidate_sha, MANIFEST_REL)
+        try:
+            _release_schema.strict_manifest(cand_manifest, "candidate " + MANIFEST_REL)
+        except SchemaError as exc:
+            raise GateError(str(exc))
         cand_rows = _strict_releases(_show_toml(root, candidate_sha, RELEASES_REL),
                                      "candidate " + RELEASES_REL)
         is_genesis = cand_manifest.get("genesis") is True
@@ -470,7 +520,10 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
             findings += row_findings
             cand_genesis_flags.append(g)
         findings += genesis_findings(cand_genesis_flags)
-        if first_pin:
+        # The first-pin precondition is AUTO-REQUIRED for a genesis / default-switch candidate, whether or
+        # not the operator passed --first-pin (round-4 finding 5; the GD-95 default switch IS the genesis
+        # release, spec L1051). --first-pin forces it for a non-genesis candidate too.
+        if first_pin or is_genesis:
             findings += _first_pin_findings(root, candidate_sha, evidence)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
@@ -486,9 +539,22 @@ CAP_BYTES = 32768  # the documented Codex default project_doc_max_bytes cap (VER
 
 
 def _show_bytes(root, ref, path):
-    """The raw bytes of path at ref, or None if the object does not exist there. Never decodes."""
+    """The raw bytes of `path` at `ref`, or None ONLY when the path is genuinely ABSENT from the tree
+    (round-4 finding 7). The commit is resolved and the tree inspected SEPARATELY, so an infrastructure or
+    resolution failure (an unresolvable ref, a git error) raises GateError -> exit 2 rather than being
+    conflated with an absent path and downgraded to a content finding. Never decodes."""
+    _rev_parse(root, ref + "^{commit}")   # resolution failure -> GateError (cannot-evaluate)
+    ls = _git(root, ["ls-tree", "-r", "-z", "--name-only", ref, "--", path])
+    if ls.returncode != 0:
+        raise GateError("git ls-tree {}:{} failed ({})".format(
+            ref, path, (ls.stderr or "").strip()))
+    if not ls.stdout.replace("\x00", "").strip():
+        return None   # the ref resolves and the tree lists cleanly, but this path is absent
     proc = _git(root, ["show", "{}:{}".format(ref, path)], binary=True)
-    return proc.stdout if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        raise GateError("git show {}:{} failed after ls-tree confirmed the path is present".format(
+            ref, path))
+    return proc.stdout
 
 
 def _demo_superset_findings(demo, agents_sha, ref):
@@ -595,23 +661,32 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
 
 
 def _first_pin_findings(root, candidate_sha, evidence):
-    """--first-pin (2.1/6.6): the step-1 freeze holds in the candidate checkout (check_clauses --genesis
-    passes) AND the delivered prefix-superset EVIDENCE is present, valid, and BOUND to the candidate's
-    AGENTS.md (round-3 finding 5), required in first-pin mode regardless of genesis."""
+    """--first-pin (2.1/6.6): the step-1 freeze holds in the candidate (check_clauses --genesis passes) AND
+    the delivered prefix-superset EVIDENCE is present, valid, and BOUND to the candidate's AGENTS.md
+    (round-3 finding 5). The candidate is materialized from RAW blob bytes (round-4 finding 1: no worktree
+    checkout, so no smudge/clean filter can restore old bytes), and a check_clauses child exit 2 or a launch
+    failure is cannot-evaluate -> GateError exit 2 (round-4 finding 4), never downgraded to a finding."""
     findings = list(_first_pin_evidence_findings(root, candidate_sha, evidence))
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-firstpin-"))
     co = tmp / "co"
+    co.mkdir()
     try:
-        proc = _git(root, ["worktree", "add", "--detach", str(co), candidate_sha])
-        if proc.returncode != 0:
-            raise GateError("cannot materialize candidate for first-pin: " + proc.stderr.strip())
-        r = subprocess.run(["python3", "tools/check_clauses.py", "--genesis"], cwd=str(co),
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            findings.append("first-pin: check_clauses.py --genesis fails in the candidate checkout "
-                            "(rc={}); the step-1 freeze is not clean".format(r.returncode))
+        try:
+            _release_schema.materialize_tree_raw(root, candidate_sha, co)
+        except SchemaError as exc:
+            raise GateError("cannot materialize the candidate for first-pin: {}".format(exc))
+        try:
+            r = subprocess.run(["python3", "tools/check_clauses.py", "--genesis", "--root", str(co)],
+                               cwd=str(co), capture_output=True, text=True)
+        except OSError as exc:
+            raise GateError("first-pin: cannot launch check_clauses.py ({}); fail-closed".format(exc))
+        if r.returncode < 0 or r.returncode > 1:
+            raise GateError("first-pin: check_clauses.py --genesis could not evaluate the candidate "
+                            "(rc={}): {}".format(r.returncode, (r.stderr or r.stdout).strip()[:300]))
+        if r.returncode == 1:
+            findings.append("first-pin: check_clauses.py --genesis fails in the candidate (rc=1); the "
+                            "step-1 freeze is not clean")
     finally:
-        _git(root, ["worktree", "remove", "--force", str(co)])
         shutil.rmtree(tmp, ignore_errors=True)
     return findings
 
@@ -690,6 +765,11 @@ def _run_audit_quiet(root):
 def _run_post_tag_quiet(root, attestation_commit, qa_path):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run_post_tag(root, attestation_commit, qa_path)
+
+
+def _run_pre_tag_quiet(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        return run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence)
 
 
 def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
@@ -843,6 +923,28 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
         if got != want:
             failures.append("_resolve_mode({}): expected {!r}, got {!r}".format(opts, want, got))
 
+    # --- duplicate-CLI rejection through main() (round-4 finding 6) --------------------------------
+    # Tested through the REAL argv/main() path, not just the dict resolver: a repeated option is exit 2
+    # BEFORE dispatch (so --self-test --self-test never recurses into a run).
+    def _main_rc(argv):
+        saved = sys.argv
+        sys.argv = ["check_release_build.py"] + argv
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                return main()
+        finally:
+            sys.argv = saved
+    for argv in (["--self-test", "--self-test"],
+                 ["--candidate-sha", "x", "--candidate-sha", "y"],
+                 ["--pre-tag", "--pre-tag"],
+                 ["--qa-path", "a", "--qa-path", "b"]):
+        if _main_rc(argv) != 2:
+            failures.append("main({}): a duplicate CLI option must be rejected exit 2 (finding 6)".format(
+                argv))
+    # a non-duplicate error case still resolves through the resolver, not a duplicate parse fault.
+    if _main_rc(["--candidate-sha", "x"]) != 2:
+        failures.append("main(--candidate-sha alone): expected exit 2 (mode resolver)")
+
     # --- git-level cases ---------------------------------------------------------------------------
     import shutil as _sh
     git_ok = True
@@ -870,10 +972,16 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                          ["config", "user.email", "selftest@example.invalid"]):
                 subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
 
-        def _write_records(path, releases_body, manifest_body="genesis = true\n"):
+        def _valid_manifest(genesis="true", release_version="1.0.0"):
+            # A STRUCTURALLY valid manifest (round-4 finding 3: tagged/candidate manifests are now strict-
+            # validated before any field is read, so a fixture's committed manifest must be well-formed).
+            return ('format-version = 1\nrelease-version = "{}"\ngenesis = {}\n'
+                    'tree-sha256 = "{}"\n'.format(release_version, genesis, "a" * 64))
+
+        def _write_records(path, releases_body, manifest_body=None):
             (path / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
             (path / RELEASES_REL).write_text(releases_body, encoding="utf-8")
-            (path / MANIFEST_REL).write_text(manifest_body, encoding="utf-8")
+            (path / MANIFEST_REL).write_text(manifest_body or _valid_manifest(), encoding="utf-8")
 
         def _commit(path, msg):
             subprocess.run(["git", "-C", str(path), "add", "-A"], check=True, capture_output=True, text=True)
@@ -894,7 +1002,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # respecting timestamp.
             a = tmp / "annotated"
             _init(a)
-            _write_records(a, "format-version = 1\n", "release-version = \"1.0.0\"\ngenesis = true\n")
+            _write_records(a, "format-version = 1\n")
             _commit(a, "genesis release tree")
             subprocess.run(["git", "-C", str(a), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
                            check=True, capture_output=True, text=True,
@@ -951,7 +1059,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # (lightweight tag) -> a finding (annotated tags are mandatory).
             lw = tmp / "lightweight"
             _init(lw)
-            _write_records(lw, "format-version = 1\n", "release-version = \"1.0.0\"\ngenesis = true\n")
+            _write_records(lw, "format-version = 1\n")
             _commit(lw, "genesis tree")
             subprocess.run(["git", "-C", str(lw), "tag", "v1.0.0"],  # lightweight (no -a)
                            check=True, capture_output=True, text=True)
@@ -969,7 +1077,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # the strict load, never a mismatch finding.
             nr = tmp / "notag"
             _init(nr)
-            _write_records(nr, "format-version = 1\n", "release-version = \"1.0.0\"\ngenesis = true\n")
+            _write_records(nr, "format-version = 1\n")
             _commit(nr, "genesis tree")
             (nr / RELEASES_REL).write_text(
                 'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
@@ -985,7 +1093,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # pre-round-3 gate returned a mismatch finding (exit 1).
             ne = tmp / "noobject"
             _init(ne)
-            _write_records(ne, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _write_records(ne, "format-version = 1\n")
             _commit(ne, "genesis tree")
             subprocess.run(["git", "-C", str(ne), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
                            check=True, capture_output=True, text=True,
@@ -1006,7 +1114,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # UnicodeDecodeError (which the pre-round-3 text=True read raised, surfacing as exit 1).
             nu = tmp / "nonutf8tag"
             _init(nu)
-            _write_records(nu, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _write_records(nu, "format-version = 1\n")
             _commit(nu, "genesis tree")
             (nu / "tagmsg").write_bytes(b"release \xff\xfe non-utf8 message\n")
             subprocess.run(["git", "-C", str(nu), "tag", "-a", "v1.0.0", "-F", str(nu / "tagmsg")],
@@ -1061,7 +1169,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # the old default-to-clean code missed.
             pt = tmp / "posttag"
             _init(pt)
-            _write_records(pt, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _write_records(pt, "format-version = 1\n")
             _commit(pt, "genesis release tree")
             subprocess.run(["git", "-C", str(pt), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
                            check=True, capture_output=True, text=True,
@@ -1130,7 +1238,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # tag ABOVE the newest row is allowed. Driven through the new leg on the real tag enumeration.
             pc = tmp / "predcomplete"
             _init(pc)
-            _write_records(pc, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _write_records(pc, "format-version = 1\n")
             _commit(pc, "tree")
             for v in ("1.0.0", "1.1.0", "1.2.0"):
                 subprocess.run(["git", "-C", str(pc), "tag", "-a", "v" + v, "-m", v],
@@ -1166,7 +1274,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             (fp / "qa" / "badsuperset.toml").write_text(
                 'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2", "obX"]\n'
                 'floor-profile-obligations = ["ob1", "ob2"]\n'.format(a_sha), encoding="utf-8")
-            _write_records(fp, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _write_records(fp, "format-version = 1\n")
             _commit(fp, "candidate with AGENTS.md + demonstration")
             fp_commit = subprocess.run(["git", "-C", str(fp), "rev-parse", "HEAD"],
                                        check=True, capture_output=True, text=True).stdout.strip()
@@ -1213,6 +1321,87 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 failures.append("first-pin evidence: a candidate without AGENTS.md must raise (exit 2)")
             except GateError:
                 pass
+
+            # (round-4 finding 7) _show_bytes distinguishes a genuinely ABSENT path (None) from a git
+            # resolution/infrastructure failure (GateError), so a git error is never downgraded to a finding.
+            if _show_bytes(pt, pt_commit, "no/such/path.toml") is not None:
+                failures.append("_show_bytes: a genuinely absent path must return None (finding 7)")
+            try:
+                _show_bytes(pt, "f" * 40, "AGENTS.md")   # a valid-syntax but unresolvable ref
+                failures.append("_show_bytes: an unresolvable ref must raise GateError, not return None "
+                                "(finding 7)")
+            except GateError:
+                pass
+
+            # (round-4 findings 4/5) a FULL-PACK genesis candidate built from `git archive HEAD`: run_pre_tag
+            # WITHOUT --first-pin still AUTO-REQUIRES first-pin evidence (finding 5), and reproduce_gate runs
+            # on the RAW-materialized + fresh-init candidate (finding 1, no worktree). The raw materialization
+            # and reproduce both exercise the round-4 cannot-evaluate propagation on the real toolchain.
+            arch = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
+            if arch.returncode == 0 and arch.stdout:
+                import tarfile
+                gcand = tmp / "genesis-candidate"
+                gcand.mkdir()
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as tf:
+                        tf.extractall(gcand)
+                    ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                            env=_fresh_git_env()).returncode == 0
+                             for a in (["init", "-q"],
+                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
+                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q",
+                                        "-m", "genesis", "--no-verify"]))
+                    if ok:
+                        gsha = subprocess.run(["git", "-C", str(gcand), "rev-parse", "HEAD"],
+                                              capture_output=True, text=True).stdout.strip()
+                        gqa_body = ('candidate-sha = "{}"\n\n'.format(gsha) + "".join(
+                            '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
+                            'unresolved-blockers = 0\ntimestamps-utc = [100]\n\n'.format(n)
+                            for n in FAMILIES))
+                        gqa = gcand / "qa.toml"
+                        gqa.write_text(gqa_body, encoding="utf-8")
+                        gqa_sha = hashlib.sha256(gqa_body.encode("utf-8")).hexdigest()
+                        # no --first-pin, no evidence: the genesis auto-require makes it exit 1 (REQUIRED),
+                        # where the pre-round-4 gate returned exit 0.
+                        rc = _run_pre_tag_quiet(gcand, gsha, str(gqa), gqa_sha, False, None)
+                        if rc != 1:
+                            failures.append("genesis run_pre_tag without --first-pin must AUTO-REQUIRE "
+                                            "evidence and fail exit 1 (finding 5), got {}".format(rc))
+                except Exception as exc:  # noqa: BLE001  a build/archive hiccup is a skip, not a false pass
+                    print("SELF-TEST NOTE: genesis run_pre_tag case skipped ({})".format(exc),
+                          file=sys.stderr)
+
+            # (round-4 finding 4) a first-pin candidate whose check_clauses --genesis is CANNOT-EVALUATE
+            # (a corrupt inventory, child exit 2) must raise GateError -> exit 2, not append a finding. The
+            # candidate carries a valid AGENTS.md + demonstration (so evidence binds) but a clauses.toml with
+            # no [[clause]] array (check_clauses load_inventory -> exit 2).
+            ce = tmp / "firstpin-cannoteval"
+            _init(ce)
+            (ce / "qa").mkdir(parents=True, exist_ok=True)
+            ce_agents = ("A" * 40000).encode("utf-8")
+            (ce / "AGENTS.md").write_bytes(ce_agents)
+            ce_sha = hashlib.sha256(ce_agents).hexdigest()
+            (ce / "qa" / "demo.toml").write_text(
+                'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1"]\n'
+                'floor-profile-obligations = ["ob1"]\n'.format(ce_sha), encoding="utf-8")
+            (ce / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
+            (ce / ".aiqt" / "core" / "clauses.toml").write_text("format-version = 1\n", encoding="utf-8")
+            (ce / ".aiqt" / "core" / "id-history.toml").write_text("", encoding="utf-8")
+            _write_records(ce, "format-version = 1\n")
+            _commit(ce, "cannot-eval candidate")
+            ce_commit = subprocess.run(["git", "-C", str(ce), "rev-parse", "HEAD"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            ce_ev = ce / "ev.toml"
+            ce_ev.write_text(
+                'candidate-sha = "{}"\nobserved-measurement = 40000\ncap-bytes = 32768\n'
+                'prefix-superset = true\ndemonstration = "qa/demo.toml"\nagents-sha256 = "{}"\n'.format(
+                    ce_commit, ce_sha), encoding="utf-8")
+            try:
+                _first_pin_findings(ce, ce_commit, str(ce_ev))
+                failures.append("first-pin: a check_clauses cannot-evaluate (child exit 2) must raise "
+                                "GateError (exit 2), not append a finding (finding 4)")
+            except GateError:
+                pass
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -1225,8 +1414,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             "unresolved blocker, false/string finished-signal, unknown/missing family key, boolean blocker "
             "count, round-2 finding 5), genesis uniqueness, the 2.4 ordering predicate, strict QA-object "
             "validation, the shared release-row schema drift binding (#6), the reproduce-command enumeration "
-            "(#7), and the build-mode RESOLVER rejecting every mixed/incomplete/out-of-mode invocation "
-            "(round-3 finding 6)")
+            "(#7), the build-mode RESOLVER rejecting every mixed/incomplete/out-of-mode invocation "
+            "(round-3 finding 6), a qa-sha256 syntax control (round-4 finding 4), and DUPLICATE-CLI "
+            "rejection through main() (round-4 finding 6)")
     if git_ran:
         print("SELF-TEST PASS: {}; and the git-level cases (zero-row audit NOT APPLICABLE, a zero-row "
               "format-version=999 exit 2 and a row missing qa-sha256/qa-store-path exit 2 (round-2 finding "
@@ -1235,8 +1425,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
               "8), a non-UTF-8 tag message handled without a crash (round-3 finding 7), read_genesis "
               "accepting a full attestation row (#6), the post-tag clean/no-qa-path/digest-mismatch/"
               "no-timestamps cases, the chronology-FORGING exit 1 (round-2 finding 6), predecessor-"
-              "completeness on a real 3-tag repo (round-2 finding 7), and the first-pin evidence bound to "
-              "the candidate's AGENTS.md with a recomputed prefix-superset (round-3 finding 5)) hold".format(
+              "completeness on a real 3-tag repo (round-2 finding 7), the first-pin evidence bound to the "
+              "candidate's AGENTS.md with a recomputed prefix-superset (round-3 finding 5), a strict-manifest "
+              "check on every tagged/candidate manifest (round-4 finding 3), _show_bytes absent-vs-git-error "
+              "(round-4 finding 7), a genesis run_pre_tag auto-requiring first-pin evidence (round-4 finding "
+              "5), and a first-pin cannot-evaluate raising exit 2 (round-4 finding 4), all over "
+              "RAW-materialized (no-worktree) candidate trees (round-4 finding 1)) hold".format(
                   core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
@@ -1250,33 +1444,42 @@ def _env():
 
 
 def _parse_args(argv):
+    """Parse argv, REJECTING any DUPLICATE option (round-4 finding 6): a repeated flag or value option is a
+    conflicting/ambiguous invocation and returns None -> exit 2 BEFORE dispatch, never a silent last-wins
+    overwrite. Returns the opts dict, or None on an unknown or duplicate option."""
     opts = {"self_test": False, "pre_tag": False, "post_tag": False, "candidate_sha": None,
             "qa_path": None, "qa_sha256": None, "first_pin": False, "evidence": None,
             "attestation_commit": None}
+    flags = {"--self-test": "self_test", "--pre-tag": "pre_tag", "--post-tag": "post_tag",
+             "--first-pin": "first_pin"}
     single = {"--candidate-sha": "candidate_sha", "--qa-path": "qa_path", "--qa-sha256": "qa_sha256",
               "--evidence": "evidence", "--attestation-commit": "attestation_commit"}
+    seen = set()
+
+    def _usage():
+        print("usage: check_release_build.py [--pre-tag --candidate-sha SHA --qa-path PATH "
+              "--qa-sha256 HEX [--first-pin --evidence PATH]] [--post-tag --qa-path PATH "
+              "[--attestation-commit REF]] | --self-test (no option may be repeated)", file=sys.stderr)
+
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--self-test":
-            opts["self_test"] = True
-            i += 1
-        elif arg == "--pre-tag":
-            opts["pre_tag"] = True
-            i += 1
-        elif arg == "--post-tag":
-            opts["post_tag"] = True
-            i += 1
-        elif arg == "--first-pin":
-            opts["first_pin"] = True
+        if arg in flags:
+            if arg in seen:
+                print("error: duplicate option {}".format(arg), file=sys.stderr)
+                return None
+            seen.add(arg)
+            opts[flags[arg]] = True
             i += 1
         elif arg in single and i + 1 < len(argv):
+            if arg in seen:
+                print("error: duplicate option {}".format(arg), file=sys.stderr)
+                return None
+            seen.add(arg)
             opts[single[arg]] = argv[i + 1]
             i += 2
         else:
-            print("usage: check_release_build.py [--pre-tag --candidate-sha SHA --qa-path PATH "
-                  "--qa-sha256 HEX [--first-pin --evidence PATH]] [--post-tag --qa-path PATH "
-                  "[--attestation-commit REF]] | --self-test", file=sys.stderr)
+            _usage()
             return None
     return opts
 
