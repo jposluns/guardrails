@@ -155,6 +155,10 @@ path = "README.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = "RELEASING.md"
+class = "pack-immutable"
+
+[[release-class]]
 path = "ROADMAP.md"
 class = "pack-immutable"
 

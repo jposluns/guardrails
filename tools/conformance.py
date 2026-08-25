@@ -790,6 +790,13 @@ def _add_skill_surface(base):
     src = base.joinpath(*gen_skill.SKILL_SRC_PARTS)
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_text(_SKILL_SRC_FIXTURE, encoding="utf-8")
+    # gen_skill.build_outputs derives the public attribution line (GD-56) from the [plugin] author-name in
+    # the identity manifest; the skill-drift fixtures do not install the hooks surface, so provide a minimal
+    # one when it is absent (never clobbering a manifest a hooks-surface caller already wrote).
+    manifest = base.joinpath(*gen_skill.IDENTITY_MANIFEST_PARTS)
+    if not manifest.exists():
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text('[plugin]\nauthor-name = "Self Test"\n', encoding="utf-8")
     reserved_map, standalone, binary = gen_skill.build_outputs(base)
     reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
     reserved_dir.mkdir(parents=True, exist_ok=True)

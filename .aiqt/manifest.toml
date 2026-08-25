@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "3fbb67398a504b3c8028872ba2fda2099c1c18915e7b0427c569853bae55dab7"
+tree-sha256 = "32a983a4e61fa9cd80eade5f969b3461afe53b96aba24f64c1582c87d3f99e29"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -61,8 +61,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 8642
-sha256 = "eea24f184868aac4a4b7baaa6bf174eff6bfd3d380b5472633cb7f6e4e2accd9"
+bytes = 8708
+sha256 = "98b9b2364a237c86a313a4aa3a4cfc6fe2a6c980844dfdc7879892d32372e1dd"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -77,7 +77,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2497
-sha256 = "e3e4be584853284057e62f25f7217deb7a0acdeeeff2ad08b08a2e9f61a8e8ac"
+sha256 = "579cbf0caffa5ce3d6500e784830f56463d5e56442e4a62c20a89d505239f8ab"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -696,8 +696,8 @@ sha256 = "c00d22486c293fc229f536337cf7cf75a41c8dd3e9ae1eeea64dec355ac3b6a9"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 6750
-sha256 = "86130d46263b2417d33f4ef04f380dfae53775fe974cf64b94162ee4a44f4d16"
+bytes = 6876
+sha256 = "8ec498aef2e6edb9dc9c3f2b64b01b97334230007a94b6067c03bbcce05af070"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -2011,8 +2011,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31127
-sha256 = "a38446aeeee97178bcdc6aad79a0612692c4927f30cd03aefc62ebd0670c94b5"
+bytes = 31152
+sha256 = "b6f79936d41299457164d52cc10d578f07a8fefbfb006f9eef71f2bd10cec1e6"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2053,6 +2053,11 @@ sha256 = "dd9102a60ec78458781af5d2f4349b065e458dde4a542d46a032f8fa3635db70"
 path = "README.md"
 bytes = 273
 sha256 = "1d2d1433c17d30a4ee06936e0f28e9498725f01d4fce7e5a5dc7277d7d97d100"
+
+[[sources]]
+path = "RELEASING.md"
+bytes = 4378
+sha256 = "edbb9f07ad879c4ae31012b593dc62c2ae120647408bf6fa0d39816b4f9ee55f"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -2136,18 +2141,18 @@ sha256 = "86d6c92fdff31020a43a83f26746a86667576ba620916266be029427d7da4ec9"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions.txt"
-bytes = 8059
-sha256 = "d1b13b805c0cf8f2859397793e084a0ea11eed86994cf4eda350e9815621e979"
+bytes = 8145
+sha256 = "16c83a9b9fc8308e39c81d654bc1d56d3baad58c83ed21bd2f04fc4202e8f328"
 
 [[sources]]
 path = "site/downloads/aiqt-skill.zip"
-bytes = 8121
-sha256 = "a6f0009ba53240be1a7ae80491d9b7c0906652899f79ebfc7c17c85b0acad5a8"
+bytes = 8213
+sha256 = "b6b57a50ebb75a04f1990581af62e2ff9e1f77d2789014d3e0dac53721f800c7"
 
 [[sources]]
 path = "site/downloads/aiqt/SKILL.md"
-bytes = 7997
-sha256 = "e356342736904682957d676f0cf82ecccdeb3d4f816dbb1f7f29022609d17bff"
+bytes = 8089
+sha256 = "62c6152f38ce41e8773d49d8fc0b1ce71f03e42ce21c26969e176a29c9391c3a"
 
 [[sources]]
 path = "site/downloads/aiqt/manifest.json"
@@ -2351,8 +2356,8 @@ sha256 = "0760e974088b58759a82a189acde9afc15978272897c4b0ca39f089520c836ca"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 46202
-sha256 = "7ab39f4e713fec808bc706f57c656c5fb3f9a5bca5121c8126038e6d82a898f1"
+bytes = 58208
+sha256 = "ca9b9149484b93ce413921b11fcad8d840ccc2f249e9a6a2bff944951b9900fe"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
@@ -2401,8 +2406,8 @@ sha256 = "e3f11b92f3ab99d699a1e2a29c35532a2efe7841004a1871b590115686df556b"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 65570
-sha256 = "f1f804308cfb4e953c271577ff5193e06509143a196cf8a096aabf57e367ed91"
+bytes = 66123
+sha256 = "3eca3f86bb0a9e7dbfa0a581c6f26b0a88c10b2ca34682897aab1e4f13371062"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -2491,8 +2496,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 27340
-sha256 = "cc131a6677d1d480fd4f67d9ab3b097a93daf3dd391d9dde1dff92c7ac875250"
+bytes = 30104
+sha256 = "f1182d75ec29fbb8a8557fb77884fc85bf7c232512800d103028556bbd808cc9"
 
 [[sources]]
 path = "tools/import_cwe.py"
@@ -4001,19 +4006,19 @@ sha256 = "260fc60b56eb76d08e46ec3b5d7720399e956727ffb1fd7dd4a409bb9840c06b"
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
 path = "site/downloads/aiqt-instructions.txt"
 kind = "file"
-sha256 = "d1b13b805c0cf8f2859397793e084a0ea11eed86994cf4eda350e9815621e979"
+sha256 = "16c83a9b9fc8308e39c81d654bc1d56d3baad58c83ed21bd2f04fc4202e8f328"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-skill.zip"
 path = "site/downloads/aiqt-skill.zip"
 kind = "file"
-sha256 = "a6f0009ba53240be1a7ae80491d9b7c0906652899f79ebfc7c17c85b0acad5a8"
+sha256 = "b6b57a50ebb75a04f1990581af62e2ff9e1f77d2789014d3e0dac53721f800c7"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/SKILL.md"
 path = "site/downloads/aiqt/SKILL.md"
 kind = "file"
-sha256 = "e356342736904682957d676f0cf82ecccdeb3d4f816dbb1f7f29022609d17bff"
+sha256 = "62c6152f38ce41e8773d49d8fc0b1ce71f03e42ce21c26969e176a29c9391c3a"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/manifest.json"
