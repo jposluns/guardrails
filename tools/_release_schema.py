@@ -149,7 +149,11 @@ def strict_release_row(row, where):
 
 def strict_releases(data, where):
     """format-version == 1, the exact top-level keyset {format-version, release}, and the full per-row
-    schema for every present row. Returns the rows list (zero rows is a valid genesis/dormant state)."""
+    schema for every present row. The array itself is APPEND-ONLY, oldest to newest: its versions are
+    unique and STRICTLY INCREASING (round-6 finding 3), so two identical rows or an out-of-order pair is a
+    malformed record even though each row is individually valid. Because a row's tag is exactly 'v' + its
+    version (strict_release_row), strictly-increasing versions make the tags unique too. Returns the rows
+    list (zero rows is a valid genesis/dormant state)."""
     _require_format_version(data, where)
     extra = set(data) - {"format-version", "release"}
     if extra:
@@ -159,6 +163,14 @@ def strict_releases(data, where):
         raise SchemaError("{}: [[release]] is not an array".format(where))
     for i, row in enumerate(rows, 1):
         strict_release_row(row, "{} row #{}".format(where, i))
+    # Array-level invariant (round-6 finding 3): per-row validation guarantees each version parses, so
+    # compare the parsed tuples pairwise in array order. A version that does not strictly exceed its
+    # predecessor (a duplicate is the equal case) is a non-append-only history, fail-closed.
+    for i in range(1, len(rows)):
+        if _parse(rows[i]["version"]) <= _parse(rows[i - 1]["version"]):
+            raise SchemaError("{}: release versions must be unique and strictly increasing in array order; "
+                              "row #{} {!r} does not exceed row #{} {!r}".format(
+                                  where, i + 1, rows[i]["version"], i, rows[i - 1]["version"]))
     return rows
 
 
@@ -488,11 +500,15 @@ def strict_id_history(data, where):
     if extra:
         raise SchemaError("{}: unknown top-level key(s): {}".format(where, ", ".join(sorted(extra))))
     rel_key = {"born": "born-release", "tombstone": "retired-release", "successor": "retired-release"}
-    born_ids = set()
     for section in ("born", "tombstone", "successor"):
         rows = data.get(section, [])
         if not isinstance(rows, list):
             raise SchemaError("{}: the {} section is not an array of tables".format(where, section))
+        # Array-level invariant (round-6 array-invariant audit): an id is unique WITHIN each section, so
+        # the section carries at most one born (birth is once), one tombstone, or one successor row per id.
+        # The born dedup existed; tombstone/successor are the symmetric gap this closes. Dedup is per section
+        # (an id legitimately appears in born AND a retirement section: born then retired).
+        seen_ids = set()
         for i, row in enumerate(rows, 1):
             rw = "{} {} row #{}".format(where, section, i)
             if not isinstance(row, dict) or set(row) != IDHISTORY_ROW_KEYS[section]:
@@ -501,13 +517,12 @@ def strict_id_history(data, where):
             if not _valid_register_id(row["id"]):
                 raise SchemaError("{}: id {!r} is neither a well-formed corpus-id nor clause-id".format(
                     rw, row["id"]))
+            if row["id"] in seen_ids:
+                raise SchemaError("{}: duplicate {} row for {!r}".format(rw, section, row["id"]))
+            seen_ids.add(row["id"])
             key = rel_key[section]
             if not isinstance(row[key], str) or _parse(row[key]) is None:
                 raise SchemaError("{}: {} is not a bare SemVer".format(rw, key))
-            if section == "born":
-                if row["id"] in born_ids:
-                    raise SchemaError("{}: duplicate born row for {!r}".format(rw, row["id"]))
-                born_ids.add(row["id"])
             if section == "successor" and not _valid_register_id(row["successor-id"]):
                 raise SchemaError("{}: successor-id {!r} is not a well-formed id".format(
                     rw, row["successor-id"]))
@@ -555,6 +570,10 @@ def _is_well_formed_url(value):
     # A well-formed URL percent-encodes any space or control character, so a raw one (space, 0x00-0x1F, DEL)
     # or a backslash is malformed: reject before urlparse, which would otherwise absorb a space into netloc.
     if any(ord(ch) <= 0x20 or ord(ch) == 0x7f for ch in value) or "\\" in value:
+        return False
+    # Every percent escape is exactly '%' + two ASCII hex digits (round-6 finding 2): '%zz', a truncated
+    # '%a', or a trailing '%' is a malformed escape that urlparse does not reject on its own.
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
         return False
     try:
         parsed = urlparse(value)

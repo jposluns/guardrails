@@ -565,7 +565,10 @@ def _renderer_freshness(root, label):
     try:
         # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must never crash the gate; only
         # the returncode is interpreted, and stderr is decoded with replacement for a diagnostic message.
-        proc = subprocess.run([sys.executable, str(root / "tools" / "gen_renderers.py"), "--check",
+        # -B: never write bytecode into the target tree (round-6 finding 1). gen_renderers imports the
+        # tree's own renderer modules; a .pyc left in `root`/tools/__pycache__ could be captured by a
+        # later index build and perturb a manifest SOURCES comparison.
+        proc = subprocess.run([sys.executable, "-B", str(root / "tools" / "gen_renderers.py"), "--check",
                                "--root", str(root)], capture_output=True)
     except OSError as exc:
         raise GateError("{} renderer freshness could not launch ({}); fail-closed".format(label, exc))
@@ -617,16 +620,24 @@ def _predecessor_tree_checks(root, commit, prev_genesis):
             _release_schema.materialize_tree_raw(root, commit, dest)
         except SchemaError as exc:
             raise GateError(str(exc))
+        # Build the throwaway index IMMEDIATELY after materialization, BEFORE any validator runs (round-6
+        # finding 1, hermeticity): the validators below run child interpreters against modules INSIDE `dest`
+        # (gen_renderers imports the tree's renderer closures), and with bytecode writing enabled a child
+        # would deposit `tools/__pycache__/*.pyc` in `dest` that this `git add --force -A` (force overrides
+        # the in-tree .gitignore) would then capture, so the predecessor manifest SOURCES set would disagree
+        # with the real tree and the gate would fail-closed spuriously. Indexing the CLEAN materialized tree
+        # first means no later-generated file can enter the index; the child interpreters are additionally
+        # launched with -B so none is written at all (defence in depth).
+        _index_materialized_tree(dest, "predecessor")
         _renderer_freshness(dest, "predecessor")
         clause_args = ["--root", str(dest)] + (["--genesis"] if prev_genesis else [])
         _validate_via_tool(dest, "check_clauses.py", clause_args,
                            "predecessor clause inventory / id-history structure (7.2/7.3)")
         # round-8 finding 1: the path leg trusts the predecessor manifest keyset, so validate the
-        # predecessor manifest against its OWN raw-materialized tree BEFORE it is trusted. Give the tree a
-        # throwaway index, then run the AUTHORITATIVE gen_manifest --check (fresh-regeneration drift) and
-        # check_manifest (exact SOURCES set-equality plus raw re-hash). A manifest that omits a covered pack
+        # predecessor manifest against its OWN raw-materialized tree BEFORE it is trusted, running the
+        # AUTHORITATIVE gen_manifest --check (fresh-regeneration drift) and check_manifest (exact SOURCES
+        # set-equality plus raw re-hash) over the index built above. A manifest that omits a covered pack
         # path (an under-claimed removal that the pre-fix gate passed as PATCH) is now exit 2.
-        _index_materialized_tree(dest, "predecessor")
         _validate_via_tool(dest, "gen_manifest.py", ["--check", "--root", str(dest)],
                            "predecessor manifest freshness (gen_manifest --check)")
         _validate_via_tool(dest, "check_manifest.py", ["--root", str(dest)],
@@ -743,8 +754,9 @@ def _validate_via_tool(root, script, args, what):
     pointed at the target via its args."""
     try:
         # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must not crash the gate; the
-        # returncode is interpreted, and the diagnostic tail is decoded with replacement.
-        proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / script), *args],
+        # returncode is interpreted, and the diagnostic tail is decoded with replacement. -B keeps the child
+        # from writing bytecode (round-6 finding 1 hermeticity), so no generated .pyc can enter a tree index.
+        proc = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve().parent / script), *args],
                               capture_output=True)
     except OSError as exc:
         raise GateError("{}: cannot launch {} ({}); fail-closed".format(what, script, exc))
@@ -1163,6 +1175,40 @@ def _real_pack_e2e(tmp, failures):
     if _run_quiet_root(repo) != 0:
         failures.append("real full-pack run(): a consistently-edited dispositioned id-keyed PATCH change "
                         "expected exit 0 (finding 2)")
+    # (round-6 finding 1) HERMETICITY: with child bytecode ENABLED, no generated file (.pyc/__pycache__) may
+    # enter the predecessor index. _predecessor_tree_checks materializes the tree and runs gen_renderers,
+    # which imports the tree's own renderer modules; the pre-fix order built the throwaway index AFTER that
+    # child ran, so a `git add --force -A` captured the fresh __pycache__ and the predecessor manifest
+    # SOURCES set disagreed with the real tree (the two fixtures above fail under a bare `python3 ...
+    # --self-test`). We drop PYTHONDONTWRITEBYTECODE from the child env, spy on the index git actually
+    # builds, and assert it carries no generated file AND that run() still returns the clean exit 0.
+    _saved_pdwb = os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+    _captured_index, _orig_index = [], _index_materialized_tree
+
+    def _spy_index(dest, label):
+        _orig_index(dest, label)
+        senv = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        senv["GIT_CONFIG_GLOBAL"] = os.devnull
+        senv["GIT_CONFIG_SYSTEM"] = os.devnull
+        ls = subprocess.run(["git", "-C", str(dest), "ls-files", "-z"], capture_output=True, env=senv)
+        _captured_index.extend(p for p in ls.stdout.decode("utf-8", "replace").split("\x00") if p)
+    globals()["_index_materialized_tree"] = _spy_index
+    try:
+        _rc_herm = _run_quiet_root(repo)
+    finally:
+        globals()["_index_materialized_tree"] = _orig_index
+        if _saved_pdwb is not None:
+            os.environ["PYTHONDONTWRITEBYTECODE"] = _saved_pdwb
+    if _rc_herm != 0:
+        failures.append("real full-pack run(): with child bytecode ENABLED the clean PATCH fixture must "
+                        "still exit 0 (round-6 finding 1 hermeticity)")
+    _generated = [p for p in _captured_index if "__pycache__" in p or p.endswith(".pyc")]
+    if _generated:
+        failures.append("HERMETICITY: a generated file entered the predecessor index {} (round-6 finding "
+                        "1)".format(sorted(_generated)[:3]))
+    if not _captured_index:
+        failures.append("HERMETICITY regression did not observe the predecessor index build (round-6 "
+                        "finding 1); the spy never fired")
     # (this round's #1) a STALE HEAD manifest: stage a NEW pack-owned path but do NOT regenerate the
     # manifest. Without the head manifest freshness/integrity check the path leg reads the stale manifest
     # keyset (missing the new path) and passes an under-claimed MINOR path-add as PATCH (exit 0); with it,
@@ -1503,6 +1549,28 @@ def _real_pack_e2e(tmp, failures):
         "real-pack-pred-disp-renderer-nosuch", _mut_disp_renderer_nosuch,
         "real full-pack run(): a PREDECESSOR renderer-semantics disposition naming an undeclared renderer "
         "must fail closed exit 2 (round-5 finding 2)")
+
+    # (round-6 finding 3) ARRAY-LEVEL releases invariants on the PREDECESSOR object. Each row is individually
+    # valid, so per-row validation passes; strict_releases now rejects the array when its versions are not
+    # unique + strictly increasing. read_genesis (keyset/presence only) accepts the multi-row record, so the
+    # NEW array check is the sole thing that flips the fixture to exit 2.
+    def _mut_releases_multi(rows_text):
+        def _mut(rp):
+            (rp / RELEASES_REL).write_text("format-version = 1\n\n" + rows_text, encoding="utf-8")
+        return _mut
+
+    def _rel_block(v):
+        return ('[[release]]\nversion = "{v}"\ntag = "v{v}"\ntag_object_sha = "{h}"\ncommit_sha = "{h}"\n'
+                'qa-sha256 = "{q}"\nqa-store-path = "qa/{v}.toml"\nattestation-timestamps = [1]\n'.format(
+                    v=v, h="a" * 40, q="c" * 64))
+    _pred_record_fixture(
+        "real-pack-pred-rel-dup", _mut_releases_multi(_rel_block("1.0.0") + "\n" + _rel_block("1.0.0")),
+        "real full-pack run(): two IDENTICAL predecessor release rows (a non-increasing version) must fail "
+        "closed exit 2 (round-6 finding 3)")
+    _pred_record_fixture(
+        "real-pack-pred-rel-order", _mut_releases_multi(_rel_block("1.0.1") + "\n" + _rel_block("1.0.0")),
+        "real full-pack run(): out-of-order predecessor release rows (versions not strictly increasing) "
+        "must fail closed exit 2 (round-6 finding 3)")
     # NOTE: a predecessor ORDER facet-duplication is NOT given a run() fixture: strict_order runs on the
     # predecessor object too (the same validator the genesis and head #5 fixtures exercise), but any facet
     # duplication also breaks operative TIER_FACETS equality, which check_manifest.check_order_record catches
@@ -1764,6 +1832,22 @@ def _real_pack_e2e(tmp, failures):
         if _run_quiet_root(g3) != 2:
             failures.append("real genesis full-pack run(): a default-correction captured-source with a "
                             "spaced host must fail closed exit 2 (round-5 finding 3)")
+
+    # (round-6 finding 2) a genesis default-correction whose captured-source carries a MALFORMED PERCENT
+    # ESCAPE ('%zz'): urlparse accepts it, but the strict grammar now rejects a '%' not followed by two hex
+    # digits, exit 2. The row is otherwise fully valid so the escape is the sole thing under test.
+    g2 = _extract_genesis("genesis-dc-badpct")
+    if g2 is not None:
+        (g2 / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "prjint1.1"\nrelease = "1.0.0"\n'
+            'kind = "default-correction"\nimpact = "x"\nrationale = "r"\n'
+            'captured-source = "https://example.com/%zz"\ncapture-date = "2026-08-24"\n'
+            'observed-measurement = "1 byte"\nobserved-date = "2026-08-24"\n'
+            'prefix-superset-reference = "qa/prefix.toml"\n', encoding="utf-8")
+        _genesis_regen(g2)
+        if _run_quiet_root(g2) != 2:
+            failures.append("real genesis full-pack run(): a default-correction captured-source with a "
+                            "malformed percent escape must fail closed exit 2 (round-6 finding 2)")
 
     # (round-5 finding 3) a subprocess child emitting INVALID UTF-8 with a nonzero exit is captured as
     # BYTES: _renderer_freshness raises a clean GateError (exit 2), never an uncaught UnicodeDecodeError
@@ -2288,6 +2372,57 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
         normalize_dispositions([dict(_cc_row, rationale="clean rationale")])
     except GateError as exc:
         failures.append("normalize_dispositions wrongly rejected a clean disposition row ({})".format(exc))
+
+    # --- round-6 direct validator regressions -----------------------------------------------------
+    # (finding 2) a malformed percent escape ('%zz', a truncated '%a', a trailing '%') is rejected; a valid
+    # escape ('%2F') is accepted. urlparse alone accepts all of these, so this is the discriminating layer.
+    for _bad_pct in ("https://example.com/%zz", "https://example.com/%a", "https://example.com/100%",
+                     "https://example.com/%g0"):
+        if _release_schema._is_well_formed_url(_bad_pct):
+            failures.append("_is_well_formed_url accepted a malformed percent escape {!r} (round-6 finding "
+                            "2)".format(_bad_pct))
+    for _ok_pct in ("https://example.com/%2Fpath", "https://example.com/a%20b", "https://example.com/p"):
+        if not _release_schema._is_well_formed_url(_ok_pct):
+            failures.append("_is_well_formed_url wrongly rejected a valid percent escape {!r} (round-6 "
+                            "finding 2)".format(_ok_pct))
+
+    # (finding 3) strict_releases enforces UNIQUE + STRICTLY-INCREASING versions across the array: two
+    # identical rows and an out-of-order pair each raise, a strictly-increasing pair is accepted.
+    def _rel_row(v):
+        return {"version": v, "tag": "v" + v, "tag_object_sha": "a" * 40, "commit_sha": "b" * 40,
+                "qa-sha256": "c" * 64, "qa-store-path": "qa/{}.toml".format(v),
+                "attestation-timestamps": [1]}
+    for _label, _vers in (("two identical rows", ["1.0.0", "1.0.0"]),
+                          ("out-of-order rows", ["1.0.1", "1.0.0"])):
+        try:
+            _release_schema.strict_releases(
+                {"format-version": 1, "release": [_rel_row(v) for v in _vers]}, "unit releases")
+            failures.append("strict_releases accepted {} (round-6 finding 3 array uniqueness/"
+                            "monotonicity)".format(_label))
+        except _release_schema.SchemaError:
+            pass
+    try:
+        _release_schema.strict_releases(
+            {"format-version": 1, "release": [_rel_row("1.0.0"), _rel_row("1.1.0")]}, "unit releases")
+    except _release_schema.SchemaError as exc:
+        failures.append("strict_releases wrongly rejected a strictly-increasing releases array ({})".format(
+            exc))
+
+    # (array-invariant audit) strict_id_history rejects a duplicate id WITHIN a section (tombstone here,
+    # symmetric with the pre-existing born dedup); an id in born AND a retirement section is still valid.
+    _dup_tomb = {"tombstone": [{"id": "prjint1.1", "retired-release": "1.1.0"},
+                               {"id": "prjint1.1", "retired-release": "1.2.0"}]}
+    try:
+        _release_schema.strict_id_history(_dup_tomb, "unit id-history")
+        failures.append("strict_id_history accepted a duplicate tombstone id (round-6 array-invariant audit)")
+    except _release_schema.SchemaError:
+        pass
+    try:
+        _release_schema.strict_id_history(
+            {"born": [{"id": "prjint1.1", "born-release": "1.0.0"}],
+             "tombstone": [{"id": "prjint1.1", "retired-release": "1.1.0"}]}, "unit id-history")
+    except _release_schema.SchemaError as exc:
+        failures.append("strict_id_history wrongly rejected an id in born AND tombstone ({})".format(exc))
 
     # --- _cat_file_batch grammar (round-7 finding 3) ----------------------------------------------
     class _FakeProc:
