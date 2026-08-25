@@ -138,6 +138,9 @@ MANIFEST_SOURCES_KEYS = frozenset({"path", "bytes", "sha256"})
 MANIFEST_ARTIFACT_BASE = frozenset({"artifact-id", "path", "kind", "sha256"})
 MANIFEST_ARTIFACT_KEYS = {"file": MANIFEST_ARTIFACT_BASE,
                           "managed-block": MANIFEST_ARTIFACT_BASE | {"block-id"}}
+# The single canonical managed block (gen_manifest.build_artifacts): the CLAUDE.md RULES-INDEX block.
+MANAGED_BLOCK_ID = "RULES-INDEX"
+MANAGED_BLOCK_PATH = "CLAUDE.md"
 
 
 def strict_manifest(data, where):
@@ -205,6 +208,15 @@ def strict_manifest(data, where):
             raise SchemaError("{}: missing or non-string path".format(rw))
         if not isinstance(row["sha256"], str) or not HEX64_RE.fullmatch(row["sha256"]):
             raise SchemaError("{}: sha256 is not 64 lowercase hex".format(rw))
+        if kind == "managed-block":
+            # The managed-block artifact is the CLAUDE.md RULES-INDEX block; validate the block-id VALUE and
+            # its bound path against the canonical set (round-6 finding 2: a block-id of 7 was accepted).
+            if row["block-id"] != MANAGED_BLOCK_ID:
+                raise SchemaError("{}: managed-block block-id must be {!r}, not {!r}".format(
+                    rw, MANAGED_BLOCK_ID, row["block-id"]))
+            if row["path"] != MANAGED_BLOCK_PATH:
+                raise SchemaError("{}: managed-block path must be {!r}, not {!r}".format(
+                    rw, MANAGED_BLOCK_PATH, row["path"]))
     return data
 
 
@@ -301,8 +313,12 @@ def strict_clause_inventory(data, where):
     non-empty canonical-text; and a 64-lowercase-hex source-digest. The full source-file span/text/digest
     CONSISTENCY (reading the rule sources) stays check_clauses'; this validates the record's own structure
     exhaustively on BOTH objects (the round-2/3 three-field guard accepted malformed ids and missing span/
-    digest fields). Returns the rows list."""
-    rows = data.get("clause")
+    digest fields). The EXACT top-level keyset is required first (round-6 finding 3: an unknown top-level
+    key like `bogus` was ignored). Returns the rows list."""
+    if not isinstance(data, dict) or set(data) != {"clause"}:
+        raise SchemaError("{}: top-level keys must be EXACTLY {{'clause'}} (found {})".format(
+            where, sorted(data) if isinstance(data, dict) else type(data).__name__))
+    rows = data["clause"]
     if not isinstance(rows, list):
         raise SchemaError("{}: no [[clause]] array".format(where))
     seen = set()

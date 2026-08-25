@@ -80,6 +80,17 @@ PROFILES_REL = ".aiqt/core/profiles.toml"
 DISPOSITION_COMMON_FIELDS = ("id", "release", "kind", "impact", "rationale")
 DEFAULT_CORRECTION_EVIDENCE = ("captured-source", "capture-date", "observed-measurement",
                                "observed-date", "prefix-superset-reference")
+# The EXACT per-kind disposition row keyset (round-6 finding 6): every kind carries exactly the common
+# fields plus its own, no more and no less. A default-correction adds the 6.6 evidence fields; a
+# class-change adds old-class/new-class; every other kind is common-only.
+_COMMON = frozenset(DISPOSITION_COMMON_FIELDS)
+DISPOSITION_KIND_KEYS = {
+    "behaviour-neutral": _COMMON, "strengthened": _COMMON, "version-impact": _COMMON,
+    "renderer-semantics": _COMMON,
+    "default-correction": _COMMON | frozenset(DEFAULT_CORRECTION_EVIDENCE),
+    "class-change": _COMMON | frozenset(("old-class", "new-class"))}
+# The release ownership-class vocabulary a class-change row moves between (single-sourced from gen_manifest).
+OWNERSHIP_CLASS_VOCAB = frozenset(gen_manifest.RELEASE_CLASSES + gen_manifest.NAMESPACE_CLASSES)
 
 
 class GateError(Exception):
@@ -175,14 +186,22 @@ def normalize_dispositions(rows):
             raise GateError(where + ": kind must be one of {}".format(sorted(DISPOSITION_KINDS)))
         if _parse(release) is None:
             raise GateError(where + ": release {!r} is not a bare SemVer".format(release))
+        # EXACT per-kind row keyset (round-6 finding 6): no extra or missing field for the kind.
+        expected = DISPOSITION_KIND_KEYS.get(kind)
+        if expected is not None and set(row) != expected:
+            raise GateError(where + ": {} row keys must be EXACTLY {} (found {})".format(
+                kind, sorted(expected), sorted(row)))
         try:
             if kind == "default-correction":
                 _release_schema.default_correction_evidence_findings(row, where)
             elif kind == "class-change":
+                # old-class and new-class are validated against the ownership-class VOCABULARY (round-6
+                # finding 6): a malformed class is a mis-stated control, exit 2, never a MINOR finding. The
+                # binding to the OBSERVED transition stays ownership_leg.
                 for k in ("old-class", "new-class"):
-                    if not isinstance(row.get(k), str) or not row.get(k):
-                        raise SchemaError(where + ": class-change row must carry a non-empty {!r} bound to "
-                                          "the observed ownership change (finding 3)".format(k))
+                    if row[k] not in OWNERSHIP_CLASS_VOCAB:
+                        raise SchemaError(where + ": class-change {} {!r} is not a release ownership class "
+                                          "({})".format(k, row[k], sorted(OWNERSHIP_CLASS_VOCAB)))
             elif kind == "renderer-semantics" and row.get("impact") not in ("alters-obligations",
                                                                             "byte-only"):
                 raise SchemaError(where + ": renderer-semantics row needs impact = alters-obligations or "
@@ -983,6 +1002,37 @@ def _real_pack_e2e(tmp, failures):
         if _run_quiet_root(gsrc) != 2:
             failures.append("real genesis full-pack run(): a manifest missing its [[sources]] section must "
                             "fail closed exit 2 (round-5 finding 1)")
+    # (round-6 finding 2) a managed-block artifact with a NON-STRING block-id: strict_manifest validates the
+    # block-id VALUE, exit 2 (the pre-round-6 validator checked the keyset but not the value).
+    gblk = _extract_genesis("genesis-bad-blockid")
+    if gblk is not None:
+        mp = gblk / ".aiqt" / "manifest.toml"
+        mutated = mp.read_text(encoding="utf-8").replace('block-id = "RULES-INDEX"', "block-id = 7", 1)
+        mp.write_text(mutated, encoding="utf-8")
+        if _run_quiet_root(gblk) != 2:
+            failures.append("real genesis full-pack run(): a non-string managed-block block-id must fail "
+                            "closed exit 2 (round-6 finding 2)")
+    # (round-6 finding 3) an UNKNOWN top-level key in clauses.toml: the exact top-level keyset is required
+    # before rows are read, exit 2 (the pre-round-6 validator ignored top-level keys).
+    gcla = _extract_genesis("genesis-clause-topkey")
+    if gcla is not None:
+        cp = gcla / CLAUSES_REL
+        cp.write_text("bogus = 1\n" + cp.read_text(encoding="utf-8"), encoding="utf-8")
+        if _run_quiet_root(gcla) != 2:
+            failures.append("real genesis full-pack run(): an unknown clauses.toml top-level key must fail "
+                            "closed exit 2 (round-6 finding 3)")
+    # (round-6 finding 6) a class-change disposition whose old-class is NOT a release ownership class: the
+    # malformed control is exit 2 at load (the pre-round-6 validator accepted any non-empty class string and
+    # the ownership leg later produced a MINOR/binding finding, exit 1).
+    gcc = _extract_genesis("genesis-bad-class")
+    if gcc is not None:
+        (gcc / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = ".aiqt/x"\nrelease = "1.0.0"\n'
+            'kind = "class-change"\nimpact = "x"\nrationale = "r"\nold-class = "not-a-class"\n'
+            'new-class = "pack-immutable"\n', encoding="utf-8")
+        if _run_quiet_root(gcc) != 2:
+            failures.append("real genesis full-pack run(): a class-change with a non-vocabulary old-class "
+                            "must fail closed exit 2 (round-6 finding 6)")
     # (finding 5) a SELF-REFERENTIAL profiles.toml symlink (a loop): the artifact is present as a tree
     # entry, so the unbuilt-profiles leg must fail closed exit 2. The pre-round-5 is_file() saw a broken
     # loop as absent and returned NOT APPLICABLE -> exit 0.
@@ -1557,8 +1607,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
                      "disposition (exit 1, round-3 finding 3), a SMUDGE-FILTER predecessor closure attack "
                      "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
                      "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
-                     "self-referential profiles symlink (exit 2, round-5 finding 5), and an invalid-UTF-8 "
-                     "child capture (round-5 finding 3) hold") \
+                     "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
+                     "child capture (round-5 finding 3), and the round-6 non-string block-id (finding 2), "
+                     "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
+                     "class (finding 6) each exit 2 hold") \
                     if real_ran else \
                     "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
         print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "

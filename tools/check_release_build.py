@@ -255,24 +255,32 @@ def _all_release_tags(root):
 
 
 def release_tag_findings(root, rows):
-    """2.4 / VER-CORE-SPEC.md:231-235,273 RELEASE-TAG COVERAGE. Over EVERY v<SemVer> tag (round-5 finding 2):
-    (a) a LIGHTWEIGHT release tag is disallowed (2.1) and is a finding; (b) an ANNOTATED release tag AT OR
-    BELOW the newest recorded row that has no attestation row is a missing-predecessor finding (a tagged
-    release must carry its row before the next release is accepted). A tag ABOVE the newest recorded row (or
-    any tag when there are zero rows) is the in-flight release whose row is appended post-tag, so it is not a
-    missing-row finding, but a lightweight in-flight tag is still disallowed."""
+    """2.4 / VER-CORE-SPEC.md:231-235,273 RELEASE-TAG COVERAGE. Over EVERY v<SemVer> tag:
+    (a) a LIGHTWEIGHT release tag is disallowed (2.1) and is a finding; (b) EVERY annotated release tag must
+    carry an attestation row EXCEPT the single HIGHEST tag overall, which is permitted as the in-flight
+    release whose row is appended post-tag (round-6 finding 4: multiple unrecorded annotated tags, or two
+    tags with zero rows, previously all passed as in-flight; spec L273 requires row N before release N+1).
+    So among the annotated tags, only the maximum may be unrecorded; every OTHER unrecorded annotated tag is
+    a missing-attestation-row finding."""
     findings = []
-    recorded = {_parse(r["version"]): r["version"] for r in rows if _parse(r["version"]) is not None}
-    newest = max(recorded) if recorded else None
-    for ver, (tag, kind) in sorted(_all_release_tags(root).items()):
+    tags = _all_release_tags(root)
+    recorded = {_parse(r["version"]) for r in rows if _parse(r["version"]) is not None}
+    newest_recorded = max(recorded) if recorded else None
+    annotated = sorted(_parse(v) for v, (_t, kind) in tags.items() if kind == "tag" and _parse(v))
+    # The in-flight release is the single highest annotated tag, but ONLY when it sits above the newest
+    # recorded row (or there are no rows); otherwise every unrecorded annotated tag is a skipped predecessor.
+    inflight = annotated[-1] if annotated and (newest_recorded is None
+                                               or annotated[-1] > newest_recorded) else None
+    for ver, (tag, kind) in sorted(tags.items()):
         t = _parse(ver)
         if kind != "tag":
             findings.append("release tag {} is LIGHTWEIGHT; release tags must be annotated (2.1); a "
                             "lightweight release tag is disallowed".format(tag))
-        if t is not None and newest is not None and t <= newest and t not in recorded:
-            findings.append("release {} is tagged ({}) at or below the newest attested release {} but has "
-                            "no attestation row; a predecessor missing its row blocks the next release "
-                            "(2.4/L273)".format(ver, tag, recorded[newest]))
+            continue
+        if t is not None and t not in recorded and t != inflight:
+            findings.append("release {} is tagged ({}) but has no attestation row; only the single highest "
+                            "release tag may be in-flight, every earlier tagged release must carry its row "
+                            "before the next release is accepted (2.4/L273)".format(ver, tag))
     return findings
 
 
@@ -438,6 +446,24 @@ def load_build_rows(root):
     return _strict_releases(data, RELEASES_REL)
 
 
+def load_strict_manifest(root, ref=None, label=None):
+    """Read the manifest from a git `ref` (or the WORKING TREE when ref is None) and strict-validate it
+    through the single exhaustive validator (round-6 finding 1, THE INVARIANT): NO build mode reads a
+    manifest field, or returns dormant, before this runs. Used by audit (working tree), pre-tag (candidate
+    ref), the tagged-row validation (tagged ref), and post-tag (attestation-commit ref)."""
+    if ref is None:
+        try:
+            data = load_toml(root / MANIFEST_REL)
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+            raise GateError("cannot read {} ({})".format(MANIFEST_REL, exc))
+    else:
+        data = _show_toml(root, ref, MANIFEST_REL)
+    try:
+        return _release_schema.strict_manifest(data, label or MANIFEST_REL)
+    except SchemaError as exc:
+        raise GateError(str(exc))
+
+
 def _validate_tag_row(root, row):
     """Resolve a row's annotated tag to both recorded SHAs and confirm the tagged tree's manifest
     declares the row's version. Returns (findings, genesis_bool). Unresolvable tag/SHA is GateError."""
@@ -459,14 +485,10 @@ def _validate_tag_row(root, row):
         findings.append("release {} tag_object_sha does not match the resolved tag object".format(version))
     if _rev_parse(root, "refs/tags/" + tag + "^{commit}") != row["commit_sha"]:
         findings.append("release {} commit_sha does not match the tag's peeled commit".format(version))
-    tagged_manifest = _show_toml(root, tag + "^{commit}", MANIFEST_REL)
-    # Strict-validate the tagged tree's manifest BEFORE reading any field (round-4 finding 3): a
-    # format-version=999 or an unknown top-level key in a tagged manifest is a schema fault, exit 2, not a
-    # clean audit.
-    try:
-        _release_schema.strict_manifest(tagged_manifest, "tagged manifest for release {}".format(version))
-    except SchemaError as exc:
-        raise GateError(str(exc))
+    # Read AND strict-validate the tagged tree's manifest through the single invariant loader before any
+    # field is read (round-4 finding 3 / round-6 THE INVARIANT).
+    tagged_manifest = load_strict_manifest(root, tag + "^{commit}",
+                                           "tagged manifest for release {}".format(version))
     if tagged_manifest.get("release-version") != version:
         findings.append("release {} tag points at a tree whose manifest release-version is {!r}".format(
             version, tagged_manifest.get("release-version")))
@@ -480,6 +502,9 @@ def run_audit(root):
     (round-5 finding 2, spec 2.6/L324-329): each layer arms when its first tag OR row exists, so a zero-row
     tree that already carries a v<SemVer> tag is armed, and a lightweight or unrecorded tag is caught."""
     try:
+        # THE INVARIANT (round-6 finding 1): strict-validate the audited (working-tree) manifest BEFORE the
+        # dormancy short-circuit, so a zero-row tree with a malformed manifest is exit 2, not a clean audit.
+        load_strict_manifest(root)
         rows = load_build_rows(root)
         tags = _all_release_tags(root)
         if not rows and not tags:
@@ -519,6 +544,16 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
     """--pre-tag CANDIDATE mode (2.6): reproduce against committed digests, QA retrieval/success/
     family-set, genesis declaration, prior-row validation. Never chronology (no tag yet)."""
     try:
+        # THE candidate is an IMMUTABLE COMMIT (round-6 finding 5): --candidate-sha must be a full lowercase
+        # 40/64-hex object id that resolves to a commit object equal to itself, so a symbolic ref (HEAD), an
+        # abbreviation, or a tag object is rejected exit 2 BEFORE any reproduction or QA read. All git reads
+        # and the QA-object candidate binding then use this canonical commit id.
+        if not _release_schema.OBJECTID_RE.fullmatch(candidate_sha):
+            raise GateError("--candidate-sha {!r} is not a full lowercase 40/64-hex object id (a symbolic "
+                            "ref, an abbreviation, or a tag name is rejected)".format(candidate_sha))
+        if _rev_parse(root, candidate_sha + "^{commit}") != candidate_sha:
+            raise GateError("--candidate-sha {!r} does not resolve to a commit object equal to itself (a "
+                            "tag object or a non-commit is rejected)".format(candidate_sha))
         findings = []
         findings += reproduce_gate(root, candidate_sha)
         qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
@@ -526,11 +561,7 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         # genesis declaration of the candidate tree; the candidate manifest AND releases record are
         # strict-validated before any field is read (round-2 finding 4 + round-3 finding 3): a bad
         # format-version or unknown key on the candidate manifest is exit 2.
-        cand_manifest = _show_toml(root, candidate_sha, MANIFEST_REL)
-        try:
-            _release_schema.strict_manifest(cand_manifest, "candidate " + MANIFEST_REL)
-        except SchemaError as exc:
-            raise GateError(str(exc))
+        cand_manifest = load_strict_manifest(root, candidate_sha, "candidate " + MANIFEST_REL)
         cand_rows = _strict_releases(_show_toml(root, candidate_sha, RELEASES_REL),
                                      "candidate " + RELEASES_REL)
         is_genesis = cand_manifest.get("genesis") is True
@@ -752,6 +783,9 @@ def run_post_tag(root, attestation_commit, qa_path):
     and it never defaults a missing field to clean."""
     try:
         ref = attestation_commit or "HEAD"
+        # THE INVARIANT (round-6 finding 1): strict-validate the attestation-commit manifest before any
+        # verdict; post-tag previously read only releases.toml at that ref.
+        load_strict_manifest(root, ref, "attestation " + MANIFEST_REL)
         releases = _show_toml(root, ref, RELEASES_REL)
         # Re-validate through the ONE shared strict validator, exactly as the working-tree loader: every
         # present row is a complete attestation record, so post-tag gets the full schema, not just anchor
@@ -1463,8 +1497,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # disallowed. Zero rows + a LIGHTWEIGHT v1.0.0 arms the gate and is flagged (was exit 0).
             lwz = tmp / "lightweight-zero"
             _init(lwz)
-            (lwz / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
-            (lwz / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+            _write_records(lwz, "format-version = 1\n")   # zero-row releases + a valid manifest
             _commit(lwz, "zero-row")
             subprocess.run(["git", "-C", str(lwz), "tag", "v1.0.0"],  # lightweight
                            check=True, capture_output=True, text=True)
@@ -1501,8 +1534,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # pass) where git rejects the raw byte in a ref name.
             u8 = tmp / "invalid-utf8-tag"
             _init(u8)
-            (u8 / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
-            (u8 / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+            _write_records(u8, "format-version = 1\n")   # zero-row releases + a valid manifest
             _commit(u8, "zero-row")
             u8_commit = subprocess.run(["git", "-C", str(u8), "rev-parse", "HEAD"],
                                        check=True, capture_output=True, text=True).stdout.strip()
@@ -1582,6 +1614,55 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                     "not a finding (round-5 finding 5)")
                 except GateError:
                     pass
+
+            # === ROUND-6 build fixtures ==============================================================
+            # (finding 1) THE INVARIANT: the manifest is strict-validated in EVERY mode before any verdict.
+            # A zero-row audit with a malformed WORKING-TREE manifest is exit 2 (was a dormant exit 0), and a
+            # post-tag with a malformed ATTESTATION-COMMIT manifest is exit 2 (post-tag read only releases).
+            am = tmp / "audit-bad-manifest"
+            _init(am)
+            _write_records(am, "format-version = 1\n",
+                           _valid_manifest().replace("format-version = 1", "format-version = 999", 1))
+            _commit(am, "zero-row with a malformed manifest")
+            if _run_audit_quiet(am) != 2:
+                failures.append("audit zero-row with a malformed manifest must fail closed exit 2 BEFORE "
+                                "dormancy (round-6 finding 1)")
+            # post-tag malformed attestation-commit manifest: reuse the clean post-tag repo (pt) but rewrite
+            # its manifest to a bogus one and commit, then run post-tag -> exit 2.
+            (pt / MANIFEST_REL).write_text(
+                _valid_manifest().replace("format-version = 1", "format-version = 999", 1),
+                encoding="utf-8")
+            _commit(pt, "malformed attestation manifest")
+            if _run_post_tag_quiet(pt, None, str(qa_file)) != 2:
+                failures.append("post-tag with a malformed attestation-commit manifest must fail closed "
+                                "exit 2 (round-6 finding 1)")
+
+            # (finding 4) a zero-row repo with TWO annotated tags (v1.0.0 AND v1.1.0): only the highest is
+            # in-flight, so v1.0.0 is a missing-attestation-row finding, exit 1 (was PASS).
+            two = tmp / "two-annotated-zero"
+            _init(two)
+            _write_records(two, "format-version = 1\n")
+            _commit(two, "zero-row")
+            for v in ("1.0.0", "1.1.0"):
+                subprocess.run(["git", "-C", str(two), "tag", "-a", "v" + v, "-m", v],
+                               check=True, capture_output=True, text=True,
+                               env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            if _run_audit_quiet(two) != 1:
+                failures.append("audit zero-row with annotated v1.0.0 AND v1.1.0 must flag v1.0.0 as a "
+                                "missing attestation row, exit 1 (round-6 finding 4)")
+
+            # (finding 5) a SYMBOLIC --candidate-sha (HEAD) is rejected exit 2 before any reproduction/QA
+            # (an immutable full commit id is required).
+            sym = tmp / "symbolic-candidate"
+            _init(sym)
+            _write_records(sym, "format-version = 1\n")
+            _commit(sym, "candidate")
+            sym_qa = sym / "qa.toml"
+            sym_qa.write_text('candidate-sha = "HEAD"\n', encoding="utf-8")
+            if _run_pre_tag_quiet(sym, "HEAD", str(sym_qa),
+                                  hashlib.sha256(sym_qa.read_bytes()).hexdigest(), False, None) != 2:
+                failures.append("pre-tag with a symbolic --candidate-sha HEAD must be rejected exit 2 "
+                                "(round-6 finding 5)")
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -1615,7 +1696,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
               "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "
               "tagged manifest with a bogus artifact key exit 2 (finding 1), an injected mkdtemp OSError "
               "raising GateError (finding 4), and a symlink-loop --evidence raising GateError (finding "
-              "5))) hold".format(core))
+              "5)); and the round-6 cases (THE INVARIANT: a malformed working-tree manifest exit 2 before "
+              "dormancy and a malformed attestation-commit manifest exit 2 (finding 1), two annotated tags "
+              "with zero rows flag the lower as a missing row exit 1 (finding 4), and a symbolic HEAD "
+              "--candidate-sha rejected exit 2 (finding 5))) hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))
