@@ -406,15 +406,44 @@ def renderer_diff(prev_decl, head_decl, rows, head_version):
     return events, findings
 
 
-def renderer_leg(root, prev_decl, head_decl, rows, head_version):
-    """6.5 RENDERER SEMANTICS. Freshness first: gen_renderers.py --check re-derives every closure and
-    framed digest (the single home of that computation); drift or an incomplete closure is exit 2. Then
-    the anchored declaration diff (renderer_diff)."""
-    proc = subprocess.run([sys.executable, str(root / "tools" / "gen_renderers.py"), "--check"],
-                          capture_output=True, text=True)
+def _renderer_freshness(root, label):
+    """Run gen_renderers.py --check against the tree at `root` (its own repo, resolved by the copied
+    gen_renderers via repo_root). Drift or an incomplete closure is exit 2."""
+    proc = subprocess.run([sys.executable, str(root / "tools" / "gen_renderers.py"), "--check",
+                           "--root", str(root)], capture_output=True, text=True)
     if proc.returncode != 0:
-        raise GateError("renderer declaration is stale or a closure is incomplete "
-                        "(gen_renderers.py --check rc={})".format(proc.returncode))
+        raise GateError("{} renderer declaration is stale or a closure is incomplete "
+                        "(gen_renderers.py --check rc={})".format(label, proc.returncode))
+
+
+def _predecessor_renderer_freshness(root, commit):
+    """Recompute and validate EVERY predecessor renderer closure and framed digest (round-3 finding 4):
+    materialize the predecessor commit into a throwaway detached worktree and run gen_renderers.py --check
+    against it, so an undeclared edit inside any closure member at the predecessor (with a restored HEAD)
+    is caught, not just a HEAD edit. Hermetic: a temp worktree, removed in finally; no host mutation."""
+    import shutil
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-prevrender-"))
+    co = tmp / "co"
+    try:
+        proc = _git(root, ["worktree", "add", "--detach", str(co), commit])
+        if proc.returncode != 0:
+            raise GateError("cannot materialize the predecessor tree for renderer freshness: {}".format(
+                (proc.stderr or "").strip()))
+        _renderer_freshness(co, "predecessor")
+    finally:
+        _git(root, ["worktree", "remove", "--force", str(co)])
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def renderer_leg(root, commit, prev_decl, head_decl, rows, head_version):
+    """6.5 RENDERER SEMANTICS. Freshness on BOTH objects (round-3 finding 4): gen_renderers.py --check
+    re-derives every closure and framed digest on HEAD, and _predecessor_renderer_freshness does the same
+    on the predecessor tree, so a closure edit at either end is caught; drift or an incomplete closure is
+    exit 2. Then the anchored declaration diff (renderer_diff). The declaration SCHEMAS are strict-validated
+    by the caller on both objects."""
+    _renderer_freshness(root, "head")
+    _predecessor_renderer_freshness(root, commit)
     return renderer_diff(prev_decl, head_decl, rows, head_version)
 
 
@@ -539,6 +568,10 @@ def run(root):
     try:
         release_rows = load_release_rows(root)
         head_manifest = _load(root, MANIFEST_REL)
+        # Strict-validate the manifest BEFORE branching genesis/delta (round-3 finding 1): a bad
+        # format-version, an unknown top-level key, or a malformed/duplicate source row is exit 2, never a
+        # clean genesis over an unvalidated manifest (spec 2.5/L299).
+        _strict(_release_schema.strict_manifest, head_manifest, MANIFEST_REL)
         rows = load_dispositions(root)
         # Profiles/groups (2.6 arm-or-fail-closed): the real diff leg is not built. While the artifact is
         # ABSENT the leg is legitimately NOT APPLICABLE; the moment it SHIPS a gate that cannot diff it must
@@ -556,7 +589,7 @@ def run(root):
             # and renderer records parse; the inventory + id-history register and renderer freshness are
             # validated through their single-home validators (VC-4 QA #1).
             _strict(_release_schema.strict_order, _load(root, ORDER_REL), ORDER_REL)
-            _load(root, RENDERERS_REL)
+            _strict(_release_schema.strict_renderers, _load(root, RENDERERS_REL), RENDERERS_REL)
             _strict(_release_schema.strict_clause_inventory, _load(root, CLAUSES_REL), CLAUSES_REL)
             _strict(_release_schema.strict_id_history, _load(root, IDHISTORY_REL), IDHISTORY_REL)
             _genesis_structural(root)
@@ -585,22 +618,47 @@ def run(root):
         _strict(_release_schema.strict_order, _show_toml(root, commit, ORDER_REL),
                 "predecessor " + ORDER_REL)
         _strict(_release_schema.strict_order, _load(root, ORDER_REL), ORDER_REL)
+        # Manifest and renderer declaration schemas on BOTH objects (round-3 findings 1/4).
+        prev_manifest = _show_toml(root, commit, MANIFEST_REL)
+        _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
+        prev_renderers = _show_toml(root, commit, RENDERERS_REL)
+        head_renderers = _load(root, RENDERERS_REL)
+        _strict(_release_schema.strict_renderers, prev_renderers, "predecessor " + RENDERERS_REL)
+        _strict(_release_schema.strict_renderers, head_renderers, RENDERERS_REL)
         events, findings = [], []
         for ev, fs in (clause_text_leg(prev_inv, head_inv, register, rows, head_version),
-                       path_keyset_leg(_show_toml(root, commit, MANIFEST_REL), head_manifest),
+                       path_keyset_leg(prev_manifest, head_manifest),
                        ownership_leg(_ownership_classes_at(root, commit),
                                      _ownership_classes_head(root), rows, head_version),
                        order_leg(_show(root, commit, ORDER_REL), (root / ORDER_REL).read_bytes()),
-                       renderer_leg(root, _show_toml(root, commit, RENDERERS_REL),
-                                    _load(root, RENDERERS_REL), rows, head_version)):
+                       renderer_leg(root, commit, prev_renderers, head_renderers, rows, head_version)):
             events += ev
             findings += fs
         # Profiles/groups is guaranteed ABSENT here (a present artifact fail-closed above): NOT APPLICABLE.
         print("release-delta: profiles/groups leg NOT APPLICABLE (adopter-experience artifact not "
               "yet defined; arms or fail-closes when it ships)")
         floor = max((e.floor for e in events), default=PATCH)
+        # The subjects of the changes DETECTED this release, grouped by the disposition kind that would
+        # target them, so a mis-dated row for a current change can be caught (round-3 finding 3).
+        clause_subjects = {e.subject for e in events if e.surface == "clause" and e.change in (
+            "behaviour-neutral", "strengthened", "default-correction", "undispositioned-text-change")}
+        ownership_subjects = {e.subject for e in events if e.surface == "ownership"
+                              and e.change in ("weakened", "strengthened")}
+        renderer_subjects = {e.subject for e in events if e.surface == "renderer"}
+        subjects_by_kind = {"behaviour-neutral": clause_subjects, "strengthened": clause_subjects,
+                            "default-correction": clause_subjects, "class-change": ownership_subjects,
+                            "renderer-semantics": renderer_subjects}
         for r in rows:
-            if r["release"] == head_version and not r["_consumed"]:
+            if r["_consumed"]:
+                continue
+            if r["id"] in subjects_by_kind.get(r["kind"], set()) and r["release"] != head_version:
+                # A row that names a change detected THIS release but is dated for another release: it was
+                # never consumed (take_row is exact-release) and the head_version sweep cannot see it, so a
+                # mis-dated disposition could otherwise hide behind a coincidentally-adequate bump.
+                findings.append("disposition row (kind {} id {}) is dated {}, not the release under build "
+                                "{}, but names a change detected in this release (mis-dated "
+                                "disposition)".format(r["kind"], r["id"], r["release"], head_version))
+            elif r["release"] == head_version:
                 findings.append("disposition row (kind {} id {}) at {} matches no detected change "
                                 "(unconsumed)".format(r["kind"], r["id"], head_version))
         if claimed < floor:
@@ -739,6 +797,56 @@ def _real_pack_e2e(tmp, failures):
     if _run_quiet_root(repo) != 2:
         failures.append("real full-pack run(): dispositions.toml format-version=999 must fail closed "
                         "exit 2 (finding 1)")
+
+    # (finding 3) WRONG-VERSION disposition: the same clause text change, a MAJOR bump (2.0.0), and a
+    # behaviour-neutral row that names the change but is mis-dated 1.0.1. take_row is exact-release, so the
+    # row is never consumed; the change goes undispositioned MAJOR, which the MAJOR bump satisfies, so the
+    # pre-fix gate returned exit 0 and the mis-dated row was invisible. The fix flags the mis-dated row.
+    (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
+    (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "2.0.0"\n', encoding="utf-8")
+    (repo / DISPOSITIONS_REL).write_text(
+        'format-version = 1\n\n[[disposition]]\nid = "{}"\nrelease = "1.0.1"\n'
+        'kind = "behaviour-neutral"\nimpact = "x"\nrationale = "r"\n'.format(cid), encoding="utf-8")
+    if _run_quiet_root(repo) != 1:
+        failures.append("real full-pack run(): a wrong-version disposition for the detected change (dated "
+                        "1.0.1, change at 2.0.0) must be flagged exit 1 (finding 3), not hidden behind the "
+                        "MAJOR bump")
+
+    # (finding 4) PREDECESSOR renderer closure edit: a second repo whose commit-1 carries an undeclared
+    # edit to tools/_gen_common.py (inside every renderer closure) while the working tree (HEAD) restores
+    # the original. The pre-fix gate ran gen_renderers --check only on HEAD (fresh) and merely diffed the
+    # predecessor declaration, so it returned exit 0; the fix recomputes the predecessor closures and fails
+    # closed exit 2. Reuses the same archive bytes.
+    gcommon = "tools/_gen_common.py"
+    repo2 = tmp / "real-pack-prevrender"
+    repo2.mkdir()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as tf:
+            tf.extractall(repo2)
+    except (tarfile.TarError, OSError):
+        return True  # the primary cases already ran; skip the optional predecessor-render case
+    orig_gcommon = (repo2 / gcommon).read_text(encoding="utf-8")
+    (repo2 / gcommon).write_text(orig_gcommon + "\n# predecessor-only undeclared edit\n", encoding="utf-8")
+    ok = True
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "release 1.0.0", "--no-verify"]):
+        if subprocess.run(["git", "-C", str(repo2), *args], capture_output=True, env=env).returncode != 0:
+            ok = False
+            break
+    if ok:
+        commit1b = subprocess.run(["git", "-C", str(repo2), "rev-parse", "HEAD"], capture_output=True,
+                                  text=True).stdout.strip()
+        (repo2 / gcommon).write_text(orig_gcommon, encoding="utf-8")   # HEAD restores the original closure
+        (repo2 / RELEASES_REL).write_text(
+            'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+            'tag_object_sha = "{c}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
+            'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
+                c=commit1b, h="a" * 64), encoding="utf-8")
+        (repo2 / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
+        (repo2 / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
+        if _run_quiet_root(repo2) != 2:
+            failures.append("real full-pack run(): an undeclared predecessor edit inside a renderer closure "
+                            "(tools/_gen_common.py) with a restored HEAD must fail closed exit 2 (finding "
+                            "4), not pass on a HEAD-only freshness check")
     return True
 
 
@@ -1042,25 +1150,33 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
         e2e_ran = False
     else:
         e2e_ran = True
+
+        def _valid_manifest(genesis):
+            # A STRUCTURALLY valid manifest (round-3 finding 1: strict_manifest now runs before the
+            # genesis/delta branch, so a fixture testing another record needs a well-formed manifest to
+            # reach it). Empty sources/artifacts are structurally valid here (the full set-equality is
+            # check_manifest's, not this gate's).
+            return ('format-version = 1\nrelease-version = "1.0.0"\ngenesis = {}\n'
+                    'tree-sha256 = "{}"\n'.format(genesis, "a" * 64))
+
         try:
-            # (genesis structural, VC-4 QA #1) zero-row releases + manifest genesis=true, but a MINIMAL
-            # record tree with no id-history register and no tools closure: genesis mode must now VALIDATE
-            # the internal structure of every consumed record (not merely parse it), so it fails CLOSED
-            # (exit 2) rather than passing exit 0 as it did before the fix. A genuine clean genesis (real
-            # inventory, register, and renderer closure) is exercised by run_all_checks against the pack.
+            # (genesis structural, VC-4 QA #1) zero-row releases + a valid manifest genesis=true, but a
+            # MINIMAL record tree whose renderer/inventory structure cannot be validated: genesis mode
+            # fails CLOSED (exit 2) rather than passing exit 0. A genuine clean genesis (real inventory,
+            # register, and renderer closure) is exercised by run_all_checks against the pack.
             g = tmp / "genesis"
             (g / ".aiqt" / "core").mkdir(parents=True)
-            (g / ".aiqt" / "manifest.toml").write_text("genesis = true\n", encoding="utf-8")
+            (g / ".aiqt" / "manifest.toml").write_text(_valid_manifest("true"), encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (g / rel).write_text("format-version = 1\n", encoding="utf-8")
             if _run_quiet_root(g) != 2:
                 failures.append("genesis structural: a record tree whose structure cannot be validated "
                                 "must fail closed exit 2 (QA #1), not pass")
 
-            # (genesis-mismatch) zero rows but manifest genesis not true -> exit 2.
+            # (genesis-mismatch) zero rows but a valid manifest whose genesis is not true -> exit 2.
             gm = tmp / "genesis-mismatch"
             (gm / ".aiqt" / "core").mkdir(parents=True)
-            (gm / ".aiqt" / "manifest.toml").write_text("genesis = false\n", encoding="utf-8")
+            (gm / ".aiqt" / "manifest.toml").write_text(_valid_manifest("false"), encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (gm / rel).write_text("format-version = 1\n", encoding="utf-8")
             if _run_quiet_root(gm) != 2:
@@ -1072,12 +1188,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
             # conservative verdict.
             u = tmp / "unreachable"
             (u / ".aiqt" / "core").mkdir(parents=True)
-            (u / ".aiqt" / "manifest.toml").write_text("genesis = false\n", encoding="utf-8")
+            (u / ".aiqt" / "manifest.toml").write_text(_valid_manifest("false"), encoding="utf-8")
             (u / RELEASES_REL).write_text(
                 'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                'tag_object_sha = "deadbeef"\ncommit_sha = "deadbeef"\nqa-sha256 = "{}"\n'
-                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format("a" * 64),
-                encoding="utf-8")
+                'tag_object_sha = "{a}"\ncommit_sha = "{a}"\nqa-sha256 = "{h}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
+                    a="a" * 40, h="a" * 64), encoding="utf-8")
             (u / CHANGELOG_REL).write_text(
                 '[[release]]\nversion = "1.1.0"\n', encoding="utf-8")
             (u / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
@@ -1096,7 +1212,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
                 load_dispositions -> the genesis structural validators in that order."""
                 base = tmp / dirname
                 (base / ".aiqt" / "core").mkdir(parents=True)
-                (base / ".aiqt" / "manifest.toml").write_text("genesis = true\n", encoding="utf-8")
+                man = overrides.pop("_manifest", _valid_manifest("true"))
+                (base / ".aiqt" / "manifest.toml").write_text(man, encoding="utf-8")
                 bodies = {RELEASES_REL: "format-version = 1\n",
                           DISPOSITIONS_REL: "format-version = 1\n",
                           ORDER_REL: 'format-version = 1\napex-corpus-id = "prjint1"\n',
@@ -1106,6 +1223,23 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
                 for rel, body in bodies.items():
                     (base / rel).write_text(body, encoding="utf-8")
                 return base
+
+            # manifest.toml malformed (round-3 finding 1): a bad format-version, an unknown top-level key,
+            # and a duplicate source row each fail closed exit 2 BEFORE the genesis/delta branch.
+            if _run_quiet_root(_genesis_base(
+                    "m-man-fmtver", _manifest='format-version = 999\nrelease-version = "1.0.0"\n'
+                    'genesis = true\ntree-sha256 = "{}"\n'.format("a" * 64))) != 2:
+                failures.append("real run(): manifest format-version=999 must fail closed exit 2 (finding 1)")
+            if _run_quiet_root(_genesis_base(
+                    "m-man-topkey", _manifest=_valid_manifest("true") + "bogustop = 1\n")) != 2:
+                failures.append("real run(): manifest unknown top-level key must fail closed exit 2 "
+                                "(finding 1)")
+            dup_src = (_valid_manifest("true")
+                       + '\n[[sources]]\npath = "a.txt"\nbytes = 1\nsha256 = "{h}"\n'
+                         '\n[[sources]]\npath = "a.txt"\nbytes = 2\nsha256 = "{h}"\n'.format(h="a" * 64))
+            if _run_quiet_root(_genesis_base("m-man-dupsrc", _manifest=dup_src)) != 2:
+                failures.append("real run(): manifest duplicate source row must fail closed exit 2 "
+                                "(finding 1)")
 
             # releases.toml format-version = 999 (finding 1/4): exit 2 BEFORE the genesis structural stage.
             if _run_quiet_root(_genesis_base("m-rel-fmtver",
@@ -1158,7 +1292,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
                         '[[clause]]\nclause-id = "cx.1"\ncorpus-id = "cx"\ncanonical-text = "a"\n\n'
                         '[[clause]]\nclause-id = "cx.1"\ncorpus-id = "cx"\ncanonical-text = "b"\n',
                         encoding="utf-8")
-                    (repo / ".aiqt" / "manifest.toml").write_text("genesis = false\n", encoding="utf-8")
+                    (repo / ".aiqt" / "manifest.toml").write_text(_valid_manifest("false"),
+                                                                  encoding="utf-8")
                     (repo / ORDER_REL).write_text(
                         'format-version = 1\napex-corpus-id = "prjint1"\n', encoding="utf-8")
                     (repo / RENDERERS_REL).write_text("format-version = 1\n", encoding="utf-8")
@@ -1252,15 +1387,18 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
             "combined multi-leg consumption, the Step-2 disposition-schema acceptance and id-uniqueness "
             "(#5), the repin/self-test mode resolution (#9), and the PATCH/MINOR/MAJOR bump computation")
     if e2e_ran:
-        full_pack = ("; and the REAL FULL-PACK two-release run() clean id-keyed PATCH (exit 0, finding 2) "
-                     "and its format-version variants (exit 2, finding 1) hold") if real_ran else \
+        full_pack = ("; and the REAL FULL-PACK two-release run() clean id-keyed PATCH (exit 0, finding 2), "
+                     "its format-version variants (exit 2, finding 1), a wrong-version disposition (exit 1, "
+                     "round-3 finding 3), and a predecessor renderer-closure edit (exit 2, round-3 finding "
+                     "4) hold") if real_ran else \
                     "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
         print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
               "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
               "predecessor-ownership (#11, no worktree materialized) cases hold; the REAL run() "
-              "malformed-input fixtures (releases/dispositions/order format-version and unknown top-level "
-              "key, junk default-correction and classless class-change, a duplicate predecessor clause row) "
-              "each fail closed exit 2 (findings 1/3/4){}".format(core, full_pack))
+              "malformed-input fixtures (releases/dispositions/order/MANIFEST format-version and unknown "
+              "top-level key, a duplicate manifest source, junk default-correction and classless "
+              "class-change, a duplicate predecessor clause row) each fail closed exit 2 (findings 1/3/4, "
+              "round-3 finding 1){}".format(core, full_pack))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end cases were SKIPPED (no writable temp "
               "directory), so those paths are UNVERIFIED this run".format(core))

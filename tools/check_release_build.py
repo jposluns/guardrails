@@ -88,15 +88,30 @@ def _rev_parse(root, ref):
     return proc.stdout.strip()
 
 
+def _object_exists(root, oid):
+    """True if oid names an object that exists in the repository (round-3 finding 8). oid is already
+    validated as full lowercase hex by the shared strict schema at load, so this only asks existence."""
+    return _git(root, ["cat-file", "-e", oid]).returncode == 0
+
+
 def _tagger_epoch(root, tag):
-    """The tagger-date epoch of an annotated tag, parsed from `git cat-file tag`. None if the ref is not
-    an annotated tag object (a lightweight tag has no tagger date). GateError on a git failure."""
+    """The tagger-date epoch of an annotated tag. None if the ref is not an annotated tag object (a
+    lightweight tag has no tagger date). The tag object is read as BYTES and only the ASCII HEADER (up to
+    the first blank line) is parsed, so a non-UTF-8 tag MESSAGE cannot raise an uncaught UnicodeDecodeError
+    (round-3 finding 7): a decode failure of the header itself is a GateError (cannot-evaluate, exit 2),
+    never a crash reported as exit 1."""
     if _tag_kind(root, tag) != "tag":
         return None
-    proc = _git(root, ["cat-file", "tag", tag])
+    proc = _git(root, ["cat-file", "tag", tag], binary=True)
     if proc.returncode != 0:
         raise GateError("cannot read tag object for {}".format(tag))
-    for line in proc.stdout.splitlines():
+    # The header ends at the first blank line; the (possibly non-UTF-8) message follows and is not parsed.
+    header = proc.stdout.split(b"\n\n", 1)[0]
+    try:
+        header_text = header.decode("ascii")
+    except UnicodeDecodeError:
+        raise GateError("tag {} has a non-ASCII header; cannot parse the tagger date".format(tag))
+    for line in header_text.splitlines():
         if line.startswith("tagger "):
             parts = line.split()
             # "tagger Name <email> <epoch> <tz>": epoch is the second-to-last token.
@@ -371,6 +386,13 @@ def _validate_tag_row(root, row):
     if _tag_kind(root, tag) != "tag":
         findings.append("release {} tag {} is not an annotated tag (a lightweight release tag is "
                         "disallowed, 2.1)".format(version, tag))
+    # The recorded objects must EXIST (round-3 finding 8): a syntactically-valid but nonexistent recorded
+    # object is cannot-evaluate (exit 2); a resolvable-but-wrong object is the mismatch finding below. A
+    # syntactically malformed id was already rejected exit 2 by the shared strict schema at load.
+    for key in ("tag_object_sha", "commit_sha"):
+        if not _object_exists(root, row[key]):
+            raise GateError("release {} records {} {} that does not exist in the repository (2.4)".format(
+                version, key, row[key]))
     if _rev_parse(root, "refs/tags/" + tag) != row["tag_object_sha"]:
         findings.append("release {} tag_object_sha does not match the resolved tag object".format(version))
     if _rev_parse(root, "refs/tags/" + tag + "^{commit}") != row["commit_sha"]:
@@ -428,7 +450,7 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
         findings += qa_findings
         # genesis declaration of the candidate tree; the candidate releases record is strict-validated
-        # too (finding 4: format-version + top-level + full rows on the candidate object).
+        # too (round-2 finding 4: format-version + top-level + full rows on the candidate object).
         cand_manifest = _show_toml(root, candidate_sha, MANIFEST_REL)
         cand_rows = _strict_releases(_show_toml(root, candidate_sha, RELEASES_REL),
                                      "candidate " + RELEASES_REL)
@@ -436,10 +458,18 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
         if is_genesis and cand_rows:
             findings.append("candidate declares genesis = true but its releases.toml is not header-only "
                             "(2.5)")
-        # prior rows validate (they are already-anchored releases).
-        for row in load_build_rows(root):
-            row_findings, _g = _validate_tag_row(root, row)
+        # Validate the CANDIDATE's rows EXCLUSIVELY, never the ambient worktree (round-3 finding 2: the
+        # candidate is the execution target, spec 2.6/L315; an ambient corrected row must not mask a bad
+        # prior tag in the candidate). Ordering, predecessor completeness, tag resolution, and genesis
+        # uniqueness all run over cand_rows.
+        findings += ordering_findings([r["version"] for r in cand_rows])
+        findings += predecessor_completeness_findings(root, cand_rows)
+        cand_genesis_flags = []
+        for row in cand_rows:
+            row_findings, g = _validate_tag_row(root, row)
             findings += row_findings
+            cand_genesis_flags.append(g)
+        findings += genesis_findings(cand_genesis_flags)
         if first_pin:
             findings += _first_pin_findings(root, candidate_sha, evidence)
     except GateError as exc:
@@ -450,19 +480,56 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
 
 FIRST_PIN_EVIDENCE_KEYS = frozenset({"candidate-sha", "observed-measurement", "cap-bytes",
                                      "prefix-superset", "demonstration", "agents-sha256"})
+FIRST_PIN_DEMO_KEYS = frozenset({"agents-sha256", "delivered-prefix-obligations",
+                                 "floor-profile-obligations"})
+CAP_BYTES = 32768  # the documented Codex default project_doc_max_bytes cap (VER-CORE-SPEC.md:1019)
 
 
-def _first_pin_evidence_findings(candidate_sha, evidence):
-    """Validate the --first-pin EVIDENCE artifact (2.1/6.6/VER-CORE-SPEC.md:1034), not merely is_file()
-    (finding 8). --evidence is REQUIRED in --first-pin mode. The artifact (a TOML file, schema a [VERIFY]
-    defined here) carries EXACTLY FIRST_PIN_EVIDENCE_KEYS: candidate-sha (bound to the candidate commit),
-    agents-sha256 (the 64-hex digest of the shipped AGENTS.md bytes demonstrated against), observed-
-    measurement and cap-bytes (positive integers with observed-measurement STRICTLY exceeding cap-bytes, the
-    61,117 > 32,768 premise of L1017/L1028), prefix-superset (a real boolean true: the delivered-prefix-
-    superset demonstration succeeded, L1029), and demonstration (a non-empty reference). An unreadable or
-    unparseable artifact is exit 2. DISCLOSED RESIDUAL (disclose-guard-residuals): offline, this validates
-    the artifact's schema, candidate binding, digest SYNTAX, and asserted superset OUTCOME; it does not
-    re-derive the byte-superset against the live AGENTS.md (adopter-experience-owned) nor test reachability."""
+def _show_bytes(root, ref, path):
+    """The raw bytes of path at ref, or None if the object does not exist there. Never decodes."""
+    proc = _git(root, ["show", "{}:{}".format(ref, path)], binary=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _demo_superset_findings(demo, agents_sha, ref):
+    """Recompute the referenced prefix-superset demonstration (round-3 finding 5): its schema, its binding
+    to the candidate AGENTS.md digest, and that the floor profile is actually a SUPERSET of the delivered
+    default-capped prefix obligations. The demonstration artifact (schema a [VERIFY] defined here) is a
+    TOML file carrying agents-sha256 plus the two obligation lists, so the superset is machine-checkable
+    offline rather than trusted as a boolean."""
+    findings = []
+    if set(demo) != FIRST_PIN_DEMO_KEYS:
+        findings.append("first-pin: demonstration {} keys are not exactly {}".format(
+            ref, sorted(FIRST_PIN_DEMO_KEYS)))
+    if demo.get("agents-sha256") != agents_sha:
+        findings.append("first-pin: demonstration {} agents-sha256 is not bound to the candidate "
+                        "AGENTS.md digest".format(ref))
+    delivered, floor = demo.get("delivered-prefix-obligations"), demo.get("floor-profile-obligations")
+    if not isinstance(delivered, list) or not delivered or not all(isinstance(x, str) for x in delivered):
+        findings.append("first-pin: demonstration {} delivered-prefix-obligations must be a non-empty list "
+                        "of strings".format(ref))
+    elif not isinstance(floor, list) or not all(isinstance(x, str) for x in floor):
+        findings.append("first-pin: demonstration {} floor-profile-obligations must be a list of "
+                        "strings".format(ref))
+    elif not set(delivered) <= set(floor):
+        findings.append("first-pin: demonstration {} floor profile is NOT a superset of the delivered "
+                        "prefix; missing {}".format(ref, sorted(set(delivered) - set(floor))[:5]))
+    return findings
+
+
+def _first_pin_evidence_findings(root, candidate_sha, evidence):
+    """Validate the --first-pin EVIDENCE artifact and BIND it to the candidate's AGENTS.md (round-3 finding
+    5; 2.1/6.6/VER-CORE-SPEC.md:1034), not merely its syntax. --evidence is REQUIRED in --first-pin mode.
+    The artifact carries EXACTLY FIRST_PIN_EVIDENCE_KEYS. AGENTS.md is retrieved FROM the candidate commit
+    and its digest and byte count RECOMPUTED: agents-sha256 must equal the recomputed digest;
+    observed-measurement must equal the recomputed byte count; cap-bytes must be the documented default
+    (CAP_BYTES); the recomputed size must exceed the cap; prefix-superset must be a real boolean true; and
+    the demonstration reference must resolve in the candidate tree and its superset be RECOMPUTED via
+    _demo_superset_findings. An unreadable/unparseable evidence artifact, an AGENTS.md not retrievable from
+    the candidate, or a demonstration that resolves but is not offline-evaluable (does not parse) is exit 2.
+    DISCLOSED RESIDUAL (disclose-guard-residuals): the obligation lists inside a well-formed demonstration
+    are taken as authored (the pack does not itself re-derive the default-cap prefix from AGENTS.md bytes);
+    URL reachability is not tested offline."""
     if evidence is None:
         return ["first-pin: --evidence is REQUIRED in --first-pin mode (the first-pin precondition is owed "
                 "delivered evidence, not asserted; L1034)"]
@@ -474,6 +541,11 @@ def _first_pin_evidence_findings(candidate_sha, evidence):
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise GateError("first-pin: evidence artifact {} is unreadable or does not parse ({})".format(
             evidence, exc))
+    agents = _show_bytes(root, candidate_sha, "AGENTS.md")
+    if agents is None:
+        raise GateError("first-pin: AGENTS.md is not retrievable from the candidate {}; the first-pin "
+                        "precondition cannot be bound (exit 2)".format(candidate_sha))
+    actual_sha, actual_len = hashlib.sha256(agents).hexdigest(), len(agents)
     findings = []
     extra, missing = set(data) - FIRST_PIN_EVIDENCE_KEYS, FIRST_PIN_EVIDENCE_KEYS - set(data)
     if extra or missing:
@@ -485,25 +557,48 @@ def _first_pin_evidence_findings(candidate_sha, evidence):
     dg = data.get("agents-sha256")
     if not isinstance(dg, str) or not _release_schema.HEX64_RE.fullmatch(dg):
         findings.append("first-pin: evidence agents-sha256 is not a 64-hex digest")
+    elif dg != actual_sha:
+        findings.append("first-pin: evidence agents-sha256 does not match the candidate's recomputed "
+                        "AGENTS.md digest")
     meas, cap = data.get("observed-measurement"), data.get("cap-bytes")
-    if not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (meas, cap)):
-        findings.append("first-pin: observed-measurement and cap-bytes must be positive integers")
-    elif not meas > cap:
-        findings.append("first-pin: observed-measurement {} does not exceed cap-bytes {} (the default-cap "
-                        "premise, L1028)".format(meas, cap))
+    if not isinstance(meas, int) or isinstance(meas, bool):
+        findings.append("first-pin: observed-measurement must be an integer")
+    elif meas != actual_len:
+        findings.append("first-pin: observed-measurement {} != the candidate AGENTS.md byte count {} "
+                        "(the measurement must be recomputed, not asserted)".format(meas, actual_len))
+    if cap != CAP_BYTES:
+        findings.append("first-pin: cap-bytes must be the documented default cap {} (L1019), not {!r}".format(
+            CAP_BYTES, cap))
+    if actual_len <= CAP_BYTES:
+        findings.append("first-pin: the candidate AGENTS.md is {} bytes and does not exceed the default cap "
+                        "{} (the compatibility-contract premise, L1028)".format(actual_len, CAP_BYTES))
     if data.get("prefix-superset") is not True:
         findings.append("first-pin: prefix-superset must be true (the delivered-prefix-superset "
                         "demonstration must succeed, L1029)")
-    if not isinstance(data.get("demonstration"), str) or not data.get("demonstration"):
+    demo_ref = data.get("demonstration")
+    if not isinstance(demo_ref, str) or not demo_ref:
         findings.append("first-pin: demonstration must be a non-empty reference")
+    else:
+        demo_bytes = _show_bytes(root, candidate_sha, demo_ref)
+        if demo_bytes is None:
+            findings.append("first-pin: the demonstration reference {} does not resolve in the candidate "
+                            "tree".format(demo_ref))
+        else:
+            try:
+                demo = tomllib.loads(demo_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+                raise GateError("first-pin: the demonstration {} resolves but is not offline-evaluable "
+                                "(does not parse); adopter-owned evidence that cannot be evaluated is "
+                                "exit 2".format(demo_ref))
+            findings += _demo_superset_findings(demo, actual_sha, demo_ref)
     return findings
 
 
 def _first_pin_findings(root, candidate_sha, evidence):
     """--first-pin (2.1/6.6): the step-1 freeze holds in the candidate checkout (check_clauses --genesis
-    passes) AND the delivered prefix-superset EVIDENCE is present and valid (finding 8), required in
-    first-pin mode regardless of genesis."""
-    findings = list(_first_pin_evidence_findings(candidate_sha, evidence))
+    passes) AND the delivered prefix-superset EVIDENCE is present, valid, and BOUND to the candidate's
+    AGENTS.md (round-3 finding 5), required in first-pin mode regardless of genesis."""
+    findings = list(_first_pin_evidence_findings(root, candidate_sha, evidence))
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-firstpin-"))
     co = tmp / "co"
     try:
@@ -718,6 +813,36 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
     except Exception as exc:  # noqa: BLE001  the QA #7 crash was exactly an exception here
         failures.append("_regenerate_check_commands raised ({}); QA #7 regression".format(exc))
 
+    # --- mode resolver (round-3 finding 6) --------------------------------------------------------
+    def _mopts(**over):
+        base = {"self_test": False, "pre_tag": False, "post_tag": False, "candidate_sha": None,
+                "qa_path": None, "qa_sha256": None, "first_pin": False, "evidence": None,
+                "attestation_commit": None}
+        base.update(over)
+        return base
+    _mode_cases = [
+        (_mopts(), "audit"),
+        (_mopts(self_test=True), "self-test"),
+        (_mopts(pre_tag=True, candidate_sha="a", qa_path="q", qa_sha256="h"), "pre-tag"),
+        (_mopts(pre_tag=True, candidate_sha="a", qa_path="q", qa_sha256="h", first_pin=True,
+                evidence="e"), "pre-tag"),
+        (_mopts(post_tag=True, qa_path="q"), "post-tag"),
+        # the finding-6 open cases: each must resolve to 'error', never fall through into audit/self-test.
+        (_mopts(pre_tag=True, first_pin=True, evidence="/missing"), "error"),   # --first-pin, no candidate
+        (_mopts(candidate_sha="deadbeef"), "error"),                            # --candidate-sha alone
+        (_mopts(self_test=True, pre_tag=True), "error"),                        # --self-test --pre-tag
+        (_mopts(pre_tag=True, candidate_sha="a", qa_path="q", qa_sha256="h", first_pin=True), "error"),
+        (_mopts(pre_tag=True, candidate_sha="a", qa_path="q", qa_sha256="h", evidence="e"), "error"),
+        (_mopts(post_tag=True), "error"),                                       # --post-tag without --qa-path
+        (_mopts(post_tag=True, qa_path="q", candidate_sha="a"), "error"),       # pre-tag arg in post-tag
+        (_mopts(pre_tag=True, post_tag=True, candidate_sha="a", qa_path="q", qa_sha256="h"), "error"),
+        (_mopts(attestation_commit="x"), "error"),                             # post-tag arg without stage
+        (_mopts(qa_path="q"), "error")]                                        # stray --qa-path in audit
+    for opts, want in _mode_cases:
+        got = _resolve_mode(opts)
+        if got != want:
+            failures.append("_resolve_mode({}): expected {!r}, got {!r}".format(opts, want, got))
+
     # --- git-level cases ---------------------------------------------------------------------------
     import shutil as _sh
     git_ok = True
@@ -791,6 +916,18 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             if _run_audit_quiet(a) != 0:
                 failures.append("audit annotated-tag row: expected a clean exit 0")
 
+            # (round-3 finding 9) the same clean row but with a Windows UNC host-absolute qa-store-path:
+            # the strict schema rejects it at load -> exit 2, where the pre-round-3 POSIX/drive-only check
+            # accepted a UNC path and the run otherwise cleaned to exit 0.
+            (a / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                "qa-store-path = '\\\\server\\share\\qa.toml'\n"
+                "attestation-timestamps = [{}]\n".format(
+                    tag_obj, commit_sha, "c" * 64, tagger - 100), encoding="utf-8")
+            if _run_audit_quiet(a) != 2:
+                failures.append("audit UNC qa-store-path: expected fail-closed exit 2 (round-3 finding 9)")
+
             # (finding 4) a committed row missing qa-sha256/qa-store-path is no longer a complete record ->
             # exit 2, not the round-2 clean audit.
             (a / RELEASES_REL).write_text(
@@ -828,7 +965,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             if _run_audit_quiet(lw) != 1:
                 failures.append("audit lightweight tag: expected exit 1 (annotated tags mandatory)")
 
-            # (unresolvable tag) a recorded tag with no tag object -> exit 2, never a pass.
+            # (finding 8, syntax) a MALFORMED recorded object id ("dead"/"beef", not 40/64 hex) is exit 2 at
+            # the strict load, never a mismatch finding.
             nr = tmp / "notag"
             _init(nr)
             _write_records(nr, "format-version = 1\n", "release-version = \"1.0.0\"\ngenesis = true\n")
@@ -839,7 +977,59 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format("c" * 64),
                 encoding="utf-8")
             if _run_audit_quiet(nr) != 2:
-                failures.append("audit unresolvable tag: expected fail-closed exit 2")
+                failures.append("audit malformed recorded object id: expected fail-closed exit 2 "
+                                "(finding 8, syntax)")
+
+            # (finding 8, resolution) a real annotated tag but a syntactically-valid NONEXISTENT recorded
+            # tag_object_sha ("a"*40): the object does not exist -> exit 2 (cannot-evaluate), where the
+            # pre-round-3 gate returned a mismatch finding (exit 1).
+            ne = tmp / "noobject"
+            _init(ne)
+            _write_records(ne, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _commit(ne, "genesis tree")
+            subprocess.run(["git", "-C", str(ne), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
+                           check=True, capture_output=True, text=True,
+                           env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            ne_commit = subprocess.run(["git", "-C", str(ne), "rev-parse", "refs/tags/v1.0.0^{commit}"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            (ne / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{a}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
+                    a="a" * 40, c=ne_commit, h="c" * 64), encoding="utf-8")
+            if _run_audit_quiet(ne) != 2:
+                failures.append("audit nonexistent recorded object: expected fail-closed exit 2 "
+                                "(finding 8, resolution)")
+
+            # (finding 7) a real annotated tag whose MESSAGE is non-UTF-8: reading the tag object must parse
+            # only the ASCII header, so the run completes (clean exit 0) rather than crashing on an uncaught
+            # UnicodeDecodeError (which the pre-round-3 text=True read raised, surfacing as exit 1).
+            nu = tmp / "nonutf8tag"
+            _init(nu)
+            _write_records(nu, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _commit(nu, "genesis tree")
+            (nu / "tagmsg").write_bytes(b"release \xff\xfe non-utf8 message\n")
+            subprocess.run(["git", "-C", str(nu), "tag", "-a", "v1.0.0", "-F", str(nu / "tagmsg")],
+                           check=True, capture_output=True, text=True,
+                           env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            nu_tag = subprocess.run(["git", "-C", str(nu), "rev-parse", "refs/tags/v1.0.0"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            nu_commit = subprocess.run(["git", "-C", str(nu), "rev-parse", "refs/tags/v1.0.0^{commit}"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            nu_tagger = _tagger_epoch(nu, "v1.0.0")
+            (nu / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{ts}]\n'.format(
+                    t=nu_tag, c=nu_commit, h="c" * 64, ts=nu_tagger - 100), encoding="utf-8")
+            try:
+                nu_rc = _run_audit_quiet(nu)
+            except Exception as exc:  # noqa: BLE001  the finding-7 crash was exactly an uncaught exception
+                nu_rc = "raised {}".format(type(exc).__name__)
+            if nu_rc != 0:
+                failures.append("audit non-UTF-8 tag message: expected clean exit 0 (finding 7: the tag "
+                                "header is parsed as ASCII bytes, never an uncaught crash), got {}".format(
+                                    nu_rc))
 
             # (read_genesis accepts a FULL attestation row, QA #6) a one-row record carrying every
             # documented field must be ACCEPTED by gen_manifest.read_genesis (it needs only the count),
@@ -958,31 +1148,71 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 failures.append("predecessor completeness: an in-flight tag above the newest row must be "
                                 "allowed (no finding)")
 
-            # (finding 8) FIRST-PIN EVIDENCE schema. A well-formed evidence artifact bound to the candidate
-            # clears; a missing --evidence, a candidate-binding mismatch, a bad digest, an observed<=cap, and
-            # a false prefix-superset each produce findings.
-            ev_ok = pt / "evidence.toml"
-            ev_ok.write_text(
-                'candidate-sha = "{}"\nobserved-measurement = 61117\ncap-bytes = 32768\n'
-                'prefix-superset = true\ndemonstration = "qa/prefix-superset.md"\n'
-                'agents-sha256 = "{}"\n'.format(pt_commit, "d" * 64), encoding="utf-8")
-            if _first_pin_evidence_findings(pt_commit, str(ev_ok)):
-                failures.append("first-pin evidence: a well-formed bound artifact expected no finding")
-            if not any("REQUIRED" in f for f in _first_pin_evidence_findings(pt_commit, None)):
+            # (findings 5/8) FIRST-PIN EVIDENCE bound to the CANDIDATE's AGENTS.md. Build a candidate tree
+            # carrying an AGENTS.md larger than the documented cap and a machine-checkable demonstration; the
+            # evidence must bind the recomputed digest and byte count, the documented cap, and a recomputed
+            # prefix-superset. The pre-fix gate accepted a fake digest, an arbitrary measurement, a cap of 1,
+            # and a nonexistent demonstration; the fix rejects each.
+            fp = tmp / "firstpin"
+            _init(fp)
+            (fp / "qa").mkdir(parents=True, exist_ok=True)
+            agents_bytes = ("A" * 40000).encode("utf-8")   # 40000 > the documented 32768 cap
+            (fp / "AGENTS.md").write_bytes(agents_bytes)
+            a_sha = hashlib.sha256(agents_bytes).hexdigest()
+            a_len = len(agents_bytes)
+            (fp / "qa" / "demo.toml").write_text(
+                'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2"]\n'
+                'floor-profile-obligations = ["ob1", "ob2", "ob3"]\n'.format(a_sha), encoding="utf-8")
+            (fp / "qa" / "badsuperset.toml").write_text(
+                'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2", "obX"]\n'
+                'floor-profile-obligations = ["ob1", "ob2"]\n'.format(a_sha), encoding="utf-8")
+            _write_records(fp, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _commit(fp, "candidate with AGENTS.md + demonstration")
+            fp_commit = subprocess.run(["git", "-C", str(fp), "rev-parse", "HEAD"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+
+            def _ev(**over):
+                body = {"candidate-sha": '"{}"'.format(fp_commit), "observed-measurement": str(a_len),
+                        "cap-bytes": "32768", "prefix-superset": "true",
+                        "demonstration": '"qa/demo.toml"', "agents-sha256": '"{}"'.format(a_sha)}
+                body.update(over)
+                p = fp / "ev-{}.toml".format(len(list(fp.glob("ev-*.toml"))))
+                p.write_text("".join("{} = {}\n".format(k, v) for k, v in body.items()), encoding="utf-8")
+                return str(p)
+
+            if _first_pin_evidence_findings(fp, fp_commit, _ev()):
+                failures.append("first-pin evidence: a well-formed candidate-bound artifact expected no "
+                                "finding (findings 5/8)")
+            if not any("REQUIRED" in f for f in _first_pin_evidence_findings(fp, fp_commit, None)):
                 failures.append("first-pin evidence: a missing --evidence must be flagged (finding 8)")
-            if not any("not bound" in f for f in _first_pin_evidence_findings("OTHER-SHA", str(ev_ok))):
-                failures.append("first-pin evidence: a candidate-binding mismatch must be flagged")
-            ev_bad = pt / "evidence-bad.toml"
-            ev_bad.write_text(
-                'candidate-sha = "{}"\nobserved-measurement = 100\ncap-bytes = 32768\n'
-                'prefix-superset = false\ndemonstration = "x"\nagents-sha256 = "nothex"\n'.format(pt_commit),
-                encoding="utf-8")
-            bad_findings = _first_pin_evidence_findings(pt_commit, str(ev_bad))
-            if not (any("agents-sha256" in f for f in bad_findings)
-                    and any("does not exceed" in f for f in bad_findings)
-                    and any("prefix-superset must be true" in f for f in bad_findings)):
-                failures.append("first-pin evidence: a bad digest, observed<=cap, and false prefix-superset "
-                                "must each be flagged (finding 8)")
+            # (finding 5) a fake digest, a wrong measurement, a cap != documented, and a nonexistent
+            # demonstration are each caught against the recomputed candidate AGENTS.md.
+            if not any("does not match" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"agents-sha256": '"{}"'.format("d" * 64)}))):
+                failures.append("first-pin evidence: a fake agents-sha256 must be caught against the "
+                                "recomputed candidate digest (finding 5)")
+            if not any("byte count" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"observed-measurement": "999999999"}))):
+                failures.append("first-pin evidence: a wrong observed-measurement must be caught against the "
+                                "recomputed byte count (finding 5)")
+            if not any("documented default cap" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"cap-bytes": "1"}))):
+                failures.append("first-pin evidence: cap-bytes must equal the documented default (finding 5)")
+            if not any("does not resolve" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"demonstration": '"qa/nonexistent.toml"'}))):
+                failures.append("first-pin evidence: a nonexistent demonstration reference must be caught "
+                                "(finding 5)")
+            # (finding 5) a demonstration whose floor is NOT a superset of the delivered prefix is caught.
+            if not any("NOT a superset" in f for f in _first_pin_evidence_findings(
+                    fp, fp_commit, _ev(**{"demonstration": '"qa/badsuperset.toml"'}))):
+                failures.append("first-pin evidence: a floor profile that is not a superset of the delivered "
+                                "prefix must be caught (finding 5)")
+            # (finding 5) AGENTS.md not retrievable from the candidate -> exit 2 (a GateError).
+            try:
+                _first_pin_evidence_findings(pt, pt_commit, _ev())
+                failures.append("first-pin evidence: a candidate without AGENTS.md must raise (exit 2)")
+            except GateError:
+                pass
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -993,17 +1223,21 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
         return 1
     core = ("the 2.2 STRICT success/family-set predicates (clean, missing/duplicate family, failed verdict, "
             "unresolved blocker, false/string finished-signal, unknown/missing family key, boolean blocker "
-            "count, finding 5), genesis uniqueness, the 2.4 ordering predicate, strict QA-object validation "
-            "(finding 5), the shared release-row schema drift binding (#6), and the reproduce-command "
-            "enumeration (#7)")
+            "count, round-2 finding 5), genesis uniqueness, the 2.4 ordering predicate, strict QA-object "
+            "validation, the shared release-row schema drift binding (#6), the reproduce-command enumeration "
+            "(#7), and the build-mode RESOLVER rejecting every mixed/incomplete/out-of-mode invocation "
+            "(round-3 finding 6)")
     if git_ran:
         print("SELF-TEST PASS: {}; and the git-level cases (zero-row audit NOT APPLICABLE, a zero-row "
-              "format-version=999 exit 2 and a row missing qa-sha256/qa-store-path exit 2 (finding 4), a "
-              "clean full attestation row, a chronology violation exit 1, a lightweight tag exit 1, an "
-              "unresolvable tag exit 2, read_genesis accepting a full attestation row (#6), the post-tag "
-              "end-to-end clean/no-qa-path/digest-mismatch cases and a no-timestamps row exit 2 (finding 4), "
-              "the chronology-FORGING exit 1 (finding 6), predecessor-completeness on a real 3-tag repo "
-              "(finding 7), and the first-pin evidence schema (finding 8)) hold".format(core))
+              "format-version=999 exit 2 and a row missing qa-sha256/qa-store-path exit 2 (round-2 finding "
+              "4), a clean full attestation row, a chronology violation exit 1, a lightweight tag exit 1, a "
+              "malformed recorded object-id exit 2 and a NONEXISTENT recorded object exit 2 (round-3 finding "
+              "8), a non-UTF-8 tag message handled without a crash (round-3 finding 7), read_genesis "
+              "accepting a full attestation row (#6), the post-tag clean/no-qa-path/digest-mismatch/"
+              "no-timestamps cases, the chronology-FORGING exit 1 (round-2 finding 6), predecessor-"
+              "completeness on a real 3-tag repo (round-2 finding 7), and the first-pin evidence bound to "
+              "the candidate's AGENTS.md with a recomputed prefix-superset (round-3 finding 5)) hold".format(
+                  core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))
@@ -1047,28 +1281,57 @@ def _parse_args(argv):
     return opts
 
 
+def _resolve_mode(opts):
+    """Classify an option set into exactly one dispatch mode BEFORE any work runs, so a mixed, incomplete,
+    or out-of-mode invocation can never fall through into audit or self-test (round-3 finding 6). Returns
+    one of 'self-test', 'audit', 'pre-tag', 'post-tag', 'error'. --self-test runs ALONE; --pre-tag requires
+    --candidate-sha/--qa-path/--qa-sha256 (and --evidence iff --first-pin) and rejects post-tag-only args;
+    --post-tag requires --qa-path and rejects pre-tag-only args; a stage option without its stage, or the
+    two stages together, is an error."""
+    pretag_only = opts["candidate_sha"] or opts["qa_sha256"] or opts["first_pin"] or opts["evidence"]
+    posttag_only = opts["attestation_commit"]
+    if opts["self_test"]:
+        if opts["pre_tag"] or opts["post_tag"] or pretag_only or posttag_only or opts["qa_path"]:
+            return "error"
+        return "self-test"
+    if opts["pre_tag"] and opts["post_tag"]:
+        return "error"
+    if opts["pre_tag"]:
+        if not (opts["candidate_sha"] and opts["qa_path"] and opts["qa_sha256"]) or posttag_only:
+            return "error"
+        if opts["first_pin"] and not opts["evidence"]:
+            return "error"
+        if opts["evidence"] and not opts["first_pin"]:
+            return "error"
+        return "pre-tag"
+    if opts["post_tag"]:
+        if not opts["qa_path"] or pretag_only:
+            return "error"
+        return "post-tag"
+    # audit (no stage): any stage-specific option present is a mixed/out-of-mode invocation.
+    if pretag_only or posttag_only or opts["qa_path"]:
+        return "error"
+    return "audit"
+
+
 def main():
     opts = _parse_args(sys.argv[1:])
     if opts is None:
         return 2
-    if opts["self_test"]:
-        return self_test_main()
-    if opts["pre_tag"] and opts["post_tag"]:
-        print("error: --pre-tag and --post-tag are mutually exclusive", file=sys.stderr)
+    mode = _resolve_mode(opts)
+    if mode == "error":
+        print("error: a mixed, incomplete, or out-of-mode invocation is rejected fail-closed. --self-test "
+              "runs alone; --pre-tag requires --candidate-sha, --qa-path, --qa-sha256 (and --evidence with "
+              "--first-pin); --post-tag requires --qa-path; a stage-specific option needs its stage",
+              file=sys.stderr)
         return 2
+    if mode == "self-test":
+        return self_test_main()
     root = repo_root()
-    if opts["pre_tag"]:
-        if not (opts["candidate_sha"] and opts["qa_path"] and opts["qa_sha256"]):
-            print("error: --pre-tag requires --candidate-sha, --qa-path, and --qa-sha256",
-                  file=sys.stderr)
-            return 2
-        if opts["first_pin"] and not opts["evidence"]:
-            print("error: --first-pin requires --evidence (the first-pin precondition is owed delivered "
-                  "evidence; finding 8)", file=sys.stderr)
-            return 2
+    if mode == "pre-tag":
         return run_pre_tag(root, opts["candidate_sha"], opts["qa_path"], opts["qa_sha256"],
                            opts["first_pin"], opts["evidence"])
-    if opts["post_tag"]:
+    if mode == "post-tag":
         return run_post_tag(root, opts["attestation_commit"], opts["qa_path"])
     return run_audit(root)
 
