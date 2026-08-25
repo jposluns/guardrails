@@ -345,6 +345,18 @@ def check_register_integrity(born, retirements, successors):
         if succ_born is not None and succ_born > retired_at:
             findings.append("id-history successor row {!r}: successor-id {!r} is born after the retirement "
                             "that points to it (a successor cannot postdate its retirement)".format(rid, succ))
+    # A successor-id that was itself retired at a STRICTLY EARLIER release than the edge pointing to it
+    # names a dead id as a successor: a resurrection through the register (7.3 forward-only). Same-release
+    # retirement is a permitted one-release pass-through fold, so the comparison is strict (reconciliation
+    # 6: the temporal form, not set membership, which would false-positive on every legal multi-step
+    # chain a->b at R1, b later retired at R2).
+    retired_release = {rid: retired_at for rid, retired_at in retirements}
+    for rid, succ, retired_at in successors:
+        succ_retired = retired_release.get(succ)
+        if succ_retired is not None and succ_retired < retired_at:
+            findings.append("id-history successor row {!r}: successor-id {!r} was already retired at an "
+                            "earlier release (naming a dead id as a successor is a resurrection through "
+                            "the register; 7.3 forward-only)".format(rid, succ))
     edges = {}
     for rid, succ, _retired_at in successors:
         edges.setdefault(rid, []).append(succ)
@@ -457,20 +469,24 @@ def load_inventory(path):
 
 def load_prev_ids(path):
     """Read ONLY the id set (each clause-id and its corpus-id) from a predecessor inventory, for the
-    cross-release disappearance leg. Spans and digests of a past release are not re-validated (they point
-    at past sources this tree may not carry). Fail-closed on an unreadable file."""
+    cross-release disappearance leg. Fail-closed on an unreadable file AND on any row whose clause-id is
+    missing, non-string, or malformed (a guard is only as good as its input: a predecessor id this loader
+    cannot parse must never silently shrink the disappearance leg's coverage; exit 2, never a skipped
+    row). Spans and digests of a past release are not re-validated (they point at past sources this tree
+    may not carry)."""
     try:
         data = load_toml(path)
     except (OSError, ValueError) as exc:
         raise GateError("cannot read the predecessor inventory {} ({})".format(path, exc))
     ids = set()
-    for row in _clause_rows(data, "predecessor inventory {}".format(path)):
+    for i, row in enumerate(_clause_rows(data, "predecessor inventory {}".format(path)), 1):
         cid = row.get("clause-id")
-        if isinstance(cid, str):
-            ids.add(cid)
-            parsed = split_clause_id(cid)
-            if parsed is not None:
-                ids.add(parsed[0])
+        parsed = split_clause_id(cid) if isinstance(cid, str) else None
+        if parsed is None:
+            raise GateError("predecessor inventory {} row #{}: missing, non-string, or malformed "
+                            "clause-id {!r}".format(path, i, cid))
+        ids.add(cid)
+        ids.add(parsed[0])
     return ids
 
 
@@ -934,6 +950,30 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
     if check_register_integrity({"calpha.1": "1.0.0", "cbeta1.1": "1.0.0"}, [],
                                 [("calpha.1", "cbeta1.1", _semver("1.4.0"))]):
         failures.append("register-integrity wrongly flagged an acyclic successor edge")
+
+    # Deferred item 2 (successor-already-retired temporal leg). An edge whose successor-id was itself
+    # retired at a STRICTLY EARLIER release than the edge is a resurrection through the register.
+    # born: calpha.1 and cbeta1.1 both at 1.0.0; retirements: cbeta1.1 tombstoned at 1.1.0; successor
+    # edge calpha.1 -> cbeta1.1 at 1.2.0 (1.1.0 < 1.2.0) -> a finding.
+    if not check_register_integrity(
+            {"calpha.1": "1.0.0", "cbeta1.1": "1.0.0"},
+            [("cbeta1.1", _semver("1.1.0")), ("calpha.1", _semver("1.2.0"))],
+            [("calpha.1", "cbeta1.1", _semver("1.2.0"))]):
+        failures.append("register-integrity missed a successor-id already retired at an earlier release")
+    # A legal chain (a -> b at R1, b -> c at R2) keeps b in the cumulative retired set but never retires
+    # b BEFORE the a->b edge, so the temporal form stays clean (membership would false-positive here).
+    if check_register_integrity(
+            {"ca.1": "1.0.0", "cb.1": "1.0.0", "cc.1": "1.0.0"},
+            [("ca.1", _semver("1.1.0")), ("cb.1", _semver("1.2.0"))],
+            [("ca.1", "cb.1", _semver("1.1.0")), ("cb.1", "cc.1", _semver("1.2.0"))]):
+        failures.append("register-integrity wrongly flagged a legal multi-step successor chain")
+    # A same-release pass-through fold (a and b both retired at R1, a -> b at R1) is permitted: the
+    # comparison is strict, so an equal retirement release is not a resurrection.
+    if check_register_integrity(
+            {"ca.1": "1.0.0", "cb.1": "1.0.0"},
+            [("ca.1", _semver("1.1.0")), ("cb.1", _semver("1.1.0"))],
+            [("ca.1", "cb.1", _semver("1.1.0"))]):
+        failures.append("register-integrity wrongly flagged a same-release pass-through fold")
 
     # --- end-to-end fixture cases (a synthetic corpus per fail mode in a private tempdir) ----------
     import copy
@@ -1420,6 +1460,57 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             base = _fresh(rules, rows, born)
             if _run_quiet(**_paths(base, genesis=True)) != 2:
                 failures.append("malformed source-digest syntax: expected fail-closed exit 2")
+
+            # (46) deferred item 1: a predecessor inventory carrying a non-string (integer) clause-id is
+            # malformed input; the hardened load_prev_ids fails closed (exit 2), never silently shrinking
+            # the disappearance leg's coverage. (Before the fix the row was silently skipped.)
+            rules, rows, born = _good_genesis()
+            current = _fresh(rules, rows, born)
+            prev = current / ".aiqt" / "core" / "prev-int.toml"
+            prev.write_text("".join(_toml_clause(r) + "\n" for r in rows)
+                            + '[[clause]]\nclause-id = 7\ncorpus-id = "calpha"\n'
+                            'source-path = ".aiqt/core/rules/calpha.md"\nstart-line = 8\nend-line = 8\n'
+                            'canonical-text = "x"\nsource-digest = "0"\n', encoding="utf-8")
+            if _run_quiet(**_paths(current, prev_inventory_path=prev)) != 2:
+                failures.append("predecessor inventory integer clause-id: expected fail-closed exit 2")
+
+            # (47) deferred item 1: a predecessor inventory with a MALFORMED string clause-id ("calpha.01",
+            # a padded ordinal) is malformed input -> fail-closed exit 2.
+            rules, rows, born = _good_genesis()
+            current = _fresh(rules, rows, born)
+            prev = current / ".aiqt" / "core" / "prev-bad.toml"
+            bad_row = dict(rows[0], **{"clause-id": "calpha.01"})
+            prev.write_text("".join(_toml_clause(r) + "\n" for r in rows)
+                            + _toml_clause(bad_row) + "\n", encoding="utf-8")
+            if _run_quiet(**_paths(current, prev_inventory_path=prev)) != 2:
+                failures.append("predecessor inventory malformed clause-id: expected fail-closed exit 2")
+
+            # (48) deferred item 2 end-to-end: a successor edge at a LATER release naming an id already
+            # tombstoned at an EARLIER release is a resurrection through the register -> exit 1. All four
+            # ids are dead (absent from the inventory) each with its own retirement row, so completeness
+            # and resurrection stay clean and the temporal leg is what fires: cdead.1 is tombstoned at
+            # 1.1.0, and the successor edge cdead2.1 -> cdead.1 is at 1.2.0 (1.1.0 < 1.2.0).
+            rules, rows, born = _good_genesis()
+            born2 = born + [("cdeada", "1.0.0"), ("cdeada.1", "1.0.0"),
+                            ("cdeadb", "1.0.0"), ("cdeadb.1", "1.0.0")]
+            tombs = [("cdeada", "1.1.0"), ("cdeada.1", "1.1.0"), ("cdeadb", "1.2.0")]
+            succs = [("cdeadb.1", "1.2.0", "cdeada.1")]
+            base = _fresh(rules, rows, born2, tombstones=tombs, successors=succs)
+            if _run_quiet(**_paths(base)) != 1:
+                failures.append("successor-already-retired resurrection: expected exit 1")
+
+            # (49) deferred item 2 end-to-end: a same-release pass-through fold is permitted -> exit 0.
+            # cfold.1 and cfoldb.1 both born 1.0.0 and both retired at 1.1.0, with cfold.1 -> cfoldb.1 at
+            # 1.1.0 (equal release, strict comparison so no resurrection). Both absent from the inventory,
+            # each with its retirement row, so completeness stays clean too.
+            rules, rows, born = _good_genesis()
+            born3 = born + [("cfolda", "1.0.0"), ("cfolda.1", "1.0.0"),
+                            ("cfoldb", "1.0.0"), ("cfoldb.1", "1.0.0")]
+            tombs3 = [("cfolda", "1.1.0"), ("cfoldb", "1.1.0"), ("cfoldb.1", "1.1.0")]
+            succs3 = [("cfolda.1", "1.1.0", "cfoldb.1")]
+            base = _fresh(rules, rows, born3, tombstones=tombs3, successors=succs3)
+            if _run_quiet(**_paths(base)) != 0:
+                failures.append("same-release pass-through fold: expected exit 0")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -1446,7 +1537,11 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "reject, absolute source-path fail, phantom-born-id fail, retirement-before-birth fail, "
               "two-node successor-cycle fail, and born-scalar / tombstone-table fail-closed exit 2; and "
               "the round-4 fixes: newline-tainted born-release fail-closed exit 2, orphan-corpus born-id "
-              "fail, unbounded-ordinal fail-closed exit 2, and malformed-digest-syntax fail-closed exit 2)"
+              "fail, unbounded-ordinal fail-closed exit 2, and malformed-digest-syntax fail-closed exit 2; "
+              "and the Step-4 deferred items: a predecessor inventory with an integer or a malformed "
+              "clause-id fails closed (exit 2, the hardened load_prev_ids), a successor-id already retired "
+              "at an earlier release is a resurrection through the register (exit 1), and a same-release "
+              "pass-through fold is permitted (exit 0))"
               .format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
