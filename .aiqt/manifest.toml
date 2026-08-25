@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "8be80e1a3b8b68058be82b3c35fd052adaa61ecc1585545c05715e9f896dc4b9"
+tree-sha256 = "dfeb1f028bc2db3f8b07c5286bfde4858b26bea2260203189f4fc88afd1c39a2"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2301,8 +2301,8 @@ sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 41014
-sha256 = "5f62f75564f02d698c45ef18ff15b1d49af84ab1e0d0c119b043d4114d9da7d8"
+bytes = 44671
+sha256 = "aaa8a077831c1ce92bba90671973ca2eae4d6b7d88cca9ace1e8a2242e6fb9de"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -2386,8 +2386,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 165732
-sha256 = "f698627786406f4a23ef3fce4db3c987d918e11dc786ab03fd9a7855dec919ed"
+bytes = 177254
+sha256 = "debab024cce0be69340722c6be210b3d8ab1634f4c2b4496400c6e4a4e133c72"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

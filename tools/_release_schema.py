@@ -16,6 +16,7 @@ unaffected: a header-only record at Step 2 is not yet a complete attestation rec
 gates run AFTER attestation, where every PRESENT release row is a post-QA attestation row carrying the
 complete record (spec 2.4 / releases.toml header / VER-CORE-SPEC.md:254), so here every field is required.
 """
+import ipaddress
 import os
 import re
 import subprocess
@@ -51,6 +52,14 @@ def _is_host_absolute(p):
     if len(p) >= 2 and p[1] == ":":               # a drive-letter path (C:..., including C:relative)
         return True
     return PurePosixPath(p).is_absolute() or PureWindowsPath(p).is_absolute()
+
+
+def has_control_char(s):
+    """True if the string carries any C0 control character (0x00-0x1F) or DEL (0x7F). A single-line
+    descriptive record field (a disposition impact/rationale/id, a 6.6 observed-measurement) carries none;
+    the one legitimately MULTI-LINE record value, a clause canonical-text, is validated against its source
+    bytes by check_clauses (source-digest consistency) rather than here, so it is not run through this."""
+    return isinstance(s, str) and any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in s)
 
 
 def is_canonical_relpath(p, allow_trailing_slash=False):
@@ -363,8 +372,8 @@ def strict_order(data, where):
         tw = "{} precedence-tier #{}".format(where, i)
         if not isinstance(t, dict) or set(t) != {"rank", "members", "members-are-equal"}:
             raise SchemaError("{}: keys are not exactly rank/members/members-are-equal".format(tw))
-        if not _is_int(t["rank"]):
-            raise SchemaError("{}: rank must be an integer".format(tw))
+        if not _is_int(t["rank"]) or t["rank"] < 0:
+            raise SchemaError("{}: rank must be a non-negative integer".format(tw))
         if t["rank"] in seen_ranks:
             raise SchemaError("{}: duplicate precedence rank {}".format(tw, t["rank"]))
         seen_ranks.add(t["rank"])
@@ -447,8 +456,14 @@ def strict_clause_inventory(data, where):
         if corpus != parsed[0]:
             raise SchemaError("{}: corpus-id {!r} does not match the clause-id corpus part {!r}".format(
                 rw, corpus, parsed[0]))
-        if not isinstance(row["source-path"], str) or not row["source-path"].strip():
-            raise SchemaError("{}: missing or non-string source-path".format(rw))
+        # source-path is a CANONICAL repo-relative path (round-5 finding 1): the prior non-empty check let a
+        # non-canonical HEAD path ('.aiqt/core/rules/../rules/...') through, which check_clauses then RESOLVED
+        # to the real file and passed, so the delta computed clean. is_canonical_relpath rejects '.', '..',
+        # '//', backslash, control characters, and host-absolute forms on head AND predecessor objects.
+        if not is_canonical_relpath(row.get("source-path")):
+            raise SchemaError("{}: source-path {!r} is not a canonical repo-relative path (no '.', '..', "
+                              "'//', backslash, control character, or host-absolute form; 4.1/L425)".format(
+                                  rw, row.get("source-path")))
         if not _is_int(row["start-line"]) or not _is_int(row["end-line"]) \
                 or row["start-line"] < 1 or row["end-line"] < row["start-line"]:
             raise SchemaError("{}: start-line/end-line must be positive integers with end >= start".format(
@@ -501,17 +516,54 @@ def strict_id_history(data, where):
 
 # --- per-kind disposition evidence (6.6 / VER-CORE-SPEC.md:1037) ------------------------------------
 
+# A host label is an LDH domain label (letter/digit/hyphen, not hyphen-bounded), the whole name at most 253
+# chars; urlparse lowercases the host, so the class is lowercase. An IP literal is validated by ipaddress.
+_URL_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def _is_valid_url_host(host):
+    """True if host is a well-formed LDH domain name or an IP literal (v4, or v6 with the brackets already
+    stripped by urlparse.hostname). A malformed host (embedded space, empty label, out-of-range octet) is
+    rejected."""
+    if not isinstance(host, str) or not host:
+        return False
+    if _URL_HOSTNAME_RE.fullmatch(host):
+        if all(part.isdigit() for part in host.split(".")):
+            try:                       # a dotted-numeric shape must be a valid IPv4 (octets 0..255)
+                ipaddress.IPv4Address(host)
+            except ValueError:
+                return False
+        return True
+    try:                               # an IPv6 literal (urlparse.hostname has stripped the [] brackets)
+        ipaddress.IPv6Address(host)
+        return True
+    except ValueError:
+        return False
+
+
 def _is_well_formed_url(value):
-    """A syntactically well-formed http(s) URL (scheme + netloc). Offline: reachability is NOT tested here
-    (the gate does not touch the network); the spec's URL-VALIDATED-at-capture reachability is a build-time
-    capture step, disclosed as a residual this offline gate does not perform."""
+    """A syntactically well-formed http(s) URL under a DETERMINISTIC grammar (round-5 finding 3): scheme
+    EXACTLY http or https; NO whitespace, control character, or backslash anywhere (urlparse otherwise
+    accepts 'https://exa mple.com', a raw space in the host); a host that is a valid LDH domain name or IP
+    literal; and a port, if present, an integer in 0..65535 (urlparse.port raises ValueError otherwise).
+    Offline: reachability is NOT tested here (the gate does not touch the network); the spec's
+    URL-VALIDATED-at-capture reachability is a build-time capture step, disclosed as a residual this offline
+    gate does not perform."""
     if not isinstance(value, str) or not value:
+        return False
+    # A well-formed URL percent-encodes any space or control character, so a raw one (space, 0x00-0x1F, DEL)
+    # or a backslash is malformed: reject before urlparse, which would otherwise absorb a space into netloc.
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7f for ch in value) or "\\" in value:
         return False
     try:
         parsed = urlparse(value)
+        host, port = parsed.hostname, parsed.port     # .port raises ValueError on a bad/oversized port
     except ValueError:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    if parsed.scheme not in ("http", "https") or not _is_valid_url_host(host):
+        return False
+    return port is None or 0 <= port <= 65535
 
 
 def _is_iso_date(value):
@@ -539,13 +591,17 @@ def default_correction_evidence_findings(row, where):
             raise SchemaError("{}: default-correction {} {!r} is not a valid ISO date (6.6)".format(
                 where, key, row.get(key)))
     meas = row.get("observed-measurement")
-    if not isinstance(meas, str) or not meas or not any(ch.isdigit() for ch in meas):
+    if not isinstance(meas, str) or not meas or not any(ch.isdigit() for ch in meas) \
+            or has_control_char(meas):
         raise SchemaError("{}: default-correction observed-measurement {!r} is not a measurement (a value "
-                          "carrying a digit; 6.6/L1038)".format(where, meas))
+                          "carrying a digit and no control character; 6.6/L1038)".format(where, meas))
+    # prefix-superset-reference names a stored artefact by repo-relative path (the 6.6 evidence points at the
+    # prefix-superset record, e.g. 'qa/prefix.toml'), so it is a CANONICAL repo-relative path, not merely a
+    # non-empty string: a traversal or control character is a malformed reference (round-5 sweep).
     ref = row.get("prefix-superset-reference")
-    if not isinstance(ref, str) or not ref:
-        raise SchemaError("{}: default-correction prefix-superset-reference is missing or empty "
-                          "(6.6/L1039)".format(where))
+    if not is_canonical_relpath(ref):
+        raise SchemaError("{}: default-correction prefix-superset-reference {!r} is not a canonical "
+                          "repo-relative path (6.6/L1039)".format(where, ref))
 
 
 # --- filter-free tree materialization (round-4 finding 1) -------------------------------------------

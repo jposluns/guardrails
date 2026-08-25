@@ -237,6 +237,13 @@ def normalize_dispositions(rows, where_rel=DISPOSITIONS_REL):
             if not isinstance(v, str) or not v:
                 raise GateError(where + ": missing or non-string {!r} (the Step-2 common schema)".format(
                     field))
+            # Every common field is a SINGLE-LINE value (id, release, kind, impact, rationale); a control
+            # character in any is a malformed record (round-5 sweep: no descriptive string field is left
+            # value-unvalidated). release/kind are further constrained below and id carries per-kind target
+            # syntax; this closes the free-text impact/rationale (and a version-impact id, which has no
+            # target syntax) against a smuggled 0x00-0x1F/0x7F byte.
+            if _release_schema.has_control_char(v):
+                raise GateError(where + ": {!r} carries a control character (0x00-0x1F/0x7F)".format(field))
         rid, kind, release = row["id"], row["kind"], row["release"]
         if rid in seen_ids:
             raise GateError(where + ": duplicate disposition id {!r}".format(rid))
@@ -868,8 +875,8 @@ def run(root):
         # SAME parsed-data validator load_dispositions applies to HEAD: the predecessor tree checks reach
         # only check_manifest's Step-2 common-field validator, so a predecessor default-correction row
         # missing its 6.6 evidence (valid at Step 2) is exit 2 here, symmetric with HEAD.
-        _validate_dispositions_data(_show_toml(root, commit, DISPOSITIONS_REL),
-                                    "predecessor " + DISPOSITIONS_REL)
+        prev_rows = _validate_dispositions_data(_show_toml(root, commit, DISPOSITIONS_REL),
+                                                "predecessor " + DISPOSITIONS_REL)
         # Manifest and renderer declaration schemas on BOTH objects (round-3 findings 1/4).
         prev_manifest = _show_toml(root, commit, MANIFEST_REL)
         _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
@@ -888,6 +895,13 @@ def run(root):
         # target in neither declaration is a mis-stated control, exit 2.
         _assert_renderer_targets_declared(
             rows, _nongenesis_renderer_target_scope(prev_renderers, head_renderers))
+        # The PREDECESSOR's OWN renderer-semantics dispositions must ALSO name a renderer DECLARED at the
+        # predecessor (round-5 finding 2): the predecessor rows were schema- and target-SYNTAX-validated at
+        # _validate_dispositions_data above, but their renderer EXISTENCE was never checked (the returned
+        # rows were discarded), so a predecessor row targeting 'nosuchrenderer' passed the gate clean. Scope
+        # to the predecessor's own strict-validated renderer declaration (a predecessor disposition can only
+        # reference a renderer that existed at that release).
+        _assert_renderer_targets_declared(prev_rows, _renderer_ids(prev_renderers))
         # Run the FULL AUTHORITATIVE validators in non-genesis mode too (round-4 finding 2), not only in
         # genesis: check_clauses over the HEAD tree's own sources (the 7.2 span/text/digest legs and the
         # 7.3 register semantics), and the same over the RAW-materialized predecessor tree together with
@@ -1468,6 +1482,15 @@ def _real_pack_e2e(tmp, failures):
             'format-version = 1\n\n[[disposition]]\nid = "clause.1"\nrelease = "1.0.0"\n'
             'kind = "default-correction"\nimpact = "x"\nrationale = "r"\n', encoding="utf-8")
 
+    def _mut_disp_renderer_nosuch(rp):
+        # (round-5 finding 2) a PREDECESSOR renderer-semantics row whose target is a valid SLUG but names NO
+        # renderer declared at the predecessor. Its target syntax passes _validate_dispositions_data, so the
+        # pre-fix gate (which discarded the predecessor rows) never existence-checked it and passed clean;
+        # the fix existence-checks the predecessor rows against the predecessor renderer declaration, exit 2.
+        (rp / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "nosuchrenderer"\nrelease = "1.0.0"\n'
+            'kind = "renderer-semantics"\nimpact = "byte-only"\nrationale = "r"\n', encoding="utf-8")
+
     _pred_record_fixture(
         "real-pack-pred-rel-ctrlpath", _mut_releases_ctrlpath,
         "real full-pack run(): a 0x01 control character in the PREDECESSOR releases qa-store-path must fail "
@@ -1476,6 +1499,10 @@ def _real_pack_e2e(tmp, failures):
         "real-pack-pred-disp-noevidence", _mut_disp_missing_evidence,
         "real full-pack run(): a predecessor default-correction row missing its 6.6 evidence (valid at "
         "Step 2) must fail closed exit 2 (this round's #2)")
+    _pred_record_fixture(
+        "real-pack-pred-disp-renderer-nosuch", _mut_disp_renderer_nosuch,
+        "real full-pack run(): a PREDECESSOR renderer-semantics disposition naming an undeclared renderer "
+        "must fail closed exit 2 (round-5 finding 2)")
     # NOTE: a predecessor ORDER facet-duplication is NOT given a run() fixture: strict_order runs on the
     # predecessor object too (the same validator the genesis and head #5 fixtures exercise), but any facet
     # duplication also breaks operative TIER_FACETS equality, which check_manifest.check_order_record catches
@@ -1691,6 +1718,52 @@ def _real_pack_e2e(tmp, failures):
         if made and _run_quiet_root(gprof) != 2:
             failures.append("real genesis full-pack run(): a self-referential profiles.toml symlink must "
                             "fail closed exit 2 (round-5 finding 5)")
+
+    # Regenerate a genesis fixture's manifest AFTER a record mutation so it stays FRESH (so the HEAD manifest
+    # integrity leg PASSES and the strict validator under test is the SOLE source of exit 2, not a stale
+    # manifest masking it, the round-4 lesson): stage the mutation, regenerate, restage the new manifest.
+    def _genesis_regen(dest):
+        genv = _selftest_env()
+        subprocess.run(["git", "-C", str(dest), "add", "-A"], capture_output=True, env=genv)
+        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(dest)], capture_output=True,
+                       env=genv)
+        subprocess.run(["git", "-C", str(dest), "add", "-A"], capture_output=True, env=genv)
+
+    # (round-5 finding 1) a HEAD clause whose source-path is NON-CANONICAL ('rules/../rules/...') but RESOLVES
+    # to the real file: check_clauses resolves and PASSES it (the finding's escape, clean PATCH exit 0);
+    # strict_clause_inventory now rejects the non-canonical form, exit 2. The manifest is regenerated so the
+    # sole thing under test is the path form (neutering the source-path check makes this fixture pass).
+    g1 = _extract_genesis("genesis-clause-noncanon-path")
+    if g1 is not None:
+        cp = g1 / CLAUSES_REL
+        text = cp.read_text(encoding="utf-8")
+        m = re.search(r'source-path = "([^"]+)"', text)
+        parts = m.group(1).split("/") if m else []
+        if len(parts) >= 2:
+            noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
+            cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
+                                       'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
+            _genesis_regen(g1)
+            if _run_quiet_root(g1) != 2:
+                failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
+                                "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
+
+    # (round-5 finding 3) a genesis default-correction row that is fully valid EXCEPT a captured-source whose
+    # host carries a raw SPACE ('https://exa mple.com/...'): the pre-fix urlparse-only check accepted it (a
+    # licensed MINOR); the deterministic URL grammar rejects it, exit 2. The row's target is a valid clause-id
+    # SYNTAX (genesis checks syntax, not existence) so the ONLY malformation under test is the URL.
+    g3 = _extract_genesis("genesis-dc-badurl")
+    if g3 is not None:
+        (g3 / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "prjint1.1"\nrelease = "1.0.0"\n'
+            'kind = "default-correction"\nimpact = "x"\nrationale = "r"\n'
+            'captured-source = "https://exa mple.com/s"\ncapture-date = "2026-08-24"\n'
+            'observed-measurement = "1 byte"\nobserved-date = "2026-08-24"\n'
+            'prefix-superset-reference = "qa/prefix.toml"\n', encoding="utf-8")
+        _genesis_regen(g3)
+        if _run_quiet_root(g3) != 2:
+            failures.append("real genesis full-pack run(): a default-correction captured-source with a "
+                            "spaced host must fail closed exit 2 (round-5 finding 3)")
 
     # (round-5 finding 3) a subprocess child emitting INVALID UTF-8 with a nonzero exit is captured as
     # BYTES: _renderer_freshness raises a clean GateError (exit 2), never an uncaught UnicodeDecodeError
@@ -2121,6 +2194,100 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
                         "union is required, this round's #6)")
     except GateError:
         pass
+
+    # --- round-5 SWEEP: type-appropriate value validation of EVERY record field ------------------
+    # These assert the shared strict validators directly (the discriminating layer for a field whose only
+    # escape is at the record-schema level), complementing the run() fixtures below. The class the sweep
+    # closes: a record FIELD whose VALUE was checked only non-empty, never for its type-appropriate grammar.
+
+    # #1 source-path is a CANONICAL repo-relative path on head AND predecessor (strict_clause_inventory is
+    # the ONE validator both objects run). A '..' path that RESOLVES to the real file (the finding's escape)
+    # is rejected here even though check_clauses would resolve and accept it.
+    def _clause_inv(source_path):
+        return {"clause": [{"clause-id": "calpha.1", "corpus-id": "calpha", "source-path": source_path,
+                            "start-line": 1, "end-line": 2, "canonical-text": "x",
+                            "source-digest": "a" * 64}]}
+    for _bad_sp in (".aiqt/core/rules/../rules/x.md", "../escape.md", "a//b.md", "a/\x01b.md"):
+        try:
+            _release_schema.strict_clause_inventory(_clause_inv(_bad_sp), "unit clauses")
+            failures.append("strict_clause_inventory accepted a non-canonical source-path {!r} (round-5 "
+                            "finding 1)".format(_bad_sp))
+        except _release_schema.SchemaError:
+            pass
+    try:
+        _release_schema.strict_clause_inventory(_clause_inv("aiqt/core/rules/x.md"), "unit clauses")
+    except _release_schema.SchemaError as exc:
+        failures.append("strict_clause_inventory wrongly rejected a clean source-path ({})".format(exc))
+
+    # #3 captured-source is a DETERMINISTIC http(s) URL: a raw space in the host (the finding's escape), a
+    # backslash, a non-http scheme, an empty host, and an out-of-range port are each rejected; real
+    # documentation URLs (domain, IPv4, explicit port) are accepted.
+    for _bad_url in ("https://exa mple.com/source", "https://ex\\ample.com/s", "ftp://example.com/s",
+                     "https:///no-host", "https://example.com:99999/p", "notaurl", ""):
+        if _release_schema._is_well_formed_url(_bad_url):
+            failures.append("_is_well_formed_url accepted a malformed URL {!r} (round-5 finding 3)".format(
+                _bad_url))
+    for _ok_url in ("https://docs.example.invalid/x", "http://example.com", "https://example.com:8443/p",
+                    "https://192.0.2.7/p"):
+        if not _release_schema._is_well_formed_url(_ok_url):
+            failures.append("_is_well_formed_url wrongly rejected a valid URL {!r} (round-5 finding "
+                            "3)".format(_ok_url))
+
+    # 6.6 evidence sweep: prefix-superset-reference is a canonical repo-relative path and observed-measurement
+    # carries a digit AND no control character; the otherwise-valid row (good URL, dates, measurement, ref)
+    # passes. default_correction_evidence_findings raises on each malformation.
+    def _dc_row(over):
+        row = {"captured-source": "https://docs.example.invalid/x", "capture-date": "2026-08-24",
+               "observed-measurement": "61117 bytes", "observed-date": "2026-08-24",
+               "prefix-superset-reference": "qa/prefix.toml"}
+        row.update(over)
+        return row
+    try:
+        _release_schema.default_correction_evidence_findings(_dc_row({}), "unit dc")
+    except _release_schema.SchemaError as exc:
+        failures.append("default_correction_evidence_findings wrongly rejected a valid row ({})".format(exc))
+    for _label, _over in (("prefix-superset-reference '../escape'",
+                           {"prefix-superset-reference": "../escape"}),
+                          ("prefix-superset-reference '//x'", {"prefix-superset-reference": "qa//x"}),
+                          ("observed-measurement with a control char",
+                           {"observed-measurement": "611\x0117 bytes"})):
+        try:
+            _release_schema.default_correction_evidence_findings(_dc_row(_over), "unit dc")
+            failures.append("default_correction_evidence_findings accepted {} (round-5 sweep)".format(_label))
+        except _release_schema.SchemaError:
+            pass
+
+    # order rank is a NON-NEGATIVE integer: a negative rank is rejected, a zero/positive rank accepted.
+    def _order(rank):
+        return {"format-version": 1, "apex-corpus-id": "prjint1",
+                "precedence-tier": [{"rank": rank, "members": ["ACCUR"], "members-are-equal": True}],
+                "presentation-order": {"families": ["apex"], "aiqt-facets": ["ACCUR"],
+                                       "security-facets": ["SECC"], "tie-breaker": "slug-bytewise"}}
+    try:
+        _release_schema.strict_order(_order(-1), "unit order")
+        failures.append("strict_order accepted a NEGATIVE precedence rank (round-5 sweep)")
+    except _release_schema.SchemaError:
+        pass
+    for _ok_rank in (0, 10):
+        try:
+            _release_schema.strict_order(_order(_ok_rank), "unit order")
+        except _release_schema.SchemaError as exc:
+            failures.append("strict_order wrongly rejected rank {} ({})".format(_ok_rank, exc))
+
+    # disposition common fields carry no control character: a 0x01 byte in rationale (or any common field)
+    # is a malformed record, exit 2; the same row without it loads.
+    _cc_row = {"id": "c.1", "kind": "behaviour-neutral", "release": "1.1.0", "impact": "x",
+               "rationale": "bad\x01rationale"}
+    try:
+        normalize_dispositions([dict(_cc_row)])
+        failures.append("normalize_dispositions accepted a control character in a common field (round-5 "
+                        "sweep)")
+    except GateError:
+        pass
+    try:
+        normalize_dispositions([dict(_cc_row, rationale="clean rationale")])
+    except GateError as exc:
+        failures.append("normalize_dispositions wrongly rejected a clean disposition row ({})".format(exc))
 
     # --- _cat_file_batch grammar (round-7 finding 3) ----------------------------------------------
     class _FakeProc:
