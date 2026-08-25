@@ -45,7 +45,8 @@ except ModuleNotFoundError:  # Python < 3.11
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
 from check_versions import _parse                        # noqa: E402  bare-SemVer (sibling idiom)
-from check_manifest import _min_for, CLASS_STRENGTH      # noqa: E402  the absolute-minimum table
+from check_manifest import _min_for, CLASS_STRENGTH, DISPOSITION_KINDS  # noqa: E402  minimum table + the
+#                              single-source disposition kind vocabulary (VC-4 QA #5; a self-test binds it)
 import gen_manifest                                      # noqa: E402  ownership loader (single source)
 
 PATCH, MINOR, MAJOR = 0, 1, 2
@@ -63,8 +64,12 @@ DERIVED_PATHS = (".aiqt/release/root.txt", ".aiqt/release/announce-snippet.txt")
 # Adopter-experience hook: dormant until the artifact exists (2.6 structural absence).
 PROFILES_REL = ".aiqt/core/profiles.toml"
 
-DISPOSITION_KINDS = {"behaviour-neutral", "strengthened", "default-correction", "class-change",
-                     "version-impact", "renderer-semantics"}
+# DISPOSITION_KINDS is imported from check_manifest (the Step-2 schema owner), the single source of the
+# kind vocabulary, so Step 2 and Step 4 cannot disagree on which kinds exist (VC-4 QA #5).
+# The Step-2 common mandatory fields this gate MUST also accept (matching check_manifest.check_dispositions
+# exactly, so a record valid at Step 2 loads here without a fail-closed exit 2); `subject` is the target
+# the row names (a clause-id, path, renderer-id, or profile) and is validated where a row is consumed.
+DISPOSITION_COMMON_FIELDS = ("id", "release", "kind", "impact", "rationale")
 DEFAULT_CORRECTION_EVIDENCE = ("captured-source", "capture-date", "observed-measurement",
                                "observed-date", "prefix-superset-reference")
 
@@ -141,23 +146,39 @@ def load_release_rows(root):
 
 def normalize_dispositions(rows):
     """Validate a list of disposition row dicts to full per-kind depth (6.5/6.6). Returns a list of
-    normalized rows each carrying a private _consumed flag. A malformed row raises GateError."""
+    normalized rows each carrying a private _consumed flag. A malformed row raises GateError.
+
+    VC-4 QA #5: this gate's schema MATCHES check_manifest.check_dispositions (the Step-2 record). The
+    COMMON mandatory fields are exactly DISPOSITION_COMMON_FIELDS = {id, release, kind, impact, rationale},
+    and `id` is the record's real unique key (Step 2 rejects a duplicate id). A record valid at Step 2
+    therefore loads here rather than failing closed exit 2. `subject` names the target the row dispositions
+    (a clause-id, path, renderer-id, or profile); it is how each leg maps a detected change to its row via
+    take_row. A row that omits or mis-types subject cannot match any change and is later reported UNCONSUMED
+    (a finding, not a crash). Per-kind depth is enforced here (default-correction evidence, 6.6; the
+    renderer-semantics impact value, 6.2/GD-89), which is exactly what Step 2 defers to Step 4."""
     if not isinstance(rows, list):
         raise GateError("{}: [[disposition]] is not an array".format(DISPOSITIONS_REL))
-    out = []
+    out, seen_ids = [], set()
     for i, row in enumerate(rows, 1):
         where = "{} row #{}".format(DISPOSITIONS_REL, i)
         if not isinstance(row, dict):
             raise GateError(where + ": not a table")
-        kind, subject, release = row.get("kind"), row.get("subject"), row.get("release")
+        for field in DISPOSITION_COMMON_FIELDS:
+            v = row.get(field)
+            if not isinstance(v, str) or not v:
+                raise GateError(where + ": missing or non-string {!r} (the Step-2 common schema)".format(
+                    field))
+        rid, kind, release = row["id"], row["kind"], row["release"]
+        if rid in seen_ids:
+            raise GateError(where + ": duplicate disposition id {!r}".format(rid))
+        seen_ids.add(rid)
         if kind not in DISPOSITION_KINDS:
             raise GateError(where + ": kind must be one of {}".format(sorted(DISPOSITION_KINDS)))
-        if not isinstance(subject, str) or not subject:
-            raise GateError(where + ": missing or non-string subject")
-        if not isinstance(release, str) or _parse(release) is None:
+        if _parse(release) is None:
             raise GateError(where + ": release {!r} is not a bare SemVer".format(release))
-        if not isinstance(row.get("rationale"), str) or not row.get("rationale"):
-            raise GateError(where + ": missing or non-string rationale")
+        subject = row.get("subject")
+        if subject is not None and (not isinstance(subject, str) or not subject):
+            raise GateError(where + ": subject, when present, must be a non-empty string")
         if kind == "default-correction":
             for k in DEFAULT_CORRECTION_EVIDENCE:
                 if not isinstance(row.get(k), str) or not row.get(k):
@@ -177,11 +198,14 @@ def load_dispositions(root):
 
 
 def take_row(rows, kind, subject, release):
-    """Consume exactly one matching unconsumed row; None if absent; GateError on duplicates."""
-    matches = [r for r in rows if r["kind"] == kind and r["subject"] == subject
+    """Consume exactly one unconsumed row whose (kind, subject, release) matches the detected change; None
+    if absent; GateError if two rows would disposition the same change (ambiguous). A row that carries no
+    subject never matches a real change and is left for the unconsumed sweep (VC-4 QA #5)."""
+    matches = [r for r in rows if r["kind"] == kind and r.get("subject") == subject
                and r["release"] == release and not r["_consumed"]]
     if len(matches) > 1:
-        raise GateError("duplicate {} disposition rows for {!r} at {}".format(kind, subject, release))
+        raise GateError("two {} disposition rows disposition {!r} at {} (ambiguous)".format(
+            kind, subject, release))
     if matches:
         matches[0]["_consumed"] = True
         return matches[0]
@@ -190,20 +214,60 @@ def take_row(rows, kind, subject, release):
 
 # --- legs (each returns (events, findings)) ---------------------------------------------------------
 
+def _register_lifecycle(register):
+    """Extract from the id-history register (7.3), for BOTH corpus-ids and clause-ids: {id: born-release},
+    {id: count of retirement (tombstone+successor) rows}, and {id: that row's retired-release}. Used to
+    enforce that an add or a removal carries its 7.3 row at THIS release (VC-4 QA #3)."""
+    born_at = {}
+    for r in register.get("born", []):
+        if isinstance(r, dict) and isinstance(r.get("id"), str):
+            born_at[r["id"]] = r.get("born-release")
+    retire_count, retire_release = {}, {}
+    for section in ("tombstone", "successor"):
+        for r in register.get(section, []):
+            if isinstance(r, dict) and isinstance(r.get("id"), str):
+                retire_count[r["id"]] = retire_count.get(r["id"], 0) + 1
+                retire_release[r["id"]] = r.get("retired-release")
+    return born_at, retire_count, retire_release
+
+
 def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
-    """6.5 CLAUSE TEXT: diff canonical text per clause-id; classify via the id-history register and the
-    public dispositions. Span or source-digest movement without a text change is not a delta."""
+    """6.5 CLAUSE TEXT and 7.3 ID LIFECYCLE. Diff canonical text per clause-id; classify a same-id text
+    change via the public dispositions. Span or source-digest movement without a text change is not a
+    delta. For an ADD or a REMOVAL the accepted disposition is the id-history ROW (6.5 accepts exactly one
+    of: an id-history row; or a same-id behaviour-neutral/strengthened/default-correction disposition), so
+    this leg REQUIRES that row, at THIS release and unique (VC-4 QA #3): an added id needs a born row
+    dated head_version; a removed id needs exactly one retirement row dated head_version. Corpus-ids (the
+    family before the dot) are diffed INDEPENDENTLY of clause-ids, so a wholly new or fully-retired corpus
+    family gains or needs its own 7.3 row (7.3 keeps one born row per corpus-id AND clause-id)."""
     events, findings = [], []
     prev = {r["clause-id"]: r.get("canonical-text", "") for r in prev_inv if isinstance(r, dict)}
     head = {r["clause-id"]: r.get("canonical-text", "") for r in head_inv if isinstance(r, dict)}
-    retired = {r.get("id") for k in ("tombstone", "successor")
-               for r in register.get(k, []) if isinstance(r, dict)}
+    born_at, retire_count, retire_release = _register_lifecycle(register)
+
+    def _require_born(ident, kind_label):
+        if born_at.get(ident) != head_version:
+            findings.append("{} {!r} is new since the predecessor release but has no id-history born row "
+                            "at {} (7.3/6.5)".format(kind_label, ident, head_version))
+
+    def _require_retirement(ident, kind_label):
+        n = retire_count.get(ident, 0)
+        if n == 0:
+            findings.append("{} {!r} disappeared with no tombstone or successor row (7.3)".format(
+                kind_label, ident))
+        elif n > 1:
+            findings.append("{} {!r} carries {} retirement rows; exactly one is allowed (7.3)".format(
+                kind_label, ident, n))
+        elif retire_release.get(ident) != head_version:
+            findings.append("{} {!r} retirement row is dated {!r}, not the release under build {} "
+                            "(7.3)".format(kind_label, ident, retire_release.get(ident), head_version))
+
     for cid in sorted(prev.keys() - head.keys()):
         events.append(DeltaEvent("clause", cid, "removed", MAJOR))
-        if cid not in retired:
-            findings.append("clause-id {!r} disappeared with no tombstone or successor row".format(cid))
+        _require_retirement(cid, "clause-id")
     for cid in sorted(head.keys() - prev.keys()):
         events.append(DeltaEvent("clause", cid, "added", MINOR))
+        _require_born(cid, "clause-id")
     for cid in sorted(prev.keys() & head.keys()):
         if prev[cid].encode("utf-8") == head[cid].encode("utf-8"):
             continue
@@ -215,6 +279,14 @@ def clause_text_leg(prev_inv, head_inv, register, rows, head_version):
         else:
             events.append(DeltaEvent("clause", cid, "undispositioned-text-change", MAJOR,
                                      detail="no public disposition; MAJOR floor (6.4 fail-closed)"))
+    prev_corpus = {c.partition(".")[0] for c in prev}
+    head_corpus = {c.partition(".")[0] for c in head}
+    for corp in sorted(prev_corpus - head_corpus):
+        events.append(DeltaEvent("clause", corp, "corpus-removed", MAJOR))
+        _require_retirement(corp, "corpus-id")
+    for corp in sorted(head_corpus - prev_corpus):
+        events.append(DeltaEvent("clause", corp, "corpus-added", MINOR))
+        _require_born(corp, "corpus-id")
     return events, findings
 
 
@@ -341,26 +413,65 @@ def _ownership_classes_head(root):
         raise GateError("cannot classify HEAD ownership ({})".format(exc))
 
 
-def _ownership_classes_at(root, commit):
-    """Predecessor ownership classes, computed against a disposable detached worktree of the anchored
-    release commit so gen_manifest's loader and classifier run over that release's real tree. The
-    worktree is removed in a finally block."""
-    import shutil
-    import tempfile
-    tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-own-"))
-    co = tmp / "co"
-    try:
-        proc = _git(root, ["worktree", "add", "--detach", str(co), commit])
-        if proc.returncode != 0:
-            raise GateError("cannot materialize predecessor {} for ownership ({})".format(
-                commit, proc.stderr.strip()))
+def _tracked_at(root, commit):
+    """The tracked path set AND the OWN_OUTPUTS present at a git commit, read from `git ls-tree -r -z`
+    PLUMBING (never a materialized worktree, so a checkout clean/smudge filter cannot alter the comparison;
+    VC-4 QA #11). Fail-closed like gen_manifest.git_tracked: a symlink, a gitlink, an unknown mode, an
+    empty tree, a duplicate, a case-fold or NFC/NFD collision, or a decode error is a cannot-evaluate, never
+    a silent empty set."""
+    import unicodedata
+    proc = _git(root, ["ls-tree", "-r", "-z", commit], binary=True)
+    if proc.returncode != 0:
+        raise GateError("cannot list predecessor tree {} ({})".format(
+            commit, proc.stderr.decode("utf-8", "replace").strip()))
+    if not proc.stdout:
+        raise GateError("predecessor tree {} lists no entries; an empty tree is never assumed".format(commit))
+    paths, seen_fold, seen_nfc = set(), {}, {}
+    for record in proc.stdout.split(b"\x00"):
+        if not record:
+            continue
         try:
-            return _classes_via_gen_manifest(co)
-        except gen_manifest.GateError as exc:
-            raise GateError("cannot classify predecessor ownership ({})".format(exc))
-    finally:
-        _git(root, ["worktree", "remove", "--force", str(co)])
-        shutil.rmtree(tmp, ignore_errors=True)
+            meta, path = record.decode("utf-8").split("\t", 1)
+            mode = meta.split(" ", 1)[0]
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise GateError("malformed git ls-tree record ({}); fail-closed".format(exc))
+        if mode == "120000":
+            raise GateError("predecessor tracked symlink {!r}: symlinks are rejected in pack scope "
+                            "(4.3)".format(path))
+        if mode == "160000":
+            raise GateError("predecessor tracked gitlink {!r}: submodules are unsupported".format(path))
+        if mode not in ("100644", "100755"):
+            raise GateError("predecessor tracked path {!r} has unsupported mode {}".format(path, mode))
+        if path in paths:
+            raise GateError("duplicate predecessor tracked path {!r}".format(path))
+        fold, nfc = path.casefold(), unicodedata.normalize("NFC", path)
+        if seen_fold.setdefault(fold, path) != path:
+            raise GateError("predecessor case-fold collision: {!r} and {!r}".format(seen_fold[fold], path))
+        if seen_nfc.setdefault(nfc, path) != path:
+            raise GateError("predecessor unicode-normalization collision: {!r} and {!r}".format(
+                seen_nfc[nfc], path))
+        paths.add(path)
+    outputs_present = {rel for rel in gen_manifest.OWN_OUTPUTS_REL if rel in paths}
+    return paths, outputs_present
+
+
+def _ownership_classes_at(root, commit):
+    """Predecessor ownership classes from git PLUMBING only (VC-4 QA #11): the ownership map read via
+    `git show <commit>:...` and validated by the SAME parser as the working tree (gen_manifest.parse_
+    ownership), the tracked set and present outputs from `git ls-tree`, both fed to the pure classifier.
+    No worktree is materialized, so no checkout filter runs and there is no cleanup to fail."""
+    data = _show_toml(root, commit, OWNERSHIP_REL)
+    try:
+        exclusions, release, namespace, _binary = gen_manifest.parse_ownership(data)
+    except gen_manifest.GateError as exc:
+        raise GateError("predecessor ownership map at {} does not validate ({})".format(commit, exc))
+    tracked, outputs_present = _tracked_at(root, commit)
+    try:
+        classes, _excluded = gen_manifest.classify(tracked, exclusions, release, namespace, root,
+                                                   outputs_present=outputs_present)
+    except gen_manifest.GateError as exc:
+        raise GateError("cannot classify predecessor ownership at {} ({})".format(commit, exc))
+    return classes
 
 
 def _claimed_rank(prev_v, head_v):
@@ -374,6 +485,31 @@ def _claimed_rank(prev_v, head_v):
     return PATCH
 
 
+# --- genesis structural validation (single-home validators, never re-implemented) -------------------
+
+def _validate_via_tool(root, script, args, what):
+    """Run a sibling single-home validator as a subprocess and raise GateError (exit 2) on any nonzero
+    exit, so a structural violation in a consumed record fails this gate closed rather than passing (VC-4
+    QA #1). The tool is located beside this gate and pointed at root, so it validates the target tree."""
+    proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / script), *args],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise GateError("{}: {} rc={} ({})".format(what, script, proc.returncode,
+                                                   (proc.stderr or proc.stdout).strip()[:400]))
+
+
+def _genesis_structural(root):
+    """Validate the internal structure of the consumed records at genesis (2.5/6.5), reusing each record's
+    authoritative single-home validator so this gate never re-implements or drifts from them: check_clauses
+    --genesis asserts the clause inventory (7.2) and the id-history register (7.3, born rows only covering
+    the whole inventory), and gen_renderers --check re-derives every renderer closure and framed digest
+    (6.5). Dispositions are validated separately by load_dispositions (normalize) in run()."""
+    _validate_via_tool(root, "check_clauses.py", ["--root", str(root), "--genesis"],
+                       "genesis clause inventory / id-history register structure (7.2/7.3)")
+    _validate_via_tool(root, "gen_renderers.py", ["--check", "--root", str(root)],
+                       "renderer declaration freshness (6.5)")
+
+
 # --- run --------------------------------------------------------------------------------------------
 
 def run(root):
@@ -381,16 +517,28 @@ def run(root):
         release_rows = load_release_rows(root)
         head_manifest = _load(root, MANIFEST_REL)
         rows = load_dispositions(root)
+        # Profiles/groups (2.6 arm-or-fail-closed): the real diff leg is not built. While the artifact is
+        # ABSENT the leg is legitimately NOT APPLICABLE; the moment it SHIPS a gate that cannot diff it must
+        # FAIL CLOSED, never silently pass a change on the profile surface (VC-4 QA #4). Checked in BOTH
+        # genesis and delta modes.
+        if (root / PROFILES_REL).is_file():
+            raise GateError("profiles/groups artifact {} has shipped but its delta leg is not implemented; "
+                            "fail-closed until the diff lands (2.6)".format(PROFILES_REL))
         if not release_rows:
             if head_manifest.get("genesis") is not True:
                 raise GateError("releases.toml is zero-row but the manifest does not declare "
                                 "genesis = true (2.5)")
-            # Genesis: validate the consumed records parse, compute no delta (2.5/6.5).
+            # Genesis (2.5/6.5): validate the INTERNAL STRUCTURE of every consumed record (not merely that
+            # it parses), and compute no delta. Dispositions are already normalized (rows, above); the order
+            # and renderer records parse; the inventory + id-history register and renderer freshness are
+            # validated through their single-home validators (VC-4 QA #1).
             _load(root, ORDER_REL)
             _load(root, RENDERERS_REL)
             _load(root, CLAUSES_REL)
-            print("release-delta: GENESIS (zero release rows, manifest genesis = true); records "
-                  "validate; no delta computed")
+            _genesis_structural(root)
+            print("release-delta: GENESIS (zero release rows, manifest genesis = true); consumed records "
+                  "validate their internal structure (dispositions, inventory, id-history register, "
+                  "renderer freshness); no delta computed")
             return 0
         prev_row = release_rows[-1]
         commit = prev_row["commit_sha"]
@@ -415,15 +563,14 @@ def run(root):
                                     _load(root, RENDERERS_REL), rows, head_version)):
             events += ev
             findings += fs
-        # Profiles/groups: dormant until the artifact exists (2.6 structural absence).
-        if not (root / PROFILES_REL).is_file():
-            print("release-delta: profiles/groups leg NOT APPLICABLE (adopter-experience artifact not "
-                  "yet defined; arms when it ships)")
+        # Profiles/groups is guaranteed ABSENT here (a present artifact fail-closed above): NOT APPLICABLE.
+        print("release-delta: profiles/groups leg NOT APPLICABLE (adopter-experience artifact not "
+              "yet defined; arms or fail-closes when it ships)")
         floor = max((e.floor for e in events), default=PATCH)
         for r in rows:
             if r["release"] == head_version and not r["_consumed"]:
                 findings.append("disposition row ({} {}) at {} matches no detected change "
-                                "(unconsumed)".format(r["kind"], r["subject"], head_version))
+                                "(unconsumed)".format(r["kind"], r.get("subject"), head_version))
         if claimed < floor:
             findings.append("claimed bump {} ({} -> {}) is below the required {} floor".format(
                 BUMP_NAME[claimed], prev_row["version"], head_version, BUMP_NAME[floor]))
@@ -454,6 +601,28 @@ def _floors(events):
     return sorted((e.surface, e.subject, e.change, e.floor) for e in events)
 
 
+def _git_available():
+    try:
+        return subprocess.run(["git", "--version"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def _git_init_commit(repo, msg, init=True):
+    """Init (once) and commit a fixture repo with a fixed, neutralized identity so a self-test commit is
+    deterministic and independent of the host git config (test hermeticity)."""
+    import os
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({"GIT_AUTHOR_NAME": "AIQT Self-Test", "GIT_AUTHOR_EMAIL": "selftest@example.invalid",
+                "GIT_COMMITTER_NAME": "AIQT Self-Test", "GIT_COMMITTER_EMAIL": "selftest@example.invalid",
+                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
+    if init:
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", msg], check=True, capture_output=True,
+                   env=env)
+
+
 def self_test_main():  # noqa: C901  a flat sequence of independent classification cases
     failures = []
 
@@ -475,40 +644,66 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
     def _inv(*pairs):
         return [{"clause-id": cid, "canonical-text": text} for cid, text in pairs]
 
-    # --- CLAUSE TEXT leg ---------------------------------------------------------------------------
-    # removed with a tombstone: MAJOR event, no finding.
-    reg = {"tombstone": [{"id": "calpha.1"}], "successor": []}
+    # --- CLAUSE TEXT + ID LIFECYCLE leg (VC-4 QA #3) ----------------------------------------------
+    def _reg(born=(), tombstone=(), successor=()):
+        # each arg is an iterable of (id, release); returns an id-history register dict.
+        return {"born": [{"id": i, "born-release": r} for i, r in born],
+                "tombstone": [{"id": i, "retired-release": r} for i, r in tombstone],
+                "successor": [{"id": i, "retired-release": r, "successor": i + "x"} for i, r in successor]}
+
+    # removed clause + its corpus, each with a retirement row dated the release: two MAJOR events, no finding.
+    reg = _reg(tombstone=(("calpha.1", "1.1.0"), ("calpha", "1.1.0")))
     ev, fs = clause_text_leg(_inv(("calpha.1", "x")), _inv(), reg, _rows(), "1.1.0")
-    if fs or _floors(ev) != [("clause", "calpha.1", "removed", MAJOR)]:
-        failures.append("clause removed-with-tombstone: expected a lone MAJOR event, no finding")
-    # removed with no retirement row: MAJOR event AND a register-incompleteness finding.
-    ev, fs = clause_text_leg(_inv(("calpha.1", "x")), _inv(), {"tombstone": [], "successor": []},
-                             _rows(), "1.1.0")
-    if not fs or _floors(ev) != [("clause", "calpha.1", "removed", MAJOR)]:
-        failures.append("clause removed-no-row: expected MAJOR event and a finding")
-    # added: MINOR.
-    ev, fs = clause_text_leg(_inv(), _inv(("cbeta1.1", "y")), {"tombstone": [], "successor": []},
-                             _rows(), "1.1.0")
-    if fs or _floors(ev) != [("clause", "cbeta1.1", "added", MINOR)]:
-        failures.append("clause added: expected a lone MINOR event")
-    # same-id text change, behaviour-neutral row: PATCH.
-    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), {"tombstone": [], "successor": []},
+    if fs or _floors(ev) != [("clause", "calpha", "corpus-removed", MAJOR),
+                             ("clause", "calpha.1", "removed", MAJOR)]:
+        failures.append("clause removed-with-retirement: expected clause+corpus MAJOR events, no finding")
+    # removed with NO retirement row: a register-incompleteness finding (7.3).
+    ev, fs = clause_text_leg(_inv(("calpha.1", "x")), _inv(), _reg(), _rows(), "1.1.0")
+    if not any("no tombstone or successor" in f for f in fs):
+        failures.append("clause removed-no-row: expected a register-incompleteness finding")
+    # removed with a retirement row dated the WRONG release: a release-specificity finding (7.3).
+    ev, fs = clause_text_leg(_inv(("calpha.1", "x")), _inv(),
+                             _reg(tombstone=(("calpha.1", "1.0.0"), ("calpha", "1.0.0"))), _rows(), "1.1.0")
+    if not any("not the release under build" in f for f in fs):
+        failures.append("clause removed wrong-release retirement: expected a release-specificity finding")
+    # removed with TWO retirement rows for one id: a uniqueness finding (7.3).
+    ev, fs = clause_text_leg(_inv(("calpha.1", "x")), _inv(),
+                             _reg(tombstone=(("calpha.1", "1.1.0"), ("calpha", "1.1.0")),
+                                  successor=(("calpha.1", "1.1.0"),)), _rows(), "1.1.0")
+    if not any("exactly one is allowed" in f for f in fs):
+        failures.append("clause removed duplicate-retirement: expected a uniqueness finding")
+    # added clause + its corpus, each with a born row at the release: two MINOR events, no finding.
+    ev, fs = clause_text_leg(_inv(), _inv(("cbeta1.1", "y")),
+                             _reg(born=(("cbeta1.1", "1.1.0"), ("cbeta1", "1.1.0"))), _rows(), "1.1.0")
+    if fs or _floors(ev) != [("clause", "cbeta1", "corpus-added", MINOR),
+                             ("clause", "cbeta1.1", "added", MINOR)]:
+        failures.append("clause added-with-born: expected clause+corpus MINOR events, no finding")
+    # added with NO born row: a born-row finding (7.3 born-in-same-release).
+    ev, fs = clause_text_leg(_inv(), _inv(("cbeta1.1", "y")), _reg(), _rows(), "1.1.0")
+    if not any("no id-history born row" in f for f in fs):
+        failures.append("clause added-no-born: expected a born-row finding")
+    # adding a clause to an EXISTING corpus: only the clause is 'added' (the corpus persists, no new event).
+    ev, fs = clause_text_leg(_inv(("cgamma.1", "a")), _inv(("cgamma.1", "a"), ("cgamma.2", "b")),
+                             _reg(born=(("cgamma.2", "1.1.0"),)), _rows(), "1.1.0")
+    if fs or _floors(ev) != [("clause", "cgamma.2", "added", MINOR)]:
+        failures.append("clause added-existing-corpus: expected a lone clause MINOR event, no finding")
+    # same-id text change, behaviour-neutral row: PATCH (no add/remove, corpus unchanged).
+    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), _reg(),
                              _rows(("behaviour-neutral", "c.1", "1.1.0")), "1.1.0")
     if fs or _floors(ev) != [("clause", "c.1", "behaviour-neutral", PATCH)]:
         failures.append("clause behaviour-neutral: expected PATCH")
     # same-id text change, strengthened row: MINOR.
-    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), {"tombstone": [], "successor": []},
+    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), _reg(),
                              _rows(("strengthened", "c.1", "1.1.0")), "1.1.0")
     if fs or _floors(ev) != [("clause", "c.1", "strengthened", MINOR)]:
         failures.append("clause strengthened: expected MINOR")
     # same-id text change, default-correction row (evidence complete): MINOR.
-    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), {"tombstone": [], "successor": []},
+    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), _reg(),
                              _rows(("default-correction", "c.1", "1.1.0")), "1.1.0")
     if fs or _floors(ev) != [("clause", "c.1", "default-correction", MINOR)]:
         failures.append("clause default-correction: expected MINOR")
     # same-id text change, NO disposition: undispositioned MAJOR floor (6.4 fail-closed).
-    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), {"tombstone": [], "successor": []},
-                             _rows(), "1.1.0")
+    ev, fs = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), _reg(), _rows(), "1.1.0")
     if fs or _floors(ev) != [("clause", "c.1", "undispositioned-text-change", MAJOR)]:
         failures.append("clause undispositioned: expected MAJOR floor")
 
@@ -581,11 +776,45 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
     if not fs or ("renderer", "agents", "changed", MAJOR) not in _floors(ev):
         failures.append("renderer rowless diff: expected a finding and a MAJOR event")
 
-    # --- take_row / disposition schema -------------------------------------------------------------
+    # --- take_row / disposition schema (VC-4 QA #5) ------------------------------------------------
+    # take_row raises when two rows would disposition the SAME change (ambiguous).
     try:
         take_row(_rows(("behaviour-neutral", "c.1", "1.1.0"), ("behaviour-neutral", "c.1", "1.1.0")),
                  "behaviour-neutral", "c.1", "1.1.0")
-        failures.append("take_row: expected GateError on duplicate rows")
+        failures.append("take_row: expected GateError on two rows for one change")
+    except GateError:
+        pass
+    # THE #5 REGRESSION GUARD: a row valid at Step 2 (check_manifest schema: id/release/kind/impact/
+    # rationale, NO subject) must LOAD here rather than fail closed exit 2, and must be reported UNCONSUMED
+    # rather than crashing (a subject-less row matches no change).
+    step2_row = {"id": "d1", "release": "1.1.0", "kind": "behaviour-neutral", "impact": "x",
+                 "rationale": "r"}
+    try:
+        loaded = normalize_dispositions([step2_row])
+    except GateError as exc:
+        loaded = None
+        failures.append("normalize_dispositions: a Step-2-valid subject-less row must load, not raise "
+                        "({})".format(exc))
+    if loaded is not None and take_row(loaded, "behaviour-neutral", "c.1", "1.1.0") is not None:
+        failures.append("take_row: a subject-less row must not match a real change")
+    # the shared kind vocabulary is the SAME object Step 2 uses (single source, cannot diverge).
+    import check_manifest as _cm
+    if DISPOSITION_KINDS is not _cm.DISPOSITION_KINDS:
+        failures.append("DISPOSITION_KINDS drift: the delta gate and check_manifest must share one set")
+    # the delta common schema must be exactly Step 2's mandatory set (matching check_manifest.check_dispositions).
+    if set(DISPOSITION_COMMON_FIELDS) != {"id", "release", "kind", "impact", "rationale"}:
+        failures.append("DISPOSITION_COMMON_FIELDS drift from the Step-2 record schema")
+    # duplicate id across rows is rejected (Step 2's real key).
+    try:
+        normalize_dispositions([dict(step2_row), dict(step2_row)])
+        failures.append("normalize_dispositions: expected GateError on a duplicate disposition id")
+    except GateError:
+        pass
+    # a missing common field (no impact) is rejected, matching Step 2.
+    try:
+        normalize_dispositions([{"id": "d", "release": "1.1.0", "kind": "behaviour-neutral",
+                                 "rationale": "r"}])
+        failures.append("normalize_dispositions: expected GateError on a missing common field")
     except GateError:
         pass
     # a default-correction row missing an evidence field is malformed input (exit 2 upstream).
@@ -603,6 +832,21 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
     except GateError:
         pass
 
+    # --- repin / self-test mode resolution (VC-4 QA #9) ------------------------------------------
+    def _opts(self_test=False, repin=False, target=None):
+        return {"self_test": self_test, "repin": repin, "target": target}
+    _cases = [(_opts(), "run"),
+              (_opts(self_test=True), "self-test"),
+              (_opts(repin=True, target="1.0.0"), "repin"),
+              (_opts(target="1.0.0"), "error"),               # --target without --repin never runs
+              (_opts(repin=True), "error"),                   # --repin without --target is incomplete
+              (_opts(repin=True, target="1.0.0", self_test=True), "error"),   # mixed with --self-test
+              (_opts(target="1.0.0", self_test=True), "error")]
+    for opts, want in _cases:
+        got = _resolve_mode(opts)
+        if got != want:
+            failures.append("_resolve_mode({}): expected {!r}, got {!r}".format(opts, want, got))
+
     # --- bump computation --------------------------------------------------------------------------
     if _claimed_rank("1.0.0", "1.0.1") != PATCH or _claimed_rank("1.0.0", "1.1.0") != MINOR \
             or _claimed_rank("1.0.0", "2.0.0") != MAJOR:
@@ -612,6 +856,20 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
         failures.append("_claimed_rank: expected GateError when head does not increase")
     except GateError:
         pass
+
+    # --- combined multi-leg delta: dispositions consumed ACROSS legs, floor = max, no residue --------
+    # A single release that both strengthens a clause and strengthens an ownership class: each leg consumes
+    # its own row from ONE shared roster, both rows are consumed, and the floor is MINOR.
+    shared = _rows(("strengthened", "c.1", "1.1.0"), ("class-change", ".aiqt/release/n.txt", "1.1.0"))
+    e_c, f_c = clause_text_leg(_inv(("c.1", "old")), _inv(("c.1", "new")), _reg(), shared, "1.1.0")
+    e_o, f_o = ownership_leg({".aiqt/release/n.txt": "derived"},
+                             {".aiqt/release/n.txt": "pack-immutable"}, shared, "1.1.0")
+    combined_findings = f_c + f_o + [r["id"] for r in shared if not r["_consumed"]]
+    if combined_findings:
+        failures.append("combined multi-leg: both rows should consume with no finding ({})".format(
+            combined_findings))
+    if max((e.floor for e in e_c + e_o), default=PATCH) != MINOR:
+        failures.append("combined multi-leg: floor should be MINOR")
 
     # --- git-independent end-to-end cases (minimal record trees in a tempdir) ----------------------
     import shutil
@@ -629,14 +887,19 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
     else:
         e2e_ran = True
         try:
-            # (genesis) zero-row releases + manifest genesis=true -> exit 0.
+            # (genesis structural, VC-4 QA #1) zero-row releases + manifest genesis=true, but a MINIMAL
+            # record tree with no id-history register and no tools closure: genesis mode must now VALIDATE
+            # the internal structure of every consumed record (not merely parse it), so it fails CLOSED
+            # (exit 2) rather than passing exit 0 as it did before the fix. A genuine clean genesis (real
+            # inventory, register, and renderer closure) is exercised by run_all_checks against the pack.
             g = tmp / "genesis"
             (g / ".aiqt" / "core").mkdir(parents=True)
             (g / ".aiqt" / "manifest.toml").write_text("genesis = true\n", encoding="utf-8")
             for rel in (RELEASES_REL, ORDER_REL, RENDERERS_REL, CLAUSES_REL, DISPOSITIONS_REL):
                 (g / rel).write_text("format-version = 1\n", encoding="utf-8")
-            if _run_quiet_root(g) != 0:
-                failures.append("genesis end-to-end: expected exit 0")
+            if _run_quiet_root(g) != 2:
+                failures.append("genesis structural: a record tree whose structure cannot be validated "
+                                "must fail closed exit 2 (QA #1), not pass")
 
             # (genesis-mismatch) zero rows but manifest genesis not true -> exit 2.
             gm = tmp / "genesis-mismatch"
@@ -660,6 +923,47 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
             (u / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
             if _run_quiet_root(u) != 2:
                 failures.append("unreachable predecessor: expected fail-closed exit 2")
+
+            # (predecessor ownership via git PLUMBING, VC-4 QA #11) build a real two-commit git repo with
+            # an ownership map and tracked files; _ownership_classes_at must read the FIRST commit's tree
+            # via git show / git ls-tree (never a materialized worktree) and classify it, while HEAD carries
+            # an extra file. Env is neutralized (git_tracked strips GIT_*; commits use a fixed identity).
+            if _git_available():
+                repo = tmp / "own-repo"
+                (repo / ".aiqt" / "core").mkdir(parents=True)
+                (repo / "pkg").mkdir()
+                # selectors are stable across both commits (a directory prefix `<prefix>/**` or an exact
+                # path; no bare '**'), so NO-STRAYS holds at each commit's tree.
+                (repo / ".aiqt" / "core" / "ownership.toml").write_text(
+                    'format-version = 1\n\n[[release-class]]\npattern = "pkg/**"\nclass = "pack-immutable"\n\n'
+                    '[[release-class]]\npattern = ".aiqt/**"\nclass = "pack-immutable"\n\n'
+                    '[adopter-extent]\nauthority = "adopter-experience-spec"\n', encoding="utf-8")
+                (repo / "pkg" / "a.txt").write_text("a\n", encoding="utf-8")
+                (repo / "pkg" / "b.txt").write_text("b\n", encoding="utf-8")
+                _git_init_commit(repo, "release one")
+                prev_commit = _git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+                (repo / "pkg" / "c.txt").write_text("c\n", encoding="utf-8")
+                _git_init_commit(repo, "release two", init=False)
+                try:
+                    prev_classes = _ownership_classes_at(repo, prev_commit)
+                    head_classes = _ownership_classes_head(repo)
+                except GateError as exc:
+                    prev_classes, head_classes = None, None
+                    failures.append("predecessor ownership via git-show raised ({})".format(exc))
+                if prev_classes is not None:
+                    want_prev = {"pkg/a.txt": "pack-immutable", "pkg/b.txt": "pack-immutable",
+                                 ".aiqt/core/ownership.toml": "pack-immutable"}
+                    if prev_classes != want_prev:
+                        failures.append("predecessor ownership (git-show): expected {}, got {}".format(
+                            want_prev, prev_classes))
+                    if "pkg/c.txt" in prev_classes or "pkg/c.txt" not in head_classes:
+                        failures.append("predecessor ownership: pkg/c.txt must be in HEAD only, proving the "
+                                        "predecessor tree came from the FIRST commit")
+                    # no worktree may be left behind (the git-show path materializes none).
+                    wt = _git(repo, ["worktree", "list"]).stdout.strip().splitlines()
+                    if len(wt) != 1:
+                        failures.append("predecessor ownership: a worktree was materialized ({} listed); "
+                                        "the git-show path must create none".format(len(wt)))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -671,11 +975,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
     core = ("the 6.5 classification legs (clause removed/added/behaviour-neutral/strengthened/"
             "default-correction/undispositioned, path added/removed/moved, ownership weakening/"
             "strengthening/below-minimum, order change, renderer alters-obligations/byte-only/rowless), "
-            "the duplicate-row and malformed-disposition fail-closed cases, and the PATCH/MINOR/MAJOR "
-            "bump computation")
+            "the id-lifecycle born/retirement release-and-uniqueness rows and corpus-id diff (#3), the "
+            "combined multi-leg consumption, the Step-2 disposition-schema acceptance and id-uniqueness "
+            "(#5), the repin/self-test mode resolution (#9), and the PATCH/MINOR/MAJOR bump computation")
     if e2e_ran:
-        print("SELF-TEST PASS: {}; and the end-to-end genesis (exit 0), genesis-flag-mismatch (exit 2), "
-              "and unreachable-predecessor (exit 2) cases hold".format(core))
+        print("SELF-TEST PASS: {}; and the end-to-end genesis-structural fail-closed (exit 2, #1), "
+              "genesis-flag-mismatch (exit 2), unreachable-predecessor (exit 2), and git-plumbing "
+              "predecessor-ownership (#11, no worktree materialized) cases hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end cases were SKIPPED (no writable temp "
               "directory), so those paths are UNVERIFIED this run".format(core))
@@ -701,13 +1007,33 @@ def _parse_args(argv):
     return opts
 
 
+def _resolve_mode(opts):
+    """Classify an option set into exactly one dispatch mode BEFORE any work runs, so a mixed or incomplete
+    invocation can never fall through to a real run (VC-4 QA #9). Any invocation touching the repin family
+    (--repin or --target) resolves to 'repin' (the fail-closed 10.4 stub) or 'error', never 'run' or
+    'self-test'. Returns one of: 'self-test', 'run', 'repin', 'error'."""
+    repin_family = opts["repin"] or opts["target"] is not None
+    if opts["self_test"]:
+        return "error" if repin_family else "self-test"
+    if repin_family:
+        # 10.4 repin requires BOTH --repin and --target; anything less is an incomplete mode.
+        return "repin" if (opts["repin"] and opts["target"] is not None) else "error"
+    return "run"
+
+
 def main():
     opts = _parse_args(sys.argv[1:])
     if opts is None:
         return 2
-    if opts["self_test"]:
+    mode = _resolve_mode(opts)
+    if mode == "error":
+        print("error: --repin is the 10.4 adopter mode; it requires --target V and runs alone. A "
+              "--target without --repin, a --repin without --target, or a repin option combined with "
+              "--self-test is a mixed or incomplete mode and is rejected fail-closed", file=sys.stderr)
+        return 2
+    if mode == "self-test":
         return self_test_main()
-    if opts["repin"]:
+    if mode == "repin":
         # 10.4 adopter re-pin mode: the doctor packaging that drives it is adopter-experience-owned and
         # not part of this release. Rather than run a half-wired path, this fails closed with a clear
         # message (never a silent clean pass), so the mode is declared but does not falsely certify.

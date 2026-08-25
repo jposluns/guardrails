@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "bd91c837c833e28bdc841e098b6dc6e3ba539034ee7057a8cba667c942113291"
+tree-sha256 = "87265cac193bc3fa13564c34bfd799f57c4421a9cbc1bfb9d0c325ae293e5b15"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2361,13 +2361,13 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 36911
-sha256 = "f653ead3698e73dff4b8bceaf12b12da72db5508650e98b688dc289516147709"
+bytes = 47829
+sha256 = "5183ed4c31cfbdb8dc769cbbfeec803b3808f2bc9f1592a8bb694444cfcec56a"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 38646
-sha256 = "ce1bb99b8e5429cd64436cf86f135e8a640485b026c5fd781a1f998bbcae53d5"
+bytes = 61344
+sha256 = "55c09b86b7144714769812f9aa78d3a2bfe9da6d791b051fcbacffb41763a717"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -2396,8 +2396,8 @@ sha256 = "565eaf3a2a53a94de3ae525faac3411a99a4bcdd96e017f2a859bc4c33b4d79d"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
-bytes = 37731
-sha256 = "fbcbf0061263e04371bf5aee094713c478167a7b60f2f79c98a5c48c238367a6"
+bytes = 38285
+sha256 = "24b3a3821e2aaf499f6141bc52356b17906ab11e6834fac08c3cbd4b723fcfb6"
 
 [[sources]]
 path = "tools/check_versions.py"
@@ -2461,8 +2461,8 @@ sha256 = "ab1d5efe7499c2e1ff068daac952f1d6a9606cd628549a7e362b39f24b7e5df1"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 49790
-sha256 = "86b2629deaf48d4a43abae237570f9f696f4cafaa1c16fd396d57a42c9c7ff45"
+bytes = 51615
+sha256 = "e3520bdc0e569fd946e19ddc7e1fdeec72e61cad74af031251c9869390aa329e"
 
 [[sources]]
 path = "tools/gen_mappings.py"

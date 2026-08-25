@@ -28,6 +28,7 @@ unreachable store, an unresolvable tag or SHA, unreadable records, or a git fail
 """
 import hashlib
 import io
+import json
 import shutil
 import subprocess
 import sys
@@ -43,11 +44,17 @@ except ModuleNotFoundError:  # Python < 3.11
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 from check_versions import _parse             # noqa: E402
+import gen_manifest                           # noqa: E402  the single shared release-row schema (QA #6)
 
 RELEASES_REL = ".aiqt/core/releases.toml"
 MANIFEST_REL = ".aiqt/manifest.toml"
 FAMILIES = ("claude", "codex", "gemini")
 HEX64 = frozenset("0123456789abcdef")
+# The keys this gate validates for a release-order row: the four anchor fields plus the three attestation
+# fields a row gains once QA'd. A self-test binds this to gen_manifest.RELEASE_ROW_ALLOWED so the full
+# per-field validator here, read_genesis, and check_release_delta cannot diverge on the schema (QA #6).
+BUILD_ROW_ANCHOR = ("version", "tag", "tag_object_sha", "commit_sha")
+BUILD_ROW_KEYS = frozenset(BUILD_ROW_ANCHOR + ("qa-sha256", "qa-store-path", "attestation-timestamps"))
 
 
 class GateError(Exception):
@@ -141,6 +148,16 @@ def chronology_findings(attestation_epochs, tagger_epoch):
         t, tagger_epoch) for t in attestation_epochs if not (t < tagger_epoch)]
 
 
+def chronology_input_findings(row):
+    """2.2, QA #8: the newest anchored row must carry its attestation-timestamps, so the chronology layer
+    is a real comparison rather than vacuously clean over an empty list. An absent or empty list is a
+    finding, never a silent default-to-clean."""
+    if not row.get("attestation-timestamps"):
+        return ["newest release row carries no attestation-timestamps; chronology cannot be evaluated and "
+                "is not defaulted clean (2.2 fail-closed)"]
+    return []
+
+
 def genesis_findings(rows_by_tag_genesis):
     """2.5: over all validated rows, exactly one tagged manifest declares genesis = true, and it is the
     first. rows_by_tag_genesis is an ordered list of booleans."""
@@ -223,7 +240,10 @@ def _regenerate_check_commands(co):
     check_manifest, run inside the candidate checkout. Enumerated via gen_gensrc.build_registry (the
     verified house loader), so the reproduce set is the same registry check_gensrc_failclose covers."""
     import gen_gensrc  # the validated registry loader (house import-reuse pattern)
-    registry = gen_gensrc.build_registry(co)
+    # build_registry returns the registry JSON TEXT ({"version", "generated": [...]}), not a list of
+    # dicts; parse it and iterate the "generated" entries (QA #7: the old code iterated the string and
+    # called .get on each character, an AttributeError that crashed every --pre-tag reproduce).
+    registry = json.loads(gen_gensrc.build_registry(co)).get("generated", [])
     commands = []
     for entry in registry:
         regen = entry.get("regenerate", "")
@@ -270,9 +290,42 @@ def _req_str(row, key, where):
     return v
 
 
+def _validate_row_fields(row, where):
+    """The FULL per-field validation of one release-order row, the single validator shared by
+    load_build_rows (working tree) and _normalize_rows (an arbitrary commit's record), so --post-tag gets
+    exactly the same strict schema as the working-tree loader (QA #8: post-tag no longer validates only the
+    anchor fields). Unknown keys are rejected against the shared schema (QA #6). Raises GateError."""
+    if not isinstance(row, dict):
+        raise GateError(where + ": not a table")
+    extra = set(row) - gen_manifest.RELEASE_ROW_ALLOWED
+    if extra:
+        raise GateError(where + ": unknown key(s): {} (not in the shared release-row schema)".format(
+            ", ".join(sorted(extra))))
+    for key in BUILD_ROW_ANCHOR:
+        _req_str(row, key, where)
+    if _parse(row["version"]) is None:
+        raise GateError(where + ": malformed version {!r}".format(row["version"]))
+    if "qa-sha256" in row:
+        d = row["qa-sha256"]
+        if not isinstance(d, str) or len(d) != 64 or set(d) - HEX64:
+            raise GateError(where + ": qa-sha256 is not 64 lowercase hex")
+    if "qa-store-path" in row:
+        p = row["qa-store-path"]
+        if not isinstance(p, str) or not p:
+            raise GateError(where + ": qa-store-path is not a non-empty string")
+        if p.startswith("/") or (len(p) > 1 and p[1] == ":"):
+            raise GateError(where + ": qa-store-path {!r} is host-absolute; the row records a "
+                            "logical store path (portability)".format(p))
+    if "attestation-timestamps" in row:
+        ts = row["attestation-timestamps"]
+        if not isinstance(ts, list) or not all(isinstance(t, int) and not isinstance(t, bool)
+                                               for t in ts):
+            raise GateError(where + ": attestation-timestamps must be a list of integer epochs")
+
+
 def load_build_rows(root):
-    """The release-order rows the build gate validates. Zero rows is the genesis/dormant state. A
-    present row must carry the four anchor fields; qa-sha256 (64 hex), qa-store-path, and
+    """The release-order rows the build gate validates. Zero rows is the genesis/dormant state. A present
+    row must carry the four anchor fields; qa-sha256 (64 hex), qa-store-path (a logical path), and
     attestation-timestamps (a list of integer epochs) are validated when present. Fail-closed on any
     malformed row."""
     try:
@@ -283,29 +336,7 @@ def load_build_rows(root):
     if not isinstance(rows, list):
         raise GateError("{}: [[release]] is not an array".format(RELEASES_REL))
     for i, row in enumerate(rows, 1):
-        where = "{} row #{}".format(RELEASES_REL, i)
-        if not isinstance(row, dict):
-            raise GateError(where + ": not a table")
-        for key in ("version", "tag", "tag_object_sha", "commit_sha"):
-            _req_str(row, key, where)
-        if _parse(row["version"]) is None:
-            raise GateError(where + ": malformed version {!r}".format(row["version"]))
-        if "qa-sha256" in row:
-            d = row["qa-sha256"]
-            if not isinstance(d, str) or len(d) != 64 or set(d) - HEX64:
-                raise GateError(where + ": qa-sha256 is not 64 lowercase hex")
-        if "qa-store-path" in row:
-            p = row["qa-store-path"]
-            if not isinstance(p, str) or not p:
-                raise GateError(where + ": qa-store-path is not a non-empty string")
-            if p.startswith("/") or (len(p) > 1 and p[1] == ":"):
-                raise GateError(where + ": qa-store-path {!r} is host-absolute; the row records a "
-                                "logical store path (portability)".format(p))
-        if "attestation-timestamps" in row:
-            ts = row["attestation-timestamps"]
-            if not isinstance(ts, list) or not all(isinstance(t, int) and not isinstance(t, bool)
-                                                   for t in ts):
-                raise GateError(where + ": attestation-timestamps must be a list of integer epochs")
+        _validate_row_fields(row, "{} row #{}".format(RELEASES_REL, i))
     return rows
 
 
@@ -352,8 +383,10 @@ def run_audit(root):
             findings += row_findings
             genesis_flags.append(is_genesis)
         findings += genesis_findings(genesis_flags)
-        # Chronology on the newest row, from the row's recorded timestamps vs its tagger date.
+        # Chronology on the newest row, from the row's recorded timestamps vs its tagger date; the
+        # timestamps must be present (no default-to-clean, QA #8).
         newest = rows[-1]
+        findings += chronology_input_findings(newest)
         findings += chronology_findings(newest.get("attestation-timestamps", []),
                                         _tagger_epoch(root, newest["tag"]))
         print("release-build: qa-retrieval MAINTAINER-SIDE (runs under --pre-tag/--post-tag; the "
@@ -416,10 +449,14 @@ def _first_pin_findings(root, candidate_sha, evidence, is_genesis):
     return findings
 
 
-def run_post_tag(root, attestation_commit):
-    """--post-tag ARMED mode (2.6): tag resolution, newest-row validation, the 2.2 chronology layer, and
-    the 2.4 ordering assertions, against the proposed attestation commit (default HEAD). Required
-    pre-merge check on the attestation-commit branch (2.1 step 6)."""
+def run_post_tag(root, attestation_commit, qa_path):
+    """--post-tag ARMED mode (2.6): tag resolution, STRICT full-row validation, the 2.4 ordering
+    assertions, the 2.2 chronology layer, AND (QA #8) retrieval + re-hash + family validation of the
+    newest row's attestation QA object, against the proposed attestation commit (default HEAD). Required
+    pre-merge check on the attestation-commit branch (2.1 step 6). The newest row MUST be fully attested
+    (qa-sha256, qa-store-path, attestation-timestamps present) and --qa-path MUST resolve the QA object:
+    the armed gate never certifies a release without retrieving and re-hashing its recorded QA evidence,
+    and it never defaults a missing field to clean."""
     try:
         ref = attestation_commit or "HEAD"
         releases = _show_toml(root, ref, RELEASES_REL)
@@ -427,7 +464,7 @@ def run_post_tag(root, attestation_commit):
         if not isinstance(rows, list) or not rows:
             raise GateError("--post-tag: the proposed attestation commit {} has no release rows to "
                             "validate".format(ref))
-        # Re-validate through the strict loader against the proposed commit's record.
+        # Re-validate through the SAME strict full-row validator as the working-tree loader (QA #8).
         norm = _normalize_rows(rows)
         findings = ordering_findings([r["version"] for r in norm])
         genesis_flags = []
@@ -437,8 +474,21 @@ def run_post_tag(root, attestation_commit):
             genesis_flags.append(is_genesis)
         findings += genesis_findings(genesis_flags)
         newest = norm[-1]
+        # The newest row is THE attestation row and must carry every attestation field; a missing field is
+        # a finding, never a default-to-clean (QA #8).
+        for key in ("qa-sha256", "qa-store-path"):
+            if key not in newest:
+                findings.append("newest release row is not fully attested: missing {} (2.2)".format(key))
+        findings += chronology_input_findings(newest)
         findings += chronology_findings(newest.get("attestation-timestamps", []),
                                         _tagger_epoch(root, newest["tag"]))
+        # Retrieve, re-hash, and validate the recorded QA object against the newest candidate commit.
+        if qa_path is None:
+            raise GateError("--post-tag requires --qa-path to retrieve and re-hash the newest row's "
+                            "attestation QA object; the armed gate never certifies without it")
+        if "qa-sha256" in newest:
+            qa_findings, _epochs = qa_layers(qa_path, newest["qa-sha256"], newest["commit_sha"])
+            findings += qa_findings
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -446,17 +496,12 @@ def run_post_tag(root, attestation_commit):
 
 
 def _normalize_rows(rows):
-    """Validate rows parsed from an arbitrary commit's releases.toml, reusing the same field checks as
-    load_build_rows (which reads the working tree)."""
+    """Validate rows parsed from an arbitrary commit's releases.toml through the SAME strict full-row
+    validator as load_build_rows (working tree), so --post-tag applies the full schema, not just the
+    anchor fields (QA #8)."""
     out = []
     for i, row in enumerate(rows, 1):
-        where = "attestation releases row #{}".format(i)
-        if not isinstance(row, dict):
-            raise GateError(where + ": not a table")
-        for key in ("version", "tag", "tag_object_sha", "commit_sha"):
-            _req_str(row, key, where)
-        if _parse(row["version"]) is None:
-            raise GateError(where + ": malformed version {!r}".format(row["version"]))
+        _validate_row_fields(row, "attestation releases row #{}".format(i))
         out.append(row)
     return out
 
@@ -479,6 +524,11 @@ def _report(findings, stage):
 def _run_audit_quiet(root):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run_audit(root)
+
+
+def _run_post_tag_quiet(root, attestation_commit, qa_path):
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        return run_post_tag(root, attestation_commit, qa_path)
 
 
 def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
@@ -547,6 +597,35 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
     fnds, _e = validate_qa_obj(good_obj, "different")
     if not any("candidate SHA" in f for f in fnds):
         failures.append("validate_qa_obj: a candidate-sha mismatch expected a finding")
+
+    # chronology-input guard (QA #8): a newest row without attestation-timestamps is a finding, never a
+    # vacuously-clean chronology.
+    if chronology_input_findings({"attestation-timestamps": [1]}):
+        failures.append("chronology_input: a row with timestamps expected no finding")
+    if not chronology_input_findings({}) or not chronology_input_findings({"attestation-timestamps": []}):
+        failures.append("chronology_input: a row with no/empty timestamps expected a finding (QA #8)")
+
+    # --- shared release-row schema drift (QA #6) --------------------------------------------------
+    # This gate's validated key universe must EQUAL the single shared schema, so read_genesis,
+    # check_release_build, and check_release_delta cannot diverge.
+    if BUILD_ROW_KEYS != gen_manifest.RELEASE_ROW_ALLOWED:
+        failures.append("release-row schema drift: BUILD_ROW_KEYS {} != gen_manifest.RELEASE_ROW_ALLOWED "
+                        "{}".format(sorted(BUILD_ROW_KEYS), sorted(gen_manifest.RELEASE_ROW_ALLOWED)))
+    if not set(BUILD_ROW_ANCHOR) <= gen_manifest.RELEASE_ROW_ALLOWED:
+        failures.append("release-row schema drift: anchor fields are not within the shared schema")
+
+    # --- reproduce-command enumeration (QA #7) ---------------------------------------------------
+    # build_registry returns JSON TEXT; _regenerate_check_commands must parse it and iterate the entries,
+    # not iterate the string (the pre-tag crash). Run against the real repo checkout (the real registry).
+    try:
+        cmds = _regenerate_check_commands(repo_root())
+        if not any(c[:1] == ["python3"] and c[-1] == "--check" for c in cmds):
+            failures.append("_regenerate_check_commands: expected python3 ... --check commands")
+        if ["python3", "tools/gen_manifest.py", "--check"] not in cmds \
+                or ["python3", "tools/check_manifest.py"] not in cmds:
+            failures.append("_regenerate_check_commands: expected the manifest + check_manifest commands")
+    except Exception as exc:  # noqa: BLE001  the QA #7 crash was exactly an exception here
+        failures.append("_regenerate_check_commands raised ({}); QA #7 regression".format(exc))
 
     # --- git-level cases ---------------------------------------------------------------------------
     import shutil as _sh
@@ -649,6 +728,77 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 'tag_object_sha = "dead"\ncommit_sha = "beef"\n', encoding="utf-8")
             if _run_audit_quiet(nr) != 2:
                 failures.append("audit unresolvable tag: expected fail-closed exit 2")
+
+            # (read_genesis accepts a FULL attestation row, QA #6) a one-row record carrying every
+            # documented field must be ACCEPTED by gen_manifest.read_genesis (it needs only the count),
+            # returning False, not rejected on the tag/qa-*/timestamps keys the old allow-set omitted.
+            rg = tmp / "readgenesis"
+            (rg / ".aiqt" / "core").mkdir(parents=True)
+            (rg / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                'tag_object_sha = "{a}"\ncommit_sha = "{b}"\nqa-sha256 = "{c}"\n'
+                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100, 200]\n'.format(
+                    a="a" * 40, b="b" * 40, c="c" * 64), encoding="utf-8")
+            try:
+                if gen_manifest.read_genesis(rg) is not False:
+                    failures.append("read_genesis: a one-row record must return False (not genesis)")
+            except Exception as exc:  # noqa: BLE001  QA #6 was exactly a rejection here
+                failures.append("read_genesis rejected a valid full attestation row (QA #6): {}".format(exc))
+            (rg / RELEASES_REL).write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ncommit_sha = "b"\nbogus = 1\n',
+                encoding="utf-8")
+            try:
+                gen_manifest.read_genesis(rg)
+                failures.append("read_genesis: an unknown row key must still be rejected")
+            except gen_manifest.GateError:
+                pass
+
+            # (post-tag end-to-end, QA #8) a genesis release, annotated tag, an attestation commit whose
+            # newest row is FULLY attested, and a matching QA object on disk: run_post_tag retrieves and
+            # re-hashes it and validates the families (armed gate clean). Then three fail-closed variants
+            # the old default-to-clean code missed.
+            pt = tmp / "posttag"
+            _init(pt)
+            _write_records(pt, "format-version = 1\n", 'release-version = "1.0.0"\ngenesis = true\n')
+            _commit(pt, "genesis release tree")
+            subprocess.run(["git", "-C", str(pt), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
+                           check=True, capture_output=True, text=True,
+                           env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+            pt_tag = subprocess.run(["git", "-C", str(pt), "rev-parse", "refs/tags/v1.0.0"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            pt_commit = subprocess.run(["git", "-C", str(pt), "rev-parse", "refs/tags/v1.0.0^{commit}"],
+                                       check=True, capture_output=True, text=True).stdout.strip()
+            pt_tagger = _tagger_epoch(pt, "v1.0.0")
+            qa_body = ('candidate-sha = "{}"\n\n'.format(pt_commit) + "".join(
+                '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
+                'unresolved-blockers = 0\ntimestamps-utc = [{}]\n\n'.format(n, pt_tagger - 100)
+                for n in FAMILIES))
+            qa_file = pt / "qa.toml"
+            qa_file.write_text(qa_body, encoding="utf-8")
+            qa_sha = hashlib.sha256(qa_body.encode("utf-8")).hexdigest()
+            good_row = ('format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                        'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                        'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
+                            pt_tag, pt_commit, qa_sha, pt_tagger - 100))
+            (pt / RELEASES_REL).write_text(good_row, encoding="utf-8")
+            _commit(pt, "attestation commit")
+            if _run_post_tag_quiet(pt, None, str(qa_file)) != 0:
+                failures.append("post-tag end-to-end: a fully-attested release with a matching QA object "
+                                "expected exit 0")
+            if _run_post_tag_quiet(pt, None, None) != 2:
+                failures.append("post-tag: a missing --qa-path must fail closed exit 2 (never certifies "
+                                "without retrieving the QA object)")
+            bad_qa = pt / "bad.toml"
+            bad_qa.write_text(qa_body + "# tampered\n", encoding="utf-8")
+            if _run_post_tag_quiet(pt, None, str(bad_qa)) != 1:
+                failures.append("post-tag: a QA object not matching the recorded digest expected exit 1")
+            nots_row = good_row.replace(
+                'attestation-timestamps = [{}]\n'.format(pt_tagger - 100), "")
+            (pt / RELEASES_REL).write_text(nots_row, encoding="utf-8")
+            _commit(pt, "drop timestamps")
+            if _run_post_tag_quiet(pt, None, str(qa_file)) != 1:
+                failures.append("post-tag: a newest row without attestation-timestamps must fail exit 1 "
+                                "(QA #8 no default-to-clean chronology)")
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -658,13 +808,15 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             print("  - " + f)
         return 1
     core = ("the 2.2 success/family-set predicates (clean, missing/duplicate family, failed verdict, "
-            "unresolved blocker, missing finished-signal), the chronology predicate (earlier/at/after/"
-            "missing tagger date), genesis uniqueness, the 2.4 ordering predicate, and QA-object "
-            "validation")
+            "unresolved blocker, missing finished-signal), the chronology predicate and its input guard "
+            "(#8), genesis uniqueness, the 2.4 ordering predicate, QA-object validation, the shared "
+            "release-row schema drift binding (#6), and the reproduce-command enumeration (#7)")
     if git_ran:
         print("SELF-TEST PASS: {}; and the git-level cases (zero-row audit NOT APPLICABLE, a clean "
-              "annotated-tag row, a chronology violation exit 1, a lightweight tag exit 1, and an "
-              "unresolvable tag exit 2) hold".format(core))
+              "annotated-tag row, a chronology violation exit 1, a lightweight tag exit 1, an "
+              "unresolvable tag exit 2, read_genesis accepting a full attestation row (#6), and the "
+              "post-tag end-to-end clean/no-qa-path/digest-mismatch/no-timestamps cases (#8)) hold".format(
+                  core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))
@@ -702,8 +854,8 @@ def _parse_args(argv):
             i += 2
         else:
             print("usage: check_release_build.py [--pre-tag --candidate-sha SHA --qa-path PATH "
-                  "--qa-sha256 HEX [--first-pin --evidence PATH]] [--post-tag [--attestation-commit "
-                  "REF]] | --self-test", file=sys.stderr)
+                  "--qa-sha256 HEX [--first-pin --evidence PATH]] [--post-tag --qa-path PATH "
+                  "[--attestation-commit REF]] | --self-test", file=sys.stderr)
             return None
     return opts
 
@@ -726,7 +878,7 @@ def main():
         return run_pre_tag(root, opts["candidate_sha"], opts["qa_path"], opts["qa_sha256"],
                            opts["first_pin"], opts["evidence"])
     if opts["post_tag"]:
-        return run_post_tag(root, opts["attestation_commit"])
+        return run_post_tag(root, opts["attestation_commit"], opts["qa_path"])
     return run_audit(root)
 
 

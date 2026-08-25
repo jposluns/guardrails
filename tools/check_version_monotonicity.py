@@ -340,10 +340,12 @@ def _resolve_base_commit(root, base):
 
 def layer_c(root, base_commit, head_data):
     """Release-order append-only (2.4): base releases.toml rows are an exact full-row prefix of head
-    rows. NOT APPLICABLE while HEAD has no baseline, the record is absent at HEAD (its REQUIRED presence
-    is owned by the manifest/drift gates; this prefix layer applies only when the record exists), or the
-    file is absent at base (introduced since base); zero rows is a valid empty prefix. head_data is the
-    parsed HEAD releases.toml, or None when absent at HEAD."""
+    rows. NOT APPLICABLE while HEAD has no baseline, the record is absent at HEAD, or the file is absent
+    at base (introduced since base); zero rows is a valid empty prefix. head_data is the parsed HEAD
+    releases.toml, or None when absent at HEAD. The absent-at-HEAD case is a sound delegation, not a
+    fail-open: releases.toml is a manifest-covered SOURCES member, so DELETING it makes check_manifest
+    fail closed (exit 2) on the missing SOURCES member and on read_genesis (VC-4 QA #10, verified); this
+    prefix layer therefore need only apply when the record exists."""
     if head_data is None:
         print("release-order-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(RELEASES_REL))
         return []
@@ -371,7 +373,9 @@ def layer_d(root, base_commit, head_data):
     """Id-history append-only (7.3): per section (born, tombstone, successor), base register rows are an
     exact full-row prefix of head register rows. NOT APPLICABLE while HEAD has no baseline, the register
     is absent at HEAD, or the file is absent at base. head_data is the parsed HEAD id-history.toml, or
-    None when absent at HEAD."""
+    None when absent at HEAD. As with layer_c, the absent-at-HEAD case is a sound delegation, not a
+    fail-open: id-history.toml is a manifest-covered SOURCES member, so DELETING it makes check_manifest
+    fail closed (exit 2) on the missing SOURCES member (VC-4 QA #10, verified)."""
     if head_data is None:
         print("id-history-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(IDHISTORY_REL))
         return []
@@ -398,8 +402,9 @@ def layer_d(root, base_commit, head_data):
 
 def _load_head_toml(root, rel):
     """Parse a HEAD record for the prefix layers. Returns None when the file is absent at HEAD (the
-    prefix layer then reports NOT APPLICABLE; the file's REQUIRED presence is owned by the manifest/drift
-    gates). A present-but-unreadable or unparseable file is fail-closed (GateError, exit 2)."""
+    prefix layer then reports NOT APPLICABLE; the file's REQUIRED presence is owned by check_manifest,
+    which fails closed exit 2 on a deleted manifest-covered register, VC-4 QA #10 verified). A
+    present-but-unreadable or unparseable file is fail-closed here too (GateError, exit 2)."""
     try:
         return load_toml(root / rel)
     except FileNotFoundError:
