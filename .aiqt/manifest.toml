@@ -2,12 +2,12 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "9531b862f7256b364fc14c1c64c231fc697923064a9b081d5f623b8b0433921e"
+tree-sha256 = "0a6bf564261c37b453e64d11750e87834bee9db245b6250703f21e9fe70651c4"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
-bytes = 8926
-sha256 = "34c3ca0cce9a026371012f1fe61bc2756474e3c1cf355bb82784eddc11a3af30"
+bytes = 8884
+sha256 = "238f26ff5d0693c37ab2b4d19163690ca0d21014146a26e1cf449837f04b5efe"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
@@ -2061,8 +2061,8 @@ sha256 = "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2"
 
 [[sources]]
 path = "NOTICE"
-bytes = 8797
-sha256 = "2407123bc04e8efae7f772ecaaca6289d7fa4fc932ed43f88ecb6f5c58191d09"
+bytes = 9015
+sha256 = "466f2affd209beda43b499d63d63fbed958d1405b06079dc0a4d3afaf661f763"
 
 [[sources]]
 path = "README.md"
@@ -2481,8 +2481,8 @@ sha256 = "51366904aab2e9c6f9f9a34a5e3340908b47256f5ddf519f8d2fceeb770efdb0"
 
 [[sources]]
 path = "tools/gen_notice.py"
-bytes = 8626
-sha256 = "a8a5fb7a96abc12a9bb6a4ff9b7139af4dba7c6f1d47246fde2d577f6ac004d0"
+bytes = 9705
+sha256 = "1a9736aac772484a3d5d54cf3a15674b4e7e17d6cffd0679c6495475e9dda013"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"

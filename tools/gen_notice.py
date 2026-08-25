@@ -2,7 +2,7 @@
 """Generate the root NOTICE file from .aiqt/attribution.toml plus the live standards manifests.
 
 The pack itself is published under CC BY-SA 4.0 (see the LICENSE file). The pack's crosswalk mappings
-reproduce third-party framework control/clause IDENTIFIERS and SHORT TITLES as navigational pointers
+reproduce third-party framework control/clause IDENTIFIERS and TITLES as navigational pointers
 only; no specification prose, requirement text, control or clause bodies, figures, or tables are
 reproduced. This generator renders the third-party attribution NOTICE from a single checked-in source
 of truth so it cannot drift from the vendored manifest set.
@@ -32,15 +32,16 @@ INTRO_TEMPLATE = (
     "trademark rights. AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns. These "
     "marks are unregistered.\n\n"
     "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
-    "{kinds} IDENTIFIERS and their SHORT TITLES are reproduced, as navigational pointers. No "
+    "{kinds} IDENTIFIERS and their TITLES are reproduced, as navigational pointers. No "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "
     "framework are reproduced. Each framework's identifiers and titles remain the property of their "
     "respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is "
     "affiliated with this pack.\n\n"
     "AIQT Guardrails reproduces only each referenced control's identifier and the publisher's official "
-    "title or heading, to help adopters align their own compliance and audit programs across frameworks. "
+    "title or heading (or a brief AIQT-authored descriptor where the publisher publishes no title of its "
+    "own), to help adopters align their own compliance and audit programs across frameworks. "
     "It reproduces no requirement text, control descriptions, or other body content, and it lists only "
-    "the controls it maps to its own rules, not a complete framework catalogue. To use the full "
+    "the controls it maps to its own rules.{complete_clause} To use the full "
     "standards, adopters must obtain them directly from the publisher and accept that publisher's own "
     "licence. AIQT Guardrails is not a substitute for, and does not relicense, any standard, and links "
     "adopters to each publisher's source."
@@ -90,6 +91,20 @@ def build(root):
     """Return the NOTICE text, or raise SystemExit(2) if a vendored publisher is unverified/unattributed."""
     manifests = load_manifests(root / ".aiqt" / "standards")  # raises ManifestError/OSError -> main exits 2
     kinds = _oxford(sorted({m.kind for m in manifests.values()}))
+    # Derive the catalogue-completeness clause from the standards data so the claim is true by
+    # construction (notice-drift then also enforces it): name exactly the frameworks whose vendored id
+    # set is the COMPLETE pinned-edition catalogue (catalogue="full"), never a hand-maintained list.
+    # This auto-updates if the full set or its size changes, so the NOTICE can never silently drift.
+    full = sorted((m for m in manifests.values() if m.catalogue == "full"),
+                  key=lambda m: natkey(m.name))
+    if full:
+        counts = {len(m.ids) for m in full}
+        extent = ("all {} entries (the complete list)".format(next(iter(counts)))
+                  if len(counts) == 1 else "the complete list")
+        complete_clause = " For {} it lists {}; for every other referenced framework it lists a subset.".format(
+            _oxford([m.name for m in full]), extent)
+    else:
+        complete_clause = " For every referenced framework it lists a subset."
     attrib = load_toml(root / ATTRIB_REL)
     publishers = attrib.get("publisher", {})
     per_manifest = attrib.get("manifest", {})
@@ -114,7 +129,7 @@ def build(root):
         raise SystemExit(2)
 
     lines = ["AIQT Guardrails™: third-party attribution NOTICE", ""]
-    lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds)))
+    lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds, complete_clause=complete_clause)))
     lines.append("")
     lines.append("=" * WRAP)
 
