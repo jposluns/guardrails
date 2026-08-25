@@ -1,7 +1,7 @@
 # attribution.toml: single source of truth for the generated root NOTICE.
 #
 # The AIQT pack is published under CC BY-SA 4.0 (see the repository LICENSE file). The pack's crosswalk
-# mappings reproduce third-party framework control/clause IDENTIFIERS and SHORT TITLES as navigational
+# mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as navigational
 # pointers only. NO specification prose, requirement text, control or clause bodies, figures, or tables
 # are reproduced. tools/gen_notice.py renders the root NOTICE from this file plus the live set of id
 # manifests under .aiqt/standards/.
@@ -21,8 +21,8 @@ slug = "owasp"
 legal-name = "OWASP Foundation, Inc."
 licence = "CC BY-SA 4.0"
 licence-url = "https://creativecommons.org/licenses/by-sa/4.0/"
-basis = "Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own CC BY-SA 4.0 satisfies ShareAlike. Only framework identifiers and their short titles are reproduced as navigational pointers; the mappings are the pack's own work."
-attribution = "Framework identifiers and short titles are Copyright the OWASP Foundation, Inc., reused under CC BY-SA 4.0."
+basis = "Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own CC BY-SA 4.0 satisfies ShareAlike. Only framework identifiers and their titles are reproduced as navigational pointers; the mappings are the pack's own work."
+attribution = "Framework identifiers and titles are Copyright the OWASP Foundation, Inc., reused under CC BY-SA 4.0."
 trademark = "OWASP is a registered trademark of the OWASP Foundation, Inc."
 non-endorsement = "The OWASP Foundation does not endorse and is not affiliated with this pack; the OWASP name and marks are not used to imply endorsement."
 verified = true
@@ -49,7 +49,7 @@ slug = "mitre"
 legal-name = "The MITRE Corporation"
 licence = "Apache License, Version 2.0"
 licence-url = "https://www.apache.org/licenses/LICENSE-2.0"
-basis = "ATLAS data is licensed under the Apache License, Version 2.0. Identifiers and short titles are reproduced as navigational pointers with the required copyright notice retained (Apache-2.0 section 4)."
+basis = "ATLAS data is licensed under the Apache License, Version 2.0. Identifiers and titles are reproduced as navigational pointers with the required copyright notice retained (Apache-2.0 section 4)."
 attribution = "MITRE ATLAS identifiers and titles: Copyright 2021-2026 The MITRE Corporation, licensed under the Apache License, Version 2.0. Approved for Public Release; Distribution Unlimited. Case Number 21-2363."
 trademark = "MITRE ATLAS and MITRE ATT&CK are a trademark and registered trademark of The MITRE Corporation."
 non-endorsement = "The MITRE Corporation does not endorse and is not affiliated with this pack; MITRE marks and logos are not used."
@@ -77,8 +77,8 @@ slug = "csa"
 legal-name = "Cloud Security Alliance"
 licence = "Proprietary CSA copyright licence (non-commercial, no-redistribution reference use)"
 licence-url = "https://cloudsecurityalliance.org/artifacts/ccm-aicm-licensing-faq"
-basis = "The CSA matrices are copyright the Cloud Security Alliance under a non-commercial, no-redistribution, no-modification reference licence. This pack reproduces only control identifiers and short titles as uncopyrightable factual pointers, with CSA attributed; it does NOT redistribute or relicense the CSA matrices, and reproduces no control-specification text. This pack's CC BY-SA 4.0 covers its own mappings, not the CSA catalogue."
-attribution = "Control identifiers and short titles are Copyright the Cloud Security Alliance, used as factual references with attribution."
+basis = "The CSA matrices are copyright the Cloud Security Alliance under a non-commercial, no-redistribution, no-modification reference licence. This pack reproduces only control identifiers and titles as uncopyrightable factual pointers, with CSA attributed; it does NOT redistribute or relicense the CSA matrices, and reproduces no control-specification text. This pack's CC BY-SA 4.0 covers its own mappings, not the CSA catalogue."
+attribution = "Control identifiers and titles are Copyright the Cloud Security Alliance, used as factual references with attribution."
 trademark = "CCM, AICM, and Cloud Security Alliance are works and marks of the Cloud Security Alliance."
 non-endorsement = "The Cloud Security Alliance does not endorse and is not affiliated with this pack; CSA marks are not used to imply endorsement."
 verified = true
@@ -90,7 +90,7 @@ verified-source = "Verbatim CSA copyright notices in the CCM v4.1.0 and AICM v1.
 
 [manifest."owasp-mcp"]
 licence = "CC BY-NC-SA 4.0"
-note = "The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial), which is not compatible with this pack's CC BY-SA 4.0. Its risk identifiers and short titles are reproduced only as uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is reproduced."
+note = "The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial), which is not compatible with this pack's CC BY-SA 4.0. Its risk identifiers and titles are reproduced only as uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is reproduced."
 verified = true
 verified-date = "2026-08-17"
 
