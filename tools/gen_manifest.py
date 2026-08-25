@@ -83,6 +83,17 @@ RENDERERS_REL = ".aiqt/core/renderers.toml"
 VERSION_REL = "VERSION"
 OWN_OUTPUTS_REL = (ATTRIBUTES_REL, MANIFEST_REL, ROOT_REL, SNIPPET_REL)
 
+# The ONE shared release-order row schema (2.4/2.6/6.5), single source of truth for the three gates that
+# read releases.toml (VC-4 QA #6): read_genesis (needs only the row count, validates the two mandatory
+# identity fields and ACCEPTS every documented field), check_release_build (the full per-field validator),
+# and check_release_delta (the delta consumer). RELEASE_ROW_MANDATORY is the identity pair every row
+# carries from birth; RELEASE_ROW_ALLOWED adds the anchor tag fields and the attestation fields a row
+# gains once QA'd. A drift self-test in check_release_build and check_release_delta binds each gate's own
+# key handling to these sets so they cannot diverge.
+RELEASE_ROW_MANDATORY = frozenset({"version", "commit_sha"})
+RELEASE_ROW_ALLOWED = frozenset({"version", "commit_sha", "tag", "tag_object_sha",
+                                 "qa-sha256", "qa-store-path", "attestation-timestamps"})
+
 RELEASE_CLASSES = ("pack-immutable", "derived", "manifest-self", "managed-block")
 NAMESPACE_CLASSES = ("adopter-state", "archive")
 BLOCK_BEGIN = "<!-- RULES-INDEX:BEGIN (generated) -->"
@@ -102,12 +113,12 @@ def _sha256(data):
 
 def _check_rel_path(path, where):
     """Canonical repo-relative POSIX path or GateError. No absolute, backslash, empty/'.'/'..' segment,
-    control characters (NUL, tab, LF, CR), or trailing slash."""
+    control character (the FULL C0 range 0x00-0x1F and DEL 0x7F), or trailing slash."""
     if not isinstance(path, str) or not path:
         raise GateError("{}: path must be a non-empty string".format(where))
     if "\\" in path or path.startswith("/") or path.endswith("/"):
         raise GateError("{}: {!r} must be a clean POSIX repo-relative path".format(where, path))
-    if any(ch in path for ch in ("\x00", "\t", "\n", "\r")):
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in path):
         raise GateError("{}: {!r} carries a control character".format(where, path))
     if any(seg in ("", ".", "..") for seg in path.split("/")):
         raise GateError("{}: {!r} has an empty, '.', or '..' segment".format(where, path))
@@ -152,13 +163,21 @@ def _selector_of(row, where):
 
 
 def load_ownership(root):
-    """Strict parse of the ownership map. Returns (exclusions, release_rows, namespace_rows, binary_set).
-    release_rows/namespace_rows are [(Selector, class)]. Any schema violation raises GateError."""
+    """Strict parse of the working-tree ownership map. Returns (exclusions, release_rows, namespace_rows,
+    binary_set). Reads the file, then defers all validation to parse_ownership."""
     path = root / OWNERSHIP_REL
     try:
         data = load_toml(path)
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(OWNERSHIP_REL, exc))
+    return parse_ownership(data)
+
+
+def parse_ownership(data):
+    """Validate an already-parsed ownership map. Split out from load_ownership so a predecessor ownership
+    map read via `git show <commit>:.aiqt/core/ownership.toml` (check_release_delta, VC-4 QA #11) runs the
+    SAME validation as the working-tree loader, never a second parser. Returns (exclusions, release_rows,
+    namespace_rows, binary_set); any schema violation raises GateError."""
     known_tables = {"format-version", "exclusion", "release-class", "namespace-class",
                     "checkout", "adopter-extent"}
     extra = set(data) - known_tables
@@ -277,17 +296,21 @@ def check_output_modes(root):
                             "(generated text is never executable)".format(path, mode))
 
 
-def classify(tracked, exclusions, release, namespace, root, assume_outputs=False):
+def classify(tracked, exclusions, release, namespace, root, assume_outputs=False, outputs_present=None):
     """The build-time assertion (4.2). Returns ({path: class}, excluded) over the in-scope set. GateError
     on: a stale exclusion (zero matches); an unclassified in-scope path (COMPLETENESS); a selector with
     zero matches or an untracked exact path (NO-STRAYS); two selectors matching one path (overlap); a class
     selector reaching an excluded path; a concern-2 selector matching any tracked path.
-    The universe is the tracked set PLUS this generator's own four outputs when present on disk (or all
-    four in write mode, assume_outputs=True): the release commit git-adds them, so an on-disk-but-untracked
-    output is in scope while a MISSING output is never assumed and trips NO-STRAYS."""
+    The universe is the tracked set PLUS this generator's own four outputs when present (or all four in
+    write mode, assume_outputs=True): the release commit git-adds them, so a present-but-untracked output
+    is in scope while a MISSING output is never assumed and trips NO-STRAYS. Presence is read from the
+    working tree by default; a caller classifying a git commit (not the checkout) passes outputs_present, a
+    set of the OWN_OUTPUTS_REL that exist AT that commit, so root's filesystem is never consulted for a
+    predecessor tree (check_release_delta, VC-4 QA #11)."""
     universe = set(tracked)
     for rel in OWN_OUTPUTS_REL:
-        if assume_outputs or (root / rel).exists():
+        present = (rel in outputs_present) if outputs_present is not None else (root / rel).exists()
+        if assume_outputs or present:
             universe.add(rel)
     excluded = set()
     for sel, _ in exclusions:
@@ -353,13 +376,16 @@ def read_genesis(root):
     """genesis derives from the release-order record: zero [[release]] rows -> True (2.5). A missing or
     unreadable record never bootstraps genesis.
 
-    F-237 SCOPED: reject an unknown TOP-LEVEL key, and apply a MINIMAL per-row guard when a [[release]]
-    row is present (rows first appear at the Step-4 attestation commit; at Step 2 the record is
-    header-only). The minimal guard rejects an unknown row key and requires the two documented mandatory
-    fields, version and the candidate commit SHA (spec 2.4 / the releases.toml header comment). DEFERRED
-    to Step 4 (the release-delta gate, spec 6.5), recorded not built here: the FULL release-row schema
-    (per-field types and formats, and the QA-attestation-digest / store-path / tag-name / timestamp field
-    names, which are undefined while zero rows exist), and the tag-validation flow of 2.4."""
+    F-237 SCOPED, VC-4 QA #6 RECONCILED: reject an unknown TOP-LEVEL key, and apply a per-row guard when a
+    [[release]] row is present (rows first appear at the Step-4 attestation commit; at Step 2 the record is
+    header-only). read_genesis needs only the ROW COUNT, so it validates the two mandatory identity fields
+    (version and the candidate commit SHA, spec 2.4 / the releases.toml header comment) and ACCEPTS every
+    field of the documented full release-row schema (RELEASE_ROW_ALLOWED). The earlier minimal allow-set
+    named only {version, commit_sha, tag_object_sha}, which rejected the tag / qa-sha256 / qa-store-path /
+    attestation-timestamps keys a real attestation row carries, so the first attested row could never pass
+    this guard: read_genesis now shares ONE release-row schema with check_release_build (the full per-field
+    validator) and check_release_delta (the delta consumer), so the three cannot diverge. The per-field
+    type/format validation and the tag-validation flow remain Step 4's (check_release_build)."""
     try:
         data = load_toml(root / RELEASES_REL)
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
@@ -374,18 +400,14 @@ def read_genesis(root):
     rows = data.get("release", [])
     if not isinstance(rows, list):
         raise GateError("{}: [[release]] must be an array".format(RELEASES_REL))
-    # Minimal Step-2 row guard: names the concretely-documented fields only; the full schema is Step 4.
-    row_allowed = {"version", "commit_sha", "tag_object_sha"}
-    row_mandatory = {"version", "commit_sha"}
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
             raise GateError("{}: [[release]] row #{} is not a table".format(RELEASES_REL, idx + 1))
-        row_extra = set(row) - row_allowed
+        row_extra = set(row) - RELEASE_ROW_ALLOWED
         if row_extra:
-            raise GateError("{}: [[release]] row #{} has unknown key(s): {} (the full release-row schema "
-                            "is deferred to the Step-4 release-delta gate)".format(
-                                RELEASES_REL, idx + 1, ", ".join(sorted(row_extra))))
-        missing = row_mandatory - set(row)
+            raise GateError("{}: [[release]] row #{} has unknown key(s): {} (not in the shared release-row "
+                            "schema)".format(RELEASES_REL, idx + 1, ", ".join(sorted(row_extra))))
+        missing = RELEASE_ROW_MANDATORY - set(row)
         if missing:
             raise GateError("{}: [[release]] row #{} is missing the mandatory field(s): {}".format(
                 RELEASES_REL, idx + 1, ", ".join(sorted(missing))))
