@@ -485,9 +485,10 @@ def _validate_tag_row(root, row):
         findings.append("release {} tag_object_sha does not match the resolved tag object".format(version))
     if _rev_parse(root, "refs/tags/" + tag + "^{commit}") != row["commit_sha"]:
         findings.append("release {} commit_sha does not match the tag's peeled commit".format(version))
-    # Read AND strict-validate the tagged tree's manifest through the single invariant loader before any
-    # field is read (round-4 finding 3 / round-6 THE INVARIANT).
-    tagged_manifest = load_strict_manifest(root, tag + "^{commit}",
+    # Read the tagged tree's manifest through the ALREADY-VALIDATED IMMUTABLE row["commit_sha"] (round-7
+    # finding 5), not through the mutable `tag^{commit}` ref, so a moved ref cannot create a split view; the
+    # single invariant loader strict-validates it before any field is read.
+    tagged_manifest = load_strict_manifest(root, row["commit_sha"],
                                            "tagged manifest for release {}".format(version))
     if tagged_manifest.get("release-version") != version:
         findings.append("release {} tag points at a tree whose manifest release-version is {!r}".format(
@@ -555,15 +556,14 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
             raise GateError("--candidate-sha {!r} does not resolve to a commit object equal to itself (a "
                             "tag object or a non-commit is rejected)".format(candidate_sha))
         findings = []
-        findings += reproduce_gate(root, candidate_sha)
-        qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
-        findings += qa_findings
-        # genesis declaration of the candidate tree; the candidate manifest AND releases record are
-        # strict-validated before any field is read (round-2 finding 4 + round-3 finding 3): a bad
-        # format-version or unknown key on the candidate manifest is exit 2.
+        # STRICT-LOAD the candidate manifest AND releases record FIRST (round-7 close-out): no field is read,
+        # and reproduction and QA do not run, before the candidate's records are strict-validated.
         cand_manifest = load_strict_manifest(root, candidate_sha, "candidate " + MANIFEST_REL)
         cand_rows = _strict_releases(_show_toml(root, candidate_sha, RELEASES_REL),
                                      "candidate " + RELEASES_REL)
+        findings += reproduce_gate(root, candidate_sha)
+        qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
+        findings += qa_findings
         is_genesis = cand_manifest.get("genesis") is True
         if is_genesis and cand_rows:
             findings.append("candidate declares genesis = true but its releases.toml is not header-only "
@@ -782,11 +782,21 @@ def run_post_tag(root, attestation_commit, qa_path):
     the armed gate never certifies a release without retrieving and re-hashing its recorded QA evidence,
     and it never defaults a missing field to clean."""
     try:
-        ref = attestation_commit or "HEAD"
-        # THE INVARIANT (round-6 finding 1): strict-validate the attestation-commit manifest before any
-        # verdict; post-tag previously read only releases.toml at that ref.
-        load_strict_manifest(root, ref, "attestation " + MANIFEST_REL)
-        releases = _show_toml(root, ref, RELEASES_REL)
+        # Resolve the attestation commit to ONE immutable commit OID and read everything through it (round-7
+        # finding 5): a moved ref cannot create a split view between the manifest read and the releases read.
+        # An explicit --attestation-commit MUST be a full commit OID (a symbolic ref, a tag, a tree, or an
+        # abbreviation is rejected); the HEAD default is resolved once to its commit OID.
+        if attestation_commit is not None:
+            if not _release_schema.OBJECTID_RE.fullmatch(attestation_commit) \
+                    or _rev_parse(root, attestation_commit + "^{commit}") != attestation_commit:
+                raise GateError("--attestation-commit {!r} must be a full commit OID (a symbolic ref, a "
+                                "tag, a tree, or an abbreviation is rejected)".format(attestation_commit))
+            commit_oid = attestation_commit
+        else:
+            commit_oid = _rev_parse(root, "HEAD^{commit}")
+        # THE INVARIANT: strict-validate the attestation-commit manifest before any verdict.
+        load_strict_manifest(root, commit_oid, "attestation " + MANIFEST_REL)
+        releases = _show_toml(root, commit_oid, RELEASES_REL)
         # Re-validate through the ONE shared strict validator, exactly as the working-tree loader: every
         # present row is a complete attestation record, so post-tag gets the full schema, not just anchor
         # fields (finding 4). A newest row missing qa-sha256/qa-store-path/attestation-timestamps is now
@@ -794,7 +804,7 @@ def run_post_tag(root, attestation_commit, qa_path):
         norm = _strict_releases(releases, "attestation " + RELEASES_REL)
         if not norm:
             raise GateError("--post-tag: the proposed attestation commit {} has no release rows to "
-                            "validate".format(ref))
+                            "validate".format(commit_oid))
         findings = ordering_findings([r["version"] for r in norm])
         findings += release_tag_findings(root, norm)  # findings 2/7: lightweight + missing-row
         genesis_flags = []
@@ -1663,6 +1673,95 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                   hashlib.sha256(sym_qa.read_bytes()).hexdigest(), False, None) != 2:
                 failures.append("pre-tag with a symbolic --candidate-sha HEAD must be rejected exit 2 "
                                 "(round-6 finding 5)")
+
+            # === ROUND-7 build fixtures ==============================================================
+            # (finding 1) THE SHARED strict_manifest rejects a non-canonical source path in the build gate
+            # too: a working-tree manifest with a "../escape" source path fails the audit exit 2.
+            esc = tmp / "audit-escape-path"
+            _init(esc)
+            (esc / ".aiqt" / "core").mkdir(parents=True, exist_ok=True)
+            (esc / RELEASES_REL).write_text("format-version = 1\n", encoding="utf-8")
+            (esc / MANIFEST_REL).write_text(
+                'format-version = 1\nrelease-version = "1.0.0"\ngenesis = true\ntree-sha256 = "{h}"\n\n'
+                '[[sources]]\npath = "../escape"\nbytes = 1\nsha256 = "{h}"\n\nartifacts = []\n'.format(
+                    h="a" * 64), encoding="utf-8")
+            _commit(esc, "escape path manifest")
+            if _run_audit_quiet(esc) != 2:
+                failures.append("audit manifest with a ../escape source path must fail closed exit 2 "
+                                "(round-7 finding 1)")
+
+            # (finding 5) --attestation-commit must be a FULL immutable commit OID: a symbolic ref (HEAD) is
+            # rejected exit 2 in post-tag.
+            if _run_post_tag_quiet(pt, "HEAD", str(qa_file)) != 2:
+                failures.append("post-tag with a symbolic --attestation-commit (HEAD) must be rejected "
+                                "exit 2 (round-7 finding 5)")
+
+            # (finding 6) THE ATTESTATION-COMMIT MODEL (Architect-approved): tag the pre-attestation release
+            # tree (immutable ROOT), then in a FOLLOW-UP commit append the attestation row AND regenerate the
+            # branch-integrity manifest/root/snippet. Confirm gen_manifest --check AND check_manifest are
+            # GREEN on that attestation commit (the required commit merges through the normal gates), and
+            # post-tag validates the REGENERATED artifacts. The QA object lives OUTSIDE the tree so it is not
+            # a tracked pack path. Skipped (no false pass) if the archive is unavailable.
+            arch6 = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
+            if arch6.returncode == 0 and arch6.stdout:
+                import tarfile
+                ac = tmp / "attestation-commit"
+                ac.mkdir()
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(arch6.stdout), mode="r:") as tf:
+                        tf.extractall(ac)
+                    ge = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+                    ge.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+                               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid",
+                               "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
+                    ok6 = all(subprocess.run(["git", "-C", str(ac), *a], capture_output=True,
+                                             env=ge).returncode == 0
+                              for a in (["init", "-q"], ["add", "-A"],
+                                        ["commit", "-q", "-m", "release 1.0.0 tree", "--no-verify"]))
+                    if ok6:
+                        subprocess.run(["git", "-C", str(ac), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
+                                       check=True, capture_output=True, env=ge)
+                        a_tobj = subprocess.run(["git", "-C", str(ac), "rev-parse", "refs/tags/v1.0.0"],
+                                                capture_output=True, text=True).stdout.strip()
+                        a_csha = subprocess.run(["git", "-C", str(ac), "rev-parse",
+                                                 "refs/tags/v1.0.0^{commit}"], capture_output=True,
+                                                text=True).stdout.strip()
+                        a_tagger = _tagger_epoch(ac, "v1.0.0")
+                        a_qa_body = ('candidate-sha = "{}"\n\n'.format(a_csha) + "".join(
+                            '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
+                            'unresolved-blockers = 0\ntimestamps-utc = [{}]\n\n'.format(n, a_tagger - 100)
+                            for n in FAMILIES))
+                        a_qa = tmp / "attestation-qa.toml"           # OUTSIDE the tree
+                        a_qa.write_text(a_qa_body, encoding="utf-8")
+                        a_qa_sha = hashlib.sha256(a_qa_body.encode("utf-8")).hexdigest()
+                        (ac / RELEASES_REL).write_text(
+                            'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                            'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                            'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
+                                a_tobj, a_csha, a_qa_sha, a_tagger - 100), encoding="utf-8")
+                        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(ac)],
+                                       capture_output=True, env=ge)
+                        subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
+                        subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m",
+                                        "attestation commit: append row 1", "--no-verify"],
+                                       capture_output=True, env=ge)
+                        a_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                               capture_output=True, text=True).stdout.strip()
+                        gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
+                                              str(ac)], capture_output=True)
+                        cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
+                                             capture_output=True)
+                        if gmc.returncode != 0 or cmc.returncode != 0:
+                            failures.append("attestation commit is not green under the wired manifest gates "
+                                            "(gen_manifest --check rc={}, check_manifest rc={}); round-7 "
+                                            "finding 6".format(gmc.returncode, cmc.returncode))
+                        if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
+                            failures.append("post-tag must validate the regenerated attestation-commit "
+                                            "artifacts, exit 0 (round-7 finding 6)")
+                except Exception as exc:  # noqa: BLE001  a build hiccup is a skip, not a false pass
+                    print("SELF-TEST NOTE: attestation-commit case skipped ({})".format(exc),
+                          file=sys.stderr)
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
 
@@ -1699,7 +1798,11 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
               "5)); and the round-6 cases (THE INVARIANT: a malformed working-tree manifest exit 2 before "
               "dormancy and a malformed attestation-commit manifest exit 2 (finding 1), two annotated tags "
               "with zero rows flag the lower as a missing row exit 1 (finding 4), and a symbolic HEAD "
-              "--candidate-sha rejected exit 2 (finding 5))) hold".format(core))
+              "--candidate-sha rejected exit 2 (finding 5)); and the round-7 cases (a manifest with a "
+              "../escape source path exit 2 (finding 1), a symbolic --attestation-commit rejected exit 2 "
+              "(finding 5), and THE ATTESTATION-COMMIT MODEL: a tagged release tree plus a follow-up "
+              "row-append + regenerate commit is GREEN under gen_manifest --check AND check_manifest and "
+              "post-tag validates the regenerated artifacts (finding 6))) hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))

@@ -128,6 +128,49 @@ def _show_toml(root, commit, path):
         raise GateError("predecessor {} at {} does not parse: {}".format(path, commit, exc))
 
 
+def _rev_parse(root, ref):
+    """The full object id `ref` resolves to, or GateError. Read as BYTES and decoded ASCII-strict (round-5
+    finding 3): a git id is ASCII, so a non-ASCII output is cannot-evaluate, never a crash."""
+    proc = _git(root, ["rev-parse", "--verify", "--quiet", ref], binary=True)
+    if proc.returncode != 0:
+        raise GateError("cannot resolve {!r}".format(ref))
+    try:
+        return proc.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise GateError("git rev-parse output for {!r} is not valid ASCII; fail-closed".format(ref))
+
+
+def _tag_kind(root, tag):
+    """'tag' for an annotated tag, 'commit' for a lightweight one; GateError if the tag does not resolve."""
+    proc = _git(root, ["cat-file", "-t", "refs/tags/" + tag], binary=True)
+    if proc.returncode != 0:
+        raise GateError("tag {} does not resolve (unfetched or deleted)".format(tag))
+    try:
+        return proc.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise GateError("git cat-file output for tag {} is not valid ASCII; fail-closed".format(tag))
+
+
+def _anchor_predecessor(root, prev_row):
+    """Establish that the predecessor row names an ANCHORED release (round-7 finding 2): its commit_sha is a
+    full object id resolving to a COMMIT equal to itself, and its annotated tag resolves to the recorded
+    tag_object_sha and peels to that commit. A malformed/unanchored predecessor is cannot-evaluate, exit 2,
+    never a silent delta over an unverifiable base."""
+    commit, tag, tag_obj = prev_row["commit_sha"], prev_row["tag"], prev_row["tag_object_sha"]
+    if not _release_schema.OBJECTID_RE.fullmatch(commit):
+        raise GateError("predecessor commit_sha {!r} is not a full lowercase object id".format(commit))
+    if _rev_parse(root, commit + "^{commit}") != commit:
+        raise GateError("predecessor commit_sha {!r} does not resolve to a commit equal to itself "
+                        "(a tree or non-commit is rejected)".format(commit))
+    if _tag_kind(root, tag) != "tag":
+        raise GateError("predecessor tag {} is not an annotated tag (2.1)".format(tag))
+    if _rev_parse(root, "refs/tags/" + tag) != tag_obj:
+        raise GateError("predecessor tag {} does not resolve to the recorded tag_object_sha".format(tag))
+    if _rev_parse(root, "refs/tags/" + tag + "^{commit}") != commit:
+        raise GateError("predecessor tag {} peels to a commit other than the recorded commit_sha".format(
+            tag))
+
+
 # --- record loading ---------------------------------------------------------------------------------
 
 def _load(root, rel):
@@ -648,6 +691,8 @@ def run(root):
             return 0
         prev_row = release_rows[-1]
         commit = prev_row["commit_sha"]
+        # Anchor the predecessor to a real commit + annotated tag before reading its tree (round-7 finding 2).
+        _anchor_predecessor(root, prev_row)
         changelog = _load(root, CHANGELOG_REL).get("release", [])
         if not isinstance(changelog, list) or not changelog or not isinstance(changelog[-1], dict):
             raise GateError("{}: no [[release]] tables to read the head version from".format(CHANGELOG_REL))
@@ -655,6 +700,13 @@ def run(root):
         if not isinstance(head_version, str) or _parse(head_version) is None:
             raise GateError("{}: latest release version {!r} is malformed".format(
                 CHANGELOG_REL, head_version))
+        # Bind the classified HEAD version to the head manifest (round-7 finding 2): the changelog version
+        # the gate classifies against MUST equal the manifest's release-version, or the surface is
+        # inconsistent and the delta cannot be trusted (exit 2).
+        if head_manifest.get("release-version") != head_version:
+            raise GateError("head manifest release-version {!r} != changelog head version {!r}; the "
+                            "surface is inconsistent".format(head_manifest.get("release-version"),
+                                                             head_version))
         claimed = _claimed_rank(prev_row["version"], head_version)
         # Strict-validate the consumed records on BOTH the predecessor object and the head object BEFORE any
         # delta computation (round-2 findings 1/4): a duplicate or incomplete clause row, a malformed
@@ -670,6 +722,11 @@ def run(root):
         # Manifest and renderer declaration schemas on BOTH objects (round-3 findings 1/4).
         prev_manifest = _show_toml(root, commit, MANIFEST_REL)
         _strict(_release_schema.strict_manifest, prev_manifest, "predecessor " + MANIFEST_REL)
+        # Bind the predecessor manifest version to the predecessor row (round-7 finding 2).
+        if prev_manifest.get("release-version") != prev_row["version"]:
+            raise GateError("predecessor manifest release-version {!r} != release-order row version {!r}; "
+                            "the anchored predecessor is inconsistent".format(
+                                prev_manifest.get("release-version"), prev_row["version"]))
         prev_renderers = _show_toml(root, commit, RENDERERS_REL)
         head_renderers = _load(root, RENDERERS_REL)
         _strict(_release_schema.strict_renderers, prev_renderers, "predecessor " + RENDERERS_REL)
@@ -875,28 +932,68 @@ def _real_pack_e2e(tmp, failures):
             return False
     commit1 = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
                              text=True).stdout.strip()
+    # Tag the predecessor 1.0.0 tree with a real ANNOTATED tag (round-7 finding 2: the delta now anchors the
+    # predecessor to a resolvable commit + annotated tag whose object matches the recorded row).
+    subprocess.run(["git", "-C", str(repo), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
+                   check=True, capture_output=True, env=env)
+    tobj = subprocess.run(["git", "-C", str(repo), "rev-parse", "refs/tags/v1.0.0"],
+                          capture_output=True, text=True).stdout.strip()
     cid = _edit_clause_consistently(repo)   # predecessor (commit1) keeps the original text
     if cid is None:
         print("SELF-TEST NOTE: no sole-coverer clause to edit; real full-pack case SKIPPED", file=sys.stderr)
         return False
-    (repo / DISPOSITIONS_REL).write_text(
-        'format-version = 1\n\n[[disposition]]\nid = "{}"\nrelease = "1.0.1"\n'
-        'kind = "behaviour-neutral"\nimpact = "byte-only wording"\nrationale = "e2e test"\n'.format(cid),
-        encoding="utf-8")
-    (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
+
+    def _set_head_version(version):
+        # Make HEAD a real release: bump VERSION + changelog and REGENERATE the head manifest so its
+        # release-version equals the changelog version (round-7 finding 2 binds the two).
+        (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+        (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
+        return subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
+                              capture_output=True, env=env).returncode == 0
+
+    def _disp(release):
+        (repo / DISPOSITIONS_REL).write_text(
+            'format-version = 1\n\n[[disposition]]\nid = "{}"\nrelease = "{}"\n'
+            'kind = "behaviour-neutral"\nimpact = "byte-only wording"\nrationale = "e2e test"\n'.format(
+                cid, release), encoding="utf-8")
 
     def _releases(fmtver):
         return ('format-version = {}\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                'tag_object_sha = "{c}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
+                'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
                 'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
-                    fmtver, c=commit1, h="a" * 64))
+                    fmtver, t=tobj, c=commit1, h="a" * 64))
 
-    # (finding 2) a CONSISTENTLY-edited id-keyed PATCH change, fully dispositioned: clean exit 0. HEAD passes
-    # the authoritative check_clauses now run in non-genesis (round-4 finding 2).
+    if not _set_head_version("1.0.1"):
+        print("SELF-TEST NOTE: could not regenerate the head manifest; real full-pack case SKIPPED",
+              file=sys.stderr)
+        return False
+    _disp("1.0.1")
     (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
+    # (finding 2) a CONSISTENTLY-edited id-keyed PATCH change, fully dispositioned, with an ANCHORED
+    # predecessor and a VERSION-BOUND head: clean exit 0.
     if _run_quiet_root(repo) != 0:
         failures.append("real full-pack run(): a consistently-edited dispositioned id-keyed PATCH change "
                         "expected exit 0 (finding 2)")
+    # (round-7 finding 2) a predecessor commit_sha that is a TREE oid (not a commit) fails the anchoring,
+    # exit 2 (the pre-round-7 gate used it directly and PASSED).
+    tree_oid = subprocess.run(["git", "-C", str(repo), "rev-parse", commit1 + "^{tree}"],
+                              capture_output=True, text=True).stdout.strip()
+    (repo / RELEASES_REL).write_text(
+        'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+        'tag_object_sha = "{t}"\ncommit_sha = "{tree}"\nqa-sha256 = "{h}"\n'
+        'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
+            t=tobj, tree=tree_oid, h="a" * 64), encoding="utf-8")
+    if _run_quiet_root(repo) != 2:
+        failures.append("real full-pack run(): a predecessor commit_sha that is a tree oid must fail the "
+                        "anchoring, exit 2 (round-7 finding 2)")
+    # (round-7 finding 2) a head whose changelog version disagrees with the head manifest release-version:
+    # exit 2 (the pre-round-7 gate classified against the changelog without binding it to the manifest).
+    (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
+    (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.2"\n', encoding="utf-8")   # manifest is 1.0.1
+    if _run_quiet_root(repo) != 2:
+        failures.append("real full-pack run(): a changelog head version disagreeing with the head manifest "
+                        "release-version must fail closed exit 2 (round-7 finding 2)")
+    (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
     # (finding 1) releases.toml / dispositions.toml format-version = 999: the loader fails closed exit 2.
     (repo / RELEASES_REL).write_text(_releases(999), encoding="utf-8")
     if _run_quiet_root(repo) != 2:
@@ -908,15 +1005,15 @@ def _real_pack_e2e(tmp, failures):
     if _run_quiet_root(repo) != 2:
         failures.append("real full-pack run(): dispositions.toml format-version=999 must fail closed exit 2")
 
-    # (round-3 finding 3) a wrong-version disposition for the detected change, hidden behind a MAJOR bump on
-    # the pre-fix gate, is flagged exit 1.
-    (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "2.0.0"\n', encoding="utf-8")
-    (repo / DISPOSITIONS_REL).write_text(
-        'format-version = 1\n\n[[disposition]]\nid = "{}"\nrelease = "1.0.1"\n'
-        'kind = "behaviour-neutral"\nimpact = "x"\nrationale = "r"\n'.format(cid), encoding="utf-8")
-    if _run_quiet_root(repo) != 1:
-        failures.append("real full-pack run(): a wrong-version disposition for the detected change must be "
-                        "flagged exit 1 (round-3 finding 3)")
+    # (round-3 finding 3) a wrong-version disposition (dated 1.0.1) for a MAJOR change (2.0.0), hidden behind
+    # the MAJOR bump on the pre-fix gate, is flagged exit 1. HEAD is re-versioned to 2.0.0 so the head
+    # manifest and changelog agree (round-7 finding 2).
+    if _set_head_version("2.0.0"):
+        _disp("1.0.1")   # mis-dated for the 2.0.0 change
+        (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
+        if _run_quiet_root(repo) != 1:
+            failures.append("real full-pack run(): a wrong-version disposition for the detected change must "
+                            "be flagged exit 1 (round-3 finding 3)")
 
     # (round-4 findings 1/4) SMUDGE-FILTER PREDECESSOR ATTACK: commit-1 carries an undeclared edit to
     # tools/_gen_common.py (inside every renderer closure) AND a smudge filter that restores the old bytes
@@ -943,6 +1040,10 @@ def _real_pack_e2e(tmp, failures):
     if ok:
         commit1b = subprocess.run(["git", "-C", str(repo2), "rev-parse", "HEAD"], capture_output=True,
                                   text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(repo2), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
+                       check=True, capture_output=True, env=env)
+        tobj2 = subprocess.run(["git", "-C", str(repo2), "rev-parse", "refs/tags/v1.0.0"],
+                               capture_output=True, text=True).stdout.strip()
         # Confirm the smudge filter WOULD hide the edit under a checkout (the attack the raw path defeats).
         wt = tmp / "smudge-wt"
         if subprocess.run(["git", "-C", str(repo2), "worktree", "add", "--detach", "-q", str(wt), commit1b],
@@ -955,11 +1056,16 @@ def _real_pack_e2e(tmp, failures):
         (repo2 / gcommon).write_text(orig_gcommon, encoding="utf-8")   # HEAD restores the original closure
         (repo2 / RELEASES_REL).write_text(
             'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-            'tag_object_sha = "{c}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
+            'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [100]\n'.format(
-                c=commit1b, h="a" * 64), encoding="utf-8")
+                t=tobj2, c=commit1b, h="a" * 64), encoding="utf-8")
+        (repo2 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
         (repo2 / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
         (repo2 / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
+        # Regenerate the head manifest so its release-version (1.0.1) binds to the changelog (round-7
+        # finding 2); the predecessor closure edit is caught later, at the raw predecessor materialization.
+        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo2)],
+                       capture_output=True, env=env)
         if _run_quiet_root(repo2) != 2:
             failures.append("real full-pack run(): a smudge-filter-hidden predecessor renderer-closure edit "
                             "must be caught by the raw materialization, exit 2 (round-4 findings 1/4)")
@@ -1033,6 +1139,37 @@ def _real_pack_e2e(tmp, failures):
         if _run_quiet_root(gcc) != 2:
             failures.append("real genesis full-pack run(): a class-change with a non-vocabulary old-class "
                             "must fail closed exit 2 (round-6 finding 6)")
+    # (round-7 finding 1) a manifest source PATH that escapes the repo root ("../escape"): the canonical
+    # logical-path validator rejects it, exit 2 (the pre-round-7 validator accepted any non-empty string).
+    gesc = _extract_genesis("genesis-manifest-escape")
+    if gesc is not None:
+        mp = gesc / ".aiqt" / "manifest.toml"
+        mp.write_text(mp.read_text(encoding="utf-8").replace(
+            "[[sources]]\npath = ", "[[sources]]\npath = \"../escape\"\nbytes = 1\nsha256 = \"{}\"\n\n"
+            "[[sources]]\npath = ".format("a" * 64), 1), encoding="utf-8")
+        if _run_quiet_root(gesc) != 2:
+            failures.append("real genesis full-pack run(): a manifest source path escaping the repo root "
+                            "must fail closed exit 2 (round-7 finding 1)")
+    # (round-7 finding 1) a manifest artifact kind that is a LIST (kind = ["file"]): the type-check before
+    # the dict lookup raises SchemaError -> exit 2, not an uncaught TypeError -> exit 1.
+    gkind = _extract_genesis("genesis-manifest-kind")
+    if gkind is not None:
+        mp = gkind / ".aiqt" / "manifest.toml"
+        mp.write_text(mp.read_text(encoding="utf-8").replace('kind = "file"', 'kind = ["file"]', 1),
+                      encoding="utf-8")
+        if _run_quiet_root(gkind) != 2:
+            failures.append("real genesis full-pack run(): a list-valued artifact kind must fail closed "
+                            "exit 2, not crash (round-7 finding 1)")
+    # (round-7 finding 8) a renderers.toml row with an INTEGER target: strict_renderers rejects a
+    # non-canonical-path target, exit 2 (the pre-round-7 validator accepted any list element).
+    grnd = _extract_genesis("genesis-renderer-badtarget")
+    if grnd is not None:
+        rp = grnd / RENDERERS_REL
+        rp.write_text(rp.read_text(encoding="utf-8").replace(
+            'targets = ["AGENTS.md"]', "targets = [7]", 1), encoding="utf-8")
+        if _run_quiet_root(grnd) != 2:
+            failures.append("real genesis full-pack run(): a renderers.toml integer target must fail closed "
+                            "exit 2 (round-7 finding 8)")
     # (finding 5) a SELF-REFERENTIAL profiles.toml symlink (a loop): the artifact is present as a tree
     # entry, so the unbuilt-profiles leg must fail closed exit 2. The pre-round-5 is_file() saw a broken
     # loop as absent and returned NOT APPLICABLE -> exit 0.
@@ -1326,6 +1463,65 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
         if got != want:
             failures.append("_resolve_mode({}): expected {!r}, got {!r}".format(opts, want, got))
 
+    # --- duplicate-CLI rejection through main() (round-7 finding 7) --------------------------------
+    def _main_rc(argv):
+        saved = sys.argv
+        sys.argv = ["check_release_delta.py"] + argv
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                return main()
+        finally:
+            sys.argv = saved
+    for argv in (["--self-test", "--self-test"], ["--repin", "--repin"],
+                 ["--target", "1.0.0", "--target", "1.0.1"]):
+        if _main_rc(argv) != 2:
+            failures.append("main({}): a duplicate CLI option must be rejected exit 2 (round-7 finding "
+                            "7)".format(argv))
+
+    # --- _cat_file_batch grammar (round-7 finding 3) ----------------------------------------------
+    class _FakeProc:
+        def __init__(self, stdout):
+            self.returncode, self.stdout, self.stderr = 0, stdout, b""
+    _saved_run = subprocess.run
+    oid = "a" * 40
+    # a malformed (non-decimal) size, and a declared-10-but-2-byte short body, each raise SchemaError.
+    for bad in (oid.encode() + b" blob NaN\nxx\n", oid.encode() + b" blob 10\nxx\n"):
+        subprocess.run = lambda *a, **k: _FakeProc(bad)
+        try:
+            _release_schema._cat_file_batch(".", [oid])
+            failures.append("_cat_file_batch: malformed batch output must raise SchemaError (finding 3)")
+        except _release_schema.SchemaError:
+            pass
+        finally:
+            subprocess.run = _saved_run
+
+    # --- materialize_tree_raw preserves git file modes (round-7 finding 4) ------------------------
+    import stat as _stat
+    if _git_available():
+        import shutil as _sh4
+        import tempfile as _tf4
+        mtmp = Path(_tf4.mkdtemp(prefix="aiqt-delta-mode-"))
+        try:
+            mrepo = mtmp / "r"
+            mrepo.mkdir()
+            (mrepo / "exec.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+            (mrepo / "plain.txt").write_text("x\n", encoding="utf-8")
+            os.chmod(mrepo / "exec.sh", 0o755)
+            for a in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "m", "--no-verify"]):
+                subprocess.run(["git", "-C", str(mrepo), *a], capture_output=True, env=_selftest_env())
+            mc = subprocess.run(["git", "-C", str(mrepo), "rev-parse", "HEAD"],
+                                capture_output=True, text=True).stdout.strip()
+            mdest = mtmp / "dest"
+            mdest.mkdir()
+            _release_schema.materialize_tree_raw(mrepo, mc, mdest)
+            if not (os.stat(mdest / "exec.sh").st_mode & _stat.S_IXUSR):
+                failures.append("materialize_tree_raw: a 100755 blob must materialize executable (finding 4)")
+            if os.stat(mdest / "plain.txt").st_mode & _stat.S_IXUSR:
+                failures.append("materialize_tree_raw: a 100644 blob must materialize non-executable "
+                                "(finding 4)")
+        finally:
+            _sh4.rmtree(mtmp, ignore_errors=True)
+
     # --- bump computation --------------------------------------------------------------------------
     if _claimed_rank("1.0.0", "1.0.1") != PATCH or _claimed_rank("1.0.0", "1.1.0") != MINOR \
             or _claimed_rank("1.0.0", "2.0.0") != MAJOR:
@@ -1608,9 +1804,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
                      "defeated by raw materialization (exit 2, round-4 findings 1/4), and the GENESIS "
                      "full-pack manifest bogus-artifact/missing-sources (exit 2, round-5 finding 1), a "
                      "self-referential profiles symlink (exit 2, round-5 finding 5), an invalid-UTF-8 "
-                     "child capture (round-5 finding 3), and the round-6 non-string block-id (finding 2), "
+                     "child capture (round-5 finding 3), the round-6 non-string block-id (finding 2), "
                      "an unknown clauses.toml top-level key (finding 3), and a non-vocabulary class-change "
-                     "class (finding 6) each exit 2 hold") \
+                     "class (finding 6) each exit 2, and the round-7 predecessor anchoring/version-binding "
+                     "(a tree-oid commit_sha and a changelog/manifest version disagreement each exit 2, "
+                     "finding 2), a manifest ../escape path and a list-valued artifact kind (finding 1), and "
+                     "a renderers.toml integer target (finding 8) each exit 2 hold") \
                     if real_ran else \
                     "; the REAL FULL-PACK two-release run() case was SKIPPED (git archive unavailable)"
         print("SELF-TEST PASS: {}; the end-to-end genesis-structural fail-closed (exit 2, #1), "
@@ -1627,20 +1826,31 @@ def self_test_main():  # noqa: C901  a flat sequence of independent classificati
 
 
 def _parse_args(argv):
+    """Parse argv, REJECTING any DUPLICATE option (round-7 finding 7): a repeated flag or value option is a
+    conflicting/ambiguous invocation and returns None -> exit 2 BEFORE dispatch, matching release-build's
+    seen-option discipline. Returns the opts dict, or None on an unknown or duplicate option."""
     opts = {"self_test": False, "repin": False, "target": None}
+    seen = set()
     i = 0
     while i < len(argv):
-        if argv[i] == "--self-test":
-            opts["self_test"] = True
+        arg = argv[i]
+        if arg in ("--self-test", "--repin"):
+            if arg in seen:
+                print("error: duplicate option {}".format(arg), file=sys.stderr)
+                return None
+            seen.add(arg)
+            opts["self_test" if arg == "--self-test" else "repin"] = True
             i += 1
-        elif argv[i] == "--repin":
-            opts["repin"] = True
-            i += 1
-        elif argv[i] == "--target" and i + 1 < len(argv):
+        elif arg == "--target" and i + 1 < len(argv):
+            if arg in seen:
+                print("error: duplicate option {}".format(arg), file=sys.stderr)
+                return None
+            seen.add(arg)
             opts["target"] = argv[i + 1]
             i += 2
         else:
-            print("usage: check_release_delta.py [--repin --target V] | --self-test", file=sys.stderr)
+            print("usage: check_release_delta.py [--repin --target V] | --self-test (no option may be "
+                  "repeated)", file=sys.stderr)
             return None
     return opts
 

@@ -35,6 +35,7 @@ HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # A recorded git object id is a full lowercase hex sha1 (40) or sha256 (64); an abbreviated or
 # mixed-case id is malformed input, exit 2 (round-3 finding 8).
 OBJECTID_RE = re.compile(r"^([0-9a-f]{40}|[0-9a-f]{64})$")
+_DECIMAL_RE = re.compile(r"^(0|[1-9][0-9]*)$")   # a git cat-file --batch object size (round-7 finding 3)
 
 
 def _is_host_absolute(p):
@@ -48,6 +49,21 @@ def _is_host_absolute(p):
     if len(p) >= 2 and p[1] == ":":               # a drive-letter path (C:..., including C:relative)
         return True
     return PurePosixPath(p).is_absolute() or PureWindowsPath(p).is_absolute()
+
+
+def is_canonical_relpath(p, allow_trailing_slash=False):
+    """True if p is a CANONICAL repo-relative POSIX path (spec 4.1/L425): a non-empty string, not
+    host-absolute, no backslash, no control character (NUL/tab/LF/CR), and no empty, '.' or '..' segment
+    (so '../escape' is rejected). A trailing slash is permitted only for a directory target when
+    allow_trailing_slash is set (renderer tree targets)."""
+    if not isinstance(p, str) or not p or _is_host_absolute(p):
+        return False
+    if "\\" in p or any(ch in p for ch in ("\x00", "\t", "\n", "\r")):
+        return False
+    body = p[:-1] if (allow_trailing_slash and p.endswith("/")) else p
+    if not body or body.endswith("/"):
+        return False
+    return all(seg not in ("", ".", "..") for seg in body.split("/"))
 
 # The COMPLETE release-order row (spec 2.4 / releases.toml header / VER-CORE-SPEC.md:254): a present row is
 # a post-QA ATTESTATION row carrying the whole record, so the delta and build gates require EVERY field.
@@ -175,8 +191,9 @@ def strict_manifest(data, where):
         rw = "{} sources row #{}".format(where, i)
         if not isinstance(row, dict) or set(row) != MANIFEST_SOURCES_KEYS:
             raise SchemaError("{}: keys are not exactly {}".format(rw, sorted(MANIFEST_SOURCES_KEYS)))
-        if not isinstance(row["path"], str) or not row["path"]:
-            raise SchemaError("{}: missing or non-string path".format(rw))
+        if not is_canonical_relpath(row["path"]):
+            raise SchemaError("{}: path {!r} is not a canonical repo-relative path (4.1/L425)".format(
+                rw, row["path"]))
         if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] < 0:
             raise SchemaError("{}: bytes is not a non-negative integer".format(rw))
         if not isinstance(row["sha256"], str) or not HEX64_RE.fullmatch(row["sha256"]):
@@ -194,7 +211,9 @@ def strict_manifest(data, where):
         if not isinstance(row, dict):
             raise SchemaError("{}: not a table".format(rw))
         kind = row.get("kind")
-        if kind not in MANIFEST_ARTIFACT_KEYS:
+        # TYPE-check kind BEFORE the dict membership test (round-7 finding 1): kind = ["file"] is unhashable
+        # and would raise an uncaught TypeError (exit 1) instead of a SchemaError (exit 2).
+        if not isinstance(kind, str) or kind not in MANIFEST_ARTIFACT_KEYS:
             raise SchemaError("{}: kind must be one of {}".format(rw, sorted(MANIFEST_ARTIFACT_KEYS)))
         if set(row) != MANIFEST_ARTIFACT_KEYS[kind]:
             raise SchemaError("{}: {} row keys must be EXACTLY {} (found {})".format(
@@ -204,8 +223,9 @@ def strict_manifest(data, where):
         if row["artifact-id"] in seen_ids:
             raise SchemaError("{}: duplicate artifact-id {!r}".format(rw, row["artifact-id"]))
         seen_ids.add(row["artifact-id"])
-        if not isinstance(row["path"], str) or not row["path"]:
-            raise SchemaError("{}: missing or non-string path".format(rw))
+        if not is_canonical_relpath(row["path"]):
+            raise SchemaError("{}: artifact path {!r} is not a canonical repo-relative path "
+                              "(4.1/L425)".format(rw, row["path"]))
         if not isinstance(row["sha256"], str) or not HEX64_RE.fullmatch(row["sha256"]):
             raise SchemaError("{}: sha256 is not 64 lowercase hex".format(rw))
         if kind == "managed-block":
@@ -220,12 +240,19 @@ def strict_manifest(data, where):
     return data
 
 
+RENDERER_ROW_KEYS = frozenset({"renderer-id", "entrypoint", "semantics-revision", "targets", "closure",
+                               "code-digest"})
+
+
 def strict_renderers(data, where):
-    """Strict structural schema of the renderer declaration (6.5), on head AND predecessor objects (round-3
-    finding 4: a predecessor renderers.toml with format-version = 999 was accepted). format-version == 1;
-    [[renderer]] a non-empty array of tables, each carrying a non-empty renderer-id (unique), a list
-    targets, a list closure, a 64-hex code-digest, and an integer semantics-revision. The freshness
-    (closure recomputation) stays gen_renderers'; this asserts the declaration shape on both objects."""
+    """EXHAUSTIVE renderer-declaration schema (6.5), on head AND predecessor objects (round-7 finding 8):
+    format-version == 1; [[renderer]] a non-empty array whose every row carries EXACTLY
+    {renderer-id, entrypoint, semantics-revision, targets, closure, code-digest}; a non-empty unique
+    renderer-id; a canonical repo-relative entrypoint; a non-negative integer semantics-revision; a
+    non-empty targets list of canonical repo-relative paths (a trailing slash allowed for a tree target); a
+    non-empty closure list of canonical repo-relative paths whose FIRST element is the entrypoint (the
+    closure/entrypoint binding); and a 64-hex code-digest. The freshness (closure recomputation) stays
+    gen_renderers'; this asserts the exhaustive declaration shape on both objects."""
     _require_format_version(data, where)
     extra = set(data) - {"format-version", "renderer"}
     if extra:
@@ -236,24 +263,37 @@ def strict_renderers(data, where):
     seen = set()
     for i, row in enumerate(rows, 1):
         rw = "{} renderer row #{}".format(where, i)
-        if not isinstance(row, dict):
-            raise SchemaError("{}: not a table".format(rw))
-        rid = row.get("renderer-id")
+        if not isinstance(row, dict) or set(row) != RENDERER_ROW_KEYS:
+            raise SchemaError("{}: keys are not EXACTLY {} (found {})".format(
+                rw, sorted(RENDERER_ROW_KEYS), sorted(row) if isinstance(row, dict) else type(row).__name__))
+        rid = row["renderer-id"]
         if not isinstance(rid, str) or not rid:
             raise SchemaError("{}: missing or non-string renderer-id".format(rw))
         if rid in seen:
             raise SchemaError("{}: duplicate renderer-id {!r}".format(rw, rid))
         seen.add(rid)
-        if not isinstance(row.get("targets"), list):
-            raise SchemaError("{}: targets must be a list".format(rw))
-        if not isinstance(row.get("closure"), list):
-            raise SchemaError("{}: closure must be a list".format(rw))
-        cd = row.get("code-digest")
+        if not is_canonical_relpath(row["entrypoint"]):
+            raise SchemaError("{}: entrypoint {!r} is not a canonical repo-relative path".format(
+                rw, row["entrypoint"]))
+        rev = row["semantics-revision"]
+        if not isinstance(rev, int) or isinstance(rev, bool) or rev < 0:
+            raise SchemaError("{}: semantics-revision must be a non-negative integer".format(rw))
+        targets = row["targets"]
+        if not isinstance(targets, list) or not targets \
+                or not all(is_canonical_relpath(t, allow_trailing_slash=True) for t in targets):
+            raise SchemaError("{}: targets must be a non-empty list of canonical repo-relative paths".format(
+                rw))
+        closure = row["closure"]
+        if not isinstance(closure, list) or not closure \
+                or not all(is_canonical_relpath(c) for c in closure):
+            raise SchemaError("{}: closure must be a non-empty list of canonical repo-relative paths".format(
+                rw))
+        if closure[0] != row["entrypoint"]:
+            raise SchemaError("{}: closure[0] {!r} must be the entrypoint {!r} (closure/entrypoint "
+                              "binding)".format(rw, closure[0], row["entrypoint"]))
+        cd = row["code-digest"]
         if not isinstance(cd, str) or not HEX64_RE.fullmatch(cd):
             raise SchemaError("{}: code-digest is not 64 lowercase hex".format(rw))
-        if not isinstance(row.get("semantics-revision"), int) or isinstance(row.get("semantics-revision"),
-                                                                            bool):
-            raise SchemaError("{}: semantics-revision must be an integer".format(rw))
     return data
 
 
@@ -462,19 +502,41 @@ def _cat_file_batch(root, shas):
     if proc.returncode != 0:
         raise SchemaError("git cat-file --batch failed: {}".format(
             proc.stderr.decode("utf-8", "replace").strip()))
+    # Parse the batch protocol under the EXACT grammar (round-7 finding 3): for each REQUESTED oid the
+    # response is "<oid> <type> <size>\n<body of exactly size bytes>\n". A malformed header, a wrong echoed
+    # oid, an unknown type, a non-decimal size, a short body, or a missing trailing delimiter is a
+    # cannot-evaluate SchemaError, never a raw ValueError or a silently-accepted truncated blob.
     out, i, result = proc.stdout, 0, {}
-    for _ in uniq:
+    for want in uniq:
         nl = out.find(b"\n", i)
         if nl == -1:
-            raise SchemaError("truncated git cat-file --batch output")
-        header = out[i:nl].decode("ascii", "replace")
+            raise SchemaError("git cat-file --batch: truncated header for {}".format(want))
+        try:
+            header = out[i:nl].decode("ascii")
+        except UnicodeDecodeError:
+            raise SchemaError("git cat-file --batch: non-ASCII header ({!r})".format(out[i:nl]))
         i = nl + 1
         parts = header.split(" ")
-        if len(parts) < 2 or parts[1] == "missing":
-            raise SchemaError("git cat-file --batch: object not found ({})".format(header))
-        osha, size = parts[0], int(parts[2])
+        if len(parts) == 2 and parts[1] == "missing":
+            raise SchemaError("git cat-file --batch: object {} is missing".format(parts[0]))
+        if len(parts) != 3:
+            raise SchemaError("git cat-file --batch: malformed header {!r}".format(header))
+        osha, otype, size_s = parts
+        if osha != want:
+            raise SchemaError("git cat-file --batch: echoed oid {!r} != requested {!r}".format(osha, want))
+        if otype not in ("blob", "commit", "tree", "tag"):
+            raise SchemaError("git cat-file --batch: unknown object type {!r}".format(otype))
+        if not _DECIMAL_RE.fullmatch(size_s):
+            raise SchemaError("git cat-file --batch: non-decimal size {!r}".format(size_s))
+        size = int(size_s)
+        if i + size > len(out):
+            raise SchemaError("git cat-file --batch: short body for {} (declared {} bytes)".format(
+                osha, size))
         result[osha] = out[i:i + size]
-        i += size + 1  # skip the trailing newline the protocol appends
+        i += size
+        if out[i:i + 1] != b"\n":
+            raise SchemaError("git cat-file --batch: missing trailing delimiter after {}".format(osha))
+        i += 1
     return result
 
 
@@ -505,22 +567,28 @@ def materialize_tree_raw(root, commit, dest):
                 commit, path_b.decode("utf-8", "replace")))
         if otype != "blob":
             continue
+        if mode not in ("100644", "100755"):
+            raise SchemaError("tree {} blob {!r} has unsupported mode {}".format(
+                commit, path_b.decode("utf-8", "replace"), mode))
         try:
             path = path_b.decode("utf-8")
         except UnicodeDecodeError:
             raise SchemaError("non-UTF-8 path in tree {}".format(commit))
-        entries.append((osha, path))
-    blobs = _cat_file_batch(root, [osha for osha, _ in entries])
+        entries.append((mode, osha, path))
+    blobs = _cat_file_batch(root, [osha for _mode, osha, _path in entries])
     dest_root = Path(dest).resolve()
     written = set()
-    for osha, path in entries:
+    for mode, osha, path in entries:
         target = (Path(dest) / path).resolve()
         if target != dest_root and dest_root not in target.parents:
             raise SchemaError("path {!r} escapes the materialization root".format(path))
         # A filesystem error writing the raw tree is cannot-evaluate, not a clean result (round-5 finding 4).
+        # PRESERVE the git file mode exactly (round-7 finding 4): a 100755 blob materialized non-executable
+        # would let reproduction verify a DIFFERENT artifact from the candidate.
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(blobs[osha])
+            os.chmod(target, 0o755 if mode == "100755" else 0o644)
         except OSError as exc:
             raise SchemaError("cannot materialize {!r} ({})".format(path, exc))
         written.add(path)
