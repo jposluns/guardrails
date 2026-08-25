@@ -293,12 +293,130 @@ def layer_b(root, head_releases):
     return findings
 
 
+RELEASES_REL = ".aiqt/core/releases.toml"
+IDHISTORY_REL = ".aiqt/core/id-history.toml"
+REGISTER_SECTIONS = ("born", "tombstone", "successor")
+
+
+def _prefix_findings(base_rows, head_rows, label):
+    """FULL-ROW prefix identity (2.4/7.3): base_rows must be an exact prefix of head_rows, comparing the
+    WHOLE row (dict equality, so ANY field edit to a prior row breaks the prefix, not merely a key edit).
+    Returns a list of finding strings. base_rows/head_rows are lists of row dicts already validated to be
+    tables by the caller."""
+    findings = []
+    if len(base_rows) > len(head_rows):
+        findings.append("{}: the base records {} row(s) but head records {}; an existing row was removed "
+                        "(append-only violation)".format(label, len(base_rows), len(head_rows)))
+    for i in range(min(len(base_rows), len(head_rows))):
+        if base_rows[i] != head_rows[i]:
+            findings.append("{} row #{}: an existing row was edited or reordered (any edit to a prior "
+                            "row is a FAIL; append-only)".format(label, i + 1))
+    return findings
+
+
+def _rows_of(data, key, where):
+    """The array-of-tables under `key`, validated. A present-but-non-array section, or a non-table row,
+    is malformed input (GateError). An absent section is a valid empty list."""
+    rows = data.get(key, [])
+    if not isinstance(rows, list):
+        raise GateError("{}: the {!r} section is not an array of tables".format(where, key))
+    for i, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise GateError("{}: {!r} row #{} is not a table".format(where, key, i))
+    return rows
+
+
+def _resolve_base_commit(root, base):
+    """Resolve the baseline commit for the append-only prefix layers, mirroring layer_a's precedence:
+    None means 'no baseline to compare' (a genuine root-commit HEAD with no explicit --base), for which
+    the prefix layers report NOT APPLICABLE. An explicit --base is always resolved (fail-closed if it
+    does not resolve), even on a root HEAD."""
+    if base is None:
+        if _is_root_commit(root):
+            return None
+        base = _default_base(root)
+    return _resolve_commit(root, base)
+
+
+def layer_c(root, base_commit, head_data):
+    """Release-order append-only (2.4): base releases.toml rows are an exact full-row prefix of head
+    rows. NOT APPLICABLE while HEAD has no baseline, the record is absent at HEAD (its REQUIRED presence
+    is owned by the manifest/drift gates; this prefix layer applies only when the record exists), or the
+    file is absent at base (introduced since base); zero rows is a valid empty prefix. head_data is the
+    parsed HEAD releases.toml, or None when absent at HEAD."""
+    if head_data is None:
+        print("release-order-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(RELEASES_REL))
+        return []
+    if base_commit is None:
+        print("release-order-append-only: NOT APPLICABLE (no baseline to compare)")
+        return []
+    if not _path_in_commit(root, base_commit, RELEASES_REL):
+        print("release-order-append-only: NOT APPLICABLE ({} is absent at base; introduced since "
+              "base)".format(RELEASES_REL))
+        return []
+    try:
+        base_data = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
+    base_rows = _rows_of(base_data, "release", "baseline " + RELEASES_REL)
+    head_rows = _rows_of(head_data, "release", RELEASES_REL)
+    findings = _prefix_findings(base_rows, head_rows, "releases.toml [[release]]")
+    if not findings:
+        print("release-order-append-only: PASS ({} base row(s) prefix-preserved into {} head "
+              "row(s))".format(len(base_rows), len(head_rows)))
+    return findings
+
+
+def layer_d(root, base_commit, head_data):
+    """Id-history append-only (7.3): per section (born, tombstone, successor), base register rows are an
+    exact full-row prefix of head register rows. NOT APPLICABLE while HEAD has no baseline, the register
+    is absent at HEAD, or the file is absent at base. head_data is the parsed HEAD id-history.toml, or
+    None when absent at HEAD."""
+    if head_data is None:
+        print("id-history-append-only: NOT APPLICABLE ({} is absent at HEAD)".format(IDHISTORY_REL))
+        return []
+    if base_commit is None:
+        print("id-history-append-only: NOT APPLICABLE (no baseline to compare)")
+        return []
+    if not _path_in_commit(root, base_commit, IDHISTORY_REL):
+        print("id-history-append-only: NOT APPLICABLE ({} is absent at base; introduced since "
+              "base)".format(IDHISTORY_REL))
+        return []
+    try:
+        base_data = tomllib.loads(_show_file(root, base_commit, IDHISTORY_REL))
+    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        raise GateError("baseline {} does not parse: {}".format(IDHISTORY_REL, exc))
+    findings = []
+    for section in REGISTER_SECTIONS:
+        base_rows = _rows_of(base_data, section, "baseline " + IDHISTORY_REL)
+        head_rows = _rows_of(head_data, section, IDHISTORY_REL)
+        findings += _prefix_findings(base_rows, head_rows, "id-history [[{}]]".format(section))
+    if not findings:
+        print("id-history-append-only: PASS (born/tombstone/successor sections prefix-preserved)")
+    return findings
+
+
+def _load_head_toml(root, rel):
+    """Parse a HEAD record for the prefix layers. Returns None when the file is absent at HEAD (the
+    prefix layer then reports NOT APPLICABLE; the file's REQUIRED presence is owned by the manifest/drift
+    gates). A present-but-unreadable or unparseable file is fail-closed (GateError, exit 2)."""
+    try:
+        return load_toml(root / rel)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise GateError("cannot read {} at HEAD: {}".format(rel, exc))
+
+
 def run(root, base):
-    """Run both layers against `root`, resolving Layer A's baseline from `base` (None means the default
+    """Run every layer against `root`, resolving the baseline from `base` (None means the default
     merge-base). Returns the exit code 0/1/2."""
     try:
         head_releases = _load_head_releases(root)
         findings = layer_a(root, base, head_releases) + layer_b(root, head_releases)
+        base_commit = _resolve_base_commit(root, base)
+        findings += layer_c(root, base_commit, _load_head_toml(root, RELEASES_REL))
+        findings += layer_d(root, base_commit, _load_head_toml(root, IDHISTORY_REL))
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -307,7 +425,8 @@ def run(root, base):
         for finding in findings:
             print("  " + finding)
         return 1
-    print("PASS: version monotonicity holds (changelog history append-only; tag layer checked)")
+    print("PASS: version monotonicity holds (changelog history append-only; tag layer checked; "
+          "release-order and id-history registers append-only)")
     return 0
 
 
@@ -374,6 +493,28 @@ def self_test_main():
         failures.append("check_tag_ceiling expected no finding when the tag equals the head latest")
     if not check_tag_ceiling([("1.0.0", "v2.0.0")], "1.0.0"):
         failures.append("check_tag_ceiling expected a finding when a tag is above the head latest")
+
+    # _parse fullmatch regression (Step 4e): the shipped SemVer parser this gate imports must reject a
+    # trailing newline (the `$`-anchored match() accepted "1.0.0\n"; fullmatch closes it). A clean
+    # version still parses.
+    if _parse("1.0.0\n") is not None:
+        failures.append("_parse should reject a trailing-newline version (fullmatch hardening, 4e)")
+    if _parse("1.2.3") != (1, 2, 3):
+        failures.append("_parse should still accept a clean bare SemVer")
+
+    # Full-row prefix identity (_prefix_findings), the shared logic of layer_c/layer_d (append-only):
+    # (append passes, edit-a-prior-field fails, delete fails, empty base passes, identical passes).
+    r1, r2 = {"version": "1.0.0", "commit_sha": "a"}, {"version": "1.1.0", "commit_sha": "b"}
+    if _prefix_findings([r1], [r1, r2], "x"):
+        failures.append("_prefix_findings: appending a row expected no finding")
+    if not _prefix_findings([r1], [{"version": "1.0.0", "commit_sha": "EDITED"}], "x"):
+        failures.append("_prefix_findings: editing a prior row FIELD expected a finding")
+    if not _prefix_findings([r1, r2], [r1], "x"):
+        failures.append("_prefix_findings: deleting a row expected a finding")
+    if _prefix_findings([], [r1], "x"):
+        failures.append("_prefix_findings: an empty base is a valid prefix")
+    if _prefix_findings([r1, r2], [r1, r2], "x"):
+        failures.append("_prefix_findings: an identical row list expected no finding")
 
     # Git-level cases: real repositories in a private tempdir. Skipped (with a note) where unavailable.
     import shutil
@@ -484,6 +625,43 @@ def self_test_main():
             if _run_quiet(r4, None) != 2:
                 failures.append("git case: a broken-parent history (unresolvable HEAD^) expected "
                                 "fail-closed exit 2")
+
+            # (8) layer_c / layer_d append-only over the release-order and id-history registers. The base
+            # commit carries a one-row releases.toml and a one-row id-history.toml; the working tree
+            # appends a row to each (exit 0), then edits a prior releases row field (exit 1), then deletes
+            # the releases record (NOT APPLICABLE, so exit 0 again).
+            r5 = base_tmp / "registers"
+            _init(r5)
+            _root(r5)
+            _write(r5, _changelog_text(["1.0.0", "1.1.0"]))
+            core = r5 / ".aiqt" / "core"
+            core.mkdir(parents=True, exist_ok=True)
+            rel_base = 'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n'
+            reg_base = '[[born]]\nid = "calpha"\nborn-release = "1.0.0"\n'
+            (core / "releases.toml").write_text(rel_base, encoding="utf-8")
+            (core / "id-history.toml").write_text(reg_base, encoding="utf-8")
+            _commit(r5, "base registers: one release row, one born row")
+            # (8a) append a release row and a born row -> a valid prefix extension, exit 0.
+            (core / "releases.toml").write_text(
+                rel_base + '\n[[release]]\nversion = "1.1.0"\ncommit_sha = "bbb"\n', encoding="utf-8")
+            (core / "id-history.toml").write_text(
+                reg_base + '\n[[born]]\nid = "cbeta1"\nborn-release = "1.1.0"\n', encoding="utf-8")
+            if _run_quiet(r5, "HEAD") != 0:
+                failures.append("git case: appending a release row and a born row expected exit 0")
+            # (8b) edit a PRIOR release row's field -> append-only violation, exit 1.
+            (core / "releases.toml").write_text(
+                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ncommit_sha = "EDITED"\n',
+                encoding="utf-8")
+            (core / "id-history.toml").write_text(reg_base, encoding="utf-8")
+            if _run_quiet(r5, "HEAD") != 1:
+                failures.append("git case: editing a prior release row field expected exit 1")
+            # (8c) delete the releases record at HEAD -> layer_c NOT APPLICABLE; with id-history restored
+            # and changelog intact the run is otherwise clean, exit 0.
+            (core / "releases.toml").unlink()
+            (core / "id-history.toml").write_text(reg_base, encoding="utf-8")
+            if _run_quiet(r5, "HEAD") != 0:
+                failures.append("git case: a releases record absent at HEAD expected NOT APPLICABLE "
+                                "(exit 0)")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -493,8 +671,10 @@ def self_test_main():
             print("  - " + f)
         return 1
     if git_ran:
-        print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, and the "
-              "git-level history and tag cases all hold")
+        print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
+              "_parse fullmatch regression (4e), the full-row register prefix logic (append/edit/delete/"
+              "empty/identical), and the git-level history, tag, and release-order/id-history "
+              "append-only cases all hold")
     else:
         print("SELF-TEST PASS (PARTIAL): prefix identity (M1), no-decrease (M2), and tag name/ceiling "
               "logic hold; the git-level history and tag cases were SKIPPED (git or a writable temp "

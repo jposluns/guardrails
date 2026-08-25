@@ -289,7 +289,25 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It checks that the pack version never moves backward across a change. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It checks the append-only monotonicity of the pack's version history across a change: the changelog release sequence never moves backward and is prefix-preserved, the dormant tag layer arms with the first tagged release, and the release-order record and the id-history register are each an exact full-row prefix of their prior state, so no shipped release row, tag, or identifier row is rewritten, reordered, or removed. It does not judge whether a version bump is semantically justified (the release-delta gate owns the required-bump computation), and its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "release-delta"
+script = "tools/check_release_delta.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It computes the minimum required SemVer bump from machine-readable deltas over the whole governance surface (clause canonical text, the full pack-owned path keyset, ownership classes with the absolute-minimum cap, the declared order record, and the renderer/generator declaration) and fails a claimed bump below it, forcing a public disposition row for every dispositioned change. It forces the disposition row mechanically but cannot judge whether the human classification a row records is correct; the profiles/groups leg is dormant until the adopter-experience artifact ships; dispositions are trusted as authored once schema-valid; and it runs in genesis mode (no delta computed) until the first anchored release exists."
+
+[[gate]]
+id = "release-build"
+script = "tools/check_release_build.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It validates the release build order, the annotated release tags and their resolution to the recorded object and commit SHAs, the genesis uniqueness declaration, the release-order ordering gate, and the attestation chronology against the tagger date. The chronology layer is keyless tamper-evident ordering within the anchored history, not cryptographic proof; the QA-store retrieval, success, and family-set layers run maintainer-side only (the private store is unreachable from CI, which validates the anchored chain instead); and every tag- and row-dependent layer is dormant until the first attestation row exists."
 
 [[gate]]
 id = "clauses"
