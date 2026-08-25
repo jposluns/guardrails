@@ -19,11 +19,12 @@ AIQT Guardrails reproduces only each referenced control's identifier and the pub
 title or heading (or a brief AIQT-authored descriptor where the publisher publishes no title of
 its own), to help adopters align their own compliance and audit programs across frameworks. It
 reproduces no requirement text, control descriptions, or other body content, and it lists only the
-controls it maps to its own rules. For most frameworks this is a subset of the framework; for the
-three OWASP Top 10 lists it maps (MCP, Web, and LLM) it lists all ten entries. To use the full
-standards, adopters must obtain them directly from the publisher and accept that publisher's own
-licence. AIQT Guardrails is not a substitute for, and does not relicense, any standard, and links
-adopters to each publisher's source.
+controls it maps to its own rules. For OWASP MCP Top 10, OWASP Top 10 (Web Application Security
+Risks), and OWASP Top 10 for LLM Applications it lists all 10 entries (the complete list); for
+every other referenced framework it lists a subset. To use the full standards, adopters must
+obtain them directly from the publisher and accept that publisher's own licence. AIQT Guardrails
+is not a substitute for, and does not relicense, any standard, and links adopters to each
+publisher's source.
 
 ==================================================================================================
 

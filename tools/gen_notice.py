@@ -41,8 +41,7 @@ INTRO_TEMPLATE = (
     "title or heading (or a brief AIQT-authored descriptor where the publisher publishes no title of its "
     "own), to help adopters align their own compliance and audit programs across frameworks. "
     "It reproduces no requirement text, control descriptions, or other body content, and it lists only "
-    "the controls it maps to its own rules. For most frameworks this is a subset of the framework; for the "
-    "three OWASP Top 10 lists it maps (MCP, Web, and LLM) it lists all ten entries. To use the full "
+    "the controls it maps to its own rules.{complete_clause} To use the full "
     "standards, adopters must obtain them directly from the publisher and accept that publisher's own "
     "licence. AIQT Guardrails is not a substitute for, and does not relicense, any standard, and links "
     "adopters to each publisher's source."
@@ -92,6 +91,20 @@ def build(root):
     """Return the NOTICE text, or raise SystemExit(2) if a vendored publisher is unverified/unattributed."""
     manifests = load_manifests(root / ".aiqt" / "standards")  # raises ManifestError/OSError -> main exits 2
     kinds = _oxford(sorted({m.kind for m in manifests.values()}))
+    # Derive the catalogue-completeness clause from the standards data so the claim is true by
+    # construction (notice-drift then also enforces it): name exactly the frameworks whose vendored id
+    # set is the COMPLETE pinned-edition catalogue (catalogue="full"), never a hand-maintained list.
+    # This auto-updates if the full set or its size changes, so the NOTICE can never silently drift.
+    full = sorted((m for m in manifests.values() if m.catalogue == "full"),
+                  key=lambda m: natkey(m.name))
+    if full:
+        counts = {len(m.ids) for m in full}
+        extent = ("all {} entries (the complete list)".format(next(iter(counts)))
+                  if len(counts) == 1 else "the complete list")
+        complete_clause = " For {} it lists {}; for every other referenced framework it lists a subset.".format(
+            _oxford([m.name for m in full]), extent)
+    else:
+        complete_clause = " For every referenced framework it lists a subset."
     attrib = load_toml(root / ATTRIB_REL)
     publishers = attrib.get("publisher", {})
     per_manifest = attrib.get("manifest", {})
@@ -116,7 +129,7 @@ def build(root):
         raise SystemExit(2)
 
     lines = ["AIQT Guardrails™: third-party attribution NOTICE", ""]
-    lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds)))
+    lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds, complete_clause=complete_clause)))
     lines.append("")
     lines.append("=" * WRAP)
 
