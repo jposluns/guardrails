@@ -306,9 +306,14 @@ THIRD_PARTY_TITLES = (
 # gensrc-registered generated outputs. DISCLOSURE.md/CHANGELOG.md/ROADMAP.md/CLAUDE.md are registered and
 # arrive through collector 3; these are the hand-authored remainder, including the shipped starter file
 # aiqt-barebones.md (in .aiqt/manifest.toml and in-scope for check_portability.py, but not gensrc-generated,
-# so the overclaim gate reaches it only through this roster). Every path is REQUIRED (absent = exit 2).
-# Nothing is dormant today, so this is a single declared constant, not idle dormant/armed machinery.
-REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md", "aiqt-barebones.md")
+# so the overclaim gate reaches it only through this roster) and the gates-manifest SOURCE
+# .aiqt/core/gates/manifest.toml (scanned as raw text so a banned overclaim in a gate RESIDUE string cannot
+# escape; it is a source, not a gensrc target, so it too is reachable only here). Every path is REQUIRED
+# (absent = exit 2). Nothing is dormant today, so this is a single declared constant, not idle dormant/armed
+# machinery. NOTE: the gates manifest now carries THIS gate's own residue AND is a scanned surface, so that
+# residue must itself stay clean under the gate (verified: it uses no banned release-integrity vocabulary).
+REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md", "aiqt-barebones.md",
+                     ".aiqt/core/gates/manifest.toml")
 
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
 # window), "intent" (skip when a negator OR an intent hedge is in that window), "sharealike" (skip only
@@ -466,12 +471,15 @@ RELEASE_PATTERNS = [
     # can be detected") voice, where the attack-noun "tampering" is the SUBJECT/OBJECT of a detect claim.
     # This is a CLAIM to detect tampering, so unlike the bare attack-noun it is matched; it still needs a
     # detect verb or the "tampering detection" noun adjacent to "tampering", so an honest control title
-    # ("Dependency Tampering") and an attack description carry neither and stay clean. The passive form also
-    # admits a present-capability modal ("can/could/may/might be detected"), a present claim that tampering
-    # is caught. RELEASE-guarded.
+    # ("Dependency Tampering") and an attack description carry neither and stay clean. The passive form
+    # admits a capability/FUTURE modal ("can/could/may/might/will/shall be detected") and the roadmap "is|are
+    # to be detected" form: the claim is BANNED REGARDLESS OF TENSE (future clearance was removed), so
+    # "tampering will be detected" flags just like "tampering is detected". A genuine adjacent denial
+    # ("tampering is not detected") carries no "is detected" adjacency and stays clean. RELEASE-guarded.
     ("tampering detection (achieved)", re.compile(
         r"\bdetect(?:s|ed|ing)?\s+(?:\w+\s+){0,2}?tampering\b|\btampering\s+detection\b|"
-        r"\btampering\s+(?:is|are|was|were|gets?|(?:can|could|may|might)\s+be)\s+detected\b",
+        r"\btampering\s+(?:is|are|was|were|gets?|(?:can|could|may|might|will|shall)\s+be"
+        r"|(?:is|are|was|were)\s+to\s+be)\s+detected\b",
         re.IGNORECASE), "release"),
     # Tamper PREVENTION/immunity claims: an assertion that the pack RESISTS, PREVENTS, or makes tampering
     # IMPOSSIBLE (the interim keyless layer does none of these; it detects accidental corruption, not
@@ -885,7 +893,10 @@ POSITIVE = [
     "Every release is tamper-detectable.",                             # adjective sibling of evident/resistant/proof
     "The release detects tampering.",                                  # active tampering-detection
     "Tampering is detected on every release.",                         # passive tampering-detection
-    "Tampering can be detected on every release.",                     # modal-passive detection
+    "Tampering can be detected on every release.",                     # modal-passive detection (present capability)
+    "Tampering will be detected by our release validation.",           # FUTURE passive detection (banned regardless of tense)
+    "Tampering shall be detected on every release.",                   # future passive detection (shall)
+    "Tampering is to be detected in a future release.",                # roadmap "is to be detected" form
     "Every release provides tampering detection.",                     # noun-form "tampering detection"
     "Every release detects any tampering.",                            # determiner between the detect verb and "tampering"
     "Each release detects malicious tampering.",                       # adjective between the detect verb and "tampering"
@@ -990,6 +1001,7 @@ NEGATIVE = [
     "Releases are not signed with minisign.",                                            # tight-adjacency denial of the signing claim
     "Our releases are not cryptographically signed.",                                    # tight-adjacency denial of the bare crypto-signing claim (B1)
     "This layer is without tamper evidence.",                                            # SINGLE negation ("without" directly negates the term) -> clears
+    "Tampering is not detected by this layer.",                                           # "is not detected" has no "is detected" adjacency -> no match, clears
     "A released or published artefact ships with a signature verifiable against an authenticated maintainer key, or a digest published through an authenticated channel independent of artefact delivery.",  # SECI obligation prose: "channel ... independent", no achieved-verification verb -> no match
     "A release's integrity rests on a SHA-256 digest published through a channel independent of the download.",  # RELEASING obligation prose: reverse "channel ... independent", no achieved verb -> no match
     "The digest travels over a channel independent of artefact delivery.",               # "channel independent of" has no "is independent of" copula -> no match
@@ -1056,6 +1068,7 @@ def _collector_self_test():
         (r / "site").mkdir(parents=True) if with_site else r.mkdir(parents=True)
         if with_roster:
             for f in REPO_PROSE_ROSTER:
+                (r / f).parent.mkdir(parents=True, exist_ok=True)  # a roster path may be nested (e.g. .aiqt/core/gates/)
                 (r / f).write_text("clean prose.\n", encoding="utf-8")
         return r
 
