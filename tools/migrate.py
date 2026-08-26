@@ -177,6 +177,17 @@ def _require_quiescence(staged):
                           "refuses a cutover outside proven quiescence (adopter-experience hook)")
 
 
+def _require_unadopt_quiescence(root):
+    """E2 (spec 1319/1323): un-adopt reverse-replays a completed cutover against the LIVE effective tree, so
+    it demands the same proven-quiescence evidence a cutover does. Quiescence (not the lock or the fd check)
+    is what excludes the post-check/pre-replay race. The adopter attests quiescence by placing
+    .aiqt/migration/quiescence.ok; the engine refuses to reverse-replay without it, and holds it (under the
+    migration lock) across the drift verification AND the whole inverse transaction."""
+    if not (root / MIGRATION_REL / "quiescence.ok").is_file():
+        raise RefuseError("un-adopt carries no quiescence evidence ({}/quiescence.ok); the engine refuses "
+                          "a reverse-replay outside proven quiescence".format(MIGRATION_REL))
+
+
 # --- subcommands --------------------------------------------------------------------------------------
 
 def _open_root_fd(root):
@@ -217,24 +228,24 @@ def _validated_completed_cutover(txn_dir):
     return intent
 
 
-def _claim_recover_lock(journal_root):
-    """Atomically claim the journal lock for recovery (fix #3, hardened for C1). Returns 'acquired' when
-    this process now owns the lock (the lock was absent, or a confirmed-dead stale lock was broken and
-    re-acquired), or 'possibly-live' when a lock whose owner may still be alive holds it (never seized,
-    the concurrency-lease rule). The confirmed-dead break-and-reacquire is SERIALIZED under a kernel
-    arbitration lock (break_stale_and_acquire, C1), which re-reads the CURRENT owner and never unlinks a
-    lock a concurrent recoverer already re-acquired live. Fail-closed (JournalError) on an unreadable lock
-    or a lost O_EXCL race."""
+def _claim_recover_lock(journal_root, root_fd):
+    """Atomically claim the journal lock for recovery (fix #3, hardened for C1 and E4). Returns 'acquired'
+    when this process now owns the lock (the lock was absent, or a confirmed-dead stale lock was reconciled
+    and broken), or 'possibly-live' when a lock whose owner may still be alive holds it (never seized, the
+    concurrency-lease rule). The confirmed-dead case is SERIALIZED under a kernel arbitration lock
+    (reconcile_and_claim_stale, C1+E4): it re-reads the CURRENT owner, and per spec 1262 breaks the stale
+    lock ONLY after reconciling every journal to a terminal state while RETAINING the stale lease, never
+    unlinking a lock a concurrent recoverer already re-acquired live. Fail-closed (JournalError) on an
+    unreadable lock, a lost O_EXCL race, or a journal that does not reconcile to terminal."""
     owner = _journal.read_lock_owner(journal_root)
     if owner is None:
         _journal.acquire_lock(journal_root, session_id="recover")
         return "acquired"
     if not _journal.owner_confirmed_dead(owner):
         return "possibly-live"
-    # Confirmed dead: serialize the break+reacquire so two recoverers cannot race one deleting the other's
-    # freshly-acquired LIVE lock (C1). break_stale_and_acquire re-reads the current owner under a kernel
-    # lock and breaks ONLY a still-confirmed-dead current lock.
-    return _journal.break_stale_and_acquire(journal_root, session_id="recover")
+    # Confirmed dead: reconcile-then-break under the kernel arbitration lock (E4, spec 1262): the stale
+    # lease is the recovery claim, retained until every journal validates terminal, and only then broken.
+    return _journal.reconcile_and_claim_stale(journal_root, root_fd, session_id="recover")
 
 
 def do_plan(root):
@@ -254,30 +265,33 @@ def do_cutover(root, staged, unit):
     except _journal.JournalError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    try:
-        _assert_off_path(root, staged)
-        _require_quiescence(staged)
-        ops = _read_staged_plan(staged)
-        # C7: bind the cutover to a REAL connected component of the crosswalk (9.1). Reject an unknown
-        # --unit BEFORE locking (exit 2), and record the component's mapped predecessor/successor
-        # clause-id set in the INTENT header so check_crosswalk can gate whole-component coverage.
-        cw = load_crosswalk(root)
-        groups = components(cw)
-        if unit not in groups:
-            raise RefuseError("unknown --unit {!r}: not a connected component of the crosswalk; run "
-                              "`plan` to list units (9.1)".format(unit))
-        member = _component_membership(groups[unit])
-    except RefuseError as exc:
-        print("error: {}; fail-closed".format(exc), file=sys.stderr)
-        return 2
-    journal_root = root / JOURNAL_REL
-    journal_root.mkdir(parents=True, exist_ok=True)
-    txn_id = "{}.{}.{}".format(_slug(unit), os.getpid(), time.time_ns())
-    root_fd, err = _open_root_or_none(root)                # fix #8: refuse a symlinked root at the CLI (exit 2)
+    # E3 (spec 1291/1300 posture): open and VALIDATE --root FIRST (unresolved abspath, O_NOFOLLOW), before
+    # ANY root-relative read, write, or lock, so a symlinked root is refused (exit 2) with no crosswalk read,
+    # no journal dir created, and no lock left behind.
+    root_fd, err = _open_root_or_none(root)                # fix #8 / E3: refuse a symlinked root at the CLI
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
     try:
+        try:
+            _assert_off_path(root, staged)
+            _require_quiescence(staged)
+            ops = _read_staged_plan(staged)
+            # C7: bind the cutover to a REAL connected component of the crosswalk (9.1). Reject an unknown
+            # --unit BEFORE locking (exit 2), and record the component's mapped predecessor/successor
+            # clause-id set in the INTENT header so check_crosswalk can gate whole-component coverage.
+            cw = load_crosswalk(root)
+            groups = components(cw)
+            if unit not in groups:
+                raise RefuseError("unknown --unit {!r}: not a connected component of the crosswalk; run "
+                                  "`plan` to list units (9.1)".format(unit))
+            member = _component_membership(groups[unit])
+        except RefuseError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
+        journal_root = root / JOURNAL_REL
+        journal_root.mkdir(parents=True, exist_ok=True)
+        txn_id = "{}.{}.{}".format(_slug(unit), os.getpid(), time.time_ns())
         try:
             _journal.acquire_lock(journal_root, session_id="cutover")
         except _journal.JournalError as exc:
@@ -332,29 +346,31 @@ def do_recover(root):
     except _journal.JournalError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    journal_root = root / JOURNAL_REL
-    if not journal_root.is_dir():
-        print("recover: no journal at {} (nothing to recover)".format(JOURNAL_REL))
-        return 0
-    # Atomically CLAIM the lock before touching any transaction (fix #3): acquire an absent lock, or break
-    # a confirmed-dead stale lock and re-acquire it (O_EXCL); a possibly-live owner is NEVER seized. Only
-    # the lock THIS recover owns is released, after every transaction reaches a terminal state.
-    try:
-        claim = _claim_recover_lock(journal_root)
-    except _journal.JournalError as exc:
-        print("error: {}; fail-closed".format(exc), file=sys.stderr)
-        return 2
-    if claim == "possibly-live":
-        owner = _journal.read_lock_owner(journal_root)
-        print("recover: journal lock is held by a possibly-live owner (pid {}); NOT seized"
-              .format((owner or {}).get("pid")), file=sys.stderr)
-        return 1
-    root_fd, err = _open_root_or_none(root)                # fix #8: refuse a symlinked root at the CLI (exit 2)
+    # E3: open and VALIDATE --root FIRST (O_NOFOLLOW), before ANY root-relative read or lock, so a symlinked
+    # root is refused (exit 2) before the journal is inspected or any lock is claimed.
+    root_fd, err = _open_root_or_none(root)                # fix #8 / E3: refuse a symlinked root at the CLI
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
-    outcomes = {}
     try:
+        journal_root = root / JOURNAL_REL
+        if not journal_root.is_dir():
+            print("recover: no journal at {} (nothing to recover)".format(JOURNAL_REL))
+            return 0
+        # Atomically CLAIM the lock before touching any transaction (fix #3): acquire an absent lock, or
+        # (E4) reconcile-then-break a confirmed-dead stale lock under the arbitration lock; a possibly-live
+        # owner is NEVER seized. Only the lock THIS recover owns is released, after every txn is terminal.
+        try:
+            claim = _claim_recover_lock(journal_root, root_fd)
+        except _journal.JournalError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
+        if claim == "possibly-live":
+            owner = _journal.read_lock_owner(journal_root)
+            print("recover: journal lock is held by a possibly-live owner (pid {}); NOT seized"
+                  .format((owner or {}).get("pid")), file=sys.stderr)
+            return 1
+        outcomes = {}
         for txn_dir in _txn_dirs(journal_root):
             try:
                 outcomes[txn_dir.name] = _journal.recover(txn_dir, root_fd)
@@ -362,15 +378,15 @@ def do_recover(root):
                 print("error: cannot recover {} ({}); fail-closed".format(txn_dir.name, exc),
                       file=sys.stderr)
                 return 2                                   # lock RETAINED: the journal is not terminal
+        _journal.release_lock(journal_root)               # release only the lock THIS recover owns
+        if outcomes:
+            for name, outcome in sorted(outcomes.items()):
+                print("recover: txn {} -> {}".format(name, outcome))
+        else:
+            print("recover: no transactions to recover")
+        return 0
     finally:
         os.close(root_fd)
-    _journal.release_lock(journal_root)                   # release only the lock THIS recover owns
-    if outcomes:
-        for name, outcome in sorted(outcomes.items()):
-            print("recover: txn {} -> {}".format(name, outcome))
-    else:
-        print("recover: no transactions to recover")
-    return 0
 
 
 def do_status(root):
@@ -410,16 +426,17 @@ def do_unadopt(root, txn_id):
     except _journal.JournalError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    journal_root = root / JOURNAL_REL
-    src = journal_root / _slug(txn_id)
-    if not src.is_dir():
-        print("error: no transaction {} to reverse; fail-closed".format(txn_id), file=sys.stderr)
-        return 2
-    root_fd, err = _open_root_or_none(root)                # fix #8: refuse a symlinked root at the CLI (exit 2)
+    # E3: open and VALIDATE --root FIRST (O_NOFOLLOW), before ANY root-relative read or lock.
+    root_fd, err = _open_root_or_none(root)                # fix #8 / E3: refuse a symlinked root at the CLI
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
     try:
+        journal_root = root / JOURNAL_REL
+        src = journal_root / _slug(txn_id)
+        if not src.is_dir():
+            print("error: no transaction {} to reverse; fail-closed".format(txn_id), file=sys.stderr)
+            return 2
         # fix #2: acquire the migration lock FIRST (like do_cutover), so the source-poststate drift check
         # and the inverse apply run under ONE held lock; no concurrent mutation can slip between the drift
         # verification and the reverse-replay. Every refusal path below releases the lock before returning.
@@ -441,6 +458,14 @@ def do_unadopt(root, txn_id):
             _journal.release_lock(journal_root)
             print("error: {} is not a COMPLETE cutover transaction; only a completed cutover can be "
                   "reversed; fail-closed".format(txn_id), file=sys.stderr)
+            return 2
+        # E2: demand proven-quiescence evidence, held under the lock across BOTH the drift verification and
+        # the whole inverse transaction (spec 1319/1323); refuse the reverse-replay without it.
+        try:
+            _require_unadopt_quiescence(root)
+        except RefuseError as exc:
+            _journal.release_lock(journal_root)
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
         # fix #2: refuse if the effective tree has DRIFTED from the source cutover's installed poststate.
         # Every original op's domain-separated poststate MUST still verify, or a reverse-replay could
@@ -830,6 +855,7 @@ def self_test():
             if txn is None:
                 failures.append("{} un-adopt: no completed txn to reverse".format(case))
                 continue
+            (uroot / MIGRATION_REL / "quiescence.ok").write_text("ok\n", encoding="utf-8")   # E2: attest quiescence
             if _run(["un-adopt", "--root", str(uroot), "--txn", txn]) != 0:
                 failures.append("{} un-adopt: reverse-replay expected exit 0".format(case))
             if _snapshot(uroot) != pre:
@@ -1087,22 +1113,26 @@ def self_test():
             failures.append("C4: a pre-INTENT failure must NOT be reported as rolled back")
         checked += 1
 
-        # (O) C1: break_stale_and_acquire never unlinks a live current lock. Seed a LIVE lock owned by THIS
+        # (O) C1: reconcile_and_claim_stale never unlinks a live current lock. Seed a LIVE lock owned by THIS
         #     process, then attempt a stale-break: it re-reads the current owner under the arbitration lock,
         #     finds it live, and refuses (possibly-live), leaving the live lock intact. The old code
         #     re-confirmed the STALE owner and would have unlinked whatever lock was there (the race).
         c1jr = tmp / "c1" / JOURNAL_REL
         c1jr.mkdir(parents=True)
-        _journal.acquire_lock(c1jr, session_id="live-holder")
-        res1 = _journal.break_stale_and_acquire(c1jr, session_id="recover")
-        if res1 != "possibly-live":
-            failures.append("C1: break_stale_and_acquire must report possibly-live for a live current lock")
-        if not (c1jr / "lock").exists():
-            failures.append("C1: break_stale_and_acquire must NEVER unlink a live current lock")
-        owner1 = _journal.read_lock_owner(c1jr)
-        if not (owner1 and owner1.get("pid") == os.getpid()):
-            failures.append("C1: the live current lock owner must be left unchanged")
-        _journal.release_lock(c1jr)
+        c1fd = os.open(str(tmp / "c1"), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _journal.acquire_lock(c1jr, session_id="live-holder")
+            res1 = _journal.reconcile_and_claim_stale(c1jr, c1fd, session_id="recover")
+            if res1 != "possibly-live":
+                failures.append("C1: reconcile_and_claim_stale must report possibly-live for a live lock")
+            if not (c1jr / "lock").exists():
+                failures.append("C1: reconcile_and_claim_stale must NEVER unlink a live current lock")
+            owner1 = _journal.read_lock_owner(c1jr)
+            if not (owner1 and owner1.get("pid") == os.getpid()):
+                failures.append("C1: the live current lock owner must be left unchanged")
+            _journal.release_lock(c1jr)
+        finally:
+            os.close(c1fd)
         checked += 1
 
         # (P) C7: an unknown --unit (not a connected component of the crosswalk) is REJECTED before locking
@@ -1171,6 +1201,7 @@ def self_test():
         if _run(["cutover", "--root", str(sroot), "--staged", str(sstaged), "--unit", _SELFTEST_UNIT]) != 0:
             failures.append("unadopt-drift: setup cutover expected exit 0")
         stxn = _latest_txn(sroot)
+        (sroot / MIGRATION_REL / "quiescence.ok").write_text("ok\n", encoding="utf-8")   # E2: past the quiescence gate
         drifted = b"a LATER change made after the cutover\n"
         (sroot / "dataA").write_bytes(drifted)              # post-cutover modification: the tree has drifted
         if _run(["un-adopt", "--root", str(sroot), "--txn", stxn]) != 2:
@@ -1243,11 +1274,154 @@ def self_test():
         ajr = tmp / "arb-symlink" / JOURNAL_REL
         ajr.mkdir(parents=True)
         os.symlink(str(tmp / "arb-symlink" / "elsewhere"), str(ajr / "lock.break"))
+        awfd = os.open(str(tmp / "arb-symlink"), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            _journal.break_stale_and_acquire(ajr, session_id="recover")
+            _journal.reconcile_and_claim_stale(ajr, awfd, session_id="recover")
             failures.append("hardening: a symlinked lock.break must be refused (O_NOFOLLOW, fail-closed)")
         except _journal.JournalError:
             pass
+        finally:
+            os.close(awfd)
+        checked += 1
+
+        # (E1) The remove/rmdir prestate check and the mutation bind to the SAME pre-opened parent handle,
+        #      so an ANCESTOR SWAP injected between the bind and the check cannot redirect the unlinkat/rmdir
+        #      (spec 1291/1300). The swap is injected by wrapping _open_parent to rename the real parent
+        #      aside and a decoy (matching the prestate) into its NAME on the first bind; the fd-bound check
+        #      then sees the REAL (drifted) target and REFUSES, where a re-walk from root would have
+        #      validated the decoy and clobbered the real target.
+        for kind, mk_real, mk_decoy, prestate in (
+                ("remove",
+                 lambda d: ((d / "t").write_bytes(b"DRIFTED\n"), os.chmod(d / "t", 0o644)),
+                 lambda d: ((d / "t").write_bytes(b"REAL\n"), os.chmod(d / "t", 0o644)),
+                 {"kind": "file", "mode": 0o644, "sha256": hashlib.sha256(b"REAL\n").hexdigest()}),
+                ("rmdir",
+                 lambda d: ((d / "t").mkdir(), os.chmod(d / "t", 0o700)),
+                 lambda d: ((d / "t").mkdir(), os.chmod(d / "t", 0o755)),
+                 {"kind": "dir", "mode": 0o755})):
+            e1 = tmp / ("e1-" + kind)
+            (e1 / "P").mkdir(parents=True)
+            (e1 / "D").mkdir()
+            mk_real(e1 / "P")
+            mk_decoy(e1 / "D")
+            e1fd = os.open(str(e1), os.O_RDONLY | os.O_DIRECTORY)
+            orig_open_parent = _journal._open_parent
+            e1state = {"swapped": False}
+
+            def _swapping_open_parent(root_fd, relpath, _orig=orig_open_parent, _e1=e1, _st=e1state):
+                res = _orig(root_fd, relpath)
+                if not _st["swapped"]:
+                    _st["swapped"] = True
+                    os.rename(str(_e1 / "P"), str(_e1 / "P_old"))   # real parent aside (pfd already bound to it)
+                    os.rename(str(_e1 / "D"), str(_e1 / "P"))       # decoy into the real parent's NAME
+                return res
+
+            _journal._open_parent = _swapping_open_parent
+            raised = False
+            try:
+                _journal.apply_ops(e1fd, [{"op": kind, "path": "P/t", "prestate": prestate}], lambda op: b"")
+            except _journal.JournalError:
+                raised = True
+            finally:
+                _journal._open_parent = orig_open_parent
+                os.close(e1fd)
+            if not raised:
+                failures.append("E1/{}: an ancestor swap between check and mutate must be caught by the "
+                                "fd-bound prestate check".format(kind))
+            if not (e1 / "P_old" / "t").exists():
+                failures.append("E1/{}: the fd-bound mutation must not clobber the real target validated "
+                                "against a decoy".format(kind))
+            checked += 1
+
+        # (E2a) un-adopt REQUIRES quiescence evidence: without .aiqt/migration/quiescence.ok it is refused
+        #       (exit 2) after classification, before any inverse replay, and the lock is released.
+        qroot = _build_case_root(tmp / "e2-quiesce" / "root", "flat-files")
+        qstaged = _build_staged(tmp / "e2-quiesce" / "staged", "flat-files")
+        if _run(["cutover", "--root", str(qroot), "--staged", str(qstaged), "--unit", _SELFTEST_UNIT]) != 0:
+            failures.append("E2a: setup cutover expected exit 0")
+        qtxn = _latest_txn(qroot)
+        if _run(["un-adopt", "--root", str(qroot), "--txn", qtxn]) != 2:      # no quiescence.ok written
+            failures.append("E2a: un-adopt without quiescence evidence must be refused (exit 2)")
+        if (qroot / JOURNAL_REL / "lock").exists():
+            failures.append("E2a: a quiescence-refused un-adopt must release the lock")
+        checked += 1
+
+        # (E2b) a non-engine write to a final component AFTER the drift check but before the reverse capture
+        #       is CAUGHT (refused, exit 2) rather than captured-and-clobbered, because the inverse capture
+        #       re-verifies the source poststate (the pin). The write is injected by wrapping
+        #       capture_preimages; quiescence evidence is present so the reverse reaches the capture.
+        rroot = _build_case_root(tmp / "e2-race" / "root", "flat-files")
+        rstaged = _build_staged(tmp / "e2-race" / "staged", "flat-files")
+        if _run(["cutover", "--root", str(rroot), "--staged", str(rstaged), "--unit", _SELFTEST_UNIT]) != 0:
+            failures.append("E2b: setup cutover expected exit 0")
+        rtxn = _latest_txn(rroot)
+        (rroot / MIGRATION_REL / "quiescence.ok").write_text("ok\n", encoding="utf-8")
+        attack = b"a non-engine write after the drift check\n"
+        orig_capture = _journal.capture_preimages
+
+        def _attacking_capture(txn_dir, root_fd, ops, _orig=orig_capture, _root=rroot, _atk=attack):
+            (_root / "dataA").write_bytes(_atk)                 # external writer between drift check and capture
+            return _orig(txn_dir, root_fd, ops)
+
+        buf2 = io.StringIO()
+        _journal.capture_preimages = _attacking_capture
+        try:
+            with redirect_stderr(buf2):
+                rc2 = do_unadopt(Path(rroot).resolve(), rtxn)
+        finally:
+            _journal.capture_preimages = orig_capture
+        if rc2 != 2:
+            failures.append("E2b: a post-check write to a final component must be caught (exit 2)")
+        if (rroot / "dataA").read_bytes() != attack:
+            failures.append("E2b: a caught reverse-replay must NOT clobber the post-check write")
+        if (rroot / JOURNAL_REL / "lock").exists():
+            failures.append("E2b: a refused un-adopt must release the lock")
+        checked += 1
+
+        # (E3) root-validation order: a symlinked --root is refused (exit 2) BEFORE any root-relative read,
+        #      write, or lock, in cutover AND recover AND un-adopt: no journal dir is created and no lock is
+        #      left. Without the fix, cutover mkdir's the journal dir and recover claims/leaves a lock before
+        #      the root is ever validated.
+        e3real = _build_case_root(tmp / "e3" / "real", "flat-files")
+        e3staged = _build_staged(tmp / "e3" / "staged", "flat-files")
+        e3link = tmp / "e3" / "link"
+        os.symlink(str(e3real), str(e3link))
+        if _run(["cutover", "--root", str(e3link), "--staged", str(e3staged), "--unit", _SELFTEST_UNIT]) != 2:
+            failures.append("E3: cutover via a symlinked --root must be refused (exit 2)")
+        if (e3real / JOURNAL_REL).exists():
+            failures.append("E3: cutover via a symlinked --root must create NO journal dir")
+        if _run(["recover", "--root", str(e3link)]) != 2:
+            failures.append("E3: recover via a symlinked --root must be refused (exit 2)")
+        if (e3real / JOURNAL_REL / "lock").exists():
+            failures.append("E3: recover via a symlinked --root must leave no lock")
+        if _run(["un-adopt", "--root", str(e3link), "--txn", "whatever"]) != 2:
+            failures.append("E3: un-adopt via a symlinked --root must be refused (exit 2)")
+        if (e3real / JOURNAL_REL).exists():
+            failures.append("E3: un-adopt via a symlinked --root must create no journal dir")
+        checked += 1
+
+        # (E4) a confirmed-DEAD stale lock is NOT broken until reconciliation establishes terminal state
+        #      (spec 1262). Over an UNRECONCILABLE journal (an invalid frame sequence recover() rejects), the
+        #      stale lease with the DEAD owner MUST remain (fail-closed, exit 2). Without reconcile-before-
+        #      break, the dead lock is unlinked and replaced by this recover's own lock before reconciliation.
+        e4root = _build_case_root(tmp / "e4" / "root", "flat-files")
+        e4jr = e4root / JOURNAL_REL
+        e4jr.mkdir(parents=True, exist_ok=True)
+        badtxn = e4jr / "badtxn"
+        badtxn.mkdir()
+        _journal.publish(badtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+        _journal.publish(badtxn, _journal.F_RC, {"txn": "A"})    # INTENT then RC (no RIP): recover() rejects
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])   # a pid that is confirmed dead once reaped
+        dead.wait()
+        (e4jr / "lock").write_bytes(json.dumps(
+            {"uid": os.getuid(), "pid": dead.pid, "session": "dead", "pid-start": "",
+             "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+        if _run(["recover", "--root", str(e4root)]) != 2:
+            failures.append("E4: recover over an unreconcilable journal must fail closed (exit 2)")
+        owner4 = _journal.read_lock_owner(e4jr)
+        if not (owner4 and owner4.get("pid") == dead.pid):
+            failures.append("E4: a stale lock must NOT be broken until reconciliation establishes terminal "
+                            "state (the dead owner's lease must remain when a journal fails to reconcile)")
         checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

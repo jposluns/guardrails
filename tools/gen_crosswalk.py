@@ -9,12 +9,22 @@ without declaring its output). The runtime adopter crosswalk.toml is NEVER a reg
 ADOPTER mode (--legacy-root DIR [--out .aiqt/migration]): build CANDIDATE crosswalk material for a human
 reviewer. Order is load-bearing (8.2, spec lines 1227 to 1234): each legacy file's RAW BYTES are archived
 FIRST under <out-archive>/.aiqt/archive/<sha256>/payload (immutable: re-archiving differing bytes under
-the same name is refused), BEFORE any pointer handling. Embedded pointers REMAIN verbatim in the
-immutable raw archived bytes; the tool never INJECTS a parsed or derived pointer annotation into an
-archived payload. The tool then emits candidate predecessor rows and pointer-
-ranked candidate mapping rows with EMPTY review/verdict fields plus an explicitly computed unmatched
-list. It NEVER auto-asserts semantic equivalence (8.5) or enumeration completeness (8.2): a pointer
-(Expected-successor: / Coverage:) is a hint with zero evidentiary weight that only RANKS candidates.
+the same name is refused), BEFORE any pointer handling. The tool never INJECTS a parsed or derived pointer
+annotation into an archived payload; the archive is always the legacy file's raw bytes verbatim. The tool
+then emits candidate predecessor rows (with computable 7.2 spans) and pointer-ranked candidate mapping rows
+with EMPTY review/verdict fields plus an explicitly computed unmatched list. It NEVER auto-asserts semantic
+equivalence (8.5) or enumeration completeness (8.2): a pointer (Expected-successor: / Coverage:) is a hint
+with zero evidentiary weight that only RANKS candidates.
+
+DISCLOSED (D10, spec 8.6 lines 1236 to 1243, tracked post-VC-6 follow-up): 8.6 mandates that a pointer live
+ONLY in the adopter's migration state and that the archived PREIMAGE always be the UNANNOTATED predecessor
+bytes. This tool archives the legacy raw bytes verbatim (correct per 8.2) BUT reads pointer HINTS from those
+same archived bytes, i.e. it assumes any pointer is embedded in the legacy source. Reconciling this to 8.6's
+migration-state-only pointer carriage is a larger redesign (predecessor clause-ids are GENERATED here, so a
+migration-state pointer carrier keyed by clause-id is a chicken-and-egg the adopter workflow must resolve),
+deferred out of the VC-6 slice. Until then, an "Expected-successor:" line in a legacy file is treated as an
+incidental hint, NOT the spec's migration-state pointer; this tool does not claim 8.6 pointer-carriage
+conformance.
 
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
@@ -22,6 +32,7 @@ Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refu
 import hashlib
 import os
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -74,8 +85,25 @@ schema-version = 1
 # Pointer grammar (8.6 lines 1206 to 1210): greppable hints carried in frontmatter or body.
 _EXPECTED_RE = re.compile(r"Expected-successor:\s*(.+)")
 _COVERAGE_RE = re.compile(r"Coverage:\s*(.+)")
-# A candidate paragraph splitter for predecessor segmentation (headings and blank-line-delimited blocks).
-_PARA_SPLIT = re.compile(r"\n\s*\n")
+def _segment_paragraphs(text):
+    """Segment text into (paragraph_text, start_line, end_line) blocks on blank-line boundaries, tracking
+    1-based line numbers, so each candidate predecessor row can carry a tight 7.2 whole-line source span
+    (start-line/end-line) over the archived bytes. Blank (whitespace-only) lines delimit; a paragraph is a
+    maximal run of non-blank lines. An all-blank or empty file yields a single whole-file block."""
+    lines = text.split("\n")
+    blocks, i, nlines = [], 0, len(lines)
+    while i < nlines:
+        while i < nlines and lines[i].strip() == "":
+            i += 1
+        if i >= nlines:
+            break
+        start = i
+        while i < nlines and lines[i].strip() != "":
+            i += 1
+        blocks.append(("\n".join(lines[start:i]), start + 1, i))   # end-line = i (1-based inclusive)
+    if not blocks:
+        return [(text, 1, max(1, nlines))]
+    return blocks
 
 
 def render_schema():
@@ -117,8 +145,8 @@ def archive_file(archive_root, data):
     digest = hashlib.sha256(data).hexdigest()
     entry = Path(archive_root) / digest
     payload = entry / "payload"
-    if payload.exists():
-        existing = payload.read_bytes()
+    existing = _read_payload_nofollow(entry)              # G8: no-follow read (a symlinked entry/payload is refused)
+    if existing is not None:
         if existing != data:
             raise AdoptError("archive immutability violation: {} already holds different bytes".format(
                 payload))
@@ -136,8 +164,8 @@ def archive_file(archive_root, data):
         try:
             os.link(str(tmp), str(payload))               # no-overwrite publish: fails if payload exists
         except FileExistsError:                           # lost a publish race: accept only byte-equality
-            existing = payload.read_bytes()
-            if existing != data:
+            existing = _read_payload_nofollow(entry)      # G8: no-follow read of the winner's payload
+            if existing is None or existing != data:
                 raise AdoptError("archive immutability violation: {} already holds different bytes"
                                  .format(payload))
     finally:
@@ -155,6 +183,54 @@ def _fsync_dir(path):
         os.fsync(dfd)
     finally:
         os.close(dfd)
+
+
+def _read_payload_nofollow(entry):
+    """G8 (8.2): read <entry>/payload through NO-FOLLOW handles and require a REGULAR file, so an archive
+    immutability comparison can never read redirectable external bytes. Returns the payload bytes, or None
+    when the entry or its payload is absent; AdoptError on a symlinked entry, a symlinked payload, or a
+    non-regular payload."""
+    try:
+        efd = os.open(str(entry), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AdoptError("cannot open archive entry {} ({}); a symlinked entry is refused".format(entry, exc))
+    try:
+        try:
+            pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=efd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise AdoptError("cannot open archived payload under {} ({}); a symlinked payload is refused"
+                             .format(entry, exc))
+        try:
+            if not stat.S_ISREG(os.fstat(pfd).st_mode):
+                raise AdoptError("archived payload under {} is not a regular file".format(entry))
+            return _read_fd_all(pfd)
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(efd)
+
+
+def _mkdirs_durable(path):
+    """G9: create every missing component of `path` and fsync the PARENT of each NEWLY-created component,
+    so a crash cannot lose a just-created directory entry though its children were synced. Best-effort on
+    the fsync (a platform that rejects fsync on a directory is tolerated; the directory creation is not)."""
+    path = Path(path)
+    missing, p = [], path
+    while not p.exists():
+        missing.append(p)
+        if p.parent == p:
+            break
+        p = p.parent
+    for comp in reversed(missing):
+        comp.mkdir(exist_ok=True)
+        try:
+            _fsync_dir(comp.parent)
+        except OSError:
+            pass
 
 
 def _read_fd_all(fd):
@@ -219,13 +295,16 @@ def build_candidates(legacy_root, archive_root, successor_texts):
         except UnicodeDecodeError:
             text = ""
         prefix = digest[:12]
-        paras = [p for p in _PARA_SPLIT.split(text) if p.strip()] or [text]
+        blocks = _segment_paragraphs(text)
         pred_ids = []
-        for ordinal, para in enumerate(paras, start=1):
+        for ordinal, (para, start_line, end_line) in enumerate(blocks, start=1):
             pid = "pre-{}.{}".format(prefix, ordinal)
             pred_ids.append(pid)
-            predecessor_rows.append({"clause-id": pid, "archive-sha256": digest,
-                                     "canonical-text": para.strip(), "source-digest": digest})
+            # emit the computable 7.2 whole-line span (start-line/end-line) the schema documents, so a
+            # candidate predecessor row is span-checkable rather than span-omitting.
+            predecessor_rows.append({"clause-id": pid, "archive-sha256": digest, "start-line": start_line,
+                                     "end-line": end_line, "canonical-text": para.strip(),
+                                     "source-digest": digest})
             expected, coverage = parse_pointers(para)
             ranked = _rank_candidates(para, successor_texts)
             if expected or coverage:
@@ -260,6 +339,8 @@ def render_candidates(cand):
     for r in cand["predecessor"]:
         out += ["[[predecessor]]", "clause-id = {}".format(_toml_str(r["clause-id"])),
                 "archive-sha256 = {}".format(_toml_str(r["archive-sha256"])),
+                "start-line = {}".format(r["start-line"]),
+                "end-line = {}".format(r["end-line"]),
                 "canonical-text = {}".format(_toml_str(r["canonical-text"])),
                 "source-digest = {}".format(_toml_str(r["source-digest"])), ""]
     for r in cand["mapping"]:
@@ -282,14 +363,14 @@ def render_candidates(cand):
 
 def run_adopter(legacy_root, out_dir, successor_texts):
     archive_root = Path(out_dir) / ".aiqt" / "archive"
-    archive_root.mkdir(parents=True, exist_ok=True)
+    _mkdirs_durable(archive_root)                         # G9: fsync each newly-created hierarchy component's parent
     try:
         cand = build_candidates(legacy_root, archive_root, successor_texts)
     except AdoptError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2 if "immutability" in str(exc) else 1
     migration_dir = Path(out_dir) / ".aiqt" / "migration"
-    migration_dir.mkdir(parents=True, exist_ok=True)
+    _mkdirs_durable(migration_dir)                        # G9: durable creation of the migration state dir too
     (migration_dir / "crosswalk.candidate.toml").write_text(render_candidates(cand), encoding="utf-8")
     print("wrote candidate crosswalk and {} archive entries under {}".format(
         len(cand["archive"]), out_dir))
@@ -377,6 +458,9 @@ def self_test():
         # fix #6: the 8.2-required owner is captured from the source fd and emitted on the archive-file row.
         if "owner = {}".format(os.getuid()) not in cand_text:
             failures.append("archive-file rows must carry the 8.2 owner captured from the source fd")
+        # G-hardening: candidate predecessor rows now carry computable 7.2 spans (start-line/end-line).
+        if "start-line = " not in cand_text or "end-line = " not in cand_text:
+            failures.append("candidate predecessor rows must emit computable 7.2 spans (start-line/end-line)")
 
         # (d) immutability: differing re-archive refused; identical idempotent.
         archive_root = out / ".aiqt" / "archive"
@@ -418,6 +502,35 @@ def self_test():
         cand = build_candidates(legacy2, tmp / "arc2", {})    # empty successor set -> nothing to map
         if not cand["unmatched"]:
             failures.append("a predecessor with no mappable successor must appear in the unmatched list")
+
+        # (G8) a SYMLINKED payload under an existing hash dir is refused (a following read would have
+        # accepted redirectable external bytes as if immutable).
+        g8bytes = b"g8 archive immutability under a no-follow read\n"
+        g8dig = hashlib.sha256(g8bytes).hexdigest()
+        g8arc = tmp / "g8arc"
+        (g8arc / g8dig).mkdir(parents=True)
+        g8ext = tmp / "g8-external"
+        g8ext.write_bytes(g8bytes)                            # external bytes that MATCH, so a follow would pass
+        os.symlink(str(g8ext), str(g8arc / g8dig / "payload"))
+        try:
+            archive_file(g8arc, g8bytes)
+            failures.append("G8: a symlinked archived payload must be refused (no-follow), not accepted")
+        except AdoptError:
+            pass
+
+        # (G9) durable hierarchy creation: run_adopter into a FRESH out dir completes without error and the
+        # archive/migration dirs and entries are present (best-effort: the parent fsyncs are not observable).
+        g9legacy = tmp / "g9-legacy"
+        g9legacy.mkdir()
+        (g9legacy / "r.md").write_text("A legacy obligation for the durability test.\n", encoding="utf-8")
+        g9out = tmp / "g9" / "nested" / "out"                 # several missing hierarchy components
+        if quiet(run_adopter, g9legacy, g9out, {}) != 0:
+            failures.append("G9: run_adopter into a fresh nested out dir must exit 0")
+        if not (g9out / ".aiqt" / "archive").is_dir():
+            failures.append("G9: the archive hierarchy must be present after run_adopter")
+        g9entries = list((g9out / ".aiqt" / "archive").iterdir()) if (g9out / ".aiqt" / "archive").is_dir() else []
+        if not g9entries:
+            failures.append("G9: at least one archive entry must be present after run_adopter")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

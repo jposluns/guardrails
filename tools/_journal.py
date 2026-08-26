@@ -157,11 +157,35 @@ def _lstat_contained(root_fd, relpath):
     except FileNotFoundError:
         return None
     try:
+        return _lstat_at(pfd, name)
+    finally:
+        os.close(pfd)
+
+
+def _lstat_at(pfd, name):
+    """lstat the final component 'name' beneath an ALREADY-OPEN parent fd, or None when it is absent.
+    Never follows a final-component symlink. E1: binds the prestate check to the SAME parent handle the
+    mutation uses (9.3 step 4, spec 1291/1300: check AND mutate beneath one pre-opened directory handle),
+    so an ancestor swap between the check and the mutation cannot redirect either onto a different tree."""
+    try:
         return os.stat(name, dir_fd=pfd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+
+
+def _read_at(pfd, name, relpath):
+    """Read the final component's bytes through an O_NOFOLLOW fd opened beneath the SAME parent handle,
+    confirming on the opened fd it is a regular file. The fd-bound sibling of _read_contained, used where
+    the read MUST bind to the parent handle the mutation uses (E1, 9.3 step 4). JournalError on a symlink,
+    a non-regular file, or a read error."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=pfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise JournalError("contained path {!r} is not a regular file".format(relpath))
+        return _read_fd(fd), st
     finally:
-        os.close(pfd)
+        os.close(fd)
 
 
 def _read_contained(root_fd, relpath):
@@ -344,7 +368,7 @@ def acquire_lock(journal_root, session_id):
         owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
                  "pid-start": _pid_start(os.getpid()),
                  "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        os.write(fd, json.dumps(owner, sort_keys=True).encode())
+        _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -434,14 +458,28 @@ def release_lock(journal_root):
     _fsync_path_dir(journal_root)
 
 
-def break_stale_and_acquire(journal_root, session_id):
-    """Serialize the stale-lock break AND the O_EXCL re-acquire as ONE operation guarded by a kernel
-    advisory lock on a STABLE, never-replaced arbitration file (<journal>/lock.break), so two recoverers
-    that read the same dead owner can never race one deleting the other's freshly-acquired LIVE lock (C1).
-    Under the arbitration lock the CURRENT lock owner is RE-READ and broken ONLY if it STILL identifies a
-    confirmed-dead owner; a lock a concurrent recoverer has already re-acquired (now live) is left
-    untouched and reported 'possibly-live', never unlinked. Returns 'acquired' or 'possibly-live';
-    JournalError on a lost O_EXCL acquire or an unreadable current lock (fail-closed).
+def _journal_txn_dirs(journal_root):
+    """The transaction subdirectories of a journal root, sorted (the reconcile order). Skips the lock and
+    arbitration files and any stray non-directory entry."""
+    out = []
+    for entry in sorted(Path(journal_root).iterdir()):
+        if entry.is_dir():
+            out.append(entry)
+    return out
+
+
+def reconcile_and_claim_stale(journal_root, root_fd, session_id):
+    """E4 (spec 1262): a confirmed-dead stale lock is broken ONLY after (a) its recorded owner is confirmed
+    dead AND (b) the journal is reconciled to a consistent (terminal) state. Under a kernel advisory lock on
+    a STABLE, never-replaced arbitration file (<journal>/lock.break) that serializes recoverers (C1), RE-READ
+    the CURRENT owner: if it is still a confirmed-dead stale lock, RECONCILE every transaction to terminal
+    via recover() WHILE RETAINING the stale lease record, VALIDATE that every journal is terminal (the C2
+    classifier), and ONLY THEN remove the stale lock and acquire a fresh O_EXCL lock. The stale lease is thus
+    the recovery claim held across reconciliation: a crash or a journal that does not reconcile leaves the
+    stale lock in place for the next recoverer rather than an unlocked, half-reconciled tree. A lock a
+    concurrent recoverer already re-acquired (now live) is left untouched and reported 'possibly-live'.
+    Returns 'acquired' or 'possibly-live'; JournalError on a lost O_EXCL acquire, an unreadable current lock,
+    or a journal that does not reconcile to terminal (fail-closed: the stale lock is NOT broken).
 
     PORTABILITY: fcntl is POSIX-only. On a platform without it (e.g. Windows) this FAILS CLOSED, refusing
     to break the stale lock rather than falling back to the unguarded race, consistent with the engine's
@@ -470,7 +508,15 @@ def break_stale_and_acquire(journal_root, session_id):
                 return "acquired"
             if not owner_confirmed_dead(current):
                 return "possibly-live"                       # a concurrent recoverer re-acquired: never break
-            try:
+            # (b) reconcile every transaction to terminal BEFORE breaking the stale lock (spec 1262), the
+            # stale lease RETAINED throughout so a crash mid-reconcile leaves the stale lock in place.
+            for txn_dir in _journal_txn_dirs(journal_root):
+                recover(txn_dir, root_fd)
+            for txn_dir in _journal_txn_dirs(journal_root):
+                if not is_terminal(txn_dir):
+                    raise JournalError("journal {} did not reconcile to terminal; refusing to break the "
+                                       "stale lock (fail-closed)".format(txn_dir.name))
+            try:                                             # every journal terminal: NOW break the stale lock
                 os.unlink(str(journal_root / "lock"))
             except FileNotFoundError:
                 pass
@@ -494,6 +540,15 @@ def capture_preimages(txn_dir, root_fd, ops):
     txn_dir = Path(txn_dir)
     pre = txn_dir / "preimages"
     pre.mkdir(exist_ok=True)
+    # E2: a REVERSE (un-adopt) transaction pins, per inverse op, the SOURCE poststate it expects to still
+    # hold. Verify every pin here, at capture, so a non-engine write that landed after the caller's drift
+    # check but before capture is caught (fail closed) rather than captured-and-clobbered (spec 1319/1323:
+    # quiescence excludes the post-check/pre-replay race; this makes the drift check contiguous with the
+    # capture under the held lock). Cutover ops carry no pin, so this is inert for them.
+    for op in ops:
+        exp = op.get("source-poststate")
+        if exp is not None:
+            _verify_source_poststate(root_fd, op["path"], exp)
     for seq, op in enumerate(ops):
         kind = op["op"]
         st = _lstat_contained(root_fd, op["path"])
@@ -538,8 +593,12 @@ def _verify_fd_prestate(fd, prestate, where):
         raise JournalError("{}: content changed since preimage capture".format(where))
 
 
-def _verify_lookup_prestate(root_fd, relpath, prestate):
-    st = _lstat_contained(root_fd, relpath)
+def _verify_prestate_at(pfd, name, relpath, prestate):
+    """E1 (spec 1291/1300): verify a lookup-based prestate (a dir for rmdir, a regular file for remove)
+    through the SAME already-open parent fd the mutation will use, by bare 'name' with no-follow, so an
+    ancestor swap between the check and the unlinkat/rmdir cannot redirect either. Supersedes a re-walk
+    from root_fd, which bound the check to a freshly-resolved parent rather than the one bound at apply."""
+    st = _lstat_at(pfd, name)
     if prestate["kind"] == "dir":
         if st is None or not stat.S_ISDIR(st.st_mode):
             raise JournalError("{}: expected a directory at apply time".format(relpath))
@@ -550,7 +609,7 @@ def _verify_lookup_prestate(root_fd, relpath, prestate):
         raise JournalError("{}: expected a regular file at apply time".format(relpath))
     if stat.S_IMODE(st.st_mode) != prestate["mode"]:
         raise JournalError("{}: mode changed since preimage capture".format(relpath))
-    data, _ = _read_contained(root_fd, relpath)
+    data, _ = _read_at(pfd, name, relpath)
     if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
         raise JournalError("{}: content changed since preimage capture".format(relpath))
 
@@ -577,6 +636,30 @@ def _poststate_verifies(root_fd, op):
     except (JournalError, OSError, KeyError):
         return False
     return False
+
+
+def _verify_source_poststate(root_fd, relpath, exp):
+    """E2 (spec 1319/1323): fail closed unless the effective tree STILL holds the source transaction's
+    poststate for one reversed path (a file's mode+content, a directory's mode, or an absence). Called at
+    un-adopt CAPTURE so the drift check is contiguous with the reverse capture under the held migration lock
+    and proven quiescence, closing the post-check/pre-replay window: a non-engine write that lands after the
+    caller's drift check but before capture is caught here rather than captured-and-clobbered."""
+    st = _lstat_contained(root_fd, relpath)
+    kind = exp["kind"]
+    if kind == "absent":
+        if st is not None:
+            raise JournalError("{}: reversed path is no longer absent (tree drifted from the source "
+                               "poststate since the cutover)".format(relpath))
+        return
+    if kind == "dir":
+        if st is None or not stat.S_ISDIR(st.st_mode) or stat.S_IMODE(st.st_mode) != exp["mode"]:
+            raise JournalError("{}: reversed directory drifted from the source poststate".format(relpath))
+        return
+    if st is None or not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != exp["mode"]:
+        raise JournalError("{}: reversed file drifted from the source poststate".format(relpath))
+    data, _ = _read_contained(root_fd, relpath)
+    if hashlib.sha256(data).hexdigest() != exp["sha256"]:
+        raise JournalError("{}: reversed file content drifted from the source poststate".format(relpath))
 
 
 # --- apply (contained, fd-bound) ----------------------------------------------------------------------
@@ -637,14 +720,14 @@ def apply_ops(root_fd, ops, staged_reader):
                 finally:
                     os.close(fd)
             elif kind == "remove":
-                _verify_lookup_prestate(root_fd, op["path"], op["prestate"])
+                _verify_prestate_at(pfd, name, op["path"], op["prestate"])   # E1: check bound to the SAME pfd
                 os.unlink(name, dir_fd=pfd)
             elif kind == "mkdir":
                 os.mkdir(name, op["poststate"]["mode"], dir_fd=pfd)
                 os.chmod(name, op["poststate"]["mode"], dir_fd=pfd, follow_symlinks=False)
                 _fsync_contained_dir(pfd, name)              # fix #1: the dir's own mode durable, not just the parent
             elif kind == "rmdir":
-                _verify_lookup_prestate(root_fd, op["path"], op["prestate"])
+                _verify_prestate_at(pfd, name, op["path"], op["prestate"])   # E1: check bound to the SAME pfd
                 os.rmdir(name, dir_fd=pfd)
             else:
                 raise JournalError("unknown op kind {!r}".format(kind))
@@ -707,19 +790,26 @@ def _restore_preimage(txn_dir, root_fd, op, op_index=0):
     mode-resume), so a crash between the mkdir and the chmod leaves no umask-reduced mode behind."""
     txn_dir = Path(txn_dir)
     path, prestate, kind = op["path"], op["prestate"], op["op"]
-    st = _lstat_contained(root_fd, path)                  # soft: None if the path OR a parent is absent
-    if kind == "create" and st is None:
-        return                                            # already absent
-    if kind == "mkdir" and st is None:
-        return                                            # already absent
     try:
-        pfd, name = _open_parent(root_fd, path)
+        pfd, name = _open_parent(root_fd, path)           # E1: bind the parent FIRST, then check on THIS fd
+    except FileNotFoundError:
+        # A parent is absent, so the target is absent too. For a create/mkdir undo whose subtree was never
+        # built that IS the prestate (clean no-op); a write/remove/rmdir undo needs its parent to restore
+        # into, so an absent parent is fail-closed.
+        if kind in ("create", "mkdir"):
+            return
+        raise JournalError("cannot restore {!r}: parent directory absent".format(path))
     except OSError as exc:
         raise JournalError("cannot restore {!r} ({})".format(path, exc))
     try:
+        st = _lstat_at(pfd, name)                         # E1: check bound to the SAME pfd the mutation uses
         if kind == "create":                              # created file: delete it back to absence
+            if st is None:
+                return                                    # already absent
             os.unlink(name, dir_fd=pfd)
         elif kind == "mkdir":                             # created dir: remove it back to absence
+            if st is None:
+                return                                    # already absent
             if not stat.S_ISDIR(st.st_mode):
                 raise JournalError("cannot restore {!r}: expected a created directory to remove, found a "
                                    "non-directory".format(path))
@@ -912,23 +1002,32 @@ def build_inverse_ops(intent_ops):
     inversion, and pin removal are Section 12 step 7 (pin.py), NOT this VC-6 slice."""
     inverse = []
     for op in reversed(intent_ops):
-        pre, kind, path = op["prestate"], op["op"], op["path"]
-        if kind == "write":
+        pre, post, kind, path = op["prestate"], op.get("poststate", {}), op["op"], op["path"]
+        # E2: each inverse op pins the SOURCE poststate the effective tree must still hold at capture (the
+        # state the ORIGINAL op installed), so un-adopt's reverse capture is itself a drift check.
+        if kind == "write":                               # after the write: prestate mode, poststate bytes
             inverse.append({"op": "write", "path": path,
                             "poststate": {"kind": "file", "content-sha256": pre["sha256"]},
+                            "source-poststate": {"kind": "file", "mode": pre["mode"],
+                                                 "sha256": post.get("content-sha256")},
                             "_source": op})
-        elif kind == "create":
-            inverse.append({"op": "remove", "path": path, "poststate": {"kind": "absent"}})
-        elif kind == "remove":
+        elif kind == "create":                            # after the create: the created file must be present
+            inverse.append({"op": "remove", "path": path, "poststate": {"kind": "absent"},
+                            "source-poststate": {"kind": "file", "mode": post.get("mode"),
+                                                 "sha256": post.get("content-sha256")}})
+        elif kind == "remove":                            # after the remove: the path must be absent
             inverse.append({"op": "create", "path": path,
                             "poststate": {"kind": "file", "mode": pre["mode"],
                                           "content-sha256": pre["sha256"]},
+                            "source-poststate": {"kind": "absent"},
                             "_source": op})
-        elif kind == "mkdir":
-            inverse.append({"op": "rmdir", "path": path, "poststate": {"kind": "absent"}})
-        elif kind == "rmdir":
+        elif kind == "mkdir":                             # after the mkdir: the created dir must be present
+            inverse.append({"op": "rmdir", "path": path, "poststate": {"kind": "absent"},
+                            "source-poststate": {"kind": "dir", "mode": post.get("mode")}})
+        elif kind == "rmdir":                             # after the rmdir: the path must be absent
             inverse.append({"op": "mkdir", "path": path,
-                            "poststate": {"kind": "dir", "mode": pre["mode"]}})
+                            "poststate": {"kind": "dir", "mode": pre["mode"]},
+                            "source-poststate": {"kind": "absent"}})
         else:
             raise JournalError("cannot invert unknown op kind {!r}".format(kind))
     return inverse

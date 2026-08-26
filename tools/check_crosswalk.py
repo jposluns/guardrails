@@ -6,8 +6,17 @@ are HUMAN-JUDGMENT. This gate proves the verdict fields are PRESENT, well-formed
 and name a reviewer distinct from the author with a distinct declared family; it CANNOT prove that a real
 cross-family review occurred. The upgrade to authenticated result records is deferred to the adopter-
 experience report envelope (spec lines 1199 to 1202). The archive/quote chain (leg 2, 3, 6) is the anti-
-self-certification property: a quote must be a verbatim substring of the pinned successor clause, whose
-predecessor mirror is span-consistent with the immutable archived bytes.
+self-certification property: a quote must be a verbatim substring of the successor clause's DECLARED
+canonical-text, whose predecessor mirror is span-consistent with the immutable archived bytes.
+
+CLASS-C RESIDUALS (disclosed, deferred to Step 7 / pin.py, post-1.0.0, out of the VC-6 slice):
+  D5: the successor inventory is checked for clause-id uniqueness and per-row self-consistency (a declared
+      span is 1-based with start <= end; a declared source-digest is 64-hex), and the quote is proven a
+      verbatim substring of the row's DECLARED canonical-text. It is NOT resolved in the PINNED RELEASE, nor
+      is the row's span-and-digest validated against that release's sources, so an adopter altering both a
+      successor's canonical-text and its quote consistently is caught only by the pinned-release binding.
+  D6: the gate validates STRUCTURAL completeness of the migration/archive state (a crosswalk requires its
+      archive and the reviewed inventory to be present) but does NOT parse pin.toml for the migration MODE.
 
 Exit convention: 0 clean, OR NOT APPLICABLE only when .aiqt/migration/, .aiqt/archive/, AND a migration-
 mode pin are ALL structurally absent (a repo that never adopted); 1 a real finding; 2 malformed input, a
@@ -120,13 +129,10 @@ def check_archive(cw, archive_root):
             findings.append("archive-file {}: predecessor-clause-ids {} does not equal the exact set of "
                             "[[predecessor]] ids declaring this hash {} (phantom or missing id, C5)"
                             .format(sha, sorted(set(pcids)), sorted(declared_by_hash.get(sha, set()))))
-        payload = Path(archive_root) / sha / "payload"
-        try:
-            data = payload.read_bytes()
-        except OSError as exc:
-            raise GateError("unreadable archive payload {} ({})".format(payload, exc))
+        data = _read_archive_payload(archive_root, sha)   # G8: no-follow read (a symlinked payload is refused)
         if hashlib.sha256(data).hexdigest() != sha:
-            findings.append("{}: archived bytes do not match their recorded hash".format(payload))
+            findings.append("{}/{}/payload: archived bytes do not match their recorded hash"
+                            .format(archive_root, sha))
         size = row.get("size")
         if size is not None and (isinstance(size, bool) or not isinstance(size, int)
                                  or size != len(data)):
@@ -135,11 +141,58 @@ def check_archive(cw, archive_root):
     return findings
 
 
+def _read_all_fd(fd):
+    chunks = []
+    while True:
+        block = os.read(fd, 1 << 20)
+        if not block:
+            break
+        chunks.append(block)
+    return b"".join(chunks)
+
+
+def _read_archive_payload(archive_root, sha):
+    """G8 (8.2): read <archive_root>/<sha>/payload through NO-FOLLOW directory and file handles, so a
+    symlinked <sha> entry or a symlinked payload (which target-following exists()/read_bytes() would
+    silently traverse to mutable external bytes) is REFUSED. The archive root is opened O_NOFOLLOW, the
+    <sha> dir openat'd O_DIRECTORY|O_NOFOLLOW beneath it, the payload openat'd O_NOFOLLOW beneath that, and
+    the opened fd is fstat'd to require a REGULAR file before its bytes are hashed (the predecessor is
+    PERMANENTLY retained in the archive as immutable bytes, never a redirectable link). GateError
+    (fail-closed) on any symlink, a non-regular payload, or an I/O error."""
+    try:
+        rootfd = os.open(str(archive_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise GateError("cannot open archive root {} through a no-follow handle ({}); fail-closed"
+                        .format(archive_root, exc))
+    try:
+        try:
+            shafd = os.open(sha, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+        except OSError as exc:
+            raise GateError("cannot open archive entry {}/{} through a no-follow handle ({}); a symlinked "
+                            "archive entry is refused (8.2)".format(archive_root, sha, exc))
+        try:
+            try:
+                pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=shafd)
+            except OSError as exc:
+                raise GateError("cannot open archived payload for {} through a no-follow handle ({}); a "
+                                "symlinked payload is refused (8.2)".format(sha, exc))
+            try:
+                if not stat.S_ISREG(os.fstat(pfd).st_mode):
+                    raise GateError("archived payload for {} is not a regular file (8.2)".format(sha))
+                return _read_all_fd(pfd)
+            finally:
+                os.close(pfd)
+        finally:
+            os.close(shafd)
+    finally:
+        os.close(rootfd)
+
+
 def _archived_text(archive_root, sha):
     try:
-        return (Path(archive_root) / sha / "payload").read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise GateError("cannot read archived payload for {} ({})".format(sha, exc))
+        return _read_archive_payload(archive_root, sha).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GateError("cannot decode archived payload for {} ({})".format(sha, exc))
 
 
 def check_predecessors(cw, archive_root):
@@ -189,10 +242,7 @@ def check_predecessors(cw, archive_root):
             findings.append("predecessor {!r}: its [[archive-file]] row does not list it in "
                             "predecessor-clause-ids (bidirectional resolution)".format(pid))
         # C5: RECOMPUTE the resolved payload's digest (archive identity), never trust row-to-row equality.
-        try:
-            data = (Path(archive_root) / sha / "payload").read_bytes()
-        except OSError as exc:
-            raise GateError("unreadable archive payload for predecessor {!r} ({})".format(pid, exc))
+        data = _read_archive_payload(archive_root, sha)   # G8: no-follow read (a symlinked payload is refused)
         if hashlib.sha256(data).hexdigest() != sha:
             findings.append("predecessor {!r}: recomputed archived payload digest does not equal its "
                             "archive-sha256 (archive identity)".format(pid))
@@ -221,12 +271,27 @@ def _whole_line_window(text, start, end):
     return "\n".join(lines[start - 1:end])
 
 
+def _substring_offsets(window, text):
+    """Every start offset (including overlapping) at which text occurs as a contiguous byte-exact substring
+    of window. Overlapping matches are counted (find at i+1), so an ambiguous window is caught, never
+    silently reduced to a single hit."""
+    offsets, i = [], window.find(text)
+    while i != -1:
+        offsets.append(i)
+        i = window.find(text, i + 1)
+    return offsets
+
+
 def _check_predecessor_span(pid, row, archive_root, sha, text):
-    """The 7.2 tight whole-line window: start-line and end-line are 1-based integers with
-    start-line <= end-line, and canonical-text is byte-exactly the whole lines [start-line, end-line] of
-    the archived bytes (the 8.2 span-and-digest tie). A malformed, missing, or out-of-range span is a
-    finding (fail-closed toward FAIL); an unreadable archived payload fails closed (GateError, via
-    _archived_text)."""
+    """The 7.2 tight whole-line window (F-226, spec 7.2 which supersedes the round-10 'byte-identical to the
+    span's content' wording): start-line and end-line are 1-based integers with start-line <= end-line, and
+    the canonical-text occurs EXACTLY ONCE as a contiguous byte-exact SUBSTRING within the
+    [start-line, end-line] whole-line window of the archived bytes, BEGINNING on start-line and ENDING on
+    end-line (a tight window). Zero or more than one occurrence is a FAIL and the gate never picks the first
+    occurrence. This is the 8.2 span-and-digest tie against the immutable archived bytes; a canonical-text
+    that merely shares its first/last line with markdown (a common heading/list prefix) is a valid substring
+    of the window, not a rejection. A malformed, missing, or out-of-range span is a finding (fail-closed
+    toward FAIL); an unreadable archived payload fails closed (GateError, via _archived_text)."""
     start = row.get("start-line")
     end = row.get("end-line")
     if (not isinstance(start, int) or not isinstance(end, int)
@@ -239,9 +304,19 @@ def _check_predecessor_span(pid, row, archive_root, sha, text):
     if window is None:
         return ["predecessor {!r}: source span [{}, {}] exceeds the archived file's line count"
                 .format(pid, start, end)]
-    if text != window:
-        return ["predecessor {!r}: canonical-text does not byte-exactly match the archived lines "
+    offsets = _substring_offsets(window, text)
+    if len(offsets) == 0:
+        return ["predecessor {!r}: canonical-text is not a byte-exact substring of the archived lines "
                 "[{}, {}] (span-and-digest disagreement, 8.2/7.2)".format(pid, start, end)]
+    if len(offsets) > 1:
+        return ["predecessor {!r}: canonical-text occurs {} times in the window [{}, {}]; 7.2 requires "
+                "EXACTLY ONE occurrence (the gate never picks the first)".format(pid, len(offsets), start, end)]
+    s = offsets[0]
+    # BEGINS on start-line (no newline precedes the match in the window) and ENDS on end-line (no newline
+    # follows the match), so the declared window is TIGHT rather than loosely enclosing the canonical text.
+    if "\n" in window[:s] or "\n" in window[s + len(text):]:
+        return ["predecessor {!r}: canonical-text does not begin on start-line {} and end on end-line {} "
+                "(the declared window is not tight, 7.2)".format(pid, start, end)]
     return []
 
 
@@ -338,6 +413,49 @@ def check_verdict(row):
             and vals["reviewer-family"] == vals["author-family"]):
         problems.append("reviewer family is identical to the author family")
     return problems
+
+
+def check_inventory(inv_rows):
+    """D5 (spec 1193/1196), the CHEAP part fixed within the VC-6 slice: the successor inventory's clause-ids
+    are UNIQUE (a duplicate is a finding, never silently deduped to last-wins), and each row is
+    SELF-CONSISTENT: a non-empty clause-id and canonical-text; and, WHERE PRESENT, a valid 7.2 source span
+    (start-line and end-line 1-based integers with start-line <= end-line) and a 64-hex lowercase
+    source-digest.
+
+    DISCLOSED RESIDUAL (disclose-guard-residuals, class-c): this gate proves the successor-quote is a
+    verbatim substring of the row's DECLARED canonical-text and that the row is internally well-formed; it
+    does NOT resolve the successor clause in the PINNED RELEASE, nor validate the row's span-and-digest
+    against that release's sources. Binding the inventory to a pinned release identity is Step-7 (pin.py)
+    territory, OUT of the VC-6 slice, so an adopter who alters both a successor's canonical-text and the
+    quote consistently is caught only by that pinned-release binding, a tracked post-1.0.0 hardening."""
+    findings, seen = [], set()
+    for i, row in enumerate(inv_rows):
+        cid = row.get("clause-id")
+        if not (isinstance(cid, str) and cid.strip()):
+            findings.append("successor inventory row {}: clause-id is absent or not a non-empty string"
+                            .format(i))
+        else:
+            if cid in seen:
+                findings.append("successor inventory has a duplicate clause-id {!r} (uniqueness, 7.2)"
+                                .format(cid))
+            seen.add(cid)
+        ct = row.get("canonical-text")
+        if not (isinstance(ct, str) and ct):
+            findings.append("successor inventory {!r}: canonical-text is absent or not a non-empty string"
+                            .format(cid))
+        # 7.2 span/digest self-consistency WHERE PRESENT (their TRUTH against the pinned release sources is
+        # deferred to Step 7; see the disclosed residual above).
+        start, end = row.get("start-line"), row.get("end-line")
+        if start is not None or end is not None:
+            if (not isinstance(start, int) or isinstance(start, bool)
+                    or not isinstance(end, int) or isinstance(end, bool) or start < 1 or end < start):
+                findings.append("successor inventory {!r}: a declared source span must be 1-based integers "
+                                "with start-line <= end-line (7.2 self-consistency)".format(cid))
+        sd = row.get("source-digest")
+        if sd is not None and not (isinstance(sd, str) and HEX64_RE.match(sd)):
+            findings.append("successor inventory {!r}: source-digest, when present, must be a 64-hex "
+                            "lowercase sha256 (7.2 self-consistency)".format(cid))
+    return findings
 
 
 def check_mappings(cw, inventory):
@@ -495,6 +613,17 @@ def run(root):
         raise GateError("PARTIAL migration state: {} is present but {} is absent (partial state is "
                         "malformed, never dormant)".format(
                             MIGRATION_REL if mig else (ARCHIVE_REL if arc else PIN_REL), CROSSWALK_REL))
+    # D6: STRUCTURAL COMPLETENESS. A crosswalk exists, so its immutable archive MUST be structurally present
+    # too; an empty crosswalk with no archive is PARTIAL (fail-open no more), never a clean PASS. The
+    # reviewed successor inventory is likewise required (its absence fails closed via _load_toml below). The
+    # state matrix: all three of (migration dir, archive, pin) absent is NA; a crosswalk present with the
+    # archive absent is PARTIAL (exit 2). DISCLOSED RESIDUAL (class-c): this validates STRUCTURAL
+    # completeness of the migration/archive state; it does NOT parse pin.toml for the migration MODE, which
+    # is Step-7 (pin.py) territory, deferred out of the VC-6 slice.
+    if not arc:
+        raise GateError("PARTIAL migration state: {} is present but the archive {} is structurally absent "
+                        "(a crosswalk requires its immutable archive; partial state is malformed, never "
+                        "dormant)".format(CROSSWALK_REL, ARCHIVE_REL))
     cw = _load_toml(cw_path)
     _validate_row_container(cw, CROSSWALK_REL, ("archive-file", "predecessor", "mapping", "pointer-hint"))
     inv_doc = _load_toml(root / INVENTORY_REL)
@@ -506,6 +635,7 @@ def run(root):
     findings += check_archive(cw, archive_root)
     findings += check_predecessors(cw, archive_root)
     findings += check_completeness(cw)
+    findings += check_inventory(inv_rows)                  # D5: inventory uniqueness + row self-consistency
     findings += check_zero_unmapped(cw)
     findings += check_mapping_referential_integrity(cw)
     findings += check_mappings(cw, inventory)
@@ -519,7 +649,10 @@ def run(root):
         return 1
     print("PASS: crosswalk archive/quote/verdict fields are well-formed (verdict truth is HUMAN-JUDGMENT; "
           "this gate proves field presence and distinctness, never that a real cross-family review "
-          "occurred)")
+          "occurred). DISCLOSED (class-c, deferred to Step 7 / pin.py, post-1.0.0): the successor-quote is "
+          "proven a verbatim substring of the row's DECLARED canonical-text, NOT resolved against the "
+          "pinned release; and structural completeness of the migration/archive state is validated, but the "
+          "pin is not parsed for the migration MODE.")
     return 0
 
 
@@ -981,6 +1114,126 @@ def self_test():
         os.symlink(str(brk / "nonexistent-target"), str(brk / MIGRATION_REL))
         if run_quiet(brk) != 2:
             failures.append("fix #9: a broken symlink at .aiqt/migration must fail closed (exit 2, never NA)")
+        n += 1
+
+        # G7: the 7.2 tight window is an exact-ONCE SUBSTRING beginning on start-line and ending on end-line,
+        # NOT the whole window. A canonical-text that shares its first/last line with markdown (a heading
+        # prefix) is a valid substring and PASSes (the regression the '== window' check wrongly REJECTED);
+        # zero or two occurrences FAIL; a loose (not-tight) window FAILs.
+        g7file = "## The retention obligation\nThe system MUST retain every record.\n"
+        g7sha = _sha(g7file)
+        g7p = "pre-{}.1".format(g7sha[:12])
+
+        def _g7_crosswalk(start, end, canonical):
+            rows = ['schema-version = 1', '',
+                    '[enumeration-review]', 'enumerator = "ann"', 'enumerator-family = "claude"',
+                    'verdict = "complete"', 'rationale = "x"', 'reviewer = "bob"',
+                    'reviewer-family = "codex"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '',
+                    '[[archive-file]]', 'legacy-path = "g.md"', 'archive-sha256 = "{}"'.format(g7sha),
+                    'size = {}'.format(len(g7file.encode())), 'owner = 0',
+                    'predecessor-clause-ids = ["{}"]'.format(g7p), '',
+                    '[[predecessor]]', 'clause-id = "{}"'.format(g7p),
+                    'archive-sha256 = "{}"'.format(g7sha),
+                    'start-line = {}'.format(start), 'end-line = {}'.format(end),
+                    'canonical-text = "{}"'.format(canonical),
+                    'source-digest = "{}"'.format(g7sha), '',
+                    '[[mapping]]', 'predecessor-clause-id = "{}"'.format(g7p),
+                    'successor-clause-id = "succ.a"', 'successor-quote = "{}"'.format(_SUCC_A),
+                    'author = "carol"', 'author-family = "claude"',
+                    'semantic-verdict = "equal-or-stronger"', 'rationale = "x"', 'reviewer = "dave"',
+                    'reviewer-family = "gemini"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '']
+            return "\n".join(rows) + "\n"
+
+        # a substring that DROPS the '## ' heading prefix: begins mid start-line, ends on end-line -> PASS.
+        g7_sub = "The retention obligation\\nThe system MUST retain every record."
+        g7ok = _build_install(tmp / "g7-substring-ok", _g7_crosswalk(1, 2, g7_sub), [g7file], inv)
+        if run_quiet(g7ok) != 0:
+            failures.append("G7: a canonical-text substring beginning on start-line and ending on end-line "
+                            "must PASS (0)")
+        n += 1
+        # a not-tight window (canonical entirely on line 2, but start-line declared 1) -> FAIL.
+        g7loose = _build_install(tmp / "g7-loose", _g7_crosswalk(1, 2, "The system MUST retain every record."),
+                                 [g7file], inv)
+        if run_quiet(g7loose) != 1:
+            failures.append("G7: a loose window (canonical not beginning on start-line) must FAIL (1)")
+        n += 1
+        # two occurrences within the window -> ambiguous -> FAIL.
+        g7twice = "AA\nAA\n"
+        g7twsha = _sha(g7twice)
+        g7twp = "pre-{}.1".format(g7twsha[:12])
+
+        def _g7_twice(canonical):
+            rows = ['schema-version = 1', '',
+                    '[enumeration-review]', 'enumerator = "ann"', 'enumerator-family = "claude"',
+                    'verdict = "complete"', 'rationale = "x"', 'reviewer = "bob"',
+                    'reviewer-family = "codex"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '',
+                    '[[archive-file]]', 'legacy-path = "t.md"', 'archive-sha256 = "{}"'.format(g7twsha),
+                    'size = {}'.format(len(g7twice.encode())), 'owner = 0',
+                    'predecessor-clause-ids = ["{}"]'.format(g7twp), '',
+                    '[[predecessor]]', 'clause-id = "{}"'.format(g7twp),
+                    'archive-sha256 = "{}"'.format(g7twsha),
+                    'start-line = 1', 'end-line = 2', 'canonical-text = "{}"'.format(canonical),
+                    'source-digest = "{}"'.format(g7twsha), '',
+                    '[[mapping]]', 'predecessor-clause-id = "{}"'.format(g7twp),
+                    'successor-clause-id = "succ.a"', 'successor-quote = "{}"'.format(_SUCC_A),
+                    'author = "carol"', 'author-family = "claude"',
+                    'semantic-verdict = "equal-or-stronger"', 'rationale = "x"', 'reviewer = "dave"',
+                    'reviewer-family = "gemini"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '']
+            return "\n".join(rows) + "\n"
+
+        g7two = _build_install(tmp / "g7-twice", _g7_twice("AA"), [g7twice], inv)
+        if run_quiet(g7two) != 1:
+            failures.append("G7: a canonical-text occurring more than once in the window must FAIL (1)")
+        n += 1
+
+        # G8: an archived payload that is a SYMLINK (to external, matching bytes) is refused (exit 2); a
+        # target-following read would have accepted the redirectable bytes.
+        g8 = _build_install(tmp / "g8-symlink", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        g8payload = g8 / ARCHIVE_REL / s1 / "payload"
+        g8ext = tmp / "g8-external-bytes"
+        g8ext.write_text(_LEGACY_ONE, encoding="utf-8")     # matching bytes, so a following read would pass
+        g8payload.unlink()
+        os.symlink(str(g8ext), str(g8payload))
+        if run_quiet(g8) != 2:
+            failures.append("G8: a symlinked archived payload must be refused (exit 2, no-follow)")
+        n += 1
+
+        # D5: successor-inventory self-consistency (cheap part). A DUPLICATE clause-id FAILs; a malformed
+        # declared span or source-digest FAILs. (The pinned-release binding is disclosed, not gated.)
+        dupinv = _build_install(tmp / "d5-dup", base_text, [_LEGACY_ONE, _LEGACY_TWO],
+                                inv + [("succ.a", _SUCC_A)])
+        if run_quiet(dupinv) != 1:
+            failures.append("D5: a duplicate successor-inventory clause-id must FAIL (1)")
+        n += 1
+        d5span = _build_install(tmp / "d5-span", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write(d5span / INVENTORY_REL,
+               'schema-version = 1\n\n[[clause]]\nclause-id = "succ.a"\n'
+               'canonical-text = "{}"\nstart-line = 5\nend-line = 2\n\n[[clause]]\nclause-id = "succ.b"\n'
+               'canonical-text = "{}"\n'.format(_SUCC_A.replace('"', '\\"'), _SUCC_B.replace('"', '\\"')))
+        if run_quiet(d5span) != 1:
+            failures.append("D5: a malformed successor-inventory source span must FAIL (1)")
+        n += 1
+        d5dig = _build_install(tmp / "d5-digest", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write(d5dig / INVENTORY_REL,
+               'schema-version = 1\n\n[[clause]]\nclause-id = "succ.a"\n'
+               'canonical-text = "{}"\nsource-digest = "NOTHEX"\n\n[[clause]]\nclause-id = "succ.b"\n'
+               'canonical-text = "{}"\n'.format(_SUCC_A.replace('"', '\\"'), _SUCC_B.replace('"', '\\"')))
+        if run_quiet(d5dig) != 1:
+            failures.append("D5: a malformed successor-inventory source-digest must FAIL (1)")
+        n += 1
+
+        # D6: structural completeness. A crosswalk present with the ARCHIVE structurally ABSENT is PARTIAL
+        # state and fails closed (exit 2), even when the crosswalk carries only an enumeration-review and no
+        # rows (which reached PASS before: an empty-migration fail-open).
+        d6 = tmp / "d6-partial"
+        (d6 / MIGRATION_REL).mkdir(parents=True)
+        _write(d6 / CROSSWALK_REL,
+               'schema-version = 1\n\n[enumeration-review]\nenumerator = "ann"\nenumerator-family = "claude"\n'
+               'verdict = "complete"\nrationale = "x"\nreviewer = "bob"\nreviewer-family = "codex"\n'
+               'reviewed-utc = "2026-08-26T00:00:00Z"\n')
+        _write(d6 / INVENTORY_REL, 'schema-version = 1\n')   # note: no .aiqt/archive, no pin
+        if run_quiet(d6) != 2:
+            failures.append("D6: a crosswalk with the archive structurally absent must fail closed (exit 2)")
         n += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
