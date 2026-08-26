@@ -235,9 +235,14 @@ BE_COPULA = re.compile(r"\b(?:is|are|was|were|be|been|being)\b", re.IGNORECASE)
 # provide tamper evidence", "did not deliver an independent anchor"). It is anchored end to end, so a
 # NON-integrity verb or a new subject between the negator and the match breaks it: "We do not doubt that
 # releases provide tamper evidence" ("doubt" is not an integrity verb) and "The not-expensive release is
-# tamper-resistant" (a modifier, plus an intervening copula) both keep FLAGGING.
+# tamper-resistant" (a modifier, plus an intervening copula) both keep FLAGGING. The adverb filler EXCLUDES
+# the closed set of exclusive-focus MINIMIZERS "only|merely|simply|purely|solely" (all end in -ly): "not
+# only|merely|simply|purely|solely tamper-resistant but also X" AFFIRMS the tamper property, so it must NOT
+# read as a denial and keeps FLAGGING, while a genuine manner-adverb filler ("not cryptographically signed")
+# still clears. It is a MINIMIZER-set exclusion, not a structural "but-follows" guard, so a real contrastive
+# denial ("not cryptographically signed but checksum-protected") still clears.
 INTEGRITY_NEG_TAIL = re.compile(
-    r"^\s*(?:[A-Za-z]+ly\s+){0,2}"
+    r"^\s*(?:(?!(?:only|merely|simply|purely|solely)\b)[A-Za-z]+ly\s+){0,2}"
     r"(?:(?:provide|provides|provided|offer|offers|offered|deliver|delivers|delivered|give|gives|given|"
     r"make|makes|made|guarantee|guarantees|guaranteed|ensure|ensures|ensured|have|has|had)\s+"
     r"(?:\w+\s+){0,2})?$", re.IGNORECASE)
@@ -508,14 +513,17 @@ RELEASE_PATTERNS = [
     # that merely says "sign" stays clean), the PRE-VERBAL adverb form where the crypto scope sits BEFORE the
     # verb with a generic subject ("cryptographically sign(s) ... releases", so "We cryptographically sign
     # releases" and "AIQT cryptographically signs every release" are caught), plus "signed with minisign",
-    # "Minisign-signed", or "carry Minisign signatures". RELEASE-guarded. The corrected CLAUDE.md wording
-    # (4.4d) landed in this rework, so this pattern's only prior hit is gone.
+    # "Minisign-signed", "carry Minisign signatures", and the BARE "cryptographically signed" (with no
+    # explicit "releases" subject; D1 bans the crypto-signing claim on any surface). RELEASE-guarded, so an
+    # honest tight-adjacency denial ("not cryptographically signed") still clears. The corrected CLAUDE.md
+    # wording (4.4d) landed in this rework, so this pattern's only prior hit is gone.
     ("releases are signed (stale signing claim)", re.compile(
         r"\breleases?\s+(?:are|is|was|were|get|gets)\s+(?:\w+ly\s+)?signed\b|\bsigned\s+with\s+minisign\b|"
         r"\bminisign[-\s]signed\b|\bminisign\s+signatures?\b|"
         r"\b(?:we|aiqt)\s+signs?\s+(?:\w+\s+){0,3}?releases?\b[^.]{0,40}?"
         r"\b(?:minisign|cryptographic(?:ally)?)\b|"
-        r"\bcryptographically\s+signs?\s+(?:\w+\s+){0,3}?releases?\b",
+        r"\bcryptographically\s+signs?\s+(?:\w+\s+){0,3}?releases?\b|"
+        r"\bcryptographically\s+signed\b",
         re.IGNORECASE), "release"),
 ]
 
@@ -885,6 +893,7 @@ POSITIVE = [
     "AIQT signs each release automatically using minisign.",           # active present, determiner + minisign
     "We cryptographically sign releases.",                             # pre-verbal signing adverb, generic subject
     "AIQT cryptographically signs every release.",                     # pre-verbal signing adverb + generic object
+    "cryptographically signed",                                        # B1: bare crypto-signing claim, no explicit "releases" subject
     # No future-tense clearance (D2): a forward promise about tamper/signing/independent-anchor now flags
     # like any bald claim, and the OLD laundered 4.4d wording flags too (proving it cannot be reintroduced).
     "Tamper-evidence will be added in a future release.",              # former future-clear; now flags
@@ -903,6 +912,13 @@ POSITIVE = [
     "Releases are tamper-evident, not expensive.",                     # TRAILING negator negates an unrelated adjective
     "Releases are tamper-resistant, not cryptographically signed.",    # TRAILING negator; the tamper claim still stands
     "Our releases are tamper-evident, not completely independent.",    # TRAILING negator over a different property
+    # CORRELATIVE affirmation "not <minimizer> X but (also) Y" AFFIRMS X, so it must FLAG (not read as a
+    # denial). The closed minimizer set is only|merely|simply|purely|solely.
+    "Our releases are not only tamper-resistant but also checksum-protected.",  # "not only ... but also" affirms tamper-resistance
+    "Our releases are not merely tamper-evident but also fast.",       # "not merely ... but" affirms tamper-evidence
+    "Our releases are not simply tamper-resistant but also fast.",     # "not simply ... but" affirms tamper-resistance
+    "Our releases are not purely tamper-evident but also fast.",       # "not purely ... but" affirms tamper-evidence
+    "Our releases are not solely tamper-resistant but also fast.",     # "not solely ... but" affirms tamper-resistance
     # SIMPLIFICATION: the subject-quantifier honest form ("No release is ...") is no longer specially cleared;
     # a copula separates the negator from the term, so it flags (the safe direction, and not a shipped form).
     "No release is tamper-evident.",                                   # was cleared under the old N1; now flags
@@ -939,6 +955,7 @@ NEGATIVE = [
     "This layer does not provide tamper evidence",                                       # tight-adjacency denial (bare form)
     "This is not a cryptographic guarantee.",                                            # honest denial: no release term; the site "guarantee" is cleared by the in-clause negator
     "Releases are not signed with minisign.",                                            # tight-adjacency denial of the signing claim
+    "Our releases are not cryptographically signed.",                                    # tight-adjacency denial of the bare crypto-signing claim (B1)
     "A released or published artefact ships with a signature verifiable against an authenticated maintainer key, or a digest published through an authenticated channel independent of artefact delivery.",  # SECI obligation prose: "channel ... independent", no achieved-verification verb -> no match
     "A release's integrity rests on a SHA-256 digest published through a channel independent of the download.",  # RELEASING obligation prose: reverse "channel ... independent", no achieved verb -> no match
     "The digest travels over a channel independent of artefact delivery.",               # "channel independent of" has no "is independent of" copula -> no match

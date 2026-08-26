@@ -262,7 +262,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "A negation-, intent-, and future-tense-aware deny-list of known overclaim and release-integrity vocabulary over site HTML, the hand-authored repo prose roster, and every registry-enumerated textual generated output. It cannot catch a novel paraphrase; the third-party title allowlist and the tense guards are maintainer-calibrated; it polices wording, not whether the underlying integrity mechanism works. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "A negation- and title-aware best-effort deny-list of marketing (site-only) and release-integrity (all-surface) overclaim vocabulary over site HTML, the hand-authored repo prose roster, and every registry-enumerated textual generated output. A banned release-integrity term flags regardless of tense and is cleared only by a directly-adjacent honest denial or a third-party control-title that wholly contains it. It cannot catch a novel paraphrase; the third-party title allowlist and the adjacency guard are maintainer-calibrated; it polices wording, not whether the underlying integrity mechanism works. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "footer"
