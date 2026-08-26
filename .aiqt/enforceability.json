@@ -346,6 +346,14 @@
         {
           "class": "a",
           "default": "block",
+          "id": "crosswalk-schema-drift",
+          "platform": "ci",
+          "residue": "A byte-identity drift gate over the shipped adopter-facing schema reference .aiqt/core/migration/crosswalk-schema.toml, regenerated deterministically from the tool's own constants, plus a self-test of the adopter-mode candidate generation (archive-before-annotation ordering, the 8.2 immutability refusal, deterministic output, pointer parsing, and the computed unmatched list). It proves the shipped schema reference equals a fresh regeneration and that the archive-first candidate flow holds its invariants on synthetic input; it does not validate any adopter's live runtime crosswalk (that is check_crosswalk) and does not judge whether the candidate ranking heuristics chose the semantically right successor, which stays human judgment.",
+          "script": "tools/gen_crosswalk.py"
+        },
+        {
+          "class": "a",
+          "default": "block",
           "id": "cursor-drift",
           "platform": "ci",
           "residue": "A byte-identity drift gate over the artefact tools/gen_cursor.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",

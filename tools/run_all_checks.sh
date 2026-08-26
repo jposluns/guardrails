@@ -72,6 +72,14 @@ run_gate "release-build-selftest" python3 tools/check_release_build.py --self-te
 run_gate "release-build"          python3 tools/check_release_build.py
 run_gate "clauses-selftest" python3 tools/check_clauses.py --self-test
 run_gate "clauses"          python3 tools/check_clauses.py --genesis
+# VER-CORE Section 12 step 6: migration engine, crosswalk tooling, archive (VC-6). The crash-injection
+# self-test is the mandatory 9.3 gate; the live check_crosswalk leg reports NOT APPLICABLE in this repo
+# (the pack is not an adopter install), self-tested first over synthetic trees.
+run_gate "crosswalk-gen-selftest" python3 tools/gen_crosswalk.py --self-test
+run_gate "crosswalk-schema-drift" python3 tools/gen_crosswalk.py --check
+run_gate "crosswalk-selftest"     python3 tools/check_crosswalk.py --self-test
+run_gate "crosswalk"              python3 tools/check_crosswalk.py
+run_gate "migrate-crashinject"    python3 tools/migrate.py --self-test
 run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 tools/check_artifact_checksums.py

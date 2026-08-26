@@ -10,6 +10,14 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_crosswalk.py",
+      "sources": [
+        "tools/gen_crosswalk.py"
+      ],
+      "target": ".aiqt/core/migration/crosswalk-schema.toml"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_renderers.py",
       "sources": [
         "tools/"
