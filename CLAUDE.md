@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.4** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.5** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -51,10 +51,11 @@ what is particular to this repo (and has no source rule) lives here.
 ## Versioning and publication discipline
 
 The pack uses SemVer, single-sourced in `changelog.toml` (the `version` on the latest `[[release]]`); the
-root `VERSION` file is generated from it and drift-gated. The pack is at `1.0.0`, its first public release
-(the chat-assistant skill). Releases are signed with minisign (DECIDED, DEFERRED until the
-offline signing key exists). The full discipline (bump rules, release process, signing) is held in the
-private design-of-record; this section is its slim public face.
+root `VERSION` file is generated from it and drift-gated. The release-delta gate
+(`tools/check_release_delta.py`) computes the minimum required bump over the governance surface. Releases
+ship with a per-file manifest and a published ROOT digest, and those hashes are also published
+independently on posluns.dev. By validating them you can identify whether the file you downloaded is the
+same one we intended you to have.
 
 ## Gates and CI
 
