@@ -125,29 +125,37 @@ clean; a pattern that flagged a legitimate line would be too broad):
     does not even match, and the LICENSE's own full wording matches but is cleared.
   - "foolproof": a bare guarantee-of-perfection adjective.
 
-The RELEASE-INTEGRITY vocabulary (VER-CORE 4.4a, runs on every surface), and why each pattern is shaped
-the way it is:
+The RELEASE-INTEGRITY vocabulary (VER-CORE 4.4a, runs on every surface) is, like the guarantee-flavoured
+set above, a MAINTAINER-CALIBRATED BEST-EFFORT DENY-LIST: it enumerates the release-integrity overclaim
+phrasings seen so far and CANNOT catch every novel paraphrase, so a wording that dodges the vocabulary
+below passes and the list is grown when a new class is found. Each pattern, and why it is shaped the way it
+is:
 
-  - "tamper evidence/resistance/proof", "tamper detection", and "detects/is-detected tampering":
-    achieved-tense claims that the interim keyless manifest-plus-ROOT layer resists or detects tampering,
-    which it does not (5.2: it detects accident, not tamper). FUTURE-guarded, so the approved roadmap
-    wording ("an independent, tamper-evident anchor is planned for a future release") and 5.6's own roadmap
-    text stay clean while a present-tense assertion trips. The CLAIM forms are evident/evidence/resistant/
-    resistance/proof, the hyphen-or-space "tamper-detection"/"tamper detection", and a detect verb governing
-    the attack-noun ("detects tampering", "tampering is detected"). A BARE attack-noun with no detect verb
-    ("Dependency Tampering", "a hand-tampered registry") is deliberately NOT matched, so an honest control
-    TITLE or attack description does not false-positive; the third-party title allowlist below is the
-    forward-safety layer for a shipped title that carries a CLAIM-form phrase.
-  - "independent ... channel/anchor/reference" AND the reverse "verified ... channel ... independent of":
-    an achieved claim of the independent integrity channel or anchor that 5.6 defers, in either word order.
-    FUTURE-guarded. The reverse order is keyed on an ACHIEVED-verification verb (verify/verified/...), so
-    the obligation prose that only DESCRIBES the standard ("a digest published through an authenticated
-    channel independent of artefact delivery" (SECI-release-integrity), "integrity rests on a ... digest
-    published through a channel independent of the download" (RELEASING)) carries no such verb and stays
-    clean by construction (pinned as NEGATIVEs below so a future edit cannot regress them).
-  - "releases are signed" / "signed with minisign" / "Minisign-signed" / "carry Minisign signatures": the
-    stale keyed-signing claim D1's keyless decision retired (the corrected CLAUDE.md wording lands in the
-    same change, 4.4d). FUTURE-guarded.
+  - "tamper evidence/resistance/proof", "tamper detection", and "detects/is-detected/tampering-detection
+    tampering": achieved-tense claims that the interim keyless manifest-plus-ROOT layer resists or detects
+    tampering, which it does not (5.2: it detects accident, not tamper). FUTURE-guarded, so the approved
+    roadmap wording ("an independent, tamper-evident anchor is planned for a future release") and 5.6's own
+    roadmap text stay clean while a present-tense assertion trips. The CLAIM forms are evident/evidence/
+    resistant/resistance/proof, the hyphen-or-space "tamper-detection"/"tamper detection", the noun
+    "tampering detection", and a detect verb governing the attack-noun ("detects tampering", "tampering is
+    detected"). A BARE attack-noun with no detect verb ("Dependency Tampering", "a hand-tampered registry")
+    is deliberately NOT matched, so an honest control TITLE or attack description does not false-positive;
+    the third-party title allowlist below is the forward-safety layer for a shipped title that carries a
+    CLAIM-form phrase.
+  - "independent ... channel/anchor/reference", the reverse "verified ... channel ... independent of", AND
+    the copula reverse "channel is independent of": an achieved claim of the independent integrity channel
+    or anchor that 5.6 defers, in any word order. FUTURE-guarded. The verified-reverse order is keyed on an
+    ACHIEVED-verification verb (verify/verified/...) and the copula reverse on "is independent of", so the
+    obligation prose that only DESCRIBES the standard as an adjectival post-modifier with no verb and no
+    copula ("a digest published through an authenticated channel independent of artefact delivery"
+    (SECI-release-integrity), "integrity rests on a ... digest published through a channel independent of the
+    download" (RELEASING)) stays clean by construction, while the achieved copula assertion ("The integrity
+    channel is independent of artefact delivery") trips (honest forms pinned as NEGATIVEs so a future edit
+    cannot regress them).
+  - "releases are signed" / "releases are cryptographically signed" (an adverb may sit between the copula
+    and "signed") / "signed with minisign" / "Minisign-signed" / "carry Minisign signatures": the stale
+    keyed-signing claim D1's keyless decision retired (the corrected CLAUDE.md wording lands in the same
+    change, 4.4d). FUTURE-guarded.
 
 RELEASE-INTEGRITY clearing, three ways (see _guard_clears "future"):
   - a shipped third-party control TITLE (THIRD_PARTY_TITLES, enumerated from the live site/mappings.html)
@@ -155,20 +163,22 @@ RELEASE-INTEGRITY clearing, three ways (see _guard_clears "future"):
     control title that itself carries the vocabulary is not read as an AIQT claim; mere sentence
     co-occurrence with an unrelated claim elsewhere does not clear (F-VC5-D);
   - a proposition-bound residual DISCLOSURE clears it (see _disclosure_clears), two ways: a PRE-MATCH
-    negator ("This layer does not provide tamper evidence"), OR a TRAILING strength-disclaimer, a negator
-    immediately followed (filler merely/a/an/... allowed) by a stronger-integrity term ("keyless
-    tamper-evident ordering within the anchored history, not cryptographic proof"). A trailing negator over
-    a WEAKER or UNRELATED term does NOT clear ("Releases are tamper-resistant, not merely checksum-protected",
-    "Releases are tamper-evident, not expensive" both flag). A negator in a leading preamble or a separate
-    coordinate/semicolon clause ("Without any doubt, ...", "Releases are tamper-evident, and no anchor is
-    independent yet") does not launder the matched claim either, and a CONTRASTIVE cuts an earlier negator
-    off (F-VC5-B);
-  - an explicitly FUTURE-tense hedge (FUTURE_HEDGE) that GOVERNS the claim in the future-hedge window (see
-    _future_hedge_window, FUTURE_WINDOW_BOUNDARY) clears it, so roadmap tense that FOLLOWS the noun phrase
-    with no boundary between clears ("... anchor is planned for a future release"), while a hedge in a
-    separate clause after a comma, a coordinating "and"/"or", OR a subordinator ("The anchor is
-    tamper-evident and a further channel is planned"; "Releases are tamper-resistant according to our
-    roadmap") cannot launder a present claim (F-VC5-C).
+    negator whose leading window is SUBORDINATOR-AWARE ("This layer does not provide tamper evidence" clears,
+    but "Releases are not expensive because they are tamper-resistant" flags, "not" bounded by "because"),
+    OR a TRAILING residual whose EXACT phrase is on the RESIDUAL_DISCLOSURES allowlist and contains the match
+    verbatim ("keyless tamper-evident ordering within the anchored history, not cryptographic proof"). Any
+    other trailing negator flags ("Releases are tamper-resistant, not merely checksum-protected", "..., not
+    expensive", and a bare "..., not cryptographically signed" all flag). A negator in a leading preamble or
+    a separate coordinate/semicolon clause ("Without any doubt, ...", "Releases are tamper-evident, and no
+    anchor is independent yet") does not launder the matched claim either (F-VC5-B, Class C1/C2);
+  - an explicitly FUTURE PREDICATE (FUTURE_PREDICATE, the copula-bound roadmap verb phrase, NOT a bare
+    "will"/"roadmap" token) that GOVERNS the claim in the future-hedge window (see _future_hedge_window,
+    FUTURE_WINDOW_BOUNDARY) clears it, so "... anchor is planned for a future release" and "Tamper-evidence
+    will be added in a future release" clear, while a bare future token governing a DIFFERENT verb ("A
+    tamper-evident release will give your team confidence"), or a future word in a separate clause after a
+    comma, a coordinating "and"/"or", or a subordinator ("The anchor is tamper-evident and a further channel
+    is planned"; "Releases are tamper-resistant according to our roadmap"), cannot launder a present claim
+    (F-VC5-C, Class B).
 
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
 the instruction loading each turn ("AIQT is on for every turn", "applied to every response") is a
@@ -195,8 +205,8 @@ import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster 
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
 # overclaim (e.g. "AIQT does not sandbox anything. It guarantees secure output." would wrongly pass).
-# The negator alternation is shared by NEGATOR (the general in-clause/pre-match negation guard) and the
-# STRENGTH_DISCLAIMER trailing-disclaimer below, so the two negator sets cannot drift apart.
+# The negator alternation drives NEGATOR (the general in-clause/pre-match negation guard) and the
+# residual-disclosure LEADING path (_disclosure_clears), so both read the same negator set.
 _NEGATOR_ALT = (
     r"not|no|never|cannot|can't|without|nor|neither|hardly|rarely|"
     r"n't|doesn't|don't|isn't|aren't|won't|wouldn't")
@@ -209,55 +219,23 @@ NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
 CLAUSE_BOUNDARY = re.compile(
     r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
     re.IGNORECASE)
-# COORD_CLAUSE_BOUNDARY adds the coordinating conjunctions and/or/plus to the shared CLAUSE_BOUNDARY. A
-# guard that must bind to a SINGLE proposition, the disclosure window's LEADING edge, breaks on it, so a
-# negator in a SEPARATE coordinate clause ("The anchor is tamper-evident AND no anchor is independent yet")
-# cannot launder a present-tense release claim. It is a DEDICATED boundary, kept apart from CLAUSE_BOUNDARY
-# so the negator and intent windows are unchanged.
-COORD_CLAUSE_BOUNDARY = re.compile(
-    r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas|and|or|plus)\b",
-    re.IGNORECASE)
-# FUTURE_WINDOW_BOUNDARY extends COORD_CLAUSE_BOUNDARY with the SUBORDINATORS that open an attributive or
-# subordinate clause. It is used for the FUTURE hedge window ONLY, so the roadmap hedge must GOVERN the
-# matched claim rather than merely co-occur in a subordinate/attributive clause: "Releases are
-# tamper-resistant according to our roadmap" and "... because the next release adds documentation" cut the
-# hedge ("roadmap", "next release") out of the window at "according"/"because", so the present-tense claim
-# still flags, while "an independent, tamper-evident anchor is planned for a future release" (no
-# subordinator between the noun phrase and "planned") keeps the hedge in the window and clears.
+# FUTURE_WINDOW_BOUNDARY is the SUBORDINATOR-AWARE clause boundary: sentence/clause punctuation, a
+# contrastive, a coordinating and/or/plus, AND the subordinators that open an attributive or subordinate
+# clause. TWO guards bind to a SINGLE proposition through it. (1) The FUTURE window (_future_hedge_window):
+# a roadmap predicate must GOVERN the matched claim, not merely co-occur in a subordinate/attributive
+# clause, so "Releases are tamper-resistant according to our roadmap" and "... because the next release
+# adds documentation" cut the future words out of the window at "according"/"because" and the present-tense
+# claim still flags, while "an independent, tamper-evident anchor is planned for a future release" (no
+# subordinator between the noun phrase and "planned") keeps the predicate in the window and clears. (2) The
+# residual-disclosure LEADING edge (_disclosure_clears): a leading negator clears only when NO subordinator
+# stands between it and the match, so "Releases are not expensive because they are tamper-resistant" flags
+# ("not" negates "expensive", bounded by "because") while "This layer does not provide tamper evidence" (no
+# subordinator) still clears. It also breaks on a comma and a coordinating and/or/plus, so a leading
+# preamble negator ("Without any doubt, ...") and a separate coordinate/semicolon clause do not leak in.
 FUTURE_WINDOW_BOUNDARY = re.compile(
     r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas|and|or|plus|"
     r"because|since|as|when|while|according|per|given|unless|until|after|before|if)\b",
     re.IGNORECASE)
-# The residual-DISCLOSURE window's TRAILING edge stays comma-permissive so a same-clause residual after a
-# comma ("keyless tamper-evident ordering within the anchored history, not cryptographic proof") is still
-# reachable, but it breaks on a semicolon and a coordinating and/or/plus (and a contrastive, and sentence
-# punctuation) so a negator in a FOLLOWING coordinate or semicolon clause ("Releases are tamper-evident,
-# and no anchor is independent yet") does not leak in. The LEADING edge uses COORD_CLAUSE_BOUNDARY, which
-# DOES break on a comma, so a leading preamble negator ("Without any doubt, ...") is excluded too. A
-# CONTRASTIVE cuts an earlier negator off, so "does not merely detect accidents but provides tamper
-# evidence" is not laundered by its pre-"but" negator.
-DISCLOSURE_TRAILING_BOUNDARY = re.compile(
-    r"[.!?;]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas|and|or|plus)\b",
-    re.IGNORECASE)
-# RESIDUAL_STRENGTH is the set of stronger-integrity terms a residual disclosure downgrades TO. A TRAILING
-# (post-match) negator clears a future-guarded release claim ONLY as a downward strength-disclaimer: the
-# negator must be immediately followed (allowing filler like merely/a/an/any/true/real/fully/actually AND
-# any adverb, the "-ly" form, so "not cryptographically signed" reads as a downgrade) by one of these
-# stronger terms. So "..., not cryptographic proof" and "..., not cryptographically signed" clear the
-# tamper claim they trail, while "..., not merely checksum-protected" (a weaker term), "..., not expensive"
-# (an unrelated term), and "..., not remotely affordable" (an adverb before a NON-strength term) do NOT
-# clear it: the trailing strength-term requirement stays, so an adverb filler cannot open an over-clear.
-# STRENGTH_DISCLAIMER encodes that "negator (+ filler/adverb) + stronger term" shape. The LEADING
-# (pre-match) negator behaviour is unchanged: any negator in the pre-match disclosure window still clears
-# ("This layer does not provide tamper evidence").
-_RESIDUAL_STRENGTH_ALT = (
-    r"cryptographic|crypto|proof|signature|signatures|signed|independent|anchor|attestation|"
-    r"guarantee|guaranteed")
-STRENGTH_DISCLAIMER = re.compile(
-    r"\b(?:" + _NEGATOR_ALT + r")\b"
-    r"(?:\s+(?:merely|a|an|any|true|real|fully|actually|[a-z]+ly))*\s+"
-    r"(?:" + _RESIDUAL_STRENGTH_ALT + r")\b", re.IGNORECASE)
-
 # An INTENT HEDGE marks a COMPATIBILITY claim honest: the decided softening frames cross-assistant reach
 # as an aim, not a verified result ("intended/designed to be portable across ...", "is meant to work to
 # the same rules", "the intent, not a verified result yet"). A compat match is skipped when an intent
@@ -270,15 +248,29 @@ STRENGTH_DISCLAIMER = re.compile(
 INTENT_HEDGE = re.compile(
     r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?|intent)\b",
     re.IGNORECASE)
-# A FUTURE HEDGE marks a RELEASE-INTEGRITY claim honest by casting it as explicit roadmap/future tense
-# (VER-CORE 4.4/5.6: tamper-resistance wording may appear only as explicitly future-tense roadmap). It
-# clears a tamper/independent-channel/signing match only when it GOVERNS the claim in the future-hedge
-# window (see _future_hedge_window), so "an independent, tamper-evident anchor is planned for a future
-# release" stays clean while a present-tense assertion, or a hedge sitting in a subordinate/attributive
-# clause ("... tamper-resistant according to our roadmap"), trips.
-FUTURE_HEDGE = re.compile(
-    r"\b(?:planned|plan(?:s|ned)?\s+to|will|future\s+release|roadmap|upcoming|deferred|"
-    r"not\s+yet|next\s+release)\b", re.IGNORECASE)
+# A FUTURE PREDICATE marks a RELEASE-INTEGRITY claim honest ONLY as the copula-bound future PREDICATE of
+# the release/tamper noun (VER-CORE 4.4/5.6: tamper wording may appear only as explicitly future-tense
+# roadmap). A BARE future token ("will", "roadmap") no longer clears: it laundered "A tamper-evident
+# release will give your team confidence" ("will" governs "give"), "... will remain verifiable" ("will"
+# governs "remain"), and "The roadmap states releases are tamper-resistant today" (leading "roadmap" names
+# the source, "today" is present). The predicate must be a roadmap-shaped VERB PHRASE. Only the future-
+# STATUS ADJECTIVES (planned/deferred/postponed/upcoming/forthcoming) clear BARE, because they are roadmap-
+# status words rather than achieved-property claims. The TENSE-AMBIGUOUS action verbs (added/introduced/
+# coming/scheduled) do NOT clear bare, because bare they also read PAST and RECURRING ("was added last
+# year", "was introduced in version 1", "is coming along nicely", "are scheduled every week"), all of which
+# must FLAG; they clear ONLY with an explicit future marker: "will be added|introduced", "to be
+# added|introduced", or a roadmap phrase ("for a/an/the next|future|later|upcoming release", "in a future|
+# later|coming release", "on the roadmap", "roadmap for", "will be|ship|arrive|land"). It clears only when
+# it GOVERNS the claim in the future-hedge window (_future_hedge_window), so "... anchor is planned for a
+# future release" and "Tamper-evidence will be added in a future release" clear, while a future word in a
+# subordinate/attributive clause ("... tamper-resistant according to our roadmap") cannot reach the claim.
+FUTURE_PREDICATE = re.compile(
+    r"\b(?:planned|deferred|postponed|upcoming|forthcoming)\b"
+    r"|\bfor\s+(?:a|an|the)\s+(?:next|future|later|upcoming)\s+release\b"
+    r"|\bin\s+a\s+(?:future|later|coming)\s+release\b"
+    r"|\bon\s+the\s+roadmap\b|\broadmap\s+for\b"
+    r"|\bwill\s+(?:be|ship|arrive|land|be\s+added|be\s+introduced)\b"
+    r"|\bto\s+be\s+(?:added|introduced)\b", re.IGNORECASE)
 # The SHAREALIKE clean form names the full permitted set from LICENSE clause 3(b)(1): a CC license with
 # the same License Elements, THIS VERSION OR LATER, OR a BY-SA Compatible License. A "the same ... licence"
 # claim is honest only when BOTH the later-version alternative AND the BY-SA-compatible alternative are
@@ -306,6 +298,19 @@ THIRD_PARTY_TITLES = (
     "Software Supply Chain Attacks & Dependency Tampering",
 )
 
+# Verbatim honest residual-disclosure phrases enumerated from the live corpus (never guessed): the ONE
+# shipped residual is the release-build gate's, in .aiqt/core/gates/manifest.toml. A future-guarded match
+# clears via the residual TRAILING path ONLY when its span falls INSIDE one of these phrases occurring
+# verbatim in the text (_residual_disclosed), the same exact-phrase shape as _title_allowlisted. This
+# REPLACES the former STRENGTH_DISCLAIMER heuristic, which over-cleared a trailing negator over a DIFFERENT
+# property ("tamper-evident, not completely independent") and widened further under an adverb filler. It is
+# fail-closed otherwise, so a bare "tamper-resistant, not cryptographically signed" now flags (it asserts
+# tamper-resistance). Grow this list only from verbatim corpus residuals; like the vocabulary itself it is
+# a maintainer-calibrated best-effort allowlist, not a complete one.
+RESIDUAL_DISCLOSURES = (
+    "keyless tamper-evident ordering within the anchored history, not cryptographic proof",
+)
+
 # The hand-authored repo prose roster (collector 2): the spec's named prose surfaces that are NOT
 # gensrc-registered generated outputs. DISCLOSURE.md/CHANGELOG.md/ROADMAP.md/CLAUDE.md are registered and
 # arrive through collector 3; these three are the hand-authored remainder. Every path is REQUIRED (absent
@@ -316,7 +321,7 @@ REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md")
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
 # window), "intent" (skip when a negator OR an intent hedge is in that window), "sharealike" (skip only
 # when the later-version AND BY-SA-compatible alternatives are both named in the surrounding sentence), or
-# "future" (skip when an allowlisted third-party title, a residual-disclosure negator, or a future hedge
+# "future" (skip when an allowlisted third-party title, a residual disclosure, or a future predicate
 # clears it; see _guard_clears).
 #
 # SITE_PATTERNS: the guarantee-flavoured MARKETING deny-list. Calibrated for the public site copy and run
@@ -439,8 +444,10 @@ SITE_PATTERNS = [
 ]
 
 # RELEASE_PATTERNS: the release-integrity deny-list (VER-CORE 4.4a). Runs on EVERY scanned surface. Every
-# entry is FUTURE-guarded (an allowlisted title overlapping the match, a residual-disclosure negator, or an
-# explicit future hedge clears; see _guard_clears "future").
+# entry is FUTURE-guarded (an allowlisted title overlapping the match, a residual disclosure, or a future
+# predicate clears; see _guard_clears "future"). Like the guarantee-flavoured set, this vocabulary is a
+# maintainer-calibrated best-effort deny-list: it cannot catch every novel paraphrase, so it is grown when
+# a new class is found rather than read as complete.
 RELEASE_PATTERNS = [
     # Achieved-tense tamper evidence/resistance/proof/detectability. The narrow CLAIM-form shape (evident/
     # evidence/resistant/resistance/proof/detectable) deliberately does NOT match the attack-noun
@@ -458,16 +465,17 @@ RELEASE_PATTERNS = [
     # the attack-noun "tampering" and "detects accident, not tamper" (detect BEFORE tamper) do not match.
     ("tamper detection (achieved)", re.compile(
         r"\btamper[-\s]+detect(?:ion|s|ed|ing)?\b", re.IGNORECASE), "future"),
-    # Achieved-tense tampering-detection in the ACTIVE ("detects tampering", "release detects tampering")
-    # and PASSIVE ("tampering is detected", "tampering can be detected") voice, where the attack-noun
-    # "tampering" is the OBJECT of a detect verb. This is a CLAIM to detect tampering, so unlike the bare
-    # attack-noun it is matched; it still needs a detect verb adjacent to "tampering", so an honest control
-    # title ("Dependency Tampering") and an attack description carry no such verb and stay clean. The passive
-    # form also admits a present-capability modal ("can/could/may/might be detected"), a present claim that
-    # tampering is caught; it stays FUTURE-guarded, so "tampering can be detected is planned for a future
-    # release" still clears. FUTURE-guarded.
+    # Achieved-tense tampering-detection in the ACTIVE ("detects tampering", "release detects tampering"),
+    # the NOUN form ("provides tampering detection"), and the PASSIVE ("tampering is detected", "tampering
+    # can be detected") voice, where the attack-noun "tampering" is the SUBJECT/OBJECT of a detect claim.
+    # This is a CLAIM to detect tampering, so unlike the bare attack-noun it is matched; it still needs a
+    # detect verb or the "tampering detection" noun adjacent to "tampering", so an honest control title
+    # ("Dependency Tampering") and an attack description carry neither and stay clean. The passive form also
+    # admits a present-capability modal ("can/could/may/might be detected"), a present claim that tampering
+    # is caught; it stays FUTURE-guarded, so "tampering can be detected is planned for a future release"
+    # still clears. FUTURE-guarded.
     ("tampering detection (achieved)", re.compile(
-        r"\bdetect(?:s|ed|ing)?\s+tampering\b|"
+        r"\bdetect(?:s|ed|ing)?\s+tampering\b|\btampering\s+detection\b|"
         r"\btampering\s+(?:is|are|was|were|gets?|(?:can|could|may|might)\s+be)\s+detected\b",
         re.IGNORECASE), "future"),
     # Achieved-tense independent integrity channel/anchor/reference (the 5.6-deferred anchor). Requires the
@@ -486,12 +494,21 @@ RELEASE_PATTERNS = [
     ("verified via channel independent of (achieved)", re.compile(
         r"\bverif(?:y|ies|ied|ying)\b[^.]{0,40}?\bchannel\b[^.]{0,25}?\bindependent\b",
         re.IGNORECASE), "future"),
-    # The stale keyed-signing claim D1 retired: "releases are/is/get signed", "signed with minisign",
+    # The COPULA reverse "channel is independent of ..." (the achieved reverse form the verif-keyed pattern
+    # above misses because it carries no verification verb). Keyed on the copula "is independent of", so the
+    # ACHIEVED assertion "The integrity channel is independent of artefact delivery" trips, while the
+    # obligation prose that only DESCRIBES the standard as an adjectival post-modifier with NO copula ("a
+    # channel independent of artefact delivery" (SECI-release-integrity), "a channel independent of the
+    # download" (RELEASING)) carries no "is independent of" and stays clean. FUTURE-guarded.
+    ("channel is independent of (achieved)", re.compile(
+        r"\bchannel\s+is\s+independent\s+of\b", re.IGNORECASE), "future"),
+    # The stale keyed-signing claim D1 retired: "releases are/is/get signed" (an adverb may sit between the
+    # copula and "signed", so "release is cryptographically signed" is caught too), "signed with minisign",
     # "Minisign-signed", or "carry Minisign signatures". FUTURE-guarded. The corrected CLAUDE.md wording
     # (4.4d) lands in the same change, so this pattern's only current hit is removed together with the
     # pattern's introduction.
     ("releases are signed (stale signing claim)", re.compile(
-        r"\breleases?\s+(?:are|is|get|gets)\s+signed\b|\bsigned\s+with\s+minisign\b|"
+        r"\breleases?\s+(?:are|is|get|gets)\s+(?:\w+ly\s+)?signed\b|\bsigned\s+with\s+minisign\b|"
         r"\bminisign[-\s]signed\b|\bminisign\s+signatures?\b",
         re.IGNORECASE), "future"),
 ]
@@ -591,7 +608,7 @@ def _sentence_window(text, start, end):
 
 
 def _future_hedge_window(text, start, end):
-    """The clause CONTAINING the match, for the future guard's FUTURE_HEDGE check: from the last
+    """The clause CONTAINING the match, for the future guard's FUTURE_PREDICATE check: from the last
     FUTURE_WINDOW_BOUNDARY before the match to the first after it. The check needs the forward half because
     roadmap tense typically FOLLOWS the noun phrase ("an independent, tamper-evident anchor is planned for a
     future release"): the pre-match window of the other guards would flag the approved 4.4d sentence itself.
@@ -608,29 +625,42 @@ def _future_hedge_window(text, start, end):
     return text[left:nxt.start() if nxt else len(text)]
 
 
+def _residual_disclosed(text, start, end):
+    """True when the matched span [start, end) falls INSIDE a verbatim (exact, case-sensitive) occurrence of
+    an allowlisted RESIDUAL_DISCLOSURES phrase, the honest downgrade the live corpus ships. This is the
+    residual TRAILING clearance path, the exact-phrase replacement for the removed STRENGTH_DISCLAIMER
+    heuristic: it clears the tamper-evident match inside "keyless tamper-evident ordering within the anchored
+    history, not cryptographic proof", but NOT a bare "tamper-resistant, not cryptographically signed" (no
+    allowlisted phrase occurs), which now flags. Fail-closed on anything not verbatim on the list."""
+    for phrase in RESIDUAL_DISCLOSURES:
+        pos = text.find(phrase)
+        while pos != -1:
+            if pos <= start and end <= pos + len(phrase):  # the match sits inside the residual phrase
+                return True
+            pos = text.find(phrase, pos + 1)
+    return False
+
+
 def _disclosure_clears(text, start, end):
-    """True when a residual-DISCLOSURE negator, bound to the MATCHED proposition, clears a future-guarded
-    match. Two paths, LEADING and TRAILING:
-      - LEADING (pre-match): any negator between the leading COORD_CLAUSE_BOUNDARY and the match clears it,
-        the honest disclaimer form ("This layer does not provide tamper evidence"). The leading edge breaks
-        on a comma, a semicolon, a coordinating and/or/plus, a contrastive, and sentence punctuation, so a
-        negator in a leading preamble or a different coordinate/semicolon clause does NOT clear ("Without
-        any doubt, ... tamper-resistant", "Deployment is not automatic; releases are tamper-resistant" flag).
-      - TRAILING (post-match): a negator clears ONLY as a downward strength-disclaimer (STRENGTH_DISCLAIMER:
-        a negator immediately followed by optional filler then a stronger-integrity term), so "..., not
-        cryptographic proof" clears while "..., not merely checksum-protected" and "..., not expensive"
-        (a weaker or unrelated term) leave the tamper claim FLAGGED. The trailing edge stays comma-permissive
-        (DISCLOSURE_TRAILING_BOUNDARY does NOT break on a comma) so a same-clause residual after a comma is
-        reachable, while a following coordinate/semicolon clause and a contrastive bound it ("Releases are
-        tamper-evident, and no anchor is independent yet" flags: "no" is past the coordinating "and")."""
+    """True when a residual-DISCLOSURE, bound to the MATCHED proposition, clears a future-guarded match.
+    Two paths, LEADING and TRAILING:
+      - LEADING (pre-match): any negator between the leading FUTURE_WINDOW_BOUNDARY (subordinator-aware) and
+        the match clears it, the honest disclaimer form ("This layer does not provide tamper evidence"). The
+        leading edge breaks on a comma, a semicolon, a coordinating and/or/plus, a contrastive, sentence
+        punctuation, AND a subordinator, so a negator in a leading preamble, a different coordinate/semicolon
+        clause, or across a subordinator does NOT clear ("Without any doubt, ... tamper-resistant";
+        "Deployment is not automatic; releases are tamper-resistant"; "Releases are not expensive because
+        they are tamper-resistant" all flag).
+      - TRAILING (post-match): the match clears ONLY when its span falls inside a verbatim allowlisted
+        residual phrase (_residual_disclosed, RESIDUAL_DISCLOSURES), so "..., not cryptographic proof" inside
+        the shipped residual clears while "..., not merely checksum-protected", "..., not expensive", and a
+        bare "..., not cryptographically signed" leave the claim FLAGGED. Fail-closed otherwise."""
     left = 0
-    for m in COORD_CLAUSE_BOUNDARY.finditer(text, 0, start):
+    for m in FUTURE_WINDOW_BOUNDARY.finditer(text, 0, start):
         left = m.end()
     if NEGATOR.search(text[left:start]):
         return True
-    nxt = DISCLOSURE_TRAILING_BOUNDARY.search(text, end)
-    trailing = text[end:nxt.start() if nxt else len(text)]
-    return bool(STRENGTH_DISCLAIMER.search(trailing))
+    return _residual_disclosed(text, start, end)
 
 
 def _title_allowlisted(text, start, end):
@@ -662,8 +692,9 @@ def _guard_clears(guard, text, m):
     surrounding sentence names BOTH the later-version and the BY-SA-compatible alternatives, the full
     permitted set from LICENSE 3(b)(1). "future" (release-integrity): a shipped third-party control TITLE
     whose occurrence overlaps or abuts the matched span, OR a proposition-bound residual disclosure (a
-    pre-match negator or a trailing strength-disclaimer, see _disclosure_clears), OR a FUTURE_HEDGE that
-    governs the claim in the future-hedge window (_future_hedge_window). "" never clears."""
+    pre-match subordinator-aware negator or a verbatim allowlisted residual phrase, see _disclosure_clears),
+    OR a FUTURE_PREDICATE that governs the claim in the future-hedge window (_future_hedge_window). "" never
+    clears."""
     if guard == "neg":
         return bool(NEGATOR.search(_clause_window(text, m.start())))
     if guard == "intent":
@@ -677,7 +708,7 @@ def _guard_clears(guard, text, m):
             return True
         if _disclosure_clears(text, m.start(), m.end()):
             return True
-        return bool(FUTURE_HEDGE.search(_future_hedge_window(text, m.start(), m.end())))
+        return bool(FUTURE_PREDICATE.search(_future_hedge_window(text, m.start(), m.end())))
     return False
 
 
@@ -872,6 +903,28 @@ POSITIVE = [
     "An independent anchor verifies every release today while the signing roadmap remains open.",  # (e) future word in a "while" subordinate clause
     "Every release is tamper-detectable.",                            # (f) adjective sibling of tamper-evident/resistant/proof
     "Tampering can be detected on every release.",                     # (g) modal-passive detection
+    # Round-3 Class B: a FUTURE token that governs a DIFFERENT verb (not a copula-bound roadmap predicate of
+    # the tamper noun) must NOT launder the present-tense tamper claim.
+    "A tamper-evident release will give your team confidence.",        # "will" governs "give", not a future predicate -> flags
+    "Every tamper-evident release we have published will remain verifiable.",  # "will" governs "remain" -> flags
+    "The roadmap states releases are tamper-resistant today.",         # leading "roadmap" names the source; "today" is present -> flags
+    # Round-3 Class B (tense-ambiguity): a BARE action verb (added/introduced/coming/scheduled) with no
+    # explicit future marker reads PAST or RECURRING, so it must NOT clear the present-tense tamper claim.
+    "The tamper-resistant design was added last year.",                # "was added" is PAST, no future marker -> flags
+    "Tamper detection was introduced in version 1.",                   # "was introduced" is PAST -> flags
+    "Our tamper-resistant pipeline is coming along nicely.",           # "is coming along" is progress, not future -> flags
+    "Tamper-evident releases are scheduled every week.",               # "scheduled every week" is recurring present -> flags
+    # Round-3 Class C1: a leading negator across a SUBORDINATOR does not bind to the matched claim.
+    "Releases are not expensive because they are tamper-resistant.",   # "not" negates "expensive", bounded by "because" -> flags
+    # Round-3 Class C2: with STRENGTH_DISCLAIMER removed, a trailing negator over a DIFFERENT property no
+    # longer clears; only a verbatim RESIDUAL_DISCLOSURES phrase does. These assert tamper-evidence.
+    "Releases are tamper-resistant, not cryptographically signed.",    # not the allowlisted residual -> flags (asserts tamper-resistance)
+    "Our releases are tamper-evident, not completely independent.",    # different-property trailing negator -> flags
+    "Releases are tamper-evident, not absolutely a cryptographic guarantee.",  # not the allowlisted residual -> flags
+    # Round-3 Class D: added present-tense vocab.
+    "Every release provides tampering detection.",                     # noun-form "tampering detection"
+    "Each release is cryptographically signed.",                       # adverb between the release copula and "signed"
+    "The integrity channel is independent of artefact delivery.",      # copula reverse "channel is independent of" (achieved)
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",
@@ -905,10 +958,13 @@ NEGATIVE = [
     "The control addresses Dependency Tampering and detects accidents in transit.",      # attack-noun "Tampering" co-occurs with a detect verb but not adjacent as "detects tampering" -> stays clean
     # Round-2 must-clear invariants exercising the tightened paths (invariant 1, the 4.4d sentence, and
     # invariant 4, the bare roadmap clause, are already pinned above).
-    "keyless tamper-evident ordering within the anchored history, not cryptographic proof",  # (invariant 2) trailing strength-disclaimer: "not cryptographic proof" downgrades TO a stronger term
+    "keyless tamper-evident ordering within the anchored history, not cryptographic proof",  # (invariant 2) the verbatim RESIDUAL_DISCLOSURES phrase clears the match inside it
     "This layer does not provide tamper evidence",                                       # (invariant 3) pre-match negator (bare form)
-    "Releases are tamper-resistant, not cryptographically signed.",                      # adverb filler "cryptographically" before the strength term "signed" -> downgrade clears
-    "Releases are tamper-evident, not absolutely a cryptographic guarantee.",            # adverb + "a" fillers before the strength term "cryptographic" -> downgrade clears
+    # Round-3 Class B must-clear: a copula-bound roadmap PREDICATE of the tamper noun still clears.
+    "Tamper-evidence will be added in a future release.",                                # "will be" + "added" + "in a future release" -> future predicate clears
+    # Round-3 Class D must-clear: the adjectival "channel independent of" (no copula) stays clean, so the
+    # copula-reverse pattern does not regress the SECI/RELEASING obligation prose.
+    "The digest travels over a channel independent of artefact delivery.",               # "channel independent of" has no "is independent of" copula -> stays clean
 ]
 
 
