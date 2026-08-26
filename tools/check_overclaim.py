@@ -180,8 +180,10 @@ honest phrasing that misses the allowlist may flag by design. The two families:
     title) or only co-occurs in the sentence does not clear (F-VC5-D);
   - a TIGHT-ADJACENCY negation that DIRECTLY negates the banned term (see _adjacent_denial_clears): within
     the pre-match clause (bounded by the last CLAUSE_BOUNDARY), the negator CLOSEST to the match is separated
-    from the term by nothing but optional adverbs and at most one integrity verb (provide/offer/deliver/...),
-    with NO be-copula between them. "This layer does not provide tamper evidence" and "is not tamper-resistant"
+    from the term by NO adverb, only an optional article/quantifier (a|an|any) OR an integrity verb
+    (provide/offer/deliver/...) governing it, with NO be-copula between them. Any adverb there risks affirming
+    a partial property ("not fully tamper-resistant" admits some, "not only tamper-resistant but also X"
+    affirms it), so none is allowed. "This layer does not provide tamper evidence" and "is not tamper-resistant"
     clear; a negator on a DIFFERENT word or across an intervening subject and copula does NOT ("The
     not-expensive release is tamper-resistant", "No customers doubt that releases are tamper-resistant"), a
     negator in a prior clause is cut off by the boundary ("Deployment is not automatic; releases are
@@ -230,22 +232,25 @@ NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
 # negator, not between it and the match, so the negation binds directly to the property.
 BE_COPULA = re.compile(r"\b(?:is|are|was|were|be|been|being)\b", re.IGNORECASE)
 # TIGHT-ADJACENCY denial tail: the text BETWEEN the governing negator and the match, with no be-copula in
-# it, is either empty/adverbs-only (the negator negates the banned property directly, "is not
-# tamper-resistant") or an optional adverb run then an INTEGRITY VERB governing the banned term ("does not
-# provide tamper evidence", "did not deliver an independent anchor"). It is anchored end to end, so a
-# NON-integrity verb or a new subject between the negator and the match breaks it: "We do not doubt that
-# releases provide tamper evidence" ("doubt" is not an integrity verb) and "The not-expensive release is
-# tamper-resistant" (a modifier, plus an intervening copula) both keep FLAGGING. The adverb filler EXCLUDES
-# the closed set of exclusive-focus MINIMIZERS "only|merely|simply|purely|solely" (all end in -ly): "not
-# only|merely|simply|purely|solely tamper-resistant but also X" AFFIRMS the tamper property, so it must NOT
-# read as a denial and keeps FLAGGING, while a genuine manner-adverb filler ("not cryptographically signed")
-# still clears. It is a MINIMIZER-set exclusion, not a structural "but-follows" guard, so a real contrastive
-# denial ("not cryptographically signed but checksum-protected") still clears.
+# it. NO ADVERB is permitted between the negator and the banned term, by construction: ANY adverb there
+# risks affirming a PARTIAL property ("not fully tamper-resistant" admits some; "not only|merely|exclusively|
+# principally tamper-resistant but also X" affirms it), and the set of exclusive-focus/degree adverbs is
+# open-ended, so none is allowed rather than blocklisting them. Only two forms clear: (1) an optional
+# article/quantifier (a|an|any) then the term directly, the negator negating the property itself ("is not
+# tamper-resistant", "not a tamper-evident release"); or (2) an INTEGRITY VERB governing the banned term,
+# optionally with up to two object words ("does not provide tamper evidence", "did not deliver an
+# independent anchor"). It is anchored end to end, so a NON-integrity verb or a new subject breaks it ("We
+# do not doubt that releases provide tamper evidence"; "The not-expensive release is tamper-resistant"), and
+# any adverbial correlative FLAGS. "not cryptographically signed" clears WITHOUT a filler: the bare-signing
+# match span STARTS at "cryptographically", so the tail is empty (and a trailing "but checksum-protected"
+# is after the match, so a genuine contrastive denial still clears).
 INTEGRITY_NEG_TAIL = re.compile(
-    r"^\s*(?:(?!(?:only|merely|simply|purely|solely)\b)[A-Za-z]+ly\s+){0,2}"
-    r"(?:(?:provide|provides|provided|offer|offers|offered|deliver|delivers|delivered|give|gives|given|"
+    r"^\s*(?:"
+    r"(?:a|an|any)\s+"
+    r"|(?:provide|provides|provided|offer|offers|offered|deliver|delivers|delivered|give|gives|given|"
     r"make|makes|made|guarantee|guarantees|guaranteed|ensure|ensures|ensured|have|has|had)\s+"
-    r"(?:\w+\s+){0,2})?$", re.IGNORECASE)
+    r"(?:\w+\s+){0,2}"
+    r")?$", re.IGNORECASE)
 # Sentence and clause punctuation ends the clause a match belongs to. A CONTRASTIVE conjunction
 # (but/yet/however/...) also ends the negation window: it flips polarity, so a negator before it does
 # NOT scope over a guarantee after it. Binding negation to the guarantee-phrase segment this way makes
@@ -624,15 +629,18 @@ def _sentence_window(text, start, end):
 def _adjacent_denial_clears(text, start):
     """True when a negator DIRECTLY negates the banned term (tight adjacency), the ONLY negation clearance in
     the simplified deny-list. Within the pre-match clause (bounded by the last CLAUSE_BOUNDARY before the
-    match), the negator CLOSEST to the match must be separated from the term by nothing but optional adverbs
-    and at most one integrity verb (provide/offer/deliver/...), with NO be-copula between them
-    (INTEGRITY_NEG_TAIL, anchored). So "does not provide tamper evidence" and "is not tamper-resistant" clear,
-    while a negator on a different word or across an intervening subject and copula does NOT: "The
-    not-expensive release is tamper-resistant" and "No customers doubt that releases are tamper-resistant"
-    both keep FLAGGING because a copula sits between the negator and the term. A negator in a prior clause is
-    cut off by the CLAUSE_BOUNDARY, and a TRAILING negator (after the term) never clears, so "Releases are
-    tamper-resistant, not merely checksum-protected" flags. This tight binding is what makes the deny-list
-    launder-free: nothing clears a banned term unless a negator is right next to it."""
+    match), the negator CLOSEST to the match must be separated from the term by NO adverb, only an optional
+    article/quantifier (a|an|any) OR an integrity verb (provide/offer/deliver/...) governing it, with NO
+    be-copula between them (INTEGRITY_NEG_TAIL, anchored). So "does not provide tamper evidence" and "is not
+    tamper-resistant" clear, while ANY adverb between the negator and the term keeps FLAGGING: "not only|
+    merely|exclusively|principally|fully tamper-resistant but also X" affirms a partial property and is not a
+    denial. A negator on a different word or across an intervening subject and copula does NOT clear either
+    ("The not-expensive release is tamper-resistant", "No customers doubt that releases are tamper-resistant"),
+    a negator in a prior clause is cut off by the CLAUSE_BOUNDARY, and a TRAILING negator (after the term)
+    never clears ("Releases are tamper-resistant, not merely checksum-protected" flags). "not cryptographically
+    signed" clears without a filler because the bare-signing match starts at "cryptographically" (empty tail).
+    This tight binding is what makes the deny-list launder-free: nothing clears a banned term unless a negator
+    is right next to it."""
     left = 0
     for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
         left = m.end()
@@ -912,13 +920,17 @@ POSITIVE = [
     "Releases are tamper-evident, not expensive.",                     # TRAILING negator negates an unrelated adjective
     "Releases are tamper-resistant, not cryptographically signed.",    # TRAILING negator; the tamper claim still stands
     "Our releases are tamper-evident, not completely independent.",    # TRAILING negator over a different property
-    # CORRELATIVE affirmation "not <minimizer> X but (also) Y" AFFIRMS X, so it must FLAG (not read as a
-    # denial). The closed minimizer set is only|merely|simply|purely|solely.
+    # ADVERBIAL correlative "not <adverb> X but (also) Y" AFFIRMS X, so it must FLAG. The structural rule
+    # allows NO adverb between the negator and the banned term (not a minimizer blocklist), so exclusive-focus
+    # and degree adverbs (only|merely|simply|purely|solely|exclusively|principally|fully|...) all keep FLAGGING.
     "Our releases are not only tamper-resistant but also checksum-protected.",  # "not only ... but also" affirms tamper-resistance
     "Our releases are not merely tamper-evident but also fast.",       # "not merely ... but" affirms tamper-evidence
     "Our releases are not simply tamper-resistant but also fast.",     # "not simply ... but" affirms tamper-resistance
     "Our releases are not purely tamper-evident but also fast.",       # "not purely ... but" affirms tamper-evidence
     "Our releases are not solely tamper-resistant but also fast.",     # "not solely ... but" affirms tamper-resistance
+    "Our releases are not exclusively tamper-resistant but also fast.",  # "not exclusively ... but" affirms tamper-resistance
+    "Our releases are not principally tamper-evident but also checksum-protected.",  # "not principally ... but" affirms tamper-evidence
+    "Our releases are not fully tamper-resistant but also fast.",      # degree adverb "fully" admits partial -> must flag
     # SIMPLIFICATION: the subject-quantifier honest form ("No release is ...") is no longer specially cleared;
     # a copula separates the negator from the term, so it flags (the safe direction, and not a shipped form).
     "No release is tamper-evident.",                                   # was cleared under the old N1; now flags
