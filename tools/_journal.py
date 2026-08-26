@@ -354,25 +354,46 @@ def _pid_start(pid):
 
 
 def acquire_lock(journal_root, session_id):
-    """O_CREAT|O_EXCL lock with owner identity (9.3 step 2). Raises JournalError (mapped to a refuse-to-
-    proceed) when a lock already exists: one open transaction at a time; a possibly-live owner is never
-    seized here (breaking a stale lock is the caller's explicit reconcile step in recover)."""
+    """Atomic-publication lock with owner identity (9.3 step 2). The FULL owner record is written to a
+    unique temp, fsynced, and published to `lock` by a NO-OVERWRITE, NO-FOLLOW hard link, so a crash
+    mid-write can never leave a half-written `lock` (a torn lock reads as malformed and can neither be
+    trusted nor, being possibly-live, broken, which would wedge recovery); the `lock` name only ever
+    appears as a complete, durable record. The no-overwrite link is the mutual-exclusion point: it raises
+    JournalError (mapped to a refuse-to-proceed) when a lock already exists (one open transaction at a
+    time; a possibly-live owner is never seized here, breaking a stale lock is the caller's explicit
+    reconcile step in recover)."""
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
+    owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
+             "pid-start": _pid_start(os.getpid()),
+             "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    record = json.dumps(owner, sort_keys=True).encode()
+    jr_fd = os.open(str(journal_root), os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
-                           .format(lock))
-    try:
-        owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
-                 "pid-start": _pid_start(os.getpid()),
-                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
-        os.fsync(fd)
+        tmp_name = "lock.{}.tmp".format(os.getpid())
+        try:
+            os.unlink(tmp_name, dir_fd=jr_fd)             # clear a stale temp from a prior same-pid crash
+        except FileNotFoundError:
+            pass
+        tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=jr_fd)
+        try:
+            _write_all(tfd, record)                       # loop: a short write cannot leave a torn temp
+            os.fsync(tfd)                                 # the FULL owner record durable BEFORE the publish
+        finally:
+            os.close(tfd)
+        try:
+            os.link(tmp_name, "lock", src_dir_fd=jr_fd, dst_dir_fd=jr_fd, follow_symlinks=False)
+        except FileExistsError:
+            raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
+                               .format(lock))
+        finally:
+            try:
+                os.unlink(tmp_name, dir_fd=jr_fd)
+            except FileNotFoundError:
+                pass
+        os.fsync(jr_fd)                                   # durable published-lock directory entry
     finally:
-        os.close(fd)
-    _fsync_path_dir(journal_root)
+        os.close(jr_fd)
     _kill_point("after-lock")
     return lock
 
@@ -395,16 +416,35 @@ def read_lock_owner(journal_root):
         raise JournalError("journal lock is not valid JSON ({})".format(exc))
     if not isinstance(owner, dict):
         raise JournalError("journal lock JSON is not an object (fail-closed)")
+    _validate_owner_schema(owner)
     return owner
+
+
+def _validate_owner_schema(owner):
+    """Validate the FULL lock-owner identity schema BEFORE any liveness evaluation (fail-closed): a valid
+    JSON object can still carry a boolean or non-int `pid`, a boolean or negative `uid`, or a non-string
+    `pid-start`, and a malformed field must never let a LIVE owner read as confirmed-dead and be seized
+    (possibly-live-never-seized, spec 1262 to 1265). bool is an int subclass, so it is excluded explicitly."""
+    pid = owner.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise JournalError("journal lock pid is not a positive integer (fail-closed)")
+    uid = owner.get("uid")
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
+        raise JournalError("journal lock uid is not a non-negative integer (fail-closed)")
+    if not isinstance(owner.get("pid-start"), str):
+        raise JournalError("journal lock pid-start is not a string (fail-closed)")
 
 
 def owner_confirmed_dead(owner):
     """True ONLY on positive evidence of death. EPERM, a live pid, or any ambiguity reads as possibly-
     live (never seized). Where a start time was recorded and is readable, a differing start time for the
     same pid also confirms death (PID reuse). Residual: PID reuse on a platform with no readable start
-    time cannot be distinguished, so it reads as possibly-live and the lock is not broken."""
+    time cannot be distinguished, so it reads as possibly-live and the lock is not broken. A malformed or
+    ambiguous identity field (a boolean/non-int/non-positive pid, or a non-string pid-start) reads as
+    possibly-live here too, so recovery can never seize a live owner behind a malformed lock (defence in
+    depth: read_lock_owner already rejects such a lock)."""
     pid = owner.get("pid")
-    if not isinstance(pid, int):
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -416,6 +456,8 @@ def owner_confirmed_dead(owner):
         return False
     recorded = owner.get("pid-start")
     if recorded:
+        if not isinstance(recorded, str):
+            return False                                  # malformed start time: possibly-live, never seized
         now = _pid_start(pid)
         return bool(now) and now != recorded
     return False

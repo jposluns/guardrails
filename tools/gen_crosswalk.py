@@ -214,12 +214,39 @@ def _read_payload_fd(entry_fd):
 _TMP_SEQ = itertools.count()
 
 
+def _verify_published_payload(entry_fd, digest, tmp_stat):
+    """G8: re-open the just-published `payload` beneath entry_fd through a NO-FOLLOW handle and confirm it is
+    the SAME regular-file inode we wrote (st_dev/st_ino match the retained temp) whose bytes still hash to
+    `digest`, BEFORE reporting success. So a concurrent writer who swaps the temp pathname for a symlink,
+    or substitutes the payload between the write and the publish, fails closed rather than publishing a
+    redirected or altered inode. AdoptError on a symlinked, non-regular, substituted, or mismatched payload."""
+    try:
+        pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=entry_fd)
+    except OSError as exc:
+        raise AdoptError("cannot re-open the published payload through a no-follow handle ({}); a symlinked "
+                         "payload is refused".format(exc))
+    try:
+        st = os.fstat(pfd)
+        if not stat.S_ISREG(st.st_mode):
+            raise AdoptError("published payload {}/payload is not a regular file".format(digest))
+        if (st.st_dev, st.st_ino) != (tmp_stat.st_dev, tmp_stat.st_ino):
+            raise AdoptError("published payload {}/payload is not the inode we wrote (concurrent substitution)"
+                             .format(digest))
+        if hashlib.sha256(_read_fd_all(pfd)).hexdigest() != digest:
+            raise AdoptError("published payload {}/payload does not hash to its digest".format(digest))
+    finally:
+        os.close(pfd)
+
+
 def _write_payload(entry_fd, digest, data):
     """Publish `data` as `payload` beneath entry_fd: write a UNIQUE-per-call temp (O_CREAT|O_EXCL|O_NOFOLLOW,
-    so concurrent callers never share a name), fsync it, then publish by a NO-OVERWRITE link (os.link fails
-    if payload already exists), so a publish race COMPARES bytes and accepts only byte-equality rather than
-    overwriting an already-published payload. The temp is always unlinked; entry_fd is fsynced so the
-    published payload entry is durable. Every handle is dir_fd-relative and O_NOFOLLOW (G8)."""
+    so concurrent callers never share a name), fsync it, then publish by a NO-OVERWRITE, NO-FOLLOW link
+    (os.link fails if payload already exists; follow_symlinks=False so a temp pathname a concurrent writer
+    swapped for a symlink links the link itself, refused below, never its target inode), so a publish race
+    COMPARES bytes and accepts only byte-equality rather than overwriting an already-published payload. On
+    the winning branch the published payload is re-verified at source (same inode as the retained temp, same
+    digest) before success is reported. The temp is always unlinked; entry_fd is fsynced so the published
+    payload entry is durable. Every handle is dir_fd-relative and O_NOFOLLOW (G8)."""
     tmp_name = "payload.{}.{}.tmp".format(os.getpid(), next(_TMP_SEQ))
     tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=entry_fd)
     try:
@@ -227,13 +254,17 @@ def _write_payload(entry_fd, digest, data):
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())                         # temp bytes durable BEFORE the atomic publish
+            tmp_stat = os.fstat(fh.fileno())              # retain the temp inode BEFORE the fd closes
         try:
-            os.link(tmp_name, "payload", src_dir_fd=entry_fd, dst_dir_fd=entry_fd)  # no-overwrite publish
+            os.link(tmp_name, "payload", src_dir_fd=entry_fd, dst_dir_fd=entry_fd,
+                    follow_symlinks=False)                # no-overwrite, no-follow publish
         except FileExistsError:                           # lost a publish race: accept only byte-equality
             existing = _read_payload_fd(entry_fd)         # G8: no-follow read of the winner's payload
             if existing is None or existing != data:
                 raise AdoptError("archive immutability violation: {}/payload already holds different bytes"
                                  .format(digest))
+        else:                                             # we published: re-verify the linked payload at source
+            _verify_published_payload(entry_fd, digest, tmp_stat)
     finally:
         try:
             os.unlink(tmp_name, dir_fd=entry_fd)
@@ -569,6 +600,35 @@ def self_test():
         leftover = [p.name for p in entry7.iterdir() if p.name != "payload"]
         if leftover:
             failures.append("archive_file must leave no temp files behind (found {})".format(leftover))
+
+        # (B1) post-publish verification: a payload SUBSTITUTED between the no-overwrite publish link and
+        # the digest re-check is refused (fail-closed), never reported as a clean publish. The substitution
+        # is injected by wrapping os.link so that immediately AFTER the real link publishes our temp inode,
+        # <entry>/payload is repointed at DIFFERENT bytes (a distinct regular file); the post-publish
+        # inode/digest re-check must then raise AdoptError. Without the re-check a swap sails to false success.
+        b1bytes = b"b1 post-publish payload verification test\n"
+        b1dig = hashlib.sha256(b1bytes).hexdigest()
+        b1arc = tmp / "b1arc"
+        b1arc.mkdir()
+        b1fd = os.open(str(b1arc), os.O_RDONLY | os.O_DIRECTORY)
+        real_link = os.link
+
+        def _link_then_swap(src, dst, **kw):
+            real_link(src, dst, **kw)                      # the real no-overwrite publish of our temp inode
+            entry = b1arc / b1dig                          # then substitute a different-inode payload
+            (entry / "payload").unlink()
+            (entry / "evil").write_bytes(b"a different payload than we wrote\n")
+            real_link(str(entry / "evil"), str(entry / "payload"))
+
+        os.link = _link_then_swap
+        try:
+            archive_file(b1fd, b1bytes)
+            failures.append("B1: a payload substituted after the publish link must be refused (fail-closed)")
+        except AdoptError:
+            pass
+        finally:
+            os.link = real_link
+            os.close(b1fd)
 
         # (f) unmatched computed: a predecessor with no overlap and no pointer is listed unmatched.
         legacy2 = tmp / "legacy2"

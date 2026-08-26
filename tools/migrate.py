@@ -815,8 +815,9 @@ def self_test():
 
         # (C) Torn payload mid-write: crash DURING a data-file payload write, leaving a torn (partially-
         #     written) payload. A torn payload can never satisfy poststate verification, so recovery must
-        #     ELECT ROLLBACK and land on the prestate EXACTLY (never the poststate), exercising the post-
-        #     restore preimage digest check on the rollback path.
+        #     ELECT ROLLBACK and land on the prestate EXACTLY (never the poststate), exercising the
+        #     pre-restore preimage digest check on the rollback path (_journal.py verifies the preimage
+        #     hashes to the recorded prestate digest immediately BEFORE it rewrites the prior bytes).
         for case in _CASES:
             pre, _post = baselines[case]
             for i, op in enumerate(_CASES[case]["ops"]):
@@ -1282,6 +1283,33 @@ def self_test():
             pass
         finally:
             os.close(awfd)
+        checked += 1
+
+        # (B2) malformed lock identity fails closed to possibly-live (spec 1262 to 1265): a valid JSON
+        #      object with a LIVE pid but a NON-STRING truthy pid-start (e.g. 1), or a BOOLEAN pid (bool is
+        #      an int subclass), must NEVER read as confirmed-dead, which would let recovery unlink a LIVE
+        #      owner's lock. owner_confirmed_dead defensively returns False even handed the malformed dict;
+        #      read_lock_owner rejects the malformed lock (JournalError); and recover leaves it in place.
+        live_pid = os.getpid()
+        if _journal.owner_confirmed_dead(
+                {"uid": os.getuid(), "pid": live_pid, "pid-start": 1, "session": "x"}):
+            failures.append("B2: a live pid with a non-string pid-start must read as possibly-live (never seized)")
+        if _journal.owner_confirmed_dead({"uid": os.getuid(), "pid": True, "pid-start": ""}):
+            failures.append("B2: a boolean pid must read as possibly-live (never seized)")
+        b2root = tmp / "malformed-lock"
+        b2jr = b2root / JOURNAL_REL
+        b2jr.mkdir(parents=True)
+        (b2jr / "lock").write_bytes(json.dumps(
+            {"uid": os.getuid(), "pid": live_pid, "pid-start": 1, "session": "x"}).encode())
+        try:
+            _journal.read_lock_owner(b2jr)
+            failures.append("B2: a lock with a non-string pid-start must fail closed (JournalError)")
+        except _journal.JournalError:
+            pass
+        if _run(["recover", "--root", str(b2root)]) == 0:
+            failures.append("B2: recover over a malformed live lock must not report success")
+        if not (b2jr / "lock").exists():
+            failures.append("B2: recover must NEVER unlink a malformed (possibly-live) lock")
         checked += 1
 
         # (E1) The remove/rmdir prestate check and the mutation bind to the SAME pre-opened parent handle,

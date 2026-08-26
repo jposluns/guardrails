@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "1f408d6dbd11011540ccf421dd519c43d5d9772e4603a1085e10e8c7eb68d356"
+tree-sha256 = "5bd00a5a1a11a493b9513c5db5e7728c84699703a550e2720e74a29f57429c5b"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2306,8 +2306,8 @@ sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
 path = "tools/_journal.py"
-bytes = 54805
-sha256 = "c8b48c97a02a0df26495c83acb71269c1e53de1124c76ead61e81966827d09d6"
+bytes = 57544
+sha256 = "390ba9bb3007b57254c7443c9c84db87973fdc34a5108f2b78f71fdcd4cc025c"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -2476,8 +2476,8 @@ sha256 = "ec42c7dc27f24a7d5fe278645df0adbb74268c76e020e5b8a835ad36be57672d"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 35933
-sha256 = "0a6ce57427c973cd791a9bd2500116748e329789c104e5eb4e9ea6dc33824661"
+bytes = 39656
+sha256 = "f3c8b72d146c46418997508db7e10f7bdd2c655ef7cd7a40773890ec75b1c2da"
 
 [[sources]]
 path = "tools/gen_cursor.py"
@@ -2561,8 +2561,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/migrate.py"
-bytes = 79136
-sha256 = "07db96a65dc08983389c8ff4a20523828831cde9cc6d6027314a4732211df639"
+bytes = 81036
+sha256 = "f13f46faec7623e76a417df5b24ea7c903c100ecd2666f8abb1d2455533facd0"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
