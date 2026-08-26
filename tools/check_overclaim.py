@@ -238,18 +238,21 @@ BE_COPULA = re.compile(r"\b(?:is|are|was|were|be|been|being)\b", re.IGNORECASE)
 # open-ended, so none is allowed rather than blocklisting them. Only two forms clear: (1) an optional
 # article/quantifier (a|an|any) then the term directly, the negator negating the property itself ("is not
 # tamper-resistant", "not a tamper-evident release"); or (2) an INTEGRITY VERB governing the banned term,
-# optionally with up to two object words ("does not provide tamper evidence", "did not deliver an
-# independent anchor"). It is anchored end to end, so a NON-integrity verb or a new subject breaks it ("We
-# do not doubt that releases provide tamper evidence"; "The not-expensive release is tamper-resistant"), and
-# any adverbial correlative FLAGS. "not cryptographically signed" clears WITHOUT a filler: the bare-signing
-# match span STARTS at "cryptographically", so the tail is empty (and a trailing "but checksum-protected"
-# is after the match, so a genuine contrastive denial still clears).
+# optionally with a SINGLE article/quantifier (a|an|any) between the verb and the term ("does not provide
+# tamper evidence", "does not offer any tamper evidence", "did not deliver an independent anchor"). The
+# object slot is a CLOSED allowance, not an arbitrary word run: an adverb or focus word there ("does not
+# provide ONLY tamper evidence; it also provides X") affirms the property IS provided, so it is not an
+# article and keeps FLAGGING. It is anchored end to end, so a NON-integrity verb or a new subject breaks it
+# ("We do not doubt that releases provide tamper evidence"; "The not-expensive release is tamper-resistant"),
+# and any adverbial correlative FLAGS. "not cryptographically signed" clears WITHOUT a filler: the
+# bare-signing match span STARTS at "cryptographically", so the tail is empty (and a trailing "but
+# checksum-protected" is after the match, so a genuine contrastive denial still clears).
 INTEGRITY_NEG_TAIL = re.compile(
     r"^\s*(?:"
     r"(?:a|an|any)\s+"
     r"|(?:provide|provides|provided|offer|offers|offered|deliver|delivers|delivered|give|gives|given|"
     r"make|makes|made|guarantee|guarantees|guaranteed|ensure|ensures|ensured|have|has|had)\s+"
-    r"(?:\w+\s+){0,2}"
+    r"(?:(?:a|an|any)\s+)?"
     r")?$", re.IGNORECASE)
 # Sentence and clause punctuation ends the clause a match belongs to. A CONTRASTIVE conjunction
 # (but/yet/however/...) also ends the negation window: it flips polarity, so a negator before it does
@@ -931,6 +934,10 @@ POSITIVE = [
     "Our releases are not exclusively tamper-resistant but also fast.",  # "not exclusively ... but" affirms tamper-resistance
     "Our releases are not principally tamper-evident but also checksum-protected.",  # "not principally ... but" affirms tamper-evidence
     "Our releases are not fully tamper-resistant but also fast.",      # degree adverb "fully" admits partial -> must flag
+    # OBJECT-SLOT launder: an adverb/focus word between the integrity verb and the term affirms the property
+    # IS provided; the object slot is a closed article/quantifier allowance, so these keep FLAGGING.
+    "This layer does not provide only tamper evidence; it also provides provenance.",  # "provide only tamper evidence" affirms it
+    "This layer does not provide merely tamper evidence but also provenance.",  # "provide merely tamper evidence" affirms it
     # SIMPLIFICATION: the subject-quantifier honest form ("No release is ...") is no longer specially cleared;
     # a copula separates the negator from the term, so it flags (the safe direction, and not a shipped form).
     "No release is tamper-evident.",                                   # was cleared under the old N1; now flags
