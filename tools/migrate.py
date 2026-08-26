@@ -1217,6 +1217,57 @@ def self_test():
         _journal.release_lock(xjr)
         checked += 1
 
+        # (B2d) COMPLETE owner-identity validation (spec 1262: UID, PID, session, and UTC): the FULL owner
+        #       record is validated BEFORE any liveness call, so NO malformed field can let a LIVE owner read
+        #       as confirmed-dead and be seized (possibly-live-never-seized, spec 1262 to 1265). Each variant
+        #       below carries a LIVE pid yet must (i) read possibly-live via owner_confirmed_dead, (ii) fail
+        #       closed in read_lock_owner (JournalError), and (iii) never be seized by recover (exit != 0, the
+        #       lock left in place): (a) an OVERLONG/out-of-range decimal pid-start ("9"*1000) that the old
+        #       unbounded ^[0-9]+$ gate accepted and that, differing from the real /proc start time, read as
+        #       confirmed-DEAD and seized a live owner; (b) a missing or empty session; (c) a missing or empty
+        #       utc; (d) a non-int/boolean pid. real_start is this live process's genuine canonical start (or
+        #       "" off Linux), so (b) and (c) are otherwise well-formed and isolate the session/utc defect.
+        real_start = _journal._pid_start(live_pid)          # the genuine canonical start (or "" off Linux)
+        base_utc = "2026-01-01T00:00:00Z"
+        malformed_owners = [
+            ("overlong-pid-start",
+             {"uid": os.getuid(), "pid": live_pid, "pid-start": "9" * 1000, "session": "x", "utc": base_utc}),
+            ("empty-session",
+             {"uid": os.getuid(), "pid": live_pid, "pid-start": real_start, "session": "", "utc": base_utc}),
+            ("missing-session",
+             {"uid": os.getuid(), "pid": live_pid, "pid-start": real_start, "utc": base_utc}),
+            ("empty-utc",
+             {"uid": os.getuid(), "pid": live_pid, "pid-start": real_start, "session": "x", "utc": ""}),
+            ("missing-utc",
+             {"uid": os.getuid(), "pid": live_pid, "pid-start": real_start, "session": "x"}),
+            ("boolean-pid",
+             {"uid": os.getuid(), "pid": True, "pid-start": "", "session": "x", "utc": base_utc}),
+            ("non-int-pid",
+             {"uid": os.getuid(), "pid": "1234", "pid-start": "", "session": "x", "utc": base_utc}),
+        ]
+        for label, owner in malformed_owners:
+            if _journal.owner_confirmed_dead(owner):
+                failures.append("B2d/{}: a live owner with a malformed identity must read possibly-live "
+                                "(never seized)".format(label))
+        for idx, (label, owner) in enumerate(malformed_owners):
+            mroot = tmp / ("malformed-owner-{}".format(idx))
+            mjr = mroot / JOURNAL_REL
+            mjr.mkdir(parents=True)
+            (mjr / "lock").write_bytes(json.dumps(owner, sort_keys=True).encode())
+            try:
+                _journal.read_lock_owner(mjr)
+                failures.append("B2d/{}: read_lock_owner must fail closed on a malformed lock "
+                                "(JournalError)".format(label))
+            except _journal.JournalError:
+                pass
+            if _run(["recover", "--root", str(mroot)]) == 0:
+                failures.append("B2d/{}: recover over a malformed live lock must not report success"
+                                .format(label))
+            if not (mjr / "lock").exists():
+                failures.append("B2d/{}: recover must NEVER unlink a malformed (possibly-live) lock"
+                                .format(label))
+        checked += 1
+
         # (E1) The remove/rmdir prestate check and the mutation bind to the SAME pre-opened parent handle,
         #      so an ANCESTOR SWAP injected between the bind and the check cannot redirect the unlinkat/rmdir
         #      (spec 1291/1300). The swap is injected by wrapping _open_parent to rename the real parent

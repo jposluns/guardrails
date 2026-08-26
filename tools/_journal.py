@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Crash-durable transactional cutover journal (VER-CORE 9.3), an importable engine module. Stdlib only.
 
-Used by tools/migrate.py (cutover, recover, un-adopt reverse replay). tools/pin.py (Section 12 step 7,
-NOT built in this VC-6 slice) will reuse the low-level contained-apply helpers for the corrupt-state
-recovery carve-out ONLY; the ordinary re-pin preimage copy deliberately uses none of this journal.
+Used by tools/migrate.py for cutover and recover; it also carries the INERT reverse-replay primitive
+(build_inverse_ops, 10.6) that Section 12 step 7's un-adopt will build on but which THIS VC-6 slice only
+exercises in the self-test (no un-adopt subcommand is wired here). tools/pin.py (Section 12 step 7, NOT
+built in this VC-6 slice) will reuse the low-level contained-apply helpers for the corrupt-state recovery
+carve-out ONLY; the ordinary re-pin preimage copy deliberately uses none of this journal.
 
 CRASH-SAFETY MODEL (journal first, then apply, then complete):
   The seven normative steps (9.3, spec lines 1252 to 1339), in order, are
@@ -51,7 +53,8 @@ from pathlib import Path
 
 MAGIC = b"AIQTJ1"
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-_PIDSTART_RE = re.compile(r"^[0-9]+$")   # a /proc starttime: a non-negative decimal integer (what _pid_start writes)
+_PIDSTART_RE = re.compile(r"^[0-9]+$")   # ASCII-digit gate for a /proc starttime (canonical bound in _is_canonical_pid_start)
+_PIDSTART_MAX = 1 << 64                   # a /proc starttime is an unsigned long long: the valid range is 0 <= v < 2**64
 F_INTENT = "INTENT"
 F_COMPLETE = "COMPLETE"
 F_RIP = "ROLLBACK-IN-PROGRESS"
@@ -354,6 +357,21 @@ def _pid_start(pid):
         return ""
 
 
+def _is_canonical_pid_start(value):
+    """True ONLY for a value that is EXACTLY what _pid_start emits for a Linux process: the /proc starttime
+    field, which the kernel prints as an unsigned long long (%llu). That canonical form is a string of ASCII
+    digits, no sign, no leading zero (except the single digit "0"), whose integer value lies in the valid
+    unsigned range 0 <= v < 2**64. An overlong value (e.g. "9"*1000), an out-of-range value, a whitespace-
+    padded or non-decimal value, or a leading-zero value is NOT canonical: _pid_start could never have
+    written it, so it must never be trusted as a genuine start time and read as a differing (dead) one
+    (spec 1262 to 1265, possibly-live is never seized). The empty string (the disclosed non-Linux/unreadable
+    case) is handled by the caller, not here: this returns False for it."""
+    if not isinstance(value, str) or not _PIDSTART_RE.match(value):
+        return False
+    v = int(value)                                        # _PIDSTART_RE guarantees ASCII digits: int() cannot fail
+    return v < _PIDSTART_MAX and str(v) == value          # in range AND canonical (str(int(...)) rejects leading zeros)
+
+
 def acquire_lock(journal_root, session_id):
     """O_CREAT|O_EXCL lock with owner identity (9.3 step 2). Raises JournalError (mapped to a refuse-to-
     proceed) when a lock already exists: one open transaction at a time; a possibly-live owner is never
@@ -419,14 +437,18 @@ def read_lock_owner(journal_root):
 
 
 def _validate_owner_schema(owner):
-    """Validate the FULL lock-owner identity schema BEFORE any liveness evaluation (fail-closed): a valid
-    JSON object can still carry a boolean or non-int `pid`, a boolean or negative `uid`, or a `pid-start`
-    that is a non-string OR a malformed string, and a malformed field must never let a LIVE owner read as
-    confirmed-dead and be seized (possibly-live-never-seized, spec 1262 to 1265). bool is an int subclass,
-    so it is excluded explicitly. `pid-start` must be EITHER empty (the disclosed non-Linux/unreadable
-    case _pid_start returns) OR the canonical /proc decimal start-time (a non-negative decimal integer
-    string, exactly what _pid_start writes); a whitespace-padded or otherwise non-decimal value is
-    rejected, so it can never be mistaken for a genuine start time and read as a differing (dead) one."""
+    """Validate the FULL lock-owner identity schema BEFORE any liveness evaluation (fail-closed). Spec 1262
+    requires the owner identity to carry a UID, a PID, a session id, and a UTC stamp (exactly the four fields
+    acquire_lock writes alongside pid-start), so EVERY one is validated here; a valid JSON object can still
+    carry a boolean or non-int `pid`, a boolean or negative `uid`, a `pid-start` that is a non-string OR a
+    malformed/overlong string, or a missing/empty `session` or `utc`, and any malformed field must never let
+    a LIVE owner read as confirmed-dead and be seized (possibly-live-never-seized, spec 1262 to 1265). bool
+    is an int subclass, so it is excluded explicitly. `pid-start` must be EITHER empty (the disclosed
+    non-Linux/unreadable case _pid_start returns) OR a CANONICAL /proc decimal start-time (ASCII digits, in
+    the unsigned range 0 <= v < 2**64, no leading zeros: exactly what _pid_start writes, see
+    _is_canonical_pid_start); an overlong ("9"*1000), out-of-range, whitespace-padded, leading-zero, or
+    otherwise non-canonical value is rejected, so it can never be mistaken for a genuine start time and read
+    as a differing (dead) one."""
     pid = owner.get("pid")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise JournalError("journal lock pid is not a positive integer (fail-closed)")
@@ -436,8 +458,15 @@ def _validate_owner_schema(owner):
     pid_start = owner.get("pid-start")
     if not isinstance(pid_start, str):
         raise JournalError("journal lock pid-start is not a string (fail-closed)")
-    if pid_start != "" and not _PIDSTART_RE.match(pid_start):
-        raise JournalError("journal lock pid-start is not empty or a /proc decimal start time (fail-closed)")
+    if pid_start != "" and not _is_canonical_pid_start(pid_start):
+        raise JournalError("journal lock pid-start is not empty or a canonical /proc decimal start time "
+                           "(fail-closed)")
+    session = owner.get("session")
+    if not isinstance(session, str) or not session:
+        raise JournalError("journal lock session is not a non-empty string (fail-closed)")
+    utc = owner.get("utc")
+    if not isinstance(utc, str) or not utc:
+        raise JournalError("journal lock utc is not a non-empty string (fail-closed)")
 
 
 def owner_confirmed_dead(owner):
@@ -446,10 +475,10 @@ def owner_confirmed_dead(owner):
     same pid also confirms death (PID reuse). Residual: PID reuse on a platform with no readable start
     time cannot be distinguished, so it reads as possibly-live and the lock is not broken. The FULL owner
     schema is validated defensively FIRST, so ANY malformed or ambiguous identity field (a boolean/non-int/
-    non-positive pid, a bad uid, or a pid-start that is not empty and not a /proc decimal start time) reads
-    as possibly-live here too: recovery can never seize a live owner behind a malformed lock, whose garbage
-    pid-start would otherwise differ from the real start time and read as dead (defence in depth:
-    read_lock_owner already rejects such a lock)."""
+    non-positive pid, a bad uid, a pid-start that is not empty and not a canonical /proc start time, or a
+    missing/empty session or utc) reads as possibly-live here too: recovery can never seize a live owner
+    behind a malformed lock, whose garbage or overlong pid-start would otherwise differ from the real start
+    time and read as dead (defence in depth: read_lock_owner already rejects such a lock)."""
     if not isinstance(owner, dict):
         return False                                      # non-dict: possibly-live, never seized
     try:
@@ -465,10 +494,12 @@ def owner_confirmed_dead(owner):
         return False
     except OSError:
         return False
-    recorded = owner.get("pid-start")                     # validated: empty, or a /proc decimal start time
+    recorded = owner.get("pid-start")                     # validated: empty, or a canonical /proc start time
     if recorded:
         now = _pid_start(pid)
-        return bool(now) and now != recorded
+        if not _is_canonical_pid_start(now):              # current start empty/unreadable/malformed: possibly-live
+            return False
+        return now != recorded                            # both canonical: a differing start time confirms PID reuse
     return False
 
 
