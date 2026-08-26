@@ -397,7 +397,7 @@ def release_lock(journal_root):
     lock owned by another process is NEVER unlinked, so a foreign live lock is never deleted (the
     concurrency-lease fail-safe). An absent lock is a clean no-op; an unreadable or malformed lock is left
     in place (fail-closed, never blind-unlinked). Breaking a confirmed-dead stale lock is the caller's
-    explicit reconcile step (break_stale_lock), never this release path."""
+    explicit reconcile step (break_stale_and_acquire), never this release path."""
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
@@ -415,20 +415,46 @@ def release_lock(journal_root):
     _fsync_path_dir(journal_root)
 
 
-def break_stale_lock(journal_root, owner):
-    """Break a lock whose recorded owner is CONFIRMED DEAD (stale-lock recovery, 9.3 step 1). Re-confirms
-    death before unlinking (defence in depth): a lock not confirmed dead is NEVER broken. The caller
-    re-acquires via O_EXCL immediately after, so a racing writer that re-created the lock makes that
-    acquire fail closed rather than seizing a foreign lock."""
-    if not owner_confirmed_dead(owner):
-        raise JournalError("refusing to break a journal lock whose owner is not confirmed dead")
-    journal_root = Path(journal_root)
-    lock = journal_root / "lock"
+def break_stale_and_acquire(journal_root, session_id):
+    """Serialize the stale-lock break AND the O_EXCL re-acquire as ONE operation guarded by a kernel
+    advisory lock on a STABLE, never-replaced arbitration file (<journal>/lock.break), so two recoverers
+    that read the same dead owner can never race one deleting the other's freshly-acquired LIVE lock (C1).
+    Under the arbitration lock the CURRENT lock owner is RE-READ and broken ONLY if it STILL identifies a
+    confirmed-dead owner; a lock a concurrent recoverer has already re-acquired (now live) is left
+    untouched and reported 'possibly-live', never unlinked. Returns 'acquired' or 'possibly-live';
+    JournalError on a lost O_EXCL acquire or an unreadable current lock (fail-closed).
+
+    PORTABILITY: fcntl is POSIX-only. On a platform without it (e.g. Windows) this FAILS CLOSED, refusing
+    to break the stale lock rather than falling back to the unguarded race, consistent with the engine's
+    existing non-Linux fail-safe posture (3.6b). Both supported platforms (Linux, macOS) expose fcntl."""
     try:
-        os.unlink(str(lock))
-    except FileNotFoundError:
-        return
-    _fsync_path_dir(journal_root)
+        import fcntl
+    except ImportError:
+        raise JournalError("stale-lock break needs the POSIX fcntl arbitration primitive (absent on this "
+                           "platform): refusing to break the stale lock (fails closed, 3.6b)")
+    journal_root = Path(journal_root)
+    arb = journal_root / "lock.break"
+    afd = os.open(str(arb), os.O_CREAT | os.O_RDWR, 0o600)   # STABLE arbitration file, never replaced
+    try:
+        fcntl.flock(afd, fcntl.LOCK_EX)
+        try:
+            current = read_lock_owner(journal_root)          # RE-READ the CURRENT owner under the lock
+            if current is None:
+                acquire_lock(journal_root, session_id)
+                return "acquired"
+            if not owner_confirmed_dead(current):
+                return "possibly-live"                       # a concurrent recoverer re-acquired: never break
+            try:
+                os.unlink(str(journal_root / "lock"))
+            except FileNotFoundError:
+                pass
+            _fsync_path_dir(journal_root)
+            acquire_lock(journal_root, session_id)           # O_EXCL under the arbitration lock
+            return "acquired"
+        finally:
+            fcntl.flock(afd, fcntl.LOCK_UN)
+    finally:
+        os.close(afd)
 
 
 # --- preimages (durably FIRST; the whole reversal is reconstructable from them alone) -----------------
@@ -529,6 +555,16 @@ def _poststate_verifies(root_fd, op):
 
 # --- apply (contained, fd-bound) ----------------------------------------------------------------------
 
+def _verify_staged_digest(op, data):
+    """C3: hash the staged write's bytes and compare to the op's recorded poststate content-sha256 from
+    the INTENT, at mutation time. A mismatch means the staged tree changed after planning; raise
+    JournalError so the transaction rolls back rather than installing bytes the INTENT never described."""
+    expected = op.get("poststate", {}).get("content-sha256")
+    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+        raise JournalError("{}: staged payload bytes changed since planning (digest does not match the "
+                           "INTENT poststate content-sha256)".format(op["path"]))
+
+
 def apply_ops(root_fd, ops, staged_reader):
     """9.3 step 5: fd-bound prestate check and mutation beneath the pre-opened directory handle, no-
     follow, by final component; never a re-resolved absolute path between check and write. ops are in
@@ -548,6 +584,7 @@ def apply_ops(root_fd, ops, staged_reader):
                 try:
                     _verify_fd_prestate(fd, op["prestate"], op["path"])
                     data = staged_reader(op)
+                    _verify_staged_digest(op, data)          # C3: staged bytes must match the INTENT digest
                     os.ftruncate(fd, 0)
                     os.lseek(fd, 0, os.SEEK_SET)
                     _maybe_torn_payload(fd, data, i)
@@ -561,6 +598,7 @@ def apply_ops(root_fd, ops, staged_reader):
                 try:
                     os.fchmod(fd, op["poststate"]["mode"])   # pin exact perms (umask independence)
                     data = staged_reader(op)
+                    _verify_staged_digest(op, data)          # C3: staged bytes must match the INTENT digest
                     _maybe_torn_payload(fd, data, i)
                     _write_all(fd, data)
                     os.fsync(fd)
@@ -690,33 +728,60 @@ def _recreate_file(pfd, name, data, mode):
 
 # --- recovery (from the journal alone, both directions, idempotent) -----------------------------------
 
+# The ONLY valid frame-type sequences an engine journal may hold (C2). Every other ordering, duplicate,
+# or contradiction (COMPLETE alongside a rollback record, ROLLBACK-COMPLETE before ROLLBACK-IN-PROGRESS, a
+# terminal frame before INTENT, two INTENTs) is rejected by not being a member of this set.
+_ACCEPTED_SEQUENCES = frozenset([
+    (),
+    (F_INTENT,),
+    (F_INTENT, F_COMPLETE),
+    (F_INTENT, F_RIP),
+    (F_INTENT, F_RIP, F_RC),
+])
+
+
 def _validate_terminal_agreement(frames):
-    """Defence in depth (fix #2): a well-formed engine journal has exactly one INTENT, first, and terminal
-    frames (COMPLETE / ROLLBACK-IN-PROGRESS / ROLLBACK-COMPLETE) that agree with it on the txn id and
-    appear at most once. Reject a stray or crafted frame that disagrees on the txn id, duplicates a
-    terminal record, contradicts one (COMPLETE with a rollback record), or orders a terminal frame before
-    the INTENT. Recovery trusts its own checksummed framing; a crafted valid-checksum journal is outside
-    the accident-recovery model (see the module Guarantee-scope note). JournalError on any violation."""
-    intent_txn = None
-    counts = {F_INTENT: 0, F_COMPLETE: 0, F_RIP: 0, F_RC: 0}
-    for ftype, obj in frames:
-        counts[ftype] = counts.get(ftype, 0) + 1
+    """Explicit accepted-sequence state machine (C2), invoked identically from recover() and is_terminal().
+    The ONLY valid frame-type sequences are [], [INTENT], [INTENT,COMPLETE], [INTENT,RIP], and
+    [INTENT,RIP,RC], with EXACTLY ONE INTENT carrying a single nonempty txn id and every subsequent frame
+    agreeing on that txn id. This rejects, by construction: ROLLBACK-COMPLETE before ROLLBACK-IN-PROGRESS
+    (the sequence is not a member); COMPLETE alongside a rollback frame; a duplicate INTENT INCLUDING two
+    null-txn INTENTs (two INTENT tokens are never an accepted sequence, so a null-txn sentinel is not
+    relied on); any terminal frame before INTENT; and any out-of-order or duplicate terminal. Recovery
+    trusts its own checksummed framing; a crafted valid-checksum journal is outside the accident-recovery
+    model (see the module Guarantee-scope note). JournalError on any violation."""
+    types = tuple(t for t, _ in frames)
+    if types not in _ACCEPTED_SEQUENCES:
+        raise JournalError("journal frame sequence {} is not an accepted terminal sequence".format(
+            list(types)))
+    if not types:
+        return
+    intent_obj = frames[0][1]                             # types[0] is F_INTENT by construction of the set
+    intent_txn = intent_obj.get("txn") if isinstance(intent_obj, dict) else None
+    if not isinstance(intent_txn, str) or not intent_txn:
+        raise JournalError("INTENT frame carries no single nonempty txn id")
+    for ftype, obj in frames[1:]:
         txn = obj.get("txn") if isinstance(obj, dict) else None
-        if ftype == F_INTENT:
-            if intent_txn is not None:
-                raise JournalError("duplicate INTENT frame in journal")
-            intent_txn = txn
-        else:
-            if intent_txn is None:
-                raise JournalError("terminal frame {} precedes any INTENT frame".format(ftype))
-            if txn != intent_txn:
-                raise JournalError("frame {} txn id disagrees with the INTENT txn id".format(ftype))
-    if counts[F_COMPLETE] > 1 or counts[F_RIP] > 1 or counts[F_RC] > 1:
-        raise JournalError("duplicate terminal frame in journal")
-    if counts[F_COMPLETE] and (counts[F_RIP] or counts[F_RC]):
-        raise JournalError("contradictory terminal frames (COMPLETE alongside a rollback record)")
-    if counts[F_RC] and not counts[F_RIP]:
-        raise JournalError("ROLLBACK-COMPLETE without a ROLLBACK-IN-PROGRESS frame")
+        if txn != intent_txn:
+            raise JournalError("frame {} txn id disagrees with the INTENT txn id".format(ftype))
+
+
+def classify_state(txn_dir):
+    """Classify a transaction's DURABLE journal state via the C2 state machine (never a bare boolean).
+    Returns 'nothing-opened' (no INTENT: pre-INTENT/capture-phase failure, nothing applied), 'complete',
+    'rolled-back' ([INTENT,RIP,RC] terminal rollback), or 'open' (INTENT present without a terminal
+    COMPLETE or RC). JournalError on a corrupt or invalid-sequence journal (fail-closed). A torn tail is
+    treated as never written (read_frames), consistent with recover()."""
+    frames, _torn, _ = read_frames(txn_dir)
+    _validate_terminal_agreement(frames)
+    types = [t for t, _ in frames]
+    if F_INTENT not in types:
+        return "nothing-opened"
+    if F_COMPLETE in types:
+        return "complete"
+    if F_RC in types:
+        return "rolled-back"
+    return "open"
 
 
 def recover(txn_dir, root_fd):
@@ -762,8 +827,13 @@ def run_transaction(root_fd, journal_root, txn_id, header, ops, staged_reader, s
     publish(txn_dir, F_INTENT, {"txn": txn_id, "header": header, "ops": ops})
     try:
         apply_ops(root_fd, ops, staged_reader)
+        # C3: COMPLETE must mean every poststate was installed. Verify ALL domain-separated post-states
+        # before publishing COMPLETE; if any fails, do NOT publish COMPLETE, roll back, and fail closed.
+        if not all(_poststate_verifies(root_fd, op) for op in ops):
+            raise JournalError("post-apply poststate verification failed; refusing to publish COMPLETE")
     except JournalError:
-        # A prestate mismatch (a hostile or racing tree): roll back from the durable preimages and fail.
+        # A prestate mismatch, a staged-digest mismatch, or a failed poststate (a hostile or racing tree):
+        # roll back from the durable preimages and fail.
         publish(txn_dir, F_RIP, {"txn": txn_id})
         total = len(ops)
         for j, op in enumerate(reversed(ops)):
@@ -776,9 +846,11 @@ def run_transaction(root_fd, journal_root, txn_id, header, ops, staged_reader, s
 
 def is_terminal(txn_dir):
     """True when the transaction has a durable terminal record (COMPLETE or ROLLBACK-COMPLETE); False
-    when it is still open (INTENT or ROLLBACK-IN-PROGRESS without a terminal). JournalError on a corrupt
-    mid-log frame (fail-closed)."""
+    when it is still open (INTENT or ROLLBACK-IN-PROGRESS without a terminal). Invokes the SAME C2 state
+    machine as recover() so the two classify identically; a corrupt mid-log frame or an invalid frame
+    sequence is a JournalError (fail-closed)."""
     frames, torn, _ = read_frames(txn_dir)
+    _validate_terminal_agreement(frames)
     types = [t for t, _ in frames]
     if F_INTENT not in types:
         return True                                       # nothing opened (or torn INTENT): not open

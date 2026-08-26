@@ -29,6 +29,7 @@ except ModuleNotFoundError:  # Python < 3.11
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 import _journal  # noqa: E402
+from migrate import components  # noqa: E402  # the SAME 9.1 component computation the engine binds cutovers to
 
 MIGRATION_REL = ".aiqt/migration"
 ARCHIVE_REL = ".aiqt/archive"
@@ -37,6 +38,7 @@ CROSSWALK_REL = ".aiqt/migration/crosswalk.toml"
 INVENTORY_REL = ".aiqt/migration/successor-inventory.toml"
 JOURNAL_REL = ".aiqt/migration/journal"
 PRED_ID_RE = re.compile(r"^pre-([0-9a-f]{12})\.([1-9][0-9]*)$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERDICT_SEMANTIC = "equal-or-stronger"
 _VERDICT_COMPLETE = "complete"
 
@@ -53,6 +55,21 @@ def _load_toml(path):
         raise GateError("required input {} is absent".format(path))
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(path, exc))
+
+
+def _validate_row_container(doc, where, keys):
+    """codex hardening: every array-of-tables the legs iterate MUST be a list of tables. A non-list value,
+    or a non-dict row inside it, is a GateError (exit 2), never an uncaught AttributeError when a leg calls
+    row.get(...) on a bare string or int."""
+    for key in keys:
+        val = doc.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, list):
+            raise GateError("{}: [[{}]] must be an array of tables".format(where, key))
+        for i, row in enumerate(val):
+            if not isinstance(row, dict):
+                raise GateError("{}: [[{}]] row {} is not a table".format(where, key, i))
 
 
 # --- legs (each returns a list of finding strings; a GateError is exit 2) ------------------------------
@@ -85,14 +102,21 @@ def _archived_text(archive_root, sha):
 
 
 def check_predecessors(cw, archive_root):
-    """8.2/8.3/7.2: predecessor ids well-formed in the pre-<archive-hash-prefix>.<ordinal> namespace with a
-    prefix consistent with the row's archive hash and unique; source-digest equals the archive hash; and
-    the SPAN-AND-DIGEST TIE enforced, not merely claimed (8.2: predecessor rows are "span-and-digest
-    checkable exactly as successor rows are"; 7.2: the source span is a TIGHT whole-line window
-    [start-line, end-line], and the canonical text is byte-exactly THAT window of the immutable archived
-    bytes, occurring exactly once, beginning on start-line and ending on end-line, never a mere
-    substring)."""
+    """8.2/8.3/7.2 (C5): predecessor ids well-formed in the pre-<archive-hash-prefix>.<ordinal> namespace,
+    prefix consistent with the row's archive hash, and unique; EVERY predecessor MUST carry a 64-hex
+    LOWERCASE sha256 (a finding when absent or malformed, NEVER a silent skip that lets an empty hash
+    bypass the span gate); source-digest equals the archive hash; the hash resolves BIDIRECTIONALLY to a
+    declared [[archive-file]] row (its sha is declared AND that row lists this predecessor); the archived
+    payload's digest is RECOMPUTED and must equal the declared sha (archive identity, never row-to-row
+    equality); and the SPAN-AND-DIGEST TIE is ALWAYS run (7.2: the source span is a TIGHT whole-line
+    window [start-line, end-line], and the canonical text is byte-exactly THAT window of the immutable
+    archived bytes, never a mere substring)."""
     findings, seen = [], set()
+    archive_index = {}                                    # archive-sha256 -> [[archive-file]] rows (C5)
+    for arow in cw.get("archive-file", []):
+        ash = arow.get("archive-sha256")
+        if isinstance(ash, str):
+            archive_index.setdefault(ash, []).append(arow)
     for row in cw.get("predecessor", []):
         pid = row.get("clause-id", "")
         sha = row.get("archive-sha256", "")
@@ -100,27 +124,55 @@ def check_predecessors(cw, archive_root):
         if not m:
             findings.append("predecessor id {!r} is not in the 8.3 pre-<prefix>.<ordinal> namespace"
                             .format(pid))
-        elif sha and m.group(1) != sha[:12]:
-            findings.append("predecessor id {!r} hash-prefix disagrees with its archive-sha256".format(pid))
         if pid in seen:
             findings.append("duplicate predecessor id {!r}".format(pid))
         seen.add(pid)
+        # C5: a 64-hex lowercase archive-sha256 is REQUIRED; an absent/malformed hash is a finding and the
+        # remaining hash-keyed checks cannot run (never a silent bypass of the span gate by "" == "").
+        if not isinstance(sha, str) or not HEX64_RE.match(sha):
+            findings.append("predecessor {!r}: archive-sha256 must be a 64-hex lowercase sha256 (absent or "
+                            "malformed; the span gate is never bypassed by an empty hash)".format(pid))
+            continue
+        if m and m.group(1) != sha[:12]:
+            findings.append("predecessor id {!r} hash-prefix disagrees with its archive-sha256".format(pid))
         if row.get("source-digest") != sha:
             findings.append("predecessor {!r}: source-digest must equal the archive-sha256 (8.2)".format(pid))
+        # C5: resolve the hash bidirectionally to a declared [[archive-file]] row.
+        arows = archive_index.get(sha, [])
+        if not arows:
+            findings.append("predecessor {!r}: archive-sha256 resolves to no declared [[archive-file]] row"
+                            .format(pid))
+        elif not any(pid in (a.get("predecessor-clause-ids") or []) for a in arows):
+            findings.append("predecessor {!r}: its [[archive-file]] row does not list it in "
+                            "predecessor-clause-ids (bidirectional resolution)".format(pid))
+        # C5: RECOMPUTE the resolved payload's digest (archive identity), never trust row-to-row equality.
+        try:
+            data = (Path(archive_root) / sha / "payload").read_bytes()
+        except OSError as exc:
+            raise GateError("unreadable archive payload for predecessor {!r} ({})".format(pid, exc))
+        if hashlib.sha256(data).hexdigest() != sha:
+            findings.append("predecessor {!r}: recomputed archived payload digest does not equal its "
+                            "archive-sha256 (archive identity)".format(pid))
+            continue                                       # wrong bytes: a span check against them is moot
         text = row.get("canonical-text", "")
         if not text:
             findings.append("predecessor {!r}: empty canonical-text".format(pid))
-        elif sha:
+        else:                                              # C5: ALWAYS run the span check (never behind elif sha)
             findings += _check_predecessor_span(pid, row, archive_root, sha, text)
     return findings
 
 
 def _whole_line_window(text, start, end):
     """The byte-exact whole-line window [start, end] (1-based inclusive) of text, or None when the range
-    exceeds the file. Lines are split on LF (3.2 byte-literal, no normalization); the window runs from the
-    start of start-line through the end of end-line, WITHOUT a trailing LF, so it is the canonical text
-    the 7.2 tight window records."""
+    exceeds the file's actual content lines. Lines are split on LF (3.2 byte-literal, no normalization);
+    the window runs from the start of start-line through the end of end-line, WITHOUT a trailing LF, so it
+    is the canonical text the 7.2 tight window records. A terminating LF yields a trailing empty element
+    that is NOT a real content line; end-line must never address that PHANTOM element beyond the file's
+    actual content lines (claude N2), so a single trailing empty element is dropped from the addressable
+    range."""
     lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
     if start < 1 or end > len(lines):
         return None
     return "\n".join(lines[start - 1:end])
@@ -162,13 +214,20 @@ def check_completeness(cw):
     findings = []
     if er.get("verdict") != _VERDICT_COMPLETE:
         findings.append("completeness verdict missing or not the fixed token {!r}".format(_VERDICT_COMPLETE))
+    # C6: each identity field must be a NON-EMPTY, NON-WHITESPACE string (a whitespace-only or non-string
+    # value never passes vacuously); distinctness compares the STRIPPED canonical values.
+    vals = {}
     for field in ("enumerator", "enumerator-family", "reviewer", "reviewer-family"):
-        if not er.get(field):
-            findings.append("completeness review: {} is absent (identity floor, 8.2/8.5)".format(field))
-    if er.get("enumerator") and er.get("reviewer") and er.get("reviewer") == er.get("enumerator"):
+        v = er.get(field)
+        if not (isinstance(v, str) and v.strip()):
+            findings.append("completeness review: {} is absent or not a non-empty string (identity floor, "
+                            "8.2/8.5)".format(field))
+        else:
+            vals[field] = v.strip()
+    if "enumerator" in vals and "reviewer" in vals and vals["reviewer"] == vals["enumerator"]:
         findings.append("completeness reviewer is identical to the enumerator")
-    if (er.get("enumerator-family") and er.get("reviewer-family")
-            and er.get("reviewer-family") == er.get("enumerator-family")):
+    if ("enumerator-family" in vals and "reviewer-family" in vals
+            and vals["reviewer-family"] == vals["enumerator-family"]):
         findings.append("completeness reviewer family is identical to the enumerator family")
     return findings
 
@@ -221,13 +280,19 @@ def check_verdict(row):
     problems = []
     if row.get("semantic-verdict") != _VERDICT_SEMANTIC:
         problems.append("verdict token missing or not {!r}".format(_VERDICT_SEMANTIC))
+    # C6: each identity field must be a NON-EMPTY, NON-WHITESPACE string (a whitespace-only value like
+    # " " or a truthy non-string never passes vacuously); distinctness compares STRIPPED canonical values.
+    vals = {}
     for field in ("author", "author-family", "reviewer", "reviewer-family"):
-        if not row.get(field):
-            problems.append("{} is absent (identity floor, 8.5)".format(field))
-    if row.get("author") and row.get("reviewer") and row.get("reviewer") == row.get("author"):
+        v = row.get(field)
+        if not (isinstance(v, str) and v.strip()):
+            problems.append("{} is absent or not a non-empty string (identity floor, 8.5)".format(field))
+        else:
+            vals[field] = v.strip()
+    if "author" in vals and "reviewer" in vals and vals["reviewer"] == vals["author"]:
         problems.append("reviewer is identical to the author")
-    if (row.get("author-family") and row.get("reviewer-family")
-            and row.get("reviewer-family") == row.get("author-family")):
+    if ("author-family" in vals and "reviewer-family" in vals
+            and vals["reviewer-family"] == vals["author-family"]):
         problems.append("reviewer family is identical to the author family")
     return problems
 
@@ -264,15 +329,27 @@ def pointer_warnings(cw):
 
 
 def check_unit_coverage(root, cw):
-    """9.1 (DISCLOSED-PARTIAL): every COMPLETE journal transaction must name a unit and touch only mapped
-    predecessors, and the crosswalk must have at least one component when a completed cutover exists. The
-    FULL op-set-to-component equality is deferred: the current data model carries no canonical component
-    id on a transaction (the plan flags this as a build reconciliation), so this leg proves coverage
-    SANITY, not exact equality, and discloses that residual rather than implying the stronger guarantee."""
+    """9.1 (C7): each executed (COMPLETE) cutover transaction MUST have covered a WHOLE crosswalk
+    component. do_cutover binds a cutover to a real connected component (rejecting an unknown --unit) and
+    records the component's mapped predecessor set in the INTENT header; this leg re-derives the canonical
+    components from the crosswalk (the SAME components() the engine used) and FAILs a completed cutover
+    whose named unit is not a component, or whose recorded component-predecessor set does not equal that
+    component's mapped predecessor set (a per-file / partial-component promotion). un-adopt reversals are
+    exempt (they reverse a prior cutover, not a component).
+
+    DISCLOSED RESIDUAL (disclose-guard-residuals): the binding is at CLAUSE-ID granularity. The gate ties
+    the transaction's DECLARED whole-component membership to the crosswalk's components; the data model
+    carries no map from individual file OPS to clause-ids, so the gate does not cross-check each file op
+    against a clause-id. An engine-produced transaction always records the full component (do_cutover
+    derives it from components(), never a subset), so this catches an unknown unit and a tampered or
+    hand-written partial-component header; a forged header claiming a whole component it did not touch is
+    outside this clause-level binding, exactly as the journal's accident-recovery model is."""
     journal_root = root / JOURNAL_REL
     if not journal_root.is_dir():
         return []
     findings = []
+    component_preds = {key: sorted({m.get("predecessor-clause-id") for m in rows})
+                       for key, rows in components(cw).items()}
     have_completed = False
     for entry in sorted(journal_root.iterdir()):
         if not entry.is_dir():
@@ -282,12 +359,26 @@ def check_unit_coverage(root, cw):
         except _journal.JournalError as exc:
             raise GateError("corrupt journal transaction {} ({})".format(entry.name, exc))
         types = [t for t, _ in frames]
-        if _journal.F_COMPLETE in types:
-            have_completed = True
-            intent = _journal._first(frames, _journal.F_INTENT)
-            header = (intent or {}).get("header", {})
-            if not header.get("unit") and header.get("kind") != "un-adopt":
-                findings.append("terminal transaction {} names no unit (9.1)".format(entry.name))
+        if _journal.F_COMPLETE not in types:
+            continue
+        intent = _journal._first(frames, _journal.F_INTENT)
+        header = (intent or {}).get("header", {})
+        if header.get("kind") == "un-adopt":
+            continue
+        have_completed = True
+        unit = header.get("unit")
+        if not unit:
+            findings.append("terminal transaction {} names no unit (9.1)".format(entry.name))
+            continue
+        if unit not in component_preds:
+            findings.append("terminal transaction {} names unit {!r} which is not a connected component "
+                            "of the crosswalk (9.1)".format(entry.name, unit))
+            continue
+        recorded = sorted(header.get("component-predecessors") or [])
+        if recorded != component_preds[unit]:
+            findings.append("terminal transaction {} did not cover the whole component {!r}: its recorded "
+                            "predecessor set {} does not equal the component's mapped predecessor set {} "
+                            "(9.1)".format(entry.name, unit, recorded, component_preds[unit]))
     if have_completed and not cw.get("mapping"):
         findings.append("a completed cutover exists but the crosswalk has no mapping rows (9.1)")
     return findings
@@ -313,7 +404,10 @@ def run(root):
                         "malformed, never dormant)".format(
                             MIGRATION_REL if mig else (ARCHIVE_REL if arc else PIN_REL), CROSSWALK_REL))
     cw = _load_toml(cw_path)
-    inv_rows = _load_toml(root / INVENTORY_REL).get("clause", [])
+    _validate_row_container(cw, CROSSWALK_REL, ("archive-file", "predecessor", "mapping", "pointer-hint"))
+    inv_doc = _load_toml(root / INVENTORY_REL)
+    _validate_row_container(inv_doc, INVENTORY_REL, ("clause",))
+    inv_rows = inv_doc.get("clause", [])
     inventory = {r.get("clause-id"): r for r in inv_rows}
     archive_root = root / ARCHIVE_REL
     findings = []
@@ -595,6 +689,126 @@ def self_test():
                                    [_LEGACY_ONE, _LEGACY_TWO], inv)
         if run_quiet(malformed) != 2:
             failures.append("malformed crosswalk TOML expected exit 2")
+        n += 1
+
+        # C5: an empty archive-sha256 (with an empty source-digest) BYPASSED the old span gate ("" == "");
+        # it now FAILs. Target only the p1 predecessor row (clause-id is unique to it).
+        def _c5(mut):
+            root = _build_install(tmp / ("c5-{}".format(n)), mut(base_text), [_LEGACY_ONE, _LEGACY_TWO], inv)
+            return run_quiet(root)
+
+        empty_sha = (base_text
+                     .replace('clause-id = "{}"\narchive-sha256 = "{}"'.format(p1, s1),
+                              'clause-id = "{}"\narchive-sha256 = ""'.format(p1))
+                     .replace('source-digest = "{}"'.format(s1), 'source-digest = ""'))
+        if _c5(lambda _t: empty_sha) != 1:
+            failures.append("C5: an empty archive-sha256 must FAIL (span gate never bypassed by '' == '')")
+        n += 1
+        # uppercase sha: not a 64-hex LOWERCASE value -> FAIL (old code reached an unreadable payload).
+        upper_sha = (base_text
+                     .replace('clause-id = "{}"\narchive-sha256 = "{}"'.format(p1, s1),
+                              'clause-id = "{}"\narchive-sha256 = "{}"'.format(p1, s1.upper()))
+                     .replace('source-digest = "{}"'.format(s1), 'source-digest = "{}"'.format(s1.upper())))
+        if _c5(lambda _t: upper_sha) != 1:
+            failures.append("C5: an uppercase archive-sha256 must FAIL (64-hex lowercase required)")
+        n += 1
+        # a predecessor whose hash is NOT listed in any [[archive-file]] row FAILs bidirectional resolution.
+        not_in_archive = base_text.replace('predecessor-clause-ids = ["{}"]'.format(p1),
+                                            'predecessor-clause-ids = ["pre-000000000000.9"]')
+        if _c5(lambda _t: not_in_archive) != 1:
+            failures.append("C5: a predecessor hash not listed in [[archive-file]] must FAIL")
+        n += 1
+
+        # C5 (claude N2): a trailing-newline PHANTOM end-line (end-line addressing the empty element a
+        # terminating LF produces, beyond the file's real content lines) FAILs; the correct in-range span
+        # passes. The old split-on-LF window let end-line = content+1 address that phantom.
+        phantom = "Alpha\nBeta\n"                          # 2 content lines + terminating LF -> phantom "" 3rd
+        phsha = _sha(phantom)
+        php = "pre-{}.1".format(phsha[:12])
+
+        def _phantom_crosswalk(end, canonical):
+            rows = ['schema-version = 1', '',
+                    '[enumeration-review]', 'enumerator = "ann"', 'enumerator-family = "claude"',
+                    'verdict = "complete"', 'rationale = "x"', 'reviewer = "bob"',
+                    'reviewer-family = "codex"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '',
+                    '[[archive-file]]', 'legacy-path = "p.md"', 'archive-sha256 = "{}"'.format(phsha),
+                    'size = {}'.format(len(phantom.encode())),
+                    'predecessor-clause-ids = ["{}"]'.format(php), '',
+                    '[[predecessor]]', 'clause-id = "{}"'.format(php),
+                    'archive-sha256 = "{}"'.format(phsha),
+                    'start-line = 1', 'end-line = {}'.format(end),
+                    'canonical-text = "{}"'.format(canonical),
+                    'source-digest = "{}"'.format(phsha), '',
+                    '[[mapping]]', 'predecessor-clause-id = "{}"'.format(php),
+                    'successor-clause-id = "succ.a"', 'successor-quote = "{}"'.format(_SUCC_A),
+                    'author = "carol"', 'author-family = "claude"',
+                    'semantic-verdict = "equal-or-stronger"', 'rationale = "x"', 'reviewer = "dave"',
+                    'reviewer-family = "gemini"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '']
+            return "\n".join(rows) + "\n"
+
+        bad_phantom = _build_install(tmp / "phantom-bad", _phantom_crosswalk(3, "Alpha\\nBeta\\n"),
+                                     [phantom], inv)
+        if run_quiet(bad_phantom) != 1:
+            failures.append("C5: a phantom trailing-newline end-line expected FAIL (1)")
+        n += 1
+        ok_phantom = _build_install(tmp / "phantom-ok", _phantom_crosswalk(2, "Alpha\\nBeta"),
+                                    [phantom], inv)
+        if run_quiet(ok_phantom) != 0:
+            failures.append("C5: a correct in-range end-line expected PASS (0)")
+        n += 1
+
+        # C6: whitespace-only and non-string identity fields FAIL (they passed vacuously before); a
+        # stripped-identical reviewer collides with the author. Valid rows still pass (covered by clean).
+        for label, mut in (
+                ("whitespace mapping author",
+                 lambda t: t.replace('author = "carol"', 'author = " "')),
+                ("non-string mapping author",
+                 lambda t: t.replace('author = "carol"', 'author = 5')),
+                ("stripped-identical reviewer",
+                 lambda t: t.replace('reviewer = "dave"', 'reviewer = " carol "')),
+                ("whitespace completeness enumerator",
+                 lambda t: t.replace('enumerator = "ann"', 'enumerator = " "'))):
+            root = _build_install(tmp / ("c6-" + label.replace(" ", "_")), mut(base_text),
+                                  [_LEGACY_ONE, _LEGACY_TWO], inv)
+            if run_quiet(root) != 1:
+                failures.append("C6: {} expected FAIL (1)".format(label))
+            n += 1
+
+        # C7: a COMPLETE journal transaction must cover a WHOLE crosswalk component. A whole-component txn
+        # PASSes; a partial (subset) membership or an unknown unit FAILs the 9.1 leg.
+        def _write_journal_txn(root, name, header):
+            td = root / JOURNAL_REL / name
+            td.mkdir(parents=True, exist_ok=True)
+            _journal.publish(td, _journal.F_INTENT, {"txn": name, "header": header, "ops": []})
+            _journal.publish(td, _journal.F_COMPLETE, {"txn": name})
+
+        c7ok = _build_install(tmp / "c7-ok", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        groups7 = components(_load_toml(c7ok / CROSSWALK_REL))
+        ukey = sorted(groups7)[0]
+        wpreds = sorted({m["predecessor-clause-id"] for m in groups7[ukey]})
+        _write_journal_txn(c7ok, "txn.ok", {"unit": ukey, "kind": "cutover",
+                                            "component-predecessors": wpreds})
+        if run_quiet(c7ok) != 0:
+            failures.append("C7: a whole-component cutover expected PASS (0)")
+        n += 1
+        c7part = _build_install(tmp / "c7-partial", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write_journal_txn(c7part, "txn.partial", {"unit": ukey, "kind": "cutover",
+                                                   "component-predecessors": wpreds[:1]})
+        if run_quiet(c7part) != 1:
+            failures.append("C7: a partial-component cutover expected FAIL (1)")
+        n += 1
+        c7unk = _build_install(tmp / "c7-unknown", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write_journal_txn(c7unk, "txn.unknown", {"unit": "not-a-component", "kind": "cutover",
+                                                  "component-predecessors": []})
+        if run_quiet(c7unk) != 1:
+            failures.append("C7: an unknown-unit cutover expected FAIL (1)")
+        n += 1
+
+        # codex: a non-dict row container is a GateError (exit 2), never an uncaught AttributeError.
+        badrow = _build_install(tmp / "badrow", 'schema-version = 1\narchive-file = ["x"]\n',
+                                [_LEGACY_ONE, _LEGACY_TWO], inv)
+        if run_quiet(badrow) != 2:
+            failures.append("codex: a non-dict archive-file row expected exit 2")
         n += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

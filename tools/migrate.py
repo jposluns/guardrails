@@ -81,6 +81,13 @@ def components(crosswalk):
     return groups
 
 
+def _component_membership(rows):
+    """The mapped predecessor and successor clause-id sets of one component (9.1), sorted and unique, as
+    recorded in the cutover INTENT header and gated by check_crosswalk's whole-component-coverage leg."""
+    return {"predecessors": sorted({m["predecessor-clause-id"] for m in rows}),
+            "successors": sorted({m["successor-clause-id"] for m in rows})}
+
+
 def load_crosswalk(root):
     path = root / CROSSWALK_REL
     try:
@@ -173,24 +180,29 @@ def _require_quiescence(staged):
 # --- subcommands --------------------------------------------------------------------------------------
 
 def _open_root_fd(root):
-    return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    # O_NOFOLLOW binds the adopter root itself against a final-component symlink swap (codex crash-safety
+    # hardening): a root whose final component is a symlink is refused rather than followed off-tree.
+    return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
 def _claim_recover_lock(journal_root):
-    """Atomically claim the journal lock for recovery (fix #3). Returns 'acquired' when this process now
-    owns the lock (the lock was absent, or a confirmed-dead stale lock was broken and re-acquired), or
-    'possibly-live' when a lock whose owner may still be alive holds it (never seized, the concurrency-
-    lease rule). Fail-closed (JournalError) on an unreadable lock or a lost stale-break race (another
-    recover re-created the lock first, so acquire_lock's O_EXCL fails rather than seizing it)."""
+    """Atomically claim the journal lock for recovery (fix #3, hardened for C1). Returns 'acquired' when
+    this process now owns the lock (the lock was absent, or a confirmed-dead stale lock was broken and
+    re-acquired), or 'possibly-live' when a lock whose owner may still be alive holds it (never seized,
+    the concurrency-lease rule). The confirmed-dead break-and-reacquire is SERIALIZED under a kernel
+    arbitration lock (break_stale_and_acquire, C1), which re-reads the CURRENT owner and never unlinks a
+    lock a concurrent recoverer already re-acquired live. Fail-closed (JournalError) on an unreadable lock
+    or a lost O_EXCL race."""
     owner = _journal.read_lock_owner(journal_root)
     if owner is None:
         _journal.acquire_lock(journal_root, session_id="recover")
         return "acquired"
     if not _journal.owner_confirmed_dead(owner):
         return "possibly-live"
-    _journal.break_stale_lock(journal_root, owner)        # confirmed dead: break then re-acquire (O_EXCL)
-    _journal.acquire_lock(journal_root, session_id="recover")
-    return "acquired"
+    # Confirmed dead: serialize the break+reacquire so two recoverers cannot race one deleting the other's
+    # freshly-acquired LIVE lock (C1). break_stale_and_acquire re-reads the current owner under a kernel
+    # lock and breaks ONLY a still-confirmed-dead current lock.
+    return _journal.break_stale_and_acquire(journal_root, session_id="recover")
 
 
 def do_plan(root):
@@ -214,6 +226,15 @@ def do_cutover(root, staged, unit):
         _assert_off_path(root, staged)
         _require_quiescence(staged)
         ops = _read_staged_plan(staged)
+        # C7: bind the cutover to a REAL connected component of the crosswalk (9.1). Reject an unknown
+        # --unit BEFORE locking (exit 2), and record the component's mapped predecessor/successor
+        # clause-id set in the INTENT header so check_crosswalk can gate whole-component coverage.
+        cw = load_crosswalk(root)
+        groups = components(cw)
+        if unit not in groups:
+            raise RefuseError("unknown --unit {!r}: not a connected component of the crosswalk; run "
+                              "`plan` to list units (9.1)".format(unit))
+        member = _component_membership(groups[unit])
     except RefuseError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -227,7 +248,9 @@ def do_cutover(root, staged, unit):
         except _journal.JournalError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
-        header = {"unit": unit, "kind": "cutover"}
+        header = {"unit": unit, "kind": "cutover",
+                  "component-predecessors": member["predecessors"],
+                  "component-successors": member["successors"]}
         txn_dir = journal_root / txn_id
         try:
             _journal.run_transaction(root_fd, journal_root, txn_id, header, ops,
@@ -242,18 +265,24 @@ def do_cutover(root, staged, unit):
 
 
 def _settle_failed_transaction(journal_root, txn_dir, exc, what):
-    """A JournalError escaped run_transaction: either an apply/prestate failure whose rollback reached a
-    terminal ROLLBACK-COMPLETE, or a rollback that ITSELF failed (a _restore_preimage error) and left the
-    journal non-terminal. Distinguish the two by the DURABLE terminal state (is_terminal), never by
-    assumption (fix #4). If a terminal rollback was published, the tree is back at its prestate: release
-    the lock and report the clean rollback, exit 2. If NOT (the rollback failed or the journal is
-    unreadable), the transaction is left open and fail-closed under the RETAINED lock for a later recover,
-    no rollback is claimed, exit 2."""
+    """A JournalError escaped run_transaction. Classify the VALIDATED journal state via the C2 state
+    machine (classify_state), never a bare is_terminal that reads True on a NO-INTENT journal and so
+    falsely reports a pre-INTENT failure as 'rolled back' (C4). Three cases:
+      (a) 'nothing-opened' (pre-INTENT / capture-phase failure, nothing applied): release the lock and
+          report 'aborted before opening (no change applied)', NOT rolled back, exit 2;
+      (b) 'rolled-back' ([INTENT,RIP,RC] terminal rollback, tree back at its prestate): release the lock
+          and report the clean rollback, exit 2;
+      (c) otherwise ('open': the rollback itself failed, or an unreadable/invalid journal): RETAIN the
+          lock, leave the transaction open for a later `recover`, claim no rollback, exit 2."""
     try:
-        terminal = _journal.is_terminal(txn_dir)
+        state = _journal.classify_state(txn_dir)
     except _journal.JournalError:
-        terminal = False                                  # unreadable journal: not a confirmed rollback
-    if terminal:
+        state = "open"                                    # unreadable/invalid journal: fail-closed, retain lock
+    if state == "nothing-opened":
+        _journal.release_lock(journal_root)
+        print("error: {} aborted before opening (no change applied) ({}); fail-closed".format(what, exc),
+              file=sys.stderr)
+    elif state == "rolled-back":
         _journal.release_lock(journal_root)
         print("error: {} aborted and rolled back ({}); fail-closed".format(what, exc), file=sys.stderr)
     else:
@@ -502,6 +531,19 @@ _CASES = {
 }
 
 
+_SELFTEST_UNIT = "p:p"   # the components() key of the one-mapping crosswalk each case ships (C7 binding)
+
+
+def _write_selftest_crosswalk(root):
+    """Ship a minimal crosswalk (one mapping p->s) so do_cutover's C7 component binding resolves the
+    self-test unit; components() keys the single component 'p:p'. It lives under .aiqt, which _snapshot
+    excludes, so it never perturbs a pre/post tree comparison."""
+    cw = root / CROSSWALK_REL
+    cw.parent.mkdir(parents=True, exist_ok=True)
+    cw.write_text('schema-version = 1\n\n[[mapping]]\n'
+                  'predecessor-clause-id = "p"\nsuccessor-clause-id = "s"\n', encoding="utf-8")
+
+
 def _build_case_root(base, case):
     root = base
     root.mkdir(parents=True, exist_ok=True)
@@ -515,6 +557,7 @@ def _build_case_root(base, case):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(data)
         os.chmod(f, mode)
+    _write_selftest_crosswalk(root)                       # C7: a real component for the cutover to bind to
     return root
 
 
@@ -622,7 +665,7 @@ def self_test():
             broot = _build_case_root(tmp / (case + "-base") / "root", case)
             bstaged = _build_staged(tmp / (case + "-base") / "staged", case)
             pre = _snapshot(broot)
-            if _run(["cutover", "--root", str(broot), "--staged", str(bstaged), "--unit", "u1"]) != 0:
+            if _run(["cutover", "--root", str(broot), "--staged", str(bstaged), "--unit", _SELFTEST_UNIT]) != 0:
                 failures.append("{}: clean cutover expected exit 0".format(case))
             post = _snapshot(broot)
             baselines[case] = (pre, post)
@@ -635,7 +678,7 @@ def self_test():
             for point in _kill_points(case):
                 iroot = _build_case_root(tmp / case / point.replace(":", "_") / "root", case)
                 istaged = _build_staged(tmp / case / point.replace(":", "_") / "staged", case)
-                rc = _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", "u1"],
+                rc = _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", _SELFTEST_UNIT],
                           kill=point)
                 if rc != 137:
                     failures.append("{} @ {}: cutover expected to die (137), got {}".format(case, point, rc))
@@ -663,7 +706,7 @@ def self_test():
             for rpoint in _rollback_kill_points(n):
                 iroot = _build_case_root(tmp / (case + "-rb") / rpoint.replace(":", "_") / "root", case)
                 istaged = _build_staged(tmp / (case + "-rb") / rpoint.replace(":", "_") / "staged", case)
-                if _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", "u1"],
+                if _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", _SELFTEST_UNIT],
                         kill=mid) != 137:
                     failures.append("{} rb {}: setup cutover expected to die at {}".format(case, rpoint, mid))
                     continue
@@ -694,7 +737,7 @@ def self_test():
                 point = "torn-payload:{}".format(i)
                 iroot = _build_case_root(tmp / (case + "-tp") / "op-{}".format(i) / "root", case)
                 istaged = _build_staged(tmp / (case + "-tp") / "op-{}".format(i) / "staged", case)
-                rc = _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", "u1"],
+                rc = _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", _SELFTEST_UNIT],
                           kill=point)
                 if rc != 137:
                     failures.append("{} @ {}: cutover expected to die (137), got {}".format(case, point, rc))
@@ -717,7 +760,7 @@ def self_test():
             uroot = _build_case_root(tmp / (case + "-unadopt") / "root", case)
             ustaged = _build_staged(tmp / (case + "-unadopt") / "staged", case)
             pre = _snapshot(uroot)
-            if _run(["cutover", "--root", str(uroot), "--staged", str(ustaged), "--unit", "u1"]) != 0:
+            if _run(["cutover", "--root", str(uroot), "--staged", str(ustaged), "--unit", _SELFTEST_UNIT]) != 0:
                 failures.append("{} un-adopt: setup cutover expected exit 0".format(case))
                 continue
             txn = _latest_txn(uroot)
@@ -734,12 +777,12 @@ def self_test():
         froot = _build_case_root(tmp / "fc" / "root", "flat-files")
         fstaged = _build_staged(tmp / "fc" / "staged", "flat-files")
         (fstaged / "quiescence.ok").unlink()
-        if _run(["cutover", "--root", str(froot), "--staged", str(fstaged), "--unit", "u1"]) != 2:
+        if _run(["cutover", "--root", str(froot), "--staged", str(fstaged), "--unit", _SELFTEST_UNIT]) != 2:
             failures.append("missing quiescence evidence expected exit 2 (refused)")
         checked += 1
         onpath = _build_case_root(tmp / "onpath" / "root", "flat-files")
         instaged = _build_staged(onpath / "inside-staged", "flat-files")
-        if _run(["cutover", "--root", str(onpath), "--staged", str(instaged), "--unit", "u1"]) != 2:
+        if _run(["cutover", "--root", str(onpath), "--staged", str(instaged), "--unit", _SELFTEST_UNIT]) != 2:
             failures.append("an on-path staged tree expected exit 2 (refused)")
         checked += 1
 
@@ -755,7 +798,7 @@ def self_test():
         # (G) A mid-log (non-tail) corrupt frame is a FAIL, never skipped: status fails closed (exit 2).
         croot = _build_case_root(tmp / "corrupt" / "root", "flat-files")
         cstaged = _build_staged(tmp / "corrupt" / "staged", "flat-files")
-        _run(["cutover", "--root", str(croot), "--staged", str(cstaged), "--unit", "u1"])
+        _run(["cutover", "--root", str(croot), "--staged", str(cstaged), "--unit", _SELFTEST_UNIT])
         ctxn = _latest_txn(croot)
         log = croot / JOURNAL_REL / ctxn / "frames.log"
         raw = bytearray(log.read_bytes())
@@ -777,7 +820,7 @@ def self_test():
             mid = "after-apply-{}".format(nops - 2)         # d/e/f and d/e removed, d not yet: rolls back
             iroot = _build_case_root(tmp / "mode-resume" / "root", case)
             istaged = _build_staged(tmp / "mode-resume" / "staged", case)
-            if _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", "u1"],
+            if _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", _SELFTEST_UNIT],
                     kill=mid) != 137:
                 failures.append("mode-resume: setup cutover expected to die at {}".format(mid))
             elif _run(["recover", "--root", str(iroot)], kill="torn-mode:1") != 137:
@@ -831,7 +874,7 @@ def self_test():
         aroot = _build_case_root(tmp / "absentlock" / "root", "flat-files")
         astaged = _build_staged(tmp / "absentlock" / "staged", "flat-files")
         an = len(_CASES["flat-files"]["ops"])
-        _run(["cutover", "--root", str(aroot), "--staged", str(astaged), "--unit", "u1"],
+        _run(["cutover", "--root", str(aroot), "--staged", str(astaged), "--unit", _SELFTEST_UNIT],
              kill="after-apply-{}".format(max(0, an - 2)))  # crash mid-apply: an OPEN txn plus a stale lock
         (aroot / JOURNAL_REL / "lock").unlink()             # remove the lock: recover must claim the absent one
         if _run(["recover", "--root", str(aroot)]) != 0:
@@ -861,7 +904,7 @@ def self_test():
         _journal._restore_preimage = _boom
         try:
             with redirect_stderr(buf):
-                rc = do_cutover(Path(rbroot).resolve(), rbstaged.resolve(), "u1")
+                rc = do_cutover(Path(rbroot).resolve(), rbstaged.resolve(), _SELFTEST_UNIT)
         finally:
             _journal._restore_preimage = orig_restore
         jr = Path(rbroot) / JOURNAL_REL
@@ -892,6 +935,136 @@ def self_test():
         _journal.publish(mtxn, _journal.F_COMPLETE, {"txn": "B"})
         if _run(["recover", "--root", str(mroot)]) != 2:
             failures.append("fix2: a mismatched-txn terminal frame must fail closed (exit 2)")
+        checked += 1
+
+        # (L) C2 accepted-sequence state machine: sequences the OLD ad-hoc checks let through are now
+        #     rejected by the explicit accepted-sequence set, from the SAME validator recover() and
+        #     is_terminal() use. TWO NULL-TXN INTENTs (the old `intent_txn is not None` sentinel missed
+        #     them) and RC-BEFORE-RIP (the old check only required RIP "somewhere", never before RC).
+        for label, frames_spec in (
+                ("two null-txn INTENTs",
+                 [(_journal.F_INTENT, {"txn": None, "header": {}, "ops": []}),
+                  (_journal.F_INTENT, {"txn": None, "header": {}, "ops": []})]),
+                ("RC before RIP",
+                 [(_journal.F_INTENT, {"txn": "A", "header": {}, "ops": []}),
+                  (_journal.F_RC, {"txn": "A"}),
+                  (_journal.F_RIP, {"txn": "A"})])):
+            stxn = tmp / "c2" / label.replace(" ", "_")
+            stxn.mkdir(parents=True)
+            for ftype, obj in frames_spec:
+                _journal.publish(stxn, ftype, obj)
+            try:
+                _journal.classify_state(stxn)
+                failures.append("C2: {} must be rejected by the state machine".format(label))
+            except _journal.JournalError:
+                pass
+            checked += 1
+        # is_terminal invokes the SAME validator (C2): an INTENT then RC (no preceding RIP) is not an
+        # accepted sequence, so is_terminal fails closed there too, classifying identically to recover.
+        itxn = tmp / "c2-isterm"
+        itxn.mkdir(parents=True)
+        _journal.publish(itxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+        _journal.publish(itxn, _journal.F_RC, {"txn": "A"})
+        try:
+            _journal.is_terminal(itxn)
+            failures.append("C2: is_terminal must reject an invalid frame sequence (same validator)")
+        except _journal.JournalError:
+            pass
+        checked += 1
+
+        # (M) C3: COMPLETE means the poststate was installed. A staged payload whose bytes do NOT match the
+        #     INTENT poststate content-sha256 (the staged tree changed after planning) must FAIL CLOSED and
+        #     roll back to the prestate, never publishing a false COMPLETE.
+        c3root = _build_case_root(tmp / "c3" / "root", "flat-files")   # has dataA = old-A\n
+        c3jr = c3root / JOURNAL_REL
+        c3jr.mkdir(parents=True, exist_ok=True)
+        c3fd = os.open(str(c3root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            planned = {"op": "write", "path": "dataA",
+                       "poststate": {"kind": "file",
+                                     "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
+            pre3 = _snapshot(c3root)
+            try:
+                _journal.run_transaction(c3fd, c3jr, "c3txn", {"unit": "x", "kind": "cutover"},
+                                         [planned], lambda op: b"MUTATED-A\n", session_id="c3")
+                failures.append("C3: a staged/INTENT digest mismatch must raise (no false COMPLETE)")
+            except _journal.JournalError:
+                pass
+            ftypes = [t for t, _ in _journal.read_frames(c3jr / "c3txn")[0]]
+            if _journal.F_COMPLETE in ftypes:
+                failures.append("C3: a digest mismatch must NEVER publish COMPLETE")
+            if _snapshot(c3root) != pre3:
+                failures.append("C3: a digest mismatch must roll back to the prestate exactly")
+        finally:
+            os.close(c3fd)
+        checked += 1
+
+        # (N) C4: a PRE-INTENT / capture-phase failure (a write op on an absent path fails in
+        #     capture_preimages, before any INTENT) reports 'aborted before opening', NOT 'rolled back',
+        #     and RELEASES the lock (is_terminal would have read True on the no-INTENT journal and falsely
+        #     claimed a rollback).
+        c4root = _build_case_root(tmp / "c4" / "root", "flat-files")
+        c4staged = tmp / "c4" / "staged"
+        (c4staged / "payload").mkdir(parents=True)
+        (c4staged / "quiescence.ok").write_text("ok\n", encoding="utf-8")
+        (c4staged / "payload" / "ghost").write_bytes(b"nope\n")
+        (c4staged / "plan.json").write_text(json.dumps({"ops": [{"op": "write", "path": "ghost"}]}),
+                                            encoding="utf-8")
+        buf4 = io.StringIO()
+        with redirect_stderr(buf4):
+            rc4 = do_cutover(c4root.resolve(), c4staged.resolve(), _SELFTEST_UNIT)
+        out4 = buf4.getvalue()
+        if rc4 != 2:
+            failures.append("C4: a pre-INTENT capture failure must exit 2")
+        if (c4root / JOURNAL_REL / "lock").exists():
+            failures.append("C4: a pre-INTENT failure must RELEASE the lock")
+        if "aborted before opening" not in out4:
+            failures.append("C4: a pre-INTENT failure must report 'aborted before opening'")
+        if "rolled back" in out4:
+            failures.append("C4: a pre-INTENT failure must NOT be reported as rolled back")
+        checked += 1
+
+        # (O) C1: break_stale_and_acquire never unlinks a live current lock. Seed a LIVE lock owned by THIS
+        #     process, then attempt a stale-break: it re-reads the current owner under the arbitration lock,
+        #     finds it live, and refuses (possibly-live), leaving the live lock intact. The old code
+        #     re-confirmed the STALE owner and would have unlinked whatever lock was there (the race).
+        c1jr = tmp / "c1" / JOURNAL_REL
+        c1jr.mkdir(parents=True)
+        _journal.acquire_lock(c1jr, session_id="live-holder")
+        res1 = _journal.break_stale_and_acquire(c1jr, session_id="recover")
+        if res1 != "possibly-live":
+            failures.append("C1: break_stale_and_acquire must report possibly-live for a live current lock")
+        if not (c1jr / "lock").exists():
+            failures.append("C1: break_stale_and_acquire must NEVER unlink a live current lock")
+        owner1 = _journal.read_lock_owner(c1jr)
+        if not (owner1 and owner1.get("pid") == os.getpid()):
+            failures.append("C1: the live current lock owner must be left unchanged")
+        _journal.release_lock(c1jr)
+        checked += 1
+
+        # (P) C7: an unknown --unit (not a connected component of the crosswalk) is REJECTED before locking
+        #     (exit 2), leaving no journal lock behind.
+        ukroot = _build_case_root(tmp / "unknown-unit" / "root", "flat-files")
+        ukstaged = _build_staged(tmp / "unknown-unit" / "staged", "flat-files")
+        if _run(["cutover", "--root", str(ukroot), "--staged", str(ukstaged),
+                 "--unit", "no-such-component"]) != 2:
+            failures.append("C7: an unknown --unit must be rejected (exit 2)")
+        if (ukroot / JOURNAL_REL / "lock").exists():
+            failures.append("C7: an unknown --unit must be rejected BEFORE locking")
+        checked += 1
+
+        # (Q) codex hardening: _open_root_fd binds the adopter root with O_NOFOLLOW, so a root whose final
+        #     component is a symlink is refused rather than followed off-tree; a real directory still opens.
+        realdir = tmp / "nofollow" / "real"
+        realdir.mkdir(parents=True)
+        linkdir = tmp / "nofollow" / "link"
+        os.symlink(str(realdir), str(linkdir))
+        try:
+            os.close(_open_root_fd(linkdir))
+            failures.append("codex: _open_root_fd must refuse a symlinked root (O_NOFOLLOW)")
+        except OSError:
+            pass
+        os.close(_open_root_fd(realdir))
         checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

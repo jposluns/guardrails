@@ -126,11 +126,15 @@ def archive_file(archive_root, data):
     entry.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(entry), prefix="payload.", suffix=".tmp")
     tmp = Path(tmp_name)
+    linked = False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())                         # temp bytes durable BEFORE the atomic publish
         try:
             os.link(str(tmp), str(payload))               # no-overwrite publish: fails if payload exists
+            linked = True
         except FileExistsError:                           # lost a publish race: accept only byte-equality
             existing = payload.read_bytes()
             if existing != data:
@@ -141,7 +145,17 @@ def archive_file(archive_root, data):
             os.unlink(str(tmp))
         except FileNotFoundError:
             pass
+    if linked:
+        _fsync_dir(entry)                                 # persist the published payload's directory entry
     return digest
+
+
+def _fsync_dir(path):
+    dfd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def parse_pointers(text):
