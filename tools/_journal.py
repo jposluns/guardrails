@@ -35,6 +35,9 @@ excludes a concurrent final-component swap; an arbitrary external writer mutatin
 open cutover is outside the transaction's control and outside this guarantee. Stale-lock liveness rests
 on kill(pid, 0) plus, on Linux, the /proc start-time; PID reuse on a platform without a readable start
 time is a residual, and any ambiguity always reads as possibly-live (the lock is never seized).
+Recovery trusts its own journal's checksummed framing: it validates that terminal frames agree with the
+INTENT on the txn id and rejects duplicate or out-of-order terminal records, but a crafted valid-checksum
+journal is outside the accident-recovery model (accident-detection, not tamper-resistance).
 
 Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malformed or read error.
 """
@@ -375,7 +378,50 @@ def owner_confirmed_dead(owner):
     return False
 
 
+def _owner_is_current(owner):
+    """True when the recorded lock owner identifies THIS running process: same uid and pid, and where a
+    /proc start-time was recorded and is readable, the same start-time (so a reused pid cannot
+    masquerade as the owner). The identity fields are exactly those acquire_lock writes."""
+    if not isinstance(owner, dict):
+        return False
+    if owner.get("uid") != os.getuid() or owner.get("pid") != os.getpid():
+        return False
+    recorded = owner.get("pid-start")
+    if recorded:
+        return recorded == _pid_start(os.getpid())
+    return True
+
+
 def release_lock(journal_root):
+    """Release the journal lock ONLY when it identifies THIS process (ownership-checked, 9.3 step 1): a
+    lock owned by another process is NEVER unlinked, so a foreign live lock is never deleted (the
+    concurrency-lease fail-safe). An absent lock is a clean no-op; an unreadable or malformed lock is left
+    in place (fail-closed, never blind-unlinked). Breaking a confirmed-dead stale lock is the caller's
+    explicit reconcile step (break_stale_lock), never this release path."""
+    journal_root = Path(journal_root)
+    lock = journal_root / "lock"
+    try:
+        owner = read_lock_owner(journal_root)
+    except JournalError:
+        return                                            # unreadable/malformed: never blind-unlink
+    if owner is None:
+        return                                            # already absent
+    if not _owner_is_current(owner):
+        return                                            # foreign lock: never delete a lock we do not own
+    try:
+        os.unlink(str(lock))
+    except FileNotFoundError:
+        return
+    _fsync_path_dir(journal_root)
+
+
+def break_stale_lock(journal_root, owner):
+    """Break a lock whose recorded owner is CONFIRMED DEAD (stale-lock recovery, 9.3 step 1). Re-confirms
+    death before unlinking (defence in depth): a lock not confirmed dead is NEVER broken. The caller
+    re-acquires via O_EXCL immediately after, so a racing writer that re-created the lock makes that
+    acquire fail closed rather than seizing a foreign lock."""
+    if not owner_confirmed_dead(owner):
+        raise JournalError("refusing to break a journal lock whose owner is not confirmed dead")
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
     try:
@@ -551,18 +597,33 @@ def _maybe_torn_payload(fd, data, i):
     fsync it, and die, leaving a torn (mid-write) payload for recovery to repair. Inert unless the
     self-test harness sets KILL_ENV."""
     if os.environ.get(KILL_ENV, "") == "torn-payload:{}".format(i) and data:
-        _write_all(fd, data[:max(1, len(data) // 2)])
+        _write_all(fd, data[:len(data) // 2])       # always a strict partial prefix (0..len-1 bytes), never the full payload
         os.fsync(fd)
+        os._exit(137)
+
+
+def _maybe_torn_mode(root_fd, relpath, i):
+    """Crash-injection between a rmdir-undo's mkdir and its chmod, when the harness targets op i: the
+    directory has just been recreated at a umask-reduced mode but its exact prestate mode is not yet set.
+    Fsync the parent so the recreated directory is durable, then die, so a fresh recover must re-apply the
+    prestate mode (idempotent mode-resume). Inert unless the self-test harness sets KILL_ENV."""
+    if os.environ.get(KILL_ENV, "") == "torn-mode:{}".format(i):
+        _fsync_parent(root_fd, relpath)
         os._exit(137)
 
 
 # --- restore (idempotent, contained) ------------------------------------------------------------------
 
-def _restore_preimage(txn_dir, root_fd, op):
+def _restore_preimage(txn_dir, root_fd, op, op_index=0):
     """Restore one op to its prestate, idempotently and contained. A no-op when the path already holds
     its prestate (including when a parent is still absent, so a create/mkdir undo whose subtree was
     never built is a clean no-op), so replaying a rollback is safe. Restores run in reverse dependency
-    order (reversed(ops)), so the parent a recreate needs has already been recreated when it runs."""
+    order (reversed(ops)), so the parent a recreate needs has already been recreated when it runs.
+    Fail-closed on an unexpected on-disk type: a mkdir undo that finds a NON-directory where it must
+    remove a created dir, and a rmdir undo that finds a non-directory where it must recreate a removed
+    dir, each raise JournalError rather than silently skipping (matching the write/remove non-regular
+    branch below). A rmdir undo whose directory ALREADY exists RE-APPLIES the prestate mode (idempotent
+    mode-resume), so a crash between the mkdir and the chmod leaves no umask-reduced mode behind."""
     txn_dir = Path(txn_dir)
     path, prestate, kind = op["path"], op["prestate"], op["op"]
     st = _lstat_contained(root_fd, path)                  # soft: None if the path OR a parent is absent
@@ -570,8 +631,6 @@ def _restore_preimage(txn_dir, root_fd, op):
         return                                            # already absent
     if kind == "mkdir" and st is None:
         return                                            # already absent
-    if kind == "rmdir" and st is not None:
-        return                                            # already present
     try:
         pfd, name = _open_parent(root_fd, path)
     except OSError as exc:
@@ -580,11 +639,20 @@ def _restore_preimage(txn_dir, root_fd, op):
         if kind == "create":                              # created file: delete it back to absence
             os.unlink(name, dir_fd=pfd)
         elif kind == "mkdir":                             # created dir: remove it back to absence
-            if stat.S_ISDIR(st.st_mode):
-                os.rmdir(name, dir_fd=pfd)
-        elif kind == "rmdir":                             # removed dir: recreate it with its mode
-            os.mkdir(name, prestate["mode"], dir_fd=pfd)
-            os.chmod(name, prestate["mode"], dir_fd=pfd, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode):
+                raise JournalError("cannot restore {!r}: expected a created directory to remove, found a "
+                                   "non-directory".format(path))
+            os.rmdir(name, dir_fd=pfd)
+        elif kind == "rmdir":                             # removed dir: recreate it (or re-apply its mode)
+            if st is None:                                # absent: recreate then set the exact mode
+                os.mkdir(name, prestate["mode"], dir_fd=pfd)
+                _maybe_torn_mode(root_fd, path, op_index)   # crash BETWEEN the mkdir and the chmod
+                os.chmod(name, prestate["mode"], dir_fd=pfd, follow_symlinks=False)
+            elif stat.S_ISDIR(st.st_mode):               # already recreated: re-apply the prestate mode
+                os.chmod(name, prestate["mode"], dir_fd=pfd, follow_symlinks=False)
+            else:                                        # a non-directory sits where the removed dir was
+                raise JournalError("cannot restore {!r}: expected a directory or absence, found a "
+                                   "non-directory".format(path))
         else:                                             # write or remove: recreate/rewrite prior bytes
             data = (txn_dir / "preimages" / prestate["payload"]).read_bytes()
             if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
@@ -601,6 +669,8 @@ def _restore_preimage(txn_dir, root_fd, op):
                     os.fsync(fd)
                 finally:
                     os.close(fd)
+            else:                                     # a racing external writer left a non-regular file where a regular file is expected: fail closed
+                raise JournalError("cannot restore {!r}: unexpected non-regular file at restore time".format(path))
         os.fsync(pfd)
     except OSError as exc:
         raise JournalError("cannot restore {!r} ({})".format(path, exc))
@@ -620,6 +690,35 @@ def _recreate_file(pfd, name, data, mode):
 
 # --- recovery (from the journal alone, both directions, idempotent) -----------------------------------
 
+def _validate_terminal_agreement(frames):
+    """Defence in depth (fix #2): a well-formed engine journal has exactly one INTENT, first, and terminal
+    frames (COMPLETE / ROLLBACK-IN-PROGRESS / ROLLBACK-COMPLETE) that agree with it on the txn id and
+    appear at most once. Reject a stray or crafted frame that disagrees on the txn id, duplicates a
+    terminal record, contradicts one (COMPLETE with a rollback record), or orders a terminal frame before
+    the INTENT. Recovery trusts its own checksummed framing; a crafted valid-checksum journal is outside
+    the accident-recovery model (see the module Guarantee-scope note). JournalError on any violation."""
+    intent_txn = None
+    counts = {F_INTENT: 0, F_COMPLETE: 0, F_RIP: 0, F_RC: 0}
+    for ftype, obj in frames:
+        counts[ftype] = counts.get(ftype, 0) + 1
+        txn = obj.get("txn") if isinstance(obj, dict) else None
+        if ftype == F_INTENT:
+            if intent_txn is not None:
+                raise JournalError("duplicate INTENT frame in journal")
+            intent_txn = txn
+        else:
+            if intent_txn is None:
+                raise JournalError("terminal frame {} precedes any INTENT frame".format(ftype))
+            if txn != intent_txn:
+                raise JournalError("frame {} txn id disagrees with the INTENT txn id".format(ftype))
+    if counts[F_COMPLETE] > 1 or counts[F_RIP] > 1 or counts[F_RC] > 1:
+        raise JournalError("duplicate terminal frame in journal")
+    if counts[F_COMPLETE] and (counts[F_RIP] or counts[F_RC]):
+        raise JournalError("contradictory terminal frames (COMPLETE alongside a rollback record)")
+    if counts[F_RC] and not counts[F_RIP]:
+        raise JournalError("ROLLBACK-COMPLETE without a ROLLBACK-IN-PROGRESS frame")
+
+
 def recover(txn_dir, root_fd):
     """Reconcile one transaction directory to a terminal state from its journal ALONE, at every crash
     point, both directions, idempotently. Returns one of: nothing-opened, terminal, rolled-forward,
@@ -628,6 +727,7 @@ def recover(txn_dir, root_fd):
     frames, torn, good_len = read_frames(txn_dir)
     if torn:
         _truncate_log(txn_dir, good_len)
+    _validate_terminal_agreement(frames)
     types = [t for t, _ in frames]
     if F_INTENT not in types:
         return "nothing-opened"
@@ -642,7 +742,7 @@ def recover(txn_dir, root_fd):
         publish(txn_dir, F_RIP, {"txn": intent["txn"]})
     total = len(ops)
     for j, op in enumerate(reversed(ops)):
-        _restore_preimage(txn_dir, root_fd, op)
+        _restore_preimage(txn_dir, root_fd, op, total - 1 - j)
         _kill_point("after-restore-{}".format(total - 1 - j))
     publish(txn_dir, F_RC, {"txn": intent["txn"]})
     return "rolled-back"
@@ -665,8 +765,9 @@ def run_transaction(root_fd, journal_root, txn_id, header, ops, staged_reader, s
     except JournalError:
         # A prestate mismatch (a hostile or racing tree): roll back from the durable preimages and fail.
         publish(txn_dir, F_RIP, {"txn": txn_id})
-        for op in reversed(ops):
-            _restore_preimage(txn_dir, root_fd, op)
+        total = len(ops)
+        for j, op in enumerate(reversed(ops)):
+            _restore_preimage(txn_dir, root_fd, op, total - 1 - j)
         publish(txn_dir, F_RC, {"txn": txn_id})
         raise
     publish(txn_dir, F_COMPLETE, {"txn": txn_id})

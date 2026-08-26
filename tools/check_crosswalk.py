@@ -85,9 +85,13 @@ def _archived_text(archive_root, sha):
 
 
 def check_predecessors(cw, archive_root):
-    """8.2/8.3: predecessor ids well-formed in the pre-<archive-hash-prefix>.<ordinal> namespace with a
-    prefix consistent with the row's archive hash and unique; source-digest equals the archive hash; the
-    canonical-text is a verbatim substring of the immutable archived bytes (the span-and-digest tie)."""
+    """8.2/8.3/7.2: predecessor ids well-formed in the pre-<archive-hash-prefix>.<ordinal> namespace with a
+    prefix consistent with the row's archive hash and unique; source-digest equals the archive hash; and
+    the SPAN-AND-DIGEST TIE enforced, not merely claimed (8.2: predecessor rows are "span-and-digest
+    checkable exactly as successor rows are"; 7.2: the source span is a TIGHT whole-line window
+    [start-line, end-line], and the canonical text is byte-exactly THAT window of the immutable archived
+    bytes, occurring exactly once, beginning on start-line and ending on end-line, never a mere
+    substring)."""
     findings, seen = [], set()
     for row in cw.get("predecessor", []):
         pid = row.get("clause-id", "")
@@ -107,25 +111,65 @@ def check_predecessors(cw, archive_root):
         if not text:
             findings.append("predecessor {!r}: empty canonical-text".format(pid))
         elif sha:
-            if text not in _archived_text(archive_root, sha):
-                findings.append("predecessor {!r}: canonical-text is not a substring of the archived "
-                                "bytes (span/digest disagreement)".format(pid))
+            findings += _check_predecessor_span(pid, row, archive_root, sha, text)
     return findings
 
 
+def _whole_line_window(text, start, end):
+    """The byte-exact whole-line window [start, end] (1-based inclusive) of text, or None when the range
+    exceeds the file. Lines are split on LF (3.2 byte-literal, no normalization); the window runs from the
+    start of start-line through the end of end-line, WITHOUT a trailing LF, so it is the canonical text
+    the 7.2 tight window records."""
+    lines = text.split("\n")
+    if start < 1 or end > len(lines):
+        return None
+    return "\n".join(lines[start - 1:end])
+
+
+def _check_predecessor_span(pid, row, archive_root, sha, text):
+    """The 7.2 tight whole-line window: start-line and end-line are 1-based integers with
+    start-line <= end-line, and canonical-text is byte-exactly the whole lines [start-line, end-line] of
+    the archived bytes (the 8.2 span-and-digest tie). A malformed, missing, or out-of-range span is a
+    finding (fail-closed toward FAIL); an unreadable archived payload fails closed (GateError, via
+    _archived_text)."""
+    start = row.get("start-line")
+    end = row.get("end-line")
+    if (not isinstance(start, int) or not isinstance(end, int)
+            or isinstance(start, bool) or isinstance(end, bool)):
+        return ["predecessor {!r}: start-line and end-line must be integers (7.2 source span)".format(pid)]
+    if start < 1 or end < start:
+        return ["predecessor {!r}: source span [{}, {}] is not a valid 1-based whole-line window "
+                "(start-line >= 1 and start-line <= end-line)".format(pid, start, end)]
+    window = _whole_line_window(_archived_text(archive_root, sha), start, end)
+    if window is None:
+        return ["predecessor {!r}: source span [{}, {}] exceeds the archived file's line count"
+                .format(pid, start, end)]
+    if text != window:
+        return ["predecessor {!r}: canonical-text does not byte-exactly match the archived lines "
+                "[{}, {}] (span-and-digest disagreement, 8.2/7.2)".format(pid, start, end)]
+    return []
+
+
 def check_completeness(cw):
-    """8.2 completeness attestation (HUMAN-JUDGMENT): the verdict is present and the fixed token, the
-    enumerator is named, and the reviewer is present and distinct from the enumerator."""
+    """8.2 completeness attestation (HUMAN-JUDGMENT), 8.5 identity model: the fixed verdict token, and the
+    identity fields PRESENT before the distinctness checks so an OMITTED enumerator or enumerator-family
+    cannot pass the anti-self-certification floor vacuously (reconciliation 6). Presence: enumerator,
+    enumerator-family, reviewer, reviewer-family; THEN reviewer name-distinct from the enumerator and
+    reviewer-family distinct from the enumerator-family."""
     er = cw.get("enumeration-review")
     if not isinstance(er, dict):
         return ["no [enumeration-review] completeness attestation (8.2)"]
     findings = []
     if er.get("verdict") != _VERDICT_COMPLETE:
         findings.append("completeness verdict missing or not the fixed token {!r}".format(_VERDICT_COMPLETE))
-    if not er.get("enumerator"):
-        findings.append("completeness review names no enumerator")
-    if not er.get("reviewer") or er.get("reviewer") == er.get("enumerator"):
-        findings.append("completeness reviewer absent or identical to the enumerator")
+    for field in ("enumerator", "enumerator-family", "reviewer", "reviewer-family"):
+        if not er.get(field):
+            findings.append("completeness review: {} is absent (identity floor, 8.2/8.5)".format(field))
+    if er.get("enumerator") and er.get("reviewer") and er.get("reviewer") == er.get("enumerator"):
+        findings.append("completeness reviewer is identical to the enumerator")
+    if (er.get("enumerator-family") and er.get("reviewer-family")
+            and er.get("reviewer-family") == er.get("enumerator-family")):
+        findings.append("completeness reviewer family is identical to the enumerator family")
     return findings
 
 
@@ -136,6 +180,21 @@ def check_zero_unmapped(cw):
     mapped = {m.get("predecessor-clause-id") for m in cw.get("mapping", [])}
     missing = sorted(x for x in (pred - mapped) if x)
     return ["predecessor {!r} has no mapping (zero-unmapped violation, 8.4)".format(p) for p in missing]
+
+
+def check_mapping_referential_integrity(cw):
+    """Bidirectional referential integrity (reconciliation 6): check_zero_unmapped covers the
+    predecessor->mapping direction; this covers mapping->predecessor. Every mapping row's
+    predecessor-clause-id MUST resolve to a declared [[predecessor]] row; a mapping citing a nonexistent
+    predecessor is a finding."""
+    pred_ids = {r.get("clause-id") for r in cw.get("predecessor", [])}
+    findings = []
+    for row in cw.get("mapping", []):
+        pid = row.get("predecessor-clause-id")
+        if pid not in pred_ids:
+            findings.append("mapping cites predecessor {!r} which resolves to no predecessor row "
+                            "(referential integrity)".format(pid))
+    return findings
 
 
 def check_quote(row, inventory):
@@ -153,15 +212,23 @@ def check_quote(row, inventory):
 
 
 def check_verdict(row):
-    """8.5 mechanical floor: fixed token, reviewer present and name-distinct from the author, and a
-    reviewer family present and distinct from the author family (reconciliation 5)."""
+    """8.5/8.6 mechanical floor: the fixed token, and the identity fields PRESENT before the distinctness
+    checks so an OMITTED author or author-family cannot pass the anti-self-certification floor vacuously
+    (reconciliation 6: an absent author made reviewer!=author trivially true). Presence: author,
+    author-family, reviewer, reviewer-family (the identity floor 8.5/8.6 requires); THEN reviewer
+    name-distinct from the author and reviewer-family distinct from the author-family. rationale and
+    reviewed-utc are schema fields the spec does not gate for presence, so they are not required here."""
     problems = []
     if row.get("semantic-verdict") != _VERDICT_SEMANTIC:
         problems.append("verdict token missing or not {!r}".format(_VERDICT_SEMANTIC))
-    if not row.get("reviewer") or row.get("reviewer") == row.get("author"):
-        problems.append("reviewer absent or identical to the author")
-    if not row.get("reviewer-family") or row.get("reviewer-family") == row.get("author-family"):
-        problems.append("reviewer family absent or identical to the author family")
+    for field in ("author", "author-family", "reviewer", "reviewer-family"):
+        if not row.get(field):
+            problems.append("{} is absent (identity floor, 8.5)".format(field))
+    if row.get("author") and row.get("reviewer") and row.get("reviewer") == row.get("author"):
+        problems.append("reviewer is identical to the author")
+    if (row.get("author-family") and row.get("reviewer-family")
+            and row.get("reviewer-family") == row.get("author-family")):
+        problems.append("reviewer family is identical to the author family")
     return problems
 
 
@@ -254,6 +321,7 @@ def run(root):
     findings += check_predecessors(cw, archive_root)
     findings += check_completeness(cw)
     findings += check_zero_unmapped(cw)
+    findings += check_mapping_referential_integrity(cw)
     findings += check_mappings(cw, inventory)
     findings += check_unit_coverage(root, cw)
     for w in pointer_warnings(cw):
@@ -342,8 +410,10 @@ def _clean_crosswalk(fold=False, split=False):
             'size = {}'.format(len(_LEGACY_TWO.encode())),
             'predecessor-clause-ids = ["{}"]'.format(p2), '',
             '[[predecessor]]', 'clause-id = "{}"'.format(p1), 'archive-sha256 = "{}"'.format(sha1),
+            'start-line = 1', 'end-line = 1',
             'canonical-text = "{}"'.format(_LEGACY_ONE), 'source-digest = "{}"'.format(sha1), '',
             '[[predecessor]]', 'clause-id = "{}"'.format(p2), 'archive-sha256 = "{}"'.format(sha2),
+            'start-line = 1', 'end-line = 1',
             'canonical-text = "{}"'.format(_LEGACY_TWO), 'source-digest = "{}"'.format(sha2), '']
 
     def mapping(pid, sid, quote):
@@ -445,6 +515,28 @@ def self_test():
              lambda t: t.replace('verdict = "complete"', 'verdict = "partial"')),
             ("bad 8.3 predecessor id",
              lambda t: t.replace('clause-id = "{}"'.format(p1), 'clause-id = "notpre.1"')),
+            # fix #5: a missing or out-of-range predecessor span (both would PASS the old substring check).
+            ("missing predecessor span",
+             lambda t: t.replace('start-line = 1\nend-line = 1\n', '', 1)),
+            ("out-of-range predecessor span",
+             lambda t: t.replace('start-line = 1\nend-line = 1', 'start-line = 5\nend-line = 9', 1)),
+            # fix #6: an omitted identity field must FAIL the floor before any distinctness check.
+            ("omitted mapping author",
+             lambda t: t.replace('author = "carol"\n', '', 1)),
+            ("omitted mapping author-family",
+             lambda t: t.replace('author-family = "claude"\n', '', 1)),
+            ("omitted mapping reviewer-family",
+             lambda t: t.replace('reviewer-family = "gemini"\n', '', 1)),
+            ("omitted completeness enumerator-family",
+             lambda t: t.replace('enumerator-family = "claude"\n', '', 1)),
+            # fix #6: a mapping citing a nonexistent predecessor fails referential integrity (the other
+            # direction from zero-unmapped; every real predecessor here stays mapped).
+            ("mapping cites nonexistent predecessor",
+             lambda t: t + ('\n[[mapping]]\npredecessor-clause-id = "pre-ffffffffffff.9"\n'
+                            'successor-clause-id = "succ.a"\nsuccessor-quote = "{}"\nauthor = "carol"\n'
+                            'author-family = "claude"\nsemantic-verdict = "equal-or-stronger"\n'
+                            'rationale = "x"\nreviewer = "dave"\nreviewer-family = "gemini"\n'
+                            'reviewed-utc = "2026-08-26T00:00:00Z"\n'.format(_SUCC_A))),
         ]
         for label, mut in checks:
             root = _build_install(tmp / ("bad-" + label.replace("/", "_").replace(" ", "_")),
@@ -452,6 +544,42 @@ def self_test():
             if run_quiet(root) != 1:
                 failures.append("{} expected FAIL (1)".format(label))
             n += 1
+
+        # fix #5: over a MULTI-LINE archived file, a canonical-text that is PRESENT in the file but NOT at
+        # the declared whole-line span FAILs (the tightened window, not a mere substring); the same text at
+        # its CORRECT span PASSes. This is the case the old substring check let through.
+        multi = "First line of the legacy rule.\nSecond obligation line here.\nThird trailing line.\n"
+        msha = _sha(multi)
+        mp = "pre-{}.1".format(msha[:12])
+
+        def _span_crosswalk(start, end):
+            rows = ['schema-version = 1', '',
+                    '[enumeration-review]', 'enumerator = "ann"', 'enumerator-family = "claude"',
+                    'verdict = "complete"', 'rationale = "x"', 'reviewer = "bob"',
+                    'reviewer-family = "codex"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '',
+                    '[[archive-file]]', 'legacy-path = "m.md"', 'archive-sha256 = "{}"'.format(msha),
+                    'size = {}'.format(len(multi.encode())),
+                    'predecessor-clause-ids = ["{}"]'.format(mp), '',
+                    '[[predecessor]]', 'clause-id = "{}"'.format(mp),
+                    'archive-sha256 = "{}"'.format(msha),
+                    'start-line = {}'.format(start), 'end-line = {}'.format(end),
+                    'canonical-text = "Second obligation line here."',
+                    'source-digest = "{}"'.format(msha), '',
+                    '[[mapping]]', 'predecessor-clause-id = "{}"'.format(mp),
+                    'successor-clause-id = "succ.a"', 'successor-quote = "{}"'.format(_SUCC_A),
+                    'author = "carol"', 'author-family = "claude"',
+                    'semantic-verdict = "equal-or-stronger"', 'rationale = "x"', 'reviewer = "dave"',
+                    'reviewer-family = "gemini"', 'reviewed-utc = "2026-08-26T00:00:00Z"', '']
+            return "\n".join(rows) + "\n"
+
+        bad_span = _build_install(tmp / "span-mismatch", _span_crosswalk(1, 1), [multi], inv)
+        if run_quiet(bad_span) != 1:
+            failures.append("canonical-text present but NOT at the declared span expected FAIL (1)")
+        n += 1
+        ok_span = _build_install(tmp / "span-ok", _span_crosswalk(2, 2), [multi], inv)
+        if run_quiet(ok_span) != 0:
+            failures.append("a correct declared whole-line span expected PASS (0)")
+        n += 1
 
         # A pointer disagreement is a WARNING, not a finding: still PASS (0).
         ptext = base_text + ('\n[[pointer-hint]]\npredecessor-clause-id = "{}"\n'

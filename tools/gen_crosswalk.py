@@ -9,8 +9,9 @@ without declaring its output). The runtime adopter crosswalk.toml is NEVER a reg
 ADOPTER mode (--legacy-root DIR [--out .aiqt/migration]): build CANDIDATE crosswalk material for a human
 reviewer. Order is load-bearing (8.2, spec lines 1227 to 1234): each legacy file's RAW BYTES are archived
 FIRST under <out-archive>/.aiqt/archive/<sha256>/payload (immutable: re-archiving differing bytes under
-the same name is refused), BEFORE any pointer handling, and a pointer read from a live file is NEVER
-written into anything that gets archived. The tool then emits candidate predecessor rows and pointer-
+the same name is refused), BEFORE any pointer handling. Embedded pointers REMAIN verbatim in the
+immutable raw archived bytes; the tool never INJECTS a parsed or derived pointer annotation into an
+archived payload. The tool then emits candidate predecessor rows and pointer-
 ranked candidate mapping rows with EMPTY review/verdict fields plus an explicitly computed unmatched
 list. It NEVER auto-asserts semantic equivalence (8.5) or enumeration completeness (8.2): a pointer
 (Expected-successor: / Coverage:) is a hint with zero evidentiary weight that only RANKS candidates.
@@ -22,6 +23,7 @@ import hashlib
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -107,9 +109,11 @@ def archive_file(archive_root, data):
     """Archive raw bytes under <archive_root>/<sha256>/payload, immutably. Returns the sha256. Refuses
     (AdoptError) if an existing entry under the same hash holds DIFFERING bytes (8.2 immutability); an
     identical re-archive is idempotent. Content-addressing keeps the archive idempotent (identical bytes
-    yield the same hash directory, so two writers of the same payload cannot disagree), and a per-process
-    temp name keeps concurrent writers of the same hash from clobbering each other's temp before the
-    atomic replace."""
+    yield the same hash directory, so two writers of the same payload cannot disagree). The staged bytes
+    go to a UNIQUE-PER-CALL temp in the entry dir (tempfile.mkstemp, so concurrent callers never share a
+    temp name) and are published by a NO-OVERWRITE link (os.link fails if payload already exists), so an
+    existence race COMPARES bytes and accepts only byte-equality rather than overwriting an already-
+    published payload."""
     digest = hashlib.sha256(data).hexdigest()
     entry = Path(archive_root) / digest
     payload = entry / "payload"
@@ -120,15 +124,30 @@ def archive_file(archive_root, data):
                 payload))
         return digest
     entry.mkdir(parents=True, exist_ok=True)
-    tmp = entry / "payload.{}.tmp".format(os.getpid())
-    tmp.write_bytes(data)
-    tmp.replace(payload)
+    fd, tmp_name = tempfile.mkstemp(dir=str(entry), prefix="payload.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        try:
+            os.link(str(tmp), str(payload))               # no-overwrite publish: fails if payload exists
+        except FileExistsError:                           # lost a publish race: accept only byte-equality
+            existing = payload.read_bytes()
+            if existing != data:
+                raise AdoptError("archive immutability violation: {} already holds different bytes"
+                                 .format(payload))
+    finally:
+        try:
+            os.unlink(str(tmp))
+        except FileNotFoundError:
+            pass
     return digest
 
 
 def parse_pointers(text):
     """Extract (expected_successor_ids, coverage) pointer hints from a legacy file's text. A pointer is a
-    HINT with zero evidentiary weight; it is never written into an archived payload."""
+    HINT with zero evidentiary weight; an embedded pointer stays verbatim in the raw archived bytes, and
+    the tool never INJECTS a parsed or derived pointer annotation into an archived payload."""
     expected = []
     for m in _EXPECTED_RE.finditer(text):
         expected += [tok.strip() for tok in re.split(r"[,\s]+", m.group(1).strip()) if tok.strip()]
@@ -340,6 +359,22 @@ def self_test():
             failures.append("re-archiving different bytes under an existing hash must be refused (exit 2)")
         except AdoptError:
             pass
+
+        # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
+        # its entry dir, publishes the exact bytes, and a same-bytes re-archive is idempotent.
+        fresh = b"a distinct archive payload for the temp/link test\n"
+        fdig = hashlib.sha256(fresh).hexdigest()
+        arc7 = tmp / "arc7"
+        d1 = archive_file(arc7, fresh)
+        d2 = archive_file(arc7, fresh)                     # same-bytes re-archive is idempotent
+        if d1 != fdig or d2 != fdig:
+            failures.append("archive_file must be content-addressed and idempotent")
+        entry7 = arc7 / fdig
+        if (entry7 / "payload").read_bytes() != fresh:
+            failures.append("the published payload must be the exact archived bytes")
+        leftover = [p.name for p in entry7.iterdir() if p.name != "payload"]
+        if leftover:
+            failures.append("archive_file must leave no temp files behind (found {})".format(leftover))
 
         # (f) unmatched computed: a predecessor with no overlap and no pointer is listed unmatched.
         legacy2 = tmp / "legacy2"

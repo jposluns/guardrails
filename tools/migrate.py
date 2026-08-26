@@ -176,6 +176,23 @@ def _open_root_fd(root):
     return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
 
 
+def _claim_recover_lock(journal_root):
+    """Atomically claim the journal lock for recovery (fix #3). Returns 'acquired' when this process now
+    owns the lock (the lock was absent, or a confirmed-dead stale lock was broken and re-acquired), or
+    'possibly-live' when a lock whose owner may still be alive holds it (never seized, the concurrency-
+    lease rule). Fail-closed (JournalError) on an unreadable lock or a lost stale-break race (another
+    recover re-created the lock first, so acquire_lock's O_EXCL fails rather than seizing it)."""
+    owner = _journal.read_lock_owner(journal_root)
+    if owner is None:
+        _journal.acquire_lock(journal_root, session_id="recover")
+        return "acquired"
+    if not _journal.owner_confirmed_dead(owner):
+        return "possibly-live"
+    _journal.break_stale_lock(journal_root, owner)        # confirmed dead: break then re-acquire (O_EXCL)
+    _journal.acquire_lock(journal_root, session_id="recover")
+    return "acquired"
+
+
 def do_plan(root):
     cw = load_crosswalk(root)
     groups = components(cw)
@@ -211,18 +228,38 @@ def do_cutover(root, staged, unit):
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
         header = {"unit": unit, "kind": "cutover"}
+        txn_dir = journal_root / txn_id
         try:
             _journal.run_transaction(root_fd, journal_root, txn_id, header, ops,
                                      _staged_reader(staged), session_id="cutover")
         except _journal.JournalError as exc:
-            _journal.release_lock(journal_root)
-            print("error: cutover aborted and rolled back ({}); fail-closed".format(exc), file=sys.stderr)
-            return 2
+            return _settle_failed_transaction(journal_root, txn_dir, exc, "cutover")
         _journal.release_lock(journal_root)
     finally:
         os.close(root_fd)
     print("cutover complete: unit {} txn {}".format(unit, txn_id))
     return 0
+
+
+def _settle_failed_transaction(journal_root, txn_dir, exc, what):
+    """A JournalError escaped run_transaction: either an apply/prestate failure whose rollback reached a
+    terminal ROLLBACK-COMPLETE, or a rollback that ITSELF failed (a _restore_preimage error) and left the
+    journal non-terminal. Distinguish the two by the DURABLE terminal state (is_terminal), never by
+    assumption (fix #4). If a terminal rollback was published, the tree is back at its prestate: release
+    the lock and report the clean rollback, exit 2. If NOT (the rollback failed or the journal is
+    unreadable), the transaction is left open and fail-closed under the RETAINED lock for a later recover,
+    no rollback is claimed, exit 2."""
+    try:
+        terminal = _journal.is_terminal(txn_dir)
+    except _journal.JournalError:
+        terminal = False                                  # unreadable journal: not a confirmed rollback
+    if terminal:
+        _journal.release_lock(journal_root)
+        print("error: {} aborted and rolled back ({}); fail-closed".format(what, exc), file=sys.stderr)
+    else:
+        print("error: {} FAILED and the rollback did not complete ({}); the transaction is left open "
+              "under the retained lock for `recover`; fail-closed".format(what, exc), file=sys.stderr)
+    return 2
 
 
 def do_recover(root):
@@ -235,14 +272,18 @@ def do_recover(root):
     if not journal_root.is_dir():
         print("recover: no journal at {} (nothing to recover)".format(JOURNAL_REL))
         return 0
+    # Atomically CLAIM the lock before touching any transaction (fix #3): acquire an absent lock, or break
+    # a confirmed-dead stale lock and re-acquire it (O_EXCL); a possibly-live owner is NEVER seized. Only
+    # the lock THIS recover owns is released, after every transaction reaches a terminal state.
     try:
-        owner = _journal.read_lock_owner(journal_root)
+        claim = _claim_recover_lock(journal_root)
     except _journal.JournalError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
-    if owner is not None and not _journal.owner_confirmed_dead(owner):
+    if claim == "possibly-live":
+        owner = _journal.read_lock_owner(journal_root)
         print("recover: journal lock is held by a possibly-live owner (pid {}); NOT seized"
-              .format(owner.get("pid")), file=sys.stderr)
+              .format((owner or {}).get("pid")), file=sys.stderr)
         return 1
     root_fd = _open_root_fd(root)
     outcomes = {}
@@ -253,10 +294,10 @@ def do_recover(root):
             except _journal.JournalError as exc:
                 print("error: cannot recover {} ({}); fail-closed".format(txn_dir.name, exc),
                       file=sys.stderr)
-                return 2
+                return 2                                   # lock RETAINED: the journal is not terminal
     finally:
         os.close(root_fd)
-    _journal.release_lock(journal_root)                   # stale or self lock; released after terminal
+    _journal.release_lock(journal_root)                   # release only the lock THIS recover owns
     if outcomes:
         for name, outcome in sorted(outcomes.items()):
             print("recover: txn {} -> {}".format(name, outcome))
@@ -333,13 +374,16 @@ def do_unadopt(root, txn_id):
     try:
         try:
             _journal.acquire_lock(journal_root, session_id="un-adopt")
+        except _journal.JournalError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
+        txn_dir = journal_root / new_txn
+        try:
             _journal.run_transaction(root_fd, journal_root, new_txn,
                                      {"kind": "un-adopt", "reverses": txn_id}, inverse, reader,
                                      session_id="un-adopt")
         except _journal.JournalError as exc:
-            _journal.release_lock(journal_root)
-            print("error: un-adopt aborted ({}); fail-closed".format(exc), file=sys.stderr)
-            return 2
+            return _settle_failed_transaction(journal_root, txn_dir, exc, "un-adopt")
         _journal.release_lock(journal_root)
     finally:
         os.close(root_fd)
@@ -444,6 +488,17 @@ _CASES = {
                 {"op": "rmdir", "path": "d/e"},
                 {"op": "rmdir", "path": "d"}],
     },
+    # A removed directory (d/e) carries a mode with a bit the umask clears, so a rollback that recreates it
+    # exercises the rmdir-undo mode-resume: a crash between the mkdir and the chmod leaves a umask-reduced
+    # mode that a fresh recover must re-apply to its exact prestate (fix #1 torn-mode test, block H).
+    "mode-remove": {
+        "pre_files": {"d/e/f": (b"leaf\n", 0o644)},
+        "pre_dirs": {"d": 0o755, "d/e": 0o770},
+        "payload": {},
+        "ops": [{"op": "remove", "path": "d/e/f"},
+                {"op": "rmdir", "path": "d/e"},
+                {"op": "rmdir", "path": "d"}],
+    },
 }
 
 
@@ -542,8 +597,10 @@ def _all_terminal(root):
 
 
 def self_test():
+    import io
     import shutil
     import tempfile
+    from contextlib import redirect_stderr
 
     try:
         _journal.require_containment()
@@ -706,6 +763,135 @@ def self_test():
         log.write_bytes(bytes(raw))
         if _run(["status", "--root", str(croot)]) != 2:
             failures.append("a mid-log corrupt frame expected status exit 2 (fail-closed, never skipped)")
+        checked += 1
+
+        # (H) FIX #1 rmdir-undo MODE-RESUME: crash a rollback's directory recreation BETWEEN the mkdir and
+        #     the chmod (the new torn-mode kill), leaving it at a umask-reduced mode; a fresh recover must
+        #     RE-APPLY the exact prestate mode (idempotent mode-resume). umask is pinned so the crash state
+        #     is observably reduced (the property under test): mkdir(0o770) yields 0o750 until the chmod.
+        old_umask = os.umask(0o022)
+        try:
+            case = "mode-remove"
+            pre, _post = baselines[case]
+            nops = len(_CASES[case]["ops"])
+            mid = "after-apply-{}".format(nops - 2)         # d/e/f and d/e removed, d not yet: rolls back
+            iroot = _build_case_root(tmp / "mode-resume" / "root", case)
+            istaged = _build_staged(tmp / "mode-resume" / "staged", case)
+            if _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", "u1"],
+                    kill=mid) != 137:
+                failures.append("mode-resume: setup cutover expected to die at {}".format(mid))
+            elif _run(["recover", "--root", str(iroot)], kill="torn-mode:1") != 137:
+                failures.append("mode-resume: recover expected to die mid mkdir->chmod (torn-mode:1)")
+            else:
+                if _run(["recover", "--root", str(iroot)]) != 0:
+                    failures.append("mode-resume: clean recover expected exit 0")
+                if _run(["recover", "--root", str(iroot)]) != 0:
+                    failures.append("mode-resume: second recover (idempotency) expected exit 0")
+                if _snapshot(iroot) != pre:
+                    failures.append("mode-resume: recover must re-apply the recreated directory's exact "
+                                    "prestate mode (mode-resume)")
+                elif not _all_terminal(iroot):
+                    failures.append("mode-resume: journal not terminal after recovery")
+            checked += 1
+        finally:
+            os.umask(old_umask)
+
+        # (I) FIX #1 FAIL-CLOSED: a non-directory where a mkdir/rmdir restore expects a directory raises
+        #     JournalError (never a silent skip), matching the write/remove non-regular branch (-> exit 2
+        #     when a CLI maps it, as do_recover does).
+        nd = _build_case_root(tmp / "nondir" / "root", "flat-files")
+        ndfd = os.open(str(nd), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            (nd / "collide").write_bytes(b"not-a-dir\n")    # a regular file where a directory is expected
+            for kind, prestate in (("mkdir", {"kind": "absent"}),
+                                   ("rmdir", {"kind": "dir", "mode": 0o755})):
+                try:
+                    _journal._restore_preimage(nd / "txn", ndfd,
+                                               {"op": kind, "path": "collide", "prestate": prestate})
+                    failures.append("{}-undo on a non-directory must raise JournalError".format(kind))
+                except _journal.JournalError:
+                    pass
+        finally:
+            os.close(ndfd)
+        checked += 1
+
+        # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
+        jr2 = tmp / "foreignlock" / JOURNAL_REL
+        jr2.mkdir(parents=True)
+        (jr2 / "lock").write_bytes(json.dumps(
+            {"uid": os.getuid(), "pid": os.getpid(), "session": "foreign", "pid-start": "not-ours",
+             "utc": "2026-01-01T00:00:00Z"}, sort_keys=True).encode())
+        _journal.release_lock(jr2)
+        if not (jr2 / "lock").exists():
+            failures.append("release_lock must never delete a lock this process does not own")
+        checked += 1
+
+        # (F3) FIX #3 CLAIM: recover claims an ABSENT lock before touching txns and releases it after the
+        #      txn reaches a terminal state.
+        aroot = _build_case_root(tmp / "absentlock" / "root", "flat-files")
+        astaged = _build_staged(tmp / "absentlock" / "staged", "flat-files")
+        an = len(_CASES["flat-files"]["ops"])
+        _run(["cutover", "--root", str(aroot), "--staged", str(astaged), "--unit", "u1"],
+             kill="after-apply-{}".format(max(0, an - 2)))  # crash mid-apply: an OPEN txn plus a stale lock
+        (aroot / JOURNAL_REL / "lock").unlink()             # remove the lock: recover must claim the absent one
+        if _run(["recover", "--root", str(aroot)]) != 0:
+            failures.append("recover must claim an absent lock and recover the open txn (exit 0)")
+        if (aroot / JOURNAL_REL / "lock").exists():
+            failures.append("recover must release the lock it claimed after reaching a terminal state")
+        checked += 1
+
+        # (J) FIX #4: a rollback that ITSELF fails must not release the lock or claim "rolled back". A plan
+        #     whose apply fails (a duplicate create) triggers rollback; an injected preimage-restore failure
+        #     leaves the journal NON-TERMINAL. do_cutover must retain the lock, leave the txn open, exit 2,
+        #     and never report a completed rollback.
+        rbroot = _build_case_root(tmp / "rbfail" / "root", "flat-files")
+        rbstaged = tmp / "rbfail" / "staged"
+        (rbstaged / "payload").mkdir(parents=True)
+        (rbstaged / "quiescence.ok").write_text("ok\n", encoding="utf-8")
+        (rbstaged / "payload" / "dupe").write_bytes(b"dup\n")
+        (rbstaged / "plan.json").write_text(json.dumps({"ops": [
+            {"op": "create", "path": "dupe", "mode": 0o644},
+            {"op": "create", "path": "dupe", "mode": 0o644}]}), encoding="utf-8")
+        orig_restore = _journal._restore_preimage
+
+        def _boom(*_a, **_k):
+            raise _journal.JournalError("injected preimage-restore failure")
+
+        buf = io.StringIO()
+        _journal._restore_preimage = _boom
+        try:
+            with redirect_stderr(buf):
+                rc = do_cutover(Path(rbroot).resolve(), rbstaged.resolve(), "u1")
+        finally:
+            _journal._restore_preimage = orig_restore
+        jr = Path(rbroot) / JOURNAL_REL
+        nonterminal = False
+        for td in _txn_dirs(jr):
+            try:
+                if not _journal.is_terminal(td):
+                    nonterminal = True
+            except _journal.JournalError:
+                nonterminal = True
+        if rc != 2:
+            failures.append("fix4: do_cutover on a failed rollback must exit 2")
+        if not (jr / "lock").exists():
+            failures.append("fix4: do_cutover must RETAIN the lock when the rollback itself failed")
+        if not nonterminal:
+            failures.append("fix4: a failed rollback must leave the journal non-terminal")
+        if "rolled back" in buf.getvalue():
+            failures.append("fix4: a failed rollback must not be reported as 'rolled back'")
+        _journal.release_lock(jr)                           # clean up the lock we deliberately left retained
+        checked += 1
+
+        # (K) FIX #2: a mismatched-txn terminal frame (a stray/crafted frame) fails closed (exit 2). Both
+        #     frames are checksum-valid; recovery rejects the disagreement rather than trusting it.
+        mroot = _build_case_root(tmp / "mismatch" / "root", "flat-files")
+        mtxn = mroot / JOURNAL_REL / "sometxn"
+        mtxn.mkdir(parents=True)
+        _journal.publish(mtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+        _journal.publish(mtxn, _journal.F_COMPLETE, {"txn": "B"})
+        if _run(["recover", "--root", str(mroot)]) != 2:
+            failures.append("fix2: a mismatched-txn terminal frame must fail closed (exit 2)")
         checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
