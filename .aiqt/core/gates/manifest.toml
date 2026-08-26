@@ -307,7 +307,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It validates the release build order, the annotated release tags and their resolution to the recorded object and commit SHAs, the genesis uniqueness declaration, the release-order ordering gate, and the attestation chronology against the tagger date. The chronology layer is keyless tamper-evident ordering within the anchored history, not cryptographic proof; the QA-store retrieval, success, and family-set layers run maintainer-side only (the private store is unreachable from CI, which validates the anchored chain instead); and every tag- and row-dependent layer is dormant only while the repository carries zero release tags AND zero attestation rows, arming when the first release tag or row exists, with a lightweight release tag disallowed."
+residue = "It validates the release build order, the annotated release tags and their resolution to the recorded object and commit SHAs, the genesis uniqueness declaration, the release-order ordering gate, and the attestation chronology against the tagger date. The chronology layer is keyless ordering evidence within the anchored history, not cryptographic proof; the QA-store retrieval, success, and family-set layers run maintainer-side only (the private store is unreachable from CI, which validates the anchored chain instead); and every tag- and row-dependent layer is dormant only while the repository carries zero release tags AND zero attestation rows, arming when the first release tag or row exists, with a lightweight release tag disallowed."
 
 [[gate]]
 id = "clauses"
@@ -415,7 +415,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "The independent release-side manifest verifier: scope-by-inversion completeness and no-strays, exact SOURCES set equality with raw-byte re-hashing, per-class verification including the CLAUDE.md managed block, TREE and ROOT and snippet recomputation, minimum-class floors, the filesystem-semantics fail-closed walk, and the 6.5 record schemas. It verifies bytes and sets against the anchored map; it does not judge whether a path's declared class matches its true ownership, does not recompute the site/downloads outputs (their own drift gates in this roster do), and detects accident, not tamper (4.4)."
+residue = "The independent release-side manifest verifier: scope-by-inversion completeness and no-strays, exact SOURCES set equality with raw-byte re-hashing, per-class verification including the CLAUDE.md managed block, TREE and ROOT and snippet recomputation, minimum-class floors, the filesystem-semantics fail-closed walk, and the 6.5 record schemas. It verifies bytes and sets against the anchored map; it does not judge whether a path's declared class matches its true ownership, does not recompute the site/downloads outputs (their own drift gates in this roster do), and detects accidental corruption, not deliberate modification (4.4)."
 
 [[gate]]
 id = "byte-canon"

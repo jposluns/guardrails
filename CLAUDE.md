@@ -53,8 +53,9 @@ what is particular to this repo (and has no source rule) lives here.
 The pack uses SemVer, single-sourced in `changelog.toml` (the `version` on the latest `[[release]]`); the
 root `VERSION` file is generated from it and drift-gated. The release-delta gate
 (`tools/check_release_delta.py`) computes the minimum required bump over the governance surface. Releases
-ship with a per-file manifest and a published ROOT digest so an adopter can verify their copy is intact;
-an independent, tamper-evident anchor is planned for a future release.
+ship with a per-file manifest and a published ROOT digest, and those hashes are also published
+independently on posluns.dev. By validating them you can identify whether the file you downloaded is the
+same one we intended you to have.
 
 ## Gates and CI
 
