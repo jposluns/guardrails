@@ -425,3 +425,32 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "Enforces the canonical byte format, .gitattributes coverage, and the platform matrix over the release scope at release time. It does not police an adopter's post-checkout local mutation; the checkout-bytes claim is proven only on the two CI matrix platforms; the zero-width/bidi allowance table is maintainer-authored policy whose rationale is reviewed, not proven; and coverage is evaluated against this repository's git attribute state, not any adopter clone's."
+
+# --- VER-CORE Section 12 step 6 (VC-6): migration engine, crosswalk tooling, archive ------------------
+
+[[gate]]
+id = "crosswalk-schema-drift"
+script = "tools/gen_crosswalk.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the shipped adopter-facing schema reference .aiqt/core/migration/crosswalk-schema.toml, regenerated deterministically from the tool's own constants, plus a self-test of the adopter-mode candidate generation (archive-before-annotation ordering, the 8.2 immutability refusal, deterministic output, and the computed unmatched list). The self-test confirms the generator archives the UNANNOTATED legacy bytes verbatim and does NOT consume or derive any pointer from the archived source (8.6-conformant): the Expected-successor:/Coverage: pointer lines are stripped from the lexical-overlap ranking input, so changing only a predecessor's pointer content never changes which successor a candidate row names, and no pointer-hint is lifted from the archived bytes. Candidate mapping rows are produced by ranking against a supplied successor inventory (the --successor-inventory adopter input) and carry EMPTY verdict fields; with no inventory supplied the generator emits predecessor rows and the computed unmatched list and defers candidate-mapping ranking. It proves the shipped schema reference equals a fresh regeneration and that the archive-first candidate flow holds its invariants on synthetic input; it does not validate any adopter's live runtime crosswalk (that is check_crosswalk) and does not judge whether the candidate ranking heuristics chose the semantically right successor, which stays human judgment."
+
+[[gate]]
+id = "crosswalk"
+script = "tools/check_crosswalk.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It proves the crosswalk fields are present and well-formed: the archive digest chain is immutable (directory name equals recorded hash equals recomputed payload), every predecessor id is in the 8.3 namespace with a source-digest tying it to the immutable archived bytes, every predecessor is mapped (zero-unmapped computed, never trusted), every successor quote is a verbatim contiguous substring of the pinned inventory clause, and each 8.5 verdict carries the fixed token with a reviewer distinct from the author in both name and declared family. It CANNOT prove the human verdict is correct: an 8.5 semantic-equivalence judgment or an 8.2 completeness attestation that is field-complete and name-and-family-distinct but substantively wrong (a bad-faith or mistaken review) passes. Verdict truth is human judgment; the authenticated result-record upgrade is deferred to the adopter-experience report envelope. In this repo the live leg reports NOT APPLICABLE (the pack is not an adopter install); its assurance is the self-test over synthetic trees. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "migrate-crashinject"
+script = "tools/migrate.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A crash-injection self-test of the 9.3 journal-first cutover engine: for every kill point in its enumerated matrix (after the lock, after each preimage, after the preimage set, a torn INTENT, after INTENT, after each apply op, a torn payload mid-write, a torn COMPLETE, after COMPLETE, plus mid-rollback, torn rollback markers, and a torn directory-mode restore between the mkdir and the chmod), a real subprocess dies there and a fresh process recovers the synthetic tree from the journal ALONE to exactly the prestate or the verified poststate, terminal and idempotent, in both directions, across flat-file, nested-create, and nested-remove trees; it also exercises the inert 10.6 reverse-replay primitive (build_inverse_ops) directly over a completed cutover's INTENT ops, inverting each op in reverse dependency order (the un-adopt CLI and workflow are Section 12 step 7, not this slice). It proves crash recovery over that enumerated matrix on synthetic trees; it does NOT cover a non-quiescent tree (quiescence of the effective tree, not the prestate check, is what excludes a concurrent final-component swap), an arbitrary external writer mutating the tree during an open cutover is outside the transaction guarantee, and PID reuse on a platform with no readable process start-time cannot be distinguished (it reads as possibly-live, and the lock is never seized). Its linkage to a single corpus rule is arguable, so none is claimed here."

@@ -140,6 +140,21 @@ jobs:
       - name: Clause inventory
         run: python3 tools/check_clauses.py --genesis
 
+      # VER-CORE Section 12 step 6 (VC-6): migration engine, crosswalk tooling, archive. The crash-
+      # injection self-test is the mandatory 9.3 gate; the live check_crosswalk leg reports NOT
+      # APPLICABLE in this repo (the pack is not an adopter install), self-tested first over synthetic
+      # trees. Mirrors the same legs in tools/run_all_checks.sh (roster symmetry).
+      - name: Crosswalk generator self-test
+        run: python3 tools/gen_crosswalk.py --self-test
+      - name: Crosswalk schema drift
+        run: python3 tools/gen_crosswalk.py --check
+      - name: Crosswalk gate self-test
+        run: python3 tools/check_crosswalk.py --self-test
+      - name: Crosswalk gate
+        run: python3 tools/check_crosswalk.py
+      - name: Migration engine crash-injection self-test
+        run: python3 tools/migrate.py --self-test
+
       - name: Rules self-test
         run: python3 tools/gen_rules.py --self-test
       # Ships DORMANT: no release records a [release.artifacts] table today, so the gate prints NOT
