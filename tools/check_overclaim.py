@@ -27,10 +27,10 @@ THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
   1. site/*.html: visible-text + meta scanning, SITE_PATTERNS + RELEASE_PATTERNS. site/ is a REQUIRED
      surface: an absent, unwalkable, or non-directory site/ is a fail-closed exit 2, never a silent PASS
      (the 4.4c correction of the old "no site/ directory -> PASS" shape).
-  2. The hand-authored repo prose roster (README.md, SCOPE.md, SYSTEM-HARDENING.md): RELEASE_PATTERNS.
-     The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md, CLAUDE.md) are
-     gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster carries only the
-     hand-authored remainder. Every rostered path is REQUIRED; an absent one is exit 2. Nothing is dormant
+  2. The hand-authored repo prose roster (README.md, SCOPE.md, SYSTEM-HARDENING.md, aiqt-barebones.md):
+     RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
+     CLAUDE.md) are gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster
+     carries the hand-authored remainder, including the shipped starter file aiqt-barebones.md. Every rostered path is REQUIRED; an absent one is exit 2. Nothing is dormant
      today (every rostered surface exists), so the roster is a single declared constant with no idle
      dormant/armed machinery, per the spec's dormant/armed single-source discipline.
   3. Every TEXTUAL generated output, enumerated FROM THE GENSRC REGISTRY by recomputing it in memory
@@ -304,10 +304,11 @@ THIRD_PARTY_TITLES = (
 
 # The hand-authored repo prose roster (collector 2): the spec's named prose surfaces that are NOT
 # gensrc-registered generated outputs. DISCLOSURE.md/CHANGELOG.md/ROADMAP.md/CLAUDE.md are registered and
-# arrive through collector 3; these three are the hand-authored remainder. Every path is REQUIRED (absent
-# = exit 2). Nothing is dormant today, so this is a single declared constant, not idle dormant/armed
-# machinery.
-REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md")
+# arrive through collector 3; these are the hand-authored remainder, including the shipped starter file
+# aiqt-barebones.md (in .aiqt/manifest.toml and in-scope for check_portability.py, but not gensrc-generated,
+# so the overclaim gate reaches it only through this roster). Every path is REQUIRED (absent = exit 2).
+# Nothing is dormant today, so this is a single declared constant, not idle dormant/armed machinery.
+REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md", "aiqt-barebones.md")
 
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
 # window), "intent" (skip when a negator OR an intent hedge is in that window), "sharealike" (skip only
@@ -642,8 +643,11 @@ def _adjacent_denial_clears(text, start):
     a negator in a prior clause is cut off by the CLAUSE_BOUNDARY, and a TRAILING negator (after the term)
     never clears ("Releases are tamper-resistant, not merely checksum-protected" flags). "not cryptographically
     signed" clears without a filler because the bare-signing match starts at "cryptographically" (empty tail).
+    A CLOSED POLARITY check then rejects a DOUBLE negation: if the clearing negator is itself governed by an
+    earlier negator in the same clause window, the parity is even (affirmation) and it does NOT clear ("not
+    without tamper evidence" / "never without an independent anchor" affirm the property and keep FLAGGING).
     This tight binding is what makes the deny-list launder-free: nothing clears a banned term unless a negator
-    is right next to it."""
+    is right next to it and not itself negated."""
     left = 0
     for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
         left = m.end()
@@ -654,7 +658,13 @@ def _adjacent_denial_clears(text, start):
     if neg is None:
         return False
     tail = window[neg.end():]  # text between the governing negator and the banned term
-    return not BE_COPULA.search(tail) and bool(INTEGRITY_NEG_TAIL.match(tail))
+    if BE_COPULA.search(tail) or not INTEGRITY_NEG_TAIL.match(tail):
+        return False
+    # CLOSED POLARITY: the clearing negator must not itself be governed by an EARLIER negator in the same
+    # clause window. "not without tamper evidence" / "never without an independent anchor" are DOUBLE
+    # negations (even parity) that AFFIRM the property, so they must NOT clear; a single negation ("without
+    # tamper evidence", "does not provide tamper evidence") has no earlier in-clause negator and still clears.
+    return not NEGATOR.search(window[:neg.start()])
 
 
 def _title_allowlisted(text, start, end):
@@ -938,6 +948,10 @@ POSITIVE = [
     # IS provided; the object slot is a closed article/quantifier allowance, so these keep FLAGGING.
     "This layer does not provide only tamper evidence; it also provides provenance.",  # "provide only tamper evidence" affirms it
     "This layer does not provide merely tamper evidence but also provenance.",  # "provide merely tamper evidence" affirms it
+    # DOUBLE-NEGATION launder: "not without X" affirms X (even parity), so it must FLAG.
+    "Releases are not without tamper evidence.",                       # "not without tamper evidence" affirms tamper evidence
+    "Validation is not without an independent anchor.",               # "not without an independent anchor" affirms it
+    "The package is not without tamper resistance.",                  # "not without tamper resistance" affirms it
     # SIMPLIFICATION: the subject-quantifier honest form ("No release is ...") is no longer specially cleared;
     # a copula separates the negator from the term, so it flags (the safe direction, and not a shipped form).
     "No release is tamper-evident.",                                   # was cleared under the old N1; now flags
@@ -975,6 +989,7 @@ NEGATIVE = [
     "This is not a cryptographic guarantee.",                                            # honest denial: no release term; the site "guarantee" is cleared by the in-clause negator
     "Releases are not signed with minisign.",                                            # tight-adjacency denial of the signing claim
     "Our releases are not cryptographically signed.",                                    # tight-adjacency denial of the bare crypto-signing claim (B1)
+    "This layer is without tamper evidence.",                                            # SINGLE negation ("without" directly negates the term) -> clears
     "A released or published artefact ships with a signature verifiable against an authenticated maintainer key, or a digest published through an authenticated channel independent of artefact delivery.",  # SECI obligation prose: "channel ... independent", no achieved-verification verb -> no match
     "A release's integrity rests on a SHA-256 digest published through a channel independent of the download.",  # RELEASING obligation prose: reverse "channel ... independent", no achieved verb -> no match
     "The digest travels over a channel independent of artefact delivery.",               # "channel independent of" has no "is independent of" copula -> no match
