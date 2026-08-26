@@ -234,7 +234,9 @@ def check_predecessors(cw, root):
     for row in cw.get("predecessor", []):
         pid = row.get("clause-id", "")
         sha = row.get("archive-sha256", "")
-        m = PRED_ID_RE.match(pid)
+        # fullmatch, not match: `$` matches before a trailing LF, so a `pre-<hex>.<ordinal>\n` id would slip
+        # past match() yet is malformed; fullmatch requires the WHOLE string to be the exact 8.3 shape.
+        m = PRED_ID_RE.fullmatch(pid)
         if not m:
             findings.append("predecessor id {!r} is not in the 8.3 pre-<prefix>.<ordinal> namespace"
                             .format(pid))
@@ -851,6 +853,12 @@ def self_test():
              lambda t: t.replace('verdict = "complete"', 'verdict = "partial"')),
             ("bad 8.3 predecessor id",
              lambda t: t.replace('clause-id = "{}"'.format(p1), 'clause-id = "notpre.1"')),
+            # C3: an 8.3 id ending in a trailing LF passes `$` (which matches before a final newline) yet is
+            # malformed. With a CONSISTENT LF across the predecessor row, its archive predecessor-clause-ids,
+            # and its mapping, every membership check still resolves, so ONLY the fullmatch shape leg catches
+            # it; a plain match() would let it through (exit 0). tomllib parses the `\n` escape as a newline.
+            ("trailing-LF 8.3 predecessor id",
+             lambda t: t.replace(p1 + '"', p1 + '\\n"')),
             # fix #5: a missing or out-of-range predecessor span (both would PASS the old substring check).
             ("missing predecessor span",
              lambda t: t.replace('start-line = 1\nend-line = 1\n', '', 1)),

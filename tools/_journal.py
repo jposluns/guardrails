@@ -40,6 +40,13 @@ time is a residual, and any ambiguity always reads as possibly-live (the lock is
 Recovery trusts its own journal's checksummed framing: it validates that terminal frames agree with the
 INTENT on the txn id and rejects duplicate or out-of-order terminal records, but a crafted valid-checksum
 journal is outside the accident-recovery model (accident-detection, not tamper-resistance).
+The lock's pid plus /proc-start-time liveness check is itself accident-detection, not tamper-resistance,
+of the SAME class: a crafted lock file carrying a LIVE pid together with a valid-but-false canonical start
+time could make recovery classify the live owner as dead and seize its lock. The engine always writes the
+real start time, so normal single-writer, engine-written operation never triggers this; it requires an
+external actor to forge a false lock file, which is outside the accident-recovery model, exactly like the
+forged-checksum journal above. The robust fix, an OS-held fcntl lease bound to the owner process's
+lifetime, is a tracked post-1.0.0 hardening.
 
 Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malformed or read error.
 """
@@ -55,6 +62,7 @@ MAGIC = b"AIQTJ1"
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _PIDSTART_RE = re.compile(r"^[0-9]+$")   # ASCII-digit gate for a /proc starttime (canonical bound in _is_canonical_pid_start)
 _PIDSTART_MAX = 1 << 64                   # a /proc starttime is an unsigned long long: the valid range is 0 <= v < 2**64
+_PIDSTART_MAX_DIGITS = 20                 # 2**64 - 1 is a 20-digit decimal, so a canonical start time is at most 20 digits
 F_INTENT = "INTENT"
 F_COMPLETE = "COMPLETE"
 F_RIP = "ROLLBACK-IN-PROGRESS"
@@ -368,7 +376,12 @@ def _is_canonical_pid_start(value):
     case) is handled by the caller, not here: this returns False for it."""
     if not isinstance(value, str) or not _PIDSTART_RE.match(value):
         return False
-    v = int(value)                                        # _PIDSTART_RE guarantees ASCII digits: int() cannot fail
+    if len(value) > _PIDSTART_MAX_DIGITS:                 # reject an overlong value BEFORE int(): an all-digit string
+        return False                                      # past CPython's ~4300-digit conversion limit raises ValueError
+    try:                                                  # (_pid_start could never emit such a value; fail-closed)
+        v = int(value)
+    except (ValueError, MemoryError):                     # not canonical: an unconvertible value is never trusted as a
+        return False                                      # genuine start time (defence in depth behind the digit cap)
     return v < _PIDSTART_MAX and str(v) == value          # in range AND canonical (str(int(...)) rejects leading zeros)
 
 
@@ -470,8 +483,9 @@ def _validate_owner_schema(owner):
 
 
 def owner_confirmed_dead(owner):
-    """True ONLY on positive evidence of death. EPERM, a live pid, or any ambiguity reads as possibly-
-    live (never seized). Where a start time was recorded and is readable, a differing start time for the
+    """True ONLY on positive evidence of death. EPERM, a live pid, an out-of-range pid that overflows
+    pid_t at os.kill (OverflowError), or any ambiguity reads as possibly-live (never seized). Where a start
+    time was recorded and is readable, a differing start time for the
     same pid also confirms death (PID reuse). Residual: PID reuse on a platform with no readable start
     time cannot be distinguished, so it reads as possibly-live and the lock is not broken. The FULL owner
     schema is validated defensively FIRST, so ANY malformed or ambiguous identity field (a boolean/non-int/
@@ -489,11 +503,9 @@ def owner_confirmed_dead(owner):
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    except OSError:
-        return False
+        return True                                       # positive evidence of death: the pid no longer exists
+    except Exception:                                     # EPERM (a live foreign owner), OverflowError (a pid too large
+        return False                                      # for pid_t), or any other error: possibly-live, never seized
     recorded = owner.get("pid-start")                     # validated: empty, or a canonical /proc start time
     if recorded:
         now = _pid_start(pid)

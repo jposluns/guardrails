@@ -1268,6 +1268,54 @@ def self_test():
                                 .format(label))
         checked += 1
 
+        # (B2e) FIX C2: a numeric identity field OUT OF RANGE must fail closed WITHOUT crashing, where the
+        #       old code let an uncaught exception escape. (a) A pid-start past CPython's ~4300-digit int()
+        #       conversion limit ("9"*5000) made _is_canonical_pid_start raise ValueError (the "int() cannot
+        #       fail" comment was false), crashing read_lock_owner and owner_confirmed_dead. (b) An ENORMOUS
+        #       pid larger than pid_t made os.kill raise OverflowError, uncaught. Both must now read
+        #       possibly-live (owner_confirmed_dead False) and never crash; the overlong pid-start also fails
+        #       closed in read_lock_owner (JournalError); and recover never seizes the live lock.
+        overlong = "9" * 5000                               # past the ~4300-digit int() conversion limit
+        enormous_pid = 1 << 70                              # far larger than any pid_t: os.kill raises OverflowError
+        c2_owners = [
+            ("overlong-pid-start-5000",
+             {"uid": os.getuid(), "pid": live_pid, "pid-start": overlong, "session": "x", "utc": base_utc}),
+            ("enormous-pid",
+             {"uid": os.getuid(), "pid": enormous_pid, "pid-start": "", "session": "x", "utc": base_utc}),
+        ]
+        for label, owner in c2_owners:
+            try:
+                if _journal.owner_confirmed_dead(owner):
+                    failures.append("B2e/{}: a live owner must read possibly-live (never seized)".format(label))
+            except Exception as exc:                        # ANY exception is the C2 crash the fix must prevent
+                failures.append("B2e/{}: owner_confirmed_dead crashed instead of reading possibly-live "
+                                "({}: {})".format(label, type(exc).__name__, exc))
+        try:
+            if _journal._is_canonical_pid_start(overlong):
+                failures.append("B2e: an overlong pid-start must not be canonical")
+        except Exception as exc:
+            failures.append("B2e: _is_canonical_pid_start crashed on an overlong value ({})"
+                            .format(type(exc).__name__))
+        c2root = tmp / "c2-overlong-lock"
+        c2jr = c2root / JOURNAL_REL
+        c2jr.mkdir(parents=True)
+        (c2jr / "lock").write_bytes(json.dumps(
+            {"uid": os.getuid(), "pid": live_pid, "pid-start": overlong, "session": "x", "utc": base_utc},
+            sort_keys=True).encode())
+        try:
+            _journal.read_lock_owner(c2jr)
+            failures.append("B2e: read_lock_owner must fail closed on an overlong pid-start (JournalError)")
+        except _journal.JournalError:
+            pass
+        except Exception as exc:                            # a non-JournalError crash is the C2 defect
+            failures.append("B2e: read_lock_owner crashed on an overlong pid-start instead of failing "
+                            "closed ({})".format(type(exc).__name__))
+        if _run(["recover", "--root", str(c2root)]) == 0:
+            failures.append("B2e: recover over an overlong-pid-start live lock must not report success")
+        if not (c2jr / "lock").exists():
+            failures.append("B2e: recover must NEVER unlink the overlong-pid-start (possibly-live) lock")
+        checked += 1
+
         # (E1) The remove/rmdir prestate check and the mutation bind to the SAME pre-opened parent handle,
         #      so an ANCESTOR SWAP injected between the bind and the check cannot redirect the unlinkat/rmdir
         #      (spec 1291/1300). The swap is injected by wrapping _open_parent to rename the real parent
