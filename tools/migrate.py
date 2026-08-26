@@ -412,6 +412,9 @@ def main():
 # journal is terminal, and that the second recover is a no-op. Both directions are proven from the
 # journal alone: the roll-FORWARD election (crash after the last apply, before COMPLETE) and rollback
 # (crash mid-apply, plus injected crashes mid-rollback and mid-publication of both rollback markers).
+# A torn-payload mid-write kill crashes DURING a data-file payload write, leaving a partially-written
+# payload that can never satisfy poststate verification, so recovery must elect rollback and land the
+# prestate EXACTLY (never an op-boundary poststate), exercising the post-restore preimage digest check.
 # Three synthetic off-path trees exercise flat files, a nested directory create, and a nested directory
 # remove, so reverse-dependency ordering and domain-separated post-states are covered in both directions.
 # A final un-adopt round-trip proves the 10.6 reverse-replay primitive returns post to pre.
@@ -622,7 +625,37 @@ def self_test():
                     failures.append("{} rb {}: journal not terminal after rollback".format(case, rpoint))
                 checked += 1
 
-        # (C) un-adopt round-trip: a completed cutover, then reverse-replay, returns post to pre.
+        # (C) Torn payload mid-write: crash DURING a data-file payload write, leaving a torn (partially-
+        #     written) payload. A torn payload can never satisfy poststate verification, so recovery must
+        #     ELECT ROLLBACK and land on the prestate EXACTLY (never the poststate), exercising the post-
+        #     restore preimage digest check on the rollback path.
+        for case in _CASES:
+            pre, _post = baselines[case]
+            for i, op in enumerate(_CASES[case]["ops"]):
+                if op["op"] not in ("write", "create"):
+                    continue
+                point = "torn-payload:{}".format(i)
+                iroot = _build_case_root(tmp / (case + "-tp") / "op-{}".format(i) / "root", case)
+                istaged = _build_staged(tmp / (case + "-tp") / "op-{}".format(i) / "staged", case)
+                rc = _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", "u1"],
+                          kill=point)
+                if rc != 137:
+                    failures.append("{} @ {}: cutover expected to die (137), got {}".format(case, point, rc))
+                    continue
+                if _run(["recover", "--root", str(iroot)]) != 0:
+                    failures.append("{} @ {}: first recover expected exit 0".format(case, point))
+                if _run(["recover", "--root", str(iroot)]) != 0:
+                    failures.append("{} @ {}: second recover (idempotency) expected exit 0"
+                                    .format(case, point))
+                state = _snapshot(iroot)
+                if state != pre:
+                    failures.append("{} @ {}: a torn payload must roll back to the prestate exactly"
+                                    .format(case, point))
+                elif not _all_terminal(iroot):
+                    failures.append("{} @ {}: journal not terminal after recovery".format(case, point))
+                checked += 1
+
+        # (D) un-adopt round-trip: a completed cutover, then reverse-replay, returns post to pre.
         for case in _CASES:
             uroot = _build_case_root(tmp / (case + "-unadopt") / "root", case)
             ustaged = _build_staged(tmp / (case + "-unadopt") / "staged", case)
@@ -640,7 +673,7 @@ def self_test():
                 failures.append("{} un-adopt: reverse-replay did not return post to pre".format(case))
             checked += 1
 
-        # (D) Fail-closed preconditions: missing quiescence evidence, and an on-path staged tree.
+        # (E) Fail-closed preconditions: missing quiescence evidence, and an on-path staged tree.
         froot = _build_case_root(tmp / "fc" / "root", "flat-files")
         fstaged = _build_staged(tmp / "fc" / "staged", "flat-files")
         (fstaged / "quiescence.ok").unlink()
@@ -653,7 +686,7 @@ def self_test():
             failures.append("an on-path staged tree expected exit 2 (refused)")
         checked += 1
 
-        # (E) The possibly-live lock is never seized: a lock owned by THIS (live) process blocks recover.
+        # (F) The possibly-live lock is never seized: a lock owned by THIS (live) process blocks recover.
         lroot = _build_case_root(tmp / "livelock" / "root", "flat-files")
         (lroot / JOURNAL_REL).mkdir(parents=True, exist_ok=True)
         _journal.acquire_lock(lroot / JOURNAL_REL, session_id="live")
@@ -662,7 +695,7 @@ def self_test():
         _journal.release_lock(lroot / JOURNAL_REL)
         checked += 1
 
-        # (F) A mid-log (non-tail) corrupt frame is a FAIL, never skipped: status fails closed (exit 2).
+        # (G) A mid-log (non-tail) corrupt frame is a FAIL, never skipped: status fails closed (exit 2).
         croot = _build_case_root(tmp / "corrupt" / "root", "flat-files")
         cstaged = _build_staged(tmp / "corrupt" / "staged", "flat-files")
         _run(["cutover", "--root", str(croot), "--staged", str(cstaged), "--unit", "u1"])
@@ -687,8 +720,9 @@ def self_test():
           "phase kill point (after-lock, each preimage, after-preimages, torn INTENT, after INTENT, each "
           "apply, torn COMPLETE, after COMPLETE) recovers the tree to EXACTLY the prestate or the "
           "verified poststate, terminal and idempotent (a second recover is a no-op); mid-rollback and "
-          "torn-rollback-marker crashes still land the prestate; the un-adopt reverse-replay returns post "
-          "to pre; and missing quiescence evidence, an on-path staged tree, a possibly-live lock, and a "
+          "torn-rollback-marker crashes still land the prestate; a torn payload mid-write rolls back to "
+          "the prestate exactly; the un-adopt reverse-replay returns post to pre; and missing quiescence "
+          "evidence, an on-path staged tree, a possibly-live lock, and a "
           "mid-log corrupt frame each fail closed.".format(checked))
     return 0
 

@@ -19,6 +19,7 @@ Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refu
 2 malformed input, a read error, or an archive immutability violation.
 """
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -105,8 +106,10 @@ def _toml_str(value):
 def archive_file(archive_root, data):
     """Archive raw bytes under <archive_root>/<sha256>/payload, immutably. Returns the sha256. Refuses
     (AdoptError) if an existing entry under the same hash holds DIFFERING bytes (8.2 immutability); an
-    identical re-archive is idempotent. The per-hash directory is created O_EXCL-style via mkdir so a
-    concurrent writer cannot race two different payloads into one hash directory."""
+    identical re-archive is idempotent. Content-addressing keeps the archive idempotent (identical bytes
+    yield the same hash directory, so two writers of the same payload cannot disagree), and a per-process
+    temp name keeps concurrent writers of the same hash from clobbering each other's temp before the
+    atomic replace."""
     digest = hashlib.sha256(data).hexdigest()
     entry = Path(archive_root) / digest
     payload = entry / "payload"
@@ -117,7 +120,7 @@ def archive_file(archive_root, data):
                 payload))
         return digest
     entry.mkdir(parents=True, exist_ok=True)
-    tmp = entry / "payload.tmp"
+    tmp = entry / "payload.{}.tmp".format(os.getpid())
     tmp.write_bytes(data)
     tmp.replace(payload)
     return digest

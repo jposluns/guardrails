@@ -504,6 +504,7 @@ def apply_ops(root_fd, ops, staged_reader):
                     data = staged_reader(op)
                     os.ftruncate(fd, 0)
                     os.lseek(fd, 0, os.SEEK_SET)
+                    _maybe_torn_payload(fd, data, i)
                     _write_all(fd, data)
                     os.fsync(fd)
                 finally:
@@ -513,7 +514,9 @@ def apply_ops(root_fd, ops, staged_reader):
                              op["poststate"]["mode"], dir_fd=pfd)
                 try:
                     os.fchmod(fd, op["poststate"]["mode"])   # pin exact perms (umask independence)
-                    _write_all(fd, staged_reader(op))
+                    data = staged_reader(op)
+                    _maybe_torn_payload(fd, data, i)
+                    _write_all(fd, data)
                     os.fsync(fd)
                 finally:
                     os.close(fd)
@@ -541,6 +544,16 @@ def _write_all(fd, data):
     while view:
         n = os.write(fd, view)
         view = view[n:]
+
+
+def _maybe_torn_payload(fd, data, i):
+    """Crash-injection: when the harness targets op i, write only a partial prefix of the payload,
+    fsync it, and die, leaving a torn (mid-write) payload for recovery to repair. Inert unless the
+    self-test harness sets KILL_ENV."""
+    if os.environ.get(KILL_ENV, "") == "torn-payload:{}".format(i) and data:
+        _write_all(fd, data[:max(1, len(data) // 2)])
+        os.fsync(fd)
+        os._exit(137)
 
 
 # --- restore (idempotent, contained) ------------------------------------------------------------------
@@ -574,6 +587,8 @@ def _restore_preimage(txn_dir, root_fd, op):
             os.chmod(name, prestate["mode"], dir_fd=pfd, follow_symlinks=False)
         else:                                             # write or remove: recreate/rewrite prior bytes
             data = (txn_dir / "preimages" / prestate["payload"]).read_bytes()
+            if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
+                raise JournalError("preimage for {!r} does not match recorded prestate digest".format(path))
             if st is None:
                 _recreate_file(pfd, name, data, prestate["mode"])
             elif stat.S_ISREG(st.st_mode):
