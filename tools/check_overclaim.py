@@ -291,12 +291,15 @@ COMPAT_ALT = re.compile(r"\bcompatible\b", re.IGNORECASE)
 
 # PREDICATE-FINAL boundary for the adjacent-denial (paired with the pre-match surface): a denial clears only
 # when the banned term ENDS the predicate, i.e. the first non-space AFTER the matched span is end-of-string,
-# a clause boundary ([.,;:!?]), or a contrastive conjunction (but|yet|however|though|although|whereas|nor).
-# Any other trailing content is a scope-reversing qualifier ("in name only", "on paper only", "nominally",
-# "in theory") or a continuing phrase that reverses the denial, so it does NOT clear -> FLAG. This closes the
-# POST-match surface structurally, without enumerating the qualifiers.
+# a HARD sentence/clause boundary (. ; ! ?), or a contrastive conjunction (but|yet|however|though|although|
+# whereas|nor). A COMMA or COLON is deliberately NOT a terminator: either can introduce a CONTINUING
+# appositive that reverses the denial ("not tamper-resistant, in name only; they resist deliberate
+# modification"; "not tamper-resistant: in marketing terms, ..."), so a trailing comma/colon means NOT
+# predicate-final -> FLAG. Any other trailing content is a scope-reversing qualifier ("in name only", "on
+# paper only", "nominally", "in theory") or a continuing phrase that reverses the denial, so it too does NOT
+# clear. This closes the POST-match surface structurally, without enumerating the qualifiers.
 POSTMATCH_PREDICATE_FINAL = re.compile(
-    r"\s*(?:[.,;:!?]|(?:but|yet|however|though|although|whereas|nor)\b|$)", re.IGNORECASE)
+    r"\s*(?:[.;!?]|(?:but|yet|however|though|although|whereas|nor)\b|$)", re.IGNORECASE)
 
 # Shipped third-party control TITLES that legitimately carry release-integrity vocabulary, enumerated
 # from the live site/mappings.html at build (never guessed). RECONCILED 2026-08-25: mappings.html carries
@@ -987,6 +990,10 @@ POSITIVE = [
     "Our releases are not tamper-resistant in name only; they resist real attacks.",  # "in name only" reverses the denial
     "Releases are not tamper-evident on paper only, but truly.",       # "on paper only" reverses (first post-match token is "on", not a boundary)
     "Not tamper-resistant nominally, our releases block attacks.",     # "nominally" continuing phrase reverses the denial
+    # COMMA/COLON is not a predicate terminator: it can introduce a continuing appositive that reverses the denial.
+    "Our releases are not tamper-resistant, in name only; they resist deliberate modification.",  # comma then "in name only" reverses
+    "Releases are not tamper-evident, on paper.",                      # trailing comma + appositive "on paper" reverses
+    "Not tamper-resistant: in marketing terms, our releases block attacks.",  # colon then continuing phrase reverses
     # SIMPLIFICATION: the subject-quantifier honest form ("No release is ...") is no longer specially cleared;
     # a copula separates the negator from the term, so it flags (the safe direction, and not a shipped form).
     "No release is tamper-evident.",                                   # was cleared under the old N1; now flags
