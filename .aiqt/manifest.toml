@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "01566a9eeb9ca9e2f72cc2673429c8a533ecf5b2b62852cf7023923371216415"
+tree-sha256 = "7697da0235a62b70b5b3af6558adc76d92104b53b1475f27e6ef0756eebc4ca0"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2066,8 +2066,8 @@ sha256 = "466f2affd209beda43b499d63d63fbed958d1405b06079dc0a4d3afaf661f763"
 
 [[sources]]
 path = "README.md"
-bytes = 2857
-sha256 = "1760189d13f0c2c6e1a4910909bd02bb27e48da690857b9bcb64ea4570343d46"
+bytes = 2929
+sha256 = "d12009859a36ecb77e41cc7400288fd622c6717c7092b5698b42647082259913"
 
 [[sources]]
 path = "RELEASING.md"

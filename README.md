@@ -11,7 +11,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 
 ## Two ways to run it
 
-- **In a chat assistant** (Claude, ChatGPT, Gemini, Copilot): install the AIQT skill, one file, and every
+- **In a chat assistant** (Claude, ChatGPT, Gemini, Copilot): add AIQT in the form each assistant supports (a skill, a Gem, an agent, or an uploaded instruction file), and every
   conversation answers to the standard. Available now.
 - **In a coding assistant** (Claude Code, Codex, Cursor, Copilot in the editor): drop the generated adapters
   into your repository so the standard governs the code as it is written, and the shipped controls catch a
