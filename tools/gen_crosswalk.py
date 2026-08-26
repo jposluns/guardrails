@@ -9,22 +9,19 @@ without declaring its output). The runtime adopter crosswalk.toml is NEVER a reg
 ADOPTER mode (--legacy-root DIR [--out .aiqt/migration]): build CANDIDATE crosswalk material for a human
 reviewer. Order is load-bearing (8.2, spec lines 1227 to 1234): each legacy file's RAW BYTES are archived
 FIRST under <out-archive>/.aiqt/archive/<sha256>/payload (immutable: re-archiving differing bytes under
-the same name is refused), BEFORE any pointer handling. The tool never INJECTS a parsed or derived pointer
-annotation into an archived payload; the archive is always the legacy file's raw bytes verbatim. The tool
-then emits candidate predecessor rows (with computable 7.2 spans) and pointer-ranked candidate mapping rows
-with EMPTY review/verdict fields plus an explicitly computed unmatched list. It NEVER auto-asserts semantic
-equivalence (8.5) or enumeration completeness (8.2): a pointer (Expected-successor: / Coverage:) is a hint
-with zero evidentiary weight that only RANKS candidates.
+the same name is refused). The tool never reads, injects, or derives a pointer from the archived source
+bytes; the archive is always the legacy file's raw bytes verbatim. The tool then emits candidate
+predecessor rows (with computable 7.2 spans) and candidate mapping rows ranked ONLY by deterministic
+lexical overlap, with EMPTY review/verdict fields, plus an explicitly computed unmatched list. It NEVER
+auto-asserts semantic equivalence (8.5) or enumeration completeness (8.2).
 
-DISCLOSED (D10, spec 8.6 lines 1236 to 1243, tracked post-VC-6 follow-up): 8.6 mandates that a pointer live
-ONLY in the adopter's migration state and that the archived PREIMAGE always be the UNANNOTATED predecessor
-bytes. This tool archives the legacy raw bytes verbatim (correct per 8.2) BUT reads pointer HINTS from those
-same archived bytes, i.e. it assumes any pointer is embedded in the legacy source. Reconciling this to 8.6's
-migration-state-only pointer carriage is a larger redesign (predecessor clause-ids are GENERATED here, so a
-migration-state pointer carrier keyed by clause-id is a chicken-and-egg the adopter workflow must resolve),
-deferred out of the VC-6 slice. Until then, an "Expected-successor:" line in a legacy file is treated as an
-incidental hint, NOT the spec's migration-state pointer; this tool does not claim section 8.6 pointer-carriage
-conformance, and migration-state pointer carriage is deferred out of the VC-6 slice (to Step 7).
+SECTION 8.6 CONFORMANCE (spec lines 1236 to 1243): 8.6 mandates that a pointer live ONLY in the adopter's
+migration state and that the archived PREIMAGE always be the UNANNOTATED predecessor bytes. This tool
+archives the legacy raw bytes verbatim (8.2) and does NOT consume pointers from the archived source: an
+"Expected-successor:" or "Coverage:" line in a legacy file is left untouched in the immutable archived
+bytes and is NEVER extracted to rank or seed candidate mappings. A pointer-hint, where an adopter uses one,
+is a migration-state artefact the reviewer supplies in crosswalk.toml, never lifted from the archived
+preimage. There is therefore no section 8.6 residual to disclose.
 
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
@@ -81,14 +78,12 @@ schema-version = 1
 # [[pointer-hint]]: an in-file pointer mirrored for the reviewer; a hint only, zero evidentiary weight.
 #   predecessor-clause-id, expected-successor-ids, coverage, carrier = "frontmatter" | "body"
 
-# Section 8.6 pointer-carriage deferral (D10): this tool does not claim section 8.6 pointer-carriage
-# conformance; migration-state pointer carriage is deferred out of the VC-6 slice (to Step 7). A pointer
-# here is an incidental in-file hint, not the spec's migration-state pointer.
+# Section 8.6 pointer carriage: a [[pointer-hint]] is a MIGRATION-STATE artefact the reviewer supplies here;
+# gen_crosswalk.py never extracts a pointer from the archived preimage (the archived predecessor bytes stay
+# unannotated), so those bytes are always exactly what the 8.3 namespace and the archive rows key on.
 '''
 
-# Pointer grammar (8.6 lines 1206 to 1210): greppable hints carried in frontmatter or body.
-_EXPECTED_RE = re.compile(r"Expected-successor:\s*(.+)")
-_COVERAGE_RE = re.compile(r"Coverage:\s*(.+)")
+
 def _segment_paragraphs(text):
     """Segment text into (paragraph_text, start_line, end_line) blocks on blank-line boundaries, tracking
     1-based line numbers, so each candidate predecessor row can carry a tight 7.2 whole-line source span
@@ -315,20 +310,6 @@ def _read_fd_all(fd):
     return b"".join(chunks)
 
 
-def parse_pointers(text):
-    """Extract (expected_successor_ids, coverage) pointer hints from a legacy file's text. A pointer is a
-    HINT with zero evidentiary weight; an embedded pointer stays verbatim in the raw archived bytes, and
-    the tool never INJECTS a parsed or derived pointer annotation into an archived payload."""
-    expected = []
-    for m in _EXPECTED_RE.finditer(text):
-        expected += [tok.strip() for tok in re.split(r"[,\s]+", m.group(1).strip()) if tok.strip()]
-    cov = ""
-    mc = _COVERAGE_RE.search(text)
-    if mc:
-        cov = mc.group(1).strip()
-    return expected, cov
-
-
 def _rank_candidates(pred_text, successor_texts):
     """Deterministic lexical-overlap ranking of successor candidates for a predecessor paragraph. Pure
     attention-ordering; it never fills a verdict and never waives review."""
@@ -344,13 +325,13 @@ def _rank_candidates(pred_text, successor_texts):
 
 def build_candidates(legacy_root, archive_fd, successor_texts):
     """Archive every legacy file FIRST (beneath the no-follow-anchored archive_fd), then emit candidate
-    predecessor rows, candidate mapping rows with EMPTY review fields, pointer hints, and the computed
-    unmatched list. Deterministic ordering."""
+    predecessor rows, candidate mapping rows with EMPTY review fields, and the computed unmatched list.
+    Deterministic ordering. No pointer is read from the archived source bytes (8.6)."""
     legacy_root = Path(legacy_root)
     files = sorted(p for p in legacy_root.rglob("*") if p.is_file())
     if not files:
         raise AdoptError("no legacy files under {}".format(legacy_root), exit_code=1)
-    archive_rows, predecessor_rows, mapping_rows, pointer_rows = [], [], [], []
+    archive_rows, predecessor_rows, mapping_rows = [], [], []
     for f in files:
         # fix #6: capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
         # recorded owner cannot disagree with the archived payload. No O_NOFOLLOW here: legacy trees may
@@ -378,14 +359,11 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
             predecessor_rows.append({"clause-id": pid, "archive-sha256": digest, "start-line": start_line,
                                      "end-line": end_line, "canonical-text": para.strip(),
                                      "source-digest": digest})
-            expected, coverage = parse_pointers(para)
+            # 8.6: candidates are ranked ONLY by deterministic lexical overlap; no pointer is read from the
+            # archived source bytes (the archived preimage stays unannotated), so nothing here consumes an
+            # Expected-successor: / Coverage: line embedded in the legacy file.
             ranked = _rank_candidates(para, successor_texts)
-            if expected or coverage:
-                pointer_rows.append({"predecessor-clause-id": pid,
-                                     "expected-successor-ids": expected, "coverage": coverage,
-                                     "carrier": "body"})
-            top = expected[:] if expected else ranked[:1]
-            for sid in top:
+            for sid in ranked[:1]:
                 mapping_rows.append({"predecessor-clause-id": pid, "successor-clause-id": sid})
         archive_rows.append({"legacy-path": rel, "archive-sha256": digest, "size": len(data),
                              "owner": owner, "predecessor-clause-ids": pred_ids})
@@ -393,7 +371,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
     all_pred = {r["clause-id"] for r in predecessor_rows}
     unmatched = sorted(all_pred - mapped)
     return {"archive": archive_rows, "predecessor": predecessor_rows, "mapping": mapping_rows,
-            "pointer": pointer_rows, "unmatched": unmatched}
+            "unmatched": unmatched}
 
 
 def render_candidates(cand):
@@ -422,13 +400,6 @@ def render_candidates(cand):
                 'successor-quote = ""', 'author = ""', 'author-family = ""',
                 'semantic-verdict = ""', 'rationale = ""', 'reviewer = ""', 'reviewer-family = ""',
                 'reviewed-utc = ""', ""]
-    for r in cand["pointer"]:
-        out += ["[[pointer-hint]]",
-                "predecessor-clause-id = {}".format(_toml_str(r["predecessor-clause-id"])),
-                "expected-successor-ids = [{}]".format(
-                    ", ".join(_toml_str(x) for x in r["expected-successor-ids"])),
-                "coverage = {}".format(_toml_str(r["coverage"])),
-                "carrier = {}".format(_toml_str(r["carrier"])), ""]
     out += ["# unmatched predecessors (computed; every one needs a reviewed mapping before check_crosswalk",
             "# can pass): [{}]".format(", ".join(_toml_str(x) for x in cand["unmatched"]))]
     return "\n".join(out) + "\n"
@@ -496,8 +467,8 @@ def main():
 #   (c) ADOPTER mode archives every legacy file's RAW BYTES first, under the sha256 directory name;
 #   (d) IMMUTABILITY: re-archiving DIFFERENT bytes under an existing hash is refused (exit 2), while an
 #       identical re-archive is idempotent;
-#   (e) pointer parsing extracts Expected-successor / Coverage hints and a pointer is never written into
-#       an archived payload;
+#   (e) 8.6: the archived payload is the raw legacy bytes (an Expected-successor: line survives in the
+#       archive, never stripped) AND no pointer is consumed from the source into the candidate crosswalk;
 #   (f) the unmatched list is COMPUTED (a predecessor with no ranked or pointed successor is listed).
 
 def self_test():
@@ -550,10 +521,15 @@ def self_test():
         payload = out / ".aiqt" / "archive" / digest / "payload"
         if not payload.is_file() or payload.read_bytes() != body.encode():
             failures.append("ADOPTER mode did not archive the raw legacy bytes under its sha256")
-        # (e) a pointer line is present in the source but the archived payload is the RAW file, unchanged.
+        # (e) 8.6: the pointer in the archived source is NOT consumed. The archived payload is the raw file
+        # (the Expected-successor: line survives), and the generated candidate carries NO [[pointer-hint]]
+        # row lifted from that source (a pre-fix generator emitted one from the legacy bytes).
         if b"Expected-successor" not in payload.read_bytes():
             failures.append("the archived payload must be the raw file (pointers not stripped from it)")
         cand_text = (out / ".aiqt" / "migration" / "crosswalk.candidate.toml").read_text(encoding="utf-8")
+        if "[[pointer-hint]]" in cand_text:
+            failures.append("8.6: no pointer may be consumed from the archived source into the candidate "
+                            "(a [[pointer-hint]] row lifted from the legacy bytes)")
         if 'semantic-verdict = ""' not in cand_text:
             failures.append("candidate mapping rows must carry EMPTY verdict fields (asserts nothing)")
         # fix #6: the 8.2-required owner is captured from the source fd and emitted on the archive-file row.
@@ -719,11 +695,11 @@ def self_test():
         return 1
     print("SELF-TEST PASS: REPO mode generates the schema reference and regenerates drift-clean and "
           "deterministically (a mutation fails --check); ADOPTER mode archives every legacy file's RAW "
-          "bytes FIRST under its sha256 (pointers are never stripped from the archived payload), emits "
-          "candidate mapping rows with EMPTY verdict fields, refuses a differing re-archive under an "
-          "existing hash while an identical one is idempotent, and computes the unmatched list. DISCLOSED: "
-          "this tool does not claim section 8.6 pointer-carriage conformance; migration-state pointer "
-          "carriage is deferred out of the VC-6 slice (to Step 7).")
+          "bytes FIRST under its sha256 (the archived preimage stays unannotated and no pointer is consumed "
+          "from it, so no [[pointer-hint]] is lifted into the candidate), emits candidate mapping rows with "
+          "EMPTY verdict fields, refuses a differing re-archive under an existing hash while an identical "
+          "one is idempotent, and computes the unmatched list. Section 8.6-conformant: a pointer lives only "
+          "in adopter migration state, never in the archived source.")
     return 0
 
 

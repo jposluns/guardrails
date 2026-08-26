@@ -50,6 +50,9 @@ PIN_REL = ".aiqt/pin.toml"
 CROSSWALK_REL = ".aiqt/migration/crosswalk.toml"
 INVENTORY_REL = ".aiqt/migration/successor-inventory.toml"
 JOURNAL_REL = ".aiqt/migration/journal"
+# H1: EVERY hex-shape or id-shape gate matches with fullmatch, not match: `$` matches before a final LF,
+# so a `<value>\n` (a real newline from a TOML `\n` escape) or an embedded-newline value would slip past
+# match() yet is a malformed lexical shape; fullmatch requires the WHOLE string to be the exact shape.
 PRED_ID_RE = re.compile(r"^pre-([0-9a-f]{12})\.([1-9][0-9]*)$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERDICT_SEMANTIC = "equal-or-stronger"
@@ -104,7 +107,7 @@ def check_archive(cw, root):
             declared_by_hash.setdefault(psha, set()).add(pid)
     for row in cw.get("archive-file", []):
         sha = row.get("archive-sha256")
-        if not (isinstance(sha, str) and HEX64_RE.match(sha)):
+        if not (isinstance(sha, str) and HEX64_RE.fullmatch(sha)):
             findings.append("an archive-file row has no 64-hex lowercase archive-sha256")
             continue
         lp = row.get("legacy-path")
@@ -245,7 +248,7 @@ def check_predecessors(cw, root):
         seen.add(pid)
         # C5: a 64-hex lowercase archive-sha256 is REQUIRED; an absent/malformed hash is a finding and the
         # remaining hash-keyed checks cannot run (never a silent bypass of the span gate by "" == "").
-        if not isinstance(sha, str) or not HEX64_RE.match(sha):
+        if not isinstance(sha, str) or not HEX64_RE.fullmatch(sha):
             findings.append("predecessor {!r}: archive-sha256 must be a 64-hex lowercase sha256 (absent or "
                             "malformed; the span gate is never bypassed by an empty hash)".format(pid))
             continue
@@ -402,7 +405,13 @@ def check_quote(row, inventory):
     if clause is None:
         return "successor id {!r} does not resolve in the pinned inventory".format(sid)
     q = row.get("successor-quote", "")
-    if not q or q not in clause.get("canonical-text", ""):
+    ct = clause.get("canonical-text", "")
+    # a non-string successor-quote (or a non-string successor canonical-text) would raise an uncaught
+    # TypeError at the substring membership below; a controlled GateError (exit 2) fails closed instead.
+    if not isinstance(q, str) or not isinstance(ct, str):
+        raise GateError("mapping {!r}: successor-quote and the successor canonical-text must be strings "
+                        "(a non-string scalar would raise TypeError at substring membership)".format(sid))
+    if not q or q not in ct:
         return "successor-quote for {!r} is not a verbatim contiguous substring of the canonical text" \
             .format(sid)
     return None
@@ -472,7 +481,7 @@ def check_inventory(inv_rows):
                 findings.append("successor inventory {!r}: a declared source span must be 1-based integers "
                                 "with start-line <= end-line (7.2 self-consistency)".format(cid))
         sd = row.get("source-digest")
-        if sd is not None and not (isinstance(sd, str) and HEX64_RE.match(sd)):
+        if sd is not None and not (isinstance(sd, str) and HEX64_RE.fullmatch(sd)):
             findings.append("successor inventory {!r}: source-digest, when present, must be a 64-hex "
                             "lowercase sha256 (7.2 self-consistency)".format(cid))
     return findings
@@ -1103,6 +1112,13 @@ def self_test():
             failures.append("codex: a non-dict archive-file row expected exit 2")
         n += 1
 
+        # a NON-STRING scalar successor-quote (e.g. an integer) must become a controlled GateError (exit 2),
+        # never an uncaught TypeError at the substring membership `q not in canonical-text`.
+        nonstr_q = base_text.replace('successor-quote = "{}"'.format(_SUCC_A), 'successor-quote = 5', 1)
+        if run_quiet(_build_install(tmp / "nonstr-quote", nonstr_q, [_LEGACY_ONE, _LEGACY_TWO], inv)) != 2:
+            failures.append("a non-string successor-quote must fail closed (exit 2), not TypeError-crash")
+        n += 1
+
         # fix #5 (C5 type floor): a STRING predecessor-clause-ids (not a list) fails CLOSED (exit 2), so a
         # bare "pre-<prefix>.1" can never satisfy the bidirectional membership check as a substring.
         str_pcids = base_text.replace('predecessor-clause-ids = ["{}"]'.format(p1),
@@ -1257,6 +1273,20 @@ def self_test():
                'canonical-text = "{}"\n'.format(_SUCC_A.replace('"', '\\"'), _SUCC_B.replace('"', '\\"')))
         if run_quiet(d5dig) != 1:
             failures.append("D5: a malformed successor-inventory source-digest must FAIL (1)")
+        n += 1
+        # H1: a successor-inventory source-digest ending in a trailing LF passes `$` (which matches before a
+        # final newline) yet is a malformed 64-hex shape; ONLY fullmatch catches it (a plain match() would
+        # let it through, exit 0). Alongside the existing trailing-LF 8.3-id case. tomllib parses `\n` as a
+        # real newline. Every other row is clean, so the digest shape is the sole finding.
+        d5lf = _build_install(tmp / "d5-digest-lf", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        _write(d5lf / INVENTORY_REL,
+               'schema-version = 1\n\n[[clause]]\nclause-id = "succ.a"\n'
+               'canonical-text = "{}"\nsource-digest = "{}\\n"\n\n[[clause]]\nclause-id = "succ.b"\n'
+               'canonical-text = "{}"\n'.format(_SUCC_A.replace('"', '\\"'), "0" * 64,
+                                                _SUCC_B.replace('"', '\\"')))
+        if run_quiet(d5lf) != 1:
+            failures.append("H1: a trailing-LF successor-inventory source-digest must FAIL (fullmatch, "
+                            "not match); a plain match() would let it through")
         n += 1
 
         # D6: structural completeness. A crosswalk present with the ARCHIVE structurally ABSENT is PARTIAL
