@@ -188,8 +188,12 @@ honest phrasing that misses the allowlist may flag by design. The two families:
     not-expensive release is tamper-resistant", "No customers doubt that releases are tamper-resistant"), a
     negator in a prior clause is cut off by the boundary ("Deployment is not automatic; releases are
     tamper-resistant"), and a TRAILING negator never clears ("..., not merely checksum-protected" still
-    asserts the tamper claim). This tight binding is what makes the deny-list launder-free: nothing clears a
-    banned term unless a negator is right next to it.
+    asserts the tamper claim). A paired PREDICATE-FINAL rule closes the POST-match surface: the banned term
+    must END the predicate (next non-space is end-of-string, a clause boundary, or a contrastive), so a
+    scope-reversing qualifier after it FLAGS ("not tamper-resistant IN NAME ONLY; they resist real attacks"
+    affirms substantive tamper resistance). This two-sided binding is what makes the deny-list launder-free:
+    nothing clears a banned term unless a negator is right next to it, not itself negated, and the term ends
+    the predicate.
 
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
 the instruction loading each turn ("AIQT is on for every turn", "applied to every response") is a
@@ -284,6 +288,15 @@ INTENT_HEDGE = re.compile(
 # BY-SA Compatible License").
 LATER_ALT = re.compile(r"\blater\b", re.IGNORECASE)
 COMPAT_ALT = re.compile(r"\bcompatible\b", re.IGNORECASE)
+
+# PREDICATE-FINAL boundary for the adjacent-denial (paired with the pre-match surface): a denial clears only
+# when the banned term ENDS the predicate, i.e. the first non-space AFTER the matched span is end-of-string,
+# a clause boundary ([.,;:!?]), or a contrastive conjunction (but|yet|however|though|although|whereas|nor).
+# Any other trailing content is a scope-reversing qualifier ("in name only", "on paper only", "nominally",
+# "in theory") or a continuing phrase that reverses the denial, so it does NOT clear -> FLAG. This closes the
+# POST-match surface structurally, without enumerating the qualifiers.
+POSTMATCH_PREDICATE_FINAL = re.compile(
+    r"\s*(?:[.,;:!?]|(?:but|yet|however|though|although|whereas|nor)\b|$)", re.IGNORECASE)
 
 # Shipped third-party control TITLES that legitimately carry release-integrity vocabulary, enumerated
 # from the live site/mappings.html at build (never guessed). RECONCILED 2026-08-25: mappings.html carries
@@ -638,7 +651,7 @@ def _sentence_window(text, start, end):
     return text[left:end + right.start()] if right else text[left:]
 
 
-def _adjacent_denial_clears(text, start):
+def _adjacent_denial_clears(text, start, end):
     """True when a negator DIRECTLY negates the banned term (tight adjacency), the ONLY negation clearance in
     the simplified deny-list. Within the pre-match clause (bounded by the last CLAUSE_BOUNDARY before the
     match), the negator CLOSEST to the match must be separated from the term by NO adverb, only an optional
@@ -656,6 +669,12 @@ def _adjacent_denial_clears(text, start):
     without tamper evidence" / "never without an independent anchor" affirm the property and keep FLAGGING).
     This tight binding is what makes the deny-list launder-free: nothing clears a banned term unless a negator
     is right next to it and not itself negated."""
+    # PREDICATE-FINAL (post-match surface): the banned term must END the predicate. If the first non-space
+    # after the match is not end-of-string, a clause boundary, or a contrastive, a trailing scope-reversing
+    # qualifier ("in name only", "on paper only", "nominally") or a continuing phrase reverses the denial, so
+    # it does NOT clear. "not tamper-resistant in name only; they resist real attacks" affirms and FLAGS.
+    if not POSTMATCH_PREDICATE_FINAL.match(text, end):
+        return False
     left = 0
     for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
         left = m.end()
@@ -720,7 +739,7 @@ def _guard_clears(guard, text, m):
     if guard == "release":
         if _title_allowlisted(text, m.start(), m.end()):
             return True
-        return _adjacent_denial_clears(text, m.start())
+        return _adjacent_denial_clears(text, m.start(), m.end())
     return False
 
 
@@ -963,6 +982,11 @@ POSITIVE = [
     "Releases are not without tamper evidence.",                       # "not without tamper evidence" affirms tamper evidence
     "Validation is not without an independent anchor.",               # "not without an independent anchor" affirms it
     "The package is not without tamper resistance.",                  # "not without tamper resistance" affirms it
+    # POST-MATCH launder: a scope-reversing qualifier AFTER the term ("in name only"/"on paper only"/
+    # "nominally") reverses the denial, so the term is not predicate-final and it must FLAG.
+    "Our releases are not tamper-resistant in name only; they resist real attacks.",  # "in name only" reverses the denial
+    "Releases are not tamper-evident on paper only, but truly.",       # "on paper only" reverses (first post-match token is "on", not a boundary)
+    "Not tamper-resistant nominally, our releases block attacks.",     # "nominally" continuing phrase reverses the denial
     # SIMPLIFICATION: the subject-quantifier honest form ("No release is ...") is no longer specially cleared;
     # a copula separates the negator from the term, so it flags (the safe direction, and not a shipped form).
     "No release is tamper-evident.",                                   # was cleared under the old N1; now flags
