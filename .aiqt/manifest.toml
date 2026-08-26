@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "5bd00a5a1a11a493b9513c5db5e7728c84699703a550e2720e74a29f57429c5b"
+tree-sha256 = "3c519e384871d9189bcc3cd72837cd889219fa67270ea5b0b684dcc60f86b3d0"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 31397
-sha256 = "d8c22e3526675b1ac17b0fa19515fe02f8fc91338d57c7d3f00284720e92d218"
+bytes = 31595
+sha256 = "f7f9accb51e6be09678939b1c0df69fcabb47b5cce6a3f36e29e97b7688373da"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
@@ -2306,8 +2306,8 @@ sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
 path = "tools/_journal.py"
-bytes = 57544
-sha256 = "390ba9bb3007b57254c7443c9c84db87973fdc34a5108f2b78f71fdcd4cc025c"
+bytes = 58475
+sha256 = "3584b1615af6b939a94af3250d5aa221724751f6f220f543eadfcd71d4419c94"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -2561,8 +2561,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/migrate.py"
-bytes = 81036
-sha256 = "f13f46faec7623e76a417df5b24ea7c903c100ecd2666f8abb1d2455533facd0"
+bytes = 72550
+sha256 = "54a69d6ba9b8f9a323182c84193638e29ea619e4f4b25fbc3c9e35d60c4b0112"
 
 [[sources]]
 path = "tools/run_all_checks.sh"

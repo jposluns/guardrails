@@ -51,6 +51,7 @@ from pathlib import Path
 
 MAGIC = b"AIQTJ1"
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_PIDSTART_RE = re.compile(r"^[0-9]+$")   # a /proc starttime: a non-negative decimal integer (what _pid_start writes)
 F_INTENT = "INTENT"
 F_COMPLETE = "COMPLETE"
 F_RIP = "ROLLBACK-IN-PROGRESS"
@@ -354,46 +355,26 @@ def _pid_start(pid):
 
 
 def acquire_lock(journal_root, session_id):
-    """Atomic-publication lock with owner identity (9.3 step 2). The FULL owner record is written to a
-    unique temp, fsynced, and published to `lock` by a NO-OVERWRITE, NO-FOLLOW hard link, so a crash
-    mid-write can never leave a half-written `lock` (a torn lock reads as malformed and can neither be
-    trusted nor, being possibly-live, broken, which would wedge recovery); the `lock` name only ever
-    appears as a complete, durable record. The no-overwrite link is the mutual-exclusion point: it raises
-    JournalError (mapped to a refuse-to-proceed) when a lock already exists (one open transaction at a
-    time; a possibly-live owner is never seized here, breaking a stale lock is the caller's explicit
-    reconcile step in recover)."""
+    """O_CREAT|O_EXCL lock with owner identity (9.3 step 2). Raises JournalError (mapped to a refuse-to-
+    proceed) when a lock already exists: one open transaction at a time; a possibly-live owner is never
+    seized here (breaking a stale lock is the caller's explicit reconcile step in recover). The O_EXCL
+    create is itself the mutual-exclusion point and refuses to follow a final-component symlink."""
     journal_root = Path(journal_root)
     lock = journal_root / "lock"
-    owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
-             "pid-start": _pid_start(os.getpid()),
-             "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    record = json.dumps(owner, sort_keys=True).encode()
-    jr_fd = os.open(str(journal_root), os.O_RDONLY | os.O_DIRECTORY)
     try:
-        tmp_name = "lock.{}.tmp".format(os.getpid())
-        try:
-            os.unlink(tmp_name, dir_fd=jr_fd)             # clear a stale temp from a prior same-pid crash
-        except FileNotFoundError:
-            pass
-        tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=jr_fd)
-        try:
-            _write_all(tfd, record)                       # loop: a short write cannot leave a torn temp
-            os.fsync(tfd)                                 # the FULL owner record durable BEFORE the publish
-        finally:
-            os.close(tfd)
-        try:
-            os.link(tmp_name, "lock", src_dir_fd=jr_fd, dst_dir_fd=jr_fd, follow_symlinks=False)
-        except FileExistsError:
-            raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
-                               .format(lock))
-        finally:
-            try:
-                os.unlink(tmp_name, dir_fd=jr_fd)
-            except FileNotFoundError:
-                pass
-        os.fsync(jr_fd)                                   # durable published-lock directory entry
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        raise JournalError("journal lock {} already held: an open transaction exists (run recover)"
+                           .format(lock))
+    try:
+        owner = {"uid": os.getuid(), "pid": os.getpid(), "session": session_id,
+                 "pid-start": _pid_start(os.getpid()),
+                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
+        os.fsync(fd)
     finally:
-        os.close(jr_fd)
+        os.close(fd)
+    _fsync_path_dir(journal_root)
     _kill_point("after-lock")
     return lock
 
@@ -402,14 +383,31 @@ def read_lock_owner(journal_root):
     """The recorded owner dict, or None when no lock file is present. JournalError on an unreadable or
     malformed lock (fail-closed: an unreadable lock is never treated as absent). HARDENING: the decoded
     JSON MUST be an object, so owner_confirmed_dead / _owner_is_current can call .get without a non-dict
-    (a bare list/int/string) reaching them as an uncaught AttributeError."""
-    lock = Path(journal_root) / "lock"
+    (a bare list/int/string) reaching them as an uncaught AttributeError. The lock is opened beneath the
+    journal-dir handle with O_NOFOLLOW and confirmed a regular file on the opened fd (mirror B1), so a
+    symlinked or non-regular `lock` fails closed rather than redirecting the read off-tree."""
+    journal_root = Path(journal_root)
     try:
-        raw = lock.read_bytes()
+        jr_fd = os.open(str(journal_root), os.O_RDONLY | os.O_DIRECTORY)
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise JournalError("cannot read journal lock ({})".format(exc))
+        raise JournalError("cannot open journal root ({})".format(exc))
+    try:
+        try:
+            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=jr_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:                            # ELOOP on a symlinked lock, or any read error: fail closed
+            raise JournalError("cannot read journal lock ({})".format(exc))
+        try:
+            if not stat.S_ISREG(os.fstat(lfd).st_mode):
+                raise JournalError("journal lock is not a regular file (fail-closed)")
+            raw = _read_fd(lfd)
+        finally:
+            os.close(lfd)
+    finally:
+        os.close(jr_fd)
     try:
         owner = json.loads(raw)
     except ValueError as exc:
@@ -422,30 +420,43 @@ def read_lock_owner(journal_root):
 
 def _validate_owner_schema(owner):
     """Validate the FULL lock-owner identity schema BEFORE any liveness evaluation (fail-closed): a valid
-    JSON object can still carry a boolean or non-int `pid`, a boolean or negative `uid`, or a non-string
-    `pid-start`, and a malformed field must never let a LIVE owner read as confirmed-dead and be seized
-    (possibly-live-never-seized, spec 1262 to 1265). bool is an int subclass, so it is excluded explicitly."""
+    JSON object can still carry a boolean or non-int `pid`, a boolean or negative `uid`, or a `pid-start`
+    that is a non-string OR a malformed string, and a malformed field must never let a LIVE owner read as
+    confirmed-dead and be seized (possibly-live-never-seized, spec 1262 to 1265). bool is an int subclass,
+    so it is excluded explicitly. `pid-start` must be EITHER empty (the disclosed non-Linux/unreadable
+    case _pid_start returns) OR the canonical /proc decimal start-time (a non-negative decimal integer
+    string, exactly what _pid_start writes); a whitespace-padded or otherwise non-decimal value is
+    rejected, so it can never be mistaken for a genuine start time and read as a differing (dead) one."""
     pid = owner.get("pid")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise JournalError("journal lock pid is not a positive integer (fail-closed)")
     uid = owner.get("uid")
     if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
         raise JournalError("journal lock uid is not a non-negative integer (fail-closed)")
-    if not isinstance(owner.get("pid-start"), str):
+    pid_start = owner.get("pid-start")
+    if not isinstance(pid_start, str):
         raise JournalError("journal lock pid-start is not a string (fail-closed)")
+    if pid_start != "" and not _PIDSTART_RE.match(pid_start):
+        raise JournalError("journal lock pid-start is not empty or a /proc decimal start time (fail-closed)")
 
 
 def owner_confirmed_dead(owner):
     """True ONLY on positive evidence of death. EPERM, a live pid, or any ambiguity reads as possibly-
     live (never seized). Where a start time was recorded and is readable, a differing start time for the
     same pid also confirms death (PID reuse). Residual: PID reuse on a platform with no readable start
-    time cannot be distinguished, so it reads as possibly-live and the lock is not broken. A malformed or
-    ambiguous identity field (a boolean/non-int/non-positive pid, or a non-string pid-start) reads as
-    possibly-live here too, so recovery can never seize a live owner behind a malformed lock (defence in
-    depth: read_lock_owner already rejects such a lock)."""
-    pid = owner.get("pid")
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    time cannot be distinguished, so it reads as possibly-live and the lock is not broken. The FULL owner
+    schema is validated defensively FIRST, so ANY malformed or ambiguous identity field (a boolean/non-int/
+    non-positive pid, a bad uid, or a pid-start that is not empty and not a /proc decimal start time) reads
+    as possibly-live here too: recovery can never seize a live owner behind a malformed lock, whose garbage
+    pid-start would otherwise differ from the real start time and read as dead (defence in depth:
+    read_lock_owner already rejects such a lock)."""
+    if not isinstance(owner, dict):
+        return False                                      # non-dict: possibly-live, never seized
+    try:
+        _validate_owner_schema(owner)                     # any malformed identity field reads possibly-live
+    except JournalError:
         return False
+    pid = owner.get("pid")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -454,10 +465,8 @@ def owner_confirmed_dead(owner):
         return False
     except OSError:
         return False
-    recorded = owner.get("pid-start")
+    recorded = owner.get("pid-start")                     # validated: empty, or a /proc decimal start time
     if recorded:
-        if not isinstance(recorded, str):
-            return False                                  # malformed start time: possibly-live, never seized
         now = _pid_start(pid)
         return bool(now) and now != recorded
     return False
@@ -1036,12 +1045,14 @@ def is_terminal(txn_dir):
 
 
 def build_inverse_ops(intent_ops):
-    """The un-adopt engine primitive (10.6): from a terminal transaction's INTENT ops, build the inverse
-    op list that returns the tree to that transaction's prestate, in reverse dependency order. write ->
-    write the prior bytes back; create -> remove; remove -> create the prior bytes; mkdir -> rmdir;
-    rmdir -> mkdir. The caller replays these as a NEW journaled transaction whose staged_reader serves
-    the ORIGINAL transaction's retained preimages. Cross-transaction ordering, authorization, repoint
-    inversion, and pin removal are Section 12 step 7 (pin.py), NOT this VC-6 slice."""
+    """The INERT reverse-replay primitive (10.6): from a terminal transaction's INTENT ops, build the
+    inverse op list that returns the tree to that transaction's prestate, in reverse dependency order.
+    write -> write the prior bytes back; create -> remove; remove -> create the prior bytes; mkdir ->
+    rmdir; rmdir -> mkdir. The caller replays these as a NEW journaled transaction whose staged_reader
+    serves the ORIGINAL transaction's retained preimages. This is inert internal code that Step 7 builds
+    on: the un-adopt CLI and workflow (cross-transaction ordering, authorization, repoint inversion, and
+    pin removal) are Section 12 step 7 (spec 1586 to 1590), NOT this step-6 slice, which exposes no
+    un-adopt subcommand."""
     inverse = []
     for op in reversed(intent_ops):
         pre, post, kind, path = op["prestate"], op.get("poststate", {}), op["op"], op["path"]
