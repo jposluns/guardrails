@@ -6,22 +6,29 @@ facing schema reference, deterministically from the constants in this file, drif
 generator (its GENSRC_OUTPUTS declaration is discovered by gen_gensrc.py, so this tool cannot land
 without declaring its output). The runtime adopter crosswalk.toml is NEVER a registry target.
 
-ADOPTER mode (--legacy-root DIR [--out .aiqt/migration]): build CANDIDATE crosswalk material for a human
-reviewer. Order is load-bearing (8.2, spec lines 1227 to 1234): each legacy file's RAW BYTES are archived
-FIRST under <out-archive>/.aiqt/archive/<sha256>/payload (immutable: re-archiving differing bytes under
-the same name is refused). The tool never reads, injects, or derives a pointer from the archived source
-bytes; the archive is always the legacy file's raw bytes verbatim. The tool then emits candidate
-predecessor rows (with computable 7.2 spans) and candidate mapping rows ranked ONLY by deterministic
-lexical overlap, with EMPTY review/verdict fields, plus an explicitly computed unmatched list. It NEVER
+ADOPTER mode (--legacy-root DIR [--out .aiqt/migration] [--successor-inventory FILE]): build CANDIDATE
+crosswalk material for a human reviewer. Order is load-bearing (8.2, spec lines 1227 to 1234): each legacy
+file's RAW BYTES are archived FIRST under <out-archive>/.aiqt/archive/<sha256>/payload (immutable:
+re-archiving differing bytes under the same name is refused). The tool never reads, injects, or derives a
+pointer from the archived source bytes; the archive is always the legacy file's raw bytes verbatim. The
+tool then emits candidate predecessor rows (with computable 7.2 spans) and, WHEN a reviewed successor
+inventory is supplied via --successor-inventory (the same .aiqt/migration/successor-inventory.toml
+[[clause]] rows check_crosswalk validates), candidate mapping rows ranked ONLY by deterministic lexical
+overlap, with EMPTY review/verdict fields, plus an explicitly computed unmatched list. With NO successor
+inventory supplied the tool emits the predecessor rows and the computed unmatched list and DEFERS
+candidate-mapping ranking (there is nothing to rank against, so nothing is overclaimed). It NEVER
 auto-asserts semantic equivalence (8.5) or enumeration completeness (8.2).
 
 SECTION 8.6 CONFORMANCE (spec lines 1236 to 1243): 8.6 mandates that a pointer live ONLY in the adopter's
 migration state and that the archived PREIMAGE always be the UNANNOTATED predecessor bytes. This tool
 archives the legacy raw bytes verbatim (8.2) and does NOT consume pointers from the archived source: an
 "Expected-successor:" or "Coverage:" line in a legacy file is left untouched in the immutable archived
-bytes and is NEVER extracted to rank or seed candidate mappings. A pointer-hint, where an adopter uses one,
-is a migration-state artefact the reviewer supplies in crosswalk.toml, never lifted from the archived
-preimage. There is therefore no section 8.6 residual to disclose.
+bytes and is NEVER extracted to rank or seed candidate mappings. Concretely, before the lexical-overlap
+ranking runs, any Expected-successor:/Coverage: pointer line is STRIPPED from the ranking text, so an
+archived predecessor's pointer content has ZERO influence on which successor a candidate row names (the
+archived bytes still keep those lines verbatim; only the ranking input excludes them). A pointer-hint,
+where an adopter uses one, is a migration-state artefact the reviewer supplies in crosswalk.toml, never
+lifted from the archived preimage. There is therefore no section 8.6 residual to disclose.
 
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
@@ -36,6 +43,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    sys.exit("error: gen_crosswalk.py requires Python 3.11+ (tomllib).")
 
 SCHEMA_REL = ".aiqt/core/migration/crosswalk-schema.toml"
 
@@ -310,6 +322,20 @@ def _read_fd_all(fd):
     return b"".join(chunks)
 
 
+# 8.6 body-carried pointer directives (spec lines 1216 to 1219): an Expected-successor: line (one id or a
+# comma-separated list) paired with a Coverage: descriptor. Matched at line start after optional leading
+# whitespace; stripped from the RANKING input only, never from the archived bytes.
+_POINTER_LINE_RE = re.compile(r"^[ \t]*(?:Expected-successor|Coverage)[ \t]*:")
+
+
+def _strip_pointer_lines(text):
+    """8.6: drop the migration-pointer directive lines (Expected-successor: / Coverage:) from the text used
+    for lexical-overlap RANKING, so an archived predecessor's pointer content has ZERO influence on which
+    successor candidate is selected. The raw bytes are still archived verbatim (8.2); only the ranking input
+    excludes pointer lines, keeping the pointer strictly a hint of zero evidentiary weight per 8.6."""
+    return "\n".join(line for line in text.split("\n") if not _POINTER_LINE_RE.match(line))
+
+
 def _rank_candidates(pred_text, successor_texts):
     """Deterministic lexical-overlap ranking of successor candidates for a predecessor paragraph. Pure
     attention-ordering; it never fills a verdict and never waives review."""
@@ -359,10 +385,11 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
             predecessor_rows.append({"clause-id": pid, "archive-sha256": digest, "start-line": start_line,
                                      "end-line": end_line, "canonical-text": para.strip(),
                                      "source-digest": digest})
-            # 8.6: candidates are ranked ONLY by deterministic lexical overlap; no pointer is read from the
-            # archived source bytes (the archived preimage stays unannotated), so nothing here consumes an
-            # Expected-successor: / Coverage: line embedded in the legacy file.
-            ranked = _rank_candidates(para, successor_texts)
+            # 8.6: candidates are ranked ONLY by deterministic lexical overlap over the paragraph text with
+            # any Expected-successor: / Coverage: pointer line STRIPPED first (_strip_pointer_lines), so an
+            # embedded pointer in the archived source bytes has ZERO influence on candidate selection (the
+            # archived preimage still keeps those lines verbatim; only the ranking input excludes them).
+            ranked = _rank_candidates(_strip_pointer_lines(para), successor_texts)
             for sid in ranked[:1]:
                 mapping_rows.append({"predecessor-clause-id": pid, "successor-clause-id": sid})
         archive_rows.append({"legacy-path": rel, "archive-sha256": digest, "size": len(data),
@@ -449,14 +476,60 @@ def run_adopter(legacy_root, out_dir, successor_texts):
     return 0
 
 
+def _load_successor_inventory(path):
+    """D10-C: load the reviewed successor inventory (the SAME .aiqt/migration/successor-inventory.toml
+    [[clause]] rows check_crosswalk validates) into {clause-id: canonical-text} for lexical-overlap
+    ranking, so the adopter CLI actually produces ranked candidate mapping rows. Fail-closed (AdoptError)
+    on a read or parse error or a malformed row, so the CLI never ranks against a partial or unreadable
+    inventory rather than silently emitting no candidates."""
+    try:
+        with open(str(path), "rb") as fh:
+            doc = tomllib.load(fh)
+    except OSError as exc:
+        raise AdoptError("cannot read successor inventory {} ({}); fail-closed".format(path, exc))
+    except tomllib.TOMLDecodeError as exc:
+        raise AdoptError("successor inventory {} is not valid TOML ({}); fail-closed".format(path, exc))
+    rows = doc.get("clause", [])
+    if not isinstance(rows, list):
+        raise AdoptError("successor inventory {}: [[clause]] must be an array of tables".format(path))
+    texts = {}
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise AdoptError("successor inventory {} clause {}: not a table".format(path, i))
+        cid, ct = row.get("clause-id"), row.get("canonical-text")
+        if not (isinstance(cid, str) and cid) or not (isinstance(ct, str) and ct):
+            raise AdoptError("successor inventory {} clause {}: clause-id and canonical-text must be "
+                             "non-empty strings".format(path, i))
+        texts[cid] = ct
+    return texts
+
+
+def _opt(args, name):
+    """The value following an option flag, or None when the flag is absent or terminal (no trailing value)."""
+    if name in args:
+        i = args.index(name)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
 def main():
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test()
     if "--legacy-root" in args:
-        legacy = Path(args[args.index("--legacy-root") + 1]).resolve()
-        out = Path(args[args.index("--out") + 1]).resolve() if "--out" in args else legacy.parent
-        return run_adopter(legacy, out, {})
+        legacy = Path(_opt(args, "--legacy-root")).resolve()
+        out_arg = _opt(args, "--out")
+        out = Path(out_arg).resolve() if out_arg else legacy.parent
+        # D10-C: rank against the reviewed successor inventory when supplied; without it, run_adopter emits
+        # predecessor rows and the unmatched list and DEFERS candidate-mapping ranking (empty successor set).
+        inv_arg = _opt(args, "--successor-inventory")
+        try:
+            successor_texts = _load_successor_inventory(Path(inv_arg).resolve()) if inv_arg else {}
+        except AdoptError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return exc.exit_code
+        return run_adopter(legacy, out, successor_texts)
     return run_repo(repo_root(), "--check" in args)
 
 
@@ -469,7 +542,11 @@ def main():
 #       identical re-archive is idempotent;
 #   (e) 8.6: the archived payload is the raw legacy bytes (an Expected-successor: line survives in the
 #       archive, never stripped) AND no pointer is consumed from the source into the candidate crosswalk;
-#   (f) the unmatched list is COMPUTED (a predecessor with no ranked or pointed successor is listed).
+#   (f) the unmatched list is COMPUTED (a predecessor with no ranked or pointed successor is listed);
+#   (D10-B) 8.6: changing ONLY the in-file pointer declarations does NOT change candidate selection (the
+#       pointer lines are stripped from the ranking input, so archived pointer content has zero influence);
+#   (D10-C) the ADOPTER CLI (main() with --successor-inventory) emits ranked candidate mapping rows against
+#       the supplied successor inventory (rather than the pre-fix empty successor set that produced none).
 
 def self_test():
     import io
@@ -685,6 +762,65 @@ def self_test():
             os.fsync = real_fsync
         if g9rc != 2:
             failures.append("G9: an injected fsync failure must make run_adopter fail closed (exit 2)")
+
+        # (D10-B) POINTER CONTENT MUST NOT INFLUENCE RANKING (8.6): two legacy files identical EXCEPT for
+        # their in-file pointer declarations must select the SAME successor candidate. The pointer lines are
+        # stripped from the lexical-overlap ranking input (the archived bytes keep them verbatim). Without
+        # the strip, each variant's pointer tokens overlap a different successor's text and FLIP the
+        # selection (variant A -> succ.beta, variant B -> succ.alpha), so the two selections would differ.
+        d10b_succ = {"succ.alpha": "alpha unique words foo bar",
+                     "succ.beta": "beta unique words baz qux"}
+        d10b_base = "a neutral predecessor obligation with no successor words\n"
+        d10b_variants = {
+            "A": d10b_base + "Expected-successor: succ.beta\nCoverage: beta unique words baz qux\n",
+            "B": d10b_base + "Expected-successor: succ.alpha\nCoverage: alpha unique words foo bar\n"}
+        d10b_selected = {}
+        for name, body_v in d10b_variants.items():
+            dlegacy = tmp / ("d10b-" + name) / "legacy"
+            dlegacy.mkdir(parents=True)
+            (dlegacy / "r.md").write_text(body_v, encoding="utf-8")
+            darc = tmp / ("d10b-" + name) / "arc"
+            darc.mkdir(parents=True)
+            dafd = os.open(str(darc), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                dcand = build_candidates(dlegacy, dafd, d10b_succ)
+            finally:
+                os.close(dafd)
+            d10b_selected[name] = [m["successor-clause-id"] for m in dcand["mapping"]]
+        if not d10b_selected["A"] or not d10b_selected["B"]:
+            failures.append("D10-B: each variant must still produce a candidate mapping row")
+        if d10b_selected["A"] != d10b_selected["B"]:
+            failures.append("D10-B: changing ONLY the in-file pointer declarations must not change candidate "
+                            "selection (pointer content must have zero influence on ranking, 8.6)")
+
+        # (D10-C) ADOPTER CLI PRODUCES CANDIDATES: main() with --successor-inventory loads the reviewed
+        # successor inventory (.aiqt/migration/successor-inventory.toml [[clause]] rows) and ranks against
+        # it, so candidate MAPPING rows are actually emitted through the REAL CLI path. Before the fix main()
+        # passed an EMPTY successor set, so every predecessor was unmatched and NO mapping row was produced.
+        c_legacy = tmp / "d10c" / "legacy"
+        c_legacy.mkdir(parents=True)
+        (c_legacy / "rule.md").write_text("The obligation about alpha unique words.\n", encoding="utf-8")
+        c_inv = tmp / "d10c" / "successor-inventory.toml"
+        c_inv.write_text('schema-version = 1\n\n[[clause]]\nclause-id = "succ.alpha"\n'
+                         'canonical-text = "alpha unique words successor obligation"\n\n'
+                         '[[clause]]\nclause-id = "succ.beta"\ncanonical-text = "utterly different zzz"\n',
+                         encoding="utf-8")
+        c_out = tmp / "d10c" / "out"
+        old_argv = sys.argv
+        sys.argv = ["gen_crosswalk.py", "--legacy-root", str(c_legacy), "--out", str(c_out),
+                    "--successor-inventory", str(c_inv)]
+        try:
+            rc_c = quiet(main)
+        finally:
+            sys.argv = old_argv
+        if rc_c != 0:
+            failures.append("D10-C: adopter CLI with --successor-inventory expected exit 0 (got {!r})"
+                            .format(rc_c))
+        c_cand = c_out / ".aiqt" / "migration" / "crosswalk.candidate.toml"
+        c_text = c_cand.read_text(encoding="utf-8") if c_cand.is_file() else ""
+        if "[[mapping]]" not in c_text or 'successor-clause-id = "succ.alpha"' not in c_text:
+            failures.append("D10-C: the adopter CLI must emit ranked candidate mapping rows against the "
+                            "supplied successor inventory (main() previously passed an empty successor set)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -696,10 +832,13 @@ def self_test():
     print("SELF-TEST PASS: REPO mode generates the schema reference and regenerates drift-clean and "
           "deterministically (a mutation fails --check); ADOPTER mode archives every legacy file's RAW "
           "bytes FIRST under its sha256 (the archived preimage stays unannotated and no pointer is consumed "
-          "from it, so no [[pointer-hint]] is lifted into the candidate), emits candidate mapping rows with "
-          "EMPTY verdict fields, refuses a differing re-archive under an existing hash while an identical "
-          "one is idempotent, and computes the unmatched list. Section 8.6-conformant: a pointer lives only "
-          "in adopter migration state, never in the archived source.")
+          "from it, so no [[pointer-hint]] is lifted into the candidate), and, against a supplied successor "
+          "inventory (--successor-inventory) exercised through the real CLI, emits candidate mapping rows "
+          "with EMPTY verdict fields, refuses a differing re-archive under an existing hash while an "
+          "identical one is idempotent, and computes the unmatched list. Section 8.6-conformant: a pointer "
+          "lives only in adopter migration state, never in the archived source, and the Expected-successor:/"
+          "Coverage: pointer lines are stripped from the ranking input, so changing only a predecessor's "
+          "pointer content does not change which successor a candidate row names.")
     return 0
 
 

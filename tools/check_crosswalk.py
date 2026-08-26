@@ -236,6 +236,11 @@ def check_predecessors(cw, root):
             archive_index.setdefault(ash, []).append(arow)
     for row in cw.get("predecessor", []):
         pid = row.get("clause-id", "")
+        # fold: type-check the id BEFORE the regex and before the hashable `seen` membership test, so a
+        # non-string clause-id (e.g. a TOML int or array) fails CLOSED (GateError, exit 2) rather than
+        # raising an uncaught TypeError inside PRED_ID_RE.fullmatch or `pid in seen`.
+        if not isinstance(pid, str):
+            raise GateError("predecessor row clause-id must be a string, got {}".format(type(pid).__name__))
         sha = row.get("archive-sha256", "")
         # fullmatch, not match: `$` matches before a trailing LF, so a `pre-<hex>.<ordinal>\n` id would slip
         # past match() yet is malformed; fullmatch requires the WHOLE string to be the exact 8.3 shape.
@@ -511,7 +516,14 @@ def pointer_warnings(cw):
         mapped.setdefault(m.get("predecessor-clause-id"), set()).add(m.get("successor-clause-id"))
     for h in cw.get("pointer-hint", []):
         pid = h.get("predecessor-clause-id")
-        expected = set(h.get("expected-successor-ids", []))
+        # fold: type-check the id list BEFORE set(), so a non-list expected-successor-ids (a non-iterable
+        # like an int, or a bare string that set() would explode into characters) fails CLOSED (GateError,
+        # exit 2) rather than raising an uncaught TypeError or silently mis-comparing.
+        raw_expected = h.get("expected-successor-ids", [])
+        if not isinstance(raw_expected, list):
+            raise GateError("pointer-hint expected-successor-ids must be an array, got {}"
+                            .format(type(raw_expected).__name__))
+        expected = set(raw_expected)
         if expected and expected != mapped.get(pid, set()):
             warnings.append("pointer for {!r} disagrees with the reviewed mapping (hint only, no verdict "
                             "change)".format(pid))
@@ -1301,6 +1313,25 @@ def self_test():
         _write(d6 / INVENTORY_REL, 'schema-version = 1\n')   # note: no .aiqt/archive, no pin
         if run_quiet(d6) != 2:
             failures.append("D6: a crosswalk with the archive structurally absent must fail closed (exit 2)")
+        n += 1
+
+        # (fold) a NON-STRING predecessor clause-id fails CLOSED (GateError), never an uncaught TypeError
+        # inside PRED_ID_RE.fullmatch or the hashable `seen` membership test.
+        try:
+            check_predecessors({"predecessor": [{"clause-id": 123, "archive-sha256": "0" * 64}]}, tmp)
+            failures.append("fold: a non-string predecessor clause-id must fail closed (GateError)")
+        except GateError:
+            pass
+        n += 1
+
+        # (fold) a NON-LIST pointer-hint expected-successor-ids fails CLOSED (GateError), never a TypeError
+        # from set() over a non-iterable (or a silent character-set from a bare string).
+        try:
+            pointer_warnings({"pointer-hint": [{"predecessor-clause-id": "pre-abc.1",
+                                                "expected-successor-ids": 5}]})
+            failures.append("fold: a non-list pointer expected-successor-ids must fail closed (GateError)")
+        except GateError:
+            pass
         n += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

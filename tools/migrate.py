@@ -278,7 +278,14 @@ def do_cutover(root, staged, unit):
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
         journal_root = root / JOURNAL_REL
-        journal_root.mkdir(parents=True, exist_ok=True)
+        try:
+            # J1: create the journal hierarchy durably (fsync each newly-created parent) BEFORE any INTENT
+            # or apply, so a crash cannot keep an applied tree mutation while losing the journal subtree
+            # (which recovery would then miss, falsely reporting nothing to recover).
+            _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
+        except _journal.JournalError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
         txn_id = "{}.{}.{}".format(_slug(unit), os.getpid(), time.time_ns())
         try:
             _journal.acquire_lock(journal_root, session_id="cutover")
@@ -1405,6 +1412,55 @@ def self_test():
         if not (owner4 and owner4.get("pid") == dead.pid):
             failures.append("E4: a stale lock must NOT be broken until reconciliation establishes terminal "
                             "state (the dead owner's lease must remain when a journal fails to reconcile)")
+        checked += 1
+
+        # (J1) FIX J1 (journal-hierarchy crash durability): the directory that HOLDS the journal dir entry
+        #      (.aiqt/migration) is fsync'd BEFORE the first INTENT, so a power loss cannot keep an applied
+        #      tree mutation while losing the never-fsynced journal subtree (which recovery would then miss,
+        #      falsely reporting 'no journal, nothing to recover' for a transaction whose mutation began).
+        #      The cutover runs IN-PROCESS with os.fsync and publish wrapped: os.fsync records each fsync'd
+        #      directory inode, and the set is frozen at the FIRST INTENT. Without the fix the journal dirs
+        #      are created by a bare mkdir(parents=True) that never fsyncs the parent, so the parent inode is
+        #      absent from the pre-INTENT fsync set and this fails closed against the regression.
+        j1root = _build_case_root(tmp / "j1" / "root", "flat-files")
+        j1staged = _build_staged(tmp / "j1" / "staged", "flat-files")
+        j1_recorded = set()
+        j1_at_intent = {"inos": None}
+        j1_orig_fsync, j1_orig_publish = os.fsync, _journal.publish
+
+        def _tracking_fsync(fd, _orig=j1_orig_fsync, _rec=j1_recorded):
+            try:
+                st = os.fstat(fd)
+                _rec.add((st.st_dev, st.st_ino))
+            except OSError:
+                pass
+            return _orig(fd)
+
+        def _snapshot_publish(txn_dir, ftype, obj, _orig=j1_orig_publish, _s=j1_at_intent, _rec=j1_recorded):
+            if ftype == _journal.F_INTENT and _s["inos"] is None:
+                _s["inos"] = set(_rec)                        # freeze the fsync'd set at the FIRST INTENT
+            return _orig(txn_dir, ftype, obj)
+
+        os.fsync = _tracking_fsync
+        _journal.publish = _snapshot_publish
+        try:
+            rc_j1 = do_cutover(j1root.resolve(), j1staged.resolve(), _SELFTEST_UNIT)
+        finally:
+            os.fsync = j1_orig_fsync
+            _journal.publish = j1_orig_publish
+        if rc_j1 != 0:
+            failures.append("J1: setup cutover expected exit 0")
+        try:
+            j1pst = os.stat(j1root / ".aiqt" / "migration")   # the dir that holds the `journal` entry
+            j1_parent_ino = (j1pst.st_dev, j1pst.st_ino)
+        except OSError:
+            j1_parent_ino = None
+        if j1_at_intent["inos"] is None:
+            failures.append("J1: no INTENT was published in the tracked cutover")
+        elif j1_parent_ino is None or j1_parent_ino not in j1_at_intent["inos"]:
+            failures.append("J1: the journal-hierarchy parent dir must be fsync'd BEFORE INTENT so the "
+                            "journal subtree is crash-durable (a crash before it is durable must not make "
+                            "recovery falsely report no journal to recover)")
         checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
