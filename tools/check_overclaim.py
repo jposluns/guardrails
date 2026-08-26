@@ -159,33 +159,41 @@ is:
     decision retired (the corrected CLAUDE.md wording lands in the same change, 4.4d). The active form is
     minisign/cryptographic-scoped so honest prose that merely says "sign" stays clean. FUTURE-guarded.
 
-RELEASE-INTEGRITY clearing, three ways (see _guard_clears "future"):
+RELEASE-INTEGRITY clearing is a TIGHT proposition-adjacent ALLOWLIST bound to the matched tamper/release
+noun (VER-CORE 4.4/5.6). It INVERTS the former loose model (round 5): rather than "any future predicate or
+any negator in the window clears", it clears ONLY a narrow enumerated set of constructions and FLAGS
+everything else, so it is launder-free by construction and its false positives fall in the safe direction.
+A novel-but-honest future or negation phrasing that misses the allowlist may flag by design. Three families:
   - a shipped third-party control TITLE (THIRD_PARTY_TITLES, enumerated from the live site/mappings.html)
     that WHOLLY CONTAINS the matched span clears it, so a framework/control title that itself carries the
     vocabulary is not read as an AIQT claim; a match that merely OVERLAPS or abuts the title ("Software
     Supply Chain Attacks & Dependency Tampering detection feature ...", where "detection" falls outside the
     title) or only co-occurs in the sentence does not clear (F-VC5-D);
-  - a proposition-bound residual DISCLOSURE clears it (see _disclosure_clears), two ways: a PRE-MATCH
-    negator whose leading window is SUBORDINATOR-AWARE and with NO be-form copula between the negator and the
-    match ("This layer does not provide tamper evidence" clears, but "Releases are not expensive because they
-    are tamper-resistant" flags, "not" bounded by "because"; "The not-expensive release is tamper-resistant"
-    and "There is no doubt that our releases are tamper-resistant" flag, a copula intervenes), OR a TRAILING
-    residual whose EXACT phrase is on the RESIDUAL_DISCLOSURES allowlist and contains the match verbatim
-    ("keyless tamper-evident ordering within the anchored history, not cryptographic proof"). Any other
-    trailing negator flags ("Releases are tamper-resistant, not merely checksum-protected", "..., not
-    expensive", and a bare "..., not cryptographically signed" all flag). A negator in a leading preamble, a
-    separate coordinate/semicolon clause, or a "so" result clause ("Without any doubt, ...", "Releases are
-    tamper-evident, and no anchor is independent yet", "We do not sign so releases are tamper-evident") does
-    not launder the matched claim either (F-VC5-B, Class C1/C2);
-  - an explicitly FUTURE PREDICATE (FUTURE_PREDICATE, the copula-bound roadmap verb phrase, NOT a bare
-    "will"/"roadmap" token) that occurs AFTER the match in the FORWARD part of the future-hedge window (see
-    _future_hedge_window, FUTURE_WINDOW_BOUNDARY), binding it to the matched noun as its copular predicate,
-    clears it, so "... anchor is planned for a future release" and "Tamper-evidence will be added in a future
-    release" clear, while a leading attributive pre-modifier of a DIFFERENT noun ("The planned release is
-    tamper-evident today"), a bare future token governing a DIFFERENT verb ("A tamper-evident release will
-    give your team confidence"), or a future word in a separate clause after a comma, a coordinating
-    "and"/"or", or a subordinator ("The anchor is tamper-evident and a further channel is planned"; "Releases
-    are tamper-resistant according to our roadmap"), cannot launder a present claim (F-VC5-C, Class B).
+  - a tight NEGATION disclosure bound to the matched proposition (see _disclosure_clears), three rules: N1 a
+    leading SUBJECT QUANTIFIER (no|neither|none as the FIRST token of the pre-match clause window, not an
+    emphatic idiom: "No release is tamper-evident" clears, "Releases with no downtime are tamper-evident" and
+    "There is no doubt that our releases are tamper-resistant" flag); N2 a DIRECT integrity-predicate negation
+    (the closest pre-match negator negating an integrity verb governing the tamper term, no be-copula between:
+    "This layer does not provide tamper evidence" clears, "We do not doubt that releases provide tamper
+    evidence" and "The not-expensive release is tamper-resistant" flag); N3 a TRAILING residual whose EXACT
+    phrase is on the RESIDUAL_DISCLOSURES allowlist and contains the match verbatim ("keyless tamper-evident
+    ordering within the anchored history, not cryptographic proof"). Any other trailing negator flags ("...,
+    not merely checksum-protected", "..., not expensive", a bare "..., not cryptographically signed"), and the
+    window breaks on a comma, semicolon, coordinating and/or/plus/so, or subordinator, so a leading preamble, a
+    separate coordinate/semicolon clause, a "so" result clause, or a "because" clause does not launder it
+    ("Without any doubt, ..."; "Releases are tamper-evident, and no anchor is independent yet"; "We do not sign
+    so releases are tamper-evident"; "Releases are not expensive because they are tamper-resistant") (F-VC5-B);
+  - one of the four tight FUTURE constructions F1-F4 bound to the matched noun (see _future_clears): F1 a
+    COPULA-ADJACENT status predicate ("anchor is planned for a future release"), F2 "will|shall be" governing
+    the match's subject ("Tamper-evidence will be added in a future release"), F3 a LEADING verbal
+    future-intent ("We plan to make releases tamper-resistant.", "Releases are planned to be tamper-resistant."),
+    or F4 a roadmap forward phrase bound with no new subject ("Tamper detection is to be introduced in a future
+    release"). A bare status adjective pre-modifying a DIFFERENT noun ("The planned release is tamper-evident
+    today", "The upcoming release is signed with minisign"), a future predicate whose subject is a different
+    noun, a "will" governing a DIFFERENT verb ("A tamper-evident release will give your team confidence"), a
+    future word across a preposition/paren/finite-verb ("... with a new logo planned for next year", "... ships
+    on our planned schedule"), or a future word in a separate clause ("... and a further channel is planned";
+    "... according to our roadmap") cannot launder a present claim (F-VC5-C, Class B).
 
 CALIBRATION: the gate catches OUTCOME/RESULT guarantees, not accurate MECHANISM claims. A claim about
 the instruction loading each turn ("AIQT is on for every turn", "applied to every response") is a
@@ -212,29 +220,43 @@ import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster 
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
 # overclaim (e.g. "AIQT does not sandbox anything. It guarantees secure output." would wrongly pass).
-# The negator alternation drives NEGATOR (the general in-clause/pre-match negation guard) and the
-# residual-disclosure LEADING path (_disclosure_clears), so both read the same negator set.
+# The negator alternation drives NEGATOR (the general in-clause/pre-match negation guard) and the tight
+# NEGATION rule N2 (_disclosure_clears), so both read the same negator set.
 _NEGATOR_ALT = (
     r"not|no|never|cannot|can't|without|nor|neither|hardly|rarely|"
     r"n't|doesn't|don't|isn't|aren't|won't|wouldn't")
 NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
-# A be-form COPULA between a leading negator and the match means the negator governs a DIFFERENT
+# A be-form COPULA between the governing negator and the match means the negator governs a DIFFERENT
 # predicate and the tamper claim is a fresh copular assertion, so the negator does NOT launder it (the
-# _disclosure_clears LEADING path checks this): "The not-expensive release IS tamper-resistant" ("is"
-# intervenes -> flags), "no doubt that ... releases ARE tamper-resistant" ("are" intervenes -> flags),
+# NEGATION rule N2 in _disclosure_clears checks this): "The not-expensive release IS tamper-resistant"
+# ("is" intervenes -> flags), "Releases with no downtime ARE tamper-evident" ("are" intervenes -> flags),
 # while the honest disclaimer "does not provide tamper evidence" (no copula between "not" and the match)
 # clears. "is not tamper-resistant" also clears: the copula sits BEFORE the negator, not between it and
 # the match, so the negation binds directly to the property.
 BE_COPULA = re.compile(r"\b(?:is|are|was|were|be|been|being)\b", re.IGNORECASE)
-# CARVE-OUT for the _disclosure_clears LEADING path: a bare SUBJECT QUANTIFIER ("no"/"neither"/"none")
-# directly negates the very noun the copula predicates the tamper property onto, so it clears even with a
-# be-copula between it and the match ("No release is tamper-evident", "Neither release is tamper-resistant"
-# honestly assert no such release exists). The exception is an EMPHATIC-IDIOM noun immediately after it ("no
-# doubt", "no question", "no way"): there the quantifier is an intensifier a launder exploits ("There is no
-# doubt that ... releases are tamper-resistant"), NOT a subject quantifier, so those keep FLAGGING.
+# NEGATION rule N1 (SUBJECT-QUANTIFIER): a bare "no"/"neither"/"none" that is the LEADING token of the
+# pre-match clause window directly negates the very noun the copula predicates the tamper property onto, so
+# it clears even with a be-copula between it and the match ("No release is tamper-evident", "Neither release
+# is tamper-resistant" honestly assert no such release exists). It clears ONLY as the leading token: an
+# oblique mid-clause "no <noun>" ("Releases with no downtime are tamper-evident") does not begin the window
+# and keeps FLAGGING. The further exception is an EMPHATIC-IDIOM noun immediately after it ("no doubt", "no
+# question", "no way"): there the quantifier is an intensifier a launder exploits ("There is no doubt that
+# ... releases are tamper-resistant"), NOT a subject quantifier, so those keep FLAGGING.
 SUBJECT_QUANTIFIER = {"no", "neither", "none"}
 EMPHATIC_IDIOM_NOUN = re.compile(
     r"\s*(?:doubt|doubts|doubting|question|questions|denying|way|means|sense)\b", re.IGNORECASE)
+# NEGATION rule N2 (DIRECT integrity-predicate negation): the text BETWEEN the governing negator and the
+# match, with no be-copula in it, is either empty/adverbs-only (the negator negates the tamper property
+# directly, "is not tamper-resistant") or an optional adverb run then an INTEGRITY VERB governing the tamper
+# term ("does not provide tamper evidence", "did not deliver an independent anchor"). It is anchored end to
+# end, so a NON-integrity verb or a new subject between the negator and the match breaks it: "We do not doubt
+# that releases provide tamper evidence" ("doubt" is not an integrity verb) and "The not-expensive release is
+# tamper-resistant" (a modifier, plus an intervening copula) both keep FLAGGING.
+INTEGRITY_NEG_TAIL = re.compile(
+    r"^\s*(?:[A-Za-z]+ly\s+){0,2}"
+    r"(?:(?:provide|provides|provided|offer|offers|offered|deliver|delivers|delivered|give|gives|given|"
+    r"make|makes|made|guarantee|guarantees|guaranteed|ensure|ensures|ensured|have|has|had)\s+"
+    r"(?:\w+\s+){0,2})?$", re.IGNORECASE)
 # Sentence and clause punctuation ends the clause a match belongs to. A CONTRASTIVE conjunction
 # (but/yet/however/...) also ends the negation window: it flips polarity, so a negator before it does
 # NOT scope over a guarantee after it. Binding negation to the guarantee-phrase segment this way makes
@@ -273,33 +295,59 @@ FUTURE_WINDOW_BOUNDARY = re.compile(
 INTENT_HEDGE = re.compile(
     r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?|intent)\b",
     re.IGNORECASE)
-# A FUTURE PREDICATE marks a RELEASE-INTEGRITY claim honest ONLY as the copula-bound future PREDICATE of
-# the release/tamper noun (VER-CORE 4.4/5.6: tamper wording may appear only as explicitly future-tense
-# roadmap). A BARE future token ("will", "roadmap") no longer clears: it laundered "A tamper-evident
-# release will give your team confidence" ("will" governs "give"), "... will remain verifiable" ("will"
-# governs "remain"), and "The roadmap states releases are tamper-resistant today" (leading "roadmap" names
-# the source, "today" is present). The predicate must be a roadmap-shaped VERB PHRASE. Only the future-
-# STATUS ADJECTIVES (planned/deferred/postponed/upcoming/forthcoming) clear BARE, because they are roadmap-
-# status words rather than achieved-property claims. The TENSE-AMBIGUOUS action verbs (added/introduced/
-# coming/scheduled) do NOT clear bare, because bare they also read PAST and RECURRING ("was added last
-# year", "was introduced in version 1", "is coming along nicely", "are scheduled every week"), all of which
-# must FLAG; they clear ONLY with an explicit future marker: "will be added|introduced", "to be
-# added|introduced", or a roadmap phrase ("for a/an/the next|future|later|upcoming release", "in a future|
-# later|coming release", "on the roadmap", "roadmap for", "will be|ship|arrive|land"). It clears only when
-# the predicate occurs AFTER the match, in the FORWARD part of the future-hedge window (match end to the
-# next boundary; see _future_hedge_window), so it binds to the matched tamper/release noun as its copular
-# predicate ("... anchor is planned for a future release", "Tamper-evidence will be added in a future
-# release" clear), while a leading attributive pre-modifier of a DIFFERENT noun ("The planned release is
-# tamper-evident today", "The upcoming release is signed with minisign") no longer launders the present
-# claim, and a future word in a subordinate/attributive clause ("... according to our roadmap") or a
-# separate coordinate clause ("... and a further channel is planned") cannot reach the claim either.
-FUTURE_PREDICATE = re.compile(
-    r"\b(?:planned|deferred|postponed|upcoming|forthcoming)\b"
-    r"|\bfor\s+(?:a|an|the)\s+(?:next|future|later|upcoming)\s+release\b"
-    r"|\bin\s+a\s+(?:future|later|coming)\s+release\b"
-    r"|\bon\s+the\s+roadmap\b|\broadmap\s+for\b"
-    r"|\bwill\s+(?:be|ship|arrive|land|be\s+added|be\s+introduced)\b"
-    r"|\bto\s+be\s+(?:added|introduced)\b", re.IGNORECASE)
+# FUTURE clearance is a TIGHT proposition-adjacent allowlist (VER-CORE 4.4/5.6: tamper wording may appear
+# only as explicitly future-tense roadmap), NOT the former "any future predicate in the forward window"
+# co-occurrence, which laundered an unrelated future word governing a DIFFERENT noun. A match clears via
+# future ONLY when one of four bound constructions holds (see _future_clears); anything else FLAGS, so a
+# novel-but-honest forward phrasing may flag by design (the safe direction). The constructions:
+#
+# F1 (COPULA-ADJACENT status predicate): from the match end, ONLY head-noun-phrase tokens (determiners,
+#    adjectives, nouns, hyphens; see _HEADNOUN) up to a be-copula, then optional -ly adverbs, then a future
+#    STATUS adjective (planned/deferred/postponed/upcoming/forthcoming), a "for a/an/the next|future|later|
+#    upcoming|coming release" phrase, or "on the roadmap". A preposition, "(", punctuation, a coordinating/
+#    subordinating boundary (the forward window ends at one), or a finite verb between the match and the
+#    copula breaks the adjacency, so "anchor is planned for a future release" clears while "tamper-resistant
+#    with a new logo is planned" (preposition first) and "release ships on our planned schedule" (a finite
+#    verb, no copula) FLAG.
+# F2 ("will|shall be" governing the match's own subject): the same head-noun-only run up to "will|shall be",
+#    e.g. "Tamper-evidence will be added in a future release", "Releases will be signed with minisign". A
+#    "will" that governs a DIFFERENT verb ("... release will give your team confidence") is NOT "will be" and
+#    FLAGS.
+# F3 (LEADING verbal future-intent that governs the property): in the pre-match clause window a future-intent
+#    verb phrase (plan|aim|intend|hope|expect|mean|prepare|aspire|set|going ... to [be|become|make|have]),
+#    "planned|set|going|scheduled to be", or "will be|become|make|ship|sign|add|introduce", e.g. "We plan to
+#    make releases tamper-resistant.", "Releases are planned to be tamper-resistant." A status word followed
+#    by a NOUN, not "to be" ("The planned release is tamper-evident today"), is not a verbal intent and FLAGS.
+# F4 (roadmap forward phrase): "in|for a/an/the next|future|later|upcoming|coming release" or "on the roadmap"
+#    in the forward window, bound to the match with NO intervening new-subject clause and no "(", so "Tamper
+#    detection is to be introduced in a future release" clears while a bracketed or new-subject roadmap phrase
+#    does not reach the claim.
+_FUTURE_PREP = (r"with|for|in|on|at|by|of|from|into|onto|over|under|through|across|per|as|about|against|"
+                r"between|among|during|without|within|to|upon|via|toward|towards|after|before")
+# A head-noun-phrase token for the forward F1/F2 scan: a determiner/adjective/noun/hyphenated word (with its
+# trailing whitespace) that is NOT a preposition, NOT will/shall, and NOT a be-copula, so the run from the
+# match to the governing copula (or "will|shall be") crosses ONLY the matched noun's own head phrase.
+_HEADNOUN = (r"(?:(?!(?:" + _FUTURE_PREP + r"|will|shall|is|are|was|were|be|been|being)\b)"
+             r"[A-Za-z][\w'-]*\s+)")
+FUTURE_F1 = re.compile(
+    r"^\s*" + _HEADNOUN + r"*?(?:is|are|was|were|be|been|being)\b(?:\s+[A-Za-z]+ly\b)*\s+"
+    r"(?:planned|deferred|postponed|upcoming|forthcoming"
+    r"|for\s+(?:a|an|the)\s+(?:next|future|later|upcoming|coming)\s+release\b"
+    r"|on\s+the\s+roadmap\b)", re.IGNORECASE)
+FUTURE_F2 = re.compile(r"^\s*" + _HEADNOUN + r"*?(?:will|shall)\s+be\b", re.IGNORECASE)
+FUTURE_F3 = re.compile(
+    r"\b(?:plan|aim|intend|hope|expect|mean|prepare|aspire|set|going)(?:s|ned|ning|ed)?\s+to\b"
+    r"(?:\s+(?:be|become|make|have))?"
+    r"|\b(?:planned|set|going|scheduled)\s+to\s+be\b"
+    r"|\bwill\s+(?:be|become|make|ship|sign|add|introduce)\b", re.IGNORECASE)
+FUTURE_F4 = re.compile(
+    r"(?:in|for)\s+(?:a|an|the)\s+(?:next|future|later|upcoming|coming)\s+release\b"
+    r"|on\s+the\s+roadmap\b", re.IGNORECASE)
+# A NEW-SUBJECT clause between the match and an F4 roadmap phrase (a determiner + noun + copula/modal) means
+# the phrase governs a DIFFERENT subject, so it does not clear the matched claim.
+FUTURE_NEW_SUBJECT = re.compile(
+    r"\b(?:a|an|the|another|our|its|their|this|these|those|new)\s+\w+\s+"
+    r"(?:is|are|was|were|will|shall)\b", re.IGNORECASE)
 # The SHAREALIKE clean form names the full permitted set from LICENSE clause 3(b)(1): a CC license with
 # the same License Elements, THIS VERSION OR LATER, OR a BY-SA Compatible License. A "the same ... licence"
 # claim is honest only when BOTH the later-version alternative AND the BY-SA-compatible alternative are
@@ -351,8 +399,8 @@ REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md")
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
 # window), "intent" (skip when a negator OR an intent hedge is in that window), "sharealike" (skip only
 # when the later-version AND BY-SA-compatible alternatives are both named in the surrounding sentence), or
-# "future" (skip when an allowlisted third-party title, a residual disclosure, or a future predicate
-# clears it; see _guard_clears).
+# "future" (skip when an allowlisted third-party title, a tight NEGATION disclosure N1-N3, or a tight FUTURE
+# construction F1-F4 bound to the match clears it; see _guard_clears).
 #
 # SITE_PATTERNS: the guarantee-flavoured MARKETING deny-list. Calibrated for the public site copy and run
 # on the SITE PAGES ONLY, because the rule corpus and generated adapters legitimately use "guarantee",
@@ -648,19 +696,47 @@ def _sentence_window(text, start, end):
 
 
 def _future_hedge_window(text, end):
-    """The FORWARD part of the clause AFTER the match, for the future guard's FUTURE_PREDICATE check: from
-    the match END to the first FUTURE_WINDOW_BOUNDARY after it. Only the forward half counts, because a
-    roadmap predicate must GOVERN the matched tamper/release noun as its copular predicate, which sits AFTER
-    it ("an independent, tamper-evident anchor is planned for a future release", "Tamper-evidence will be
-    added in a future release"). A FUTURE_PREDICATE in the PRE-match part is a leading attributive pre-
-    modifier of a DIFFERENT noun ("The planned release is tamper-evident today") and must NOT launder the
-    present claim, so it is excluded by construction. Because FUTURE_WINDOW_BOUNDARY breaks on a coordinating
-    and/or/plus/so AND on a subordinator, "The anchor is tamper-evident and a further channel is planned"
-    (bare "and") cuts "planned" out of the forward window, and "Releases are tamper-resistant according to
-    our roadmap" / "... because the next release adds documentation" cut the hedge out at
-    "according"/"because", so the predicate must directly follow the matched noun to clear it."""
+    """The FORWARD part of the clause AFTER the match, for the F1/F2/F4 forward checks: from the match END to
+    the first FUTURE_WINDOW_BOUNDARY after it. Only the forward half counts, because a roadmap predicate must
+    GOVERN the matched tamper/release noun as its copular predicate, which sits AFTER it ("an independent,
+    tamper-evident anchor is planned for a future release", "Tamper-evidence will be added in a future
+    release"). A future word in the PRE-match part is a leading attributive pre-modifier of a DIFFERENT noun
+    ("The planned release is tamper-evident today") and must NOT launder the present claim, so it is excluded
+    by construction. Because FUTURE_WINDOW_BOUNDARY breaks on a coordinating and/or/plus/so AND on a
+    subordinator, "The anchor is tamper-evident and a further channel is planned" (bare "and") cuts "planned"
+    out of the forward window, and "Releases are tamper-resistant according to our roadmap" / "... because the
+    next release adds documentation" cut the hedge out at "according"/"because", so the predicate must
+    directly follow the matched noun to clear it."""
     nxt = FUTURE_WINDOW_BOUNDARY.search(text, end)
     return text[end:nxt.start() if nxt else len(text)]
+
+
+def _future_leading_window(text, start):
+    """The pre-match clause window for the F3 leading future-intent check: from the last
+    FUTURE_WINDOW_BOUNDARY (subordinator-aware) before the match to the match. This binds a leading intent
+    verb to the same clause, so "We plan to make releases tamper-resistant" clears while a "will be" or
+    "plan to" in a prior clause or sentence (cut off at the boundary) does not reach a fresh claim ("The
+    anchor is planned for a future release. It is tamper-evident today." flags: the period bounds it out)."""
+    left = 0
+    for m in FUTURE_WINDOW_BOUNDARY.finditer(text, 0, start):
+        left = m.end()
+    return text[left:start]
+
+
+def _future_clears(text, start, end):
+    """True when one of the four TIGHT proposition-adjacent FUTURE constructions binds a roadmap sense to the
+    matched tamper/release noun (F1 copula-adjacent status, F2 "will|shall be", F3 leading verbal intent, F4
+    roadmap forward phrase). Anything else FLAGS: a bare status adjective on a forward or leading DIFFERENT
+    noun, a future predicate whose subject is a different noun, or a future word across a preposition, paren,
+    or finite verb from the match cannot launder a present claim. A novel honest forward phrasing that misses
+    all four may flag by design (the safe direction)."""
+    forward = _future_hedge_window(text, end)
+    if FUTURE_F1.match(forward) or FUTURE_F2.match(forward):  # F1 / F2: copula-adjacent, no intervening prep
+        return True
+    f4 = FUTURE_F4.search(forward)  # F4: a roadmap forward phrase bound with no new subject and no "("
+    if f4 and "(" not in forward[:f4.start()] and not FUTURE_NEW_SUBJECT.search(forward[:f4.start()]):
+        return True
+    return bool(FUTURE_F3.search(_future_leading_window(text, start)))  # F3: leading verbal future-intent
 
 
 def _residual_disclosed(text, start, end):
@@ -680,43 +756,50 @@ def _residual_disclosed(text, start, end):
 
 
 def _disclosure_clears(text, start, end):
-    """True when a residual-DISCLOSURE, bound to the MATCHED proposition, clears a future-guarded match.
-    Two paths, LEADING and TRAILING:
-      - LEADING (pre-match): a negator between the leading FUTURE_WINDOW_BOUNDARY (subordinator-aware) and
-        the match clears it when EITHER (a) no be-form copula (BE_COPULA) stands between that negator and the
-        match, the honest disclaimer form ("This layer does not provide tamper evidence"), OR (b) the negator
-        is a bare SUBJECT QUANTIFIER (no|neither|none) NOT immediately followed by an emphatic-idiom noun, the
-        honest subject negation ("No release is tamper-evident", "Neither release is tamper-resistant" assert
-        no such release exists, even though the copula intervenes). A copula between an ORDINARY negator and
-        the match means the negator governs a DIFFERENT predicate and the tamper claim is a fresh copular
-        assertion, so "The not-expensive release is tamper-resistant" ("is" intervenes) FLAGS; and an
-        emphatic-idiom quantifier ("There is no doubt that our releases are tamper-resistant", no+doubt)
-        FLAGS because it is an intensifier, not a subject quantifier. The leading edge
-        also breaks on a comma, a semicolon, a coordinating and/or/plus/so, a contrastive, sentence
-        punctuation, AND a subordinator, so a negator in a leading preamble, a different coordinate/semicolon
-        clause, a "so" result clause, or across a subordinator does NOT clear ("Without any doubt, ...
-        tamper-resistant"; "Deployment is not automatic; releases are tamper-resistant"; "We do not sign so
-        releases are tamper-evident"; "Releases are not expensive because they are tamper-resistant" all
-        flag).
-      - TRAILING (post-match): the match clears ONLY when its span falls inside a verbatim allowlisted
-        residual phrase (_residual_disclosed, RESIDUAL_DISCLOSURES), so "..., not cryptographic proof" inside
-        the shipped residual clears while "..., not merely checksum-protected", "..., not expensive", and a
-        bare "..., not cryptographically signed" leave the claim FLAGGED. Fail-closed otherwise."""
+    """True when a NEGATION disclosure, bound to the MATCHED proposition, clears a future-guarded match. This
+    is the TIGHT allowlist, NOT the former "any negator in the pre-match window clears": a negator on a
+    different word or modifier, an oblique mid-clause "no <noun>", or an emphatic idiom now FLAGS. Three rules:
+      - N1 (SUBJECT-QUANTIFIER): the pre-match clause window (from the last subordinator-aware
+        FUTURE_WINDOW_BOUNDARY to the match), left-stripped, BEGINS with no|neither|none and that quantifier
+        is not an emphatic idiom (no doubt / question / way / ...). It determines the subject the copula
+        predicates the tamper term onto, so it clears even with a be-copula between ("No release is
+        tamper-evident", "Neither release is tamper-resistant" assert no such release exists). It clears ONLY
+        as the LEADING clause token, e.g. "Releases with no downtime are tamper-evident" (window begins with "Releases")
+        and "There is no doubt that ... tamper-resistant" (emphatic idiom) keep FLAGGING.
+      - N2 (DIRECT integrity-predicate negation): the closest pre-match negator negates an integrity predicate
+        governing the tamper term, i.e. the text between the negator and the match has NO be-copula and is
+        empty/adverbs-only or an adverb run then an integrity verb (INTEGRITY_NEG_TAIL). So "This layer does
+        not provide tamper evidence" and "is not tamper-resistant" clear, while "We do not doubt that releases
+        provide tamper evidence" ("doubt" is not an integrity verb) and "The not-expensive release is
+        tamper-resistant" (a modifier, plus an intervening copula) FLAG. The window breaks on a comma,
+        semicolon, coordinating and/or/plus/so, contrastive, sentence punctuation, and a subordinator, so a
+        leading preamble, a separate coordinate/semicolon clause, a "so" result clause, or a "because" clause
+        does not reach across ("Without any doubt, ..."; "Deployment is not automatic; ..."; "We do not sign
+        so ..."; "Releases are not expensive because they are tamper-resistant" all flag).
+      - N3 (TRAILING residual): the match's span falls inside a verbatim allowlisted residual phrase
+        (_residual_disclosed, RESIDUAL_DISCLOSURES), so "..., not cryptographic proof" inside the shipped
+        residual clears while "..., not merely checksum-protected", "..., not expensive", and a bare "..., not
+        cryptographically signed" leave the claim FLAGGED. Fail-closed otherwise."""
     left = 0
     for m in FUTURE_WINDOW_BOUNDARY.finditer(text, 0, start):
         left = m.end()
     window = text[left:start]
+    # N1: a bare subject quantifier as the LEADING token, not an emphatic idiom.
+    stripped = window.lstrip()
+    lead = re.match(r"[A-Za-z]+", stripped)
+    if (lead and lead.group().lower() in SUBJECT_QUANTIFIER
+            and not EMPHATIC_IDIOM_NOUN.match(stripped[lead.end():])):
+        return True
+    # N2: the closest negator directly negates an integrity predicate governing the tamper term (no
+    # intervening be-copula; only adverbs or an integrity verb between the negator and the match).
     neg = None
     for m in NEGATOR.finditer(window):
         neg = m  # the negator CLOSEST to the match governs
     if neg is not None:
         tail = window[neg.end():]  # text between the governing negator and the match
-        if not BE_COPULA.search(tail):  # (a) honest disclaimer: negator directly negates the property
+        if not BE_COPULA.search(tail) and INTEGRITY_NEG_TAIL.match(tail):
             return True
-        # (b) bare subject quantifier (no|neither|none) negating the noun the copula predicates onto, but
-        # NOT an emphatic idiom (no doubt / no question / no way), which a launder exploits.
-        if neg.group().lower() in SUBJECT_QUANTIFIER and not EMPHATIC_IDIOM_NOUN.match(tail):
-            return True
+    # N3: the existing trailing residual-disclosure exact-phrase allowlist.
     return _residual_disclosed(text, start, end)
 
 
@@ -752,10 +835,10 @@ def _guard_clears(guard, text, m):
     in-clause negator OR intent hedge (the compat softening frames reach as an aim). "sharealike": the
     surrounding sentence names BOTH the later-version and the BY-SA-compatible alternatives, the full
     permitted set from LICENSE 3(b)(1). "future" (release-integrity): a shipped third-party control TITLE
-    that WHOLLY CONTAINS the matched span, OR a proposition-bound residual disclosure (a pre-match
-    subordinator-aware negator with no be-form copula between it and the match, or a verbatim allowlisted
-    residual phrase, see _disclosure_clears), OR a FUTURE_PREDICATE in the FORWARD window after the match
-    (_future_hedge_window). "" never clears."""
+    that WHOLLY CONTAINS the matched span, OR a tight NEGATION disclosure bound to the match (N1 leading
+    subject quantifier, N2 direct integrity-predicate negation, or N3 the trailing residual allowlist, see
+    _disclosure_clears), OR one of the tight FUTURE constructions F1-F4 bound to the match (_future_clears).
+    "" never clears."""
     if guard == "neg":
         return bool(NEGATOR.search(_clause_window(text, m.start())))
     if guard == "intent":
@@ -769,7 +852,7 @@ def _guard_clears(guard, text, m):
             return True
         if _disclosure_clears(text, m.start(), m.end()):
             return True
-        return bool(FUTURE_PREDICATE.search(_future_hedge_window(text, m.end())))
+        return _future_clears(text, m.start(), m.end())
     return False
 
 
@@ -1008,6 +1091,17 @@ POSITIVE = [
     "AIQT signs each release automatically using minisign.",           # active present, determiner + minisign
     "Every release was cryptographically signed.",                     # past signing "was ... signed"
     "Every release detects any tampering.",                            # determiner "any" between detect verb and tampering
+    # Round-5 launder-free restructure: the tight FUTURE/NEGATION allowlist FLAGS everything not bound to the
+    # matched noun. A forward future word across a preposition, paren, or finite verb, a status word on a
+    # DIFFERENT noun, and a negator on a modifier/oblique noun or emphatic idiom must all flag.
+    "Releases are tamper-resistant with a new logo planned for next year.",  # "planned" across the preposition "with" -> F1 adjacency broken
+    "Releases are tamper-resistant (a new logo is planned for next year).",  # a paren opens a new subject before the future word
+    "Every tamper-resistant release ships on our planned schedule.",   # "ships" is a finite verb; no copula reaches "planned"
+    "Our tamper-evident pipeline follows the postponed audit calendar.",  # "postponed" modifies a different noun, no copula
+    "The tamper-evident anchor planned earlier now ships to every adopter.",  # "planned earlier" is a post-modifier, not a copular predicate
+    "We do not doubt that releases provide tamper evidence.",          # "doubt" is not an integrity verb -> N2 fails
+    "Releases with no downtime are tamper-evident.",                   # oblique "no downtime": the window does not BEGIN with the negator
+    "A release with no caveats is tamper-evident.",                    # oblique "no caveats": not a leading subject quantifier
 ]
 NEGATIVE = [
     "It is not a static analyzer, a vulnerability scanner, or an audit, and it does not guarantee that generated code is secure.",
@@ -1055,6 +1149,15 @@ NEGATIVE = [
     # with a copula between it and the match; it is honest (no such release exists), not an emphatic idiom.
     "No release is tamper-evident.",                                                      # "No" negates the subject noun -> clears
     "Neither release is tamper-resistant.",                                               # "Neither" negates the subject noun -> clears
+    # Round-5 launder-free restructure must-clear: the tight FUTURE allowlist still clears the bound
+    # constructions. F2 "will be" governing the subject, F3 leading verbal future-intent ("plan to",
+    # "planned to be"), and the adjectival "channel independent of" (no copula) that stays clean.
+    "Releases will be signed with minisign.",                                             # F2/F3: leading "will be" governs the signing claim
+    "We plan to make releases tamper-resistant.",                                         # F3: leading "plan to make" future-intent
+    "Releases are planned to be tamper-resistant.",                                       # F3: "planned to be" verbal future-intent
+    "Releases are planned to be signed with minisign.",                                   # F3: "planned to be" governs the signing claim
+    "published through an authenticated channel independent of artefact delivery",        # reverse "channel independent" with no copula/verif verb -> no match
+    "channel independent of artefact delivery",                                           # bare adjectival post-modifier -> no match
 ]
 
 
