@@ -10,7 +10,7 @@ schema-version = 1
 #   version, tag-object-sha, commit-sha, root, clause-inventory-digest
 
 # [[archive-file]]: one row per archived legacy file (immutable, 8.2).
-#   legacy-path, archive-sha256 (also the archive directory name), size, mode, owner,
+#   legacy-path, archive-sha256 (also the archive directory name), size, owner,
 #   predecessor-clause-ids (the predecessor ids segmented out of this archived file)
 
 # [enumeration-review]: 8.2 completeness attestation (HUMAN-JUDGMENT).

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "0ba822c21e54b1191632179182631acaf9c42e7fbd59608a9f73e5cfcdd40316"
+tree-sha256 = "6c82b4b68adf7326cba061841fb55c2dfe58d11cd06c07987fa77afcff1d7f8d"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -56,8 +56,8 @@ sha256 = "f745ae5a8ca0036d093e15c9683198b101790ed931d7876f845dcf9347be72f0"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
-bytes = 2089
-sha256 = "8ea537930047ba78da6a3f37633b5e19057d221ceeb034913bf65a96413a94b9"
+bytes = 2083
+sha256 = "f3ba16978482b65d237d0212aee6d2f87c6093d79fa2405b24056287238274e9"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
@@ -2306,8 +2306,8 @@ sha256 = "3852fe3dfd40ee2153325c33ab95e17bdf80fc1ceb7852b89f28edcf82a0bdd5"
 
 [[sources]]
 path = "tools/_journal.py"
-bytes = 44609
-sha256 = "46e652481564648947f875acc65517d715d2c23d44f876b83910ea98c0c68bf6"
+bytes = 47679
+sha256 = "4a1432cef704e4c35bd7d6e31a5cc2e0036101192354c385733ceb0f1303fade"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -2341,8 +2341,8 @@ sha256 = "e6c66303c6770d8afeacc0f807a3bd807e841344b43a17cfd72d37432d151db1"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
-bytes = 46054
-sha256 = "6ab8d4377f2d37d270ddc2b12574aca2310e063ba19f0221b8cb82cfb52eb6a7"
+bytes = 58757
+sha256 = "b1044d477dd4d0cf1752f5524a182ed44ef0050815f03792bc874133b73ecfd4"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -2476,8 +2476,8 @@ sha256 = "ec42c7dc27f24a7d5fe278645df0adbb74268c76e020e5b8a835ad36be57672d"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 21678
-sha256 = "ac73fc193f292577f185e17ee83e8c4b736a7034167208448e89f5e0f8d06238"
+bytes = 22831
+sha256 = "f6a0cedbed73681c59d5ee2f3da01235ebd3252a987200ca611637631c533332"
 
 [[sources]]
 path = "tools/gen_cursor.py"
@@ -2561,8 +2561,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/migrate.py"
-bytes = 55360
-sha256 = "028adafc0d79bffe4b10086e10c791646befdbdf3d753f82ac3c0bd4791dd0e1"
+bytes = 67533
+sha256 = "702d454aac99738eefa5faa5bba788e4ee990124d98fbe630ed97400af1b7019"
 
 [[sources]]
 path = "tools/run_all_checks.sh"

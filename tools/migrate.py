@@ -185,6 +185,38 @@ def _open_root_fd(root):
     return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
 
+def _open_root_or_none(root):
+    """Open the adopter root fd with O_NOFOLLOW; return (fd, None) on success or (None, message) so a
+    symlinked or unreadable --root is REFUSED at the CLI (exit 2) rather than crashing with a traceback
+    (fix #8: main keeps an unresolved abspath root, so O_NOFOLLOW here is the leg that actually refuses a
+    symlinked final root component)."""
+    try:
+        return _open_root_fd(root), None
+    except OSError as exc:
+        return None, ("cannot open --root {} ({}); a symlinked or unreadable root is refused "
+                      "(O_NOFOLLOW, 3.6b); fail-closed".format(root, exc))
+
+
+def _validated_completed_cutover(txn_dir):
+    """Fix #3 (C2 in all consumers): classify a transaction through the SINGLE validated terminal state
+    machine and return its INTENT object ONLY when it is a genuinely COMPLETE cutover eligible for
+    reverse-replay or coverage-gating: the frame sequence is exactly [INTENT, COMPLETE] (via
+    classify_state, which runs _validate_terminal_agreement, so a mismatched-txn or invalid sequence is
+    rejected) AND the INTENT header names kind == "cutover". Returns the INTENT dict for such a
+    transaction, or None when it is not a completed cutover (a rolled-back, still-open, un-adopt, or other
+    non-cutover terminal journal). JournalError (fail-closed) on a corrupt or invalid-sequence journal."""
+    if _journal.classify_state(txn_dir) != "complete":       # runs the C2 validator; raises on an invalid sequence
+        return None
+    frames, _torn, _ = _journal.read_frames(txn_dir)
+    if [t for t, _ in frames] != [_journal.F_INTENT, _journal.F_COMPLETE]:
+        return None
+    intent = _journal._first(frames, _journal.F_INTENT)
+    header = (intent or {}).get("header", {})
+    if not isinstance(header, dict) or header.get("kind") != "cutover":
+        return None
+    return intent
+
+
 def _claim_recover_lock(journal_root):
     """Atomically claim the journal lock for recovery (fix #3, hardened for C1). Returns 'acquired' when
     this process now owns the lock (the lock was absent, or a confirmed-dead stale lock was broken and
@@ -241,7 +273,10 @@ def do_cutover(root, staged, unit):
     journal_root = root / JOURNAL_REL
     journal_root.mkdir(parents=True, exist_ok=True)
     txn_id = "{}.{}.{}".format(_slug(unit), os.getpid(), time.time_ns())
-    root_fd = _open_root_fd(root)
+    root_fd, err = _open_root_or_none(root)                # fix #8: refuse a symlinked root at the CLI (exit 2)
+    if err:
+        print("error: {}".format(err), file=sys.stderr)
+        return 2
     try:
         try:
             _journal.acquire_lock(journal_root, session_id="cutover")
@@ -314,7 +349,10 @@ def do_recover(root):
         print("recover: journal lock is held by a possibly-live owner (pid {}); NOT seized"
               .format((owner or {}).get("pid")), file=sys.stderr)
         return 1
-    root_fd = _open_root_fd(root)
+    root_fd, err = _open_root_or_none(root)                # fix #8: refuse a symlinked root at the CLI (exit 2)
+    if err:
+        print("error: {}".format(err), file=sys.stderr)
+        return 2
     outcomes = {}
     try:
         for txn_dir in _txn_dirs(journal_root):
@@ -377,35 +415,56 @@ def do_unadopt(root, txn_id):
     if not src.is_dir():
         print("error: no transaction {} to reverse; fail-closed".format(txn_id), file=sys.stderr)
         return 2
-    try:
-        frames, torn, _ = _journal.read_frames(src)
-    except _journal.JournalError as exc:
-        print("error: cannot read {} ({}); fail-closed".format(txn_id, exc), file=sys.stderr)
+    root_fd, err = _open_root_or_none(root)                # fix #8: refuse a symlinked root at the CLI (exit 2)
+    if err:
+        print("error: {}".format(err), file=sys.stderr)
         return 2
-    types = [t for t, _ in frames]
-    if _journal.F_COMPLETE not in types:
-        print("error: {} is not a COMPLETE (forward-applied) transaction; only a completed cutover can "
-              "be reversed; fail-closed".format(txn_id), file=sys.stderr)
-        return 2
-    intent = _journal._first(frames, _journal.F_INTENT)
     try:
-        inverse = _journal.build_inverse_ops(intent["ops"])
-    except _journal.JournalError as exc:
-        print("error: {}; fail-closed".format(exc), file=sys.stderr)
-        return 2
-
-    def reader(iop):
-        source_op = iop["_source"]
-        return (src / "preimages" / source_op["prestate"]["payload"]).read_bytes()
-
-    new_txn = "{}.unadopt.{}".format(_slug(txn_id), time.time_ns())
-    root_fd = _open_root_fd(root)
-    try:
+        # fix #2: acquire the migration lock FIRST (like do_cutover), so the source-poststate drift check
+        # and the inverse apply run under ONE held lock; no concurrent mutation can slip between the drift
+        # verification and the reverse-replay. Every refusal path below releases the lock before returning.
         try:
             _journal.acquire_lock(journal_root, session_id="un-adopt")
         except _journal.JournalError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
+        # fix #3: route through the SINGLE validated terminal classification; only a genuinely COMPLETE
+        # cutover ([INTENT, COMPLETE] AND header kind == "cutover") is reversible. A mismatched-txn, an
+        # invalid sequence, a rolled-back, or a non-cutover terminal journal is refused (never mis-selected).
+        try:
+            intent = _validated_completed_cutover(src)
+        except _journal.JournalError as exc:
+            _journal.release_lock(journal_root)
+            print("error: cannot reverse {} ({}); fail-closed".format(txn_id, exc), file=sys.stderr)
+            return 2
+        if intent is None:
+            _journal.release_lock(journal_root)
+            print("error: {} is not a COMPLETE cutover transaction; only a completed cutover can be "
+                  "reversed; fail-closed".format(txn_id), file=sys.stderr)
+            return 2
+        # fix #2: refuse if the effective tree has DRIFTED from the source cutover's installed poststate.
+        # Every original op's domain-separated poststate MUST still verify, or a reverse-replay could
+        # clobber a later change (an original create -> inverse remove would delete whatever is now there;
+        # write / mkdir analogous). This is the quiescence requirement for the un-adopt path.
+        drift = [op["path"] for op in intent["ops"] if not _journal._poststate_verifies(root_fd, op)]
+        if drift:
+            _journal.release_lock(journal_root)
+            print("error: refusing un-adopt: the effective tree has drifted from {}'s installed poststate "
+                  "({} path(s), first: {!r}); a reverse-replay could clobber a later change; fail-closed"
+                  .format(txn_id, len(drift), drift[0]), file=sys.stderr)
+            return 2
+        try:
+            inverse = _journal.build_inverse_ops(intent["ops"])
+        except _journal.JournalError as exc:
+            _journal.release_lock(journal_root)
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
+
+        def reader(iop):
+            source_op = iop["_source"]
+            return (src / "preimages" / source_op["prestate"]["payload"]).read_bytes()
+
+        new_txn = "{}.unadopt.{}".format(_slug(txn_id), time.time_ns())
         txn_dir = journal_root / new_txn
         try:
             _journal.run_transaction(root_fd, journal_root, new_txn,
@@ -455,7 +514,10 @@ def main():
     if cmd in ("plan", "cutover", "recover", "status", "un-adopt") and root is None:
         print("error: --root DIR is required", file=sys.stderr)
         return 2
-    root = Path(root).resolve() if root else None
+    # fix #8: keep an ABSOLUTE but UNRESOLVED root (os.path.abspath does not follow symlinks), so a
+    # symlinked final --root component survives to _open_root_fd's O_NOFOLLOW and is refused there rather
+    # than silently followed off-tree by an early resolve().
+    root = Path(os.path.abspath(root)) if root else None
     if cmd == "plan":
         return do_plan(root)
     if cmd == "cutover":
@@ -488,8 +550,9 @@ def main():
 # A torn-payload mid-write kill crashes DURING a data-file payload write, leaving a partially-written
 # payload that can never satisfy poststate verification, so recovery must elect rollback and land the
 # prestate EXACTLY (never an op-boundary poststate), exercising the post-restore preimage digest check.
-# Three synthetic off-path trees exercise flat files, a nested directory create, and a nested directory
-# remove, so reverse-dependency ordering and domain-separated post-states are covered in both directions.
+# Four synthetic off-path cases over three tree structures exercise flat files, a nested directory
+# create, a nested directory remove, and a umask-reduced-mode remove variant, so reverse-dependency
+# ordering, domain-separated post-states, and directory mode-resume are covered in both directions.
 # A final un-adopt round-trip proves the 10.6 reverse-replay primitive returns post to pre.
 
 _CASES = {
@@ -1066,6 +1129,126 @@ def self_test():
             pass
         os.close(_open_root_fd(realdir))
         checked += 1
+
+        # (R) FIX #1 directory-mode DURABILITY: crash a rollback's directory recreation immediately AFTER
+        #     its exact mode is set and the directory's OWN fd is fsync'd (the durability point, a kill that
+        #     exists only on the fixed durable path). A fresh recover must still land the exact prestate
+        #     mode, terminal and idempotent. Without the durable dir-fsync the kill point is absent and the
+        #     injected recover never dies (rc != 137), so this fails closed against a regression.
+        old_umask = os.umask(0o022)
+        try:
+            case = "mode-remove"
+            pre, _post = baselines[case]
+            nops = len(_CASES[case]["ops"])
+            mid = "after-apply-{}".format(nops - 2)
+            iroot = _build_case_root(tmp / "dir-durable" / "root", case)
+            istaged = _build_staged(tmp / "dir-durable" / "staged", case)
+            if _run(["cutover", "--root", str(iroot), "--staged", str(istaged), "--unit", _SELFTEST_UNIT],
+                    kill=mid) != 137:
+                failures.append("dir-durable: setup cutover expected to die at {}".format(mid))
+            elif _run(["recover", "--root", str(iroot)], kill="torn-dirsync:1") != 137:
+                failures.append("dir-durable: recover expected to die AFTER the dir-mode durability fsync "
+                                "(torn-dirsync:1); the durable dir-fsync path is missing")
+            else:
+                if _run(["recover", "--root", str(iroot)]) != 0:
+                    failures.append("dir-durable: clean recover expected exit 0")
+                if _run(["recover", "--root", str(iroot)]) != 0:
+                    failures.append("dir-durable: second recover (idempotency) expected exit 0")
+                if _snapshot(iroot) != pre:
+                    failures.append("dir-durable: recover must land the recreated directory's exact durable "
+                                    "prestate mode")
+                elif not _all_terminal(iroot):
+                    failures.append("dir-durable: journal not terminal after recovery")
+            checked += 1
+        finally:
+            os.umask(old_umask)
+
+        # (S) FIX #2 un-adopt DRIFT SAFETY: after a completed cutover, a later modification to a post-cutover
+        #     file makes the source poststate no longer verify; un-adopt must REFUSE (exit 2) and NOT clobber
+        #     the drifted tree. Without the drift check the reverse-replay would overwrite the later change.
+        sroot = _build_case_root(tmp / "unadopt-drift" / "root", "flat-files")
+        sstaged = _build_staged(tmp / "unadopt-drift" / "staged", "flat-files")
+        if _run(["cutover", "--root", str(sroot), "--staged", str(sstaged), "--unit", _SELFTEST_UNIT]) != 0:
+            failures.append("unadopt-drift: setup cutover expected exit 0")
+        stxn = _latest_txn(sroot)
+        drifted = b"a LATER change made after the cutover\n"
+        (sroot / "dataA").write_bytes(drifted)              # post-cutover modification: the tree has drifted
+        if _run(["un-adopt", "--root", str(sroot), "--txn", stxn]) != 2:
+            failures.append("unadopt-drift: un-adopt against a drifted tree must be refused (exit 2)")
+        if (sroot / "dataA").read_bytes() != drifted:
+            failures.append("unadopt-drift: a refused un-adopt must NOT clobber the drifted file")
+        if (sroot / JOURNAL_REL / "lock").exists():
+            failures.append("unadopt-drift: a refused un-adopt must release the lock")
+        checked += 1
+
+        # (T) FIX #3 (C2 in un-adopt): a mismatched-txn terminal and a non-cutover terminal journal are
+        #     REFUSED by un-adopt (exit 2), routed through the single validated classification rather than a
+        #     bare "COMPLETE anywhere" acceptance.
+        troot = _build_case_root(tmp / "unadopt-c2" / "root", "flat-files")
+        tjr = troot / JOURNAL_REL
+        mm = tjr / "mismatch"
+        mm.mkdir(parents=True)
+        _journal.publish(mm, _journal.F_INTENT, {"txn": "A", "header": {"kind": "cutover"}, "ops": []})
+        _journal.publish(mm, _journal.F_COMPLETE, {"txn": "B"})    # crafted mismatched-txn terminal
+        if _run(["un-adopt", "--root", str(troot), "--txn", "mismatch"]) != 2:
+            failures.append("fix3/un-adopt: a mismatched-txn terminal must be refused (exit 2)")
+        nc = tjr / "noncutover"
+        nc.mkdir(parents=True)
+        _journal.publish(nc, _journal.F_INTENT, {"txn": "N", "header": {"kind": "other"}, "ops": []})
+        _journal.publish(nc, _journal.F_COMPLETE, {"txn": "N"})    # completed, but NOT a cutover
+        if _run(["un-adopt", "--root", str(troot), "--txn", "noncutover"]) != 2:
+            failures.append("fix3/un-adopt: a non-cutover terminal must be refused (exit 2)")
+        checked += 1
+
+        # (U) FIX #8: through the REAL CLI, a symlinked --root is REFUSED (exit 2), not followed. main keeps
+        #     an unresolved abspath so _open_root_fd's O_NOFOLLOW refuses the symlinked final component; an
+        #     early resolve() would have followed it off-tree.
+        ureal = _build_case_root(tmp / "cli-nofollow" / "real", "flat-files")
+        ustg = _build_staged(tmp / "cli-nofollow" / "staged", "flat-files")
+        ulink = tmp / "cli-nofollow" / "link"
+        os.symlink(str(ureal), str(ulink))
+        if _run(["cutover", "--root", str(ulink), "--staged", str(ustg), "--unit", _SELFTEST_UNIT]) != 2:
+            failures.append("fix8: a symlinked --root must be refused at the CLI (exit 2)")
+        if (ureal / JOURNAL_REL / "lock").exists():
+            failures.append("fix8: a refused symlinked root must not leave a journal lock")
+        checked += 1
+
+        # (V) HARDENING: _verify_staged_digest rejects a missing / non-string / uppercase / non-64-hex
+        #     expected digest immediately (never a silent skip that would install an undescribed payload);
+        #     a well-formed matching digest still passes.
+        for bad in ({"kind": "file"}, {"kind": "file", "content-sha256": None},
+                    {"kind": "file", "content-sha256": "A" * 64},
+                    {"kind": "file", "content-sha256": "zz"}):
+            try:
+                _journal._verify_staged_digest({"path": "x", "poststate": bad}, b"data")
+                failures.append("hardening: a malformed poststate content-sha256 ({!r}) must raise"
+                                .format(bad))
+            except _journal.JournalError:
+                pass
+        _journal._verify_staged_digest(
+            {"path": "x", "poststate": {"kind": "file",
+                                        "content-sha256": hashlib.sha256(b"data").hexdigest()}}, b"data")
+        checked += 1
+
+        # (W) HARDENING: a non-dict lock JSON fails closed in read_lock_owner (never an AttributeError in
+        #     owner_confirmed_dead / _owner_is_current); a symlinked lock.break is refused by O_NOFOLLOW.
+        wjr = tmp / "nondict-lock" / JOURNAL_REL
+        wjr.mkdir(parents=True)
+        (wjr / "lock").write_bytes(b"[1, 2, 3]")            # a JSON array, not an object
+        try:
+            _journal.read_lock_owner(wjr)
+            failures.append("hardening: a non-dict lock JSON must fail closed (JournalError)")
+        except _journal.JournalError:
+            pass
+        ajr = tmp / "arb-symlink" / JOURNAL_REL
+        ajr.mkdir(parents=True)
+        os.symlink(str(tmp / "arb-symlink" / "elsewhere"), str(ajr / "lock.break"))
+        try:
+            _journal.break_stale_and_acquire(ajr, session_id="recover")
+            failures.append("hardening: a symlinked lock.break must be refused (O_NOFOLLOW, fail-closed)")
+        except _journal.JournalError:
+            pass
+        checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1075,7 +1258,8 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: crash-injection recovery proven from the journal alone across {} scenarios "
-          "over 3 synthetic off-path trees (flat files, nested create, nested remove). Every cutover-"
+          "over 4 synthetic off-path cases across 3 tree structures (flat files, nested create, nested "
+          "remove, plus a umask-reduced-mode remove variant). Every cutover-"
           "phase kill point (after-lock, each preimage, after-preimages, torn INTENT, after INTENT, each "
           "apply, torn COMPLETE, after COMPLETE) recovers the tree to EXACTLY the prestate or the "
           "verified poststate, terminal and idempotent (a second recover is a no-op); mid-rollback and "

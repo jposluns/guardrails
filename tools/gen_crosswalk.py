@@ -50,7 +50,7 @@ schema-version = 1
 #   version, tag-object-sha, commit-sha, root, clause-inventory-digest
 
 # [[archive-file]]: one row per archived legacy file (immutable, 8.2).
-#   legacy-path, archive-sha256 (also the archive directory name), size, mode, owner,
+#   legacy-path, archive-sha256 (also the archive directory name), size, owner,
 #   predecessor-clause-ids (the predecessor ids segmented out of this archived file)
 
 # [enumeration-review]: 8.2 completeness attestation (HUMAN-JUDGMENT).
@@ -122,11 +122,12 @@ def archive_file(archive_root, data):
         if existing != data:
             raise AdoptError("archive immutability violation: {} already holds different bytes".format(
                 payload))
+        _fsync_dir(entry)                                 # fix #7: durable on the early-exists return too
         return digest
     entry.mkdir(parents=True, exist_ok=True)
+    _fsync_dir(archive_root)                              # fix #7: persist the (new) hash directory in archive_root
     fd, tmp_name = tempfile.mkstemp(dir=str(entry), prefix="payload.", suffix=".tmp")
     tmp = Path(tmp_name)
-    linked = False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -134,7 +135,6 @@ def archive_file(archive_root, data):
             os.fsync(fh.fileno())                         # temp bytes durable BEFORE the atomic publish
         try:
             os.link(str(tmp), str(payload))               # no-overwrite publish: fails if payload exists
-            linked = True
         except FileExistsError:                           # lost a publish race: accept only byte-equality
             existing = payload.read_bytes()
             if existing != data:
@@ -145,8 +145,7 @@ def archive_file(archive_root, data):
             os.unlink(str(tmp))
         except FileNotFoundError:
             pass
-    if linked:
-        _fsync_dir(entry)                                 # persist the published payload's directory entry
+    _fsync_dir(entry)                                     # fix #7: durable on EVERY successful return (winner + lost-race)
     return digest
 
 
@@ -156,6 +155,16 @@ def _fsync_dir(path):
         os.fsync(dfd)
     finally:
         os.close(dfd)
+
+
+def _read_fd_all(fd):
+    chunks = []
+    while True:
+        block = os.read(fd, 1 << 20)
+        if not block:
+            break
+        chunks.append(block)
+    return b"".join(chunks)
 
 
 def parse_pointers(text):
@@ -194,7 +203,15 @@ def build_candidates(legacy_root, archive_root, successor_texts):
         raise AdoptError("no legacy files under {}".format(legacy_root))
     archive_rows, predecessor_rows, mapping_rows, pointer_rows = [], [], [], []
     for f in files:
-        data = f.read_bytes()                             # archive raw bytes FIRST (before any pointers)
+        # fix #6: capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
+        # recorded owner cannot disagree with the archived payload. No O_NOFOLLOW here: legacy trees may
+        # legitimately carry symlinked files that rglob(is_file) and the prior read_bytes both followed.
+        fd = os.open(str(f), os.O_RDONLY)
+        try:
+            owner = os.fstat(fd).st_uid
+            data = _read_fd_all(fd)                        # archive raw bytes FIRST (before any pointers)
+        finally:
+            os.close(fd)
         digest = archive_file(archive_root, data)
         rel = str(f.relative_to(legacy_root))
         try:
@@ -219,7 +236,7 @@ def build_candidates(legacy_root, archive_root, successor_texts):
             for sid in top:
                 mapping_rows.append({"predecessor-clause-id": pid, "successor-clause-id": sid})
         archive_rows.append({"legacy-path": rel, "archive-sha256": digest, "size": len(data),
-                             "predecessor-clause-ids": pred_ids})
+                             "owner": owner, "predecessor-clause-ids": pred_ids})
     mapped = {m["predecessor-clause-id"] for m in mapping_rows}
     all_pred = {r["clause-id"] for r in predecessor_rows}
     unmatched = sorted(all_pred - mapped)
@@ -237,6 +254,7 @@ def render_candidates(cand):
         out += ["[[archive-file]]", "legacy-path = {}".format(_toml_str(r["legacy-path"])),
                 "archive-sha256 = {}".format(_toml_str(r["archive-sha256"])),
                 "size = {}".format(r["size"]),
+                "owner = {}".format(r["owner"]),
                 "predecessor-clause-ids = [{}]".format(
                     ", ".join(_toml_str(x) for x in r["predecessor-clause-ids"])), ""]
     for r in cand["predecessor"]:
@@ -356,6 +374,9 @@ def self_test():
         cand_text = (out / ".aiqt" / "migration" / "crosswalk.candidate.toml").read_text(encoding="utf-8")
         if 'semantic-verdict = ""' not in cand_text:
             failures.append("candidate mapping rows must carry EMPTY verdict fields (asserts nothing)")
+        # fix #6: the 8.2-required owner is captured from the source fd and emitted on the archive-file row.
+        if "owner = {}".format(os.getuid()) not in cand_text:
+            failures.append("archive-file rows must carry the 8.2 owner captured from the source fd")
 
         # (d) immutability: differing re-archive refused; identical idempotent.
         archive_root = out / ".aiqt" / "archive"

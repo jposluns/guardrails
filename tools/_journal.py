@@ -44,11 +44,13 @@ Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malfo
 import hashlib
 import json
 import os
+import re
 import stat
 import time
 from pathlib import Path
 
 MAGIC = b"AIQTJ1"
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 F_INTENT = "INTENT"
 F_COMPLETE = "COMPLETE"
 F_RIP = "ROLLBACK-IN-PROGRESS"
@@ -205,6 +207,18 @@ def _fsync_path_dir(path):
         os.close(fd)
 
 
+def _fsync_contained_dir(pfd, name):
+    """Fix #1 (directory mode durability): fsync a just-created/recreated directory's OWN fd, so its mode
+    (set via chmod) is durable before COMPLETE, not merely the parent link. Open it O_DIRECTORY|O_NOFOLLOW
+    beneath its bound parent fd (a swapped-in symlink raises rather than redirecting the fsync), fsync the
+    dir fd, then close it; the caller fsyncs the parent separately."""
+    dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 # --- frame layer (checksummed framing; a torn final frame is detectably unwritten) --------------------
 
 def _frame(ftype, payload):
@@ -341,7 +355,9 @@ def acquire_lock(journal_root, session_id):
 
 def read_lock_owner(journal_root):
     """The recorded owner dict, or None when no lock file is present. JournalError on an unreadable or
-    malformed lock (fail-closed: an unreadable lock is never treated as absent)."""
+    malformed lock (fail-closed: an unreadable lock is never treated as absent). HARDENING: the decoded
+    JSON MUST be an object, so owner_confirmed_dead / _owner_is_current can call .get without a non-dict
+    (a bare list/int/string) reaching them as an uncaught AttributeError."""
     lock = Path(journal_root) / "lock"
     try:
         raw = lock.read_bytes()
@@ -350,9 +366,12 @@ def read_lock_owner(journal_root):
     except OSError as exc:
         raise JournalError("cannot read journal lock ({})".format(exc))
     try:
-        return json.loads(raw)
+        owner = json.loads(raw)
     except ValueError as exc:
         raise JournalError("journal lock is not valid JSON ({})".format(exc))
+    if not isinstance(owner, dict):
+        raise JournalError("journal lock JSON is not an object (fail-closed)")
+    return owner
 
 
 def owner_confirmed_dead(owner):
@@ -434,8 +453,15 @@ def break_stale_and_acquire(journal_root, session_id):
                            "platform): refusing to break the stale lock (fails closed, 3.6b)")
     journal_root = Path(journal_root)
     arb = journal_root / "lock.break"
-    afd = os.open(str(arb), os.O_CREAT | os.O_RDWR, 0o600)   # STABLE arbitration file, never replaced
+    try:                                                     # STABLE arbitration file, never replaced
+        afd = os.open(str(arb), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)   # O_NOFOLLOW: refuse a symlink
+    except OSError as exc:
+        raise JournalError("cannot open arbitration file {} ({}); refusing to break the stale lock "
+                           "(fails closed)".format(arb, exc))
     try:
+        if not stat.S_ISREG(os.fstat(afd).st_mode):          # trust it as the arbitration inode only if regular
+            raise JournalError("arbitration file {} is not a regular file; refusing to break the stale "
+                               "lock (fails closed)".format(arb))
         fcntl.flock(afd, fcntl.LOCK_EX)
         try:
             current = read_lock_owner(journal_root)          # RE-READ the CURRENT owner under the lock
@@ -558,9 +584,15 @@ def _poststate_verifies(root_fd, op):
 def _verify_staged_digest(op, data):
     """C3: hash the staged write's bytes and compare to the op's recorded poststate content-sha256 from
     the INTENT, at mutation time. A mismatch means the staged tree changed after planning; raise
-    JournalError so the transaction rolls back rather than installing bytes the INTENT never described."""
+    JournalError so the transaction rolls back rather than installing bytes the INTENT never described.
+    HARDENING: a write/create op MUST carry a 64-hex LOWERCASE content-sha256; a missing, non-string, or
+    malformed (uppercase / not 64-hex) expected digest is itself a JournalError, never a silent skip that
+    would let an undescribed payload install."""
     expected = op.get("poststate", {}).get("content-sha256")
-    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+    if not (isinstance(expected, str) and _HEX64_RE.match(expected)):
+        raise JournalError("{}: poststate content-sha256 must be a 64-hex lowercase digest (absent or "
+                           "malformed; the staged-digest check is never silently skipped)".format(op["path"]))
+    if hashlib.sha256(data).hexdigest() != expected:
         raise JournalError("{}: staged payload bytes changed since planning (digest does not match the "
                            "INTENT poststate content-sha256)".format(op["path"]))
 
@@ -610,6 +642,7 @@ def apply_ops(root_fd, ops, staged_reader):
             elif kind == "mkdir":
                 os.mkdir(name, op["poststate"]["mode"], dir_fd=pfd)
                 os.chmod(name, op["poststate"]["mode"], dir_fd=pfd, follow_symlinks=False)
+                _fsync_contained_dir(pfd, name)              # fix #1: the dir's own mode durable, not just the parent
             elif kind == "rmdir":
                 _verify_lookup_prestate(root_fd, op["path"], op["prestate"])
                 os.rmdir(name, dir_fd=pfd)
@@ -650,6 +683,16 @@ def _maybe_torn_mode(root_fd, relpath, i):
         os._exit(137)
 
 
+def _maybe_torn_dirsync(root_fd, relpath, i):
+    """Crash-injection for fix #1: die immediately AFTER a rmdir-undo has recreated the directory, set its
+    exact prestate mode, and fsync'd the directory's own fd (the durability point). A fresh recover must
+    still land the directory at its exact prestate mode, terminal and idempotent. Inert unless the harness
+    sets KILL_ENV; the kill point exists only on the fixed durable-fsync path."""
+    if os.environ.get(KILL_ENV, "") == "torn-dirsync:{}".format(i):
+        _fsync_parent(root_fd, relpath)
+        os._exit(137)
+
+
 # --- restore (idempotent, contained) ------------------------------------------------------------------
 
 def _restore_preimage(txn_dir, root_fd, op, op_index=0):
@@ -686,8 +729,11 @@ def _restore_preimage(txn_dir, root_fd, op, op_index=0):
                 os.mkdir(name, prestate["mode"], dir_fd=pfd)
                 _maybe_torn_mode(root_fd, path, op_index)   # crash BETWEEN the mkdir and the chmod
                 os.chmod(name, prestate["mode"], dir_fd=pfd, follow_symlinks=False)
+                _fsync_contained_dir(pfd, name)             # fix #1: recreated dir's mode durable
+                _maybe_torn_dirsync(root_fd, path, op_index)  # crash AFTER the durability fsync (fix #1 test)
             elif stat.S_ISDIR(st.st_mode):               # already recreated: re-apply the prestate mode
                 os.chmod(name, prestate["mode"], dir_fd=pfd, follow_symlinks=False)
+                _fsync_contained_dir(pfd, name)             # fix #1: re-applied mode durable
             else:                                        # a non-directory sits where the removed dir was
                 raise JournalError("cannot restore {!r}: expected a directory or absence, found a "
                                    "non-directory".format(path))
