@@ -87,7 +87,7 @@ def _validate_row_container(doc, where, keys):
 
 # --- legs (each returns a list of finding strings; a GateError is exit 2) ------------------------------
 
-def check_archive(cw, archive_root):
+def check_archive(cw, root):
     """8.2 archive-row schema (fix #6), immutability, and predecessor-id type floor (fix #5, C5). Per
     [[archive-file]] row: archive-sha256 is a 64-hex LOWERCASE digest resolving to <archive>/<sha>/payload
     whose recomputed digest equals it (immutability); the 8.2 REQUIRED fields legacy-path and owner are
@@ -129,10 +129,10 @@ def check_archive(cw, archive_root):
             findings.append("archive-file {}: predecessor-clause-ids {} does not equal the exact set of "
                             "[[predecessor]] ids declaring this hash {} (phantom or missing id, C5)"
                             .format(sha, sorted(set(pcids)), sorted(declared_by_hash.get(sha, set()))))
-        data = _read_archive_payload(archive_root, sha)   # G8: no-follow read (a symlinked payload is refused)
+        data = _read_archive_payload(root, sha)           # G8: no-follow read (a symlinked payload/ancestor is refused)
         if hashlib.sha256(data).hexdigest() != sha:
             findings.append("{}/{}/payload: archived bytes do not match their recorded hash"
-                            .format(archive_root, sha))
+                            .format(root / ARCHIVE_REL, sha))
         size = row.get("size")
         if size is not None and (isinstance(size, bool) or not isinstance(size, int)
                                  or size != len(data)):
@@ -151,25 +151,43 @@ def _read_all_fd(fd):
     return b"".join(chunks)
 
 
-def _read_archive_payload(archive_root, sha):
-    """G8 (8.2): read <archive_root>/<sha>/payload through NO-FOLLOW directory and file handles, so a
-    symlinked <sha> entry or a symlinked payload (which target-following exists()/read_bytes() would
-    silently traverse to mutable external bytes) is REFUSED. The archive root is opened O_NOFOLLOW, the
-    <sha> dir openat'd O_DIRECTORY|O_NOFOLLOW beneath it, the payload openat'd O_NOFOLLOW beneath that, and
-    the opened fd is fstat'd to require a REGULAR file before its bytes are hashed (the predecessor is
-    PERMANENTLY retained in the archive as immutable bytes, never a redirectable link). GateError
-    (fail-closed) on any symlink, a non-regular payload, or an I/O error."""
+def _open_archive_dir(root):
+    """G8: open <root>/.aiqt/archive by opening the install root once and walking each ancestor component
+    (.aiqt, archive) beneath it through an O_DIRECTORY|O_NOFOLLOW handle, so no symlinked ANCESTOR can
+    redirect the archive read outside the tree. Returns the archive dir fd (caller closes). GateError
+    (fail-closed) on a symlinked ancestor, a non-directory, or an I/O error."""
     try:
-        rootfd = os.open(str(archive_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     except OSError as exc:
-        raise GateError("cannot open archive root {} through a no-follow handle ({}); fail-closed"
-                        .format(archive_root, exc))
+        raise GateError("cannot open install root {} ({}); fail-closed".format(root, exc))
+    try:
+        for comp in ARCHIVE_REL.split("/"):
+            nxt = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except OSError as exc:
+        os.close(fd)
+        raise GateError("cannot open archive path component under {} through a no-follow handle ({}); a "
+                        "symlinked ancestor is refused (8.2)".format(root, exc))
+    return fd
+
+
+def _read_archive_payload(root, sha):
+    """G8 (8.2): read <root>/.aiqt/archive/<sha>/payload by opening the install root once and walking every
+    component (.aiqt, archive, <sha>, payload) beneath it through NO-FOLLOW handles, so neither a symlinked
+    ANCESTOR (.aiqt or archive) nor a symlinked <sha> entry or payload (which target-following
+    exists()/read_bytes() would silently traverse to mutable external bytes) can redirect the read outside
+    the tree. Each directory is opened O_DIRECTORY|O_NOFOLLOW and the payload O_NOFOLLOW, and the opened fd
+    is fstat'd to require a REGULAR file before its bytes are hashed (the predecessor is PERMANENTLY retained
+    in the archive as immutable bytes, never a redirectable link). GateError (fail-closed) on any symlink, a
+    non-regular payload, or an I/O error."""
+    archfd = _open_archive_dir(root)
     try:
         try:
-            shafd = os.open(sha, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+            shafd = os.open(sha, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=archfd)
         except OSError as exc:
             raise GateError("cannot open archive entry {}/{} through a no-follow handle ({}); a symlinked "
-                            "archive entry is refused (8.2)".format(archive_root, sha, exc))
+                            "archive entry is refused (8.2)".format(root / ARCHIVE_REL, sha, exc))
         try:
             try:
                 pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=shafd)
@@ -185,17 +203,17 @@ def _read_archive_payload(archive_root, sha):
         finally:
             os.close(shafd)
     finally:
-        os.close(rootfd)
+        os.close(archfd)
 
 
-def _archived_text(archive_root, sha):
+def _archived_text(root, sha):
     try:
-        return _read_archive_payload(archive_root, sha).decode("utf-8")
+        return _read_archive_payload(root, sha).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise GateError("cannot decode archived payload for {} ({})".format(sha, exc))
 
 
-def check_predecessors(cw, archive_root):
+def check_predecessors(cw, root):
     """8.2/8.3/7.2 (C5): predecessor ids well-formed in the pre-<archive-hash-prefix>.<ordinal> namespace,
     prefix consistent with the row's archive hash, and unique; EVERY predecessor MUST carry a 64-hex
     LOWERCASE sha256 (a finding when absent or malformed, NEVER a silent skip that lets an empty hash
@@ -242,7 +260,7 @@ def check_predecessors(cw, archive_root):
             findings.append("predecessor {!r}: its [[archive-file]] row does not list it in "
                             "predecessor-clause-ids (bidirectional resolution)".format(pid))
         # C5: RECOMPUTE the resolved payload's digest (archive identity), never trust row-to-row equality.
-        data = _read_archive_payload(archive_root, sha)   # G8: no-follow read (a symlinked payload is refused)
+        data = _read_archive_payload(root, sha)           # G8: no-follow read (a symlinked payload/ancestor is refused)
         if hashlib.sha256(data).hexdigest() != sha:
             findings.append("predecessor {!r}: recomputed archived payload digest does not equal its "
                             "archive-sha256 (archive identity)".format(pid))
@@ -251,7 +269,7 @@ def check_predecessors(cw, archive_root):
         if not text:
             findings.append("predecessor {!r}: empty canonical-text".format(pid))
         else:                                              # C5: ALWAYS run the span check (never behind elif sha)
-            findings += _check_predecessor_span(pid, row, archive_root, sha, text)
+            findings += _check_predecessor_span(pid, row, root, sha, text)
     return findings
 
 
@@ -282,7 +300,7 @@ def _substring_offsets(window, text):
     return offsets
 
 
-def _check_predecessor_span(pid, row, archive_root, sha, text):
+def _check_predecessor_span(pid, row, root, sha, text):
     """The 7.2 tight whole-line window (F-226, spec 7.2 which supersedes the round-10 'byte-identical to the
     span's content' wording): start-line and end-line are 1-based integers with start-line <= end-line, and
     the canonical-text occurs EXACTLY ONCE as a contiguous byte-exact SUBSTRING within the
@@ -300,7 +318,7 @@ def _check_predecessor_span(pid, row, archive_root, sha, text):
     if start < 1 or end < start:
         return ["predecessor {!r}: source span [{}, {}] is not a valid 1-based whole-line window "
                 "(start-line >= 1 and start-line <= end-line)".format(pid, start, end)]
-    window = _whole_line_window(_archived_text(archive_root, sha), start, end)
+    window = _whole_line_window(_archived_text(root, sha), start, end)
     if window is None:
         return ["predecessor {!r}: source span [{}, {}] exceeds the archived file's line count"
                 .format(pid, start, end)]
@@ -630,10 +648,9 @@ def run(root):
     _validate_row_container(inv_doc, INVENTORY_REL, ("clause",))
     inv_rows = inv_doc.get("clause", [])
     inventory = {r.get("clause-id"): r for r in inv_rows}
-    archive_root = root / ARCHIVE_REL
     findings = []
-    findings += check_archive(cw, archive_root)
-    findings += check_predecessors(cw, archive_root)
+    findings += check_archive(cw, root)
+    findings += check_predecessors(cw, root)
     findings += check_completeness(cw)
     findings += check_inventory(inv_rows)                  # D5: inventory uniqueness + row self-consistency
     findings += check_zero_unmapped(cw)
@@ -1196,6 +1213,18 @@ def self_test():
         os.symlink(str(g8ext), str(g8payload))
         if run_quiet(g8) != 2:
             failures.append("G8: a symlinked archived payload must be refused (exit 2, no-follow)")
+        n += 1
+
+        # G8 ANCESTOR: a symlinked .aiqt ANCESTOR (its target holding the real, matching archive) redirects
+        # the whole archive; a target-following read would PASS (the presence lstats resolve through the
+        # link and the moved bytes match). The no-follow ANCESTOR walk from the install root refuses it, so
+        # the gate fails closed (exit 2), never a silent clean PASS on bytes reached through the link.
+        g8anc = _build_install(tmp / "g8-ancestor", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
+        g8anc_real = tmp / "g8-ancestor-real-aiqt"
+        shutil.move(str(g8anc / ".aiqt"), str(g8anc_real))
+        os.symlink(str(g8anc_real), str(g8anc / ".aiqt"))
+        if run_quiet(g8anc) != 2:
+            failures.append("G8: a symlinked .aiqt ancestor must be refused (exit 2, no-follow ancestor walk)")
         n += 1
 
         # D5: successor-inventory self-consistency (cheap part). A DUPLICATE clause-id FAILs; a malformed

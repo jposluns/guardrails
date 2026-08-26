@@ -29,3 +29,7 @@ schema-version = 1
 
 # [[pointer-hint]]: an in-file pointer mirrored for the reviewer; a hint only, zero evidentiary weight.
 #   predecessor-clause-id, expected-successor-ids, coverage, carrier = "frontmatter" | "body"
+
+# Section 8.6 pointer-carriage deferral (D10): this tool does not claim section 8.6 pointer-carriage
+# conformance; migration-state pointer carriage is deferred out of the VC-6 slice (to Step 7). A pointer
+# here is an incidental in-file hint, not the spec's migration-state pointer.

@@ -23,18 +23,18 @@ same archived bytes, i.e. it assumes any pointer is embedded in the legacy sourc
 migration-state-only pointer carriage is a larger redesign (predecessor clause-ids are GENERATED here, so a
 migration-state pointer carrier keyed by clause-id is a chicken-and-egg the adopter workflow must resolve),
 deferred out of the VC-6 slice. Until then, an "Expected-successor:" line in a legacy file is treated as an
-incidental hint, NOT the spec's migration-state pointer; this tool does not claim 8.6 pointer-carriage
-conformance.
+incidental hint, NOT the spec's migration-state pointer; this tool does not claim section 8.6 pointer-carriage
+conformance, and migration-state pointer carriage is deferred out of the VC-6 slice (to Step 7).
 
 Exit convention (matches the repo's gates): 0 clean; 1 drift (--check) or a refused adopter precondition;
 2 malformed input, a read error, or an archive immutability violation.
 """
 import hashlib
+import itertools
 import os
 import re
 import stat
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -80,6 +80,10 @@ schema-version = 1
 
 # [[pointer-hint]]: an in-file pointer mirrored for the reviewer; a hint only, zero evidentiary weight.
 #   predecessor-clause-id, expected-successor-ids, coverage, carrier = "frontmatter" | "body"
+
+# Section 8.6 pointer-carriage deferral (D10): this tool does not claim section 8.6 pointer-carriage
+# conformance; migration-state pointer carriage is deferred out of the VC-6 slice (to Step 7). A pointer
+# here is an incidental in-file hint, not the spec's migration-state pointer.
 '''
 
 # Pointer grammar (8.6 lines 1206 to 1210): greppable hints carried in frontmatter or body.
@@ -126,111 +130,148 @@ def run_repo(root, check):
 # --- adopter mode: archive-first candidate generation -------------------------------------------------
 
 class AdoptError(Exception):
-    """A refused adopter precondition or an archive immutability violation: fail-closed."""
+    """A refused adopter precondition or an archive immutability/read-safety violation: fail-closed. The
+    exit_code is 1 for a refused precondition (a human-actionable input state) and 2 for malformed or
+    unsafe input, an I/O error, or an unconfirmed durability guarantee."""
+
+    def __init__(self, message, exit_code=2):
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 def _toml_str(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
-def archive_file(archive_root, data):
-    """Archive raw bytes under <archive_root>/<sha256>/payload, immutably. Returns the sha256. Refuses
-    (AdoptError) if an existing entry under the same hash holds DIFFERING bytes (8.2 immutability); an
-    identical re-archive is idempotent. Content-addressing keeps the archive idempotent (identical bytes
-    yield the same hash directory, so two writers of the same payload cannot disagree). The staged bytes
-    go to a UNIQUE-PER-CALL temp in the entry dir (tempfile.mkstemp, so concurrent callers never share a
-    temp name) and are published by a NO-OVERWRITE link (os.link fails if payload already exists), so an
-    existence race COMPARES bytes and accepts only byte-equality rather than overwriting an already-
-    published payload."""
-    digest = hashlib.sha256(data).hexdigest()
-    entry = Path(archive_root) / digest
-    payload = entry / "payload"
-    existing = _read_payload_nofollow(entry)              # G8: no-follow read (a symlinked entry/payload is refused)
-    if existing is not None:
-        if existing != data:
-            raise AdoptError("archive immutability violation: {} already holds different bytes".format(
-                payload))
-        _fsync_dir(entry)                                 # fix #7: durable on the early-exists return too
-        return digest
-    entry.mkdir(parents=True, exist_ok=True)
-    _fsync_dir(archive_root)                              # fix #7: persist the (new) hash directory in archive_root
-    fd, tmp_name = tempfile.mkstemp(dir=str(entry), prefix="payload.", suffix=".tmp")
-    tmp = Path(tmp_name)
+def _open_dir_at(dir_fd, name, create):
+    """G8/G9: open directory `name` beneath dir_fd through an O_DIRECTORY|O_NOFOLLOW handle so a symlinked
+    component can never redirect the archive out of the tree, creating it first when `create`. When a new
+    directory is created its parent (dir_fd) is fsynced so a crash cannot lose the just-created entry (G9),
+    and a fsync failure is PROPAGATED as an AdoptError rather than swallowed (success is never reported on
+    an unconfirmed durability guarantee). Returns the opened dir fd (caller closes). AdoptError on a
+    symlinked component, a non-directory, an I/O error, or an unconfirmed fsync."""
+    created = False
+    if create:
+        try:
+            os.mkdir(name, dir_fd=dir_fd)
+            created = True
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise AdoptError("cannot create archive component {!r} ({}); fail-closed".format(name, exc))
     try:
-        with os.fdopen(fd, "wb") as fh:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as exc:
+        raise AdoptError("cannot open archive component {!r} through a no-follow handle ({}); a symlinked "
+                         "component is refused".format(name, exc))
+    if created:
+        try:
+            os.fsync(dir_fd)                              # G9: persist the newly-created directory entry
+        except OSError as exc:
+            os.close(fd)
+            raise AdoptError("cannot fsync the parent after creating {!r} ({}); durability not confirmed, "
+                             "fail-closed".format(name, exc))
+    return fd
+
+
+def _walk_components(base_fd, names, create):
+    """G8/G9: descend `names` in turn beneath base_fd, every hop through _open_dir_at (O_NOFOLLOW per
+    component, durable creation), so no symlinked ANCESTOR can redirect the path and each new directory is
+    crash-durable. Returns the final dir fd; intermediate fds are closed and base_fd is left open.
+    AdoptError (fail-closed) on any symlinked or unconfirmed component."""
+    fd, close_prev = base_fd, False
+    try:
+        for name in names:
+            nxt = _open_dir_at(fd, name, create)
+            if close_prev:
+                os.close(fd)
+            fd, close_prev = nxt, True
+    except BaseException:
+        if close_prev:
+            os.close(fd)
+        raise
+    return fd
+
+
+def _read_payload_fd(entry_fd):
+    """G8 (8.2): read the `payload` beneath entry_fd through a NO-FOLLOW handle and require a REGULAR file,
+    so an archive immutability comparison can never read redirectable external bytes. Returns the payload
+    bytes, or None when the payload is absent; AdoptError on a symlinked or non-regular payload."""
+    try:
+        pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=entry_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AdoptError("cannot open archived payload ({}); a symlinked payload is refused".format(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(pfd).st_mode):
+            raise AdoptError("archived payload is not a regular file")
+        return _read_fd_all(pfd)
+    finally:
+        os.close(pfd)
+
+
+_TMP_SEQ = itertools.count()
+
+
+def _write_payload(entry_fd, digest, data):
+    """Publish `data` as `payload` beneath entry_fd: write a UNIQUE-per-call temp (O_CREAT|O_EXCL|O_NOFOLLOW,
+    so concurrent callers never share a name), fsync it, then publish by a NO-OVERWRITE link (os.link fails
+    if payload already exists), so a publish race COMPARES bytes and accepts only byte-equality rather than
+    overwriting an already-published payload. The temp is always unlinked; entry_fd is fsynced so the
+    published payload entry is durable. Every handle is dir_fd-relative and O_NOFOLLOW (G8)."""
+    tmp_name = "payload.{}.{}.tmp".format(os.getpid(), next(_TMP_SEQ))
+    tfd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=entry_fd)
+    try:
+        with os.fdopen(tfd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())                         # temp bytes durable BEFORE the atomic publish
         try:
-            os.link(str(tmp), str(payload))               # no-overwrite publish: fails if payload exists
+            os.link(tmp_name, "payload", src_dir_fd=entry_fd, dst_dir_fd=entry_fd)  # no-overwrite publish
         except FileExistsError:                           # lost a publish race: accept only byte-equality
-            existing = _read_payload_nofollow(entry)      # G8: no-follow read of the winner's payload
+            existing = _read_payload_fd(entry_fd)         # G8: no-follow read of the winner's payload
             if existing is None or existing != data:
-                raise AdoptError("archive immutability violation: {} already holds different bytes"
-                                 .format(payload))
+                raise AdoptError("archive immutability violation: {}/payload already holds different bytes"
+                                 .format(digest))
     finally:
         try:
-            os.unlink(str(tmp))
+            os.unlink(tmp_name, dir_fd=entry_fd)
         except FileNotFoundError:
             pass
-    _fsync_dir(entry)                                     # fix #7: durable on EVERY successful return (winner + lost-race)
-    return digest
+    os.fsync(entry_fd)                                    # durable published-payload directory entry
 
 
-def _fsync_dir(path):
-    dfd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+def archive_file(archive_fd, data):
+    """Archive raw bytes as <archive_fd>/<sha256>/payload, immutably, ENTIRELY through dir_fd-relative
+    O_NOFOLLOW handles beneath archive_fd (opened by run_adopter via a no-follow ANCESTOR walk), so neither
+    a symlinked ancestor (.aiqt, archive) nor a symlinked hash-entry or payload can redirect the archive in
+    or out of the tree (G8). Returns the sha256. Refuses (AdoptError) if an existing entry under the same
+    hash holds DIFFERING bytes (8.2 immutability); an identical re-archive is idempotent. Content-addressing
+    keeps the archive idempotent (identical bytes yield the same hash directory, so two writers of the same
+    payload cannot disagree). The hash directory is created durably (G9) and the payload is published by a
+    no-overwrite link (see _write_payload), so an existence race COMPARES bytes and accepts only
+    byte-equality rather than overwriting an already-published payload."""
+    digest = hashlib.sha256(data).hexdigest()
     try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-
-
-def _read_payload_nofollow(entry):
-    """G8 (8.2): read <entry>/payload through NO-FOLLOW handles and require a REGULAR file, so an archive
-    immutability comparison can never read redirectable external bytes. Returns the payload bytes, or None
-    when the entry or its payload is absent; AdoptError on a symlinked entry, a symlinked payload, or a
-    non-regular payload."""
-    try:
-        efd = os.open(str(entry), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        entry_fd = os.open(digest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=archive_fd)
     except FileNotFoundError:
-        return None
+        entry_fd = _open_dir_at(archive_fd, digest, create=True)  # mkdir + no-follow open + parent fsync (G8/G9)
     except OSError as exc:
-        raise AdoptError("cannot open archive entry {} ({}); a symlinked entry is refused".format(entry, exc))
+        raise AdoptError("cannot open archive entry {} through a no-follow handle ({}); a symlinked entry "
+                         "is refused".format(digest, exc))
     try:
-        try:
-            pfd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=efd)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise AdoptError("cannot open archived payload under {} ({}); a symlinked payload is refused"
-                             .format(entry, exc))
-        try:
-            if not stat.S_ISREG(os.fstat(pfd).st_mode):
-                raise AdoptError("archived payload under {} is not a regular file".format(entry))
-            return _read_fd_all(pfd)
-        finally:
-            os.close(pfd)
+        existing = _read_payload_fd(entry_fd)             # G8: no-follow payload read; None when absent
+        if existing is not None:
+            if existing != data:
+                raise AdoptError("archive immutability violation: {}/payload already holds different bytes"
+                                 .format(digest))
+            os.fsync(entry_fd)                            # fix #7: durable on the idempotent early-exists return
+            return digest
+        _write_payload(entry_fd, digest, data)
+        return digest
     finally:
-        os.close(efd)
-
-
-def _mkdirs_durable(path):
-    """G9: create every missing component of `path` and fsync the PARENT of each NEWLY-created component,
-    so a crash cannot lose a just-created directory entry though its children were synced. Best-effort on
-    the fsync (a platform that rejects fsync on a directory is tolerated; the directory creation is not)."""
-    path = Path(path)
-    missing, p = [], path
-    while not p.exists():
-        missing.append(p)
-        if p.parent == p:
-            break
-        p = p.parent
-    for comp in reversed(missing):
-        comp.mkdir(exist_ok=True)
-        try:
-            _fsync_dir(comp.parent)
-        except OSError:
-            pass
+        os.close(entry_fd)
 
 
 def _read_fd_all(fd):
@@ -270,13 +311,14 @@ def _rank_candidates(pred_text, successor_texts):
     return [sid for _, sid in scored]
 
 
-def build_candidates(legacy_root, archive_root, successor_texts):
-    """Archive every legacy file FIRST, then emit candidate predecessor rows, candidate mapping rows with
-    EMPTY review fields, pointer hints, and the computed unmatched list. Deterministic ordering."""
+def build_candidates(legacy_root, archive_fd, successor_texts):
+    """Archive every legacy file FIRST (beneath the no-follow-anchored archive_fd), then emit candidate
+    predecessor rows, candidate mapping rows with EMPTY review fields, pointer hints, and the computed
+    unmatched list. Deterministic ordering."""
     legacy_root = Path(legacy_root)
     files = sorted(p for p in legacy_root.rglob("*") if p.is_file())
     if not files:
-        raise AdoptError("no legacy files under {}".format(legacy_root))
+        raise AdoptError("no legacy files under {}".format(legacy_root), exit_code=1)
     archive_rows, predecessor_rows, mapping_rows, pointer_rows = [], [], [], []
     for f in files:
         # fix #6: capture the 8.2 OWNER from the SAME opened source fd the raw bytes come from, so the
@@ -288,7 +330,7 @@ def build_candidates(legacy_root, archive_root, successor_texts):
             data = _read_fd_all(fd)                        # archive raw bytes FIRST (before any pointers)
         finally:
             os.close(fd)
-        digest = archive_file(archive_root, data)
+        digest = archive_file(archive_fd, data)
         rel = str(f.relative_to(legacy_root))
         try:
             text = data.decode("utf-8")
@@ -361,17 +403,45 @@ def render_candidates(cand):
     return "\n".join(out) + "\n"
 
 
+def _write_candidate(migration_fd, text):
+    """Write crosswalk.candidate.toml beneath migration_fd through an O_NOFOLLOW handle (G8, so a symlinked
+    candidate file cannot redirect the write) and fsync both the file and the directory entry (G9)."""
+    fd = os.open("crosswalk.candidate.toml",
+                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644, dir_fd=migration_fd)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.fsync(migration_fd)
+
+
 def run_adopter(legacy_root, out_dir, successor_texts):
-    archive_root = Path(out_dir) / ".aiqt" / "archive"
-    _mkdirs_durable(archive_root)                         # G9: fsync each newly-created hierarchy component's parent
+    out_dir = Path(out_dir)
     try:
-        cand = build_candidates(legacy_root, archive_root, successor_texts)
+        os.makedirs(str(out_dir), exist_ok=True)          # the chosen output root is the trusted anchor
+        root_fd = os.open(str(out_dir), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        print("error: cannot open output root {} ({}); fail-closed".format(out_dir, exc), file=sys.stderr)
+        return 2
+    try:
+        # G8/G9: walk .aiqt/archive and .aiqt/migration beneath the output root through no-follow handles
+        # (durable creation), so no symlinked ancestor can redirect the archive or the migration state, and
+        # archive/publish everything beneath those anchored handles.
+        archive_fd = _walk_components(root_fd, (".aiqt", "archive"), create=True)
+        try:
+            cand = build_candidates(legacy_root, archive_fd, successor_texts)
+        finally:
+            os.close(archive_fd)
+        migration_fd = _walk_components(root_fd, (".aiqt", "migration"), create=True)
+        try:
+            _write_candidate(migration_fd, render_candidates(cand))
+        finally:
+            os.close(migration_fd)
     except AdoptError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
-        return 2 if "immutability" in str(exc) else 1
-    migration_dir = Path(out_dir) / ".aiqt" / "migration"
-    _mkdirs_durable(migration_dir)                        # G9: durable creation of the migration state dir too
-    (migration_dir / "crosswalk.candidate.toml").write_text(render_candidates(cand), encoding="utf-8")
+        return exc.exit_code
+    finally:
+        os.close(root_fd)
     print("wrote candidate crosswalk and {} archive entries under {}".format(
         len(cand["archive"]), out_dir))
     return 0
@@ -464,8 +534,9 @@ def self_test():
 
         # (d) immutability: differing re-archive refused; identical idempotent.
         archive_root = out / ".aiqt" / "archive"
+        afd = os.open(str(archive_root), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            same = archive_file(archive_root, body.encode())
+            same = archive_file(afd, body.encode())
             if same != digest:
                 failures.append("identical re-archive should be idempotent")
         except AdoptError:
@@ -474,18 +545,22 @@ def self_test():
         forged = archive_root / digest / "payload"
         forged.write_bytes(b"tampered\n")
         try:
-            archive_file(archive_root, body.encode())
+            archive_file(afd, body.encode())
             failures.append("re-archiving different bytes under an existing hash must be refused (exit 2)")
         except AdoptError:
             pass
+        os.close(afd)
 
         # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
         # its entry dir, publishes the exact bytes, and a same-bytes re-archive is idempotent.
         fresh = b"a distinct archive payload for the temp/link test\n"
         fdig = hashlib.sha256(fresh).hexdigest()
         arc7 = tmp / "arc7"
-        d1 = archive_file(arc7, fresh)
-        d2 = archive_file(arc7, fresh)                     # same-bytes re-archive is idempotent
+        arc7.mkdir()
+        afd7 = os.open(str(arc7), os.O_RDONLY | os.O_DIRECTORY)
+        d1 = archive_file(afd7, fresh)
+        d2 = archive_file(afd7, fresh)                     # same-bytes re-archive is idempotent
+        os.close(afd7)
         if d1 != fdig or d2 != fdig:
             failures.append("archive_file must be content-addressed and idempotent")
         entry7 = arc7 / fdig
@@ -499,7 +574,11 @@ def self_test():
         legacy2 = tmp / "legacy2"
         legacy2.mkdir()
         (legacy2 / "x.md").write_text("zzz qqq wthismatchesnothing\n", encoding="utf-8")
-        cand = build_candidates(legacy2, tmp / "arc2", {})    # empty successor set -> nothing to map
+        arc2 = tmp / "arc2"
+        arc2.mkdir()
+        afd2 = os.open(str(arc2), os.O_RDONLY | os.O_DIRECTORY)
+        cand = build_candidates(legacy2, afd2, {})            # empty successor set -> nothing to map
+        os.close(afd2)
         if not cand["unmatched"]:
             failures.append("a predecessor with no mappable successor must appear in the unmatched list")
 
@@ -512,11 +591,13 @@ def self_test():
         g8ext = tmp / "g8-external"
         g8ext.write_bytes(g8bytes)                            # external bytes that MATCH, so a follow would pass
         os.symlink(str(g8ext), str(g8arc / g8dig / "payload"))
+        g8fd = os.open(str(g8arc), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            archive_file(g8arc, g8bytes)
+            archive_file(g8fd, g8bytes)
             failures.append("G8: a symlinked archived payload must be refused (no-follow), not accepted")
         except AdoptError:
             pass
+        os.close(g8fd)
 
         # (G9) durable hierarchy creation: run_adopter into a FRESH out dir completes without error and the
         # archive/migration dirs and entries are present (best-effort: the parent fsyncs are not observable).
@@ -531,6 +612,43 @@ def self_test():
         g9entries = list((g9out / ".aiqt" / "archive").iterdir()) if (g9out / ".aiqt" / "archive").is_dir() else []
         if not g9entries:
             failures.append("G9: at least one archive entry must be present after run_adopter")
+
+        # (G8 ancestor) a symlinked .aiqt ANCESTOR in the OUTPUT tree cannot redirect the archive: the
+        # no-follow ancestor walk refuses it and run_adopter fails CLOSED (exit 2), never writing the
+        # archive through the link to an external directory. A target-following mkdir/open would have
+        # created the archive under the external target instead.
+        g8anc_out = tmp / "g8anc-out"
+        g8anc_out.mkdir()
+        g8anc_ext = tmp / "g8anc-external"
+        g8anc_ext.mkdir()
+        os.symlink(str(g8anc_ext), str(g8anc_out / ".aiqt"))
+        if quiet(run_adopter, g9legacy, g8anc_out, {}) != 2:
+            failures.append("G8: a symlinked .aiqt ancestor in the output tree must fail closed (exit 2)")
+        if list(g8anc_ext.iterdir()):
+            failures.append("G8: nothing must be written through the symlinked .aiqt ancestor")
+
+        # (G9) an injected fsync failure on a newly-created hierarchy parent makes run_adopter FAIL CLOSED
+        # (exit 2), never reporting success on a swallowed durability failure: the fsync OSError propagates
+        # as an AdoptError rather than being discarded. Only the FIRST fsync (the first hierarchy parent) is
+        # failed and every later fsync succeeds, so a discard bug would otherwise sail past it to a false
+        # success (this isolates the swallow, not a blanket fsync outage).
+        g9fail_out = tmp / "g9fail" / "out"
+        real_fsync = os.fsync
+        g9state = {"first": True}
+
+        def _boom_once(fd):
+            if g9state["first"]:
+                g9state["first"] = False
+                raise OSError("injected fsync failure")
+            return real_fsync(fd)
+
+        os.fsync = _boom_once
+        try:
+            g9rc = quiet(run_adopter, g9legacy, g9fail_out, {})
+        finally:
+            os.fsync = real_fsync
+        if g9rc != 2:
+            failures.append("G9: an injected fsync failure must make run_adopter fail closed (exit 2)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -543,7 +661,9 @@ def self_test():
           "deterministically (a mutation fails --check); ADOPTER mode archives every legacy file's RAW "
           "bytes FIRST under its sha256 (pointers are never stripped from the archived payload), emits "
           "candidate mapping rows with EMPTY verdict fields, refuses a differing re-archive under an "
-          "existing hash while an identical one is idempotent, and computes the unmatched list.")
+          "existing hash while an identical one is idempotent, and computes the unmatched list. DISCLOSED: "
+          "this tool does not claim section 8.6 pointer-carriage conformance; migration-state pointer "
+          "carriage is deferred out of the VC-6 slice (to Step 7).")
     return 0
 
 
