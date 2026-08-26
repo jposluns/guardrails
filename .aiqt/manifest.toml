@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "7697da0235a62b70b5b3af6558adc76d92104b53b1475f27e6ef0756eebc4ca0"
+tree-sha256 = "efe9998d0a9b1870cec1cfab29c7d6b4ed890bd0895a51f1d79f609bc4f73676"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2211,8 +2211,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 3209
-sha256 = "8db2b667cb2932d4df8d671030a2005622b45fa1ffaaed27d73a729365784017"
+bytes = 14419
+sha256 = "a2939d97763fcbc486bb78f6638e5c36efdee4c9ba6d57f6f516f4a1a3de49dd"
 
 [[sources]]
 path = "site/install-chatgpt.html"

@@ -3,48 +3,274 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AIQT Guardrails</title>
-<style>
-  :root,:root[data-theme="dark"]{--bg:#0b1220;--ink:#e6edf3;--muted:#9fb0c3;--accent:#5eb0ef;--accent-2:#7ee0c8;--on-accent:#08111f;--line:#1e2c44;--panel:#111b2e}
-  :root[data-theme="light"]{--bg:#f7f9fc;--ink:#101828;--muted:#41506a;--accent:#1d6fd0;--accent-2:#0d9488;--on-accent:#ffffff;--line:#e2e8f2;--panel:#ffffff}
-  @media (prefers-color-scheme:light){:root:not([data-theme]){--bg:#f7f9fc;--ink:#101828;--muted:#41506a;--accent:#1d6fd0;--accent-2:#0d9488;--on-accent:#ffffff;--line:#e2e8f2;--panel:#ffffff}}
-  *{box-sizing:border-box}
-  body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
-    display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;
-    background:var(--bg);color:var(--ink);line-height:1.6;-webkit-font-smoothing:antialiased}
-  main{text-align:center;padding:2rem;max-width:640px}
-  .eyebrow{color:var(--accent-2);font-weight:800;letter-spacing:.14em;text-transform:uppercase;
-    font-size:1.12rem;margin:0 0 1rem}
-  h1{font-weight:750;letter-spacing:-.02em;font-size:clamp(2.6rem,7vw,4rem);margin:0 0 1.2rem}
-  p{color:var(--muted);font-size:1.28rem;margin:0 0 1rem}
-  .draft{margin-top:2rem}
-  .draft a{display:inline-block;padding:.75rem 1.5rem;border-radius:10px;font-weight:650;
-    background:var(--accent);color:var(--on-accent);text-decoration:none}
-  .draft a:hover{filter:brightness(1.08)}
-  .note{font-size:1.07rem;color:var(--muted);margin-top:1.8rem}
-  a{color:var(--accent)}
-  .themetoggle{position:fixed;top:1rem;right:1rem;font:inherit;cursor:pointer;color:var(--muted);
-    background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:.42rem .9rem;font-size:1rem;font-weight:650}
-  .themetoggle:hover{border-color:var(--accent);color:var(--accent)}
-</style>
+<title>AIQT Guardrails: rules your AI follows</title>
+<meta name="description" content="AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Free and open.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="/styles.css?v=20260811za">
 <script src="/theme.js"></script>
 <link rel="canonical" href="https://aiqt.ai/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
-<meta property="og:title" content="AIQT Guardrails">
-<meta property="og:description" content="">
+<meta property="og:title" content="AIQT Guardrails: rules your AI follows">
+<meta property="og:description" content="AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. Free and open.">
 <meta property="og:url" content="https://aiqt.ai/">
 <meta name="twitter:card" content="summary">
+<style>
+  /* landing-only components, built from the shared design tokens (no restyle of the site) */
+  .fA{color:var(--accent); font-weight:800}
+  .fB{color:var(--accent-2); font-weight:800}
+  .fork{display:grid; grid-template-columns:repeat(2,1fr); gap:1.1rem; margin-top:1.6rem}
+  @media (max-width:760px){.fork{grid-template-columns:1fr}}
+  .fork .avail{margin:0; color:var(--faint); font-size:1rem}
+  .herocta-note{font-size:1.02rem; color:var(--faint); margin:.2rem 0 0}
+</style>
 </head>
 <body>
-<button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
-<main>
-  <p class="eyebrow">Accuracy &middot; Integrity &middot; Quality &middot; Trust</p>
-  <h1>AIQT Guardrails™</h1>
-  <p>Your AI assistant sounds confident even when it is wrong. AIQT™ is the standard that requires it to check its work, admit what it does not know, and never change anything quietly. Launching soon.</p>
-  <div class="draft"><a href="/draft">You may view the DRAFT site for now</a></div>
-  <p class="note">The GitHub repository goes public at launch.</p>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="/draft" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT&trade;</span></a>
+  <div class="topformula" aria-label="AIQT priority ordering: Accuracy Integrity Quality Trust first, then Progress, Speed, Cost">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; <span class="t2">Progress</span> &gt; <span class="t3">Speed</span> &gt; <span class="t4">Cost</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="/draft">Home</a>
+  <h4>Chat assistants</h4>
+  <a class="navlink" href="/install">All assistants</a>
+  <a class="navlink" href="/install-claude">Claude</a>
+  <a class="navlink" href="/install-chatgpt">ChatGPT</a>
+  <a class="navlink" href="/install-gemini">Gemini</a>
+  <a class="navlink" href="/install-copilot">Copilot</a>
+  <a class="navlink" href="/install-other">Any other</a>
+  <h4>Developers &amp; teams</h4>
+  <a class="navlink" href="/development">Developers &amp; Coding</a>
+  <a class="navlink" href="/tech-details">Technical details</a>
+  <a class="navlink" href="/teams">Teams &amp; Enterprise</a>
+  <h4>Learn more</h4>
+  <a class="navlink" href="/learn">Overview</a>
+  <a class="navlink" href="/standard">The Standard</a>
+  <a class="navlink" href="/mappings">Mappings</a>
+  <a class="navlink" href="/examples">Examples</a>
+  <a class="navlink" href="/roadmap">Roadmap</a>
+  <a class="navlink" href="/evidence">Evidence</a>
+  <h4>Project</h4>
+  <a class="navlink" href="/about">About</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Rules your AI follows. Controls that catch what slips.</h1>
+    <p class="lead">AIQT Guardrails holds your assistant to one standard: <span class="fA">A</span>ccuracy,
+      <span class="fB">I</span>ntegrity, <span class="fA">Q</span>uality, and <span class="fB">T</span>rust.
+      More than guidance: these principles outrank progress, speed, and cost. In chat, your assistant
+      answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes
+      they are built to catch. Free and open.</p>
+    <p class="herocta-note">Licensed CC BY-SA 4.0.</p>
+    <div class="cta">
+      <a class="btn primary" href="/install">Set up in chat</a>
+      <a class="btn ghost" href="/development">Put AIQT in your repository</a>
+    </div>
+  </div>
+</header>
+
+<section id="two-ways">
+  <div class="wrap">
+    <p class="eyebrow">Two ways to run it</p>
+    <h2>Chat guidance, or enforced controls</h2>
+    <p class="lead">The same standard, held two ways: loaded into your conversation, or dropped into the
+      repository where your coding assistant works.</p>
+    <div class="fork">
+      <div class="path">
+        <span class="pill now">Available now</span>
+        <h3>In your chat assistant</h3>
+        <p>Add AIQT to Claude, ChatGPT, Gemini, or Copilot chat, in the form each supports: a skill, a Gem, an agent, or an uploaded instruction file. The rules load into the
+          conversation, and your assistant answers to the standard: claims are checked or labelled,
+          shortcuts are surfaced instead of smoothed over, and "done" means the stated bar was met.</p>
+        <a class="btn primary" href="/install">Set up in chat</a>
+      </div>
+      <div class="path">
+        <span class="pill now">Available now</span>
+        <h3>In your codebase</h3>
+        <p>Drop the AIQT adapter into a repository used with Claude Code, Codex, Cursor, or Copilot in
+          the editor. The same rules guide the assistant as you work, and the shipped technical controls
+          block, flag, or refuse the mistakes they are built to catch. A guided install wizard and a
+          setup doctor are coming in an upcoming release.</p>
+        <a class="btn primary" href="/development">Put AIQT in your repository</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="fixes" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">What AIQT fixes</p>
+    <h2>Four everyday failures, and what changes</h2>
+    <p class="lead">Each one maps to a facet of the standard: what happens unguarded, and what happens
+      once the guardrails are in place.</p>
+
+    <div class="example">
+      <h3>Accuracy</h3>
+      <div class="compare">
+        <div class="col without">
+          <p class="lbl">Unguarded</p>
+          <p>A gap in the assistant's knowledge gets filled with a confident, plausible guess, and the
+            guess reads exactly like a fact.</p>
+        </div>
+        <div class="col with">
+          <p class="lbl">Guarded</p>
+          <p>The rules require claims to be verified at their source or labelled as unverified. The answer
+            tells you what was checked, what was not, and what would settle the difference.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Integrity</h3>
+      <div class="compare">
+        <div class="col without">
+          <p class="lbl">Unguarded</p>
+          <p>A failing check gets quietly skipped, a broken test gets deleted, an inconvenient result gets
+            smoothed over so the work can keep moving.</p>
+        </div>
+        <div class="col with">
+          <p class="lbl">Guarded</p>
+          <p>The rules treat masking a failure as worse than reporting one, and in a repository the shipped
+            controls flag or refuse the silent shortcut. Failures surface where you can see them.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Quality</h3>
+      <div class="compare">
+        <div class="col without">
+          <p class="lbl">Unguarded</p>
+          <p>"Done" means the happy path ran once. Edge cases, error handling, and the checks nobody re-ran
+            are left for the next person to discover.</p>
+        </div>
+        <div class="col with">
+          <p class="lbl">Guarded</p>
+          <p>Done is a defined bar, not a feeling. The rules hold work to the bar, and in a repository the
+            controls block the claim of completion until the checks that back the claim have actually run.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="example">
+      <h3>Trust</h3>
+      <div class="compare">
+        <div class="col without">
+          <p class="lbl">Unguarded</p>
+          <p>The assistant reports more than the evidence supports: "all tests pass" when some never ran,
+            "fully fixed" when one case was patched.</p>
+        </div>
+        <div class="col with">
+          <p class="lbl">Guarded</p>
+          <p>An overclaim is treated as a defect. The rules require the report to match the evidence, and
+            the shipped controls are built to catch claims that reach beyond what was verified.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="one-standard">
+  <div class="wrap">
+    <p class="eyebrow">One standard</p>
+    <h2>One ordering, and it does not bend</h2>
+    <div class="ordering">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; Progress &gt; Speed &gt; Cost</div>
+    <p style="margin-top:1.2rem">Accuracy, Integrity, Quality, and Trust sit together as one top tier, and
+      that tier outranks Progress, Speed, and Cost, in that order. The ordering is the whole point: a gain
+      in progress, speed, or cost never buys a loss on the top tier. When the two collide, your assistant
+      is instructed to stop and tell you rather than resolve the conflict silently. That single ordering is
+      what every rule and every control in the pack serves.</p>
+    <p><a href="/standard">Read the standard</a></p>
+  </div>
+</section>
+
+<section id="how" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2>Instruction and enforcement, one standard from both sides</h2>
+    <ol class="steps">
+      <li><b>One standard, written down.</b>
+        <p>The pack ships the standard as rules your assistant actually works from: what counts as
+          verified, what counts as done, what must never be smoothed over. Not a poster on the wall; the
+          working instructions themselves.</p></li>
+      <li><b>The rules ride along.</b>
+        <p>In chat, AIQT loads the rules into the conversation, so every answer is produced under
+          the standard rather than checked against the standard afterwards. In a repository, the adapter
+          puts the same rules where your coding assistant reads before acting.</p></li>
+      <li><b>Controls catch what slips.</b>
+        <p>Rules guide; controls enforce. In your codebase, shipped hooks, lints, and gates watch for the
+          specific mistakes they are built to catch, and block, flag, or refuse them at the moment they
+          happen.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="releases">
+  <div class="wrap">
+    <p class="eyebrow">Better with every release</p>
+    <h2>The catch grows with the pack</h2>
+    <p class="lead">AIQT catches the mistakes that align to the rules and process we have built so far, and
+      improves with every release. The pack is open, so you can contribute your own guardrails today.
+      Opt-in tools coming in an upcoming release will let you automatically share the comments,
+      improvements, and guardrails you have added, so the community's contributions feed future versions.</p>
+  </div>
+</section>
+
+<section id="verify" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Know what you downloaded</p>
+    <h2>Confirm you have the files we intended</h2>
+    <p class="lead">Every release ships with a per-file manifest and a root digest. After downloading,
+      validate the per-file manifest and root digest (also on posluns.dev) to confirm the files are the
+      ones we intended you to have.</p>
+  </div>
+</section>
+
+<section id="free">
+  <div class="wrap">
+    <p class="eyebrow">Free and open</p>
+    <h2>Use it, adapt it, ship it forward</h2>
+    <p class="lead">AIQT Guardrails is free and open, licensed under CC BY-SA 4.0. Use the pack, adapt the
+      pack, and share your adaptations under CC BY-SA 4.0. Contributions are welcome today; the
+      opt-in sharing tools coming in an upcoming release will make contributing even easier.</p>
+    <p><a href="https://github.com/jposluns/guardrails">View the source on GitHub</a></p>
+  </div>
+</section>
+
+<section id="closing" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Get started</p>
+    <h2>Pick your assistant and set it up</h2>
+    <p class="lead">The rules are written. The controls are built. The standard is waiting for an assistant
+      to hold to.</p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.4rem">
+      <a class="btn primary" href="/install">Chat assistants</a>
+      <a class="btn ghost" href="/development">Coding assistants</a>
+    </div>
+  </div>
+</section>
 </main>
+
+<footer><div class="wrap">
+  <p>CC BY-SA 4.0 &middot; Verify your download on posluns.dev</p>
+  <p>AIQT and AIQT Guardrails are trademarks of Jeff Posluns.</p>
+  <p><a href="https://github.com/jposluns/guardrails">View the source on GitHub</a></p>
+  <p>Published under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+</div></footer>
+
+</div>
+</div>
 </body>
 </html>
