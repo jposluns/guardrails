@@ -37,7 +37,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -54,7 +54,13 @@ AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3, "PROGR": 4}
 # Output locations, as relative parts joined under the repo root (or a --self-test temp root).
 RESERVED_PARTS = ("site", "downloads", "aiqt")            # 100% generated: orphan-scanned in full
 INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standalone named output
-ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output
+ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output: the stable
+# "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
+# releases. The site links to the version-numbered copy; both are written from the same bytes, so
+# gen_skill --check (which compares each to disk) keeps the two byte-identical.
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.1.zip")  # the version-numbered copy the site
+# links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
+# assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
@@ -85,7 +91,16 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
+    {"target": "site/downloads/aiqt-skill-1.0.1.zip", "kind": "file",
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
+     "regenerate": "python3 tools/gen_skill.py"},
 )
+# The install-page SKILL-DOWNLOAD block (site/install-claude.html) is generated and drift-gated by its own
+# generator, tools/gen_install.py, a block generator with NO RENDERER_DECL registered in the gensrc
+# registry the same way gen_disclosure.py registers site/disclosure.html. Keeping it a separate,
+# RENDERER_DECL-free generator is what lets it be roster-tracked without gen_manifest recording the whole
+# hand-authored install page as a whole-file "skill" artifact.
 
 # The public download is packed deterministically so its bytes never depend on the wall clock, the host
 # OS, or the zlib version: a fixed ZIP-epoch timestamp, members in sorted order, a fixed unix mode, and
@@ -304,10 +319,28 @@ def _security_block(data):
     return "\n\n".join(blocks)
 
 
+def _header_block(data):
+    """The visible metadata block (cleanlanguage-style) placed directly under the SKILL.md `# AIQT™` H1:
+    five fields, each on its own rendered line. cleanlanguage forces the line breaks with two trailing
+    spaces, but the shipped-surface byte-canon gate (tools/check_byte_canon.py) forbids trailing whitespace
+    and weakening a gate is not permitted, so the first four lines use CommonMark's other hard break, a
+    trailing backslash, which renders identically and carries no trailing whitespace. The portability
+    author-header exemption (check_portability.author_header_line) matches the Author line INCLUDING that
+    backslash. Website is the [plugin] homepage value verbatim from the identity manifest (e.g.
+    https://aiqt.ai)."""
+    return ("Version: {version}\\\n"
+            "Author: {name}\\\n"
+            "Website: {homepage}\\\n"
+            "GitHub: {github}\\\n"
+            "Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)").format(
+                version=data["meta"]["version"], name=data["identity_name"],
+                homepage=data["identity_homepage"], github=ATTRIBUTION_SOURCE_URL)
+
+
 def render_skill(data):
     blocks = [
         _frontmatter(data),
-        "# AIQT™\n\n" + data["body_aiqt"],
+        "# AIQT™\n\n" + _header_block(data) + "\n\n" + data["body_aiqt"],
         "# Rules\n\n" + data["body_rules"],
         _conduct_block(data),
         _security_block(data),
@@ -316,6 +349,26 @@ def render_skill(data):
         "---\n\n" + data["attribution"],
     ]
     return "\n\n".join(blocks) + "\n"
+
+
+def versioned_zip_basename(version):
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.1.zip'. This is the
+    shared SHAPE helper: it spells the filename PATTERN in one place, so the build-time match assertion, the
+    install-page block (gen_install.py), and any other caller derive the name the same way. It is NOT the
+    single source of the concrete versioned name: that name is spelled as a literal in several spots (the
+    four in RELEASING.md's bump checklist: the skill-source.md meta version, the ZIP_VERSIONED_PARTS literal
+    and its GENSRC_OUTPUTS target, check_portability.BINARY_ALLOW, and ownership.toml [checkout].binary).
+    Those literals are kept consistent by the fail-closed version-match assertion in build_outputs plus the
+    bump checklist, not by true single-sourcing."""
+    return "aiqt-skill-{}.zip".format(version)
+
+
+def zip_versioned_version():
+    """The version substring embedded in the ZIP_VERSIONED_PARTS basename ('aiqt-skill-<v>.zip'). Lets the
+    self-test and conformance fixtures pin their skill meta version to the shipped literal, so the
+    version-match assertion in build_outputs passes for a well-formed fixture and fires only on a mismatch."""
+    base = ZIP_VERSIONED_PARTS[-1]
+    return base[len("aiqt-skill-"):-len(".zip")]
 
 
 def render_zip(data):
@@ -381,24 +434,36 @@ def render_provenance(data):
         "- Source corpus hash: {}".format(data["corpus_hash"]),
         "- Included rules (by corpus id): {}".format(", ".join(data["included_ids"])),
         "",
-        "The published aiqt-skill.zip is packed deterministically from this same SKILL.md by the same "
-        "generator, so its aiqt/SKILL.md member is byte-identical to the text recorded here.",
+        "The published aiqt-skill.zip and its version-numbered copy aiqt-skill-{}.zip are "
+        "byte-identical, packed deterministically from this same SKILL.md by the same generator, so their "
+        "aiqt/SKILL.md member is byte-identical to the text recorded here.".format(m["version"]),
     ]
     return "\n".join(lines) + "\n"
 
 
-def attribution_string(root):
-    """The public attribution line (GD-56), built from the [plugin] author-name in the canonical identity
-    manifest plus the pack's public source URL, so the maintainer's name is never a literal in a scanned
-    source file. An absent, unparseable, or name-less manifest is fail-closed (OSError/ValueError, which
-    build_outputs surfaces as exit 2). The exact string must match the portability gate's exempt line."""
+def plugin_identity(root):
+    """Read the operator NAME and HOMEPAGE from the [plugin] table of the canonical identity manifest, so
+    neither is ever a literal in a scanned source file. Returns (name, homepage). An absent, unparseable,
+    name-less, or homepage-less manifest is fail-closed (OSError/ValueError, which build_outputs surfaces
+    as exit 2)."""
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None
+    homepage = plugin.get("homepage") if isinstance(plugin, dict) else None
     if not isinstance(name, str) or not name.strip():
         raise ValueError("identity manifest {} has no [plugin] author-name".format(
             "/".join(IDENTITY_MANIFEST_PARTS)))
+    if not isinstance(homepage, str) or not homepage.strip():
+        raise ValueError("identity manifest {} has no [plugin] homepage".format(
+            "/".join(IDENTITY_MANIFEST_PARTS)))
+    return name.strip(), homepage.strip()
+
+
+def attribution_string(name):
+    """The public attribution line (GD-56), built from the operator name plus the pack's public source URL,
+    so the maintainer's name is never a literal in a scanned source file. The exact string must match the
+    portability gate's exempt line."""
     return "AIQT Guardrails by {}, {}, CC BY-SA 4.0".format(name, ATTRIBUTION_SOURCE_URL)
 
 
@@ -407,19 +472,36 @@ def build_outputs(root):
     (reserved_map, standalone, binary): reserved_map is {filename: text} for the reserved
     site/downloads/aiqt/ subtree, standalone is [(abs_path, text)] for named text outputs beside it, and
     binary is [(abs_path, bytes)] for named binary outputs beside it (the deterministic download zip).
+    The install-page download block is generated by its own generator (tools/gen_install.py), not here.
     Raises ValueError/OSError (an unknown id, a malformed or unreadable source): the caller fails closed.
     Parameterized on root so the conformance suite and the self-test can call it off the real tree."""
     corpus = load_corpus(root.joinpath(*CORPUS_PARTS))
     source = parse_source(root.joinpath(*SKILL_SRC_PARTS))
     data = resolve(source, corpus)
-    data["attribution"] = attribution_string(root)
+    # Fail-closed version-match gate (runs in CI via gen_skill --check): the shipped version-numbered zip
+    # literal MUST spell the skill meta version, so a skill bump that forgets to update ZIP_VERSIONED_PARTS
+    # (and the GENSRC_OUTPUTS target beside it) fails closed rather than shipping a stale filename.
+    expected_basename = versioned_zip_basename(data["meta"]["version"])
+    if ZIP_VERSIONED_PARTS[-1] != expected_basename:
+        raise ValueError(
+            "versioned zip name {!r} does not match the skill meta version {!r} (expected {!r}); bump "
+            "ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target when the skill version changes".format(
+                ZIP_VERSIONED_PARTS[-1], data["meta"]["version"], expected_basename))
+    name, homepage = plugin_identity(root)
+    data["identity_name"] = name
+    data["identity_homepage"] = homepage
+    data["attribution"] = attribution_string(name)
     reserved_map = {
         "SKILL.md": render_skill(data),
         "manifest.json": render_manifest(data),
         "provenance.md": render_provenance(data),
     }
     standalone = [(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
-    binary = [(root.joinpath(*ZIP_PARTS), render_zip(data))]
+    # Both zips are written from the SAME bytes, so the version-numbered copy and the stable "latest" alias
+    # are byte-identical by construction; gen_skill --check compares each to disk, so a divergence is caught.
+    zip_bytes = render_zip(data)
+    binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
+              (root.joinpath(*ZIP_VERSIONED_PARTS), zip_bytes)]
     return reserved_map, standalone, binary
 
 
@@ -462,6 +544,25 @@ def run_gen(root, check):
                 if not check:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(content)
+        # Orphan-clean stale version-numbered download zips. A prior-version aiqt-skill-<old>.zip left in
+        # site/downloads after a version bump is a stale shipped surface, so it is removed on a normal run
+        # and reported as drift on --check (exit 1). The stable alias aiqt-skill.zip (no version segment, so
+        # it does not match the aiqt-skill-*.zip shape) and the CURRENT ZIP_VERSIONED_PARTS copy are kept.
+        # The scan fails closed on an unreadable downloads dir (os.walk onerror=raise), mirroring the
+        # reserved-subtree orphan scan below, so an I/O error can never conceal a stale zip. Top level only:
+        # version-numbered zips live directly under site/downloads (the reserved aiqt/ subtree is scanned
+        # separately below).
+        downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
+        current_versioned = ZIP_VERSIONED_PARTS[-1]
+        if dir_present(downloads_dir):
+            for dirpath, _dirs, filenames in os.walk(downloads_dir, onerror=_raise):
+                _dirs[:] = []  # top level only: do not descend into the reserved aiqt/ subtree
+                for fn in sorted(filenames):
+                    if fn.startswith("aiqt-skill-") and fn.endswith(".zip") and fn != current_versioned:
+                        stale = Path(dirpath) / fn
+                        drift.append("orphan " + stale.relative_to(root).as_posix())
+                        if not check:
+                            stale.unlink()
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -510,7 +611,9 @@ def main():
 #   3. a hand-edited (drifted) SKILL.md makes --check report drift (exit 1),
 #   4. an orphan file in the reserved output subtree is detected (exit 1),
 #   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
-#      guards the widened (OSError, UnicodeError) reconcile arm (F-154).
+#      guards the widened (OSError, UnicodeError) reconcile arm (F-154),
+#   6. a stale version-numbered download zip (aiqt-skill-0.0.0.zip) is flagged as drift on --check
+#      (exit 1) and removed on a normal regen, while the alias and the current versioned copy are kept.
 
 _APEX = """---
 corpus-id: prjint1
@@ -576,7 +679,7 @@ A second self-test conduct rule body.
 
 _SKILL_SRC = """=== meta ===
 name: aiqt
-version: 9.9.9
+version: __ZIPVER__
 license: CC-BY-SA-4.0
 date: 2026-01-01
 apex-id: prjint1
@@ -634,7 +737,8 @@ def _write_fixture(root, skill_src_text):
     (root.joinpath(*SKILL_SRC_PARTS)).write_text(skill_src_text, encoding="utf-8")
     manifest = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\n', encoding="utf-8")
+    manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
+                        encoding="utf-8")
 
 
 def self_test_main():
@@ -643,9 +747,11 @@ def self_test_main():
     import tempfile
     from contextlib import redirect_stdout
 
-    # good_src resolves cleanly (apex plus two distinct security ids). bad_src cites a corpus-id that is
+    # good_src resolves cleanly (apex plus two distinct security ids). Its version is pinned to the shipped
+    # ZIP_VERSIONED_PARTS literal so the build-time version-match assertion passes for a well-formed fixture;
+    # a leg below pins a MISMATCHED version to prove the assertion fires. bad_src cites a corpus-id that is
     # not in the fixture corpus, so the anti-fabrication gate must fire.
-    good_src = _SKILL_SRC
+    good_src = _SKILL_SRC.replace("__ZIPVER__", zip_versioned_version())
     bad_src = good_src.replace("[secres]\n", "[nosuch9]\n")
 
     def capture(root, check):
@@ -735,6 +841,48 @@ def self_test_main():
         code, out = capture(misfacet, False)
         if code != 2:
             failures.append("facet-misplaced rule expected exit 2 (section-facet guard), got {}\n{}".format(code, out))
+
+        # 7. A skill meta version that does NOT match the shipped ZIP_VERSIONED_PARTS literal fails closed
+        #    (exit 2): the version-match assertion. This is the case a skill bump that forgets to update
+        #    ZIP_VERSIONED_PARTS would hit. Removing the assertion makes this leg fail.
+        mismatch = tmp / "mismatch"
+        mismatch.mkdir()
+        mm_src = _SKILL_SRC.replace("__ZIPVER__", zip_versioned_version() + "-unbumped")
+        _write_fixture(mismatch, mm_src)
+        code, out = capture(mismatch, False)
+        if code != 2:
+            failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
+                            "got {}\n{}".format(code, out))
+
+        # 8. A stale version-numbered download zip (aiqt-skill-0.0.0.zip) beside the current one is reported
+        #    as drift on --check (exit 1) and removed on a normal regen, while the stable alias and the
+        #    current versioned copy are kept. Start from a clean tree, drop a stale zip, then check and
+        #    regenerate. Removing the orphan-clean scan makes this leg fail (the stale zip survives).
+        stalezip = tmp / "stalezip"
+        stalezip.mkdir()
+        _write_fixture(stalezip, good_src)
+        capture(stalezip, False)  # generate a clean tree first
+        downloads = stalezip.joinpath(*ZIP_PARTS[:-1])
+        stale = downloads / "aiqt-skill-0.0.0.zip"
+        stale.write_bytes(b"PK\x03\x04 stale prior-version zip bytes")
+        code, out = capture(stalezip, True)
+        if code != 1 or "orphan" not in out or "aiqt-skill-0.0.0.zip" not in out:
+            failures.append("stale versioned zip expected --check exit 1 naming the orphan, got {}\n{}".format(
+                code, out))
+        code, out = capture(stalezip, False)  # regen removes it
+        if code != 0 or stale.exists():
+            failures.append("regen expected to remove the stale versioned zip, got exit {} (present={})\n{}"
+                            .format(code, stale.exists(), out))
+        # The alias and the current versioned copy are kept, and --check is clean again.
+        alias = stalezip.joinpath(*ZIP_PARTS)
+        current = stalezip.joinpath(*ZIP_VERSIONED_PARTS)
+        if not alias.exists() or not current.exists():
+            failures.append("orphan-clean must keep the alias and the current versioned zip (alias={}, "
+                            "current={})".format(alias.exists(), current.exists()))
+        code, out = capture(stalezip, True)
+        if code != 0:
+            failures.append("after removing the stale zip, --check expected exit 0 (clean), got {}\n{}".format(
+                code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -743,9 +891,11 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: well-formed source round-trips clean; an unknown corpus-id and an "
-          "invalid-UTF-8 target fail closed (exit 2); a drifted SKILL.md and an orphan output are "
-          "caught (exit 1); a facet-misplaced rule fails closed (exit 2).")
+    print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
+          "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
+          "a drifted SKILL.md, an orphan reserved output, and a stale version-numbered download zip are "
+          "caught (exit 1, the stale zip removed on regen while the alias and current copy are kept); a "
+          "facet-misplaced rule fails closed (exit 2).")
     return 0
 
 

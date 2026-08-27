@@ -92,6 +92,8 @@ run_gate "reference-facts-selftest" python3 tools/check_reference_facts.py --sel
 run_gate "reference-facts" python3 tools/check_reference_facts.py
 run_gate "disclosure-selftest" python3 tools/gen_disclosure.py --self-test
 run_gate "disclosure-drift"    python3 tools/gen_disclosure.py --check
+run_gate "install-selftest" python3 tools/gen_install.py --self-test
+run_gate "install-drift"    python3 tools/gen_install.py --check
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
 run_gate "claude-drift"    python3 tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 tools/gen_adapters.py --check

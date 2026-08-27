@@ -748,7 +748,7 @@ A self-test rule asserting one id as both tight and broad, which mutual exclusiv
 # install a VALID chat-skill surface and then drift it, exercising the C2 skill fold for real.
 _SKILL_SRC_FIXTURE = """=== meta ===
 name: aiqt
-version: 9.9.9
+version: __ZIPVER__
 license: CC-BY-SA-4.0
 date: 2026-01-01
 apex-id: apex01
@@ -835,12 +835,16 @@ A self-test confidentiality rule body.
 
 def _add_skill_surface(base):
     """Install a VALID generated chat-skill surface onto a tree already built by _build_conformant: the
-    reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the deterministic
-    aiqt-skill.zip, all from _SKILL_SRC_FIXTURE. Because regeneration then succeeds, a later hand-edit of
+    reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the two deterministic,
+    byte-identical zips (aiqt-skill.zip and the version-numbered aiqt-skill-<version>.zip), all from
+    _SKILL_SRC_FIXTURE. Because regeneration then succeeds, a later hand-edit of
     any installed output (SKILL.md or the zip) reads as drift (C2 skill FAIL), not MALFORMED."""
     src = base.joinpath(*gen_skill.SKILL_SRC_PARTS)
     src.parent.mkdir(parents=True, exist_ok=True)
-    src.write_text(_SKILL_SRC_FIXTURE, encoding="utf-8")
+    # Pin the fixture skill version to the shipped ZIP_VERSIONED_PARTS literal so gen_skill's build-time
+    # version-match assertion passes for this well-formed surface.
+    src.write_text(_SKILL_SRC_FIXTURE.replace("__ZIPVER__", gen_skill.zip_versioned_version()),
+                   encoding="utf-8")
     # the conduct block cites two aiqt-family rules; install them in the corpus so resolve() succeeds
     corpus_aiqt = base.joinpath(*gen_skill.CORPUS_PARTS) / "aiqt"
     corpus_aiqt.mkdir(parents=True, exist_ok=True)
@@ -853,7 +857,8 @@ def _add_skill_surface(base):
     manifest = base.joinpath(*gen_skill.IDENTITY_MANIFEST_PARTS)
     if not manifest.exists():
         manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text('[plugin]\nauthor-name = "Self Test"\n', encoding="utf-8")
+        manifest.write_text('[plugin]\nauthor-name = "Self Test"\nhomepage = "https://example.test"\n',
+                            encoding="utf-8")
     reserved_map, standalone, binary = gen_skill.build_outputs(base)
     reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
     reserved_dir.mkdir(parents=True, exist_ok=True)

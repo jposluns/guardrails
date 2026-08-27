@@ -191,8 +191,8 @@ path = "roadmap.toml"
 class = "pack-immutable"
 
 # --- concern-1: pack-immutable non-download site paths (each literal; the three block-generated pages
-# --- site/disclosure.html, site/mappings.html, site/roadmap.html are whole-file pack-immutable here,
-# --- their block FRESHNESS checked separately by each block generator's own --check, 4.2) ---------------
+# --- site/disclosure.html, site/mappings.html, site/roadmap.html, site/install-claude.html are whole-file
+# --- pack-immutable here, their block FRESHNESS checked separately by each block generator's own --check, 4.2)
 
 [[release-class]]
 path = "site/404.html"
@@ -318,7 +318,7 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # --- checkout byte stability (3.3): every concern-1 path is `text eol=lf` except these ------------------
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.1.zip"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 

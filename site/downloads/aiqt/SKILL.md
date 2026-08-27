@@ -7,10 +7,16 @@ description: >-
   priority ordering, decided in advance, is
   (Accuracy = Integrity = Quality = Trust) > Progress > Speed > Cost.
 license: CC-BY-SA-4.0
-version: 1.0.0
+version: 1.0.1
 ---
 
 # AIQT™
+
+Version: 1.0.1\
+Author: Jeff Posluns\
+Website: https://aiqt.ai\
+GitHub: https://github.com/jposluns/guardrails\
+Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
 
 The one priority ordering, decided in advance:
 

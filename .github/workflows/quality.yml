@@ -189,6 +189,12 @@ jobs:
       - name: Disclosure drift
         run: python3 tools/gen_disclosure.py --check
 
+      - name: Install page block self-test
+        run: python3 tools/gen_install.py --self-test
+
+      - name: Install page block drift
+        run: python3 tools/gen_install.py --check
+
       - name: NOTICE drift
         run: python3 tools/gen_notice.py --check
 
