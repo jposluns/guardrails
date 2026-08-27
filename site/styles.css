@@ -6,13 +6,13 @@
 /* dark is the default; a [data-theme] attribute (set by the toggle) beats the OS setting */
 :root{
   --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
-  --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
+  --ink:#e6edf3; --muted:#9fb0c3; --faint:#7488a1;
   --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
   --on-accent:#08111f; --on-accent-2:#08111f;
 }
 :root[data-theme="dark"]{
   --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
-  --ink:#e6edf3; --muted:#9fb0c3; --faint:#6b7d94;
+  --ink:#e6edf3; --muted:#9fb0c3; --faint:#7488a1;
   --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
   --on-accent:#08111f; --on-accent-2:#08111f;
 }
@@ -72,7 +72,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
 /* hero */
 header.hero{padding:6rem 0 4.5rem; text-align:center; background:
   radial-gradient(1200px 420px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
-header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem; max-width:940px}
+header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem; text-wrap:balance}
 header.hero .lead{max-width:62ch; margin:0 auto 1.7rem}
 .ordering{display:inline-block; max-width:100%; overflow-x:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   background:var(--panel); border:1px solid var(--line); border-radius:12px;
