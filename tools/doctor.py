@@ -74,7 +74,7 @@ def _nlink_ok(root_fd, relpath):
     return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
-# --- the six assertions -------------------------------------------------------------------------------
+# --- the eight assertions -----------------------------------------------------------------------------
 
 def assert_history_chain(root_fd, root):
     """verify_chain end-to-end plus terminal-row agreement with the current pin (or the clean un-adopted
@@ -343,10 +343,10 @@ def assert_state_completeness(root_fd, root):
         return Result("state-completeness", MALFORMED,
                       "a pin is present without its pin-transition record (partial/tampered state); the "
                       "installed-path digest verification depends on it; exit 2, never NA (4.4)")
-    if not pin_present and not history_present and (txn_present or preimages_present or migration_present):
+    if not pin_present and (txn_present or preimages_present or migration_present):
         return Result("state-completeness", MALFORMED,
-                      "migration/transition/preimage state present with no pin and no history (partial "
-                      "state); exit 2, never NA (4.4)")
+                      "transition/preimage/migration state present with no live pin to own it (a partial or "
+                      "orphaned state); exit 2, never NA (4.4)")
     return Result("state-completeness", PASS, "pin-state file set is complete for its stage")
 
 
@@ -411,7 +411,13 @@ def run(root):
         if absent:
             print("  -- not adopted (no pin/adoption state); NOT APPLICABLE")
             return 0
-        results = [fn(root_fd, root) for fn in ASSERTIONS]
+        results = []
+        for fn in ASSERTIONS:
+            try:
+                results.append(fn(root_fd, root))
+            except _journal.JournalError as exc:
+                results.append(Result(fn.__name__, MALFORMED,
+                                      "contained-path error (a symlink or traversal was refused): {}".format(exc)))
     finally:
         os.close(root_fd)
     for r in results:
