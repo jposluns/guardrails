@@ -63,6 +63,7 @@ run_gate "footer-selftest" python3 tools/check_footer.py --self-test
 run_gate "footer" python3 tools/check_footer.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
+run_gate "versions-selftest" python3 tools/check_versions.py --self-test
 run_gate "versions"        python3 tools/check_versions.py
 run_gate "version-monotonicity-selftest" python3 tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 tools/check_version_monotonicity.py

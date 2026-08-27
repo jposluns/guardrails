@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "2c6a80fa316a2cd14058a0cb0aa8c3b02ed91710821aee39950fe1267b4c2c84"
+tree-sha256 = "fc27c86c744fafcc84f2bf49715f7b6efffe5a5f97f35d11fe918a9a99d47181"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2441,8 +2441,8 @@ sha256 = "24b3a3821e2aaf499f6141bc52356b17906ab11e6834fac08c3cbd4b723fcfb6"
 
 [[sources]]
 path = "tools/check_versions.py"
-bytes = 17049
-sha256 = "4bcce96a5e3b7134340548851734a566eacd14c229fdb9b2b959c85f3f473e21"
+bytes = 18452
+sha256 = "f16b07e110cfcec0c2d26e32c1f9ac366e27f35273cdc055e2af3b3e6af2d2b3"
 
 [[sources]]
 path = "tools/ci-status.sh"
@@ -2571,8 +2571,8 @@ sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 8044
-sha256 = "953ae12c606867cdefff228c39a68a53308a080b66cbc08418bd868b0575ea15"
+bytes = 8117
+sha256 = "92281a27f2b39978e163917716fbf2b6f0b7bdff33d7253af320f7c5208f0836"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"

@@ -145,23 +145,24 @@ def check_versions(root):
     downloads = root / "site" / "downloads"
     alias_rel = "site/downloads/aiqt-skill.zip"
     alias_path = root / alias_rel
-    # Confirm the downloads directory is listable BEFORE trusting glob. Path.glob can SWALLOW an
-    # os.scandir error (a PermissionError on the directory itself) and yield an empty match, which would
+    # Enumerate the version-numbered zips in ONE guarded os.scandir pass, never Path.glob: glob can SWALLOW
+    # an os.scandir error (a PermissionError on the directory itself) and yield an empty match, which would
     # misread an unreadable dir as "no version-numbered zip ships" (a misleading exit 1) instead of the
-    # fail-closed exit 2 a read error demands. An explicit os.scandir probe fails closed on that read
-    # error (a cannot-evaluate the two-valued finding path cannot carry). An ABSENT directory is not a
-    # read error: it is left to the empty-glob path below, where it reads as a genuinely absent versioned
-    # zip (a normal finding, exit 1), the same outcome an absent downloads dir produced before.
+    # fail-closed exit 2 a read error demands. Collecting matches directly from the scandir iterator makes a
+    # read error raised at ANY point in the listing propagate as OSError -> exit 2 (a cannot-evaluate the
+    # two-valued finding path cannot carry); there is no second enumeration to swallow it. An ABSENT
+    # directory (FileNotFoundError) is not a read error: it reads as a genuinely absent versioned zip (a
+    # normal finding, exit 1), the same outcome an absent downloads dir produced before. The name match
+    # mirrors the old aiqt-skill-*.zip glob (the alias aiqt-skill.zip has no dash and is excluded).
     try:
         with os.scandir(downloads) as it:
-            for _ in it:
-                pass
+            versioned = sorted(downloads / e.name for e in it
+                               if e.name.startswith("aiqt-skill-") and e.name.endswith(".zip"))
     except FileNotFoundError:
-        pass
+        versioned = []
     except OSError as exc:
         print("error: cannot list site/downloads ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
-    versioned = sorted(downloads.glob("aiqt-skill-*.zip"))
     if not versioned:
         findings.append("no version-numbered skill zip (site/downloads/aiqt-skill-*.zip) ships; exactly "
                         "one must")
@@ -225,6 +226,12 @@ def _write_versions_fixture(root, versioned, alias_bytes):
         (downloads / "aiqt-skill.zip").write_bytes(alias_bytes)
 
 
+def _raise_perm(*a, **k):
+    """A stand-in for os.scandir that fails: lets the self-test inject a deterministic directory read
+    error (a PermissionError) so the fail-closed enumeration path is exercised regardless of uid."""
+    raise PermissionError("injected read error")
+
+
 def self_test_main():
     import io
     import shutil
@@ -234,6 +241,15 @@ def self_test_main():
     def _run_quiet(root):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return check_versions(root)
+
+    def _inject_scandir_error(root, failures):
+        real_scandir = os.scandir
+        os.scandir = _raise_perm
+        try:
+            if _run_quiet(root) != 2:
+                failures.append("an injected scandir read error expected exit 2 (fail-closed)")
+        finally:
+            os.scandir = real_scandir
 
     failures = []
     skipped = []
@@ -297,6 +313,14 @@ def self_test_main():
             failures.append("an unreadable downloads dir expected exit 2 (fail-closed)")
         os.chmod(unreadable_dir, 0o755)  # restore so cleanup can remove it
         unreadable_dir = None
+
+        # 7. a READ ERROR during the scandir enumeration fails closed (exit 2) DETERMINISTICALLY (works
+        #    under root, unlike leg 6): inject an OSError from os.scandir so the single guarded enumeration
+        #    raises rather than silently yielding an empty match (the round-2 double-enumeration guard).
+        injected = tmp / "injected"
+        injected.mkdir()
+        _write_versions_fixture(injected, [("aiqt-skill-1.0.1.zip", same)], same)
+        _inject_scandir_error(injected, failures)
     finally:
         if unreadable_dir is not None:
             os.chmod(unreadable_dir, 0o755)  # restore even on an unexpected early exit
