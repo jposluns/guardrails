@@ -138,11 +138,30 @@ def assert_pin_and_manifest(root_fd, root):
     if txn is not None and txn.get("phase") == "committed":
         for op in txn.get("op", []):
             kind, path = op.get("op"), op.get("path")
+            post = op.get("poststate") or {}
             if kind in ("create", "write"):
                 st = _journal._lstat_contained(root_fd, path)
                 if st is None or not stat.S_ISREG(st.st_mode):
                     return Result("pin-and-manifest", FAIL,
                                   "pin installs {!r} but it is absent or not a regular file".format(path))
+                want_sha = post.get("content-sha256")
+                if not want_sha:
+                    return Result("pin-and-manifest", MALFORMED,
+                                  "transition op for {!r} lacks a recorded content digest".format(path))
+                try:
+                    data, _ = _journal._read_contained(root_fd, path)
+                except _journal.JournalError as exc:
+                    return Result("pin-and-manifest", MALFORMED,
+                                  "cannot read installed path {!r} ({})".format(path, exc))
+                if hashlib.sha256(data).hexdigest() != want_sha:
+                    return Result("pin-and-manifest", FAIL,
+                                  "installed {!r} does not match the recorded pin digest (in-place drift "
+                                  "or tamper)".format(path))
+                want_mode = post.get("mode")
+                if want_mode is not None and stat.S_IMODE(st.st_mode) != int(want_mode):
+                    return Result("pin-and-manifest", FAIL,
+                                  "installed {!r} mode {} differs from the recorded pin mode {}".format(
+                                      path, oct(stat.S_IMODE(st.st_mode)), oct(int(want_mode))))
                 installed += 1
             elif kind == "mkdir":
                 st = _journal._lstat_contained(root_fd, path)
@@ -151,8 +170,9 @@ def assert_pin_and_manifest(root_fd, root):
                                   "pin installs directory {!r} but it is absent".format(path))
                 installed += 1
     return Result("pin-and-manifest", PASS,
-                  "pin schema valid; {} installed path(s) verified present in the tree; full concern-3 "
-                  "set-equality is owed to the adopter-experience spec".format(installed))
+                  "pin schema valid; {} installed path(s) verified present and digest-matched against the "
+                  "recorded pin; full concern-3 set-equality is owed to the deferred adopter-experience "
+                  "extent roster".format(installed))
 
 
 def assert_open_journal(root_fd, root):
@@ -161,18 +181,33 @@ def assert_open_journal(root_fd, root):
     jr = _journal._lstat_contained(root_fd, pin.JOURNAL_REL)
     if jr is None:
         return Result("open-journal", NA, "no cutover journal installed")
+    if not stat.S_ISDIR(jr.st_mode):
+        return Result("open-journal", MALFORMED, "cutover journal path is not a directory")
     journal_root = Path(root) / pin.JOURNAL_REL
     open_txns = []
     try:
-        for entry in sorted(journal_root.iterdir()):
-            if not entry.is_dir():
-                continue
-            if not _journal.is_terminal(entry):
-                open_txns.append(entry.name)
+        pfd, name = _journal._open_parent(root_fd, pin.JOURNAL_REL)
+    except (OSError, _journal.JournalError) as exc:
+        return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
+    try:
+        jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+    except OSError as exc:
+        os.close(pfd)
+        return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
+    try:
+        for entry in sorted(os.listdir(jfd)):
+            est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
+            if not stat.S_ISDIR(est.st_mode):
+                continue                                  # a non-directory / symlinked journal entry is skipped
+            if not _journal.is_terminal(journal_root / entry):
+                open_txns.append(entry)
     except _journal.JournalError as exc:
         return Result("open-journal", MALFORMED, "corrupt journal ({})".format(exc))
     except OSError as exc:
         return Result("open-journal", MALFORMED, "cannot read the journal ({})".format(exc))
+    finally:
+        os.close(jfd)
+        os.close(pfd)
     if open_txns:
         return Result("open-journal", FAIL,
                       "{} open transaction(s) block any new pin operation until recovered: {}"
@@ -223,22 +258,21 @@ def assert_reverse_step(root_fd, root):
     if txn is None:
         return Result("reverse-step", NA, "no transition to reverse")
     tid = txn.get("transition-id")
-    base = Path(root) / pin.PREIMAGES_REL / str(tid) / "preimages"
     checked = 0
     for op in txn.get("op", []):
         pre = op.get("prestate") or {}
         ref = pre.get("payload")
         if ref in (None, ""):
             continue                                     # prior-absence / directory prestate: no payload
-        payload = base / str(ref)
+        relpath = "{}/{}/preimages/{}".format(pin.PREIMAGES_REL, str(tid), str(ref))
         try:
-            data = payload.read_bytes()
-        except OSError as exc:
+            data, _ = _journal._read_contained(root_fd, relpath)
+        except _journal.JournalError as exc:
             return Result("reverse-step", MALFORMED,
-                          "referenced preimage {} is missing/unreadable ({})".format(payload.name, exc))
+                          "referenced preimage {} is missing/unreadable ({})".format(ref, exc))
         if hashlib.sha256(data).hexdigest() != pre.get("sha256"):
             return Result("reverse-step", MALFORMED,
-                          "preimage {} does not match its recorded prestate digest".format(payload.name))
+                          "preimage {} does not match its recorded prestate digest".format(ref))
         checked += 1
     return Result("reverse-step", PASS,
                   "{} referenced preimage(s) present and digest-matched".format(checked))
@@ -306,8 +340,9 @@ def _adoption_absent(root_fd):
     for rel in (pin.PIN_REL, pin.HISTORY_REL, pin.TRANSITION_REL):
         if _present(root_fd, rel):
             return False
-    if _journal._lstat_contained(root_fd, pin.PREIMAGES_REL) is not None:
-        return False
+    for rel in (pin.PREIMAGES_REL, pin.JOURNAL_REL, pin.REPOINTS_REL):
+        if _journal._lstat_contained(root_fd, rel) is not None:
+            return False
     return True
 
 

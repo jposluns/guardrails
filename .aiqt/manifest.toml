@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "fb88ebfc686766cd5bf54b915c4aa9b1a80f99a6c7e0b3e1f3618d15bac1c28b"
+tree-sha256 = "7f06ad905c5db4960bc47ff0a9557056361c1e85228fc762e2b459770f118db3"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2456,8 +2456,8 @@ sha256 = "3eca3f86bb0a9e7dbfa0a581c6f26b0a88c10b2ca34682897aab1e4f13371062"
 
 [[sources]]
 path = "tools/doctor.py"
-bytes = 22155
-sha256 = "91d64943a184d523bd11f4647855fb144cb897df84e31a99953a5b59fb3279d2"
+bytes = 24403
+sha256 = "458d4dc6308fa3a927bc1162bb6d7e562a1c92d9a0f32a686f408acd62829eb5"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -2571,8 +2571,8 @@ sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
 path = "tools/pin.py"
-bytes = 56800
-sha256 = "0ddd8dc5ead8583c058b5ac0d8ff408ba754f29d68393011bf5370998d965685"
+bytes = 65021
+sha256 = "41226bd50e3245dbb4fa1353cadc10495707c3fb425e3fbbb12f5417feaad6c4"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
