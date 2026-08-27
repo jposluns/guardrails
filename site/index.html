@@ -30,14 +30,14 @@
 
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
-  <a class="logo" href="/draft" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT&trade;</span></a>
+  <a class="logo" href="/" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT&trade;</span></a>
   <div class="topformula" aria-label="AIQT priority ordering: Accuracy Integrity Quality Trust first, then Progress, Speed, Cost">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; <span class="t2">Progress</span> &gt; <span class="t3">Speed</span> &gt; <span class="t4">Cost</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
 <nav class="sidebar" id="sidebar" aria-label="Main navigation">
   <h4>Start</h4>
-  <a class="navlink" href="/draft">Home</a>
+  <a class="navlink" href="/" aria-current="page">Home</a>
   <h4>Chat assistants</h4>
   <a class="navlink" href="/install">All assistants</a>
   <a class="navlink" href="/install-claude">Claude</a>
@@ -67,7 +67,7 @@
 
 <header class="hero">
   <div class="wrap">
-    <h1>Rules your AI follows. Controls that catch what slips.</h1>
+    <h1>Rules your AI follows. <span class="grad">Controls that catch what slips.</span></h1>
     <p class="lead">AIQT Guardrails holds your assistant to one standard: <span class="fA">A</span>ccuracy,
       <span class="fB">I</span>ntegrity, <span class="fA">Q</span>uality, and <span class="fB">T</span>rust.
       More than guidance: these principles outrank progress, speed, and cost. In chat, your assistant
