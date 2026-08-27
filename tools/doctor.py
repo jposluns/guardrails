@@ -10,7 +10,7 @@ them standalone. Default operation is READ-ONLY: no assertion writes, and any st
 (re-pin, carve-out, un-adopt) is a SEPARATE explicit tools/pin.py invocation that carries its own
 authorization, never the doctor's default.
 
-Assertions (plan 4.3): pin-and-manifest, history-chain, open-journal, repoints, reverse-step, transition.
+Assertions (plan 4.3): state-completeness, pin-and-manifest, history-chain, open-journal, repoints, reverse-step, transition, unadopt-intent.
 
 HONESTY LIMIT, disclosed in every chain message (10.2): with no keys the pin-history chain is tamper-
 evident against a CASUAL in-place edit ONLY. It is NOT truncation-evident (deleting a valid tail leaves a
@@ -144,6 +144,10 @@ def assert_pin_and_manifest(root_fd, root):
                 if st is None or not stat.S_ISREG(st.st_mode):
                     return Result("pin-and-manifest", FAIL,
                                   "pin installs {!r} but it is absent or not a regular file".format(path))
+                if st.st_nlink != 1:
+                    return Result("pin-and-manifest", FAIL,
+                                  "installed {!r} is a hardlink (st_nlink={}); a pin-installed path must be a "
+                                  "plain regular file".format(path, st.st_nlink))
                 want_sha = post.get("content-sha256")
                 if not want_sha:
                     return Result("pin-and-manifest", MALFORMED,
@@ -331,6 +335,7 @@ def assert_state_completeness(root_fd, root):
     except _journal.JournalError as exc:
         return Result("state-completeness", MALFORMED, str(exc))
     preimages_present = _journal._lstat_contained(root_fd, pin.PREIMAGES_REL) is not None
+    migration_present = _journal._lstat_contained(root_fd, pin.MIGRATION_REL) is not None
     if pin_present and not history_present:
         return Result("state-completeness", MALFORMED,
                       "a pin is present without a pin-history (partial state); exit 2, never NA (4.4)")
@@ -338,10 +343,10 @@ def assert_state_completeness(root_fd, root):
         return Result("state-completeness", MALFORMED,
                       "a pin is present without its pin-transition record (partial/tampered state); the "
                       "installed-path digest verification depends on it; exit 2, never NA (4.4)")
-    if not pin_present and not history_present and (txn_present or preimages_present):
+    if not pin_present and not history_present and (txn_present or preimages_present or migration_present):
         return Result("state-completeness", MALFORMED,
-                      "transition/preimage state present with no pin and no history (partial state); "
-                      "exit 2, never NA (4.4)")
+                      "migration/transition/preimage state present with no pin and no history (partial "
+                      "state); exit 2, never NA (4.4)")
     return Result("state-completeness", PASS, "pin-state file set is complete for its stage")
 
 

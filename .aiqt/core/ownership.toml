@@ -310,6 +310,11 @@ class = "adopter-state"
 note = "The two-phase re-pin transition record (10.3); prepared/applied/committed."
 
 [[namespace-class]]
+path = ".aiqt/pin-unadopt.toml"
+class = "adopter-state"
+note = "The un-adopt INTENT record (10.6); written before the reverse swap, removed last; recover completes an interrupted un-adopt."
+
+[[namespace-class]]
 pattern = ".aiqt/pin-preimages/**"
 class = "adopter-state"
 note = "Standalone re-pin and pre-adoption preimage payloads (10.3); no journal engine; retained until the pin advances again (10.6)."
