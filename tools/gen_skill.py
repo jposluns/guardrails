@@ -720,6 +720,20 @@ def self_test_main():
             code = "raised {}".format(type(exc).__name__)
         if code != 2:
             failures.append("invalid-UTF-8 reserved target expected exit 2 (fail-closed), got {}".format(code))
+
+        # 6. A rule placed in a facet-inappropriate block fails closed (exit 2): the section-facet guard.
+        #    Swap the conduct rule (nofabr, ACCUR) with the security rule (secunt, SECI) so each lands in
+        #    the wrong block; resolve_group must reject the mismatched facet. Removing the guard makes this
+        #    generate cleanly, so the case fails without it.
+        misfacet = tmp / "misfacet"
+        misfacet.mkdir()
+        swapped = (good_src.replace("[nofabr]", "[__tmpswap__]")
+                           .replace("[secunt]", "[nofabr]")
+                           .replace("[__tmpswap__]", "[secunt]"))
+        _write_fixture(misfacet, swapped)
+        code, out = capture(misfacet, False)
+        if code != 2:
+            failures.append("facet-misplaced rule expected exit 2 (section-facet guard), got {}\n{}".format(code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -730,7 +744,7 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: well-formed source round-trips clean; an unknown corpus-id and an "
           "invalid-UTF-8 target fail closed (exit 2); a drifted SKILL.md and an orphan output are "
-          "caught (exit 1).")
+          "caught (exit 1); a facet-misplaced rule fails closed (exit 2).")
     return 0
 
 
