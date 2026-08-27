@@ -28,7 +28,8 @@ filename to the skill meta version.
   check_versions.py --check    same, for parity with the generator gates
   check_versions.py --self-test  deterministic self-test of the shipped-skill-zip leg (a single
                                  byte-identical version-numbered/alias pair passes; none, two, a
-                                 byte-differing alias, or a missing alias fails)
+                                 byte-differing alias, or a missing alias fails exit 1; an unreadable
+                                 downloads directory fails closed exit 2)
 
 Exit convention (matches the repo's gates):
   0  clean
@@ -36,6 +37,7 @@ Exit convention (matches the repo's gates):
      version-numbered skill zip, a missing alias, or a byte mismatch between the versioned copy and the alias)
   2  malformed input or a read error (fail-closed)
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -143,11 +145,23 @@ def check_versions(root):
     downloads = root / "site" / "downloads"
     alias_rel = "site/downloads/aiqt-skill.zip"
     alias_path = root / alias_rel
+    # Confirm the downloads directory is listable BEFORE trusting glob. Path.glob can SWALLOW an
+    # os.scandir error (a PermissionError on the directory itself) and yield an empty match, which would
+    # misread an unreadable dir as "no version-numbered zip ships" (a misleading exit 1) instead of the
+    # fail-closed exit 2 a read error demands. An explicit os.scandir probe fails closed on that read
+    # error (a cannot-evaluate the two-valued finding path cannot carry). An ABSENT directory is not a
+    # read error: it is left to the empty-glob path below, where it reads as a genuinely absent versioned
+    # zip (a normal finding, exit 1), the same outcome an absent downloads dir produced before.
     try:
-        versioned = sorted(downloads.glob("aiqt-skill-*.zip"))
+        with os.scandir(downloads) as it:
+            for _ in it:
+                pass
+    except FileNotFoundError:
+        pass
     except OSError as exc:
         print("error: cannot list site/downloads ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
+    versioned = sorted(downloads.glob("aiqt-skill-*.zip"))
     if not versioned:
         findings.append("no version-numbered skill zip (site/downloads/aiqt-skill-*.zip) ships; exactly "
                         "one must")
@@ -187,8 +201,10 @@ def check_versions(root):
 # --- self-test --------------------------------------------------------------------------------------
 # Proves the version-agnostic shipped-surface leg fires on the things it must catch, against synthetic temp
 # trees, never the real tree: a single byte-identical version-numbered/alias pair passes; zero, two, or a
-# byte-differing version-numbered zip each fail (exit 1); a missing alias fails (exit 1). Offline, stdlib
-# only. The zip names are arbitrary versions, since the leg no longer derives the name from the pack version.
+# byte-differing version-numbered zip each fail (exit 1); a missing alias fails (exit 1); an UNREADABLE
+# downloads directory fails closed (exit 2), never a misleading exit 1, since glob can swallow the scandir
+# error. Offline, stdlib only. The zip names are arbitrary versions, since the leg no longer derives the
+# name from the pack version.
 
 _CHANGELOG = (
     'title = "t"\nnote = "n"\n\n'
@@ -220,6 +236,8 @@ def self_test_main():
             return check_versions(root)
 
     failures = []
+    skipped = []
+    unreadable_dir = None
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-versions-selftest-"))
     except OSError as exc:
@@ -261,7 +279,27 @@ def self_test_main():
         _write_versions_fixture(noalias, [("aiqt-skill-1.0.1.zip", same)], None)
         if _run_quiet(noalias) != 1:
             failures.append("a missing alias expected exit 1")
+
+        # 6. an UNREADABLE downloads directory fails closed (exit 2), never a misleading exit 1. glob can
+        #    swallow the scandir PermissionError and yield an empty match, which would read as "no
+        #    version-numbered zip" (exit 1); the explicit os.scandir probe surfaces the read error as a
+        #    fail-closed cannot-evaluate. changelog.toml and VERSION are valid so the run reaches the
+        #    downloads leg. Skipped where the runner can still read a chmod-0 dir (root/DAC-bypass),
+        #    observed via os.access, as the sibling generators do.
+        unread = tmp / "unread"
+        unread.mkdir()
+        _write_versions_fixture(unread, [("aiqt-skill-1.0.1.zip", same)], same)
+        unreadable_dir = unread / "site" / "downloads"
+        os.chmod(unreadable_dir, 0)
+        if os.access(unreadable_dir, os.R_OK):
+            skipped.append("6 unreadable-downloads-dir")
+        elif _run_quiet(unread) != 2:
+            failures.append("an unreadable downloads dir expected exit 2 (fail-closed)")
+        os.chmod(unreadable_dir, 0o755)  # restore so cleanup can remove it
+        unreadable_dir = None
     finally:
+        if unreadable_dir is not None:
+            os.chmod(unreadable_dir, 0o755)  # restore even on an unexpected early exit
         shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -269,9 +307,12 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
+    note = ("" if not skipped else
+            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
+            .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a single byte-identical version-numbered/alias zip pair passes; no "
           "version-numbered zip, two of them, a byte-differing alias, and a missing alias each fail "
-          "(exit 1).")
+          "(exit 1); an unreadable downloads directory fails closed (exit 2)." + note)
     return 0
 
 

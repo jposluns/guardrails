@@ -285,6 +285,14 @@
     },
     {
       "kind": "block",
+      "regenerate": "python3 tools/gen_install.py",
+      "sources": [
+        ".aiqt/core/skill/skill-source.md"
+      ],
+      "target": "site/install-claude.html"
+    },
+    {
+      "kind": "block",
       "regenerate": "python3 tools/gen_mappings.py",
       "sources": [
         ".aiqt/standards/",

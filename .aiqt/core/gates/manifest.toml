@@ -108,6 +108,15 @@ class = "a"
 residue = "A byte-identity drift gate over the artefact tools/gen_disclosure.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
 
 [[gate]]
+id = "install-drift"
+script = "tools/gen_install.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the artefact tools/gen_install.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+
+[[gate]]
 id = "notice-drift"
 script = "tools/gen_notice.py"
 rules = ["gensrc"]

@@ -503,6 +503,7 @@ tools/gen_disclosure.py text eol=lf
 tools/gen_enforceability.py text eol=lf
 tools/gen_gensrc.py text eol=lf
 tools/gen_hooks.py text eol=lf
+tools/gen_install.py text eol=lf
 tools/gen_manifest.py text eol=lf
 tools/gen_mappings.py text eol=lf
 tools/gen_notice.py text eol=lf

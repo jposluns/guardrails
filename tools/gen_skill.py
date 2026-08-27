@@ -37,7 +37,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, replace_block, reconcile  # noqa: E402
+from _gen_common import repo_root, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -61,12 +61,6 @@ ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.1.zip")  # the versi
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
-# The install page carries ONE generated region (the download button and the versioned filename it names),
-# regenerated from the skill meta version and drift-gated by this generator's --check, the same block
-# mechanism gen_disclosure.py uses for site/disclosure.html. The hand-authored chrome around the markers is
-# human-reviewed as before.
-INSTALL_PAGE_PARTS = ("site", "install-claude.html")
-SKILL_DOWNLOAD_MARKER = "SKILL-DOWNLOAD"
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
 # gate read from). The public attribution line (GD-56) is built from the [plugin] author-name here plus
@@ -101,15 +95,11 @@ GENSRC_OUTPUTS = (
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
 )
-# NOTE: the install-page SKILL-DOWNLOAD block (site/install-claude.html) is regenerated and drift-gated by
-# this generator's --check (see build_outputs/run_gen), but is deliberately NOT declared in GENSRC_OUTPUTS.
-# This generator carries a RENDERER_DECL, so gen_renderers.py would promote any GENSRC_OUTPUTS target into a
-# renderer target and gen_manifest.build_artifacts would then record site/install-claude.html as a
-# WHOLE-FILE "skill" artifact, falsely claiming the skill renderer produces the entire hand-authored page
-# and coupling its hand-authored prose to the manifest. A block inside a hand-authored page belongs in a
-# managed-block artifact that digests only the block (the CLAUDE.md/RULES-INDEX precedent), not a whole-file
-# one; generalizing that is a separate change, so until then the block is kept out of the renderer roster
-# and gated by --check alone. The page is still scanned as a site page by check_overclaim (collector 1).
+# The install-page SKILL-DOWNLOAD block (site/install-claude.html) is generated and drift-gated by its own
+# generator, tools/gen_install.py, a block generator with NO RENDERER_DECL registered in the gensrc
+# registry the same way gen_disclosure.py registers site/disclosure.html. Keeping it a separate,
+# RENDERER_DECL-free generator is what lets it be roster-tracked without gen_manifest recording the whole
+# hand-authored install page as a whole-file "skill" artifact.
 
 # The public download is packed deterministically so its bytes never depend on the wall clock, the host
 # OS, or the zlib version: a fixed ZIP-epoch timestamp, members in sorted order, a fixed unix mode, and
@@ -361,9 +351,14 @@ def render_skill(data):
 
 
 def versioned_zip_basename(version):
-    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.1.zip'. The single
-    place the shipped filename shape is spelled, so the ZIP_VERSIONED_PARTS literal, the install-page block,
-    and the build-time match assertion all agree."""
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.1.zip'. This is the
+    shared SHAPE helper: it spells the filename PATTERN in one place, so the build-time match assertion, the
+    install-page block (gen_install.py), and any other caller derive the name the same way. It is NOT the
+    single source of the concrete versioned name: that name is spelled as a literal in several spots (the
+    four in RELEASING.md's bump checklist: the skill-source.md meta version, the ZIP_VERSIONED_PARTS literal
+    and its GENSRC_OUTPUTS target, check_portability.BINARY_ALLOW, and ownership.toml [checkout].binary).
+    Those literals are kept consistent by the fail-closed version-match assertion in build_outputs plus the
+    bump checklist, not by true single-sourcing."""
     return "aiqt-skill-{}.zip".format(version)
 
 
@@ -373,15 +368,6 @@ def zip_versioned_version():
     version-match assertion in build_outputs passes for a well-formed fixture and fires only on a mismatch."""
     base = ZIP_VERSIONED_PARTS[-1]
     return base[len("aiqt-skill-"):-len(".zip")]
-
-
-def render_install_download_block(data):
-    """The install page's SKILL-DOWNLOAD block: the download button whose href names the version-numbered
-    zip, rendered from the skill meta version so a version bump propagates on regenerate and a hand-edit
-    reads as drift. Only the button (the version-bearing href) sits in the block; the surrounding note and
-    step text are version-free hand-authored chrome, so a bump touches only this one rendered line."""
-    return ('      <a class="btn primary" href="/downloads/{}" download>'
-            'Download the Skill (.zip)</a>').format(versioned_zip_basename(data["meta"]["version"]))
 
 
 def render_zip(data):
@@ -482,12 +468,10 @@ def attribution_string(name):
 
 def build_outputs(root):
     """Load the corpus and skill source under root and render every output. Returns
-    (reserved_map, standalone, binary, blocks): reserved_map is {filename: text} for the reserved
-    site/downloads/aiqt/ subtree, standalone is [(abs_path, text)] for named text outputs beside it,
-    binary is [(abs_path, bytes)] for named binary outputs beside it (the deterministic download zip),
-    and blocks is [(abs_path, marker, inner_text)] for generated regions inside hand-authored pages
-    (the install-page download button). The block INNER is rendered here from the loaded data; run_gen
-    reads the page, splices the inner between the markers, and reconciles it.
+    (reserved_map, standalone, binary): reserved_map is {filename: text} for the reserved
+    site/downloads/aiqt/ subtree, standalone is [(abs_path, text)] for named text outputs beside it, and
+    binary is [(abs_path, bytes)] for named binary outputs beside it (the deterministic download zip).
+    The install-page download block is generated by its own generator (tools/gen_install.py), not here.
     Raises ValueError/OSError (an unknown id, a malformed or unreadable source): the caller fails closed.
     Parameterized on root so the conformance suite and the self-test can call it off the real tree."""
     corpus = load_corpus(root.joinpath(*CORPUS_PARTS))
@@ -517,9 +501,7 @@ def build_outputs(root):
     zip_bytes = render_zip(data)
     binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
               (root.joinpath(*ZIP_VERSIONED_PARTS), zip_bytes)]
-    blocks = [(root.joinpath(*INSTALL_PAGE_PARTS), SKILL_DOWNLOAD_MARKER,
-               render_install_download_block(data))]
-    return reserved_map, standalone, binary, blocks
+    return reserved_map, standalone, binary
 
 
 def run_gen(root, check):
@@ -538,9 +520,9 @@ def run_gen(root, check):
         # never concealed. A PRESENT corpus with a missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
         if dir_present(corpus_dir):
-            reserved_map, standalone, binary, blocks = build_outputs(root)
+            reserved_map, standalone, binary = build_outputs(root)
         else:
-            reserved_map, standalone, binary, blocks = {}, [], [], []
+            reserved_map, standalone, binary = {}, [], []
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -561,22 +543,25 @@ def run_gen(root, check):
                 if not check:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(content)
-        # Generated regions inside hand-authored pages (the install-page download button), spliced between
-        # markers and reconciled the same way gen_disclosure.py handles site/disclosure.html. A missing page
-        # or missing markers is fail-closed (exit 2): the generator never silently skips a target it is meant
-        # to keep in sync. reconcile() fails closed on a read/write error (exit 2) of its own.
-        for page_path, marker, inner in blocks:
-            if not page_path.exists():
-                print("error: {} not found (expected generated block target)".format(
-                    page_path.relative_to(root).as_posix()))
-                return 2
-            try:
-                new_text = replace_block(page_path.read_text(encoding="utf-8"), marker, inner)
-            except ValueError as exc:
-                print("error: {}".format(exc))
-                return 2
-            if reconcile(page_path, new_text, check):
-                drift.append(page_path.relative_to(root).as_posix())
+        # Orphan-clean stale version-numbered download zips. A prior-version aiqt-skill-<old>.zip left in
+        # site/downloads after a version bump is a stale shipped surface, so it is removed on a normal run
+        # and reported as drift on --check (exit 1). The stable alias aiqt-skill.zip (no version segment, so
+        # it does not match the aiqt-skill-*.zip shape) and the CURRENT ZIP_VERSIONED_PARTS copy are kept.
+        # The scan fails closed on an unreadable downloads dir (os.walk onerror=raise), mirroring the
+        # reserved-subtree orphan scan below, so an I/O error can never conceal a stale zip. Top level only:
+        # version-numbered zips live directly under site/downloads (the reserved aiqt/ subtree is scanned
+        # separately below).
+        downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
+        current_versioned = ZIP_VERSIONED_PARTS[-1]
+        if dir_present(downloads_dir):
+            for dirpath, _dirs, filenames in os.walk(downloads_dir, onerror=_raise):
+                _dirs[:] = []  # top level only: do not descend into the reserved aiqt/ subtree
+                for fn in sorted(filenames):
+                    if fn.startswith("aiqt-skill-") and fn.endswith(".zip") and fn != current_versioned:
+                        stale = Path(dirpath) / fn
+                        drift.append("orphan " + stale.relative_to(root).as_posix())
+                        if not check:
+                            stale.unlink()
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -625,7 +610,9 @@ def main():
 #   3. a hand-edited (drifted) SKILL.md makes --check report drift (exit 1),
 #   4. an orphan file in the reserved output subtree is detected (exit 1),
 #   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
-#      guards the widened (OSError, UnicodeError) reconcile arm (F-154).
+#      guards the widened (OSError, UnicodeError) reconcile arm (F-154),
+#   6. a stale version-numbered download zip (aiqt-skill-0.0.0.zip) is flagged as drift on --check
+#      (exit 1) and removed on a normal regen, while the alias and the current versioned copy are kept.
 
 _APEX = """---
 corpus-id: prjint1
@@ -751,15 +738,6 @@ def _write_fixture(root, skill_src_text):
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
                         encoding="utf-8")
-    # A minimal install page carrying the SKILL-DOWNLOAD markers, so run_gen's block reconcile has a target
-    # to splice into (a missing page or missing markers is fail-closed, exercised by dedicated legs below).
-    install = root.joinpath(*INSTALL_PAGE_PARTS)
-    install.parent.mkdir(parents=True, exist_ok=True)
-    install.write_text('<div class="cta">\n'
-                       '      <!-- SKILL-DOWNLOAD:BEGIN (generated) -->\n'
-                       '      placeholder\n'
-                       '      <!-- SKILL-DOWNLOAD:END -->\n'
-                       '</div>\n', encoding="utf-8")
 
 
 def self_test_main():
@@ -875,27 +853,34 @@ def self_test_main():
             failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
                             "got {}\n{}".format(code, out))
 
-        # 8. A missing install page and missing SKILL-DOWNLOAD markers each fail closed (exit 2): the block
-        #    reconcile never silently skips a target it must keep in sync. Start from a clean tree, then
-        #    (a) delete the install page and (b) strip its markers.
-        nopage = tmp / "nopage"
-        nopage.mkdir()
-        _write_fixture(nopage, good_src)
-        capture(nopage, False)  # generate a clean tree first
-        nopage.joinpath(*INSTALL_PAGE_PARTS).unlink()
-        code, out = capture(nopage, True)
-        if code != 2:
-            failures.append("missing install page expected exit 2 (fail-closed), got {}\n{}".format(code, out))
-
-        nomarker = tmp / "nomarker"
-        nomarker.mkdir()
-        _write_fixture(nomarker, good_src)
-        capture(nomarker, False)
-        page = nomarker.joinpath(*INSTALL_PAGE_PARTS)
-        page.write_text("<div class=\"cta\">no markers here</div>\n", encoding="utf-8")
-        code, out = capture(nomarker, True)
-        if code != 2:
-            failures.append("missing SKILL-DOWNLOAD markers expected exit 2 (fail-closed), got {}\n{}".format(
+        # 8. A stale version-numbered download zip (aiqt-skill-0.0.0.zip) beside the current one is reported
+        #    as drift on --check (exit 1) and removed on a normal regen, while the stable alias and the
+        #    current versioned copy are kept. Start from a clean tree, drop a stale zip, then check and
+        #    regenerate. Removing the orphan-clean scan makes this leg fail (the stale zip survives).
+        stalezip = tmp / "stalezip"
+        stalezip.mkdir()
+        _write_fixture(stalezip, good_src)
+        capture(stalezip, False)  # generate a clean tree first
+        downloads = stalezip.joinpath(*ZIP_PARTS[:-1])
+        stale = downloads / "aiqt-skill-0.0.0.zip"
+        stale.write_bytes(b"PK\x03\x04 stale prior-version zip bytes")
+        code, out = capture(stalezip, True)
+        if code != 1 or "orphan" not in out or "aiqt-skill-0.0.0.zip" not in out:
+            failures.append("stale versioned zip expected --check exit 1 naming the orphan, got {}\n{}".format(
+                code, out))
+        code, out = capture(stalezip, False)  # regen removes it
+        if code != 0 or stale.exists():
+            failures.append("regen expected to remove the stale versioned zip, got exit {} (present={})\n{}"
+                            .format(code, stale.exists(), out))
+        # The alias and the current versioned copy are kept, and --check is clean again.
+        alias = stalezip.joinpath(*ZIP_PARTS)
+        current = stalezip.joinpath(*ZIP_VERSIONED_PARTS)
+        if not alias.exists() or not current.exists():
+            failures.append("orphan-clean must keep the alias and the current versioned zip (alias={}, "
+                            "current={})".format(alias.exists(), current.exists()))
+        code, out = capture(stalezip, True)
+        if code != 0:
+            failures.append("after removing the stale zip, --check expected exit 0 (clean), got {}\n{}".format(
                 code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -905,10 +890,11 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md, the zips, and the install-page "
-          "download block); an unknown corpus-id, an invalid-UTF-8 target, a version/zip-literal mismatch, "
-          "and a missing install page or markers each fail closed (exit 2); a drifted SKILL.md and an "
-          "orphan output are caught (exit 1); a facet-misplaced rule fails closed (exit 2).")
+    print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
+          "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
+          "a drifted SKILL.md, an orphan reserved output, and a stale version-numbered download zip are "
+          "caught (exit 1, the stale zip removed on regen while the alias and current copy are kept); a "
+          "facet-misplaced rule fails closed (exit 2).")
     return 0
 
 

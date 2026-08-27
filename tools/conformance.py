@@ -280,7 +280,7 @@ def _skill_drift(root, corpus):
     if not present:
         return (NA, "no site/downloads/aiqt/ chat-skill surface installed")
     try:
-        reserved_map, standalone, binary, _blocks = gen_skill.build_outputs(root)
+        reserved_map, standalone, binary = gen_skill.build_outputs(root)
     except (ValueError, OSError) as exc:
         return (MALFORMED, "cannot regenerate the chat skill: {}".format(exc))
     drift = []
@@ -859,7 +859,7 @@ def _add_skill_surface(base):
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text('[plugin]\nauthor-name = "Self Test"\nhomepage = "https://example.test"\n',
                             encoding="utf-8")
-    reserved_map, standalone, binary, _blocks = gen_skill.build_outputs(base)
+    reserved_map, standalone, binary = gen_skill.build_outputs(base)
     reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
     reserved_dir.mkdir(parents=True, exist_ok=True)
     for name, content in reserved_map.items():
