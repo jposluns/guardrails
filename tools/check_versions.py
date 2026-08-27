@@ -28,8 +28,9 @@ filename to the skill meta version.
   check_versions.py --check    same, for parity with the generator gates
   check_versions.py --self-test  deterministic self-test of the shipped-skill-zip leg (a single
                                  byte-identical version-numbered/alias pair passes; none, two, a
-                                 byte-differing alias, or a missing alias fails exit 1; an unreadable
-                                 downloads directory fails closed exit 2)
+                                 byte-differing alias, or a missing alias fails exit 1; a clean fixture
+                                 is enumerated in one os.scandir pass; a read error during the listing
+                                 fails closed exit 2; an absent downloads dir reads as a missing zip exit 1)
 
 Exit convention (matches the repo's gates):
   0  clean
@@ -71,6 +72,26 @@ def _parse(version):
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
+
+
+def _scan_versioned_zips(downloads):
+    """Enumerate the version-numbered skill zips under `downloads` in ONE guarded os.scandir pass.
+
+    A FileNotFoundError raised by the os.scandir() OPEN means the directory is genuinely absent, and only
+    then is [] returned (the caller reads that as a genuinely absent versioned zip, a normal finding, exit
+    1). Every OTHER OSError from the open, and ANY error raised DURING the iteration, including a
+    mid-iteration FileNotFoundError (a subclass of OSError, e.g. the directory vanishing mid-listing), is
+    left to PROPAGATE out of this helper so check_versions()'s `except OSError -> return 2` fails closed. A
+    read error is never misread as an absent directory. The name filter mirrors the old aiqt-skill-*.zip
+    glob: it requires the aiqt-skill- prefix (excluding the dash-less alias aiqt-skill.zip) and the .zip
+    suffix."""
+    try:
+        scandir_it = os.scandir(downloads)
+    except FileNotFoundError:
+        return []
+    with scandir_it as it:
+        return sorted(downloads / e.name for e in it
+                      if e.name.startswith("aiqt-skill-") and e.name.endswith(".zip"))
 
 
 def check_versions(root):
@@ -155,11 +176,7 @@ def check_versions(root):
     # normal finding, exit 1), the same outcome an absent downloads dir produced before. The name match
     # mirrors the old aiqt-skill-*.zip glob (the alias aiqt-skill.zip has no dash and is excluded).
     try:
-        with os.scandir(downloads) as it:
-            versioned = sorted(downloads / e.name for e in it
-                               if e.name.startswith("aiqt-skill-") and e.name.endswith(".zip"))
-    except FileNotFoundError:
-        versioned = []
+        versioned = _scan_versioned_zips(downloads)
     except OSError as exc:
         print("error: cannot list site/downloads ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -202,10 +219,13 @@ def check_versions(root):
 # --- self-test --------------------------------------------------------------------------------------
 # Proves the version-agnostic shipped-surface leg fires on the things it must catch, against synthetic temp
 # trees, never the real tree: a single byte-identical version-numbered/alias pair passes; zero, two, or a
-# byte-differing version-numbered zip each fail (exit 1); a missing alias fails (exit 1); an UNREADABLE
-# downloads directory fails closed (exit 2), never a misleading exit 1, since glob can swallow the scandir
-# error. Offline, stdlib only. The zip names are arbitrary versions, since the leg no longer derives the
-# name from the pack version.
+# byte-differing version-numbered zip each fail (exit 1); a missing alias fails (exit 1). Three legs guard
+# the single-pass enumeration specifically, and are MUTATION-SENSITIVE against the reverted probe-then-glob
+# implementation: a clean fixture enumerates the downloads dir with EXACTLY ONE os.scandir call (the revert
+# probes then globs, calling it twice); a read error raised DURING the listing fails closed (exit 2), never
+# misread as an absent dir; and a genuinely absent downloads dir (FileNotFoundError at the OPEN) reads as an
+# absent versioned zip (exit 1), proving the [] path is distinct from the fail-closed path. Offline, stdlib
+# only. The zip names are arbitrary versions, since the leg no longer derives the name from the pack version.
 
 _CHANGELOG = (
     'title = "t"\nnote = "n"\n\n'
@@ -226,10 +246,64 @@ def _write_versions_fixture(root, versioned, alias_bytes):
         (downloads / "aiqt-skill.zip").write_bytes(alias_bytes)
 
 
-def _raise_perm(*a, **k):
-    """A stand-in for os.scandir that fails: lets the self-test inject a deterministic directory read
-    error (a PermissionError) so the fail-closed enumeration path is exercised regardless of uid."""
-    raise PermissionError("injected read error")
+class _FakeEntry:
+    """A minimal os.DirEntry stand-in carrying only the .name the enumeration filters on."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+class _MidIterScandir:
+    """A fake os.scandir result that context-manages, yields ONE DirEntry-like item, then RAISES on the
+    next iteration step. This puts the read error DURING the listing rather than at the open, so the
+    self-test can prove a mid-iteration vanish fails closed (exit 2) rather than being misread as an absent
+    directory (exit 1)."""
+
+    def __init__(self, exc):
+        self._exc = exc
+        self._items = iter([_FakeEntry("aiqt-skill-1.0.1.zip")])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._items)
+        except StopIteration:
+            raise self._exc
+
+
+class _CountingScandir:
+    """Wraps a real os.scandir result and counts every entry actually yielded through it, so the self-test
+    can prove the enumeration ran THROUGH the guarded os.scandir pass rather than through a separate,
+    invisible enumeration such as Path.glob (which does not route through a patched os.scandir attribute).
+    The single-pass helper consumes the directory through this wrapper; a probe-then-glob revert enters and
+    exits the wrapper without consuming any entry, so its yielded-entry count is zero."""
+
+    def __init__(self, it, on_entry):
+        self._it = it
+        self._on_entry = on_entry
+
+    def __enter__(self):
+        self._it.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self._it.__exit__(*a)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        e = next(self._it)
+        self._on_entry()
+        return e
 
 
 def self_test_main():
@@ -242,18 +316,59 @@ def self_test_main():
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return check_versions(root)
 
-    def _inject_scandir_error(root, failures):
+    def _single_enumeration(root, failures):
+        # Leg (a): on a CLEAN fixture, check_versions enumerates the downloads dir in ONE guarded
+        # os.scandir pass and consumes the directory THROUGH it. Counting only calls whose path argument is
+        # the downloads dir gives exactly one; counting the entries yielded through that call proves the
+        # single pass did the real enumeration. The reverted probe-then-glob enters and exits the guarded
+        # scandir without consuming any entry (its `with os.scandir(...): pass` probe) and enumerates via
+        # Path.glob, which does not route through the patched os.scandir attribute, so its yielded-entry
+        # count is zero: this leg fails against that revert, making the self-test mutation-sensitive.
+        downloads = root / "site" / "downloads"
         real_scandir = os.scandir
-        os.scandir = _raise_perm
+        calls = {"n": 0}
+        entries = {"n": 0}
+
+        def counting_scandir(path, *a, **k):
+            it = real_scandir(path, *a, **k)
+            try:
+                is_downloads = os.fspath(path) == os.fspath(downloads)
+            except (TypeError, ValueError):
+                is_downloads = False
+            if is_downloads:
+                calls["n"] += 1
+                return _CountingScandir(it, lambda: entries.__setitem__("n", entries["n"] + 1))
+            return it
+
+        os.scandir = counting_scandir
         try:
-            if _run_quiet(root) != 2:
-                failures.append("an injected scandir read error expected exit 2 (fail-closed)")
+            rc = _run_quiet(root)
         finally:
             os.scandir = real_scandir
+        if rc != 0:
+            failures.append("leg (a): a clean fixture expected exit 0, got {}".format(rc))
+        if calls["n"] != 1:
+            failures.append("leg (a): expected exactly ONE os.scandir on the downloads dir, saw {} "
+                            "(a separate probe pass would raise this)".format(calls["n"]))
+        if entries["n"] < 1:
+            failures.append("leg (a): the downloads dir was not enumerated THROUGH the guarded os.scandir "
+                            "pass (0 entries consumed); the reverted probe-then-glob enumerates elsewhere")
+
+    def _mid_iteration_error(root, failures):
+        # Leg (b): a read error raised DURING the listing (not at the open) fails closed (exit 2). The
+        # fake yields one DirEntry-like item then raises FileNotFoundError on the next step, so the error
+        # is mid-iteration; it must propagate as OSError -> exit 2, never be misread as an absent dir.
+        real_scandir = os.scandir
+        os.scandir = lambda path, *a, **k: _MidIterScandir(FileNotFoundError("vanished mid-listing"))
+        try:
+            rc = _run_quiet(root)
+        finally:
+            os.scandir = real_scandir
+        if rc != 2:
+            failures.append("leg (b): a mid-iteration read error expected exit 2 (fail-closed), got "
+                            "{}".format(rc))
 
     failures = []
-    skipped = []
-    unreadable_dir = None
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-versions-selftest-"))
     except OSError as exc:
@@ -296,34 +411,32 @@ def self_test_main():
         if _run_quiet(noalias) != 1:
             failures.append("a missing alias expected exit 1")
 
-        # 6. an UNREADABLE downloads directory fails closed (exit 2), never a misleading exit 1. glob can
-        #    swallow the scandir PermissionError and yield an empty match, which would read as "no
-        #    version-numbered zip" (exit 1); the explicit os.scandir probe surfaces the read error as a
-        #    fail-closed cannot-evaluate. changelog.toml and VERSION are valid so the run reaches the
-        #    downloads leg. Skipped where the runner can still read a chmod-0 dir (root/DAC-bypass),
-        #    observed via os.access, as the sibling generators do.
-        unread = tmp / "unread"
-        unread.mkdir()
-        _write_versions_fixture(unread, [("aiqt-skill-1.0.1.zip", same)], same)
-        unreadable_dir = unread / "site" / "downloads"
-        os.chmod(unreadable_dir, 0)
-        if os.access(unreadable_dir, os.R_OK):
-            skipped.append("6 unreadable-downloads-dir")
-        elif _run_quiet(unread) != 2:
-            failures.append("an unreadable downloads dir expected exit 2 (fail-closed)")
-        os.chmod(unreadable_dir, 0o755)  # restore so cleanup can remove it
-        unreadable_dir = None
+        # (a) SINGLE-ENUMERATION INVARIANT: a clean fixture is enumerated with exactly one os.scandir on
+        #     the downloads dir (kills the Finding-B hollow test; fails against the reverted probe-then-glob).
+        clean = tmp / "clean"
+        clean.mkdir()
+        _write_versions_fixture(clean, [("aiqt-skill-1.0.1.zip", same)], same)
+        _single_enumeration(clean, failures)
 
-        # 7. a READ ERROR during the scandir enumeration fails closed (exit 2) DETERMINISTICALLY (works
-        #    under root, unlike leg 6): inject an OSError from os.scandir so the single guarded enumeration
-        #    raises rather than silently yielding an empty match (the round-2 double-enumeration guard).
-        injected = tmp / "injected"
-        injected.mkdir()
-        _write_versions_fixture(injected, [("aiqt-skill-1.0.1.zip", same)], same)
-        _inject_scandir_error(injected, failures)
+        # (b) MID-ITERATION READ ERROR -> exit 2: a FileNotFoundError raised DURING the listing fails
+        #     closed, proving a mid-listing vanish is not misread as an absent dir (covers Finding A). The
+        #     fixture is well-formed so the run reaches the downloads leg before the injected fake fires.
+        midfix = tmp / "midfix"
+        midfix.mkdir()
+        _write_versions_fixture(midfix, [("aiqt-skill-1.0.1.zip", same)], same)
+        _mid_iteration_error(midfix, failures)
+
+        # (c) ABSENT DIR -> exit 1: with a valid changelog and VERSION but NO site/downloads dir, os.scandir
+        #     raises FileNotFoundError at the OPEN -> [] -> the gate reports a missing versioned zip (exit
+        #     1), NOT fail-closed. This proves the [] path is distinct from the (b) fail-closed path.
+        absent = tmp / "absent"
+        absent.mkdir()
+        (absent / "changelog.toml").write_text(_CHANGELOG, encoding="utf-8")
+        (absent / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        if _run_quiet(absent) != 1:
+            failures.append("leg (c): an absent downloads dir expected exit 1 (absent versioned zip), "
+                            "not fail-closed")
     finally:
-        if unreadable_dir is not None:
-            os.chmod(unreadable_dir, 0o755)  # restore even on an unexpected early exit
         shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -331,12 +444,11 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    note = ("" if not skipped else
-            " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
-            .format(len(skipped), ", ".join(skipped)))
     print("SELF-TEST PASS: a single byte-identical version-numbered/alias zip pair passes; no "
           "version-numbered zip, two of them, a byte-differing alias, and a missing alias each fail "
-          "(exit 1); an unreadable downloads directory fails closed (exit 2)." + note)
+          "(exit 1); a clean fixture is enumerated with exactly one os.scandir; a mid-iteration read "
+          "error fails closed (exit 2); and an absent downloads dir reads as a missing versioned zip "
+          "(exit 1).")
     return 0
 
 
