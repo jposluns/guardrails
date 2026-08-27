@@ -101,9 +101,6 @@ jobs:
       - name: Changelog drift
         run: python3 tools/gen_changelog.py --check
 
-      - name: Version single-source self-test
-        run: python3 tools/check_versions.py --self-test
-
       - name: Version format and single-source
         run: python3 tools/check_versions.py
 

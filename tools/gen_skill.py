@@ -56,7 +56,8 @@ RESERVED_PARTS = ("site", "downloads", "aiqt")            # 100% generated: orph
 INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standalone named output
 ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output: the stable
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
-# releases. The site links to the version-numbered copy; check_versions.py gates the two byte-identical.
+# releases. The site links to the version-numbered copy; both are written from the same bytes, so
+# gen_skill --check (which compares each to disk) keeps the two byte-identical.
 ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.1.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
@@ -497,7 +498,7 @@ def build_outputs(root):
     }
     standalone = [(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
     # Both zips are written from the SAME bytes, so the version-numbered copy and the stable "latest" alias
-    # are byte-identical (check_versions.py gates the match).
+    # are byte-identical by construction; gen_skill --check compares each to disk, so a divergence is caught.
     zip_bytes = render_zip(data)
     binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
               (root.joinpath(*ZIP_VERSIONED_PARTS), zip_bytes)]

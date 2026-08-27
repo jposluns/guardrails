@@ -19,14 +19,15 @@ signed; the independently published digest is the authenticated reference.
    (the version-numbered `site/downloads/aiqt-skill-1.0.1.zip`, which the site links to, and
    `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
-   byte-identical to the version-numbered copy (the `check_versions` gate enforces the match). The
+   byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
+   --check` compares each to disk, so they cannot diverge). The
    release-metadata edits prescribed below (the recorded digests, the evidence fields, and the tag key)
    are the only changes permitted after this point.
 
    Skill version bump checklist. The skill is independently versioned. The concrete version-numbered
    filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
-   fail-closed version-match assertion in `gen_skill.build_outputs` and the `check_versions` "exactly one
-   version-numbered zip" gate, not by true single-sourcing (`versioned_zip_basename` is only the shared
+   fail-closed version-match assertion in `gen_skill.build_outputs` and `gen_skill.py`'s orphan-clean plus
+   `--check` (which flags a stale version-numbered zip), not by true single-sourcing (`versioned_zip_basename` is only the shared
    filename SHAPE). To bump the skill version, edit all four, then regenerate:
      - a. `.aiqt/core/skill/skill-source.md`: the `meta` `version` (the authoritative source the assertion
        and both generators read).

@@ -52,4 +52,4 @@ entrypoint = "tools/gen_skill.py"
 semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.1.zip"]
 closure = ["tools/gen_skill.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "df203958ccc3e6d8cf85648a0331d7052a7fa238941c1c9d68221c0874574e56"
+code-digest = "01dcaacc3d459b0b381948223a151feae3e53b2eb52fab6a64a67656d4adda55"
