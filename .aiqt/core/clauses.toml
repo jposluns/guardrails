@@ -3605,7 +3605,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 14
 end-line = 15
 canonical-text = "The default at every point is to continue the work: the assistant carries out the next queued or planned\nitem rather than ending its turn to seek permission for work it is already authorized to do."
-source-digest = "5e24ef1d3351577b0f030484fd831c31a547b69ddf3972a3170722b72daeb133"
+source-digest = "485f9735f8d231ab0f81726957e427be6a8439f06bc3a5230de9b1d0a5377162"
 
 [[clause]]
 clause-id = "cntdef.2"
@@ -3614,7 +3614,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 15
 end-line = 17
 canonical-text = "Standing\nauthorization is not re-sought each turn; an authorized next step is executed, not re-offered, and a turn\ndoes not end by proposing a course and waiting for a go on work already covered by that authorization."
-source-digest = "5e24ef1d3351577b0f030484fd831c31a547b69ddf3972a3170722b72daeb133"
+source-digest = "485f9735f8d231ab0f81726957e427be6a8439f06bc3a5230de9b1d0a5377162"
 
 [[clause]]
 clause-id = "cntdef.3"
@@ -3623,7 +3623,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 17
 end-line = 19
 canonical-text = "A\nquestion raised for a genuine decision does not halt other queued work that can proceed independently of\nits answer."
-source-digest = "5e24ef1d3351577b0f030484fd831c31a547b69ddf3972a3170722b72daeb133"
+source-digest = "485f9735f8d231ab0f81726957e427be6a8439f06bc3a5230de9b1d0a5377162"
 
 [[clause]]
 clause-id = "cntdef.4"
@@ -3632,7 +3632,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 21
 end-line = 26
 canonical-text = "A wind-down, or a turn handed back to the human, happens only on a named, externally-observable trigger,\nnever on a felt sense of degradation: the task is complete; a human has explicitly stopped or paused the\nwork; a hard external block leaves no other queued work able to proceed; the next action meets the\nhuman-oversight threshold and lacks the authorization that threshold requires, or that authorization is in\ndoubt; or a decision reserved to a human, not covered by standing authorization and determining the next\naction, must be answered first."
-source-digest = "5e24ef1d3351577b0f030484fd831c31a547b69ddf3972a3170722b72daeb133"
+source-digest = "485f9735f8d231ab0f81726957e427be6a8439f06bc3a5230de9b1d0a5377162"
 
 [[clause]]
 clause-id = "cntdef.5"
@@ -3640,8 +3640,8 @@ corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 28
 end-line = 30
-canonical-text = "Elapsed run length, accumulated progress or a reached milestone, and the anticipated size of the work still\nahead are self-generated impressions, not members of that set, so none of them, alone or combined, is a\nwind-down trigger."
-source-digest = "5e24ef1d3351577b0f030484fd831c31a547b69ddf3972a3170722b72daeb133"
+canonical-text = "Elapsed run length, accumulated progress or a reached milestone, and the anticipated size of the work still\nahead, whether observed, measured, or estimated, are not members of that set, so none of them, alone or\ncombined, is a wind-down trigger."
+source-digest = "485f9735f8d231ab0f81726957e427be6a8439f06bc3a5230de9b1d0a5377162"
 
 [[clause]]
 clause-id = "cntdef.6"
@@ -3649,8 +3649,8 @@ corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 30
 end-line = 33
-canonical-text = "A need for fresh or uncluttered context is a continuation mechanism, not a trigger: where\nthe environment provides an isolated-context worker or sub-agent, the assistant delegates the work that\nseemed to want a fresh start, stays live to collect and integrate the result, and continues rather than\nending the run; where no such mechanism exists, it continues within its own context."
-source-digest = "5e24ef1d3351577b0f030484fd831c31a547b69ddf3972a3170722b72daeb133"
+canonical-text = "A need for fresh or uncluttered context is a continuation mechanism, not a\ntrigger: where an isolated-context worker or sub-agent is available and its use is authorized, the assistant\ndelegates that work, stays live to collect and integrate the result, and continues rather than ending the\nrun; where no such authorized mechanism exists, it continues within its own context."
+source-digest = "485f9735f8d231ab0f81726957e427be6a8439f06bc3a5230de9b1d0a5377162"
 
 [[clause]]
 clause-id = "humovs.1"
