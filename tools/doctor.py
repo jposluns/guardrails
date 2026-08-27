@@ -37,9 +37,10 @@ FAIL = "FAIL"                 # a finding -> exit 1
 NA = "NOT APPLICABLE"         # nothing to validate -> degrade, never fake a pass
 MALFORMED = "MALFORMED"       # unreadable / partial state -> exit 2 (fail-closed)
 
-_HONESTY = ("the pin-history chain is tamper-evident against a casual in-place edit ONLY; it is NOT "
-            "truncation-evident and NOT splice-proof, so it proves nothing and authorizes nothing on its "
-            "own (10.2); a rollback needs wholesale anchored target validation plus recorded authorization")
+_HONESTY = ("the pin-history chain is tamper-evident against a casual in-place edit of an interior "
+            "(non-tail) row ONLY; it is NOT truncation-evident, NOT tail-edit-evident, and NOT splice-proof, "
+            "so it proves nothing and authorizes nothing on its own (10.2); a rollback needs wholesale "
+            "anchored target validation plus recorded authorization")
 
 
 def chain_honesty_note():

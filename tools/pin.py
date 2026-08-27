@@ -12,9 +12,11 @@
 Authorization flags (required on rollback, carve-out, and un-adopt): --authorizer WHO --reason WHY.
 
 HONESTY LIMIT, disclosed everywhere it surfaces (10.2): with no keys the pin-history chain is tamper-
-evident against a CASUAL in-place edit ONLY. It is NOT truncation-evident (deleting a valid tail leaves a
-valid chain) and NOT splice-proof (a writer with full tree access can insert a genuine old release's row
-and recompute the suffix), so history proves NOTHING and authorizes NOTHING on its own. A rollback always
+evident against a CASUAL in-place edit of an INTERIOR (non-tail) row ONLY. It is NOT truncation-evident
+(deleting a valid tail leaves a valid chain), NOT tail-edit-evident (editing the sole or last row leaves a
+valid chain, since no successor commits its hash), and NOT splice-proof (a writer with full tree access can
+insert a genuine old release's row and recompute the suffix), so history proves NOTHING and authorizes
+NOTHING on its own. A rollback always
 requires wholesale anchored validation of the target release PLUS explicit recorded adopter authorization
 (10.4); the pin-history match only classifies and locates. Defeating truncation and splice needs an
 authenticated external append-only head ledger, a deferred ceiling-raiser recorded with the 5.6 deferrals.
@@ -54,7 +56,7 @@ HISTORY_REL = ".aiqt/pin-history.toml"
 TRANSITION_REL = ".aiqt/pin-transition.toml"
 PREIMAGES_REL = ".aiqt/pin-preimages"
 REPOINTS_REL = ".aiqt/migration/repoints.toml"
-JOURNAL_REL = ".aiqt/migration/journal"   # the shared 9.3 journal root, reused by the carve-out and un-adopt
+JOURNAL_REL = ".aiqt/migration/journal"   # the shared 9.3 journal root (deferred carve-out / forward migration); the 1.0.0 un-adopt uses a contained reverse-swap, NOT this journal
 MIGRATION_REL = ".aiqt/migration"          # the adopter-created migration-state namespace (journal, repoints, crosswalk)
 UNADOPT_REL = ".aiqt/pin-unadopt.toml"     # the un-adopt INTENT marker (class adopter-state): written before the reverse swap, removed last
 
@@ -694,9 +696,12 @@ def do_un_adopt(root, authorizer, reason):
     except (PinError, OSError) as exc:
         return _fail(exc)
     try:
-        if _blocking_open_journal(root, root_fd):
-            raise PinError("an open migration cutover journal blocks un-adopt (9.3/4.4); resolve it with the "
-                           "migration tool first (un-adopt must not race a live cutover)")
+        if _journal._lstat_contained(root_fd, MIGRATION_REL) is not None:
+            raise PinError("migration state (.aiqt/migration) is present; un-adopt is refused while any "
+                           "migration journal or migration-created state exists, open OR terminal, because "
+                           "reconciling or removing it is the deferred migration tool's responsibility (10.6, "
+                           "not enacted at 1.0.0) and un-adopt must not orphan it into a doctor-malformed "
+                           "state (4.4); resolve it with the migration tool first")
         if read_unadopt(root_fd) is not None:
             raise PinError("an un-adopt is already in progress (pin-unadopt.toml present); run `recover` to "
                            "complete it before starting another")
@@ -1296,6 +1301,31 @@ def self_test():
         check("honesty: a truncated tail leaves a valid chain", verify_chain([r0]) == [])
         check("honesty: a spliced suffix re-validates",
               verify_chain([dict(r0), row(1, 1, next_chain(r0), version="0.9.0", action="re-pin")]) == [])
+
+        # ---- M1: a TAIL-row in-place edit is uncaught (matches the disclosed interior-only limit) ----
+        r1_tailedit = dict(r1); r1_tailedit["version"] = "9.9.9"
+        check("honesty: tail-edit disclosed", "tail-edit" in note)
+        check("honesty: a tail-row in-place edit re-validates (uncaught; no successor commits its hash)",
+              verify_chain([r0, r1_tailedit]) == [])
+
+        # ---- B2: a symlinked journal frames.log fails closed (no-follow), never read as empty/terminal ----
+        jb2 = tmp / "JB2" / "txn"; jb2.mkdir(parents=True)
+        os.symlink(str(tmp / "JB2" / "nowhere"), str(jb2 / "frames.log"))
+        b2_caught = False
+        try:
+            _journal.is_terminal(str(jb2))
+        except _journal.JournalError:
+            b2_caught = True
+        check("B2: a symlinked frames.log fails closed (no-follow), not read as empty/terminal", b2_caught)
+
+        # ---- B1: un-adopt REFUSES while migration state (.aiqt/migration) is present ----
+        ub1 = tmp / "UB1" / "root"; ub1.mkdir(parents=True)
+        _run_cli(["pin", "--root", str(ub1), "--staged",
+                  str(_write_staged(tmp / "UB1" / "s", onop, onpay, rel1, []))])
+        (ub1 / MIGRATION_REL).mkdir(parents=True)
+        rc_ub1, _ = _run_cli(["un-adopt", "--root", str(ub1), "--authorizer", "t", "--reason", "r"])
+        check("B1: un-adopt refuses while .aiqt/migration state is present (exit 2)", rc_ub1 == 2)
+        check("B1: pin still present after the refused un-adopt", (ub1 / PIN_REL).is_file())
 
         # ---- T13: partial state MALFORMED; total absence NA ----
         g = tmp / "G" / "root"; (g / ".aiqt").mkdir(parents=True)
