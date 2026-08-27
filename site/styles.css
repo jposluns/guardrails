@@ -72,7 +72,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
 /* hero */
 header.hero{padding:6rem 0 4.5rem; text-align:center; background:
   radial-gradient(1200px 420px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
-header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem; text-wrap:balance}
+header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem}
 header.hero .lead{max-width:62ch; margin:0 auto 1.7rem}
 .ordering{display:inline-block; max-width:100%; overflow-x:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   background:var(--panel); border:1px solid var(--line); border-radius:12px;
