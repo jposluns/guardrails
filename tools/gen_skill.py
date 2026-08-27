@@ -724,7 +724,8 @@ def self_test_main():
         # 6. A rule placed in a facet-inappropriate block fails closed (exit 2): the section-facet guard.
         #    Swap the conduct rule (nofabr, ACCUR) with the security rule (secunt, SECI) so each lands in
         #    the wrong block; resolve_group must reject the mismatched facet. Removing the guard makes this
-        #    generate cleanly, so the case fails without it.
+        #    case FAIL rather than pass: with the pre-sort facet validation gone, the sort key raises on the
+        #    mismatched facet, so the self-test still fails when the guard is absent (the case guards the guard).
         misfacet = tmp / "misfacet"
         misfacet.mkdir()
         swapped = (good_src.replace("[nofabr]", "[__tmpswap__]")

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "0a8e3502e745ce2a9cc33366f055d9c1a9ac57428e4375300077f8dafd92c4e5"
+tree-sha256 = "44af7914c33a64df9ab50e9069a899705f7183031b036c68f3f2af35d1804335"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -82,7 +82,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2497
-sha256 = "1354e0bd84ea81d7b2d169662ff8d6d31ab76bd162cfda59139533f1215046eb"
+sha256 = "46aad859822f58b321494ae3fb4d8221a8650947e7d44d3d6b2a35109a4a241a"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2546,8 +2546,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 33664
-sha256 = "1924ab7634e141ffc470a66e77a82dba10986b3635792ccebcab04f017a0e72e"
+bytes = 33826
+sha256 = "5bebdd25399d2c6eb21f1d6354d47947e837e66cc8434b83628a82aee7ffccf1"
 
 [[sources]]
 path = "tools/import_cwe.py"
