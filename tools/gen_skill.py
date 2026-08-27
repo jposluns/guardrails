@@ -47,6 +47,9 @@ CANON_ORDERING = "(Accuracy = Integrity = Quality = Trust) > Progress > Speed > 
 # The security family's CIA-plus-privacy order, matching gen_agents.CIA_FACET_ORDER, so the rendered
 # security entries sort deterministically the same way the rest of the pack orders that family.
 CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
+# AIQT-facet order for the conduct block (accuracy, integrity, quality, trust, progress), so the
+# non-security conduct rules render in a stable, facet-grouped order the same way the security block does.
+AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3, "PROGR": 4}
 
 # Output locations, as relative parts joined under the repo root (or a --self-test temp root).
 RESERVED_PARTS = ("site", "downloads", "aiqt")            # 100% generated: orphan-scanned in full
@@ -64,7 +67,7 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
 # Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
-RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 1}
+RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 2}
 # GENSRC_OUTPUTS is STATICALLY parsed by gen_gensrc.py and must be a LITERAL (a tuple of dict literals),
 # so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
 # source: the public attribution line (GD-56) is rendered from its [plugin] author-name, so a change to that
@@ -96,6 +99,7 @@ _ENTRY = re.compile(r"^\[([a-z0-9]{6,})\]$")
 _META = re.compile(r"^([a-z0-9-]+):\s*(.*)$")
 
 REQUIRED_SECTIONS = ("meta", "description", "instructions-preamble", "body-aiqt", "body-rules",
+                     "conduct-intro", "conduct-unconditional", "conduct-conditional",
                      "security-intro", "security-unconditional", "security-conditional",
                      "security-capability-note")
 REQUIRED_META = ("name", "version", "license", "date", "apex-id")
@@ -191,6 +195,9 @@ def parse_source(path):
         "body_rules": sections["body-rules"],
         "security_intro": sections["security-intro"],
         "capability_note": sections["security-capability-note"],
+        "conduct_intro": sections["conduct-intro"],
+        "conduct_unconditional": _parse_entries(sections["conduct-unconditional"], "conduct-unconditional"),
+        "conduct_conditional": _parse_entries(sections["conduct-conditional"], "conduct-conditional"),
         "unconditional": _parse_entries(sections["security-unconditional"], "security-unconditional"),
         "conditional": _parse_entries(sections["security-conditional"], "security-conditional"),
     }
@@ -222,7 +229,7 @@ def resolve(source, corpus):
 
     included = [apex_id]
 
-    def resolve_group(entries, group):
+    def resolve_group(entries, group, facet_order):
         out = []
         for cid, text in entries:
             if cid not in by_id:
@@ -232,12 +239,14 @@ def resolve(source, corpus):
             included.append(cid)
             fm = by_id[cid][0]
             out.append((cid, text, fm.get("facet", ""), str(fm.get("slug", ""))))
-        # Deterministic CIA-facet order (SECC, SECI, SECA, SECP), then slug, matching gen_agents.
-        out.sort(key=lambda e: (CIA_FACET_ORDER.get(e[2], 9), e[3]))
+        # Deterministic facet order (per the passed facet_order), then slug, matching gen_agents.
+        out.sort(key=lambda e: (facet_order.get(e[2], 9), e[3]))
         return [text for _cid, text, _f, _s in out]
 
-    uncond_texts = resolve_group(source["unconditional"], "unconditional")
-    cond_texts = resolve_group(source["conditional"], "conditional")
+    conduct_uncond_texts = resolve_group(source["conduct_unconditional"], "conduct-unconditional", AIQT_FACET_ORDER)
+    conduct_cond_texts = resolve_group(source["conduct_conditional"], "conduct-conditional", AIQT_FACET_ORDER)
+    uncond_texts = resolve_group(source["unconditional"], "unconditional", CIA_FACET_ORDER)
+    cond_texts = resolve_group(source["conditional"], "conditional", CIA_FACET_ORDER)
 
     digest = hashlib.sha256()
     for cid in sorted(included):
@@ -251,6 +260,9 @@ def resolve(source, corpus):
         "body_rules": source["body_rules"],
         "security_intro": source["security_intro"],
         "capability_note": source["capability_note"],
+        "conduct_intro": source["conduct_intro"],
+        "conduct_uncond_texts": conduct_uncond_texts,
+        "conduct_cond_texts": conduct_cond_texts,
         "uncond_texts": uncond_texts,
         "cond_texts": cond_texts,
         "included_ids": sorted(included),
@@ -269,6 +281,14 @@ def _frontmatter(data):
                           license=data["meta"]["license"], version=data["meta"]["version"])
 
 
+def _conduct_block(data):
+    blocks = ["# Conduct", data["conduct_intro"]]
+    blocks += data["conduct_uncond_texts"]
+    blocks.append("## If your platform exposes tools, browsing, retrieval, or persistent memory")
+    blocks += data["conduct_cond_texts"]
+    return "\n\n".join(blocks)
+
+
 def _security_block(data):
     blocks = ["# Security", data["security_intro"]]
     blocks += data["uncond_texts"]
@@ -283,6 +303,7 @@ def render_skill(data):
         _frontmatter(data),
         "# AIQT™\n\n" + data["body_aiqt"],
         "# Rules\n\n" + data["body_rules"],
+        _conduct_block(data),
         _security_block(data),
         # Public attribution footer (GD-56): attributes both the project and the maintainer under the
         # pack's CC BY-SA. The portability gate carries a narrow, reviewed exemption for exactly this line.
@@ -319,6 +340,7 @@ def render_instructions(data):
         "=" * 60,
         "# AIQT\n\n" + data["body_aiqt"],
         "# Rules\n\n" + data["body_rules"],
+        _conduct_block(data),
         _security_block(data),
     ]
     return "\n\n".join(blocks) + "\n"
@@ -520,6 +542,32 @@ slug: resource-bounds
 A second self-test security rule body.
 """
 
+_CONDUCT1 = """---
+corpus-id: nofabr
+origin: pack
+family: aiqt
+tier: 10
+facet: ACCUR
+slug: no-fabrication
+---
+# No fabrication
+
+A self-test conduct rule body.
+"""
+
+_CONDUCT2 = """---
+corpus-id: exetgt
+origin: pack
+family: aiqt
+tier: 10
+facet: QUALI
+slug: confirm-execution-target
+---
+# Confirm the execution target
+
+A second self-test conduct rule body.
+"""
+
 _SKILL_SRC = """=== meta ===
 name: aiqt
 version: 9.9.9
@@ -539,6 +587,17 @@ Self-test AIQT body.
 
 === body-rules ===
 Self-test rules body.
+
+=== conduct-intro ===
+Self-test conduct intro.
+
+=== conduct-unconditional ===
+[nofabr]
+**Self-test conduct unconditional entry.** Body text.
+
+=== conduct-conditional ===
+[exetgt]
+**Self-test conduct conditional entry.** Body text.
 
 === security-intro ===
 Self-test security intro.
@@ -563,6 +622,8 @@ def _write_fixture(root, skill_src_text):
     (src / "aiqt" / "00-project-integrity.md").write_text(_APEX, encoding="utf-8")
     (src / "security" / "untrusted-content.md").write_text(_SEC, encoding="utf-8")
     (src / "security" / "resource-bounds.md").write_text(_SEC2, encoding="utf-8")
+    (src / "aiqt" / "no-fabrication.md").write_text(_CONDUCT1, encoding="utf-8")
+    (src / "aiqt" / "confirm-execution-target.md").write_text(_CONDUCT2, encoding="utf-8")
     (root.joinpath(*SKILL_SRC_PARTS)).parent.mkdir(parents=True)
     (root.joinpath(*SKILL_SRC_PARTS)).write_text(skill_src_text, encoding="utf-8")
     manifest = root.joinpath(*IDENTITY_MANIFEST_PARTS)
