@@ -54,6 +54,8 @@ TRANSITION_REL = ".aiqt/pin-transition.toml"
 PREIMAGES_REL = ".aiqt/pin-preimages"
 REPOINTS_REL = ".aiqt/migration/repoints.toml"
 JOURNAL_REL = ".aiqt/migration/journal"   # the shared 9.3 journal root, reused by the carve-out and un-adopt
+MIGRATION_REL = ".aiqt/migration"          # the adopter-created migration-state namespace (journal, repoints, crosswalk)
+UNADOPT_REL = ".aiqt/pin-unadopt.toml"     # the un-adopt INTENT marker (class adopter-state): written before the reverse swap, removed last
 
 CHAIN_DOMAIN = b"aiqt-pin-history-row-v1\n"
 GENESIS = hashlib.sha256(b"aiqt-pin-history-genesis-v1").hexdigest()
@@ -223,6 +225,28 @@ def read_repoints(root_fd):
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise PinError("{}: [[repoint]] must be a list of tables".format(REPOINTS_REL))
     return rows
+
+
+def read_unadopt(root_fd):
+    """The un-adopt INTENT record, or None when absent. Its presence means an un-adopt is in progress (or
+    was interrupted) and `recover` must complete it before any new pin operation (10.6)."""
+    return _read_contained_toml(root_fd, UNADOPT_REL)
+
+
+def _render_unadopt(intent):
+    """Render the un-adopt INTENT: the transition being reversed, the target version, quorum, UTC, and the
+    authorization, so recover can complete an interrupted un-adopt under the same authorization it began."""
+    lines = ["# .aiqt/pin-unadopt.toml (VER-CORE 10.6): the un-adopt INTENT, written BEFORE the reverse",
+             "# swap so recover can COMPLETE an interrupted un-adopt idempotently; removed LAST. Generated;",
+             "# do not hand-edit.", "",
+             "schema-version = 1",
+             "transition-id = {}".format(_toml_str(intent["transition-id"])),
+             "target-version = {}".format(_toml_str(intent.get("target-version", ""))),
+             "quorum = {}".format(int(intent.get("quorum", 1))),
+             "utc = {}".format(_toml_str(intent.get("utc", ""))),
+             "authorization = {}".format(_auth_inline(intent.get("authorization") or {})),
+             ""]
+    return "\n".join(lines) + "\n"
 
 
 # --- TOML writers (atomic whole-file replace; the append-only file keeps a chain-verified prefix) ------
@@ -412,20 +436,8 @@ def _staged_reader(staged):
     return reader
 
 
-def _preimage_reader(root, transition_id):
-    """Serve the retained preimage bytes for an inverse op, keyed on the ORIGINAL op's payload ref. Used
-    by the un-adopt engine replay, whose inverse write/create ops restore prior bytes (build_inverse_ops
-    threads the original op through '_source')."""
-    base = root / PREIMAGES_REL / transition_id / "preimages"
-
-    def reader(op):
-        src = op.get("_source") or {}
-        ref = (src.get("prestate") or {}).get("payload")
-        if ref is None:
-            raise _journal.JournalError("inverse op for {!r} has no retained preimage payload"
-                                        .format(op.get("path")))
-        return (base / str(ref)).read_bytes()
-    return reader
+# _preimage_reader removed in round 3: the onboarding reverse is a CONTAINED reverse swap (10.3/10.6)
+# with no retained-byte reads, so no absolute-path preimage reader exists (closes the B9 reader leg).
 
 
 def _load_staged_ops(staged):
@@ -492,11 +504,24 @@ def _contained_swap(root_fd, ops, staged_reader):
 # --- flows --------------------------------------------------------------------------------------------
 
 def _read_release(staged):
+    """Read and VALIDATE the staged release record (guard-input-soundness on do_pin's DIRECT input, RB9):
+    every identity field must be a non-empty string and quorum a positive int, with NO coercion. A
+    malformed or empty release record is a fail-closed PinError (exit 2), never a pin published over empty
+    identity."""
     data = tomllib.loads((staged / "release.toml").read_text(encoding="utf-8"))
     rel = data.get("release", {})
-    return {"version": rel.get("version", ""), "tag-object-sha": rel.get("tag-object-sha", ""),
-            "commit-sha": rel.get("commit-sha", ""), "root": rel.get("root", ""),
-            "manifest-digest": rel.get("manifest-digest", "")}, int(data.get("quorum", 1))
+    if not isinstance(rel, dict):
+        raise PinError("release.toml [release] must be a table")
+    out = {}
+    for key in ("version", "tag-object-sha", "commit-sha", "root", "manifest-digest"):
+        val = rel.get(key)
+        if not isinstance(val, str) or not val:
+            raise PinError("release.toml [release].{} must be a non-empty string".format(key))
+        out[key] = val
+    quorum = data.get("quorum", 1)
+    if not isinstance(quorum, int) or isinstance(quorum, bool) or quorum < 1:
+        raise PinError("release.toml quorum must be a positive integer")
+    return out, quorum
 
 
 def _history_rows_and_prev(root_fd):
@@ -547,6 +572,8 @@ def _blocking_open_journal(root, root_fd):
     try:
         for entry in os.listdir(jfd):
             est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
+            if stat.S_ISLNK(est.st_mode):
+                return True                               # a symlinked journal entry is never followed (block)
             if stat.S_ISDIR(est.st_mode) and not _journal.is_terminal(journal_root / entry):
                 return True
         return False
@@ -574,8 +601,16 @@ def do_pin(root, staged, transition_id=None):
         if _blocking_open_journal(root, root_fd):
             raise PinError("an open migration cutover journal blocks a new pin operation (9.3/4.4); "
                            "recover it first")
+        if read_unadopt(root_fd) is not None:
+            raise PinError("an un-adopt is in progress (pin-unadopt.toml present); run `recover` to complete "
+                           "it before a new pin operation")
         release, quorum = _read_release(staged)
         ops = _load_staged_ops(staged)
+        for op in ops:
+            if op.get("op") not in ("create", "mkdir"):
+                raise PinError("onboarding pin installs new paths only; op {!r} on {!r} is not create/mkdir "
+                               "(overwriting or removing an existing path is an adopter-experience overlay "
+                               "concern, deferred at this release)".format(op.get("op"), op.get("path")))
         transition_id = transition_id or "pin.{}.{}".format(os.getpid(), time.time_ns())
         _capture_pin_preimages(root, root_fd, transition_id, ops)
         txn = {"transition-id": transition_id, "action": "pin", "phase": "prepared",
@@ -631,26 +666,31 @@ def do_carve_out(root, target_seq):
 
 
 def do_un_adopt(root, authorizer, reason):
-    """Un-adopt and the one-reverse-step guarantee (10.6): require explicit authorization; verify reverse
-    preimages and repoint rows; quiesce; replay the pin preimage copies (initial pin included) via the 9.3
-    engine, inverting repoints in the SAME transaction; append the terminal `un-adopt` history row; remove
-    pin.toml inside the transaction. NEVER deletes archives."""
+    """Un-adopt and the one-reverse-step guarantee (10.6): reverse the ONBOARDING pin to pre-adoption via the
+    CONTAINED reverse swap (NO 9.3 journal and NO lock; the journal engine is the deferred migration path's,
+    not onboarding's). Crash-safe via a durable un-adopt INTENT written BEFORE the reversal, so `recover`
+    completes an interrupted un-adopt idempotently. Requires explicit authorization. Refuses if coupled gate
+    re-points are recorded (overlay inversion deferred) or an un-adopt is already in progress. NEVER deletes
+    archives."""
     authorization = None
     try:
         try:
             _journal.require_containment()
         except _journal.JournalError as exc:
-            raise PinError("un-adopt fails closed: the 9.3 engine primitive is absent ({}); it never "
-                           "leaves the tree silently stranded (3.6/10.6)".format(exc))
+            raise PinError("un-adopt fails closed: the race-free containment primitive is absent ({}); it "
+                           "never leaves the tree silently stranded (3.6/10.6)".format(exc))
         authorization = _require_auth(authorizer, reason)
         root_fd = _open_root_fd(root)
     except (PinError, OSError) as exc:
         return _fail(exc)
     try:
+        if read_unadopt(root_fd) is not None:
+            raise PinError("an un-adopt is already in progress (pin-unadopt.toml present); run `recover` to "
+                           "complete it before starting another")
         current = read_pin(root_fd)
         if current is None:
             raise PinError("no pin to un-adopt")
-        if read_repoints(root_fd) is not None:
+        if read_repoints(root_fd):                # a NON-EMPTY repoint list; an empty/absent file is fine
             raise PinError("un-adopt with recorded coupled gate re-points is deferred at this release: "
                            "inverting live gate re-points (10.6) is the adopter-experience overlay's "
                            "responsibility, not enacted at 1.0.0; refusing rather than leave re-points "
@@ -659,43 +699,25 @@ def do_un_adopt(root, authorizer, reason):
         if txn_rec is None or txn_rec.get("phase") != "committed":
             raise PinError("un-adopt requires a committed transition record to reverse; none present or "
                            "not committed (an open transition blocks a new pin operation, 4.4)")
-        transition_id = txn_rec["transition-id"]
-        ops = _transition_ops(txn_rec)
-        inverse = _journal.build_inverse_ops(ops)
-        rows, prev = _history_rows_and_prev(root_fd)
-        chain_findings = verify_chain(rows)
+        chain_findings = verify_chain(read_history(root_fd) or [])
         if chain_findings:
             raise PinError("un-adopt requires a chain-valid pin-history; chain is invalid: {}"
                            .format("; ".join(chain_findings)))
-        # Replay the reversal via the 9.3 engine (run_transaction): the inverse ops restore the retained
-        # preimages under the journal's crash-durable discipline. Repoint inversion joins the same
-        # transaction (the repoints file is included in the reverse set where present); here the repoint
-        # rows are verified against the live gate configs by the doctor and inverted by the adopter-side
-        # overlay hook. NEVER delete archives.
-        _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-        journal_root = root / JOURNAL_REL
-        txn_id = "unadopt.{}.{}".format(os.getpid(), time.time_ns())
-        _journal.acquire_lock(journal_root, session_id="un-adopt")
-        try:
-            _journal.run_transaction(root_fd, journal_root, txn_id,
-                                     {"kind": "un-adopt", "reverses": transition_id},
-                                     inverse, _preimage_reader(root, transition_id), session_id="un-adopt")
-        finally:
-            _journal.release_lock(journal_root)
-        # Append the terminal un-adopt row, then remove pin.toml (both after the reversal committed). The
-        # terminal row lets the doctor distinguish a clean un-adopted state (history + terminal row + no
-        # pin) from a malformed history-without-pin (reconciliation 6).
-        rows2, prev2 = _history_rows_and_prev(root_fd)
-        release = {"version": "", "tag-object-sha": "", "commit-sha": "", "root": "", "manifest-digest": ""}
-        _append_history_row(root, rows2, prev2, len(rows2), release, int(current.get("quorum", 1)),
-                            "un-adopt", authorization, None)
-        _remove_contained(root, PIN_REL)
-        _remove_contained(root, TRANSITION_REL)
+        ops = _transition_ops(txn_rec)
+        # Publish the durable un-adopt INTENT BEFORE any reversal, so a crash at any later point is COMPLETED
+        # by `recover` (10.6), never stranded. Then complete the un-adopt idempotently.
+        intent = {"transition-id": txn_rec["transition-id"],
+                  "target-version": txn_rec.get("target-version", ""),
+                  "quorum": int(current.get("quorum", 1)), "utc": _utc_now(),
+                  "authorization": authorization}
+        _atomic_publish(root, UNADOPT_REL, _render_unadopt(intent))
+        _complete_un_adopt(root, root_fd, ops, intent)
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
         os.close(root_fd)
         return _fail(exc)
     os.close(root_fd)
-    print("un-adopt: reversed transition {} and recorded the terminal history row".format(transition_id))
+    print("un-adopt: reversed transition {} to pre-adoption and recorded the terminal history row"
+          .format(txn_rec["transition-id"]))
     return EXIT_OK
 
 
@@ -772,32 +794,76 @@ def _sweep_orphan_preimages(root, root_fd):
     return 1
 
 
-def _reverse_pin_transition(root, root_fd, transition_id, ops):
-    """Reverse the APPLIED subset of an interrupted pin-transition's ops from the retained preimages, via
-    the crash-durable 9.3 engine, leaving the tree at the prior (pre-transition) state. Each op still at its
-    prestate is left untouched; any op in neither its prestate nor its poststate is MALFORMED (fail-closed),
-    so a partial swap recovers deterministically. Idempotent: re-running reverses only what remains applied.
-    An initial onboarding pin installs create/mkdir ops, so their inverses are contained remove/rmdir; the
-    preimage reader serves original bytes only for a write inverse, which the onboarding path never
-    produces."""
-    applied = [op for op in ops if _journal._poststate_verifies(root_fd, op)]
-    for op in ops:
-        if op not in applied and not _op_at_prestate(root_fd, op):
-            raise PinError("recover: {!r} is in an unexpected state (neither the applied poststate nor the "
-                           "original prestate); fail-closed".format(op.get("path")))
-    if not applied:
+def _reverse_swap(root, root_fd, ops):
+    """The ONBOARDING reverse swap (10.3/10.6): reverse a pin-transition's create/mkdir ops by CONTAINED
+    removal in reverse-dependency order, with NO 9.3 journal and NO lock (the journal engine is the migration
+    path's, not onboarding's). TORN-SAFE and idempotent: for each op whose prestate is prior-absence, if the
+    target still EXISTS (any content, so a torn/partial create is cleanly removed) it is unlinked (file) or
+    rmdir'd (directory); an already-absent target is skipped. A re-run reverses only what remains. Refuses a
+    non-absence prestate (a write/remove op needs a preimage and is not an onboarding op; do_pin restricts
+    onboarding to create/mkdir). A directory that is unexpectedly non-empty is left in place (never destroy
+    adopter content), a disclosed leniency."""
+    for op in reversed(ops):
+        path = op["path"]
+        pre = op.get("prestate") or {}
+        if pre.get("kind") != "absent":
+            raise PinError("reverse-swap: {!r} prestate is {!r}, not prior-absence; the onboarding reverse "
+                           "handles create/mkdir only (a write/remove op needs a preimage and is deferred)"
+                           .format(path, pre.get("kind")))
+        st = _journal._lstat_contained(root_fd, path)
+        if st is None:
+            continue                                      # already at prior-absence
+        pfd, name = _journal._open_parent(root_fd, path)
+        try:
+            if stat.S_ISDIR(st.st_mode):
+                try:
+                    os.rmdir(name, dir_fd=pfd)
+                except OSError:
+                    pass                                  # non-empty (children removed as own ops) / already gone
+            else:
+                try:
+                    os.unlink(name, dir_fd=pfd)
+                except FileNotFoundError:
+                    pass
+            os.fsync(pfd)
+        finally:
+            os.close(pfd)
+
+
+def _trim_last_pin_row(root, root_fd, txn):
+    """Restore the pin-history to its pre-transition state during a rollback: drop the single `pin` row THIS
+    transition appended (identified as the LAST row iff it is a `pin` action for the transition's target
+    version), keeping every prior row (a re-adoption after un-adopt leaves [pin, un-adopt, pin...]). An empty
+    result removes the file. If the last row is not this transition's (a crash before the row was appended,
+    or any other shape), the history is left unchanged, never dropping a foreign row (fail-closed-safe)."""
+    rows = read_history(root_fd)
+    if not rows:
         return
-    inverse = _journal.build_inverse_ops(applied)
-    _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-    journal_root = root / JOURNAL_REL
-    txn_id = "recover.{}.{}".format(os.getpid(), time.time_ns())
-    _journal.acquire_lock(journal_root, session_id="recover")
-    try:
-        _journal.run_transaction(root_fd, journal_root, txn_id,
-                                 {"kind": "recover-reverse", "reverses": transition_id},
-                                 inverse, _preimage_reader(root, transition_id), session_id="recover")
-    finally:
-        _journal.release_lock(journal_root)
+    last = rows[-1]
+    if last.get("action") == "pin" and last.get("version") == txn.get("target-version"):
+        remaining = rows[:-1]
+        if remaining:
+            _atomic_publish(root, HISTORY_REL, _render_history(remaining))
+        else:
+            _remove_contained(root, HISTORY_REL)
+
+
+def _complete_un_adopt(root, root_fd, ops, intent):
+    """Complete an un-adopt idempotently from the durable intent (10.6): reverse the onboarding ops
+    (contained, torn-safe), append the terminal `un-adopt` history row if it is not already the last row,
+    remove pin.toml and the transition record, sweep the spent preimages, and remove the intent marker LAST.
+    Safe to re-run at ANY crash point: every step is idempotent, so recover completes an interrupted un-adopt
+    to the same terminal state."""
+    _reverse_swap(root, root_fd, ops)
+    rows, prev = _history_rows_and_prev(root_fd)
+    if not rows or rows[-1].get("action") != "un-adopt":
+        release = {"version": "", "tag-object-sha": "", "commit-sha": "", "root": "", "manifest-digest": ""}
+        _append_history_row(root, rows, prev, len(rows), release, int(intent.get("quorum", 1)),
+                            "un-adopt", intent.get("authorization"), None)
+    _remove_contained(root, PIN_REL)
+    _remove_contained(root, TRANSITION_REL)
+    _sweep_orphan_preimages(root, root_fd)
+    _remove_contained(root, UNADOPT_REL)
 
 
 def _pin_transition_complete(root_fd, txn, ops):
@@ -839,8 +905,8 @@ def _recover_open_journal(root, root_fd):
     try:
         for entry in sorted(os.listdir(jfd)):
             est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
-            if not stat.S_ISDIR(est.st_mode):
-                continue
+            if stat.S_ISLNK(est.st_mode) or not stat.S_ISDIR(est.st_mode):
+                continue                                  # never follow a symlink; skip a non-dir (e.g. lock)
             if not _journal.is_terminal(journal_root / entry):
                 _journal.recover(journal_root / entry, root_fd)
     finally:
@@ -849,13 +915,14 @@ def _recover_open_journal(root, root_fd):
 
 
 def do_recover(root):
-    """Reconcile an interrupted pin-transition (10.3 recovery). A committed or absent transition needs no
-    recovery. An APPLIED transition whose pin + terminal history row already exist and agree is rolled
-    FORWARD (mark committed), preserving a successful pin. Otherwise (prepared, or applied-but-incomplete)
-    the transition is rolled BACK: the applied swap ops are reversed from the retained preimages, then the
-    partial pin/history/transition/preimages are removed, returning the tree to the prior state so `pin` may
-    be re-run. Only an initial-pin transition is recoverable here (re-pin/rollback are deferred at 1.0.0).
-    Never touches archives. Idempotent: a re-run after a clean recover finds no transition and is a no-op."""
+    """Reconcile any interrupted pin operation (10.3/10.6), idempotently and from on-disk state alone. In
+    order: an interrupted UN-ADOPT (pin-unadopt.toml present) -> complete it; a committed or absent pin-
+    transition -> nothing to recover (sweeping orphan preimages from a pre-intent crash, but NEVER while a
+    pin is live); an APPLIED transition whose pin + terminal history row already agree -> roll FORWARD (mark
+    committed); otherwise (prepared, or applied-but-incomplete) roll BACK via the contained reverse swap,
+    trimming this transition's history row (restoring a prior un-adopted state on a re-adoption) and removing
+    the partial pin/transition/preimages. Only an initial-pin transition is recoverable here. Never touches
+    archives. Idempotent."""
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -865,14 +932,27 @@ def do_recover(root):
     except OSError as exc:
         return _fail(exc)
     try:
-        _recover_open_journal(root, root_fd)
+        _recover_open_journal(root, root_fd)     # defense: reconcile a planted/migration open journal
+        intent = read_unadopt(root_fd)
+        if intent is not None:
+            txn_rec = read_transition(root_fd)
+            ops = _transition_ops(txn_rec) if txn_rec is not None else []
+            _complete_un_adopt(root, root_fd, ops, intent)
+            os.close(root_fd)
+            print("recover: completed an interrupted un-adopt (transition {})"
+                  .format(intent.get("transition-id")))
+            return EXIT_OK
         txn = read_transition(root_fd)
         if txn is None:
+            if read_pin(root_fd) is not None:
+                raise PinError("recover: a pin is present but its transition record is absent (a tampered or "
+                               "partial state); refusing to sweep a live pin's reversal preimages; restore "
+                               "the transition record or `un-adopt`")
             removed = _sweep_orphan_preimages(root, root_fd)
             os.close(root_fd)
             if removed:
-                print("recover: no transition record; swept {} orphan preimage set(s) left by a crash "
-                      "before the transition was published".format(removed))
+                print("recover: no transition record; swept the orphan preimage store left by a crash "
+                      "before the transition was published")
             else:
                 print("recover: no transition record; nothing to recover")
             return EXIT_OK
@@ -898,13 +978,9 @@ def do_recover(root):
             print("recover: transition {} was fully applied; rolled FORWARD to committed"
                   .format(transition_id))
             return EXIT_OK
-        _reverse_pin_transition(root, root_fd, transition_id, ops)
-        rows = read_history(root_fd)
-        if rows is not None and len(rows) > 1:
-            raise PinError("recover: refusing to reverse over a multi-row pin-history (unexpected at 1.0.0 "
-                           "where re-pin is deferred); manual review needed")
+        _reverse_swap(root, root_fd, ops)
+        _trim_last_pin_row(root, root_fd, txn)
         _remove_contained(root, PIN_REL)
-        _remove_contained(root, HISTORY_REL)
         _remove_contained(root, TRANSITION_REL)
         _sweep_orphan_preimages(root, root_fd)
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
@@ -1251,6 +1327,110 @@ def self_test():
         rc, _ = _run_cli(["recover", "--root", str(k)])
         check("T12: recover reconciles the open journal (exit 0)", rc == 0)
         check("T12: doctor clean after the journal is reconciled", dr(str(k)) == 0)
+
+        # ===== ROUND 3 blocker regressions =====
+        # T15 [RB1]: a TORN payload mid-write -> recover removes the torn create, clean (was: stranded).
+        t15 = tmp / "T15" / "root"; t15.mkdir(parents=True)
+        s15 = _write_staged(tmp / "T15" / "s", onop, onpay, rel1, [])
+        rc = crash(["pin", "--root", str(t15), "--staged", str(s15)], "torn-payload:0")
+        check("T15: torn-payload crash killed the child", rc == 137)
+        check("T15: a torn file is on disk (partial create)", (t15 / "aiqt-file").exists())
+        rc, _ = _run_cli(["recover", "--root", str(t15)])
+        check("T15: recover exits 0 on a torn payload", rc == 0)
+        check("T15: recover removed the torn create", not (t15 / "aiqt-file").exists())
+        check("T15: doctor clean after recover", dr(str(t15)) == 0)
+
+        # T16 [RB9]: a malformed (empty-field) release record -> pin REFUSES, nothing published.
+        t16 = tmp / "T16" / "root"; t16.mkdir(parents=True)
+        badrel = {"version": "", "tag-object-sha": "t", "commit-sha": "c", "root": "r", "manifest-digest": "m"}
+        s16 = _write_staged(tmp / "T16" / "s", onop, onpay, badrel, [])
+        rc, out = _run_cli(["pin", "--root", str(t16), "--staged", str(s16)])
+        check("T16: pin REFUSES a malformed release (empty version) exit 2", rc == 2)
+        check("T16: no pin published on a malformed release", not (t16 / PIN_REL).exists())
+
+        # T17 [RB7d]: an onboarding plan with a write op -> pin REFUSES (create/mkdir only).
+        t17 = tmp / "T17" / "root"; t17.mkdir(parents=True)
+        s17 = _write_staged(tmp / "T17" / "s", [{"op": "write", "path": "aiqt-file", "mode": 0o644}],
+                            onpay, rel1, [])
+        rc, out = _run_cli(["pin", "--root", str(t17), "--staged", str(s17)])
+        check("T17: pin REFUSES a write op in an onboarding plan exit 2", rc == 2 and "create/mkdir" in out)
+
+        # T18 [RB7]: a directory-mode change on an installed mkdir -> doctor FAIL.
+        t18 = tmp / "T18" / "root"; t18.mkdir(parents=True)
+        s18 = _write_staged(tmp / "T18" / "s",
+                            [{"op": "mkdir", "path": "d", "mode": 0o750},
+                             {"op": "create", "path": "d/f", "mode": 0o644}],
+                            {"d/f": b"x\n"}, rel1, [])
+        rc, _ = _run_cli(["pin", "--root", str(t18), "--staged", str(s18)])
+        check("T18: pin with a dir exits 0 and doctor clean", rc == 0 and dr(str(t18)) == 0)
+        os.chmod(t18 / "d", 0o777)
+        check("T18: doctor FAILs a directory-mode change", dr(str(t18)) == 1)
+        os.chmod(t18 / "d", 0o750)
+
+        # T19 [RB6/BL-4]: deleting the transition record must NOT let the doctor pass over a tampered file,
+        # and recover must NOT sweep a live pin's preimages.
+        t19 = tmp / "T19" / "root"; t19.mkdir(parents=True)
+        _run_cli(["pin", "--root", str(t19), "--staged",
+                  str(_write_staged(tmp / "T19" / "s", onop, onpay, rel1, []))])
+        (t19 / TRANSITION_REL).unlink()
+        (t19 / "aiqt-file").write_bytes(b"tampered\n")
+        check("T19: doctor is MALFORMED (not clean) with the transition deleted", dr(str(t19)) == 2)
+        rc, out = _run_cli(["recover", "--root", str(t19)])
+        check("T19: recover REFUSES to sweep a live pin's preimages exit 2", rc == 2)
+        check("T19: the pin and its preimages survive the refused recover",
+              (t19 / PIN_REL).is_file() and (t19 / PREIMAGES_REL).exists())
+
+        # T20 [RB2]: an interrupted un-adopt (intent present) -> doctor FAILs, recover COMPLETES it.
+        t20 = tmp / "T20" / "root"; t20.mkdir(parents=True)
+        _run_cli(["pin", "--root", str(t20), "--staged",
+                  str(_write_staged(tmp / "T20" / "s", onop, onpay, rel1, []))])
+        with _RootFd(t20) as fd:
+            tr = read_transition(fd)
+        intent = {"transition-id": tr["transition-id"], "target-version": tr.get("target-version", ""),
+                  "quorum": 1, "utc": _utc_now(),
+                  "authorization": {"authorizer": "ops", "utc": _utc_now(), "reason": "reverse"}}
+        _atomic_publish(t20, UNADOPT_REL, _render_unadopt(intent))     # simulate a crash right after the intent
+        check("T20: doctor FAILs an interrupted un-adopt", dr(str(t20)) == 1)
+        rc, _ = _run_cli(["recover", "--root", str(t20)])
+        check("T20: recover completes the un-adopt exit 0", rc == 0)
+        check("T20: file gone, pin gone, intent gone after completion",
+              not (t20 / "aiqt-file").exists() and not (t20 / PIN_REL).exists()
+              and not (t20 / UNADOPT_REL).exists())
+        check("T20: doctor clean (terminal un-adopted) after recover", dr(str(t20)) == 0)
+        rc, _ = _run_cli(["recover", "--root", str(t20)])
+        check("T20: recover idempotent after completion", rc == 0)
+
+        # T21 [RB5]: a crashed RE-ADOPTION (pin -> un-adopt -> pin) recovers to the prior un-adopted state.
+        t21 = tmp / "T21" / "root"; t21.mkdir(parents=True)
+        _run_cli(["pin", "--root", str(t21), "--staged",
+                  str(_write_staged(tmp / "T21" / "s1", onop, onpay, rel1, []))])
+        _run_cli(["un-adopt", "--root", str(t21), "--authorizer", "ops", "--reason", "reverse"])
+        _run_cli(["pin", "--root", str(t21), "--staged",
+                  str(_write_staged(tmp / "T21" / "s2", onop, onpay, rel1, []))])   # re-adoption (succeeds)
+        with _RootFd(t21) as fd:
+            tr2 = read_transition(fd)
+            hrows = read_history(fd)
+        check("T21: re-adoption gives a 3-row history [pin,un-adopt,pin]",
+              hrows is not None and len(hrows) == 3)
+        applied = {"transition-id": tr2["transition-id"], "action": tr2["action"], "phase": "applied",
+                   "from-pin-digest": tr2.get("from-pin-digest", ""),
+                   "target-version": tr2.get("target-version", ""), "ops": _transition_ops(tr2)}
+        _atomic_publish(t21, TRANSITION_REL, _render_transition(applied))    # simulate a crashed re-adoption
+        _remove_contained(t21, PIN_REL)
+        rc, _ = _run_cli(["recover", "--root", str(t21)])
+        check("T21: recover exits 0 on a crashed re-adoption", rc == 0)
+        with _RootFd(t21) as fd:
+            hrows2 = read_history(fd)
+        check("T21: recover trimmed to the prior [pin,un-adopt] history (2 rows)",
+              hrows2 is not None and len(hrows2) == 2 and hrows2[-1]["action"] == "un-adopt")
+        check("T21: no pin, no installed file after recover; doctor clean",
+              not (t21 / PIN_REL).exists() and not (t21 / "aiqt-file").exists() and dr(str(t21)) == 0)
+
+        # T22 [RB4]: a symlinked journal ENTRY -> doctor open-journal MALFORMED (never followed).
+        t22 = tmp / "T22" / "root"; (t22 / JOURNAL_REL).mkdir(parents=True)
+        out22 = tmp / "T22-out"; out22.mkdir()
+        os.symlink(str(out22), str(t22 / JOURNAL_REL / "txn-sym"))
+        check("T22: doctor is MALFORMED on a symlinked journal entry (not followed)", dr(str(t22)) == 2)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

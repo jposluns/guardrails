@@ -158,7 +158,10 @@ def assert_pin_and_manifest(root_fd, root):
                                   "installed {!r} does not match the recorded pin digest (in-place drift "
                                   "or tamper)".format(path))
                 want_mode = post.get("mode")
-                if want_mode is not None and stat.S_IMODE(st.st_mode) != int(want_mode):
+                if want_mode is None:
+                    return Result("pin-and-manifest", MALFORMED,
+                                  "transition op for {!r} lacks a recorded mode".format(path))
+                if stat.S_IMODE(st.st_mode) != int(want_mode):
                     return Result("pin-and-manifest", FAIL,
                                   "installed {!r} mode {} differs from the recorded pin mode {}".format(
                                       path, oct(stat.S_IMODE(st.st_mode)), oct(int(want_mode))))
@@ -168,6 +171,14 @@ def assert_pin_and_manifest(root_fd, root):
                 if st is None or not stat.S_ISDIR(st.st_mode):
                     return Result("pin-and-manifest", FAIL,
                                   "pin installs directory {!r} but it is absent".format(path))
+                want_mode = post.get("mode")
+                if want_mode is None:
+                    return Result("pin-and-manifest", MALFORMED,
+                                  "transition op for directory {!r} lacks a recorded mode".format(path))
+                if stat.S_IMODE(st.st_mode) != int(want_mode):
+                    return Result("pin-and-manifest", FAIL,
+                                  "installed directory {!r} mode {} differs from the recorded mode {}".format(
+                                      path, oct(stat.S_IMODE(st.st_mode)), oct(int(want_mode))))
                 installed += 1
     return Result("pin-and-manifest", PASS,
                   "pin schema valid; {} installed path(s) verified present and digest-matched against the "
@@ -197,8 +208,11 @@ def assert_open_journal(root_fd, root):
     try:
         for entry in sorted(os.listdir(jfd)):
             est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
+            if stat.S_ISLNK(est.st_mode):
+                return Result("open-journal", MALFORMED,
+                              "a symlinked journal entry {!r} is refused, not followed".format(entry))
             if not stat.S_ISDIR(est.st_mode):
-                continue                                  # a non-directory / symlinked journal entry is skipped
+                continue                                  # a regular file (e.g. the lock) is not a transaction dir
             if not _journal.is_terminal(journal_root / entry):
                 open_txns.append(entry)
     except _journal.JournalError as exc:
@@ -320,6 +334,10 @@ def assert_state_completeness(root_fd, root):
     if pin_present and not history_present:
         return Result("state-completeness", MALFORMED,
                       "a pin is present without a pin-history (partial state); exit 2, never NA (4.4)")
+    if pin_present and not txn_present:
+        return Result("state-completeness", MALFORMED,
+                      "a pin is present without its pin-transition record (partial/tampered state); the "
+                      "installed-path digest verification depends on it; exit 2, never NA (4.4)")
     if not pin_present and not history_present and (txn_present or preimages_present):
         return Result("state-completeness", MALFORMED,
                       "transition/preimage state present with no pin and no history (partial state); "
@@ -327,8 +345,23 @@ def assert_state_completeness(root_fd, root):
     return Result("state-completeness", PASS, "pin-state file set is complete for its stage")
 
 
+def assert_unadopt_intent(root_fd, root):
+    """An un-adopt INTENT present means an un-adopt is in progress or was interrupted; it FAILs (exit 1) with
+    the recovery direction until `recover` completes it idempotently (10.6). Absent = NA; unreadable = MALFORMED."""
+    try:
+        intent = pin.read_unadopt(root_fd)
+    except pin.PinError as exc:
+        return Result("unadopt-intent", MALFORMED, str(exc))
+    if intent is None:
+        return Result("unadopt-intent", NA, "no un-adopt in progress")
+    return Result("unadopt-intent", FAIL,
+                  "an un-adopt is in progress or interrupted (transition {}); run `recover` to complete it"
+                  .format(intent.get("transition-id")))
+
+
 ASSERTIONS = (assert_state_completeness, assert_pin_and_manifest, assert_history_chain,
-              assert_open_journal, assert_repoints, assert_reverse_step, assert_transition)
+              assert_open_journal, assert_repoints, assert_reverse_step, assert_transition,
+              assert_unadopt_intent)
 
 
 # --- orchestration ------------------------------------------------------------------------------------
@@ -337,10 +370,10 @@ def _adoption_absent(root_fd):
     """True only when EVERY pin/adoption-state input is totally absent (the NA "not adopted" case). Any
     single present input makes the state non-absent, so a partial state routes to the assertions where it
     is caught as MALFORMED rather than read as a clean NA."""
-    for rel in (pin.PIN_REL, pin.HISTORY_REL, pin.TRANSITION_REL):
+    for rel in (pin.PIN_REL, pin.HISTORY_REL, pin.TRANSITION_REL, pin.UNADOPT_REL):
         if _present(root_fd, rel):
             return False
-    for rel in (pin.PREIMAGES_REL, pin.JOURNAL_REL, pin.REPOINTS_REL):
+    for rel in (pin.PREIMAGES_REL, pin.MIGRATION_REL):
         if _journal._lstat_contained(root_fd, rel) is not None:
             return False
     return True
@@ -449,12 +482,10 @@ def self_test():
         r0["version"] = "9.9.9"                          # casual in-place edit of a NON-tail (interior) row;
         # r1.chain was computed over the ORIGINAL r0, so recomputing over the edited r0 breaks at row 1.
         # (Editing the tail row would NOT be detected: the tip is unprotected, the disclosed honesty limit.)
+        # A pin-ABSENT history with a broken interior chain: state-completeness passes (history present,
+        # no pin) and the chain break surfaces as a FAIL (exit 1). A pin PRESENT without its transition
+        # record is now MALFORMED (RB6), so this fixture omits the pin to isolate the chain-FAIL invariant.
         (broken / pin.HISTORY_REL).write_text(pin._render_history([r0, r1]), encoding="utf-8")
-        (broken / pin.PIN_REL).write_text(pin._render_pin({
-            "adoption-path": "onboarding", "quorum": 1, "verified-utc": "x",
-            "ownership-map-identity": "m", "transition-id": "t",
-            "release": {"version": "1.1.0", "tag-object-sha": "t2", "commit-sha": "c2", "root": "r2",
-                        "manifest-digest": "m"}}), encoding="utf-8")
         rc = run(str(broken))
         check("a broken chain FAILs (exit 1)", rc == 1)
     finally:
