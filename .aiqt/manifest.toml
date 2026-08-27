@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "44af7914c33a64df9ab50e9069a899705f7183031b036c68f3f2af35d1804335"
+tree-sha256 = "6b755c2de1f9a41f21143cb5182b923d4675da95e3b10ce3fca104bc0124e11a"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -66,8 +66,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 8708
-sha256 = "98b9b2364a237c86a313a4aa3a4cfc6fe2a6c980844dfdc7879892d32372e1dd"
+bytes = 8639
+sha256 = "04a0638a09ad3ad3a53c9d3597228310b34df5fc72b3e321c4cade33ab83fa52"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2031,8 +2031,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31658
-sha256 = "479ab81d777c5dc76391cf57f87bc55e07849f3af703a25b8495cecae58a5efe"
+bytes = 31630
+sha256 = "76251956c55b518082648b50e3b0537b66aa9a5f08eb30bd492dcbd3f8ca1b15"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2136,28 +2136,28 @@ sha256 = "19693290809b2a3470accd6369f705ac9c7a66ee7ea65056deb7b0bc79d6a377"
 
 [[sources]]
 path = "site/404.html"
-bytes = 4381
-sha256 = "b1911a6f3ba74955b8d99b68211ed5cb90e49f9651852459033aebf1037fb5a1"
+bytes = 4366
+sha256 = "26a69f8f96dfabe6e8c70ab74032dbc7aeab5a5d708715f35561c7318ae96167"
 
 [[sources]]
 path = "site/_redirects"
-bytes = 22
-sha256 = "11af24598dd319e022223306644047f456a93f59d9fff56a34a62f59782075e5"
+bytes = 30
+sha256 = "375c83bfc79d9c146b610fa04c5046bba34043f973f1f5cb6bf7bfb875f2dae5"
 
 [[sources]]
 path = "site/about.html"
-bytes = 9896
-sha256 = "da27efc08b26c7ca5b547cb1e165145a0484e74084cc8fe17586edfc0894914e"
+bytes = 9886
+sha256 = "a16d0d5de7d0235f4e50085f32f974ab1b0be4117781c14ed6f3b2143e7233b4"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14351
-sha256 = "6c8c3adb26ee6d171e5348635fa04e90ae9ddbdf97154416fd988dca0648b71e"
+bytes = 14331
+sha256 = "9625c1cf8a3cd3fab74f36dd48ec4ed36b9973c630f6f52c534fde56aedc5284"
 
 [[sources]]
 path = "site/disclosure.html"
-bytes = 14875
-sha256 = "f0c306cf644a55be2836e9b04e68a9b1a691de85b4fbba1115b68a2f0cdeba63"
+bytes = 14865
+sha256 = "d1de26e9dbe58e75aa3c0e0ef21787f9e34f034321067e22ff9e7bab6ac1689d"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions.txt"
@@ -2195,19 +2195,14 @@ bytes = 401613
 sha256 = "f6b4177e52fe9347c81a27d6ae38c2e33c0a3db85a37edd3bce63177b8534c7e"
 
 [[sources]]
-path = "site/draft.html"
-bytes = 10831
-sha256 = "32f882639a1879416eda3e69fc3432884eeb6a59cce81382c127bbb066df5286"
-
-[[sources]]
 path = "site/evidence.html"
-bytes = 9234
-sha256 = "51a0cc9244a07f3ba0c3e297458d9da88b70976bccce57b5d497efa95a789ca5"
+bytes = 9224
+sha256 = "0a768ff83952c8449823e5c72a30f273dfe75b50f8b597f6e76553ae1f4f6bd5"
 
 [[sources]]
 path = "site/examples.html"
-bytes = 20766
-sha256 = "ced08401eb553ee498bf3565a1cee7b07254c64bb72eca38b00c6b893dfcc585"
+bytes = 20756
+sha256 = "4f7908fd13218fe7cebf9678ccd539a5b01ac49b1bdee364cc19a38288826a0f"
 
 [[sources]]
 path = "site/favicon.svg"
@@ -2216,53 +2211,53 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 14419
-sha256 = "a2939d97763fcbc486bb78f6638e5c36efdee4c9ba6d57f6f516f4a1a3de49dd"
+bytes = 14455
+sha256 = "543165387adf467f2d9b69629781117df59038a2059edd7f3b45e20ee7dc58e5"
 
 [[sources]]
 path = "site/install-chatgpt.html"
-bytes = 9114
-sha256 = "d8f0bc5a35f315feeccb2a6dfeb334fd2d52d13482014527bf331161860bff66"
+bytes = 9104
+sha256 = "745307e74aec9a9c8044531462c1fcbb76b47262eb3dd3d93042797cac23ed36"
 
 [[sources]]
 path = "site/install-claude.html"
-bytes = 9628
-sha256 = "fcbc06df5e4699912537a28e2bac9070ffd47399be3b2be0940304196de409b5"
+bytes = 9618
+sha256 = "05b8057ec7e0f785091bb400397f57747ab15a442b799b6d0926f0595b07a79c"
 
 [[sources]]
 path = "site/install-copilot.html"
-bytes = 8828
-sha256 = "1eac0db9f7a76a13709d192cb9ef1ef6021a373ed0b12c25620813f75be2e707"
+bytes = 8818
+sha256 = "3df4d56490d1cc93c9f27387a63ee9a44eb5e11064ec0a0a479924de2672501d"
 
 [[sources]]
 path = "site/install-gemini.html"
-bytes = 8929
-sha256 = "2bbff6bd4f5193347266f75199d81a19ec7d88573ad6d9245da83f218617aa62"
+bytes = 8919
+sha256 = "85f8f30f72fa9b133b93404058f12b07a4af4e63dcbb7316dc037d76d5b7d6d9"
 
 [[sources]]
 path = "site/install-other.html"
-bytes = 7673
-sha256 = "7c7b550380c310c3e27f90e46c5561b890e51f870c9ac8af409a300b80af944b"
+bytes = 7663
+sha256 = "b86001b1370d763564e0c44f7a401c60cd37e928cb8c409b02a8425d8deb6367"
 
 [[sources]]
 path = "site/install.html"
-bytes = 9977
-sha256 = "0594ff432ceeb6a4868bcae276551f4c75ff6ce1aeb25bfd9dcbd25093ab25af"
+bytes = 9967
+sha256 = "965e316da15c7a0ad8907ccf9706d77a701b3eaf9d6c8898df1b2a3cac4ff4ed"
 
 [[sources]]
 path = "site/learn.html"
-bytes = 6778
-sha256 = "060f46657ff6d8aa35d527f20f749796eb78f9892398267b6bb3f839cf4e3613"
+bytes = 6768
+sha256 = "24e53a0443cc1e2995503906ea316a69e0b559802fc175c29f36a980df2886cb"
 
 [[sources]]
 path = "site/mappings.html"
-bytes = 439714
-sha256 = "6c6a419cd2713bdc69c5c6a052113eb58fe507a3429a29e8348f7da60f801d5e"
+bytes = 439704
+sha256 = "cf1eadd65c4b5a1e7e21d76554ae8f15e85fae25467e3bfde48c46f4adbb98bd"
 
 [[sources]]
 path = "site/roadmap.html"
-bytes = 7600
-sha256 = "7171aaea9aa28bde6ab2eab280756910c9967571ddc28fd124716827f87d3466"
+bytes = 7590
+sha256 = "16e156c95d443398242d93092634eaefd0e9737c9f64feccd73c36baafe92901"
 
 [[sources]]
 path = "site/robots.txt"
@@ -2271,23 +2266,23 @@ sha256 = "4af241b735cd232d6d688a808865a2448d90a47dce196d956aa026063fdd27ac"
 
 [[sources]]
 path = "site/standard.html"
-bytes = 9517
-sha256 = "ebb4ecbb303591e8653d96460d8e7c6287aaab2bdc7a1ebafbeecdca1035e119"
+bytes = 9507
+sha256 = "db54bf08efc6ece652841457045f5ee5e6dfc6d7a0067989872352c8cd8b4cea"
 
 [[sources]]
 path = "site/styles.css"
-bytes = 20801
-sha256 = "8c2d853eaa50e0d66029cc2b8e5a82c5c23f2711dcbd77002c6a60fb788aec69"
+bytes = 20803
+sha256 = "7df7b4cdd7f702ba0cfe70b19804dbe5c5ff2321cbfd3ae9417041fc94d69d46"
 
 [[sources]]
 path = "site/teams.html"
-bytes = 13841
-sha256 = "64970da827ee6c835f371cc28c512825fcedf2fb90fc4486bbdfbde6f79a0a99"
+bytes = 13826
+sha256 = "1dd2c8ac84e6eae7b502dd4a4af762d8b296783c2b55d229063b058cf241aa96"
 
 [[sources]]
 path = "site/tech-details.html"
-bytes = 22858
-sha256 = "76221e0949db9cb235310ec0d90c14010b434ecb41d96cfd73acb4f23aa5aa86"
+bytes = 22848
+sha256 = "1a4b4c5ec0908dc15e4a4a213fe9900f61896412406e2a3fcb6bd29550dcca0d"
 
 [[sources]]
 path = "site/theme.js"

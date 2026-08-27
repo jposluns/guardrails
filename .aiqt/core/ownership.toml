@@ -215,10 +215,6 @@ path = "site/disclosure.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/draft.html"
-class = "pack-immutable"
-
-[[release-class]]
 path = "site/evidence.html"
 class = "pack-immutable"
 
