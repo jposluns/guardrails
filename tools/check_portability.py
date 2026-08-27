@@ -115,7 +115,7 @@ PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 # The only shippable file that is not scannable text. It is byte-reconciled by gen_skill.py --check from
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
 # an unreadable copy fails closed rather than passing silently.
-BINARY_ALLOW = {"site/downloads/aiqt-skill.zip"}
+BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.1.zip"}
 
 # GD-56 attribution exemption (NARROW and REVIEWED; NOT a general operator-identity allowance). The
 # maintainer deliberately attributes both the project and himself, by name, on the two PUBLISHED chat
@@ -136,12 +136,28 @@ ATTRIBUTION_EXEMPT_FILES = {
     "site/downloads/aiqt-instructions.txt",   # the same body wrapped for platforms with no Skills feature
 }
 
+# The generated SKILL.md carries, directly under its `# AIQT™` H1, a visible metadata header block whose
+# `Author: <name>` line is a SECOND legitimate occurrence of the operator name (distinct from the GD-56
+# footer attribution line). It is exempted with the SAME narrow, line-anchored, single-placement discipline
+# as the footer line, and ONLY in SKILL.md (this rel), never in the instructions fallback or anywhere else.
+SKILL_MD_REL = "site/downloads/aiqt/SKILL.md"
+
 
 def attribution_line(name):
     """The single public attribution string GD-56 permits, built from the loaded operator NAME and the
     pack's public source URL. Exactly this string, on its own line, and only in ATTRIBUTION_EXEMPT_FILES,
     is masked before the C1 scan; nothing else is exempted."""
     return "AIQT Guardrails by {}, {}, CC BY-SA 4.0".format(name, ATTRIBUTION_SOURCE_URL)
+
+
+def author_header_line(name):
+    """The single SKILL.md header `Author: <name>` line that legitimately carries the operator name in the
+    visible metadata block. It ends with a trailing backslash: the header block uses CommonMark backslash
+    hard breaks (byte-canon forbids the trailing-space form), so the shipped line is `Author: <name>\\`, and
+    this exempt string matches it including that backslash. Exactly this string, on its own line, and only
+    in SKILL_MD_REL, is masked before the C1 scan; nothing else is exempted. A break-style change that drops
+    the backslash makes this mismatch, so the name trips C1 (fail-safe), never a silent pass."""
+    return "Author: {}\\".format(name)
 
 
 def mask_attribution_line(text, line):
@@ -336,7 +352,7 @@ def _mask_plugin_json_identity(text):
     return "".join(out)
 
 
-def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=None):
+def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=None, header_line=None):
     """Scan one file's text for C1 (operator identity), C2 (operational vocabulary), and C5 (exemption
     marker). For the two attribution files the operator-identity VALUE spans are masked first (that identity
     ships by design); the identity is then matched over the WHOLE remaining document, so a same-line comment,
@@ -360,6 +376,17 @@ def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=
             # still trips C1 below; and the wrong placement is itself a finding.
             findings.append("{}: exempt attribution artefact must carry exactly one standalone GD-56 "
                             "attribution line, found {} (portability C1)".format(rel, count))
+    if header_line and rel == SKILL_MD_REL:
+        # The SKILL.md header `Author: <name>` line, masked with the SAME line-anchored, single-placement
+        # discipline as the attribution line above and ONLY in SKILL.md: on exactly one standalone match
+        # the operator name in the header block clears; a missing, wrapped, near-variant, or duplicated
+        # line leaves the identity to trip C1 and raises a placement finding.
+        h_blanked, h_count = mask_attribution_line(masked, header_line)
+        if h_count == 1:
+            masked = h_blanked
+        else:
+            findings.append("{}: exempt chat artefact must carry exactly one standalone GD-56 author-header "
+                            "line, found {} (portability C1)".format(rel, h_count))
     if find_handle(masked):
         findings.append("{}: operator personal handle (@{}) in shipped content (portability C1)".format(
             rel, PERSONAL_HANDLE))
@@ -481,7 +508,8 @@ def gather_surface(root):
     return files, findings
 
 
-def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open, attribution=None):
+def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open, attribution=None,
+              header_line=None):
     """Scan one surface file: its relative PATHNAME always (C1/C2), and its CONTENT unless it is an
     allow-listed binary. An allow-listed binary is OPENED and read (opener, builtin open by default;
     injectable for the self-test) so an unreadable one fails closed (GateError -> exit 2), never a silent
@@ -508,7 +536,8 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open
         findings.append("{}: shipped text file is not valid UTF-8 and is not on the binary allow-list "
                         "(portability C3)".format(rel))
         return findings
-    findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=attribution))
+    findings.extend(scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=attribution,
+                              header_line=header_line))
     return findings
 
 
@@ -521,10 +550,11 @@ def run(root):
         term_grams = {normalize_term(t) for t in OPERATIONAL_TERMS}
         maxn = max(len(_tokens(t)) for t in OPERATIONAL_TERMS)
         attribution = attribution_line(name)  # GD-56 exempt line, from the same runtime identity source
+        author_header = author_header_line(name)  # GD-56 SKILL.md header line, same runtime identity source
         files, findings = gather_surface(root)
         for path in sorted(files):
             findings.extend(scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn,
-                                      attribution=attribution))
+                                      attribution=attribution, header_line=author_header))
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -626,6 +656,7 @@ def _build_surface(base, name, email):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(_CLEAN_MD, encoding="utf-8")
     (base / "site/downloads/aiqt-skill.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
+    (base / "site/downloads/aiqt-skill-1.0.1.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
     return base
 
 
@@ -771,6 +802,28 @@ def self_test_main():
         failures.append("GD-56 anchor: a missing attribution line did not raise the placement finding")
     if _c1("header\n\n  " + attr + "  \ncontent\n"):
         failures.append("GD-56 anchor: an indented standalone attribution line was not cleared")
+
+    # GD-56 SKILL.md author-header exemption: the visible metadata block under the SKILL.md `# AIQT™` H1
+    # carries the operator name a SECOND time on an `Author: <name>` line (distinct from the footer
+    # attribution line), masked with the SAME line-anchored, single-placement discipline and ONLY in
+    # SKILL.md. (a) exactly one standalone Author line masks clean; (b) a duplicated Author line leaves the
+    # identity to trip C1 and raises the placement finding; (c) a missing Author line (when a header_line is
+    # expected) raises the placement finding; (d) the same header line in the instructions fallback (not
+    # SKILL_MD_REL) is NOT exempted, so its operator name still trips C1.
+    hdr = author_header_line(name)
+
+    def _skill_c1(txt):
+        return [f for f in scan_text(SKILL_MD_REL, txt, ident_forms, ident_maxn, term_grams, maxn,
+                                     attribution=attr, header_line=hdr) if "portability C1" in f]
+    if _skill_c1("# AIQT\n\n" + hdr + "\n" + attr + "\ncontent\n"):
+        failures.append("GD-56 author-header: a single standalone Author line in SKILL.md was not masked clean")
+    if not any("author-header" in f for f in _skill_c1(hdr + "\n" + hdr + "\n" + attr + "\n")):
+        failures.append("GD-56 author-header: a duplicated Author line did not raise the placement finding")
+    if not any("author-header" in f for f in _skill_c1(attr + "\n")):
+        failures.append("GD-56 author-header: a missing Author line did not raise the placement finding")
+    if not [f for f in scan_text(exempt_rel, hdr + "\n", ident_forms, ident_maxn, term_grams, maxn,
+                                 attribution=attr, header_line=hdr) if "portability C1" in f]:
+        failures.append("GD-56 author-header: the header line was exempted outside SKILL.md (scope too broad)")
 
     # Personal-handle check (round-1 QA finding 2): an @-prefixed operator handle in shipped content is
     # flagged, while the bare owner segment inside a legitimate source URL (the attribution URL and a normal

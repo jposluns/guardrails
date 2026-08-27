@@ -435,6 +435,7 @@ site/about.html text eol=lf
 site/development.html text eol=lf
 site/disclosure.html text eol=lf
 site/downloads/aiqt-instructions.txt text eol=lf
+site/downloads/aiqt-skill-1.0.1.zip binary
 site/downloads/aiqt-skill.zip binary
 site/downloads/aiqt/SKILL.md text eol=lf
 site/downloads/aiqt/manifest.json text eol=lf
@@ -502,6 +503,7 @@ tools/gen_disclosure.py text eol=lf
 tools/gen_enforceability.py text eol=lf
 tools/gen_gensrc.py text eol=lf
 tools/gen_hooks.py text eol=lf
+tools/gen_install.py text eol=lf
 tools/gen_manifest.py text eol=lf
 tools/gen_mappings.py text eol=lf
 tools/gen_notice.py text eol=lf

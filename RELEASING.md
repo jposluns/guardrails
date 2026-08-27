@@ -16,14 +16,36 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (`site/downloads/aiqt-skill.zip`, `site/downloads/aiqt-instructions.txt`) and their generating inputs
-   (the corpus and `tools/gen_skill.py`) do not change; the release-metadata edits prescribed below (the
-   recorded digests, the evidence fields, and the tag key) are the only changes permitted after this
-   point.
+   (the version-numbered `site/downloads/aiqt-skill-1.0.1.zip`, which the site links to, and
+   `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
+   `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
+   byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
+   --check` compares each to disk, so they cannot diverge). The
+   release-metadata edits prescribed below (the recorded digests, the evidence fields, and the tag key)
+   are the only changes permitted after this point.
+
+   Skill version bump checklist. The skill is independently versioned. The concrete version-numbered
+   filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
+   fail-closed version-match assertion in `gen_skill.build_outputs` and `gen_skill.py`'s orphan-clean plus
+   `--check` (which flags a stale version-numbered zip), not by true single-sourcing (`versioned_zip_basename` is only the shared
+   filename SHAPE). To bump the skill version, edit all four, then regenerate:
+     - a. `.aiqt/core/skill/skill-source.md`: the `meta` `version` (the authoritative source the assertion
+       and both generators read).
+     - b. `tools/gen_skill.py`: the `ZIP_VERSIONED_PARTS` literal AND its matching `GENSRC_OUTPUTS` target
+       (both spell the version-numbered basename).
+     - c. `tools/check_portability.py`: the `BINARY_ALLOW` set (the version-numbered zip is a shipped
+       binary allowed past the portability text scan).
+     - d. `.aiqt/core/ownership.toml`: the `[checkout]` `binary` list (the version-numbered zip is a
+       tracked binary artefact).
+   Then run `python3 tools/gen_skill.py`, which repacks both zips and orphan-cleans the prior-version
+   `aiqt-skill-<old>.zip` (its `--check` reports that stale zip as drift). A bump that misses spot a leaves
+   the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
+   drift or portability gate. Finally, run `python3 tools/gen_install.py` to repoint the install-page
+   download button at the new versioned filename.
 2. Compute. From the repository root on the frozen tree, run
-   `sha256sum site/downloads/aiqt-skill.zip site/downloads/aiqt-instructions.txt`. These two files are
-   the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in the
-   evidence page and the `changelog.toml` reserved-key example. The mapping exports under
+   `sha256sum site/downloads/aiqt-skill-1.0.1.zip site/downloads/aiqt-instructions.txt`. These two files
+   are the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in
+   the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
 3. Record. Add a `[release.artifacts]` sub-table to the latest `[[release]]` in `changelog.toml`,

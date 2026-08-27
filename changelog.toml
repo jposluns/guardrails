@@ -6,7 +6,7 @@ note = "The user-facing changes for each public release."
 # inert to gen_changelog, check_versions, and the version-monotonicity gate. No release records it yet, so
 # the gate is dormant (NOT APPLICABLE); the first digests are added at the 1.0.0 content freeze. Shape:
 #   [release.artifacts]
-#   "site/downloads/aiqt-skill.zip" = "sha256:<64 lowercase hex>"
+#   "site/downloads/aiqt-skill-1.0.1.zip" = "sha256:<64 lowercase hex>"
 #   "site/downloads/aiqt-instructions.txt" = "sha256:<64 lowercase hex>"
 
 [[release]]

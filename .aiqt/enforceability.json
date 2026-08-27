@@ -402,6 +402,14 @@
         {
           "class": "a",
           "default": "block",
+          "id": "install-drift",
+          "platform": "ci",
+          "residue": "A byte-identity drift gate over the artefact tools/gen_install.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",
+          "script": "tools/gen_install.py"
+        },
+        {
+          "class": "a",
+          "default": "block",
           "id": "manifest-gen-drift",
           "platform": "ci",
           "residue": "A byte-identity drift gate over the four release-integrity outputs (manifest, .gitattributes, ROOT, announce snippet) regenerated from the ownership map and the git-tracked surface. It proves the committed outputs equal a fresh regeneration and that the inversion assertion holds; it does not prove a class ASSIGNMENT is semantically right (a wrong but consistent class survives to review), and it cannot see a file hidden by an existing concrete exclusion pattern (the disclosed bounded residual of 4.2).",
