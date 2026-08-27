@@ -785,7 +785,7 @@ Self-test security intro.
 **Self-test unconditional entry.** Body text.
 
 === security-conditional ===
-[integ1]
+[secc01]
 **Self-test conditional entry.** Body text.
 
 === security-capability-note ===
@@ -820,6 +820,19 @@ A self-test trust rule body.
 """
 
 
+_SECC = """---
+corpus-id: secc01
+origin: pack
+family: security
+facet: SECC
+slug: selftest-secc
+---
+# Self-test confidentiality rule
+
+A self-test confidentiality rule body.
+"""
+
+
 def _add_skill_surface(base):
     """Install a VALID generated chat-skill surface onto a tree already built by _build_conformant: the
     reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the deterministic
@@ -833,6 +846,7 @@ def _add_skill_surface(base):
     corpus_aiqt.mkdir(parents=True, exist_ok=True)
     (corpus_aiqt / "selftest-integ.md").write_text(_INTEG, encoding="utf-8")
     (corpus_aiqt / "selftest-trust.md").write_text(_TRUST, encoding="utf-8")
+    (base.joinpath(*gen_skill.CORPUS_PARTS) / "security" / "selftest-secc.md").write_text(_SECC, encoding="utf-8")
     # gen_skill.build_outputs derives the public attribution line (GD-56) from the [plugin] author-name in
     # the identity manifest; the skill-drift fixtures do not install the hooks surface, so provide a minimal
     # one when it is absent (never clobbering a manifest a hooks-surface caller already wrote).

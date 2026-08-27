@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "540415e4c8ba5361bcbf2a116dc211031781dadcb7070956e1719f6d25565250"
+tree-sha256 = "14328a3e213f7dd628193901c20306c0c5cad933f0a57b4fc3530427bdae326a"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -82,7 +82,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2497
-sha256 = "31251fd07f74811493a8411ecb4e3bcfe905dcb3ba26ad965b3441d9ce51bb50"
+sha256 = "170474f28cd4803ebd0504691db42a13ad1d0fe8bcb7f82244eff187bfddc6af"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -696,8 +696,8 @@ sha256 = "ca2a29d56f95091c3f50db083deae2655f01b54d7d44e2686f8d29b45ada76ff"
 
 [[sources]]
 path = ".aiqt/core/skill/skill-source.md"
-bytes = 16407
-sha256 = "a94ad764137b30c2f2b31293ebcc8554e17cde22f4d8e32853da97c3da64c1cc"
+bytes = 16905
+sha256 = "bcc3582801ffe48f0316535fab57879f196f67dbbec709671ec7117527eaa362"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
@@ -2161,23 +2161,23 @@ sha256 = "f0c306cf644a55be2836e9b04e68a9b1a691de85b4fbba1115b68a2f0cdeba63"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions.txt"
-bytes = 15826
-sha256 = "5f0349dc0ed880bc10a419ec703b7105ba599c57e20cb36a0e3dbc321008766f"
+bytes = 16324
+sha256 = "a138f05e1d19f703d3832c06a586d6f36c4361900d5fd32c531c4145e8e021ee"
 
 [[sources]]
 path = "site/downloads/aiqt-skill.zip"
-bytes = 15894
-sha256 = "966b55f9b670809d0fbe2c2de0fd602ee1998b6d3be3d9b93e354b3c43ae59fc"
+bytes = 16392
+sha256 = "4d42a7106c464c32fd6db09d98eed4dccdf6901fd04cb4f16139fc2475b8de17"
 
 [[sources]]
 path = "site/downloads/aiqt/SKILL.md"
-bytes = 15770
-sha256 = "87ae16bcbe08cd8e57f05dec88ab1aa92098f5a513188db19cfb7befe9d0fb5b"
+bytes = 16268
+sha256 = "5705dd66e7569bd1b1687b6e988dfbc79cab449443262c538a3ec7cbdd373c63"
 
 [[sources]]
 path = "site/downloads/aiqt/manifest.json"
 bytes = 822
-sha256 = "bd4a61dc518e0246fad0f8874d14f68d4ff9d652ac266a36816c7e54f1e4a9bf"
+sha256 = "f3689f08d42359d0d7966a0368f89e880c4dc818a3d0fbd878a0324ea8ef52ad"
 
 [[sources]]
 path = "site/downloads/aiqt/provenance.md"
@@ -2451,8 +2451,8 @@ sha256 = "e3f11b92f3ab99d699a1e2a29c35532a2efe7841004a1871b590115686df556b"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 67067
-sha256 = "141f482c5e46e3e5758d648cbde5bba813b92d7d2b5052394422fa4c05752d01"
+bytes = 67360
+sha256 = "7a44a637e6b3741a7b51bae6c0951c46f20d6c8b5e19c0da064055894b63a0dc"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -2546,8 +2546,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 32283
-sha256 = "5a6a4bb730b800379ec068fecebbc4fc1a01af66e35d26c11d61cb65910bcde9"
+bytes = 32755
+sha256 = "7958541c6fc6f631a6b57bfd539e14520a4eb9337c96ddbc4d5d6edf678d52ca"
 
 [[sources]]
 path = "tools/import_cwe.py"
@@ -4073,25 +4073,25 @@ sha256 = "99712756ce48e9de48433cd78a7b76a94896d7aad1203a325c98ee550811c497"
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
 path = "site/downloads/aiqt-instructions.txt"
 kind = "file"
-sha256 = "5f0349dc0ed880bc10a419ec703b7105ba599c57e20cb36a0e3dbc321008766f"
+sha256 = "a138f05e1d19f703d3832c06a586d6f36c4361900d5fd32c531c4145e8e021ee"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-skill.zip"
 path = "site/downloads/aiqt-skill.zip"
 kind = "file"
-sha256 = "966b55f9b670809d0fbe2c2de0fd602ee1998b6d3be3d9b93e354b3c43ae59fc"
+sha256 = "4d42a7106c464c32fd6db09d98eed4dccdf6901fd04cb4f16139fc2475b8de17"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/SKILL.md"
 path = "site/downloads/aiqt/SKILL.md"
 kind = "file"
-sha256 = "87ae16bcbe08cd8e57f05dec88ab1aa92098f5a513188db19cfb7befe9d0fb5b"
+sha256 = "5705dd66e7569bd1b1687b6e988dfbc79cab449443262c538a3ec7cbdd373c63"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/manifest.json"
 path = "site/downloads/aiqt/manifest.json"
 kind = "file"
-sha256 = "bd4a61dc518e0246fad0f8874d14f68d4ff9d652ac266a36816c7e54f1e4a9bf"
+sha256 = "f3689f08d42359d0d7966a0368f89e880c4dc818a3d0fbd878a0324ea8ef52ad"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt/provenance.md"

@@ -239,8 +239,14 @@ def resolve(source, corpus):
             included.append(cid)
             fm = by_id[cid][0]
             out.append((cid, text, fm.get("facet", ""), str(fm.get("slug", ""))))
+        # A rule's facet must belong to this block's facet set: a security rule may not sit in the
+        # conduct block, nor a conduct rule in the security block (silent misplacement guard).
+        for _cid, _text, _facet, _slug in out:
+            if _facet not in facet_order:
+                raise ValueError("skill source places '{}' (facet {}) in the {} block, which does not "
+                                 "accept that facet".format(_cid, _facet or "none", group))
         # Deterministic facet order (per the passed facet_order), then slug, matching gen_agents.
-        out.sort(key=lambda e: (facet_order.get(e[2], 9), e[3]))
+        out.sort(key=lambda e: (facet_order[e[2]], e[3]))
         return [text for _cid, text, _f, _s in out]
 
     conduct_uncond_texts = resolve_group(source["conduct_unconditional"], "conduct-unconditional", AIQT_FACET_ORDER)
@@ -353,7 +359,7 @@ def render_manifest(data):
         "license": data["meta"]["license"],
         "date": data["meta"]["date"],
         "generator": "tools/gen_skill.py",
-        "generator-version": "1",
+        "generator-version": "2",
         "source-corpus-hash": data["corpus_hash"],
         "included-rule-ids": data["included_ids"],
     }

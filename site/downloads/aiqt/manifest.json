@@ -1,7 +1,7 @@
 {
   "date": "2026-08-17",
   "generator": "tools/gen_skill.py",
-  "generator-version": "1",
+  "generator-version": "2",
   "included-rule-ids": [
     "asadv1",
     "clmobs",
