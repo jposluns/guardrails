@@ -766,6 +766,17 @@ Self-test AIQT body.
 === body-rules ===
 Self-test rules body.
 
+=== conduct-intro ===
+Self-test conduct intro.
+
+=== conduct-unconditional ===
+[accur01]
+**Self-test conduct unconditional entry.** Body text.
+
+=== conduct-conditional ===
+[trust1]
+**Self-test conduct conditional entry.** Body text.
+
 === security-intro ===
 Self-test security intro.
 
@@ -774,11 +785,51 @@ Self-test security intro.
 **Self-test unconditional entry.** Body text.
 
 === security-conditional ===
-[accur01]
+[secc01]
 **Self-test conditional entry.** Body text.
 
 === security-capability-note ===
 Self-test capability note.
+"""
+
+
+_INTEG = """---
+corpus-id: integ1
+origin: pack
+family: aiqt
+tier: 10
+facet: INTEG
+slug: selftest-integ
+---
+# Self-test integrity rule
+
+A self-test integrity rule body.
+"""
+
+_TRUST = """---
+corpus-id: trust1
+origin: pack
+family: aiqt
+tier: 10
+facet: TRUST
+slug: selftest-trust
+---
+# Self-test trust rule
+
+A self-test trust rule body.
+"""
+
+
+_SECC = """---
+corpus-id: secc01
+origin: pack
+family: security
+facet: SECC
+slug: selftest-secc
+---
+# Self-test confidentiality rule
+
+A self-test confidentiality rule body.
 """
 
 
@@ -790,6 +841,12 @@ def _add_skill_surface(base):
     src = base.joinpath(*gen_skill.SKILL_SRC_PARTS)
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_text(_SKILL_SRC_FIXTURE, encoding="utf-8")
+    # the conduct block cites two aiqt-family rules; install them in the corpus so resolve() succeeds
+    corpus_aiqt = base.joinpath(*gen_skill.CORPUS_PARTS) / "aiqt"
+    corpus_aiqt.mkdir(parents=True, exist_ok=True)
+    (corpus_aiqt / "selftest-integ.md").write_text(_INTEG, encoding="utf-8")
+    (corpus_aiqt / "selftest-trust.md").write_text(_TRUST, encoding="utf-8")
+    (base.joinpath(*gen_skill.CORPUS_PARTS) / "security" / "selftest-secc.md").write_text(_SECC, encoding="utf-8")
     # gen_skill.build_outputs derives the public attribution line (GD-56) from the [plugin] author-name in
     # the identity manifest; the skill-drift fixtures do not install the hooks surface, so provide a minimal
     # one when it is absent (never clobbering a manifest a hooks-surface caller already wrote).
