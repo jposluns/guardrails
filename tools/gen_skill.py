@@ -37,7 +37,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, replace_block, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -57,10 +57,16 @@ INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standal
 ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output: the stable
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
 # releases. The site links to the version-numbered copy; check_versions.py gates the two byte-identical.
-ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.0.zip")  # the version-numbered copy the site
-# links to. The literal version here is checked against the single-source VERSION by check_versions.py, so
-# a release bump that forgets to update this name fails closed.
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.1.zip")  # the version-numbered copy the site
+# links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
+# assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
+# The install page carries ONE generated region (the download button and the versioned filename it names),
+# regenerated from the skill meta version and drift-gated by this generator's --check, the same block
+# mechanism gen_disclosure.py uses for site/disclosure.html. The hand-authored chrome around the markers is
+# human-reviewed as before.
+INSTALL_PAGE_PARTS = ("site", "install-claude.html")
+SKILL_DOWNLOAD_MARKER = "SKILL-DOWNLOAD"
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
 # gate read from). The public attribution line (GD-56) is built from the [plugin] author-name here plus
@@ -90,11 +96,20 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
-    {"target": "site/downloads/aiqt-skill-1.0.0.zip", "kind": "file",
+    {"target": "site/downloads/aiqt-skill-1.0.1.zip", "kind": "file",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
 )
+# NOTE: the install-page SKILL-DOWNLOAD block (site/install-claude.html) is regenerated and drift-gated by
+# this generator's --check (see build_outputs/run_gen), but is deliberately NOT declared in GENSRC_OUTPUTS.
+# This generator carries a RENDERER_DECL, so gen_renderers.py would promote any GENSRC_OUTPUTS target into a
+# renderer target and gen_manifest.build_artifacts would then record site/install-claude.html as a
+# WHOLE-FILE "skill" artifact, falsely claiming the skill renderer produces the entire hand-authored page
+# and coupling its hand-authored prose to the manifest. A block inside a hand-authored page belongs in a
+# managed-block artifact that digests only the block (the CLAUDE.md/RULES-INDEX precedent), not a whole-file
+# one; generalizing that is a separate change, so until then the block is kept out of the renderer roster
+# and gated by --check alone. The page is still scanned as a site page by check_overclaim (collector 1).
 
 # The public download is packed deterministically so its bytes never depend on the wall clock, the host
 # OS, or the zlib version: a fixed ZIP-epoch timestamp, members in sorted order, a fixed unix mode, and
@@ -345,6 +360,30 @@ def render_skill(data):
     return "\n\n".join(blocks) + "\n"
 
 
+def versioned_zip_basename(version):
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.1.zip'. The single
+    place the shipped filename shape is spelled, so the ZIP_VERSIONED_PARTS literal, the install-page block,
+    and the build-time match assertion all agree."""
+    return "aiqt-skill-{}.zip".format(version)
+
+
+def zip_versioned_version():
+    """The version substring embedded in the ZIP_VERSIONED_PARTS basename ('aiqt-skill-<v>.zip'). Lets the
+    self-test and conformance fixtures pin their skill meta version to the shipped literal, so the
+    version-match assertion in build_outputs passes for a well-formed fixture and fires only on a mismatch."""
+    base = ZIP_VERSIONED_PARTS[-1]
+    return base[len("aiqt-skill-"):-len(".zip")]
+
+
+def render_install_download_block(data):
+    """The install page's SKILL-DOWNLOAD block: the download button whose href names the version-numbered
+    zip, rendered from the skill meta version so a version bump propagates on regenerate and a hand-edit
+    reads as drift. Only the button (the version-bearing href) sits in the block; the surrounding note and
+    step text are version-free hand-authored chrome, so a bump touches only this one rendered line."""
+    return ('      <a class="btn primary" href="/downloads/{}" download>'
+            'Download the Skill (.zip)</a>').format(versioned_zip_basename(data["meta"]["version"]))
+
+
 def render_zip(data):
     """The public aiqt-skill.zip, built in memory from the SAME SKILL.md the reserved subtree carries, so
     the zip's aiqt/SKILL.md member is byte-identical to the tracked SKILL.md. Deterministic (see ZIP_EPOCH
@@ -408,9 +447,9 @@ def render_provenance(data):
         "- Source corpus hash: {}".format(data["corpus_hash"]),
         "- Included rules (by corpus id): {}".format(", ".join(data["included_ids"])),
         "",
-        "The published aiqt-skill.zip and its version-numbered copy aiqt-skill-1.0.0.zip are "
+        "The published aiqt-skill.zip and its version-numbered copy aiqt-skill-{}.zip are "
         "byte-identical, packed deterministically from this same SKILL.md by the same generator, so their "
-        "aiqt/SKILL.md member is byte-identical to the text recorded here.",
+        "aiqt/SKILL.md member is byte-identical to the text recorded here.".format(m["version"]),
     ]
     return "\n".join(lines) + "\n"
 
@@ -443,14 +482,26 @@ def attribution_string(name):
 
 def build_outputs(root):
     """Load the corpus and skill source under root and render every output. Returns
-    (reserved_map, standalone, binary): reserved_map is {filename: text} for the reserved
-    site/downloads/aiqt/ subtree, standalone is [(abs_path, text)] for named text outputs beside it, and
-    binary is [(abs_path, bytes)] for named binary outputs beside it (the deterministic download zip).
+    (reserved_map, standalone, binary, blocks): reserved_map is {filename: text} for the reserved
+    site/downloads/aiqt/ subtree, standalone is [(abs_path, text)] for named text outputs beside it,
+    binary is [(abs_path, bytes)] for named binary outputs beside it (the deterministic download zip),
+    and blocks is [(abs_path, marker, inner_text)] for generated regions inside hand-authored pages
+    (the install-page download button). The block INNER is rendered here from the loaded data; run_gen
+    reads the page, splices the inner between the markers, and reconciles it.
     Raises ValueError/OSError (an unknown id, a malformed or unreadable source): the caller fails closed.
     Parameterized on root so the conformance suite and the self-test can call it off the real tree."""
     corpus = load_corpus(root.joinpath(*CORPUS_PARTS))
     source = parse_source(root.joinpath(*SKILL_SRC_PARTS))
     data = resolve(source, corpus)
+    # Fail-closed version-match gate (runs in CI via gen_skill --check): the shipped version-numbered zip
+    # literal MUST spell the skill meta version, so a skill bump that forgets to update ZIP_VERSIONED_PARTS
+    # (and the GENSRC_OUTPUTS target beside it) fails closed rather than shipping a stale filename.
+    expected_basename = versioned_zip_basename(data["meta"]["version"])
+    if ZIP_VERSIONED_PARTS[-1] != expected_basename:
+        raise ValueError(
+            "versioned zip name {!r} does not match the skill meta version {!r} (expected {!r}); bump "
+            "ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target when the skill version changes".format(
+                ZIP_VERSIONED_PARTS[-1], data["meta"]["version"], expected_basename))
     name, homepage = plugin_identity(root)
     data["identity_name"] = name
     data["identity_homepage"] = homepage
@@ -466,7 +517,9 @@ def build_outputs(root):
     zip_bytes = render_zip(data)
     binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
               (root.joinpath(*ZIP_VERSIONED_PARTS), zip_bytes)]
-    return reserved_map, standalone, binary
+    blocks = [(root.joinpath(*INSTALL_PAGE_PARTS), SKILL_DOWNLOAD_MARKER,
+               render_install_download_block(data))]
+    return reserved_map, standalone, binary, blocks
 
 
 def run_gen(root, check):
@@ -485,9 +538,9 @@ def run_gen(root, check):
         # never concealed. A PRESENT corpus with a missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
         if dir_present(corpus_dir):
-            reserved_map, standalone, binary = build_outputs(root)
+            reserved_map, standalone, binary, blocks = build_outputs(root)
         else:
-            reserved_map, standalone, binary = {}, [], []
+            reserved_map, standalone, binary, blocks = {}, [], [], []
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -508,6 +561,22 @@ def run_gen(root, check):
                 if not check:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(content)
+        # Generated regions inside hand-authored pages (the install-page download button), spliced between
+        # markers and reconciled the same way gen_disclosure.py handles site/disclosure.html. A missing page
+        # or missing markers is fail-closed (exit 2): the generator never silently skips a target it is meant
+        # to keep in sync. reconcile() fails closed on a read/write error (exit 2) of its own.
+        for page_path, marker, inner in blocks:
+            if not page_path.exists():
+                print("error: {} not found (expected generated block target)".format(
+                    page_path.relative_to(root).as_posix()))
+                return 2
+            try:
+                new_text = replace_block(page_path.read_text(encoding="utf-8"), marker, inner)
+            except ValueError as exc:
+                print("error: {}".format(exc))
+                return 2
+            if reconcile(page_path, new_text, check):
+                drift.append(page_path.relative_to(root).as_posix())
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -622,7 +691,7 @@ A second self-test conduct rule body.
 
 _SKILL_SRC = """=== meta ===
 name: aiqt
-version: 9.9.9
+version: __ZIPVER__
 license: CC-BY-SA-4.0
 date: 2026-01-01
 apex-id: prjint1
@@ -682,6 +751,15 @@ def _write_fixture(root, skill_src_text):
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
                         encoding="utf-8")
+    # A minimal install page carrying the SKILL-DOWNLOAD markers, so run_gen's block reconcile has a target
+    # to splice into (a missing page or missing markers is fail-closed, exercised by dedicated legs below).
+    install = root.joinpath(*INSTALL_PAGE_PARTS)
+    install.parent.mkdir(parents=True, exist_ok=True)
+    install.write_text('<div class="cta">\n'
+                       '      <!-- SKILL-DOWNLOAD:BEGIN (generated) -->\n'
+                       '      placeholder\n'
+                       '      <!-- SKILL-DOWNLOAD:END -->\n'
+                       '</div>\n', encoding="utf-8")
 
 
 def self_test_main():
@@ -690,9 +768,11 @@ def self_test_main():
     import tempfile
     from contextlib import redirect_stdout
 
-    # good_src resolves cleanly (apex plus two distinct security ids). bad_src cites a corpus-id that is
+    # good_src resolves cleanly (apex plus two distinct security ids). Its version is pinned to the shipped
+    # ZIP_VERSIONED_PARTS literal so the build-time version-match assertion passes for a well-formed fixture;
+    # a leg below pins a MISMATCHED version to prove the assertion fires. bad_src cites a corpus-id that is
     # not in the fixture corpus, so the anti-fabrication gate must fire.
-    good_src = _SKILL_SRC
+    good_src = _SKILL_SRC.replace("__ZIPVER__", zip_versioned_version())
     bad_src = good_src.replace("[secres]\n", "[nosuch9]\n")
 
     def capture(root, check):
@@ -782,6 +862,41 @@ def self_test_main():
         code, out = capture(misfacet, False)
         if code != 2:
             failures.append("facet-misplaced rule expected exit 2 (section-facet guard), got {}\n{}".format(code, out))
+
+        # 7. A skill meta version that does NOT match the shipped ZIP_VERSIONED_PARTS literal fails closed
+        #    (exit 2): the version-match assertion. This is the case a skill bump that forgets to update
+        #    ZIP_VERSIONED_PARTS would hit. Removing the assertion makes this leg fail.
+        mismatch = tmp / "mismatch"
+        mismatch.mkdir()
+        mm_src = _SKILL_SRC.replace("__ZIPVER__", zip_versioned_version() + "-unbumped")
+        _write_fixture(mismatch, mm_src)
+        code, out = capture(mismatch, False)
+        if code != 2:
+            failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
+                            "got {}\n{}".format(code, out))
+
+        # 8. A missing install page and missing SKILL-DOWNLOAD markers each fail closed (exit 2): the block
+        #    reconcile never silently skips a target it must keep in sync. Start from a clean tree, then
+        #    (a) delete the install page and (b) strip its markers.
+        nopage = tmp / "nopage"
+        nopage.mkdir()
+        _write_fixture(nopage, good_src)
+        capture(nopage, False)  # generate a clean tree first
+        nopage.joinpath(*INSTALL_PAGE_PARTS).unlink()
+        code, out = capture(nopage, True)
+        if code != 2:
+            failures.append("missing install page expected exit 2 (fail-closed), got {}\n{}".format(code, out))
+
+        nomarker = tmp / "nomarker"
+        nomarker.mkdir()
+        _write_fixture(nomarker, good_src)
+        capture(nomarker, False)
+        page = nomarker.joinpath(*INSTALL_PAGE_PARTS)
+        page.write_text("<div class=\"cta\">no markers here</div>\n", encoding="utf-8")
+        code, out = capture(nomarker, True)
+        if code != 2:
+            failures.append("missing SKILL-DOWNLOAD markers expected exit 2 (fail-closed), got {}\n{}".format(
+                code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -790,9 +905,10 @@ def self_test_main():
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: well-formed source round-trips clean; an unknown corpus-id and an "
-          "invalid-UTF-8 target fail closed (exit 2); a drifted SKILL.md and an orphan output are "
-          "caught (exit 1); a facet-misplaced rule fails closed (exit 2).")
+    print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md, the zips, and the install-page "
+          "download block); an unknown corpus-id, an invalid-UTF-8 target, a version/zip-literal mismatch, "
+          "and a missing install page or markers each fail closed (exit 2); a drifted SKILL.md and an "
+          "orphan output are caught (exit 1); a facet-misplaced rule fails closed (exit 2).")
     return 0
 
 
