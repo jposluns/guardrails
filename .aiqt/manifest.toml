@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "6b755c2de1f9a41f21143cb5182b923d4675da95e3b10ce3fca104bc0124e11a"
+tree-sha256 = "7470ab851ef8a8b081de32738b9deb08fafdfac0d2c43602fdec9df428732c18"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2071,8 +2071,8 @@ sha256 = "466f2affd209beda43b499d63d63fbed958d1405b06079dc0a4d3afaf661f763"
 
 [[sources]]
 path = "README.md"
-bytes = 2929
-sha256 = "d12009859a36ecb77e41cc7400288fd622c6717c7092b5698b42647082259913"
+bytes = 2994
+sha256 = "0a4277b00d37350bec555b600b5b80dbeb1ff1f719e4bf661ebac513f02be25f"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2211,8 +2211,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 14455
-sha256 = "543165387adf467f2d9b69629781117df59038a2059edd7f3b45e20ee7dc58e5"
+bytes = 14426
+sha256 = "f8d336e6652978281a61105dca5b2bfb743ce1e70f4205ce7a386acdb0ac697e"
 
 [[sources]]
 path = "site/install-chatgpt.html"
@@ -2271,8 +2271,8 @@ sha256 = "db54bf08efc6ece652841457045f5ee5e6dfc6d7a0067989872352c8cd8b4cea"
 
 [[sources]]
 path = "site/styles.css"
-bytes = 20803
-sha256 = "7df7b4cdd7f702ba0cfe70b19804dbe5c5ff2321cbfd3ae9417041fc94d69d46"
+bytes = 20784
+sha256 = "b7946afbab7b87d644f62244ad678faf400e45b6c052dda135dec84946493fa3"
 
 [[sources]]
 path = "site/teams.html"
