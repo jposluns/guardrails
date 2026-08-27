@@ -54,7 +54,12 @@ AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3, "PROGR": 4}
 # Output locations, as relative parts joined under the repo root (or a --self-test temp root).
 RESERVED_PARTS = ("site", "downloads", "aiqt")            # 100% generated: orphan-scanned in full
 INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standalone named output
-ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output
+ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output: the stable
+# "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
+# releases. The site links to the version-numbered copy; check_versions.py gates the two byte-identical.
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.0.zip")  # the version-numbered copy the site
+# links to. The literal version here is checked against the single-source VERSION by check_versions.py, so
+# a release bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
@@ -82,6 +87,10 @@ GENSRC_OUTPUTS = (
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
     {"target": "site/downloads/aiqt-skill.zip", "kind": "file",
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
+     "regenerate": "python3 tools/gen_skill.py"},
+    {"target": "site/downloads/aiqt-skill-1.0.0.zip", "kind": "file",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
@@ -304,10 +313,28 @@ def _security_block(data):
     return "\n\n".join(blocks)
 
 
+def _header_block(data):
+    """The visible metadata block (cleanlanguage-style) placed directly under the SKILL.md `# AIQT™` H1:
+    five fields, each on its own rendered line. cleanlanguage forces the line breaks with two trailing
+    spaces, but the shipped-surface byte-canon gate (tools/check_byte_canon.py) forbids trailing whitespace
+    and weakening a gate is not permitted, so the first four lines use CommonMark's other hard break, a
+    trailing backslash, which renders identically and carries no trailing whitespace. The portability
+    author-header exemption (check_portability.author_header_line) matches the Author line INCLUDING that
+    backslash. Website is the [plugin] homepage value verbatim from the identity manifest (e.g.
+    https://aiqt.ai)."""
+    return ("Version: {version}\\\n"
+            "Author: {name}\\\n"
+            "Website: {homepage}\\\n"
+            "GitHub: {github}\\\n"
+            "Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)").format(
+                version=data["meta"]["version"], name=data["identity_name"],
+                homepage=data["identity_homepage"], github=ATTRIBUTION_SOURCE_URL)
+
+
 def render_skill(data):
     blocks = [
         _frontmatter(data),
-        "# AIQT™\n\n" + data["body_aiqt"],
+        "# AIQT™\n\n" + _header_block(data) + "\n\n" + data["body_aiqt"],
         "# Rules\n\n" + data["body_rules"],
         _conduct_block(data),
         _security_block(data),
@@ -381,24 +408,36 @@ def render_provenance(data):
         "- Source corpus hash: {}".format(data["corpus_hash"]),
         "- Included rules (by corpus id): {}".format(", ".join(data["included_ids"])),
         "",
-        "The published aiqt-skill.zip is packed deterministically from this same SKILL.md by the same "
-        "generator, so its aiqt/SKILL.md member is byte-identical to the text recorded here.",
+        "The published aiqt-skill.zip and its version-numbered copy aiqt-skill-1.0.0.zip are "
+        "byte-identical, packed deterministically from this same SKILL.md by the same generator, so their "
+        "aiqt/SKILL.md member is byte-identical to the text recorded here.",
     ]
     return "\n".join(lines) + "\n"
 
 
-def attribution_string(root):
-    """The public attribution line (GD-56), built from the [plugin] author-name in the canonical identity
-    manifest plus the pack's public source URL, so the maintainer's name is never a literal in a scanned
-    source file. An absent, unparseable, or name-less manifest is fail-closed (OSError/ValueError, which
-    build_outputs surfaces as exit 2). The exact string must match the portability gate's exempt line."""
+def plugin_identity(root):
+    """Read the operator NAME and HOMEPAGE from the [plugin] table of the canonical identity manifest, so
+    neither is ever a literal in a scanned source file. Returns (name, homepage). An absent, unparseable,
+    name-less, or homepage-less manifest is fail-closed (OSError/ValueError, which build_outputs surfaces
+    as exit 2)."""
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None
+    homepage = plugin.get("homepage") if isinstance(plugin, dict) else None
     if not isinstance(name, str) or not name.strip():
         raise ValueError("identity manifest {} has no [plugin] author-name".format(
             "/".join(IDENTITY_MANIFEST_PARTS)))
+    if not isinstance(homepage, str) or not homepage.strip():
+        raise ValueError("identity manifest {} has no [plugin] homepage".format(
+            "/".join(IDENTITY_MANIFEST_PARTS)))
+    return name.strip(), homepage.strip()
+
+
+def attribution_string(name):
+    """The public attribution line (GD-56), built from the operator name plus the pack's public source URL,
+    so the maintainer's name is never a literal in a scanned source file. The exact string must match the
+    portability gate's exempt line."""
     return "AIQT Guardrails by {}, {}, CC BY-SA 4.0".format(name, ATTRIBUTION_SOURCE_URL)
 
 
@@ -412,14 +451,21 @@ def build_outputs(root):
     corpus = load_corpus(root.joinpath(*CORPUS_PARTS))
     source = parse_source(root.joinpath(*SKILL_SRC_PARTS))
     data = resolve(source, corpus)
-    data["attribution"] = attribution_string(root)
+    name, homepage = plugin_identity(root)
+    data["identity_name"] = name
+    data["identity_homepage"] = homepage
+    data["attribution"] = attribution_string(name)
     reserved_map = {
         "SKILL.md": render_skill(data),
         "manifest.json": render_manifest(data),
         "provenance.md": render_provenance(data),
     }
     standalone = [(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
-    binary = [(root.joinpath(*ZIP_PARTS), render_zip(data))]
+    # Both zips are written from the SAME bytes, so the version-numbered copy and the stable "latest" alias
+    # are byte-identical (check_versions.py gates the match).
+    zip_bytes = render_zip(data)
+    binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
+              (root.joinpath(*ZIP_VERSIONED_PARTS), zip_bytes)]
     return reserved_map, standalone, binary
 
 
@@ -634,7 +680,8 @@ def _write_fixture(root, skill_src_text):
     (root.joinpath(*SKILL_SRC_PARTS)).write_text(skill_src_text, encoding="utf-8")
     manifest = root.joinpath(*IDENTITY_MANIFEST_PARTS)
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\n', encoding="utf-8")
+    manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
+                        encoding="utf-8")
 
 
 def self_test_main():

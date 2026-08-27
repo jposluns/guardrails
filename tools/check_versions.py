@@ -20,10 +20,13 @@ not exist yet. Those stay deferred; this gate covers only what is decidable from
 
   check_versions.py            check the invariants (also the default; no flags needed)
   check_versions.py --check    same, for parity with the generator gates
+  check_versions.py --self-test  deterministic self-test of the version-match leg (byte-identical pair
+                                 passes; a missing versioned zip or a byte-differing pair fails)
 
 Exit convention (matches the repo's gates):
   0  clean
-  1  a real finding (drift, non-increasing sequence, VERSION mismatch)
+  1  a real finding (drift, non-increasing sequence, VERSION mismatch, a missing version-numbered skill zip
+     or a mismatch between it and the stable alias)
   2  malformed input or a read error (fail-closed)
 """
 import re
@@ -61,8 +64,7 @@ def _parse(version):
         return None
 
 
-def main():
-    root = repo_root()
+def check_versions(root):
     try:
         data = load_toml(root / "changelog.toml")
     except (OSError, ValueError) as exc:
@@ -122,15 +124,124 @@ def main():
         findings.append("VERSION ({!r}) does not equal the latest release version {!r} plus newline".format(
             on_disk, latest))
 
+    # 4: the version-numbered skill zip for the single-source version exists, and the stable "latest" alias
+    # site/downloads/aiqt-skill.zip is BYTE-IDENTICAL to it (the site links to the version-numbered copy;
+    # the alias keeps a direct link stable across releases). A missing versioned zip or a byte mismatch is a
+    # normal finding (exit 1); any read failure on a present file is fail-closed (exit 2), so an unreadable
+    # zip can never scan as a match.
+    versioned_rel = "site/downloads/aiqt-skill-{}.zip".format(latest)
+    alias_rel = "site/downloads/aiqt-skill.zip"
+    versioned_path = root / versioned_rel
+    alias_path = root / alias_rel
+    if not versioned_path.exists():
+        findings.append("{} is missing; the version-numbered skill zip must ship for version {}".format(
+            versioned_rel, latest))
+    else:
+        try:
+            versioned_bytes = versioned_path.read_bytes()
+            alias_bytes = alias_path.read_bytes()
+        except FileNotFoundError:
+            findings.append("{} is missing; it must be a byte-identical alias of {}".format(
+                alias_rel, versioned_rel))
+        except OSError as exc:
+            print("error: cannot read a skill zip ({}); fail-closed".format(exc), file=sys.stderr)
+            return 2
+        else:
+            if versioned_bytes != alias_bytes:
+                findings.append("{} is not byte-identical to {} (the stable alias must equal the "
+                                "version-numbered copy)".format(alias_rel, versioned_rel))
+
     if findings:
         print("FAIL: {} version finding(s)".format(len(findings)))
         for finding in findings:
             print("  " + finding)
         print("changelog.toml is the single source; run tools/gen_changelog.py to regenerate VERSION")
         return 1
-    print("PASS: {} release version(s) well-formed and increasing; VERSION == latest ({})".format(
-        len(parsed), latest))
+    print("PASS: {} release version(s) well-formed and increasing; VERSION == latest ({}); the "
+          "version-numbered skill zip ships and the stable alias is byte-identical".format(
+              len(parsed), latest))
     return 0
+
+
+# --- self-test --------------------------------------------------------------------------------------
+# Proves the version-match leg fires on the things it must catch, against synthetic temp trees, never the
+# real tree: a byte-identical zip pair passes, a missing version-numbered zip fails (exit 1), and a
+# byte-differing pair fails (exit 1). Offline, stdlib only.
+
+_CHANGELOG = (
+    'title = "t"\nnote = "n"\n\n'
+    '[[release]]\ntitle = "r"\nversion = "1.0.0"\ndate = "2026-01-01"\nitems = ["x"]\n')
+
+
+def _write_versions_fixture(root, versioned_bytes, alias_bytes):
+    """Write a minimal single-source tree (changelog.toml, VERSION) plus the two skill zips (each optional:
+    pass None to omit that file), so the version-match leg can run off a real synthetic root."""
+    (root / "changelog.toml").write_text(_CHANGELOG, encoding="utf-8")
+    (root / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    downloads = root / "site" / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    if versioned_bytes is not None:
+        (downloads / "aiqt-skill-1.0.0.zip").write_bytes(versioned_bytes)
+    if alias_bytes is not None:
+        (downloads / "aiqt-skill.zip").write_bytes(alias_bytes)
+
+
+def self_test_main():
+    import io
+    import shutil
+    import tempfile
+    from contextlib import redirect_stdout, redirect_stderr
+
+    def _run_quiet(root):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return check_versions(root)
+
+    failures = []
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-versions-selftest-"))
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        same = b"PK\x03\x04 identical skill zip bytes"
+        # 1. byte-identical pair passes (exit 0).
+        good = tmp / "good"
+        good.mkdir()
+        _write_versions_fixture(good, same, same)
+        if _run_quiet(good) != 0:
+            failures.append("byte-identical zip pair expected exit 0")
+
+        # 2. a missing version-numbered zip fails (exit 1).
+        missing = tmp / "missing"
+        missing.mkdir()
+        _write_versions_fixture(missing, None, same)
+        if _run_quiet(missing) != 1:
+            failures.append("a missing version-numbered zip expected exit 1")
+
+        # 3. a byte-differing pair fails (exit 1).
+        differ = tmp / "differ"
+        differ.mkdir()
+        _write_versions_fixture(differ, same, same + b" extra")
+        if _run_quiet(differ) != 1:
+            failures.append("a byte-differing zip pair expected exit 1")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if failures:
+        print("SELF-TEST FAIL:")
+        for f in failures:
+            print("  - " + f)
+        return 1
+    print("SELF-TEST PASS: a byte-identical version-numbered/alias zip pair passes; a missing "
+          "version-numbered zip and a byte-differing pair each fail (exit 1).")
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--self-test" in argv:
+        return self_test_main()
+    return check_versions(repo_root())
 
 
 if __name__ == "__main__":

@@ -16,14 +16,17 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (`site/downloads/aiqt-skill.zip`, `site/downloads/aiqt-instructions.txt`) and their generating inputs
-   (the corpus and `tools/gen_skill.py`) do not change; the release-metadata edits prescribed below (the
-   recorded digests, the evidence fields, and the tag key) are the only changes permitted after this
-   point.
+   (the version-numbered `site/downloads/aiqt-skill-1.0.0.zip`, which the site links to, and
+   `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
+   `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
+   byte-identical to the version-numbered copy (the `check_versions` gate enforces the match). On a
+   version bump, update the `ZIP_VERSIONED_PARTS` literal in `tools/gen_skill.py` to the new version and
+   remove any stale prior-version zip. The release-metadata edits prescribed below (the recorded digests,
+   the evidence fields, and the tag key) are the only changes permitted after this point.
 2. Compute. From the repository root on the frozen tree, run
-   `sha256sum site/downloads/aiqt-skill.zip site/downloads/aiqt-instructions.txt`. These two files are
-   the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in the
-   evidence page and the `changelog.toml` reserved-key example. The mapping exports under
+   `sha256sum site/downloads/aiqt-skill-1.0.0.zip site/downloads/aiqt-instructions.txt`. These two files
+   are the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in
+   the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
 3. Record. Add a `[release.artifacts]` sub-table to the latest `[[release]]` in `changelog.toml`,

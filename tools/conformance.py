@@ -835,8 +835,9 @@ A self-test confidentiality rule body.
 
 def _add_skill_surface(base):
     """Install a VALID generated chat-skill surface onto a tree already built by _build_conformant: the
-    reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the deterministic
-    aiqt-skill.zip, all from _SKILL_SRC_FIXTURE. Because regeneration then succeeds, a later hand-edit of
+    reserved site/downloads/aiqt/* files, the standalone aiqt-instructions.txt, and the two deterministic,
+    byte-identical zips (aiqt-skill.zip and the version-numbered aiqt-skill-1.0.0.zip), all from
+    _SKILL_SRC_FIXTURE. Because regeneration then succeeds, a later hand-edit of
     any installed output (SKILL.md or the zip) reads as drift (C2 skill FAIL), not MALFORMED."""
     src = base.joinpath(*gen_skill.SKILL_SRC_PARTS)
     src.parent.mkdir(parents=True, exist_ok=True)
@@ -853,7 +854,8 @@ def _add_skill_surface(base):
     manifest = base.joinpath(*gen_skill.IDENTITY_MANIFEST_PARTS)
     if not manifest.exists():
         manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text('[plugin]\nauthor-name = "Self Test"\n', encoding="utf-8")
+        manifest.write_text('[plugin]\nauthor-name = "Self Test"\nhomepage = "https://example.test"\n',
+                            encoding="utf-8")
     reserved_map, standalone, binary = gen_skill.build_outputs(base)
     reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
     reserved_dir.mkdir(parents=True, exist_ok=True)
