@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "4152aa9a4e0d384f526da9cf0518291938f0732118bff5471c7211f3471b15bd"
+tree-sha256 = "9ac5ec0707110c3a202315bc8d15485f99582f2b93b0d0d19623bae090c279d0"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2216,8 +2216,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 14961
-sha256 = "d73562b054a1f89e302e89115a330181e3e0d65c2b6c3d2889919efe347bdc98"
+bytes = 14957
+sha256 = "975262da0c66a74e2fa45c50d59896e79f95864aef26cd705162e73ee86d5c1e"
 
 [[sources]]
 path = "site/install-chatgpt.html"
@@ -2426,8 +2426,8 @@ sha256 = "46fe8d5eb030e2e092d4a7e157fd4cc2f597b42967248ab4bb656b42042d9e68"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 14842
-sha256 = "180fc35abfdc26f75c51480a1ade9345fe9e3f05f7a00b99f366a8b4f928bacb"
+bytes = 17405
+sha256 = "8d9c93c2dad38228a72a725aca24621ed29913661fcc0439c246c9ce658b7227"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
@@ -2576,8 +2576,8 @@ sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 8161
-sha256 = "1fdc9416bc3d826e50c2305fc78eccbefd277654d3331fd853bd61184c81fe3f"
+bytes = 8226
+sha256 = "cf5ffa25a5c329e20af76ca1dde12cc75a14201083233b99e895b07f1a0b036b"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
