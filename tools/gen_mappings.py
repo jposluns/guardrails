@@ -124,6 +124,11 @@ def rule_title(path):
     raise ValueError("{}: no body '# ' heading to use as the rule title".format(path.name))
 
 
+def _framework_sort_key(row):
+    """Group frameworks alphabetically by source family (publisher), then by framework stem."""
+    return (natkey(row["publisher"].casefold()), natkey(row["framework"].casefold()))
+
+
 def build_rows(corpus, manifests):
     """One flat row per (rule, framework, id) mapping, in canonical rule order then framework/fit key
     order then the manifest's natural id order. Every downstream artifact is derived from this list."""
@@ -190,7 +195,7 @@ def registry_rows(manifests, rows):
             "ids_cited": len(cited.get(stem, ())),
             "ids_total": len(manifest.ids),
         })
-    return out
+    return sorted(out, key=_framework_sort_key)
 
 
 def render_coverage(reg, rows):
@@ -334,7 +339,9 @@ def render_forward(rows):
             '        <div class="inner">',
             '          <p><a href="{}" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>'.format(_attr(source)),
             '          <ul>']
-        for _fw, frows in _group_ordered(rrows, "framework").items():
+        framework_groups = _group_ordered(rrows, "framework")
+        for _fw, frows in sorted(
+                framework_groups.items(), key=lambda item: _framework_sort_key(item[1][0])):
             head = frows[0]
             parts.append('            <li>{name} ({edition}): {relation}'.format(
                 name=_text(head["framework_name"]), edition=_text(head["edition"]),
@@ -443,6 +450,7 @@ def main():
         corpus = gen_rules.load_corpus(src_dir)
         corpus.sort(key=lambda item: sort_key(item[1]))
         rows = build_rows(corpus, manifests)
+        export_rows = sorted(rows, key=_framework_sort_key)
     except (ManifestError, ValueError, OSError, KeyError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
@@ -461,7 +469,7 @@ def main():
         text = replace_block(text, "REGISTRYINTRO", render_registry_intro(reg))
         text = replace_block(text, "REGISTRY", render_registry(reg))
         text = replace_block(text, "FORWARD", render_forward(rows))
-        text = replace_block(text, "REVERSE", render_reverse(rows, reg))
+        text = replace_block(text, "REVERSE", render_reverse(export_rows, reg))
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
@@ -470,10 +478,10 @@ def main():
     if reconcile(page, text, check):
         print("drift: site/mappings.html")
         drift = True
-    if reconcile(root / "site" / "downloads" / "mappings.csv", render_csv(rows), check):
+    if reconcile(root / "site" / "downloads" / "mappings.csv", render_csv(export_rows), check):
         print("drift: site/downloads/mappings.csv")
         drift = True
-    if reconcile(root / "site" / "downloads" / "mappings.json", render_json(reg, rows), check):
+    if reconcile(root / "site" / "downloads" / "mappings.json", render_json(reg, export_rows), check):
         print("drift: site/downloads/mappings.json")
         drift = True
     if check and drift:
