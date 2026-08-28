@@ -29,6 +29,14 @@ What it verifies (fail-closed):
       --update. --update REFUSES to bless if the source hash changed but a condensation was not also changed
       in git (the reconciliation did not happen), unless --force says no change was needed.
 
+      DISCLOSED RESIDUAL (the reconciliation check is a heuristic, not a proof). The git check proves only
+      that a condensation was "changed vs HEAD", NOT that the change semantically reconciled the meaning: a
+      whitespace-only edit to a condensation satisfies it. And when the recorded baseline is MISSING or
+      EMPTY there is no prior hash to compare, so the drift check cannot run at all; a fresh bless in that
+      state is refused unless --force is passed, so an emptied or deleted baseline can never be blessed away
+      silently. True editorial fidelity of a condensation to the source remains human judgment this gate
+      cannot verify.
+
 Usage:
   check_sized_instructions.py             check; exit non-zero on any finding or drift
   check_sized_instructions.py --update    reconcile: verify caps/versions, then record the source hash
@@ -56,9 +64,14 @@ SOURCE_REL = "site/downloads/aiqt-instructions.txt"           # the generated so
 SKILL_SRC_REL = ".aiqt/core/skill/skill-source.md"            # the authoritative version lives in its meta
 RECORDED_REL = "tools/sized-instructions-source.sha256"       # the blessed source hash (tracked, tools/**)
 
-# The first line-anchored `Version X.Y.Z` in a file. Greedy \d+ over three dotted groups then a word
-# boundary matches both the source's "Version 1.0.3 ." and a condensation's "Version 1.0.3." spelling.
-VERSION_RE = re.compile(r"^Version\s+(\d+\.\d+\.\d+)\b", re.M)
+# A line-anchored `Version X.Y.Z` line. HORIZONTAL whitespace only ([ \t], never \s, so a bare "Version"
+# line cannot swallow the next line's number across the newline). Exactly three dotted numeric groups,
+# with the end anchored so a 4th dotted segment (1.2.3.4) or a trailing alphanumeric (1.2.3rc1) does NOT
+# read as a valid version: `(?![A-Za-z0-9])` rejects a following letter or digit, `(?!\.\d)` rejects a
+# following ".<digit>" 4th segment, while still allowing a trailing sentence period ("Version 1.0.3.") and
+# the source's "Version 1.0.3 ." spelling. A malformed version matches nothing and is a fail-closed finding,
+# never a silent pass.
+VERSION_RE = re.compile(r"^Version[ \t]+(\d+\.\d+\.\d+)(?![A-Za-z0-9])(?!\.\d)", re.M)
 
 
 class GateError(Exception):
@@ -72,11 +85,17 @@ def char_count(text):
 
 
 def extract_version(text, where):
-    """The version from the first line-anchored `Version X.Y.Z` in `text`, or GateError naming `where`."""
-    m = VERSION_RE.search(text)
-    if not m:
-        raise GateError("{}: no line-anchored 'Version X.Y.Z' line found".format(where))
-    return m.group(1)
+    """The single version from the line-anchored `Version X.Y.Z` line(s) in `text`, or GateError naming
+    `where`. Every valid version line is collected (not just the first), so two CONFLICTING version lines
+    are a fail-closed finding rather than the first silently winning; a missing or malformed line is a
+    finding too."""
+    versions = VERSION_RE.findall(text)
+    if not versions:
+        raise GateError("{}: no valid line-anchored 'Version X.Y.Z' line found".format(where))
+    distinct = sorted(set(versions))
+    if len(distinct) > 1:
+        raise GateError("{}: conflicting version lines {}".format(where, distinct))
+    return distinct[0]
 
 
 def skill_version(root):
@@ -86,7 +105,7 @@ def skill_version(root):
     path = root / SKILL_SRC_REL
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(SKILL_SRC_REL, exc))
     try:
         sections = gen_skill._split_sections(text)
@@ -104,8 +123,12 @@ def skill_version(root):
 
 
 def _read_text(root, rel):
+    """The file's text with NO newline translation, so char_count() equals `wc -m` exactly. read_text()
+    normalizes CRLF to LF before len(), which would undercount a CRLF file by one character per line and
+    let a just-over-cap CRLF condensation read as within its cap; decoding the raw bytes preserves every
+    CR so the count matches wc -m."""
     try:
-        return (root / rel).read_text(encoding="utf-8")
+        return (root / rel).read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise GateError("cannot read {} ({}); fail-closed".format(rel, exc))
 
@@ -178,25 +201,39 @@ def run(root, update=False, force=False):
     recorded_path = root / RECORDED_REL
 
     if update:
-        # Refuse to bless stale condensations: if the source hash changed but a condensation was not also
-        # changed in git, the reconciliation did not happen (unless --force says no change was needed).
+        # Read any prior blessed hash. A MISSING or EMPTY baseline offers nothing to reconcile the source
+        # drift against, so a fresh bless there cannot run the reconciliation check at all: it must be an
+        # explicit, deliberate act (--force), never a silent free bless. Without this, deleting or emptying
+        # the baseline bypassed the reconciliation entirely (the delete-the-baseline bypass).
+        recorded = ""
         if recorded_path.exists():
             try:
                 recorded = recorded_path.read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError) as exc:
                 print("error: cannot read {} ({}); fail-closed".format(RECORDED_REL, exc), file=sys.stderr)
                 return 2
-            if recorded and recorded != computed and not force:
-                for rel, _cap in SIZED:
-                    unchanged = _git_unchanged(root, rel)
-                    if unchanged is None:
-                        print("refusing to bless: cannot confirm via git whether {} was reconciled; "
-                              "commit the reconciliation or pass --force".format(rel), file=sys.stderr)
-                        return 1
-                    if unchanged:
-                        print("refusing to bless: the source changed but {} was not reconciled; update it, "
-                              "or pass --force if no change is needed".format(rel), file=sys.stderr)
-                        return 1
+        if not recorded:
+            if not force:
+                print("refusing to bless: {} carries no prior blessed source hash (missing or empty), so "
+                      "the source-drift reconciliation has no baseline to check against. A fresh bless must "
+                      "be explicit: reconcile the condensations with the source, then re-run with "
+                      "--force.".format(RECORDED_REL), file=sys.stderr)
+                return 1
+        elif recorded != computed and not force:
+            # The source changed. Refuse to bless if a condensation was not also changed in git (the
+            # reconciliation did not happen). Residual, disclosed in the docstring: this proves only
+            # "changed vs HEAD", not that the edit actually reconciled the meaning; a whitespace-only edit
+            # to a condensation passes this git-diff heuristic.
+            for rel, _cap in SIZED:
+                unchanged = _git_unchanged(root, rel)
+                if unchanged is None:
+                    print("refusing to bless: cannot confirm via git whether {} was reconciled; "
+                          "commit the reconciliation or pass --force".format(rel), file=sys.stderr)
+                    return 1
+                if unchanged:
+                    print("refusing to bless: the source changed but {} was not reconciled; update it, "
+                          "or pass --force if no change is needed".format(rel), file=sys.stderr)
+                    return 1
         if findings:
             print("refusing to record: the condensations still fail a content check:", file=sys.stderr)
             for f in findings:
@@ -244,9 +281,15 @@ def run(root, update=False, force=False):
 # Synthetic fixtures assert the fail-closed invariants without the real corpus:
 #   (a) the pure content check: a clean set has no findings; an over-cap file, a condensation version
 #       mismatch, and a source version mismatch each produce a finding;
+#   (a2) version parsing (fix 1): the canonical and source spellings parse; a 4th dotted segment, a
+#       Version line split across a newline, and two conflicting version lines each fail-close.
 #   (b) run() end to end on a temp root: a conformant tree passes (exit 0); an over-cap condensation,
 #       a version mismatch, and an un-reconciled source drift (recorded != computed) each fail (exit 1);
-#   (c) fail-closed (exit 2): a missing condensation and a missing recorded hash file.
+#   (c) fail-closed (exit 2): a missing condensation and a missing recorded hash file;
+#   (d) hardening mutations: a CRLF condensation one char over its cap fails (fix 2, exit 1); invalid
+#       UTF-8 in skill-source.md fails closed (fix 3, exit 2); a 4th-segment source version fails closed
+#       (fix 1, exit 2); and an empty or missing --update baseline refuses to bless without --force but
+#       performs an explicit --force fresh bless (fix 4).
 
 _MIN_SKILL = "=== meta ===\nversion: {v}\n"
 
@@ -302,6 +345,25 @@ def _self_test():
     if not any(SOURCE_REL in f for f in compute_findings("1.2.3", _wrap("9.9.9"), clean)):
         failures.append("pure: a source version mismatch produced no finding")
 
+    # (a2) version parsing (fix 1): horizontal-whitespace-only, exactly three dotted segments, and a
+    # conflict between two disagreeing version lines is a fail-closed finding, not a silent first-wins.
+    def raises_gate(text):
+        try:
+            extract_version(text, "x")
+        except GateError:
+            return True
+        return False
+    if extract_version(_wrap("1.0.3"), "x") != "1.0.3":
+        failures.append("version: the canonical 'Version 1.0.3.' spelling did not parse")
+    if extract_version("AIQT\nVersion 1.0.3 .\n", "x") != "1.0.3":
+        failures.append("version: the source 'Version 1.0.3 .' spelling did not parse")
+    if not raises_gate(_wrap("1.2.3.4")):
+        failures.append("version: a 4th dotted segment (1.2.3.4) was accepted, not rejected")
+    if not raises_gate("AIQT instructions\nVersion\n1.2.3\n"):
+        failures.append("version: a split 'Version<newline>1.2.3' was accepted across the newline")
+    if not raises_gate("AIQT\nVersion 1.2.3.\nVersion 9.9.9.\n"):
+        failures.append("version: two conflicting version lines did not fail (first silently won)")
+
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-sized-selftest-"))
     try:
         # (b) run() end to end.
@@ -331,6 +393,45 @@ def _self_test():
         miss_rec = _build(tmp / "missrec", record=False)
         if quiet(miss_rec) != 2:
             failures.append("a missing recorded hash file expected exit 2 (fail-closed)")
+
+        # (d) hardening mutations, each a fail-without-the-fix guard.
+        # Fix 2 (CRLF char count): a condensation one character over its cap when CR is counted must fail.
+        # read_text() would normalize the CRLF away and undercount it to exactly the cap (a silent pass).
+        crlf = _build(tmp / "crlf")
+        over_line = "Version 1.2.3.\r\n"
+        crlf_body = over_line + "x" * (1501 - len(over_line))   # 1501 chars counting CR, over the 1500 cap
+        (crlf / SIZED[2][0]).write_bytes(crlf_body.encode("utf-8"))
+        if quiet(crlf) != 1:
+            failures.append("a CRLF condensation one char over its cap did not fail (exit 1)")
+
+        # Fix 3 (UTF-8 fail-close): invalid UTF-8 in skill-source.md must fail closed (exit 2), not raise
+        # an uncaught UnicodeDecodeError that would exit 1.
+        badutf8 = _build(tmp / "badutf8")
+        (badutf8 / SKILL_SRC_REL).write_bytes(b"=== meta ===\nversion: 1.2.3\n\xff\xfe")
+        if quiet(badutf8) != 2:
+            failures.append("invalid UTF-8 in skill-source.md did not fail closed (exit 2)")
+
+        # Fix 1 (end to end): a 4th-segment source version is a malformed line, a fail-closed finding (exit 2).
+        badsrcver = _build(tmp / "badsrcver")
+        (badsrcver / SOURCE_REL).write_text(_wrap("1.2.3.4", "body\n"), encoding="utf-8")
+        if quiet(badsrcver) != 2:
+            failures.append("a 4th-segment source version (1.2.3.4) did not fail closed (exit 2)")
+
+        # Fix 4 (--update baseline bypass): an EMPTY or MISSING recorded baseline with a drifted source must
+        # NOT bless without --force (the delete-the-baseline bypass); an explicit --force fresh bless passes.
+        emptybase = _build(tmp / "emptybase")
+        (emptybase / SOURCE_REL).write_text(_wrap("1.2.3", "drifted source\n"), encoding="utf-8")
+        (emptybase / RECORDED_REL).write_text("", encoding="utf-8")
+        if quiet(emptybase, update=True) != 1:
+            failures.append("--update with an empty baseline blessed without --force (bypass)")
+        if quiet(emptybase, update=True, force=True) != 0:
+            failures.append("--update --force with an empty baseline did not perform the fresh bless (exit 0)")
+
+        missbase = _build(tmp / "missbase")
+        (missbase / SOURCE_REL).write_text(_wrap("1.2.3", "drifted source\n"), encoding="utf-8")
+        (missbase / RECORDED_REL).unlink()
+        if quiet(missbase, update=True) != 1:
+            failures.append("--update with a missing baseline blessed without --force (bypass)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -340,9 +441,12 @@ def _self_test():
             print("  - " + f)
         return 1
     print("PASS: check_sized_instructions self-test: the pure content check flags an over-cap file and a "
-          "version mismatch; run() passes a conformant tree and fails an over-cap file, a version mismatch, "
-          "and an un-reconciled source drift (exit 1); a missing condensation and a missing recorded hash "
-          "both fail closed (exit 2)")
+          "version mismatch; version parsing rejects a 4th segment, a newline-split Version line, and "
+          "conflicting version lines; run() passes a conformant tree and fails an over-cap file, a version "
+          "mismatch, and an un-reconciled source drift (exit 1); a missing condensation, a missing recorded "
+          "hash, invalid UTF-8 in skill-source.md, and a malformed source version all fail closed (exit 2); "
+          "a CRLF condensation over its cap fails (exit 1); and an empty or missing --update baseline "
+          "refuses to bless without --force")
     return 0
 
 

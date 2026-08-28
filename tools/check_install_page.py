@@ -17,25 +17,34 @@ What it verifies (reliably):
 
   1. Each family id exists exactly once on a <section id=X data-family-section=X> with an <h2> that has
      visible text; no id in the document is duplicated.
-  2. No family section carries, on itself, hidden, inert, aria-hidden="true", or the visually-hidden class,
-     so none is default-hidden without JavaScript.
+  2. No family section carries, on itself, hidden, inert, aria-hidden="true", the visually-hidden class, or
+     an inline display:none / visibility:hidden style, so none is default-hidden without JavaScript.
   3. No pre-set filter state: the root <html> has no data-family, and no picker link has aria-current.
   4. Each family has exactly one picker <a data-family-link=X href="#X"> inside the .platform-actions group
      (which install.js queries as '.platform-actions a[data-family-link]').
-  5. Exactly one #family-reset button exists and is hidden in the static markup; the aria-live #family-status
-     status region exists.
-  6. install.js is referenced as an EXTERNAL <script src=".../js/install.js">, and neither the picker group
-     nor any family section (their subtrees) carries an inline <script> or an on* event handler. This is
-     SCOPED to the picker and sections: the shared header's theme/nav inline handlers, and the page's inline
-     style attributes, are out of scope and never fail this gate.
-  7. The guarded collapse rule is present in site/styles.css: a hiding rule whose selector carries a
-     positive, boundary-anchored html[data-family] guard and names data-family-section. This catches the
-     feature being deleted or its guard being renamed.
+  5. The #install-picker group is present and NOT hidden; exactly one #family-reset button exists and is
+     hidden in the static markup; the #family-status region announces (aria-live polite/assertive, or
+     role="status" with no aria-live="off" overriding it).
+  6. install.js is referenced as an EXECUTABLE external <script src=".../js/install.js"> (not commented out,
+     no non-JS type attribute), and site/js/install.js is non-empty and carries the real picker logic. Also
+     neither the picker group nor any family section (their subtrees) carries an inline <script> or an on*
+     event handler. That inline-code scope is keyed by STRUCTURE (the .platform-actions group, #install-picker,
+     or a data-family-section), so removing the id does not move the picker's handlers out of scope; the
+     shared header's theme/nav inline handlers and the page's inline style attributes stay out of scope.
+  7. The guarded collapse rules are present in site/styles.css: the hide-all rule (a SINGLE selector part
+     carrying a positive, non-negated html[data-family] presence guard AND the generic [data-family-section],
+     with a real display:none) AND all five per-family reveal rules (each a single selector part with
+     html[data-family="<fam>"] and [data-family-section="<fam>"] and display:block). The property is matched
+     at a boundary, so a --custom property does not count; a :not()-negated guard, a guard and section split
+     across comma selectors, or a missing reveal each fail. This catches the feature being deleted, its guard
+     renamed or negated, or the page collapsed to hide everything.
 
 What it does NOT verify (the reviewer's and cross-family QA's job): it is not a CSS engine. It does not
-detect a NEW stylesheet rule that hides a family section without the guard, a hiding ancestor, a custom
-class that clips or zeroes opacity, or hiding by id. Those are visible regressions a browser check, a
-reviewer, or the tri-family QA catches; a regex cannot decide them without false positives.
+detect a NEW stylesheet rule (beyond the guarded ones above) that hides a family section without the guard,
+a hiding ancestor, a custom class that clips or zeroes opacity, or hiding by id. It does not execute
+install.js or prove the picker logic is correct, only that the expected functions are present. Those are
+visible regressions a browser check, a reviewer, or the tri-family QA catches; a regex cannot decide them
+without false positives.
 
 Usage:
   check_install_page.py             scan the page, styles, and script
@@ -62,16 +71,33 @@ ZERO_WIDTH = "\u200b\u200c\u200d\ufeff\u00a0\u2060\u200e\u200f\u00ad"
 
 CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 CSS_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.S)
-# A positive root guard: html[data-family] or html[data-family=...], boundary-anchored so a class (.html),
-# a different element (xhtml), or a longer name (data-family-mode) does not count.
-GUARD = re.compile(r"(?:^|[\s,>+~(])html\[data-family(?:[~^$*|]?=|\])", re.I)
-# The page must reference install.js as an external script (with a src).
-EXTERNAL_SCRIPT = re.compile(r'<script[^>]*\ssrc="[^"]*/js/install\.js"', re.I)
+# A hide/show declaration matched at a PROPERTY boundary, so a CSS custom property (--display:none) that
+# sets a variable and hides nothing is NOT mistaken for the real display:none property. The (?<![\w-])
+# lookbehind rejects a preceding word char or hyphen (the "--" of a custom property, or "x-display").
+HIDE_DECL = re.compile(r"(?<![\w-])(?:display:none|visibility:(?:hidden|collapse))")
+SHOW_DECL = re.compile(r"(?<![\w-])display:block")
+# A :not(...) negation of the guard inverts its meaning (hiding when the attribute is ABSENT), so the
+# guard is tested only AFTER the negations are stripped from a selector.
+NOT_PSEUDO = re.compile(r":not\([^)]*\)", re.I)
+# The presence guard html[data-family] (no value) and the generic section [data-family-section] (no
+# value) that together form the hide-all rule; each boundary-anchored so .html, xhtml, or data-family-mode
+# does not count, and the closing ] pins the attribute to its exact name (no value).
+HIDE_GUARD = re.compile(r"(?:^|[\s>+~])html\[data-family\]", re.I)
+GENERIC_SECTION = re.compile(r"\[data-family-section\]")
+# The page must reference install.js as an EXECUTABLE external script; parsed structurally (below) so a
+# commented-out tag or a non-JS type attribute does not count.
 EXECUTABLE_TYPES = {"", "module", "text/javascript", "application/javascript", "text/ecmascript"}
+# The picker logic install.js must actually carry, so an empty or stub file is caught (matched
+# case-insensitively as substrings).
+JS_LOGIC_TOKENS = ("render", "apply", "family")
 
 
 def has_visible_text(data):
     return bool(data.translate({ord(c): None for c in ZERO_WIDTH}).strip())
+
+
+def _style_hides(style):
+    return bool(HIDE_DECL.search(re.sub(r"\s+", "", style).lower()))
 
 
 def is_hiding_element(attrs):
@@ -81,22 +107,56 @@ def is_hiding_element(attrs):
         or "inert" in attrs
         or attrs.get("aria-hidden", "").lower() == "true"
         or "visually-hidden" in classes
+        or _style_hides(attrs.get("style", ""))
     )
 
 
 def _hides(body):
-    b = re.sub(r"\s+", "", body).lower()
-    return "display:none" in b or "visibility:hidden" in b or "visibility:collapse" in b
+    return bool(HIDE_DECL.search(re.sub(r"\s+", "", body).lower()))
 
 
-def collapse_rule_present(css_text):
-    """True iff some hiding rule's selector carries the positive html[data-family] guard and names
-    data-family-section: the guarded collapse rule that hides the non-selected sections only when the
-    attribute is set."""
-    stripped = CSS_COMMENT.sub("", css_text)
-    for selector, body in CSS_RULE.findall(stripped):
-        if _hides(body) and "data-family-section" in selector.lower() and GUARD.search(selector):
-            return True
+def _shows(body):
+    return bool(SHOW_DECL.search(re.sub(r"\s+", "", body).lower()))
+
+
+def _css_rules(css_text):
+    return CSS_RULE.findall(CSS_COMMENT.sub("", css_text))
+
+
+def _selector_parts(selector):
+    """The comma-separated selectors of a rule, each with its :not() negations stripped, so a guard and a
+    family-section named in DIFFERENT comma parts never satisfy a single-part requirement, and a negated
+    guard never counts."""
+    return [NOT_PSEUDO.sub("", part) for part in selector.split(",")]
+
+
+def hide_all_rule_present(css_text):
+    """True iff a single selector part carries BOTH the positive html[data-family] presence guard and the
+    generic [data-family-section] (no value), with a real display:none / visibility:hidden body. This is
+    the rule that collapses every non-selected family section only when the attribute is set."""
+    for selector, body in _css_rules(css_text):
+        if not _hides(body):
+            continue
+        for part in _selector_parts(selector):
+            if HIDE_GUARD.search(part) and GENERIC_SECTION.search(part):
+                return True
+    return False
+
+
+def family_reveal_present(css_text, fam):
+    """True iff a single selector part carries BOTH html[data-family="<fam>"] and
+    [data-family-section="<fam>"] with a real display:block body: the rule that re-shows the selected
+    family. Without all five, a selected family (or all families) would stay hidden."""
+    guard = re.compile(
+        r'(?:^|[\s>+~])html\[data-family\s*[~^$*|]?=\s*["\']?' + re.escape(fam) + r'["\']?\s*\]', re.I)
+    section = re.compile(
+        r'\[data-family-section\s*[~^$*|]?=\s*["\']?' + re.escape(fam) + r'["\']?\s*\]', re.I)
+    for selector, body in _css_rules(css_text):
+        if not _shows(body):
+            continue
+        for part in _selector_parts(selector):
+            if guard.search(part) and section.search(part):
+                return True
     return False
 
 
@@ -123,6 +183,9 @@ class InstallParser(HTMLParser):
         self.status_ok = 0
         self.scoped_inline_scripts = 0
         self.scoped_inline_handlers = []
+        self.picker_present = 0
+        self.picker_hidden = 0
+        self.install_script_ok = 0
         self._h2_family = None
 
     def _in_region(self):
@@ -169,12 +232,33 @@ class InstallParser(HTMLParser):
             if "hidden" in attrs:
                 self.reset_hidden_count += 1
 
+        if attrs.get("id") == "install-picker":
+            self.picker_present += 1
+            if is_hiding_element(attrs):
+                self.picker_hidden += 1
+
         if attrs.get("id") == "family-status":
-            if "aria-live" in attrs or attrs.get("role", "").lower() == "status":
+            live = attrs.get("aria-live", "").strip().lower()
+            role_status = attrs.get("role", "").strip().lower() == "status"
+            # A live region announces only for aria-live polite/assertive, or an implicit role="status"
+            # with no aria-live overriding it; an explicit aria-live="off" defeats the announcement even
+            # under role="status", so "off" never counts as live.
+            if (live in ("polite", "assertive") or role_status) and live != "off":
                 self.status_ok += 1
 
-        # scoped inline-code check: within the picker group or a family section subtree.
-        opens_region = (attrs.get("id") == "install-picker") or ("data-family-section" in attrs)
+        # install.js must be an EXECUTABLE external script. Parsed here (not by regex over the raw page) so
+        # a commented-out <script> is invisible to the parser, and a non-JS type (application/json) or a
+        # missing src does not count.
+        if tag == "script" and "src" in attrs and "/js/install.js" in attrs.get("src", "") \
+                and attrs.get("type", "").strip().lower() in EXECUTABLE_TYPES:
+            self.install_script_ok += 1
+
+        # scoped inline-code check: within the picker group or a family section subtree, keyed by STRUCTURE
+        # (the .platform-actions group, the #install-picker id, or a data-family-section) so removing the id
+        # cannot move the picker's own handlers out of scope.
+        cls = attrs.get("class", "").split()
+        opens_region = ("platform-actions" in cls) or (attrs.get("id") == "install-picker") \
+            or ("data-family-section" in attrs)
         if self._in_region() or opens_region:
             for key in attrs:
                 if re.match(r"on[a-z]+$", key):
@@ -203,9 +287,9 @@ class InstallParser(HTMLParser):
             self.family_has_h2[self._h2_family] = True
 
 
-def analyze(page_text, css_text):
-    """The static findings for the page markup plus the stylesheet collapse rule. Returns a list of
-    strings; an empty list is a clean pass."""
+def analyze(page_text, css_text, js_text):
+    """The static findings for the page markup, the stylesheet collapse rules, and install.js. Returns a
+    list of strings; an empty list is a clean pass."""
     parser = InstallParser()
     parser.feed(page_text)
     problems = []
@@ -248,6 +332,15 @@ def analyze(page_text, css_text):
         problems.append("the {} picker link is not inside the .platform-actions group, so install.js (which "
                         "queries '.platform-actions a[data-family-link]') would not find it.".format(fam))
 
+    # the picker group itself must be present and not hidden
+    if parser.picker_present == 0:
+        problems.append('the picker group (id="install-picker") is missing; the reader has no control to '
+                        "choose a family.")
+    elif parser.picker_hidden:
+        problems.append('the picker group (id="install-picker") is hidden in the static markup (hidden, '
+                        "inert, aria-hidden, the visually-hidden class, or an inline display:none/"
+                        "visibility:hidden style); the reader could not choose a family without JavaScript.")
+
     # 3. no pre-set filter state
     if "data-family" in parser.html_attrs:
         problems.append("the root <html> element carries data-family in the static markup; the filter must "
@@ -268,10 +361,19 @@ def analyze(page_text, css_text):
         problems.append('the aria-live status region (id="family-status" with aria-live or role="status") '
                         "is missing.")
 
-    # 5. install.js external; no inline code inside the picker or the family sections
-    if not EXTERNAL_SCRIPT.search(page_text):
-        problems.append("the page does not reference /js/install.js as an external <script src=...>; the "
-                        "picker behaviour would be gone.")
+    # 5. install.js is an executable external script carrying real logic; no inline code in the picker/sections
+    if not parser.install_script_ok:
+        problems.append("the page does not reference /js/install.js as an executable external "
+                        "<script src=...> (it is commented out, carries a non-JS type attribute, or is "
+                        "absent); the picker behaviour would be gone.")
+    if not js_text.strip():
+        problems.append("site/js/install.js is empty; the picker logic is gone.")
+    else:
+        low = js_text.lower()
+        missing = [tok for tok in JS_LOGIC_TOKENS if tok not in low]
+        if missing:
+            problems.append("site/js/install.js does not carry the expected picker logic (missing: {}); it "
+                            "may be a stub or placeholder.".format(", ".join(missing)))
     if parser.scoped_inline_scripts:
         problems.append("the picker or a family section contains an inline <script>; move the code to "
                         "site/js/install.js.")
@@ -279,12 +381,19 @@ def analyze(page_text, css_text):
         problems.append("the picker or a family section carries an inline event handler {}; bind the "
                         "listener in site/js/install.js instead.".format(handler))
 
-    # 6. the guarded collapse rule still exists
-    if not collapse_rule_present(css_text):
-        problems.append("no guarded collapse rule found in site/styles.css: a rule keyed on a positive "
-                        "html[data-family] must hide the non-selected data-family-section. The selector "
-                        "feature has rotted out, or its guard is no longer the html[data-family] form this "
-                        "gate recognizes.")
+    # 6. the guarded collapse rules still exist: the hide-all rule AND all five per-family reveal rules
+    if not hide_all_rule_present(css_text):
+        problems.append("no guarded hide-all collapse rule found in site/styles.css: a single selector must "
+                        "carry a positive html[data-family] presence guard AND the generic "
+                        "[data-family-section] (guard not negated, both in the same selector) with a real "
+                        "display:none. The feature has rotted out, its guard was renamed or negated, the "
+                        "guard and section were split across selectors, or the property is a --custom one.")
+    missing_reveals = [f for f in FAMILIES if not family_reveal_present(css_text, f)]
+    if missing_reveals:
+        problems.append("the per-family reveal rule is missing for: {}. Each family needs a single selector "
+                        'html[data-family="<fam>"] ... [data-family-section="<fam>"] with display:block, or '
+                        "the selected family (or every family) would stay hidden.".format(
+                            ", ".join(missing_reveals)))
     return problems
 
 
@@ -298,25 +407,30 @@ def run(root):
     try:
         page_text = page.read_text(encoding="utf-8")
         css_text = styles.read_text(encoding="utf-8")
-        js.read_text(encoding="utf-8")   # opened so an unreadable script fails closed, not silently clean
+        js_text = js.read_text(encoding="utf-8")   # read so an unreadable OR empty script fails, not silently clean
     except (OSError, UnicodeDecodeError) as exc:
         print("error: cannot read an install-page input ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
 
-    problems = analyze(page_text, css_text)
+    problems = analyze(page_text, css_text, js_text)
     if problems:
         print("FAIL: {} install-page problem(s):".format(len(problems)))
         for problem in problems:
             print("  - " + problem)
         return 1
-    print("PASS: the install page carries all five family sections statically and visibly, the picker and "
-          "single hidden reset and status region are present with no pre-set filter state, no inline code in "
-          "the picker or sections, and the guarded collapse rule is present.")
+    print("PASS: the install page carries all five family sections statically and visibly, the visible "
+          "picker and single hidden reset and announcing status region are present with no pre-set filter "
+          "state, install.js is an executable external script carrying the picker logic with no inline code "
+          "in the picker or sections, and the guarded hide-all plus all five per-family reveal rules are "
+          "present.")
     return 0
 
 
 # --- self-test ----------------------------------------------------------------------------------------
-# A synthetic conformant page + stylesheet pass; each targeted mutation fails (exit 1); and a missing input
+# A synthetic conformant page + stylesheet + script pass; each targeted mutation (including the hardened
+# ones: inline-style hiding, aria-live="off", a missing or hidden picker, an inline handler on a de-ided
+# .platform-actions, a commented-out or non-JS-type or empty or stub install.js, a --custom-property or
+# :not()-negated or split hide-all guard, and all five reveal rules removed) fails; and a missing input
 # fails closed (exit 2).
 
 def _clean_page():
@@ -339,9 +453,19 @@ def _clean_page():
             '<script src="/js/install.js" defer></script></body></html>')
 
 
+_REVEALS = ",\n".join(
+    'html[data-family="{0}"] section[data-family-section="{0}"]'.format(f) for f in FAMILIES)
 _CLEAN_CSS = ("body{color:#111}\n"
               "html[data-family] section[data-family-section]{display:none}\n"
-              'html[data-family="claude"] section[data-family-section="claude"]{display:block}\n')
+              + _REVEALS + "{display:block}\n")
+
+_CLEAN_JS = ("(function(){\n"
+             "  var FAMILIES = ['claude','chatgpt','gemini','copilot','other'];\n"
+             "  var root = document.documentElement;\n"
+             "  function render(family){ root.setAttribute('data-family', family); }\n"
+             "  function apply(){ render(FAMILIES[0]); }\n"
+             "  apply();\n"
+             "})();\n")
 
 
 def _self_test():
@@ -354,41 +478,81 @@ def _self_test():
     clean = _clean_page()
 
     # Pure analyze() clean pass.
-    if analyze(clean, _CLEAN_CSS):
-        failures.append("a clean page produced findings: {}".format(analyze(clean, _CLEAN_CSS)))
+    if analyze(clean, _CLEAN_CSS, _CLEAN_JS):
+        failures.append("a clean page produced findings: {}".format(analyze(clean, _CLEAN_CSS, _CLEAN_JS)))
 
+    # A split-selector hide-all (guard and section in DIFFERENT comma parts) and a :not()-negated guard:
+    # both look superficially guarded but do not actually collapse the sections when the attribute is set.
+    _split_css = ("html[data-family] p, section[data-family-section]{display:none}\n" + _REVEALS
+                  + "{display:block}\n")
+    _negated_css = (":not(html[data-family]) section[data-family-section]{display:none}\n" + _REVEALS
+                    + "{display:block}\n")
+    _custom_prop_css = ("html[data-family] section[data-family-section]{--display:none}\n" + _REVEALS
+                        + "{display:block}\n")
+    _no_reveals_css = "html[data-family] section[data-family-section]{display:none}\n"
+
+    # Each mutation is (label, page, css, js); a mutation of one input keeps the others clean.
     mutations = [
         ("dropped family section",
          clean.replace('<section id="gemini" data-family-section="gemini"><h2>Add AIQT to gemini</h2>'
-                       '<p style="margin-top:1rem">steps</p></section>', ""), _CLEAN_CSS),
+                       '<p style="margin-top:1rem">steps</p></section>', ""), _CLEAN_CSS, _CLEAN_JS),
         ("default-hidden section",
          clean.replace('<section id="copilot" data-family-section="copilot">',
-                       '<section id="copilot" data-family-section="copilot" hidden>'), _CLEAN_CSS),
+                       '<section id="copilot" data-family-section="copilot" hidden>'), _CLEAN_CSS, _CLEAN_JS),
+        ("inline-style hidden section",
+         clean.replace('<section id="copilot" data-family-section="copilot">',
+                       '<section id="copilot" data-family-section="copilot" style="display:none">'),
+         _CLEAN_CSS, _CLEAN_JS),
         ("picker link wrong href",
          clean.replace('href="#other" data-family-link="other"',
-                       'href="#others" data-family-link="other"'), _CLEAN_CSS),
+                       'href="#others" data-family-link="other"'), _CLEAN_CSS, _CLEAN_JS),
         ("pre-set data-family on root",
-         clean.replace('<html lang="en">', '<html lang="en" data-family="claude">'), _CLEAN_CSS),
+         clean.replace('<html lang="en">', '<html lang="en" data-family="claude">'), _CLEAN_CSS, _CLEAN_JS),
         ("reset not hidden",
          clean.replace('<button type="button" id="family-reset" hidden>Show all</button>',
-                       '<button type="button" id="family-reset">Show all</button>'), _CLEAN_CSS),
+                       '<button type="button" id="family-reset">Show all</button>'), _CLEAN_CSS, _CLEAN_JS),
         ("missing status region",
-         clean.replace('<span role="status" aria-live="polite" id="family-status"></span>', ""), _CLEAN_CSS),
+         clean.replace('<span role="status" aria-live="polite" id="family-status"></span>', ""),
+         _CLEAN_CSS, _CLEAN_JS),
+        ("aria-live off is not live",
+         clean.replace('aria-live="polite"', 'aria-live="off"'), _CLEAN_CSS, _CLEAN_JS),
+        ("missing picker group",
+         clean.replace(' id="install-picker"', ""), _CLEAN_CSS, _CLEAN_JS),
+        ("hidden picker group",
+         clean.replace('<div class="platform-actions" id="install-picker">',
+                       '<div class="platform-actions" id="install-picker" hidden>'), _CLEAN_CSS, _CLEAN_JS),
         ("inline handler on a section",
          clean.replace('<section id="claude" data-family-section="claude">',
-                       '<section id="claude" data-family-section="claude" onclick="x()">'), _CLEAN_CSS),
+                       '<section id="claude" data-family-section="claude" onclick="x()">'),
+         _CLEAN_CSS, _CLEAN_JS),
+        ("inline handler on .platform-actions (id removed)",
+         clean.replace(' id="install-picker"', ' onclick="x()"'), _CLEAN_CSS, _CLEAN_JS),
         ("inline script inside the picker",
          clean.replace('<button type="button" id="family-reset" hidden>Show all</button>',
                        '<button type="button" id="family-reset" hidden>Show all</button><script>x()</script>'),
-         _CLEAN_CSS),
+         _CLEAN_CSS, _CLEAN_JS),
         ("install.js no longer external",
-         clean.replace('<script src="/js/install.js" defer></script>', ""), _CLEAN_CSS),
-        ("collapse rule removed", clean, "body{color:#111}\n"),
+         clean.replace('<script src="/js/install.js" defer></script>', ""), _CLEAN_CSS, _CLEAN_JS),
+        ("install.js script commented out",
+         clean.replace('<script src="/js/install.js" defer></script>',
+                       '<!-- <script src="/js/install.js" defer></script> -->'), _CLEAN_CSS, _CLEAN_JS),
+        ("install.js non-JS type",
+         clean.replace('<script src="/js/install.js" defer></script>',
+                       '<script src="/js/install.js" type="application/json"></script>'),
+         _CLEAN_CSS, _CLEAN_JS),
+        ("install.js empty", clean, _CLEAN_CSS, "\n"),
+        ("install.js stub without logic", clean, _CLEAN_CSS, "// placeholder\n"),
+        ("collapse rule removed", clean, "body{color:#111}\n", _CLEAN_JS),
         ("collapse guard renamed", clean,
-         "html[data-family-mode] section[data-family-section]{display:none}\n"),
+         "html[data-family-mode] section[data-family-section]{display:none}\n" + _REVEALS
+         + "{display:block}\n", _CLEAN_JS),
+        ("hide-all custom-property fragment", clean, _custom_prop_css, _CLEAN_JS),
+        ("hide-all guard negated by :not()", clean, _negated_css, _CLEAN_JS),
+        ("hide-all guard and section split across selectors", clean, _split_css, _CLEAN_JS),
+        ("all five reveal rules removed", clean, _no_reveals_css, _CLEAN_JS),
     ]
-    for label, page, css in mutations:
-        if not analyze(page, css):
+    for label, page, css, js in mutations:
+        if not analyze(page, css, js):
             failures.append("mutation '{}' produced no finding".format(label))
 
     # run() exit-code legs on temp roots.
@@ -402,7 +566,7 @@ def _self_test():
         (good / "site" / "js").mkdir(parents=True)
         (good / PAGE_REL).write_text(clean, encoding="utf-8")
         (good / STYLES_REL).write_text(_CLEAN_CSS, encoding="utf-8")
-        (good / JS_REL).write_text("// install\n", encoding="utf-8")
+        (good / JS_REL).write_text(_CLEAN_JS, encoding="utf-8")
         if quiet(good) != 0:
             failures.append("a conformant tree did not pass (exit 0)")
 
@@ -412,7 +576,7 @@ def _self_test():
                                                          'data-family-link="other" aria-current="true"'),
                                           encoding="utf-8")
         (regressed / STYLES_REL).write_text(_CLEAN_CSS, encoding="utf-8")
-        (regressed / JS_REL).write_text("// install\n", encoding="utf-8")
+        (regressed / JS_REL).write_text(_CLEAN_JS, encoding="utf-8")
         if quiet(regressed) != 1:
             failures.append("a regressed page did not report a finding (exit 1)")
 

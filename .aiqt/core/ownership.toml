@@ -59,7 +59,7 @@ note = "Regenerated from manifest plus version; carved out of SOURCES (R9-6)."
 [[release-class]]
 pattern = "site/downloads/**"
 class = "derived"
-note = "Published outputs, corpus-derived, manifest-covered in SOURCES; drift-gated at source: the machine-generated outputs by their own gensrc drift gates, the hand-authored sized instruction condensations (aiqt-instructions-8k/5k/1_5k.txt), which have no generator, by tools/check_sized_instructions.py."
+note = "Published outputs, corpus-derived, manifest-covered in SOURCES. The machine-generated outputs are byte-identity drift-gated at source by their own gensrc drift gates. The hand-authored sized instruction condensations (aiqt-instructions-8k/5k/1_5k.txt) have no generator; tools/check_sized_instructions.py gates their character caps, version agreement, and a recorded SHA-256 of the generated source, but their editorial reconciliation with that source is a maintainer --update step whose git-diff check proves only that a condensation changed versus HEAD, not that the change preserved the meaning (a whitespace-only edit passes), so semantic fidelity rests on maintainer review, not on the gate."
 
 # --- concern-1: pack-immutable subtrees -----------------------------------------------------------------
 
