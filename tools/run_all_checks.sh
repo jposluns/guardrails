@@ -61,6 +61,8 @@ run_gate "overclaim-selftest" python3 tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 tools/check_overclaim.py
 run_gate "footer-selftest" python3 tools/check_footer.py --self-test
 run_gate "footer" python3 tools/check_footer.py
+run_gate "newtab-selftest" python3 tools/check_newtab.py --self-test
+run_gate "newtab" python3 tools/check_newtab.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py

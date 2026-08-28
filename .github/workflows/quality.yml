@@ -95,6 +95,12 @@ jobs:
       - name: Footer coverage
         run: python3 tools/check_footer.py
 
+      - name: New-tab external links self-test
+        run: python3 tools/check_newtab.py --self-test
+
+      - name: New-tab external links
+        run: python3 tools/check_newtab.py
+
       - name: Roadmap drift
         run: python3 tools/gen_roadmap.py --check
 

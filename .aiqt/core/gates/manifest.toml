@@ -283,6 +283,15 @@ class = "a"
 residue = "It checks per-file footer coverage across the surface. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "newtab"
+script = "tools/check_newtab.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks that every external site link opens in a new tab with a noopener rel. It is a site UX and reverse-tabnabbing-safety invariant, not a corpus-rule linkage, so none is claimed here."
+
+[[gate]]
 id = "versions"
 script = "tools/check_versions.py"
 rules = []
