@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "e7f2ec408e65f8563da4129e42b3c20e1fc2b21fdc313c6ba709a29760d724f4"
+tree-sha256 = "040c4ae70947b55c338a4b5935d6a4493d5b6948bfc070b302eeddbf4ed07c5f"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 33155
-sha256 = "5749dba44bd25088ac3561013cff90e2a433228c4580e234b62e198d99ea8e62"
+bytes = 34844
+sha256 = "51c593bc6df0552c01c20c66073032adbf92fea9491b148d01cb69b33cd4f431"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
@@ -66,8 +66,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 8356
-sha256 = "fee89733009c6081abdd9e8ee3780987cd6e55f4d2a1eaa4a5d1c0d57329e187"
+bytes = 8547
+sha256 = "9adaec82306145aa8ffbf453d650228619828f069cd5595dc5416e9b500532f9"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2031,8 +2031,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31743
-sha256 = "f9741e6e7c4c99fbed8e7ab9d7a842de31936b7635e1cff06205e40f32fd929c"
+bytes = 31880
+sha256 = "5152edede3c9232e178b6031d2975285455e686e806a4b444c63618c2f9957f4"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2350,6 +2350,11 @@ bytes = 81799
 sha256 = "f4229c460cb6980bd26f2b262f18593888de88fce71f4bb89d2de0ff7eff2e5e"
 
 [[sources]]
+path = "tools/check_install_page.py"
+bytes = 22141
+sha256 = "0462aafe1bac7db3153f222327bd8b72af0face61b8e483fed6d2cfbd929b713"
+
+[[sources]]
 path = "tools/check_leaks.py"
 bytes = 8225
 sha256 = "2d7961aaf1bf768415f5951959328c9157dc85134e058407659e96188438ead1"
@@ -2423,6 +2428,11 @@ sha256 = "46fe8d5eb030e2e092d4a7e157fd4cc2f597b42967248ab4bb656b42042d9e68"
 path = "tools/check_site.py"
 bytes = 17405
 sha256 = "8d9c93c2dad38228a72a725aca24621ed29913661fcc0439c246c9ce658b7227"
+
+[[sources]]
+path = "tools/check_sized_instructions.py"
+bytes = 17097
+sha256 = "2d94c920f633ceff208b12a380dea537fe0036586c9f0103c76c80f855c1f28f"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
@@ -2571,13 +2581,18 @@ sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 8226
-sha256 = "cf5ffa25a5c329e20af76ca1dde12cc75a14201083233b99e895b07f1a0b036b"
+bytes = 8532
+sha256 = "6719c4dd86ce64faccc164540e256266bd942d9017d4900224b7d9be63122c82"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
 bytes = 207776
 sha256 = "0872a2a1ca87af08d94c41c80909095a65ccee5140d32bd000306519fb0294b2"
+
+[[sources]]
+path = "tools/sized-instructions-source.sha256"
+bytes = 65
+sha256 = "2a1416ed0a2998d0081d9d8571d81808bc106b07071031470f9faa3317b80c9d"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

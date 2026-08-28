@@ -292,6 +292,24 @@ class = "a"
 residue = "It checks that every external site link opens in a new tab with a noopener rel. It is a site UX and reverse-tabnabbing-safety invariant, not a corpus-rule linkage, so none is claimed here."
 
 [[gate]]
+id = "install-page"
+script = "tools/check_install_page.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A static tripwire over site/install.html, site/js/install.js, and site/styles.css: it checks that the five family sections are present and statically visible, the picker links and single hidden reset and aria-live status region are present with no pre-set filter state, install.js is an external script with no inline code in the picker or sections, and the guarded html[data-family] collapse rule is present. It is deliberately NOT a CSS engine or a browser: it cannot detect a new stylesheet rule that hides a family section without the guard, a hiding ancestor, or a custom clip/opacity class, which are left to review and the cross-family QA. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "sized-instructions"
+script = "tools/check_sized_instructions.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It checks the three hand-authored sized instruction condensations (aiqt-instructions-8k/5k/1_5k.txt) against their character caps, agree on version with the authoritative skill version and the generated full instructions file, and match a recorded SHA-256 of that generated source, failing until a maintainer reconciles them and re-blesses with --update. Because the condensations are hand-authored, it cannot judge whether their trimmed prose faithfully preserves the standard's meaning; the editorial fidelity of a condensation is human judgment the cap-and-version-and-source-hash checks cannot verify. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "versions"
 script = "tools/check_versions.py"
 rules = []

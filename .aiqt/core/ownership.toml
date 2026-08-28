@@ -59,7 +59,7 @@ note = "Regenerated from manifest plus version; carved out of SOURCES (R9-6)."
 [[release-class]]
 pattern = "site/downloads/**"
 class = "derived"
-note = "Published outputs, corpus-derived, manifest-covered in SOURCES; recomputed by their own gensrc drift gates."
+note = "Published outputs, corpus-derived, manifest-covered in SOURCES; drift-gated at source: the machine-generated outputs by their own gensrc drift gates, the hand-authored sized instruction condensations (aiqt-instructions-8k/5k/1_5k.txt), which have no generator, by tools/check_sized_instructions.py."
 
 # --- concern-1: pack-immutable subtrees -----------------------------------------------------------------
 
