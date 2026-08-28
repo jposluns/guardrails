@@ -34,6 +34,7 @@ import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+from _gen_common import is_external_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml, replace_block, reconcile  # noqa: E402
@@ -187,8 +188,11 @@ def render_site(rows):
     cards, last = [], len(rows) - 1
     for idx, row in enumerate(rows):
         style = ' style="margin-bottom:1.1rem"' if idx < last else ""
-        links = " ".join('<a href="{}">{}</a>'.format(_attr(ev["href"]), _text(ev["text"]))
-                         for ev in row["evidence"])
+        def _ev_anchor(ev):
+            href = ev["href"]
+            ext = ' target="_blank" rel="noopener noreferrer"' if is_external_url(href) else ""
+            return '<a href="{}"{}>{}</a>'.format(_attr(href), ext, _text(ev["text"]))
+        links = " ".join(_ev_anchor(ev) for ev in row["evidence"])
         parts = [
             '      <div class="card"{}>'.format(style),
             '        <h3 id="disclosure-{}">{}</h3>'.format(_attr(row["id"]), _text(row["topic"])),
