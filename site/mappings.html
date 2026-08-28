@@ -117,12 +117,12 @@
         <table class="dtable">
           <thead><tr><th>Framework</th><th>Publisher</th><th>Edition</th><th>Relation</th><th>Edition stability</th><th>Identifiers referenced</th></tr></thead>
           <tbody>
-            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>67 referenced (curated subset)</td></tr>
             <tr><td>CSA AI Controls Matrix</td><td>Cloud Security Alliance</td><td>1.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>79 referenced (curated subset)</td></tr>
             <tr><td>CSA Cloud Controls Matrix</td><td>Cloud Security Alliance</td><td>4.1.0</td><td>supports control</td><td><span class="pill now">stable</span></td><td>57 referenced (curated subset)</td></tr>
-            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 23894:2023 AI guidance on risk management</td><td>ISO/IEC</td><td>2023</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>14 referenced (curated subset)</td></tr>
             <tr><td>ISO/IEC 42001:2023 AI management system</td><td>ISO/IEC</td><td>2023</td><td>supports control</td><td><span class="pill now">stable</span></td><td>18 referenced (curated subset)</td></tr>
+            <tr><td>MITRE ATLAS</td><td>MITRE</td><td>2026.06</td><td>mitigates technique</td><td><span class="pill idea">snapshot</span></td><td>67 referenced (curated subset)</td></tr>
+            <tr><td>MITRE CWE</td><td>MITRE</td><td>4.20</td><td>mitigates weakness</td><td><span class="pill idea">snapshot</span></td><td>72 referenced (curated subset)</td></tr>
             <tr><td>NIST SP 800-53 Security and Privacy Controls</td><td>NIST</td><td>Rev 5 (catalog 5.2.0)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>67 referenced (curated subset)</td></tr>
             <tr><td>NIST AI Risk Management Framework</td><td>NIST</td><td>1.0 (NIST AI 100-1)</td><td>aligns with guidance</td><td><span class="pill now">stable</span></td><td>24 referenced (curated subset)</td></tr>
             <tr><td>NIST Secure Software Development Framework</td><td>NIST</td><td>1.1 (SP 800-218)</td><td>supports control</td><td><span class="pill now">stable</span></td><td>20 referenced (curated subset)</td></tr>
@@ -671,11 +671,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.2: Accountability (broad)</li>
@@ -685,6 +680,11 @@
             <li>ISO/IEC 42001:2023 AI management system (2023): supports control
               <ul>
                 <li>A.6.1.3: Processes for responsible design and development of AI systems (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1131,13 +1131,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0101: Data Destruction via AI Agent Tool Invocation (broad)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.2: Accountability (broad)</li>
@@ -1149,6 +1142,13 @@
               <ul>
                 <li>A.3.2: AI roles and responsibilities (broad)</li>
                 <li>A.9.2: Processes for responsible use of AI systems (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0101: Data Destruction via AI Agent Tool Invocation (broad)</li>
               </ul>
             </li>
             <li>NIST AI Risk Management Framework (1.0 (NIST AI 100-1)): aligns with guidance
@@ -1409,15 +1409,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
-                <li>AML.T0083: Credentials from AI Agent Configuration (broad)</li>
-                <li>AML.T0098: AI Agent Tool Credential Harvesting (broad)</li>
-                <li>AML.T0055: Unsecured Credentials (tight)</li>
-                <li>AML.T0095.000: Code Repositories (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>DSP-17: Sensitive Data Protection (broad)</li>
@@ -1433,16 +1424,25 @@
                 <li>IAM-14: Credentials Management (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
+                <li>AML.T0083: Credentials from AI Agent Configuration (broad)</li>
+                <li>AML.T0098: AI Agent Tool Credential Harvesting (broad)</li>
+                <li>AML.T0055: Unsecured Credentials (tight)</li>
+                <li>AML.T0095.000: Code Repositories (tight)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-798: Use of Hard-coded Credentials (broad)</li>
                 <li>CWE-532: Insertion of Sensitive Information into Log File (tight)</li>
                 <li>CWE-540: Inclusion of Sensitive Information in Source Code (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1488,13 +1488,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
-                <li>AML.T0085: Data from AI Services (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>IAM-18: Agent Access Restriction (broad)</li>
@@ -1509,16 +1502,23 @@
                 <li>IAM-15: Authorization Mechanisms (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-285: Improper Authorization (broad)</li>
-                <li>CWE-441: Unintended Proxy or Intermediary ('Confused Deputy') (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.8: Privacy (broad)</li>
                 <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
+                <li>AML.T0085: Data from AI Services (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-285: Improper Authorization (broad)</li>
+                <li>CWE-441: Unintended Proxy or Intermediary ('Confused Deputy') (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1550,12 +1550,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0057: LLM Data Leakage (broad)</li>
-                <li>AML.T0080: AI Agent Context Poisoning (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-14: AI Cache Protection (broad)</li>
@@ -1569,17 +1563,23 @@
                 <li>I&amp;S-06: Segmentation and Segregation (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.8: Privacy (broad)</li>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0057: LLM Data Leakage (broad)</li>
+                <li>AML.T0080: AI Agent Context Poisoning (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (broad)</li>
                 <li>CWE-653: Improper Isolation or Compartmentalization (broad)</li>
                 <li>CWE-488: Exposure of Data Element to Wrong Session (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.8: Privacy (broad)</li>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1606,16 +1606,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
-                <li>AML.T0098: AI Agent Tool Credential Harvesting (broad)</li>
-                <li>AML.T0056: Extract LLM System Prompt (tight)</li>
-                <li>AML.T0057: LLM Data Leakage (tight)</li>
-                <li>AML.T0069: Discover LLM System Information (tight)</li>
-                <li>AML.T0084: Discover AI Agent Configuration (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-15: Prompt Differentiation (broad)</li>
@@ -1629,16 +1619,26 @@
                 <li>DSP-17: Sensitive Data Protection (broad)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-497: Exposure of Sensitive System Information to an Unauthorized Control Sphere (broad)</li>
-                <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.8: Privacy (broad)</li>
                 <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
+                <li>AML.T0098: AI Agent Tool Credential Harvesting (broad)</li>
+                <li>AML.T0056: Extract LLM System Prompt (tight)</li>
+                <li>AML.T0057: LLM Data Leakage (tight)</li>
+                <li>AML.T0069: Discover LLM System Information (tight)</li>
+                <li>AML.T0084: Discover AI Agent Configuration (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-497: Exposure of Sensitive System Information to an Unauthorized Control Sphere (broad)</li>
+                <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1665,13 +1665,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0012: Valid Accounts (broad)</li>
-                <li>AML.T0091.000: Application Access Token (broad)</li>
-                <li>AML.T0091.001: Web Session Cookie (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>SEF-07: Incident Management and Response (broad)</li>
@@ -1691,6 +1684,13 @@
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0012: Valid Accounts (broad)</li>
+                <li>AML.T0091.000: Application Access Token (broad)</li>
+                <li>AML.T0091.001: Web Session Cookie (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1723,12 +1723,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0012: Valid Accounts (broad)</li>
-                <li>AML.T0055: Unsecured Credentials (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>IAM-13: Strong Authentication (tight)</li>
@@ -1741,16 +1735,22 @@
                 <li>IAM-14: Credentials Management (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0012: Valid Accounts (broad)</li>
+                <li>AML.T0055: Unsecured Credentials (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-306: Missing Authentication for Critical Function (broad)</li>
                 <li>CWE-798: Use of Hard-coded Credentials (broad)</li>
                 <li>CWE-287: Improper Authentication (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1795,13 +1795,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
-                <li>AML.T0085: Data from AI Services (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>IAM-16: Knowledge Access Control - Need to Know (broad)</li>
@@ -1817,17 +1810,24 @@
                 <li>IAM-15: Authorization Mechanisms (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0082: RAG Credential Harvesting (broad)</li>
+                <li>AML.T0085: Data from AI Services (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-284: Improper Access Control (broad)</li>
                 <li>CWE-862: Missing Authorization (tight)</li>
                 <li>CWE-863: Incorrect Authorization (tight)</li>
                 <li>CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1912,17 +1912,17 @@
                 <li>CEK-04: Encryption Algorithm (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.8: Privacy (broad)</li>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-311: Missing Encryption of Sensitive Data (broad)</li>
                 <li>CWE-295: Improper Certificate Validation (tight)</li>
                 <li>CWE-327: Use of a Broken or Risky Cryptographic Algorithm (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.8: Privacy (broad)</li>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -1967,21 +1967,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0018.002: Embed Malware (broad)</li>
-                <li>AML.T0111: AI Supply Chain Reputation Inflation (broad)</li>
-                <li>AML.T0112.001: AI Artifacts (broad)</li>
-                <li>AML.T0010.001: AI Software (tight)</li>
-                <li>AML.T0010.003: Model (tight)</li>
-                <li>AML.T0010.005: AI Agent Tool (tight)</li>
-                <li>AML.T0011.000: Unsafe AI Artifacts (tight)</li>
-                <li>AML.T0011.001: Malicious Package (tight)</li>
-                <li>AML.T0011.002: Poisoned AI Agent Tool (tight)</li>
-                <li>AML.T0104: Publish Poisoned AI Agent Tool (tight)</li>
-                <li>AML.T0109: AI Supply Chain Rug Pull (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>MDS-12: Open Model Risk Assessment (broad)</li>
@@ -2005,13 +1990,6 @@
                 <li>STA-10: Supply Chain Risk Management (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-1357: Reliance on Insufficiently Trustworthy Component (broad)</li>
-                <li>CWE-494: Download of Code Without Integrity Check (tight)</li>
-                <li>CWE-829: Inclusion of Functionality from Untrusted Control Sphere (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
@@ -2022,6 +2000,28 @@
               <ul>
                 <li>A.4.4: Tooling resources (broad)</li>
                 <li>A.10.3: Suppliers (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0018.002: Embed Malware (broad)</li>
+                <li>AML.T0111: AI Supply Chain Reputation Inflation (broad)</li>
+                <li>AML.T0112.001: AI Artifacts (broad)</li>
+                <li>AML.T0010.001: AI Software (tight)</li>
+                <li>AML.T0010.003: Model (tight)</li>
+                <li>AML.T0010.005: AI Agent Tool (tight)</li>
+                <li>AML.T0011.000: Unsafe AI Artifacts (tight)</li>
+                <li>AML.T0011.001: Malicious Package (tight)</li>
+                <li>AML.T0011.002: Poisoned AI Agent Tool (tight)</li>
+                <li>AML.T0104: Publish Poisoned AI Agent Tool (tight)</li>
+                <li>AML.T0109: AI Supply Chain Rug Pull (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-1357: Reliance on Insufficiently Trustworthy Component (broad)</li>
+                <li>CWE-494: Download of Code Without Integrity Check (tight)</li>
+                <li>CWE-829: Inclusion of Functionality from Untrusted Control Sphere (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2199,14 +2199,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0081: Modify AI Agent Configuration (tight)</li>
-                <li>AML.T0101: Data Destruction via AI Agent Tool Invocation (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>CCC-05: Change Agreements (broad)</li>
@@ -2220,12 +2212,6 @@
                 <li>CCC-04: Unauthorized Change Protection (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-862: Missing Authorization (broad)</li>
-                <li>CWE-451: User Interface (UI) Misrepresentation of Critical Information (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.2: Accountability (broad)</li>
@@ -2236,6 +2222,20 @@
             <li>ISO/IEC 42001:2023 AI management system (2023): supports control
               <ul>
                 <li>A.9.2: Processes for responsible use of AI systems (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0081: Modify AI Agent Configuration (tight)</li>
+                <li>AML.T0101: Data Destruction via AI Agent Tool Invocation (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-862: Missing Authorization (broad)</li>
+                <li>CWE-451: User Interface (UI) Misrepresentation of Critical Information (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2263,12 +2263,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0049: Exploit Public-Facing Application (broad)</li>
-                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-08: API Security (broad)</li>
@@ -2280,16 +2274,22 @@
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-74: Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection') (broad)</li>
-                <li>CWE-20: Improper Input Validation (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.9: Robustness (broad)</li>
                 <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0049: Exploit Public-Facing Application (broad)</li>
+                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-74: Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection') (broad)</li>
+                <li>CWE-20: Improper Input Validation (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2332,13 +2332,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0051.001: Indirect (broad)</li>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0073: Impersonation (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>IAM-05: Least Privilege (broad)</li>
@@ -2356,16 +2349,23 @@
                 <li>IAM-15: Authorization Mechanisms (broad)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0051.001: Indirect (broad)</li>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0073: Impersonation (tight)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-501: Trust Boundary Violation (broad)</li>
                 <li>CWE-272: Least Privilege Violation (tight)</li>
                 <li>CWE-290: Authentication Bypass by Spoofing (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2407,12 +2407,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0012: Valid Accounts (broad)</li>
-                <li>AML.T0055: Unsecured Credentials (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>CEK-01: Encryption and Key Management Policy and Procedures (broad)</li>
@@ -2435,16 +2429,22 @@
                 <li>CEK-21: Key Inventory Management (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0012: Valid Accounts (broad)</li>
+                <li>AML.T0055: Unsecured Credentials (tight)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-323: Reusing a Nonce, Key Pair in Encryption (broad)</li>
                 <li>CWE-321: Use of Hard-coded Cryptographic Key (tight)</li>
                 <li>CWE-324: Use of a Key Past its Expiration Date (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2476,15 +2476,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0098: AI Agent Tool Credential Harvesting (broad)</li>
-                <li>AML.T0101: Data Destruction via AI Agent Tool Invocation (broad)</li>
-                <li>AML.T0112.000: Local AI Agent (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-13: AI Sandboxing (broad)</li>
@@ -2501,16 +2492,25 @@
                 <li>IAM-05: Least Privilege (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0053: AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0086: Exfiltration via AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0098: AI Agent Tool Credential Harvesting (broad)</li>
+                <li>AML.T0101: Data Destruction via AI Agent Tool Invocation (broad)</li>
+                <li>AML.T0112.000: Local AI Agent (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-269: Improper Privilege Management (broad)</li>
                 <li>CWE-250: Execution with Unnecessary Privileges (tight)</li>
                 <li>CWE-272: Least Privilege Violation (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2548,12 +2548,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0055: Unsecured Credentials (broad)</li>
-                <li>AML.T0063: Discover AI Model Outputs (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>DSP-17: Sensitive Data Protection (broad)</li>
@@ -2569,12 +2563,6 @@
                 <li>LOG-09: Log Records (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (broad)</li>
-                <li>CWE-532: Insertion of Sensitive Information into Log File (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.8: Privacy (broad)</li>
@@ -2584,6 +2572,18 @@
             <li>ISO/IEC 42001:2023 AI management system (2023): supports control
               <ul>
                 <li>A.6.2.8: AI system recording of event logs (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0055: Unsecured Credentials (broad)</li>
+                <li>AML.T0063: Discover AI Model Outputs (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (broad)</li>
+                <li>CWE-532: Insertion of Sensitive Information into Log File (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2632,13 +2632,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
-                <li>AML.T0113: Steal Web Session Cookie (broad)</li>
-                <li>AML.T0077: LLM Response Rendering (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-10: Output Validation (broad)</li>
@@ -2649,15 +2642,22 @@
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
+                <li>AML.T0113: Steal Web Session Cookie (broad)</li>
+                <li>AML.T0077: LLM Response Rendering (tight)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-116: Improper Encoding or Escaping of Output (broad)</li>
                 <li>CWE-838: Inappropriate Encoding for Output Context (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2693,13 +2693,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
-                <li>AML.T0077: LLM Response Rendering (tight)</li>
-                <li>AML.T0102: Generate Malicious Commands (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-05: Application Security Testing (broad)</li>
@@ -2715,16 +2708,23 @@
                 <li>AIS-05: Application Security Testing (broad)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-20: Improper Input Validation (broad)</li>
-                <li>CWE-1426: Improper Validation of Generative AI Output (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.9: Robustness (broad)</li>
                 <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
+                <li>AML.T0077: LLM Response Rendering (tight)</li>
+                <li>AML.T0102: Generate Malicious Commands (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-20: Improper Input Validation (broad)</li>
+                <li>CWE-1426: Improper Validation of Generative AI Output (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -2815,19 +2815,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0010.002: Data (broad)</li>
-                <li>AML.T0066: Retrieval Content Crafting (broad)</li>
-                <li>AML.T0018.000: Poison AI Model (tight)</li>
-                <li>AML.T0020: Poison Training Data (tight)</li>
-                <li>AML.T0059: Erode Dataset Integrity (tight)</li>
-                <li>AML.T0070: RAG Poisoning (tight)</li>
-                <li>AML.T0071: False RAG Entry Injection (tight)</li>
-                <li>AML.T0080: AI Agent Context Poisoning (tight)</li>
-                <li>AML.T0099: AI Agent Tool Data Poisoning (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>MDS-06: Adversarial Attack Analysis (broad)</li>
@@ -2836,12 +2823,6 @@
                 <li>DSP-23: Data Integrity Check (tight)</li>
                 <li>MDS-01: Training Pipeline Security (tight)</li>
                 <li>MDS-08: Model Integrity Checks (tight)</li>
-              </ul>
-            </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-348: Use of Less Trusted Source (broad)</li>
-                <li>CWE-345: Insufficient Verification of Data Authenticity (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -2855,6 +2836,25 @@
               <ul>
                 <li>A.7.3: Acquisition of data (broad)</li>
                 <li>A.7.4: Quality of data for AI systems (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0010.002: Data (broad)</li>
+                <li>AML.T0066: Retrieval Content Crafting (broad)</li>
+                <li>AML.T0018.000: Poison AI Model (tight)</li>
+                <li>AML.T0020: Poison Training Data (tight)</li>
+                <li>AML.T0059: Erode Dataset Integrity (tight)</li>
+                <li>AML.T0070: RAG Poisoning (tight)</li>
+                <li>AML.T0071: False RAG Entry Injection (tight)</li>
+                <li>AML.T0080: AI Agent Context Poisoning (tight)</li>
+                <li>AML.T0099: AI Agent Tool Data Poisoning (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-348: Use of Less Trusted Source (broad)</li>
+                <li>CWE-345: Insufficient Verification of Data Authenticity (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3155,12 +3155,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0049: Exploit Public-Facing Application (broad)</li>
-                <li>AML.T0063: Discover AI Model Outputs (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>CCC-06: Change Management Baseline (broad)</li>
@@ -3177,15 +3171,21 @@
                 <li>I&amp;S-04: OS Hardening and Base Controls (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0049: Exploit Public-Facing Application (broad)</li>
+                <li>AML.T0063: Discover AI Model Outputs (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-1188: Initialization of a Resource with an Insecure Default (tight)</li>
                 <li>CWE-1269: Product Released in Non-Release Configuration (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3247,11 +3247,6 @@
                 <li>LOG-13: Access Control Logs (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-778: Insufficient Logging (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.2: Accountability (broad)</li>
@@ -3261,6 +3256,11 @@
             <li>ISO/IEC 42001:2023 AI management system (2023): supports control
               <ul>
                 <li>A.6.2.8: AI system recording of event logs (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-778: Insufficient Logging (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3314,14 +3314,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0055: Unsecured Credentials (broad)</li>
-                <li>AML.T0091.000: Application Access Token (broad)</li>
-                <li>AML.T0091.001: Web Session Cookie (broad)</li>
-                <li>AML.T0113: Steal Web Session Cookie (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>CEK-03: Data Protection (broad)</li>
@@ -3336,17 +3328,25 @@
                 <li>IAM-14: Credentials Management (tight)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0055: Unsecured Credentials (broad)</li>
+                <li>AML.T0091.000: Application Access Token (broad)</li>
+                <li>AML.T0091.001: Web Session Cookie (broad)</li>
+                <li>AML.T0113: Steal Web Session Cookie (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-522: Insufficiently Protected Credentials (broad)</li>
                 <li>CWE-331: Insufficient Entropy (tight)</li>
                 <li>CWE-352: Cross-Site Request Forgery (CSRF) (tight)</li>
                 <li>CWE-613: Insufficient Session Expiration (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3490,12 +3490,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
-                <li>AML.T0102: Generate Malicious Commands (broad)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-09: Input Validation (tight)</li>
@@ -3509,17 +3503,23 @@
                 <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
               </ul>
             </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.11: Security (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0050: Command and Scripting Interpreter (broad)</li>
+                <li>AML.T0102: Generate Malicious Commands (broad)</li>
+              </ul>
+            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal') (broad)</li>
                 <li>CWE-77: Improper Neutralization of Special Elements used in a Command ('Command Injection') (broad)</li>
                 <li>CWE-20: Improper Input Validation (tight)</li>
                 <li>CWE-88: Improper Neutralization of Argument Delimiters in a Command ('Argument Injection') (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.11: Security (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3556,6 +3556,29 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
+            <li>CSA AI Controls Matrix (1.1.0): supports control
+              <ul>
+                <li>AIS-09: Input Validation (broad)</li>
+                <li>AIS-11: Agents Security Boundaries (broad)</li>
+                <li>DSP-24: Data Differentiation and Relevance (broad)</li>
+                <li>TVM-02: Malware and Malicious Instructions Protection Policy and Procedures (broad)</li>
+                <li>TVM-13: Guardrails (broad)</li>
+                <li>AIS-15: Prompt Differentiation (tight)</li>
+              </ul>
+            </li>
+            <li>CSA Cloud Controls Matrix (4.1.0): supports control
+              <ul>
+                <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
+                <li>TVM-02: Malware and Malicious Instructions Protection Policy and Procedures (broad)</li>
+              </ul>
+            </li>
+            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
+              <ul>
+                <li>A.9: Robustness (broad)</li>
+                <li>A.11: Security (broad)</li>
+                <li>B.5: Risk sources related to machine learning (broad)</li>
+              </ul>
+            </li>
             <li>MITRE ATLAS (2026.06): mitigates technique
               <ul>
                 <li>AML.T0068: LLM Prompt Obfuscation (broad)</li>
@@ -3574,32 +3597,9 @@
                 <li>AML.T0110: AI Agent Tool Poisoning (tight)</li>
               </ul>
             </li>
-            <li>CSA AI Controls Matrix (1.1.0): supports control
-              <ul>
-                <li>AIS-09: Input Validation (broad)</li>
-                <li>AIS-11: Agents Security Boundaries (broad)</li>
-                <li>DSP-24: Data Differentiation and Relevance (broad)</li>
-                <li>TVM-02: Malware and Malicious Instructions Protection Policy and Procedures (broad)</li>
-                <li>TVM-13: Guardrails (broad)</li>
-                <li>AIS-15: Prompt Differentiation (tight)</li>
-              </ul>
-            </li>
-            <li>CSA Cloud Controls Matrix (4.1.0): supports control
-              <ul>
-                <li>AIS-04: Secure Application Development Lifecycle (broad)</li>
-                <li>TVM-02: Malware and Malicious Instructions Protection Policy and Procedures (broad)</li>
-              </ul>
-            </li>
             <li>MITRE CWE (4.20): mitigates weakness
               <ul>
                 <li>CWE-1427: Improper Neutralization of Input Used for LLM Prompting (tight)</li>
-              </ul>
-            </li>
-            <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
-              <ul>
-                <li>A.9: Robustness (broad)</li>
-                <li>A.11: Security (broad)</li>
-                <li>B.5: Risk sources related to machine learning (broad)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3636,11 +3636,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0011.001: Malicious Package (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-12: Source Code Management (broad)</li>
@@ -3662,15 +3657,20 @@
                 <li>STA-08: Supply Chain Inventory (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-1357: Reliance on Insufficiently Trustworthy Component (broad)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.11: Security (broad)</li>
                 <li>B.5: Risk sources related to machine learning (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0011.001: Malicious Package (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-1357: Reliance on Insufficiently Trustworthy Component (broad)</li>
               </ul>
             </li>
             <li>NIST AI Risk Management Framework (1.0 (NIST AI 100-1)): aligns with guidance
@@ -3697,15 +3697,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0046: Spamming AI System with Chaff Data (broad)</li>
-                <li>AML.T0029: Denial of AI Service (tight)</li>
-                <li>AML.T0034.000: Excessive Queries (tight)</li>
-                <li>AML.T0034.001: Resource-Intensive Queries (tight)</li>
-                <li>AML.T0034.002: Agentic Resource Consumption (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>AIS-13: AI Sandboxing (broad)</li>
@@ -3715,14 +3706,6 @@
             <li>CSA Cloud Controls Matrix (4.1.0): supports control
               <ul>
                 <li>I&amp;S-02: Capacity and Resource Planning (broad)</li>
-              </ul>
-            </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-674: Uncontrolled Recursion (broad)</li>
-                <li>CWE-834: Excessive Iteration (broad)</li>
-                <li>CWE-400: Uncontrolled Resource Consumption (tight)</li>
-                <li>CWE-770: Allocation of Resources Without Limits or Throttling (tight)</li>
               </ul>
             </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
@@ -3735,6 +3718,23 @@
             <li>ISO/IEC 42001:2023 AI management system (2023): supports control
               <ul>
                 <li>A.6.2.6: AI system operation and monitoring (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0046: Spamming AI System with Chaff Data (broad)</li>
+                <li>AML.T0029: Denial of AI Service (tight)</li>
+                <li>AML.T0034.000: Excessive Queries (tight)</li>
+                <li>AML.T0034.001: Resource-Intensive Queries (tight)</li>
+                <li>AML.T0034.002: Agentic Resource Consumption (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-674: Uncontrolled Recursion (broad)</li>
+                <li>CWE-834: Excessive Iteration (broad)</li>
+                <li>CWE-400: Uncontrolled Resource Consumption (tight)</li>
+                <li>CWE-770: Allocation of Resources Without Limits or Throttling (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3802,13 +3802,6 @@
         <div class="inner">
           <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
           <ul>
-            <li>MITRE ATLAS (2026.06): mitigates technique
-              <ul>
-                <li>AML.T0024.000: Infer Training Data Membership (broad)</li>
-                <li>AML.T0024.001: Invert AI Model (broad)</li>
-                <li>AML.T0057: LLM Data Leakage (tight)</li>
-              </ul>
-            </li>
             <li>CSA AI Controls Matrix (1.1.0): supports control
               <ul>
                 <li>DSP-17: Sensitive Data Protection (broad)</li>
@@ -3824,12 +3817,6 @@
                 <li>DSP-12: Limitation of Purpose in Personal Data Processing (tight)</li>
               </ul>
             </li>
-            <li>MITRE CWE (4.20): mitigates weakness
-              <ul>
-                <li>CWE-359: Exposure of Private Personal Information to an Unauthorized Actor (broad)</li>
-                <li>CWE-201: Insertion of Sensitive Information Into Sent Data (tight)</li>
-              </ul>
-            </li>
             <li>ISO/IEC 23894:2023 AI guidance on risk management (2023): aligns with guidance
               <ul>
                 <li>A.8: Privacy (broad)</li>
@@ -3838,6 +3825,19 @@
             <li>ISO/IEC 42001:2023 AI management system (2023): supports control
               <ul>
                 <li>A.7.6: Data preparation (broad)</li>
+              </ul>
+            </li>
+            <li>MITRE ATLAS (2026.06): mitigates technique
+              <ul>
+                <li>AML.T0024.000: Infer Training Data Membership (broad)</li>
+                <li>AML.T0024.001: Invert AI Model (broad)</li>
+                <li>AML.T0057: LLM Data Leakage (tight)</li>
+              </ul>
+            </li>
+            <li>MITRE CWE (4.20): mitigates weakness
+              <ul>
+                <li>CWE-359: Exposure of Private Personal Information to an Unauthorized Actor (broad)</li>
+                <li>CWE-201: Insertion of Sensitive Information Into Sent Data (tight)</li>
               </ul>
             </li>
             <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
@@ -3999,392 +3999,6 @@
       references, and the rules that reference it. Identifiers that no rule references are not listed; the
       registry above states the coverage honestly instead.</p>
     <!-- REVERSE:BEGIN (generated) -->
-      <details class="more">
-        <summary>MITRE ATLAS (2026.06)</summary>
-        <div class="inner">
-          <p>mitigates technique. 67 identifiers referenced from a curated subset of the edition.</p>
-          <ul>
-            <li>AML.T0010: AI Supply Chain Compromise
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md" target="_blank" rel="noopener noreferrer">Referenced instructions are pinned and re-verified</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0010.001: AI Software
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0010.002: Data
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0010.003: Model
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0010.005: AI Agent Tool
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0011.000: Unsafe AI Artifacts
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0011.001: Malicious Package
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">Verify a dependency exists before adding it</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0011.002: Poisoned AI Agent Tool
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0012: Valid Accounts
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">Strong authentication</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">Key management</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0018.000: Poison AI Model
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0018.002: Embed Malware
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0020: Poison Training Data
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0024.000: Infer Training Data Membership
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0024.001: Invert AI Model
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0025: Exfiltration via Cyber Means
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md" target="_blank" rel="noopener noreferrer">Egress goes only to expected destinations</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0029: Denial of AI Service
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0034.000: Excessive Queries
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0034.001: Resource-Intensive Queries
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0034.002: Agentic Resource Consumption
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0046: Spamming AI System with Chaff Data
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0049: Exploit Public-Facing Application
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">Secure by default configuration</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0050: Command and Scripting Interpreter
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">Validate tool arguments before use</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0051: LLM Prompt Injection
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md" target="_blank" rel="noopener noreferrer">Referenced instructions are pinned and re-verified</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md" target="_blank" rel="noopener noreferrer">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0051.000: Direct
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0051.001: Indirect
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0051.002: Triggered
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0053: AI Agent Tool Invocation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0054: LLM Jailbreak
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md" target="_blank" rel="noopener noreferrer">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0055: Unsecured Credentials
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">Strong authentication</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">Key management</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0056: Extract LLM System Prompt
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0057: LLM Data Leakage
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0059: Erode Dataset Integrity
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0063: Discover AI Model Outputs
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">Secure by default configuration</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0066: Retrieval Content Crafting
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0067.000: Citations
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md" target="_blank" rel="noopener noreferrer">Corroborate external claims</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0068: LLM Prompt Obfuscation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0069: Discover LLM System Information
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0070: RAG Poisoning
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0071: False RAG Entry Injection
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0073: Impersonation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0077: LLM Response Rendering
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0078: Drive-by Compromise
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0080: AI Agent Context Poisoning
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0081: Modify AI Agent Configuration
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0082: RAG Credential Harvesting
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0083: Credentials from AI Agent Configuration
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0084: Discover AI Agent Configuration
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0085: Data from AI Services
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0086: Exfiltration via AI Agent Tool Invocation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md" target="_blank" rel="noopener noreferrer">Egress goes only to expected destinations</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0091.000: Application Access Token
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0091.001: Web Session Cookie
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0092: Manipulate User LLM Chat History
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0093: Prompt Infiltration via Public-Facing Application
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0094: Delay Execution of LLM Instructions
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0095.000: Code Repositories
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0098: AI Agent Tool Credential Harvesting
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0099: AI Agent Tool Data Poisoning
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0100: AI Agent Clickbait
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0101: Data Destruction via AI Agent Tool Invocation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0102: Generate Malicious Commands
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">Validate tool arguments before use</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0104: Publish Poisoned AI Agent Tool
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0109: AI Supply Chain Rug Pull
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0110: AI Agent Tool Poisoning
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-            <li>AML.T0111: AI Supply Chain Reputation Inflation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0112.000: Local AI Agent
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0112.001: AI Artifacts
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
-              </ul>
-            </li>
-            <li>AML.T0113: Steal Web Session Cookie
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
-              </ul>
-            </li>
-          </ul>
-        </div>
-      </details>
       <details class="more">
         <summary>CSA AI Controls Matrix (1.1.0)</summary>
         <div class="inner">
@@ -5175,6 +4789,661 @@
         </div>
       </details>
       <details class="more">
+        <summary>ISO/IEC 23894:2023 AI guidance on risk management (2023)</summary>
+        <div class="inner">
+          <p>aligns with guidance. 14 identifiers referenced from a curated subset of the edition.</p>
+          <ul>
+            <li>6.2: Communication and consultation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md" target="_blank" rel="noopener noreferrer">Surface a counterproductive instruction before executing it</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-clarify-before-acting.md" target="_blank" rel="noopener noreferrer">Clarify before acting</a> (broad)</li>
+              </ul>
+            </li>
+            <li>6.4.2: Risk identification
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-threat-model-boundaries.md" target="_blank" rel="noopener noreferrer">Threat-model new trust boundaries before implementation</a> (broad)</li>
+              </ul>
+            </li>
+            <li>6.7: Recording and reporting
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md" target="_blank" rel="noopener noreferrer">No concealed failure</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md" target="_blank" rel="noopener noreferrer">A launched task stays observable</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md" target="_blank" rel="noopener noreferrer">Records first</a> (tight)</li>
+              </ul>
+            </li>
+            <li>A.2: Accountability
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md" target="_blank" rel="noopener noreferrer">Commit identity</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md" target="_blank" rel="noopener noreferrer">Surface a counterproductive instruction before executing it</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md" target="_blank" rel="noopener noreferrer">Assess and advise are discussion only</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md" target="_blank" rel="noopener noreferrer">Express authorization before execution</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md" target="_blank" rel="noopener noreferrer">Trust recovery and escalation</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-ext.md" target="_blank" rel="noopener noreferrer">Autonomy steps down after a confirmed trust loss</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md" target="_blank" rel="noopener noreferrer">Decision classification before enacting</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md" target="_blank" rel="noopener noreferrer">Security logging with traceable context</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.4: Availability and quality of training and test data
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+              </ul>
+            </li>
+            <li>A.7: Maintainability
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-match-surrounding-code.md" target="_blank" rel="noopener noreferrer">Match the surrounding code</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-smallest-correct-change.md" target="_blank" rel="noopener noreferrer">Prefer the smallest correct change</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.8: Privacy
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md" target="_blank" rel="noopener noreferrer">Sound cryptography</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md" target="_blank" rel="noopener noreferrer">Honour residency, retention, and deletion</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-purpose-limitation.md" target="_blank" rel="noopener noreferrer">Bind personal-data use to its authorized purpose</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.9: Robustness
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.10: Safety
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.11: Security
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md" target="_blank" rel="noopener noreferrer">Defence in depth by default</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">Strong authentication</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md" target="_blank" rel="noopener noreferrer">Sound cryptography</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">Key management</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">Secure by default configuration</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md" target="_blank" rel="noopener noreferrer">Security logging with traceable context</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">Validate tool arguments before use</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">Verify a dependency exists before adding it</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.12: Transparency and explainability
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md" target="_blank" rel="noopener noreferrer">Claims about the work rest on observation</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md" target="_blank" rel="noopener noreferrer">A completeness claim enumerates its set</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md" target="_blank" rel="noopener noreferrer">Evidence-grounded completion</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md" target="_blank" rel="noopener noreferrer">Measured and estimated figures stay separate</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-no-fabrication.md" target="_blank" rel="noopener noreferrer">No fabrication</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md" target="_blank" rel="noopener noreferrer">No concealed failure</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md" target="_blank" rel="noopener noreferrer">Trust recovery and escalation</a> (broad)</li>
+              </ul>
+            </li>
+            <li>B.4: Level of automation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md" target="_blank" rel="noopener noreferrer">Assess and advise are discussion only</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-continue-by-default.md" target="_blank" rel="noopener noreferrer">Continue by default</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md" target="_blank" rel="noopener noreferrer">Express authorization before execution</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md" target="_blank" rel="noopener noreferrer">Decision classification before enacting</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
+            <li>B.5: Risk sources related to machine learning
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-no-fabrication.md" target="_blank" rel="noopener noreferrer">No fabrication</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">Verify a dependency exists before adding it</a> (broad)</li>
+              </ul>
+            </li>
+            <li>B.7: System life cycle issues
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>ISO/IEC 42001:2023 AI management system (2023)</summary>
+        <div class="inner">
+          <p>supports control. 18 identifiers referenced from a curated subset of the edition.</p>
+          <ul>
+            <li>7.5.2: Creating and updating documented information
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md" target="_blank" rel="noopener noreferrer">Records first</a> (broad)</li>
+              </ul>
+            </li>
+            <li>7.5.3: Control of documented information
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md" target="_blank" rel="noopener noreferrer">Records first</a> (broad)</li>
+              </ul>
+            </li>
+            <li>8.1: Operational planning and control
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-session-close-on-green.md" target="_blank" rel="noopener noreferrer">Close each session on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-session-resume-from-handoff.md" target="_blank" rel="noopener noreferrer">Resume from the durable handoff</a> (broad)</li>
+              </ul>
+            </li>
+            <li>10.2: Nonconformity and corrective action
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-required-step-remains-required.md" target="_blank" rel="noopener noreferrer">A required step remains required under friction</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md" target="_blank" rel="noopener noreferrer">Propose a guardrail when an error reveals a gap</a> (tight)</li>
+              </ul>
+            </li>
+            <li>A.3.2: AI roles and responsibilities
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md" target="_blank" rel="noopener noreferrer">Commit identity</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.3.3: Reporting of concerns
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md" target="_blank" rel="noopener noreferrer">Surface a counterproductive instruction before executing it</a> (tight)</li>
+              </ul>
+            </li>
+            <li>A.4.4: Tooling resources
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-ai-toolchain-register.md" target="_blank" rel="noopener noreferrer">Maintain an AI toolchain register</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.6.1.3: Processes for responsible design and development of AI systems
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.6.2.4: AI system verification and validation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-gate-discipline.md" target="_blank" rel="noopener noreferrer">Gate discipline</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md" target="_blank" rel="noopener noreferrer">No concealed failure</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md" target="_blank" rel="noopener noreferrer">A rerun pass does not erase an earlier failure</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md" target="_blank" rel="noopener noreferrer">Validation is a gate on apply</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-change-carries-check.md" target="_blank" rel="noopener noreferrer">A behavioural change carries a check that fails without it</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md" target="_blank" rel="noopener noreferrer">A verification finding is fixed, not argued away</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-high-assurance-verification.md" target="_blank" rel="noopener noreferrer">High-assurance verification</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md" target="_blank" rel="noopener noreferrer">Isolate verifiers and judge by their result signal</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md" target="_blank" rel="noopener noreferrer">A test's verdict comes from the code, not its surroundings</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-verifier-diversity.md" target="_blank" rel="noopener noreferrer">Verifier diversity</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.6.2.6: AI system operation and monitoring
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md" target="_blank" rel="noopener noreferrer">A launched task stays observable</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.6.2.8: AI system recording of event logs
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md" target="_blank" rel="noopener noreferrer">Security logging with traceable context</a> (tight)</li>
+              </ul>
+            </li>
+            <li>A.7.3: Acquisition of data
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.7.4: Quality of data for AI systems
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.7.5: Data provenance
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-reference-capture.md" target="_blank" rel="noopener noreferrer">Capture the reference when the claim is made</a> (tight)</li>
+              </ul>
+            </li>
+            <li>A.7.6: Data preparation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.8.5: Information for interested parties
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-tracking-ext.md" target="_blank" rel="noopener noreferrer">Change record has a curated public face</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.9.2: Processes for responsible use of AI systems
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md" target="_blank" rel="noopener noreferrer">Assess and advise are discussion only</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md" target="_blank" rel="noopener noreferrer">Express authorization before execution</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md" target="_blank" rel="noopener noreferrer">Decision classification before enacting</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>A.10.3: Suppliers
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>MITRE ATLAS (2026.06)</summary>
+        <div class="inner">
+          <p>mitigates technique. 67 identifiers referenced from a curated subset of the edition.</p>
+          <ul>
+            <li>AML.T0010: AI Supply Chain Compromise
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md" target="_blank" rel="noopener noreferrer">Referenced instructions are pinned and re-verified</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0010.001: AI Software
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0010.002: Data
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0010.003: Model
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0010.005: AI Agent Tool
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0011.000: Unsafe AI Artifacts
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0011.001: Malicious Package
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">Verify a dependency exists before adding it</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0011.002: Poisoned AI Agent Tool
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0012: Valid Accounts
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">Strong authentication</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">Key management</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0018.000: Poison AI Model
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0018.002: Embed Malware
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0020: Poison Training Data
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0024.000: Infer Training Data Membership
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0024.001: Invert AI Model
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0025: Exfiltration via Cyber Means
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md" target="_blank" rel="noopener noreferrer">Egress goes only to expected destinations</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0029: Denial of AI Service
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0034.000: Excessive Queries
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0034.001: Resource-Intensive Queries
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0034.002: Agentic Resource Consumption
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0046: Spamming AI System with Chaff Data
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0049: Exploit Public-Facing Application
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">Secure by default configuration</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0050: Command and Scripting Interpreter
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">Validate tool arguments before use</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0051: LLM Prompt Injection
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md" target="_blank" rel="noopener noreferrer">Referenced instructions are pinned and re-verified</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md" target="_blank" rel="noopener noreferrer">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0051.000: Direct
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0051.001: Indirect
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0051.002: Triggered
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0053: AI Agent Tool Invocation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0054: LLM Jailbreak
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md" target="_blank" rel="noopener noreferrer">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0055: Unsecured Credentials
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">Strong authentication</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">Key management</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0056: Extract LLM System Prompt
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0057: LLM Data Leakage
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0059: Erode Dataset Integrity
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0063: Discover AI Model Outputs
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">Secure by default configuration</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0066: Retrieval Content Crafting
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0067.000: Citations
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md" target="_blank" rel="noopener noreferrer">Corroborate external claims</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0068: LLM Prompt Obfuscation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0069: Discover LLM System Information
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0070: RAG Poisoning
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0071: False RAG Entry Injection
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0073: Impersonation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0077: LLM Response Rendering
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0078: Drive-by Compromise
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0080: AI Agent Context Poisoning
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0081: Modify AI Agent Configuration
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0082: RAG Credential Harvesting
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0083: Credentials from AI Agent Configuration
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0084: Discover AI Agent Configuration
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0085: Data from AI Services
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0086: Exfiltration via AI Agent Tool Invocation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-egress-destinations.md" target="_blank" rel="noopener noreferrer">Egress goes only to expected destinations</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0091.000: Application Access Token
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0091.001: Web Session Cookie
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0092: Manipulate User LLM Chat History
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0093: Prompt Infiltration via Public-Facing Application
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0094: Delay Execution of LLM Instructions
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0095.000: Code Repositories
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0098: AI Agent Tool Credential Harvesting
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0099: AI Agent Tool Data Poisoning
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0100: AI Agent Clickbait
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0101: Data Destruction via AI Agent Tool Invocation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0102: Generate Malicious Commands
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">Validate tool arguments before use</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0104: Publish Poisoned AI Agent Tool
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0109: AI Supply Chain Rug Pull
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0110: AI Agent Tool Poisoning
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
+              </ul>
+            </li>
+            <li>AML.T0111: AI Supply Chain Reputation Inflation
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0112.000: Local AI Agent
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0112.001: AI Artifacts
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
+              </ul>
+            </li>
+            <li>AML.T0113: Steal Web Session Cookie
+              <ul>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
         <summary>MITRE CWE (4.20)</summary>
         <div class="inner">
           <p>mitigates weakness. 72 identifiers referenced from a curated subset of the edition.</p>
@@ -5556,275 +5825,6 @@
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md" target="_blank" rel="noopener noreferrer">Higher-trust instructions outrank lower-trust ones</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (tight)</li>
-              </ul>
-            </li>
-          </ul>
-        </div>
-      </details>
-      <details class="more">
-        <summary>ISO/IEC 23894:2023 AI guidance on risk management (2023)</summary>
-        <div class="inner">
-          <p>aligns with guidance. 14 identifiers referenced from a curated subset of the edition.</p>
-          <ul>
-            <li>6.2: Communication and consultation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md" target="_blank" rel="noopener noreferrer">Surface a counterproductive instruction before executing it</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-clarify-before-acting.md" target="_blank" rel="noopener noreferrer">Clarify before acting</a> (broad)</li>
-              </ul>
-            </li>
-            <li>6.4.2: Risk identification
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-threat-model-boundaries.md" target="_blank" rel="noopener noreferrer">Threat-model new trust boundaries before implementation</a> (broad)</li>
-              </ul>
-            </li>
-            <li>6.7: Recording and reporting
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md" target="_blank" rel="noopener noreferrer">No concealed failure</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md" target="_blank" rel="noopener noreferrer">A launched task stays observable</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md" target="_blank" rel="noopener noreferrer">Records first</a> (tight)</li>
-              </ul>
-            </li>
-            <li>A.2: Accountability
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md" target="_blank" rel="noopener noreferrer">Commit identity</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md" target="_blank" rel="noopener noreferrer">Surface a counterproductive instruction before executing it</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md" target="_blank" rel="noopener noreferrer">Assess and advise are discussion only</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md" target="_blank" rel="noopener noreferrer">Express authorization before execution</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md" target="_blank" rel="noopener noreferrer">Trust recovery and escalation</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-ext.md" target="_blank" rel="noopener noreferrer">Autonomy steps down after a confirmed trust loss</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md" target="_blank" rel="noopener noreferrer">Decision classification before enacting</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md" target="_blank" rel="noopener noreferrer">Security logging with traceable context</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.4: Availability and quality of training and test data
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (tight)</li>
-              </ul>
-            </li>
-            <li>A.7: Maintainability
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-match-surrounding-code.md" target="_blank" rel="noopener noreferrer">Match the surrounding code</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-smallest-correct-change.md" target="_blank" rel="noopener noreferrer">Prefer the smallest correct change</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.8: Privacy
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md" target="_blank" rel="noopener noreferrer">Sound cryptography</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md" target="_blank" rel="noopener noreferrer">Honour residency, retention, and deletion</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-purpose-limitation.md" target="_blank" rel="noopener noreferrer">Bind personal-data use to its authorized purpose</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.9: Robustness
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.10: Safety
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.11: Security
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md" target="_blank" rel="noopener noreferrer">Defence in depth by default</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md" target="_blank" rel="noopener noreferrer">Keep secrets out</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md" target="_blank" rel="noopener noreferrer">Retrieval enforces the requester's authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md" target="_blank" rel="noopener noreferrer">No cross-context bleed</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md" target="_blank" rel="noopener noreferrer">No disclosure of secrets or hidden context</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md" target="_blank" rel="noopener noreferrer">Rotate a leaked secret</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md" target="_blank" rel="noopener noreferrer">Strong authentication</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md" target="_blank" rel="noopener noreferrer">Least-privilege authorization</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md" target="_blank" rel="noopener noreferrer">Sound cryptography</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md" target="_blank" rel="noopener noreferrer">Validate external input at the boundary</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md" target="_blank" rel="noopener noreferrer">Trust between agents is earned, not inherited</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md" target="_blank" rel="noopener noreferrer">Key management</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md" target="_blank" rel="noopener noreferrer">Least-privilege tool and file access</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md" target="_blank" rel="noopener noreferrer">Encode output for its sink</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md" target="_blank" rel="noopener noreferrer">Generated output is untrusted input</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md" target="_blank" rel="noopener noreferrer">Secure by default configuration</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md" target="_blank" rel="noopener noreferrer">Security logging with traceable context</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md" target="_blank" rel="noopener noreferrer">Secure session and token handling</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md" target="_blank" rel="noopener noreferrer">Validate tool arguments before use</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">Verify a dependency exists before adding it</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.12: Transparency and explainability
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md" target="_blank" rel="noopener noreferrer">Claims about the work rest on observation</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md" target="_blank" rel="noopener noreferrer">A completeness claim enumerates its set</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md" target="_blank" rel="noopener noreferrer">Evidence-grounded completion</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md" target="_blank" rel="noopener noreferrer">Measured and estimated figures stay separate</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-no-fabrication.md" target="_blank" rel="noopener noreferrer">No fabrication</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md" target="_blank" rel="noopener noreferrer">No concealed failure</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md" target="_blank" rel="noopener noreferrer">Trust recovery and escalation</a> (broad)</li>
-              </ul>
-            </li>
-            <li>B.4: Level of automation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md" target="_blank" rel="noopener noreferrer">Assess and advise are discussion only</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-continue-by-default.md" target="_blank" rel="noopener noreferrer">Continue by default</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md" target="_blank" rel="noopener noreferrer">Express authorization before execution</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md" target="_blank" rel="noopener noreferrer">Decision classification before enacting</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
-              </ul>
-            </li>
-            <li>B.5: Risk sources related to machine learning
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-no-fabrication.md" target="_blank" rel="noopener noreferrer">No fabrication</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md" target="_blank" rel="noopener noreferrer">Untrusted content is data, not instructions</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md" target="_blank" rel="noopener noreferrer">Verify a dependency exists before adding it</a> (broad)</li>
-              </ul>
-            </li>
-            <li>B.7: System life cycle issues
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
-              </ul>
-            </li>
-          </ul>
-        </div>
-      </details>
-      <details class="more">
-        <summary>ISO/IEC 42001:2023 AI management system (2023)</summary>
-        <div class="inner">
-          <p>supports control. 18 identifiers referenced from a curated subset of the edition.</p>
-          <ul>
-            <li>7.5.2: Creating and updating documented information
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md" target="_blank" rel="noopener noreferrer">Records first</a> (broad)</li>
-              </ul>
-            </li>
-            <li>7.5.3: Control of documented information
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md" target="_blank" rel="noopener noreferrer">Records first</a> (broad)</li>
-              </ul>
-            </li>
-            <li>8.1: Operational planning and control
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-session-close-on-green.md" target="_blank" rel="noopener noreferrer">Close each session on green</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-session-resume-from-handoff.md" target="_blank" rel="noopener noreferrer">Resume from the durable handoff</a> (broad)</li>
-              </ul>
-            </li>
-            <li>10.2: Nonconformity and corrective action
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-required-step-remains-required.md" target="_blank" rel="noopener noreferrer">A required step remains required under friction</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md" target="_blank" rel="noopener noreferrer">Propose a guardrail when an error reveals a gap</a> (tight)</li>
-              </ul>
-            </li>
-            <li>A.3.2: AI roles and responsibilities
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md" target="_blank" rel="noopener noreferrer">Commit identity</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.3.3: Reporting of concerns
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md" target="_blank" rel="noopener noreferrer">Surface a counterproductive instruction before executing it</a> (tight)</li>
-              </ul>
-            </li>
-            <li>A.4.4: Tooling resources
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-ai-toolchain-register.md" target="_blank" rel="noopener noreferrer">Maintain an AI toolchain register</a> (tight)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.6.1.3: Processes for responsible design and development of AI systems
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.6.2.4: AI system verification and validation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-gate-discipline.md" target="_blank" rel="noopener noreferrer">Gate discipline</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md" target="_blank" rel="noopener noreferrer">No concealed failure</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md" target="_blank" rel="noopener noreferrer">A rerun pass does not erase an earlier failure</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md" target="_blank" rel="noopener noreferrer">Validation is a gate on apply</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-change-carries-check.md" target="_blank" rel="noopener noreferrer">A behavioural change carries a check that fails without it</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md" target="_blank" rel="noopener noreferrer">A verification finding is fixed, not argued away</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-high-assurance-verification.md" target="_blank" rel="noopener noreferrer">High-assurance verification</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md" target="_blank" rel="noopener noreferrer">Isolate verifiers and judge by their result signal</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md" target="_blank" rel="noopener noreferrer">A test's verdict comes from the code, not its surroundings</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-verifier-diversity.md" target="_blank" rel="noopener noreferrer">Verifier diversity</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.6.2.6: AI system operation and monitoring
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md" target="_blank" rel="noopener noreferrer">A launched task stays observable</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md" target="_blank" rel="noopener noreferrer">Bounded consumption and safe failure</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.6.2.8: AI system recording of event logs
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md" target="_blank" rel="noopener noreferrer">Redact sensitive content from logs</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md" target="_blank" rel="noopener noreferrer">Security logging with traceable context</a> (tight)</li>
-              </ul>
-            </li>
-            <li>A.7.3: Acquisition of data
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.7.4: Quality of data for AI systems
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md" target="_blank" rel="noopener noreferrer">Resist data, model, and memory poisoning</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.7.5: Data provenance
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-reference-capture.md" target="_blank" rel="noopener noreferrer">Capture the reference when the claim is made</a> (tight)</li>
-              </ul>
-            </li>
-            <li>A.7.6: Data preparation
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md" target="_blank" rel="noopener noreferrer">Minimize personal data sent to AI services</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.8.5: Information for interested parties
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-tracking-ext.md" target="_blank" rel="noopener noreferrer">Change record has a curated public face</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.9.2: Processes for responsible use of AI systems
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md" target="_blank" rel="noopener noreferrer">Assess and advise are discussion only</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md" target="_blank" rel="noopener noreferrer">Express authorization before execution</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md" target="_blank" rel="noopener noreferrer">Human oversight and the autonomy threshold</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md" target="_blank" rel="noopener noreferrer">Decision classification before enacting</a> (broad)</li>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md" target="_blank" rel="noopener noreferrer">Human authorization for consequential actions</a> (broad)</li>
-              </ul>
-            </li>
-            <li>A.10.3: Suppliers
-              <ul>
-                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md" target="_blank" rel="noopener noreferrer">Trusted, pinned dependency provenance</a> (broad)</li>
               </ul>
             </li>
           </ul>
