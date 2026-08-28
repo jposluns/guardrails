@@ -332,7 +332,7 @@ def render_forward(rows):
             '      <details class="more">',
             '        <summary>{}</summary>'.format(_text(title)),
             '        <div class="inner">',
-            '          <p><a href="{}">View this rule on GitHub</a></p>'.format(_attr(source)),
+            '          <p><a href="{}" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>'.format(_attr(source)),
             '          <ul>']
         for _fw, frows in _group_ordered(rrows, "framework").items():
             head = frows[0]
@@ -380,7 +380,7 @@ def render_reverse(rows, reg):
             parts.append('              <ul>')
             for row in idrows:
                 parts.append(
-                    '                <li><a href="{src}">{title}</a> ({fit})</li>'.format(
+                    '                <li><a href="{src}" target="_blank" rel="noopener noreferrer">{title}</a> ({fit})</li>'.format(
                         src=_attr(row["rule_source"]), title=_text(row["rule_title"]),
                         fit=_text(row["fit"])))
             parts.append('              </ul>')
