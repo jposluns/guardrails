@@ -1,6 +1,6 @@
 === meta ===
 name: aiqt
-version: 1.0.1
+version: 1.0.2
 license: CC-BY-SA-4.0
 date: 2026-08-27
 apex-id: prjint1

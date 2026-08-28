@@ -86,10 +86,13 @@ class GateError(Exception):
 
 # --- pure legs (always exercised by --self-test) ----------------------------------------------------
 
-def scan_bytes(data, allowances=()):
+def scan_bytes(data, allowances=(), hardbreak=False):
     """The 3.1 legs over one file's raw bytes. allowances is a tuple of (start, end, codepoint-set)
-    byte-range rows already validated for this file. Returns a list of finding strings. A file that
-    does not decode as UTF-8 yields a finding (it is the thing asserted against), never an error."""
+    byte-range rows already validated for this file. hardbreak, when True, permits an EXACTLY-two-trailing-
+    space CommonMark hard break on any non-blank line (markdownlint MD009 br_spaces=2) for this path, and
+    nothing else; every other trailing-whitespace vector still fails. Returns a list of finding
+    strings. A file that does not decode as UTF-8 yields a finding (the thing asserted against), never an
+    error."""
     findings = []
     has_bom = data.startswith(BOM)
     if has_bom:
@@ -110,6 +113,8 @@ def scan_bytes(data, allowances=()):
     for lineno, line in enumerate(lines, start=1):
         body = line[:-1] if line.endswith("\r") else line  # CR is reported once, above
         if body != body.rstrip():
+            if hardbreak and _is_two_space_break(body):
+                continue  # a permitted CommonMark two-space hard break on a hardbreak-allowed path
             findings.append("line {}: trailing whitespace".format(lineno))
     for m in FORBIDDEN_RE.finditer(data):
         if has_bom and m.start() == 0:
@@ -158,7 +163,8 @@ def release_scope(root):
     return set(classes), set(binary_set)
 
 
-POLICY_TOP_KEYS = frozenset(("format-version", "platforms", "allowance"))
+POLICY_TOP_KEYS = frozenset(("format-version", "platforms", "allowance", "hardbreak"))
+HARDBREAK_KEYS = frozenset(("path", "rationale"))
 POLICY_PLATFORM_KEYS = frozenset(("supported", "roadmap"))
 ALLOWANCE_KEYS = frozenset(("path", "sha256", "start", "end", "codepoints", "rationale"))
 
@@ -167,7 +173,7 @@ def load_policy(root):
     """Strict parse of the platform/allowance policy. format-version must be exactly 1, the platform
     sets must equal this gate's constants (single-source discipline: the shipped artifact and the
     enforcing gate cannot drift), and no unknown top-level or [platforms] key is tolerated. Any
-    schema or type error is fail-closed (exit 2). Returns the raw allowance rows."""
+    schema or type error is fail-closed (exit 2). Returns (raw allowance rows, raw hardbreak rows)."""
     try:
         data = load_toml(root / POLICY_REL)
     except (OSError, ValueError) as exc:
@@ -189,7 +195,10 @@ def load_policy(root):
     rows = data.get("allowance", [])
     if not isinstance(rows, list):
         raise GateError("{}: [[allowance]] is not an array".format(POLICY_REL))
-    return rows
+    hb_rows = data.get("hardbreak", [])
+    if not isinstance(hb_rows, list):
+        raise GateError("{}: [[hardbreak]] is not an array".format(POLICY_REL))
+    return rows, hb_rows
 
 
 def validate_allowances(root, rows, scope_paths):
@@ -238,6 +247,57 @@ def validate_allowances(root, rows, scope_paths):
         out[path] = out[path] + ((start, end, cpset),)
     return out
 
+
+def _is_two_space_break(body):
+    """True iff `body` (one line, any trailing CR already removed) ends in EXACTLY two spaces after
+    non-space content: the CommonMark / markdownlint MD009 two-space hard break. A single space, three
+    or more spaces, a tab or other whitespace, and an all-whitespace line are all False, so nothing but
+    the exact hard break is ever permitted."""
+    stripped = body.rstrip()
+    return bool(stripped) and body[len(stripped):] == "  "
+
+
+def _has_two_space_break(data):
+    """Whether `data` carries at least one two-space hard-break line (the used-once check for an
+    allowance). Undecodable bytes carry none: scan_bytes reports the decode failure separately."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    lines = text.split("\n")[:-1] if text.endswith("\n") else text.split("\n")
+    return any(_is_two_space_break(l[:-1] if l.endswith("\r") else l) for l in lines)
+
+
+def validate_hardbreak(root, rows, scope_paths):
+    """Validate the two-space hard-break allowances; return the set of in-scope paths on which the
+    trailing-whitespace leg permits an EXACTLY-two-space CommonMark hard break (and nothing else). Each
+    row binds an in-scope release path and a rationale; a duplicate, out-of-scope, malformed, or unused
+    row (the file carries no such break, so the allowance is stale) is fail-closed. This is the sole,
+    disclosed residual of the trailing-whitespace leg: every other trailing-whitespace vector (one
+    space, three or more, a tab, a blank line) still fails everywhere, including on a listed path."""
+    out = set()
+    for i, row in enumerate(rows, 1):
+        where = "{} hardbreak #{}".format(POLICY_REL, i)
+        if not isinstance(row, dict):
+            raise GateError("{}: not a table".format(where))
+        unknown = set(row) - HARDBREAK_KEYS
+        if unknown:
+            raise GateError("{}: unknown key(s) {}".format(where, sorted(unknown)))
+        path, rationale = row.get("path"), row.get("rationale")
+        if not (isinstance(path, str) and isinstance(rationale, str) and rationale):
+            raise GateError("{}: missing or malformed field".format(where))
+        if path not in scope_paths:
+            raise GateError("{}: path {!r} is not an in-scope release path".format(where, path))
+        if path in out:
+            raise GateError("{}: duplicate hardbreak allowance for {}".format(where, path))
+        try:
+            data = (root / path).read_bytes()
+        except OSError as exc:
+            raise GateError("{}: cannot read {} ({})".format(where, path, exc))
+        if not _has_two_space_break(data):
+            raise GateError("{}: unused (no two-space hard break occurs in {})".format(where, path))
+        out.add(path)
+    return out
 
 def effective_attributes(root, scope_paths):
     """{path: {"text": v, "eol": v}} via `git check-attr -z --stdin`, the engine evaluation. A
@@ -304,8 +364,9 @@ def check_matrix(root):
 def run(root):
     try:
         scope, binary = release_scope(root)
-        allow_rows = load_policy(root)
+        allow_rows, hb_rows = load_policy(root)
         allowances = validate_allowances(root, allow_rows, scope)
+        hardbreak_paths = validate_hardbreak(root, hb_rows, scope)
         check_matrix(root)
         findings = coverage_findings(scope, binary, effective_attributes(root, scope))
         for path in sorted(scope - binary):
@@ -313,7 +374,8 @@ def run(root):
                 data = (root / path).read_bytes()
             except OSError as exc:
                 raise GateError("cannot read in-scope file {} ({})".format(path, exc))
-            findings += ["{}: {}".format(path, f) for f in scan_bytes(data, allowances.get(path, ()))]
+            findings += ["{}: {}".format(path, f) for f in
+                         scan_bytes(data, allowances.get(path, ()), path in hardbreak_paths)]
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -469,6 +531,8 @@ def self_test_main():
                                 platforms={"supported": list(SUPPORTED), "roadmap": list(ROADMAP),
                                            "surprise": 1})):
         failures.append("an unknown [platforms] key was not rejected")
+    if not _policy_rejects(dict(base_policy, hardbreak={"not": "a list"})):
+        failures.append("a non-array hardbreak policy value was not rejected")
     # validate_allowances row schema (FIX 2): an unknown key and a bool offset each fail closed.
     # The path does not exist, so a downstream read would also raise GateError; assert the SPECIFIC
     # schema rejection reason so the test isolates the key/type check, not the file-read failure.
@@ -497,6 +561,72 @@ def self_test_main():
                             "{}".format(exc))
     except Exception as exc:  # a non-GateError (e.g. TypeError) is the exact pre-fix escape
         failures.append("a nested allowance codepoint raised {!r} instead of GateError".format(exc))
+    # Two-space CommonMark hard break: cleared only with hardbreak=True, and ONLY for exactly two
+    # trailing spaces on a non-blank line. Every other trailing-whitespace vector still fails, even on a
+    # hardbreak-allowed path. This is the durable guard for the SKILL.md five-line header render.
+    if scan_bytes(b"Version: 1  \nrest\n", (), True):
+        failures.append("a two-space hard break was not cleared under a hardbreak allowance")
+    if not scan_bytes(b"Version: 1  \nrest\n", (), False):
+        failures.append("a two-space trailing run cleared without a hardbreak allowance")
+    if not scan_bytes(b"Version: 1   \nrest\n", (), True):
+        failures.append("a three-space trailing run wrongly cleared as a hard break")
+    if not scan_bytes(b"Version: 1\t\nrest\n", (), True):
+        failures.append("a trailing tab wrongly cleared as a hard break")
+    if not scan_bytes(b"Version: 1 \nrest\n", (), True):
+        failures.append("a ONE-space trailing run wrongly cleared as a two-space hard break")
+    if not scan_bytes(("Version: 1" + chr(0x00A0) + "\nrest\n").encode("utf-8"), (), True):
+        failures.append("a trailing non-breaking space wrongly cleared as a hard break")
+    if not scan_bytes(b"  \nrest\n", (), True):
+        failures.append("an all-space line wrongly cleared as a hard break")
+    if not _has_two_space_break(b"Version: 1  \nx\n"):
+        failures.append("_has_two_space_break missed a present hard break")
+    if _has_two_space_break(b"Version: 1\nx\n"):
+        failures.append("_has_two_space_break saw a hard break where none exists")
+    # validate_hardbreak schema: an unknown key, a missing field, and an out-of-scope path fail closed.
+    hb_good = {"path": "x", "rationale": "r"}
+    for bad, reason in ((dict(hb_good, extra=1), "unknown key"),
+                        ({"path": "x"}, "malformed"),
+                        (dict(hb_good, rationale=""), "malformed")):
+        try:
+            validate_hardbreak(repo_root(), [bad], {"x"})
+            failures.append("validate_hardbreak accepted a bad row ({})".format(reason))
+        except GateError as exc:
+            if reason not in str(exc):
+                failures.append("validate_hardbreak rejected a row on wrong terms: {}".format(exc))
+    try:
+        validate_hardbreak(repo_root(), [hb_good], set())
+        failures.append("validate_hardbreak accepted an out-of-scope path")
+    except GateError as exc:
+        if "in-scope" not in str(exc):
+            failures.append("validate_hardbreak out-of-scope rejection on wrong terms: {}".format(exc))
+    # validate_hardbreak read-dependent legs: a valid used row passes; duplicate, unused/stale, and
+    # unreadable rows each fail closed. Exercised against a temp root so the mutation guard is real.
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _d:
+        _root = Path(_d)
+        (_root / "f.md").write_text("Version: 1  \nx\n")  # carries a two-space hard break
+        if validate_hardbreak(_root, [{"path": "f.md", "rationale": "r"}], {"f.md"}) != {"f.md"}:
+            failures.append("validate_hardbreak rejected a valid used hardbreak row")
+        try:
+            validate_hardbreak(_root, [{"path": "f.md", "rationale": "r"},
+                                       {"path": "f.md", "rationale": "r"}], {"f.md"})
+            failures.append("validate_hardbreak accepted a duplicate path")
+        except GateError as exc:
+            if "duplicate" not in str(exc):
+                failures.append("validate_hardbreak duplicate rejection on wrong terms: {}".format(exc))
+        (_root / "g.md").write_text("Version: 1\nx\n")  # no two-space break -> unused/stale
+        try:
+            validate_hardbreak(_root, [{"path": "g.md", "rationale": "r"}], {"g.md"})
+            failures.append("validate_hardbreak accepted a stale (unused) allowance")
+        except GateError as exc:
+            if "unused" not in str(exc):
+                failures.append("validate_hardbreak unused rejection on wrong terms: {}".format(exc))
+        try:
+            validate_hardbreak(_root, [{"path": "missing.md", "rationale": "r"}], {"missing.md"})
+            failures.append("validate_hardbreak accepted an unreadable path")
+        except GateError as exc:
+            if "cannot read" not in str(exc):
+                failures.append("validate_hardbreak unreadable rejection on wrong terms: {}".format(exc))
     # effective_attributes fail-closed (FIX 4): launch failure and malformed response each -> GateError.
     def _boom(*_a, **_k):
         raise FileNotFoundError("injected git launch failure")
