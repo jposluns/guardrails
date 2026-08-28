@@ -43,12 +43,12 @@ a:hover{text-decoration:underline}
 .wrap{max-width:1040px; margin:0 auto; padding:0 1.5rem}
 
 section{padding:1.75rem 0}
-h1,h2,h3{line-height:1.12; letter-spacing:-.025em; font-weight:750}
+h1,h2,h3{line-height:1.12; letter-spacing:-.025em; font-weight:750; text-wrap:pretty}
 h1{font-size:clamp(2.1rem,4vw,3.2rem)}
 h2{font-size:clamp(1.85rem,3.2vw,2.75rem); margin:0 0 1.15rem}
 h3{font-size:1.42rem; margin:0 0 .5rem}
-p{color:var(--muted); margin:0 0 1.05rem}
-.lead{font-size:clamp(1.24rem,1.7vw,1.42rem); color:var(--ink); line-height:1.55}
+p{color:var(--muted); margin:0 0 1.05rem; text-wrap:pretty}
+.lead{font-size:clamp(1.24rem,1.7vw,1.42rem); color:var(--ink); line-height:1.55; text-wrap:pretty}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
 
 /* the teal kicker above every section */
@@ -155,8 +155,7 @@ ul.clean li{margin:.35rem 0; color:var(--muted)}
 .pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
 .idea-note{font-size:1.02rem; color:var(--faint)}
 
-footer{border-top:1px solid var(--line); padding:2.6rem 0 3.2rem; text-align:center; margin-top:2rem}
-footer p{color:var(--faint); font-size:0.97rem; margin:.35rem 0}
+#main{padding-bottom:4rem}
 
 /* dark/light toggle */
 .themetoggle{font:inherit; cursor:pointer; color:var(--muted); background:var(--panel);
