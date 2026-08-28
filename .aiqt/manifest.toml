@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c87376ab346c5ea277d00501ff3854563fe286939761986e93a7ad9a60e8ca4e"
+tree-sha256 = "4152aa9a4e0d384f526da9cf0518291938f0732118bff5471c7211f3471b15bd"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2192,12 +2192,12 @@ sha256 = "68ec6effb145cf031170f8dce6046f968efee6f3628ff7083b1773d3082286ee"
 [[sources]]
 path = "site/downloads/mappings.csv"
 bytes = 253471
-sha256 = "f1be6ca7bf067a849bdbdaf491fc13a48c0939241af497d9435abd1f0221eec7"
+sha256 = "27d758c40420435ffb216d602f83a8ffac81090543b0ff5aecd61c2ad1038745"
 
 [[sources]]
 path = "site/downloads/mappings.json"
 bytes = 401613
-sha256 = "f6b4177e52fe9347c81a27d6ae38c2e33c0a3db85a37edd3bce63177b8534c7e"
+sha256 = "e61ef53b31f4a77641299f014043f191fddeefc61242dbae0afbc39ec19da090"
 
 [[sources]]
 path = "site/evidence.html"
@@ -2257,7 +2257,7 @@ sha256 = "c187ff25459daa8a2ed592eddb8cbd721200cdae98246e2c416d2a728d801352"
 [[sources]]
 path = "site/mappings.html"
 bytes = 483756
-sha256 = "f572562270acc1353915a1687a7bd586a0b7d23faaffac604d5d6c2893c8cfa4"
+sha256 = "6d697cde18a281653b0bb4d95604dd5930edec624d8134c088e0d466c9367949"
 
 [[sources]]
 path = "site/roadmap.html"
@@ -2521,8 +2521,8 @@ sha256 = "609d391e9a3dc849730afd858867bfe5169f9b7353aa318bda7c9d3650f4a4cc"
 
 [[sources]]
 path = "tools/gen_mappings.py"
-bytes = 24852
-sha256 = "c59b6897df36abe16697a4dac57bf6d978967e0b58cbd58129bf5df38fff1764"
+bytes = 25299
+sha256 = "f2bfe4f8a81fce35f5a3569c81f3911fd82164c2ce05d6d675b22ee8e0976d4d"
 
 [[sources]]
 path = "tools/gen_notice.py"
