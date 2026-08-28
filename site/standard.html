@@ -118,27 +118,28 @@
     <p class="eyebrow">The five rules</p>
     <h2>The five rules: the standard in practice</h2>
     <p class="lead">The ordering is what AIQT holds to; the five rules are how an assistant applies
-      it, moment to moment. They ship in the chat skill you install today, and each one produces
-      something you can see. (The first two echo a famous pair on purpose.)</p>
+      it, moment to moment. They ship in the chat skill you install today, scoped to the issues the
+      work in front of it turns up.</p>
     <ol class="rules">
-      <li><b>Every catch is announced.</b>
+      <li><b>Every catch is surfaced.</b>
         <p>When a guardrail catches something (it blocks, flags, or refuses), the assistant tells
           you which guardrail and what it caught. Silent passes stay quiet, so what reaches you is
           signal, not noise.</p></li>
-      <li><b>The standard is re-anchored, visibly.</b>
-        <p>The assistant reminds itself that it must always follow AIQT, a short "AIQT check" it
-          states out loud, so that the standard was applied is itself something you can see.</p></li>
+      <li><b>Each change gets a self-check.</b>
+        <p>At least once per change, the assistant recaps how it has followed AIQT. It does this in
+          its own reasoning, where the platform gives it one, so the check keeps the standard honest
+          without cluttering your answer or your deliverables.</p></li>
       <li><b>Problems in scope are fixed before it calls the work done.</b>
         <p>An issue the current work turns up, within what it is doing now, is fixed before the
           assistant declares that piece finished.</p></li>
-      <li><b>Problems out of scope are fixed next, not dropped.</b>
-        <p>An issue it turns up but outside the current scope is carried to the next step rather
-          than forgotten (the piece in hand finishes first).</p></li>
-      <li><b>Underlying gaps become new guardrails.</b>
-        <p>When a gap let an issue through, the assistant does not just fix the one instance; it
-          adds a guardrail so that shape of issue is caught from then on. In a project that new
-          guardrail can be shared back, with your permission, so everyone's assistant improves.
-          This is how AIQT self-learns.</p></li>
+      <li><b>Problems out of scope are surfaced, not dropped.</b>
+        <p>An issue it turns up but outside the current request is named plainly rather than quietly
+          dropped or quietly acted on. If addressing it needs work beyond the request, the assistant
+          asks first instead of expanding scope on its own.</p></li>
+      <li><b>Underlying gaps get a proposed fix.</b>
+        <p>When the assistant's own gap let an issue through, it does not just fix the one instance;
+          it proposes a guardrail (and drafts it if you ask) so that shape of issue should not
+          recur.</p></li>
     </ol>
     <div class="cta" style="justify-content:flex-start; margin-top:1.6rem">
       <a class="btn primary" href="/examples">See the ordering decide: the examples</a>

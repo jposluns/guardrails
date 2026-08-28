@@ -34,7 +34,7 @@ evidence = [
 [[row]]
 id = "what-it-enforces"
 topic = "What it can enforce"
-claim = "AIQT is a behavioural standard your assistant is required to follow: visible self-checks, announced catches, and claims backed by evidence."
+claim = "AIQT is a behavioural standard your assistant is required to follow: it announces what its guardrails catch, surfaces issues instead of hiding them, and backs its claims with evidence."
 limitation = "It does not technically prevent a model from erring. Results still depend on the model, the platform, competing instructions, and the tools in the conversation. AIQT does not make an AI infallible, and it does not sandbox, monitor, or block anything at runtime."
 evidence = [
   { text = "What AIQT does not do", href = "/evidence#limits" },

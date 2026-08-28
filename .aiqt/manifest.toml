@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "0cd5cbf3f17d7bec8c9f3b26b26acf4a15327eb568e079de270fd0be983fb9de"
+tree-sha256 = "cee3ef67bb8c9d0a812beaada496b8a035d4d77e9c8991038393b615b454a904"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2051,8 +2051,8 @@ sha256 = "476a7bfdc4c2e9fd95070b04886e7671331a229219fffdb657f77fba85ecaf0d"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 7382
-sha256 = "db49d1da96fbf936b8645c5125560fafa6f47b4c0942ebcb67c7359daddf2b3b"
+bytes = 7427
+sha256 = "440b3f6c3a2ef516bdf433bff591c15c7d56c639f627363de6f9cff7c2591781"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2111,8 +2111,8 @@ sha256 = "02e7e549d86d94d11d40fd4a4619e2d34c0c28e057a336b8046d4e6fda43809d"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 8768
-sha256 = "cd585acadd2611afda31f68cd993f784d784b8368af704ceeff01c266a5703d5"
+bytes = 8813
+sha256 = "a809a987534c9c496f2def0a92b640dfd4d79ea5e195fa764153d4f11793e907"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
@@ -2156,8 +2156,8 @@ sha256 = "ab43d1c68b00f5de7ad26d09eeef2ca632561269b1753ea89d365ab5044cc7ef"
 
 [[sources]]
 path = "site/disclosure.html"
-bytes = 14676
-sha256 = "d2c7d82aeb8bc8add45945bdcf302747f3997e2c9fc7c9eb3e89449d97d7a580"
+bytes = 14721
+sha256 = "555b589b9c370e585135bb82ad6e55c036356eb94bd37671558e105c304968c7"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions.txt"
@@ -2271,8 +2271,8 @@ sha256 = "4af241b735cd232d6d688a808865a2448d90a47dce196d956aa026063fdd27ac"
 
 [[sources]]
 path = "site/standard.html"
-bytes = 9207
-sha256 = "d19f925731848fa469a7b9c783836242f7eebba27880c257c2be9e7e21c130d7"
+bytes = 9219
+sha256 = "439751566d1c0141656f4a77ac6d55ae9da1a7635202c83f2c73569bace33d3e"
 
 [[sources]]
 path = "site/styles.css"
