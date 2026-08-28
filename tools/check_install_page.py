@@ -79,17 +79,25 @@ SHOW_DECL = re.compile(r"(?<![\w-])display:block")
 # A :not(...) negation of the guard inverts its meaning (hiding when the attribute is ABSENT), so the
 # guard is tested only AFTER the negations are stripped from a selector.
 NOT_PSEUDO = re.compile(r":not\([^)]*\)", re.I)
-# The presence guard html[data-family] (no value) and the generic section [data-family-section] (no
+# The presence guard html[data-family] (no value) and the family section section[data-family-section] (no
 # value) that together form the hide-all rule; each boundary-anchored so .html, xhtml, or data-family-mode
-# does not count, and the closing ] pins the attribute to its exact name (no value).
+# does not count, and the closing ] pins the attribute to its exact name (no value). The section attribute
+# must sit on a `section` tag specifically, so a wrong-tag selector like html[data-family] x[data-family-
+# section] (which matches no real <section> and would collapse nothing) does not count.
 HIDE_GUARD = re.compile(r"(?:^|[\s>+~])html\[data-family\]", re.I)
-GENERIC_SECTION = re.compile(r"\[data-family-section\]")
+GENERIC_SECTION = re.compile(r"(?:^|[\s>+~])section\[data-family-section\]", re.I)
 # The page must reference install.js as an EXECUTABLE external script; parsed structurally (below) so a
 # commented-out tag or a non-JS type attribute does not count.
 EXECUTABLE_TYPES = {"", "module", "text/javascript", "application/javascript", "text/ecmascript"}
 # The picker logic install.js must actually carry, so an empty or stub file is caught (matched
-# case-insensitively as substrings).
+# case-insensitively as substrings). The tokens are sought only in CODE: JavaScript comments are stripped
+# first (below), so a comment-only file (e.g. "// render apply family") no longer reads as real logic.
 JS_LOGIC_TOKENS = ("render", "apply", "family")
+# JavaScript comment forms, stripped before the picker-logic token test. This is a heuristic strip (it does
+# not model strings or regex literals), sufficient for this tripwire: it prevents a comment-only stub from
+# passing by mentioning the tokens, and never removes real code that carries them.
+JS_LINE_COMMENT = re.compile(r"//[^\n]*")
+JS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 
 
 def has_visible_text(data):
@@ -150,7 +158,8 @@ def family_reveal_present(css_text, fam):
     guard = re.compile(
         r'(?:^|[\s>+~])html\[data-family\s*[~^$*|]?=\s*["\']?' + re.escape(fam) + r'["\']?\s*\]', re.I)
     section = re.compile(
-        r'\[data-family-section\s*[~^$*|]?=\s*["\']?' + re.escape(fam) + r'["\']?\s*\]', re.I)
+        r'(?:^|[\s>+~])section\[data-family-section\s*[~^$*|]?=\s*["\']?' + re.escape(fam)
+        + r'["\']?\s*\]', re.I)
     for selector, body in _css_rules(css_text):
         if not _shows(body):
             continue
@@ -248,10 +257,15 @@ class InstallParser(HTMLParser):
 
         # install.js must be an EXECUTABLE external script. Parsed here (not by regex over the raw page) so
         # a commented-out <script> is invisible to the parser, and a non-JS type (application/json) or a
-        # missing src does not count.
-        if tag == "script" and "src" in attrs and "/js/install.js" in attrs.get("src", "") \
+        # missing src does not count. The src is matched by its BASENAME (query and fragment stripped): the
+        # basename must equal "install.js" exactly, so a suffixed path like /js/install.js.disabled, which a
+        # substring test would accept, is rejected.
+        if tag == "script" and "src" in attrs \
                 and attrs.get("type", "").strip().lower() in EXECUTABLE_TYPES:
-            self.install_script_ok += 1
+            src = attrs.get("src", "")
+            basename = src.split("#", 1)[0].split("?", 1)[0].rsplit("/", 1)[-1]
+            if basename == "install.js":
+                self.install_script_ok += 1
 
         # scoped inline-code check: within the picker group or a family section subtree, keyed by STRUCTURE
         # (the .platform-actions group, the #install-picker id, or a data-family-section) so removing the id
@@ -369,11 +383,13 @@ def analyze(page_text, css_text, js_text):
     if not js_text.strip():
         problems.append("site/js/install.js is empty; the picker logic is gone.")
     else:
-        low = js_text.lower()
-        missing = [tok for tok in JS_LOGIC_TOKENS if tok not in low]
+        # Strip JavaScript comments before the token test so a comment-only file cannot mention the tokens
+        # and read as real logic.
+        code = JS_LINE_COMMENT.sub("", JS_BLOCK_COMMENT.sub("", js_text)).lower()
+        missing = [tok for tok in JS_LOGIC_TOKENS if tok not in code]
         if missing:
             problems.append("site/js/install.js does not carry the expected picker logic (missing: {}); it "
-                            "may be a stub or placeholder.".format(", ".join(missing)))
+                            "may be a stub or a comment-only placeholder.".format(", ".join(missing)))
     if parser.scoped_inline_scripts:
         problems.append("the picker or a family section contains an inline <script>; move the code to "
                         "site/js/install.js.")
@@ -429,9 +445,10 @@ def run(root):
 # --- self-test ----------------------------------------------------------------------------------------
 # A synthetic conformant page + stylesheet + script pass; each targeted mutation (including the hardened
 # ones: inline-style hiding, aria-live="off", a missing or hidden picker, an inline handler on a de-ided
-# .platform-actions, a commented-out or non-JS-type or empty or stub install.js, a --custom-property or
-# :not()-negated or split hide-all guard, and all five reveal rules removed) fails; and a missing input
-# fails closed (exit 2).
+# .platform-actions, a commented-out or non-JS-type or suffixed-src (.disabled, fix B) or empty or stub or
+# comment-only (fix C) install.js, a --custom-property or :not()-negated or split or wrong-tag (fix D)
+# hide-all guard, wrong-tag (fix D) reveal rules, and all five reveal rules removed) fails; and a missing
+# input fails closed (exit 2).
 
 def _clean_page():
     picker = ['<div class="platform-actions" id="install-picker">']
@@ -490,6 +507,16 @@ def _self_test():
     _custom_prop_css = ("html[data-family] section[data-family-section]{--display:none}\n" + _REVEALS
                         + "{display:block}\n")
     _no_reveals_css = "html[data-family] section[data-family-section]{display:none}\n"
+    # Fix D: a wrong-tag selector carries the attribute on a non-section element (x[data-family-section]),
+    # which matches no real <section> and collapses nothing; the gate must not accept it as the hide-all.
+    _wrongtag_hide_css = ("html[data-family] x[data-family-section]{display:none}\n" + _REVEALS
+                          + "{display:block}\n")
+    # Fix D: the reveal rules on a wrong tag (x instead of section) re-show nothing real, so every reveal
+    # is effectively missing.
+    _wrongtag_reveals = ",\n".join(
+        'html[data-family="{0}"] x[data-family-section="{0}"]'.format(f) for f in FAMILIES)
+    _wrongtag_reveal_css = ("html[data-family] section[data-family-section]{display:none}\n"
+                            + _wrongtag_reveals + "{display:block}\n")
 
     # Each mutation is (label, page, css, js); a mutation of one input keeps the others clean.
     mutations = [
@@ -540,8 +567,13 @@ def _self_test():
          clean.replace('<script src="/js/install.js" defer></script>',
                        '<script src="/js/install.js" type="application/json"></script>'),
          _CLEAN_CSS, _CLEAN_JS),
+        ("install.js suffixed src (.disabled)",
+         clean.replace('<script src="/js/install.js" defer></script>',
+                       '<script src="/js/install.js.disabled" defer></script>'), _CLEAN_CSS, _CLEAN_JS),
         ("install.js empty", clean, _CLEAN_CSS, "\n"),
         ("install.js stub without logic", clean, _CLEAN_CSS, "// placeholder\n"),
+        ("install.js comment-only mentioning the logic tokens", clean, _CLEAN_CSS,
+         "// render apply family picker\n/* render apply family */\n"),
         ("collapse rule removed", clean, "body{color:#111}\n", _CLEAN_JS),
         ("collapse guard renamed", clean,
          "html[data-family-mode] section[data-family-section]{display:none}\n" + _REVEALS
@@ -549,6 +581,8 @@ def _self_test():
         ("hide-all custom-property fragment", clean, _custom_prop_css, _CLEAN_JS),
         ("hide-all guard negated by :not()", clean, _negated_css, _CLEAN_JS),
         ("hide-all guard and section split across selectors", clean, _split_css, _CLEAN_JS),
+        ("hide-all attribute on a wrong tag (not <section>)", clean, _wrongtag_hide_css, _CLEAN_JS),
+        ("reveal rules attribute on a wrong tag (not <section>)", clean, _wrongtag_reveal_css, _CLEAN_JS),
         ("all five reveal rules removed", clean, _no_reveals_css, _CLEAN_JS),
     ]
     for label, page, css, js in mutations:

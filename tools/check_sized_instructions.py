@@ -65,13 +65,21 @@ SKILL_SRC_REL = ".aiqt/core/skill/skill-source.md"            # the authoritativ
 RECORDED_REL = "tools/sized-instructions-source.sha256"       # the blessed source hash (tracked, tools/**)
 
 # A line-anchored `Version X.Y.Z` line. HORIZONTAL whitespace only ([ \t], never \s, so a bare "Version"
-# line cannot swallow the next line's number across the newline). Exactly three dotted numeric groups,
-# with the end anchored so a 4th dotted segment (1.2.3.4) or a trailing alphanumeric (1.2.3rc1) does NOT
-# read as a valid version: `(?![A-Za-z0-9])` rejects a following letter or digit, `(?!\.\d)` rejects a
-# following ".<digit>" 4th segment, while still allowing a trailing sentence period ("Version 1.0.3.") and
-# the source's "Version 1.0.3 ." spelling. A malformed version matches nothing and is a fail-closed finding,
-# never a silent pass.
-VERSION_RE = re.compile(r"^Version[ \t]+(\d+\.\d+\.\d+)(?![A-Za-z0-9])(?!\.\d)", re.M)
+# line cannot swallow the next line's number across the newline). Exactly three dotted numeric groups, and
+# the version token is clean ONLY when those three segments are immediately followed by whitespace, the
+# end of the line (an optional CR then the line end, so a CRLF file's version line still parses), or a
+# single sentence period that is itself followed by whitespace or end-of-line. The
+# positive lookahead `(?=[ \t]|\r?$|\.(?:[ \t]|\r?$))` enforces exactly that: it accepts the source spelling
+# "Version 1.0.3 ." and the condensations' "Version 1.0.3." but rejects a 4th dotted segment (1.2.3.4), a
+# non-numeric 4th segment (1.2.3.foo), a prerelease or build suffix (1.2.3-alpha, 1.2.3+build), and a
+# trailing alphanumeric (1.2.3rc1). A malformed version matches nothing here and is caught as a fail-closed
+# finding by the VERSION_LINE_RE sweep below, never a silent pass.
+VERSION_RE = re.compile(r"^Version[ \t]+(\d+\.\d+\.\d+)(?=[ \t]|\r?$|\.(?:[ \t]|\r?$))", re.M)
+# Any line that opens a version declaration ("Version" then horizontal whitespace). Every such line MUST
+# parse cleanly through VERSION_RE; one that does not is a malformed declaration (e.g. a "Version 1.2.3.4"
+# line sitting beside a valid "Version 1.0.3." line), which VERSION_RE alone would silently skip while the
+# valid line won. The sweep in extract_version turns that into a fail-closed finding.
+VERSION_LINE_RE = re.compile(r"^Version[ \t].*$", re.M)
 
 
 class GateError(Exception):
@@ -89,6 +97,13 @@ def extract_version(text, where):
     `where`. Every valid version line is collected (not just the first), so two CONFLICTING version lines
     are a fail-closed finding rather than the first silently winning; a missing or malformed line is a
     finding too."""
+    # A line that opens a version declaration but does not parse to a clean X.Y.Z is a malformed line, a
+    # fail-closed finding even when a valid version line sits beside it (so a malformed line can never hide
+    # next to a good one and let the good one silently win).
+    for m in VERSION_LINE_RE.finditer(text):
+        line = m.group(0)
+        if not VERSION_RE.match(line):
+            raise GateError("{}: malformed version line {!r}".format(where, line.strip()))
     versions = VERSION_RE.findall(text)
     if not versions:
         raise GateError("{}: no valid line-anchored 'Version X.Y.Z' line found".format(where))
@@ -281,8 +296,10 @@ def run(root, update=False, force=False):
 # Synthetic fixtures assert the fail-closed invariants without the real corpus:
 #   (a) the pure content check: a clean set has no findings; an over-cap file, a condensation version
 #       mismatch, and a source version mismatch each produce a finding;
-#   (a2) version parsing (fix 1): the canonical and source spellings parse; a 4th dotted segment, a
-#       Version line split across a newline, and two conflicting version lines each fail-close.
+#   (a2) version parsing (fix 1): the canonical and source spellings parse; a 4th dotted segment
+#       (1.2.3.4), a non-numeric 4th segment (1.2.3.foo), a prerelease (1.2.3-alpha) or build
+#       (1.2.3+build) suffix, a trailing alphanumeric (1.2.3rc1), a Version line split across a newline,
+#       two conflicting version lines, and a malformed version line beside a valid one each fail-close.
 #   (b) run() end to end on a temp root: a conformant tree passes (exit 0); an over-cap condensation,
 #       a version mismatch, and an un-reconciled source drift (recorded != computed) each fail (exit 1);
 #   (c) fail-closed (exit 2): a missing condensation and a missing recorded hash file;
@@ -359,10 +376,20 @@ def _self_test():
         failures.append("version: the source 'Version 1.0.3 .' spelling did not parse")
     if not raises_gate(_wrap("1.2.3.4")):
         failures.append("version: a 4th dotted segment (1.2.3.4) was accepted, not rejected")
+    if not raises_gate(_wrap("1.2.3.foo")):
+        failures.append("version: a non-numeric 4th segment (1.2.3.foo) was accepted, not rejected")
+    if not raises_gate(_wrap("1.2.3-alpha")):
+        failures.append("version: a prerelease suffix (1.2.3-alpha) was accepted, not rejected")
+    if not raises_gate(_wrap("1.2.3+build")):
+        failures.append("version: a build-metadata suffix (1.2.3+build) was accepted, not rejected")
+    if not raises_gate(_wrap("1.2.3rc1")):
+        failures.append("version: a trailing alphanumeric (1.2.3rc1) was accepted, not rejected")
     if not raises_gate("AIQT instructions\nVersion\n1.2.3\n"):
         failures.append("version: a split 'Version<newline>1.2.3' was accepted across the newline")
     if not raises_gate("AIQT\nVersion 1.2.3.\nVersion 9.9.9.\n"):
         failures.append("version: two conflicting version lines did not fail (first silently won)")
+    if not raises_gate("AIQT\nVersion 1.2.3.4\nVersion 1.0.3.\n"):
+        failures.append("version: a malformed version line beside a valid one did not fail (valid won)")
 
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-sized-selftest-"))
     try:
@@ -441,8 +468,10 @@ def _self_test():
             print("  - " + f)
         return 1
     print("PASS: check_sized_instructions self-test: the pure content check flags an over-cap file and a "
-          "version mismatch; version parsing rejects a 4th segment, a newline-split Version line, and "
-          "conflicting version lines; run() passes a conformant tree and fails an over-cap file, a version "
+          "version mismatch; version parsing rejects a 4th segment, a non-numeric 4th segment, a "
+          "prerelease or build suffix, a trailing alphanumeric, a newline-split Version line, conflicting "
+          "version lines, and a malformed line beside a valid one; run() passes a conformant tree and fails "
+          "an over-cap file, a version "
           "mismatch, and an un-reconciled source drift (exit 1); a missing condensation, a missing recorded "
           "hash, invalid UTF-8 in skill-source.md, and a malformed source version all fail closed (exit 2); "
           "a CRLF condensation over its cap fails (exit 1); and an empty or missing --update baseline "
