@@ -88,9 +88,9 @@ class GateError(Exception):
 
 def scan_bytes(data, allowances=(), hardbreak=False):
     """The 3.1 legs over one file's raw bytes. allowances is a tuple of (start, end, codepoint-set)
-    byte-range rows already validated for this file. hardbreak, when True, permits a single EXACTLY-two-
-    trailing-space CommonMark hard break on a non-blank line (markdownlint MD009 br_spaces=2) for this
-    path, and nothing else; every other trailing-whitespace vector still fails. Returns a list of finding
+    byte-range rows already validated for this file. hardbreak, when True, permits an EXACTLY-two-trailing-
+    space CommonMark hard break on any non-blank line (markdownlint MD009 br_spaces=2) for this path, and
+    nothing else; every other trailing-whitespace vector still fails. Returns a list of finding
     strings. A file that does not decode as UTF-8 yields a finding (the thing asserted against), never an
     error."""
     findings = []
@@ -572,6 +572,10 @@ def self_test_main():
         failures.append("a three-space trailing run wrongly cleared as a hard break")
     if not scan_bytes(b"Version: 1\t\nrest\n", (), True):
         failures.append("a trailing tab wrongly cleared as a hard break")
+    if not scan_bytes(b"Version: 1 \nrest\n", (), True):
+        failures.append("a ONE-space trailing run wrongly cleared as a two-space hard break")
+    if not scan_bytes(("Version: 1" + chr(0x00A0) + "\nrest\n").encode("utf-8"), (), True):
+        failures.append("a trailing non-breaking space wrongly cleared as a hard break")
     if not scan_bytes(b"  \nrest\n", (), True):
         failures.append("an all-space line wrongly cleared as a hard break")
     if not _has_two_space_break(b"Version: 1  \nx\n"):
@@ -595,6 +599,34 @@ def self_test_main():
     except GateError as exc:
         if "in-scope" not in str(exc):
             failures.append("validate_hardbreak out-of-scope rejection on wrong terms: {}".format(exc))
+    # validate_hardbreak read-dependent legs: a valid used row passes; duplicate, unused/stale, and
+    # unreadable rows each fail closed. Exercised against a temp root so the mutation guard is real.
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _d:
+        _root = Path(_d)
+        (_root / "f.md").write_text("Version: 1  \nx\n")  # carries a two-space hard break
+        if validate_hardbreak(_root, [{"path": "f.md", "rationale": "r"}], {"f.md"}) != {"f.md"}:
+            failures.append("validate_hardbreak rejected a valid used hardbreak row")
+        try:
+            validate_hardbreak(_root, [{"path": "f.md", "rationale": "r"},
+                                       {"path": "f.md", "rationale": "r"}], {"f.md"})
+            failures.append("validate_hardbreak accepted a duplicate path")
+        except GateError as exc:
+            if "duplicate" not in str(exc):
+                failures.append("validate_hardbreak duplicate rejection on wrong terms: {}".format(exc))
+        (_root / "g.md").write_text("Version: 1\nx\n")  # no two-space break -> unused/stale
+        try:
+            validate_hardbreak(_root, [{"path": "g.md", "rationale": "r"}], {"g.md"})
+            failures.append("validate_hardbreak accepted a stale (unused) allowance")
+        except GateError as exc:
+            if "unused" not in str(exc):
+                failures.append("validate_hardbreak unused rejection on wrong terms: {}".format(exc))
+        try:
+            validate_hardbreak(_root, [{"path": "missing.md", "rationale": "r"}], {"missing.md"})
+            failures.append("validate_hardbreak accepted an unreadable path")
+        except GateError as exc:
+            if "cannot read" not in str(exc):
+                failures.append("validate_hardbreak unreadable rejection on wrong terms: {}".format(exc))
     # effective_attributes fail-closed (FIX 4): launch failure and malformed response each -> GateError.
     def _boom(*_a, **_k):
         raise FileNotFoundError("injected git launch failure")

@@ -329,9 +329,9 @@ def _header_block(data):
     an inline <br>. The shipped-surface byte-canon gate forbids trailing whitespace in general; a single,
     disclosed, path-scoped hard-break allowance (byte-canon.toml [[hardbreak]] for this SKILL.md) permits
     EXACTLY two trailing spaces on a non-blank line and nothing else, so the gate is honoured, not weakened.
-    The portability author-header exemption (check_portability.author_header_line) matches the Author line
-    INCLUDING its two trailing spaces. Website is the [plugin] homepage value verbatim from the identity
-    manifest (e.g. https://aiqt.ai)."""
+    The portability author-header exemption (check_portability.author_header_line) matches this Author line
+    by its STRIPPED content, so its two trailing spaces are transparent to that match. Website is the
+    [plugin] homepage value verbatim from the identity manifest (e.g. https://aiqt.ai)."""
     return ("Version: {version}  \n"
             "Author: {name}  \n"
             "Website: {homepage}  \n"
@@ -781,6 +781,21 @@ def self_test_main():
         code, out = capture(good, True)
         if code != 0:
             failures.append("well-formed --check after generate expected exit 0 (clean), got {}\n{}".format(code, out))
+
+        # 1b. The rendered header carries the five-line identity block: four two-space CommonMark hard
+        # breaks (Version/Author/Website/GitHub) and NONE on the Licence line. Removing any break (so the
+        # header would collapse in a sanitizing viewer) fails here even after regeneration.
+        good_md = good.joinpath(*RESERVED_PARTS) / "SKILL.md"
+        hdr_lines = [ln for ln in good_md.read_text(encoding="utf-8").splitlines()
+                     if ln.split(":", 1)[0] in ("Version", "Author", "Website", "GitHub", "Licence")]
+
+        def _two(ln):
+            return ln != ln.rstrip() and ln[len(ln.rstrip()):] == "  "
+        breaks = sum(1 for ln in hdr_lines if _two(ln))
+        if breaks != 4:
+            failures.append("header expected exactly four two-space hard breaks, got {}".format(breaks))
+        if any(ln.startswith("Licence:") and _two(ln) for ln in hdr_lines):
+            failures.append("the Licence header line must not carry a two-space hard break")
 
         # 2. Unknown corpus-id fails closed (exit 2): the anti-fabrication gate.
         badid = tmp / "badid"

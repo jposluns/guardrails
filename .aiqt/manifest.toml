@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "603a90c827c4702d7357c6d052ab5667a0da8e36c0b9f030eb63d37fbb6c0a7f"
+tree-sha256 = "293d0eaeee94203d2edfeedd0deea2f206ad30130fd0704b5d3693e49cc138cb"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -82,7 +82,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2536
-sha256 = "ee89c3cdd1ce9ae81f95768260d936a6ae8e9ef8393d296f34a0a23a7e093114"
+sha256 = "3a832167a13e034d5cd72d7f3dc46872358a1701831c7ac386edc0b20c04ea13"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2331,8 +2331,8 @@ sha256 = "96d047d5a0eae90e5e4f35c0caa47c73a093495ce9e99a2dc0232f04738f6d48"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 41124
-sha256 = "cdcd84e29a36ee2875d4554963e049ba2f06e7129dc734cdcb11e938ce63d4e4"
+bytes = 43281
+sha256 = "316ad0a049bacc10b372a49da00b5a4961352d0689d33872987ccc807f18d563"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -2551,8 +2551,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 45059
-sha256 = "545c3cfa9920f2c6ed4c9bac4e7e1a50e647acef4ffd169ccc77b55d04cfc1ae"
+bytes = 46105
+sha256 = "4aae2c5541f7e1ce3a6a7f433eb9a3c52d4d7eb8b1b2ba2f438a5ff73a7dbd3b"
 
 [[sources]]
 path = "tools/import_cwe.py"
