@@ -96,7 +96,7 @@ GENSRC_OUTPUTS = (
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
 )
-# The install-page SKILL-DOWNLOAD block (site/install-claude.html) is generated and drift-gated by its own
+# The install-page SKILL-DOWNLOAD block (site/install.html) is generated and drift-gated by its own
 # generator, tools/gen_install.py, a block generator with NO RENDERER_DECL registered in the gensrc
 # registry the same way gen_disclosure.py registers site/disclosure.html. Keeping it a separate,
 # RENDERER_DECL-free generator is what lets it be roster-tracked without gen_manifest recording the whole

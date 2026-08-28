@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Add AIQT to your assistant</title>
-<meta name="description" content="Add AIQT to your chat assistant. Pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, and follow a short guide for that platform. No command line, no developer account, no GitHub knowledge needed.">
+<meta name="description" content="Add AIQT to your chat assistant on one page. Pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, get the file it needs, and follow a short guide. No command line, no developer account, no GitHub knowledge needed.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css?v=20260811za">
 <script src="/theme.js"></script>
@@ -12,7 +12,7 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Add AIQT to your assistant">
-<meta property="og:description" content="Add AIQT to your chat assistant. Pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, and follow a short guide for that platform. No command line, no developer account, no GitHub knowledge needed.">
+<meta property="og:description" content="Add AIQT to your chat assistant on one page. Pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, get the file it needs, and follow a short guide. No command line, no developer account, no GitHub knowledge needed.">
 <meta property="og:url" content="https://aiqt.ai/install">
 <meta name="twitter:card" content="summary">
 </head>
@@ -31,11 +31,11 @@
   <a class="navlink" href="/">Home</a>
   <h4>Chat assistants</h4>
   <a class="navlink active" href="/install" aria-current="page">All assistants</a>
-  <a class="navlink" href="/install-claude">Claude</a>
-  <a class="navlink" href="/install-chatgpt">ChatGPT</a>
-  <a class="navlink" href="/install-gemini">Gemini</a>
-  <a class="navlink" href="/install-copilot">Copilot</a>
-  <a class="navlink" href="/install-other">Any other</a>
+  <a class="navlink" href="/install#claude">Claude</a>
+  <a class="navlink" href="/install#chatgpt">ChatGPT</a>
+  <a class="navlink" href="/install#gemini">Gemini</a>
+  <a class="navlink" href="/install#copilot">Copilot</a>
+  <a class="navlink" href="/install#other">Any other</a>
   <h4>Developers &amp; teams</h4>
   <a class="navlink" href="/development">Developers &amp; Coding</a>
   <a class="navlink" href="/tech-details">Technical details</a>
@@ -60,32 +60,34 @@
   <p class="eyebrow">You and your chat assistant</p>
   <h1>Add AIQT to your assistant.</h1>
   <p class="lead">Your assistant sounds just as confident when it is guessing as when it knows.
-    AIQT 1.0.0 guides it toward a stated standard, and it is available now. Pick the AI you use below and
-    follow a short, focused guide. You do not need a command line, a developer account, or any
-    knowledge of GitHub.</p>
+    AIQT 1.0.0 guides it toward a stated standard, and it is available now. Pick the AI you use,
+    get the file it needs, and follow a short, focused guide, all on this one page. You do not need
+    a command line, a developer account, or any knowledge of GitHub.</p>
 </div>
 
 <section id="pick">
   <div class="wrap">
     <p class="eyebrow">Pick your assistant</p>
     <h2>Choose the AI you use</h2>
-    <p class="lead">One standard, intended for any assistant that accepts standing instructions. Each
-      guide is a single page with just the steps for that platform, so you are not reading past the
-      parts that do not apply to you.</p>
-    <div class="platform-actions">
-      <a class="platform-button" href="/install-claude"><span class="platform-icon claude">C</span>
-        <span><strong>Set up in Claude</strong><small>Upload the Skill</small></span></a>
-      <a class="platform-button" href="/install-chatgpt"><span class="platform-icon chatgpt">O</span>
-        <span><strong>Set up in ChatGPT</strong><small>Use the instruction file</small></span></a>
-      <a class="platform-button" href="/install-gemini"><span class="platform-icon gemini">G</span>
-        <span><strong>Set up in Gemini</strong><small>Create a Gem</small></span></a>
-      <a class="platform-button" href="/install-copilot"><span class="platform-icon copilot">Co</span>
-        <span><strong>Set up in Copilot</strong><small>Create an agent</small></span></a>
-      <a class="platform-button wide" href="/install-other"><span class="platform-icon guide">+</span>
+    <p class="lead">Choosing one hides the other assistants' steps, so you read only yours. Or leave
+      it unset and scroll to read them all. One standard, intended for any assistant that accepts
+      standing instructions.</p>
+    <div class="platform-actions" id="install-picker" tabindex="-1" role="group" aria-label="Pick your AI assistant">
+      <a class="platform-button" href="#claude" data-family-link="claude"><span class="platform-icon claude" aria-hidden="true">C</span>
+        <span><strong>Claude</strong><small>Upload the Skill</small></span></a>
+      <a class="platform-button" href="#chatgpt" data-family-link="chatgpt"><span class="platform-icon chatgpt" aria-hidden="true">O</span>
+        <span><strong>ChatGPT</strong><small>Use the Skill or the file</small></span></a>
+      <a class="platform-button" href="#gemini" data-family-link="gemini"><span class="platform-icon gemini" aria-hidden="true">G</span>
+        <span><strong>Gemini</strong><small>Create a Gem</small></span></a>
+      <a class="platform-button" href="#copilot" data-family-link="copilot"><span class="platform-icon copilot" aria-hidden="true">Co</span>
+        <span><strong>Copilot</strong><small>Create an agent</small></span></a>
+      <a class="platform-button wide" href="#other" data-family-link="other"><span class="platform-icon guide" aria-hidden="true">+</span>
         <span><strong>Any other assistant</strong><small>Use the portable instruction file</small></span></a>
-      <a class="platform-button wide" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer"><span class="platform-icon source">&lt;/&gt;</span>
-        <span><strong>View the source on GitHub</strong><small>Read every rule and the licence</small></span></a>
     </div>
+    <p class="family-reset">
+      <button type="button" id="family-reset" class="btn ghost" hidden>Show all assistants</button>
+      <span class="vh" role="status" aria-live="polite" id="family-status"></span>
+    </p>
     <p style="margin-top:1.3rem">AIQT is a standard your assistant is required to follow, not a
       guarantee that the model is perfect: results still depend on the platform and model, and you stay
       in charge. What it changes is what you can demand and check. Both files it ships as are prose
@@ -93,38 +95,214 @@
   </div>
 </section>
 
-<section id="expect">
+<section id="download" class="section-alt">
   <div class="wrap">
-    <p class="eyebrow">What changes</p>
-    <h2>What you can now demand</h2>
-    <p class="lead">The irritations that brought you to this page are exactly what AIQT is built to curb.</p>
+    <p class="eyebrow">Get AIQT</p>
+    <h2>Get the file your assistant needs</h2>
+    <p class="lead">AIQT comes in two forms: a packaged Skill, and a plain instruction file in four
+      sizes. Download the one your assistant can use; if you are not sure, the routing below tells
+      you which.</p>
     <div class="grid">
       <div class="card">
-        <h3>No more confident bluffing</h3>
-        <p>Your assistant is required to back a factual claim with its source, or say when it
-          cannot, and when a guardrail catches something, it names the guardrail and what it
-          caught.</p>
+        <h3>The Skill (a .zip)</h3>
+        <p>For assistants that accept Skills, such as Claude and paid ChatGPT. It installs the full
+          standard so it is available in any chat. Do not unzip it.</p>
+        <div class="cta" style="justify-content:flex-start; margin-top:1rem">
+          <!-- SKILL-DOWNLOAD:BEGIN (generated) -->
+      <a class="btn primary" href="/downloads/aiqt-skill-1.0.3.zip" download>Download the Skill (.zip)</a>
+      <!-- SKILL-DOWNLOAD:END -->
+        </div>
       </div>
       <div class="card">
-        <h3>No more guessing to please you</h3>
-        <p>When your assistant does not know, it says so. When a decision is yours, it pauses and
-          asks, instead of filling the gap with a plausible invention.</p>
-      </div>
-      <div class="card">
-        <h3>No more "done" that was not</h3>
-        <p>A "done" rests on a check that actually ran, so a finished claim is meant to come with a
-          check you can point to.</p>
-      </div>
-      <div class="card">
-        <h3>No more quiet changes</h3>
-        <p>No weakened checks, no half-built work dressed up as finished, no invented names or
-          citations. Failures are surfaced to you first.</p>
+        <h3>The instruction file (.txt)</h3>
+        <p>For assistants that cannot use Skills, such as Gemini, Copilot, and most others. It is the
+          same standard as prose, in four sizes. Pick the largest your assistant accepts: the smaller
+          files carry less of the finer detail to fit a tighter instruction limit, so they are a
+          little less complete. That is a limit of some assistants, not of the standard.</p>
+        <div class="cta" style="justify-content:flex-start; margin-top:1rem">
+          <a class="btn primary" href="/downloads/aiqt-instructions.txt" download>Full instructions</a>
+          <a class="btn ghost" href="/downloads/aiqt-instructions-8k.txt" download>Compact, 8k</a>
+          <a class="btn ghost" href="/downloads/aiqt-instructions-5k.txt" download>Condensed, 5k</a>
+          <a class="btn ghost" href="/downloads/aiqt-instructions-1_5k.txt" download>Pointer, 1.5k</a>
+        </div>
       </div>
     </div>
+    <p style="margin-top:1.3rem">Which file each assistant uses:</p>
+    <ul class="clean">
+      <li><b>Claude:</b> the Skill (.zip).</li>
+      <li><b>ChatGPT:</b> the Skill (.zip) on a paid plan (a Project or custom GPT); if you cannot use
+        Skills, attach the full instruction file to a chat.</li>
+      <li><b>Gemini:</b> the full instruction file, pasted into a Gem.</li>
+      <li><b>Copilot:</b> the 8k instruction file, pasted into a Copilot agent.</li>
+      <li><b>Any other assistant:</b> the full instruction file.</li>
+    </ul>
+    <p style="margin-top:1.1rem">The instruction file is plain text; the Skill is a zip of prose
+      instructions and reference files, with no program inside. You can
+      <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">read every rule and the licence on GitHub</a>.</p>
   </div>
 </section>
 
-<section id="cleanlanguage">
+<section id="claude" data-family-section="claude">
+  <div class="wrap">
+    <p class="eyebrow">Chat assistant &middot; Claude</p>
+    <h2>Add AIQT to Claude</h2>
+    <p class="verified">Last verified: pending</p>
+    <p class="lead"><b>The recommended Claude method installs the Skill</b>, so the full standard is
+      available in any chat. Use the Skill (.zip) from <a href="#download">Get AIQT</a>.</p>
+    <ol class="steps">
+      <li><b>Turn on code execution first.</b> The Skills section does not appear without it. On the
+        Free, Pro, and Max plans, open Settings, then Capabilities, and enable code execution and
+        file creation. This is Claude's requirement for using any Skill; AIQT itself contains no
+        code to execute. Install from a desktop browser; the mobile apps are not documented to
+        support Skill upload.</li>
+      <li><b>Open Claude Skills.</b> Go to your Skills page, click the + button, then choose
+        + Create skill.</li>
+      <li><b>Click "Upload a skill".</b></li>
+      <li><b>Select the file.</b> Choose the skill zip you downloaded.</li>
+      <li><b>Switch it on.</b> Make sure that AIQT is switched on in your Skills list.</li>
+    </ol>
+    <p class="evidence-label" style="margin-top:1.4rem">If Skills are turned off: the Projects fallback</p>
+    <p>If your plan or organization has Skills disabled, use a Project instead. Use the
+      <a href="#download">full instruction file</a>, create a new Project named AIQT, upload the file
+      to the Project's knowledge, and set the Project instructions to apply AIQT to every response.</p>
+    <p style="margin-top:.9rem"><b>Tell Claude to always use it.</b> A Skill is loaded when Claude
+      judges it relevant, and AIQT is a standing standard rather than task-specific. Open Settings,
+      then your personal preferences, and add <i>"Always apply the AIQT skill to every response."</i>
+      (or add the same line to a specific Project's instructions). With it, AIQT is on for every turn,
+      which is what a standard is for.</p>
+    <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
+  </div>
+</section>
+
+<section id="chatgpt" data-family-section="chatgpt">
+  <div class="wrap">
+    <p class="eyebrow">Chat assistant &middot; ChatGPT</p>
+    <h2>Add AIQT to ChatGPT</h2>
+    <p class="verified">Last verified: pending</p>
+    <p class="lead">On a paid plan, ChatGPT can use the same packaged Skill as Claude, kept in a
+      Project or a custom GPT. If you cannot use Skills, attach the full instruction file to a chat
+      instead. Get both from <a href="#download">Get AIQT</a>.</p>
+    <ol class="steps">
+      <li><b>Create a place for it.</b> On a paid plan, create a Project named AIQT, or a custom GPT
+        named AIQT, to hold the standard in one dedicated spot.</li>
+      <li><b>Add the Skill or the file.</b> Upload the Skill (.zip) where your plan accepts Skills; if
+        it does not offer Skills, upload or paste the full instruction file into the Project knowledge
+        or the custom GPT's instructions instead.</li>
+      <li><b>Turn it on for every response.</b> At the top of the Project or custom GPT instructions,
+        add <i>"Always apply the AIQT instructions to every response."</i></li>
+      <li><b>No Project or Skills?</b> Attach the full instruction file to an ordinary chat and ask
+        ChatGPT to follow the AIQT instructions for the conversation.</li>
+    </ol>
+    <p style="margin-top:1.1rem">ChatGPT has not yet been tested against AIQT, so treat these steps
+      as method-accurate rather than a verified result; the <a href="/evidence">evidence page</a>
+      carries the current test status. ChatGPT's settings labels also change from time to time, so if
+      a name here does not match, look for the equivalent Skills, Projects, or custom-instructions
+      setting.</p>
+    <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
+  </div>
+</section>
+
+<section id="gemini" data-family-section="gemini">
+  <div class="wrap">
+    <p class="eyebrow">Chat assistant &middot; Gemini</p>
+    <h2>Add AIQT to Gemini</h2>
+    <p class="verified">Last verified: pending</p>
+    <p class="lead">Gemini uses a Gem, with the full instruction file pasted into it. You set this up
+      once on a computer, and it is then available on mobile too. Get the
+      <a href="#download">full instruction file</a> first.</p>
+    <ol class="steps">
+      <li><b>Open Gemini on a computer.</b> Go to gemini.google.com. Gems are created on the website,
+        not in the mobile app.</li>
+      <li><b>Open Gems, and create one.</b> In the left menu choose Gems, create a new Gem, and name
+        it AIQT.</li>
+      <li><b>Paste the file in.</b> Open <code>aiqt-instructions.txt</code>, copy all of it, and paste
+        it into the Gem's instructions. Pasting the instructions has given better results than
+        uploading alone, so paste is the primary method.</li>
+      <li><b>Save it.</b> Save the Gem. You can also add <code>aiqt-instructions.txt</code> to the
+        Gem's Knowledge section as well, if you want both.</li>
+      <li><b>Use it.</b> Once saved on the website, the AIQT Gem is available in the mobile app too.
+        Open the AIQT Gem whenever you want the standard applied.</li>
+    </ol>
+    <p style="margin-top:1.1rem">Gemini has not yet been tested against AIQT, so treat these steps as
+      method-accurate rather than a verified result; the <a href="/evidence">evidence page</a>
+      carries the current test status.</p>
+    <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
+  </div>
+</section>
+
+<section id="copilot" data-family-section="copilot">
+  <div class="wrap">
+    <p class="eyebrow">Chat assistant &middot; Copilot</p>
+    <h2>Add AIQT to Copilot</h2>
+    <p class="verified">Last verified: pending</p>
+    <p class="lead">Microsoft 365 Copilot uses an agent. Copilot caps an agent's instructions at
+      8000 characters, so paste the <b>8k</b> file as the instructions and add the full file as
+      reference. Get the files from <a href="#download">Get AIQT</a>.</p>
+    <ol class="steps">
+      <li><b>Open Microsoft 365 Copilot.</b> Open the agents panel and click New agent; when it offers
+        to build the agent for you, click Skip to set it up yourself.</li>
+      <li><b>Name it AIQT.</b></li>
+      <li><b>Paste the 8k file in.</b> Open the 8k instruction file, copy all of it, and paste it into
+        the Instructions box.</li>
+      <li><b>Add the full file as reference.</b> Find the option to add specific websites and add the
+        full instruction file URL as reference the agent can consult; the pasted instructions are what
+        it follows.</li>
+      <li><b>Create and use it.</b> Click Create, then select AIQT whenever you write.</li>
+    </ol>
+    <p class="evidence-label" style="margin-top:1.4rem">Without an agent: the fallback</p>
+    <p>Open the <a href="#download">full instruction file</a>, copy its contents into a chat, and ask
+      Copilot to follow the AIQT rules for the conversation.</p>
+    <p style="margin-top:1.1rem">Copilot has not yet been tested against AIQT, so treat these steps as
+      method-accurate rather than a verified result; the <a href="/evidence">evidence page</a>
+      carries the current test status.</p>
+    <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
+  </div>
+</section>
+
+<section id="other" data-family-section="other">
+  <div class="wrap">
+    <p class="eyebrow">Chat assistant &middot; Any other</p>
+    <h2>Add AIQT to any other assistant</h2>
+    <p class="verified">Last verified: pending</p>
+    <p class="lead">This covers local models, API-based assistants, and any system that accepts
+      standing guidance. Use the <a href="#download">full instruction file</a>.</p>
+    <ol class="steps">
+      <li><b>Add the file where your assistant takes standing guidance:</b> its custom instructions,
+        a system prompt, project knowledge, or an attached reference file.</li>
+      <li><b>Tell it to always apply AIQT:</b> <i>"Use the AIQT instructions for every response
+        unless I explicitly tell you not to."</i></li>
+    </ol>
+    <p style="margin-top:.9rem">That instruction line is what keeps AIQT applied to every response.
+      Without it, the assistant may follow the standard only when it happens to judge it relevant.</p>
+    <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
+  </div>
+</section>
+
+<section id="verify">
+  <div class="wrap">
+    <p class="eyebrow">Confirm that it is on</p>
+    <h2>Check that it is on</h2>
+    <p class="lead">In a new chat, ask: <i>"Are you applying the AIQT standard? Which version, and
+      what does it require of you?"</i></p>
+    <p>A correctly set-up assistant confirms that it is applying AIQT and summarizes the ordering:
+      Accuracy, Integrity, Quality, and Trust come first, then Progress, Speed, and Cost. If it does
+      not, repeat the setup steps for your assistant above, and check that the Skill or file is in
+      place and that your always-on instruction is set.</p>
+  </div>
+</section>
+
+<section id="remove">
+  <div class="wrap">
+    <p class="eyebrow">Full control</p>
+    <h2>How to remove it</h2>
+    <p>To turn AIQT off, undo it in each place you set it up: remove or disable the Skill, Gem, or
+      agent; delete any always-on instruction you added (in your personal preferences or a project's
+      instructions); and remove any AIQT file, Project, or space you created for it. Once nothing you
+      added remains, your assistant is back to its default behaviour.</p>
+  </div>
+</section>
+
+<section id="cleanlanguage" class="section-alt">
   <div class="wrap">
     <p class="eyebrow">Also recommended</p>
     <h2>We also recommend Clean Language</h2>
@@ -147,8 +325,8 @@
       also share one standard, intended to reach across the assistants it uses, on the
       <a href="/teams">Teams &amp; Enterprise</a> path.</p>
     <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
-      <a class="btn primary" href="/examples">Not sure yet? See what changes, both ways</a>
-      <a class="btn ghost" href="#pick">Pick your assistant</a>
+      <a class="btn primary" href="/standard">See what you can now demand: the Standard</a>
+      <a class="btn ghost" href="/examples">See the difference in action</a>
     </div>
   </div>
 </section>
@@ -156,5 +334,6 @@
 
 </div>
 </div>
+<script src="/js/install.js" defer></script>
 </body>
 </html>

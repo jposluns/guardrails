@@ -190,8 +190,8 @@ class = "pack-immutable"
 path = "roadmap.toml"
 class = "pack-immutable"
 
-# --- concern-1: pack-immutable non-download site paths (each literal; the three block-generated pages
-# --- site/disclosure.html, site/mappings.html, site/roadmap.html, site/install-claude.html are whole-file
+# --- concern-1: pack-immutable non-download site paths (each literal; the block-generated pages
+# --- site/disclosure.html, site/mappings.html, site/roadmap.html, site/install.html are whole-file
 # --- pack-immutable here, their block FRESHNESS checked separately by each block generator's own --check, 4.2)
 
 [[release-class]]
@@ -228,26 +228,6 @@ class = "pack-immutable"
 
 [[release-class]]
 path = "site/index.html"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/install-chatgpt.html"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/install-claude.html"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/install-copilot.html"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/install-gemini.html"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/install-other.html"
 class = "pack-immutable"
 
 [[release-class]]

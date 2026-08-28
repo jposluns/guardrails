@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the SKILL-DOWNLOAD block on site/install-claude.html from the skill meta version.
+"""Generate the SKILL-DOWNLOAD block on site/install.html from the skill meta version.
 
 The install page carries ONE generated region: the download button whose href names the version-numbered
 skill zip. That name tracks the skill meta version in .aiqt/core/skill/skill-source.md, so a skill bump
@@ -18,7 +18,7 @@ manifest's whole-file artefact set. It single-sources the skill version through 
 the filename shape through gen_skill.versioned_zip_basename, so the button, the version-numbered zip name,
 and the skill meta version cannot diverge.
 
-  gen_install.py            regenerate the SKILL-DOWNLOAD block on site/install-claude.html
+  gen_install.py            regenerate the SKILL-DOWNLOAD block on site/install.html
   gen_install.py --check    exit 1 if the block is out of date; exit 2 on a malformed source, a missing
                             page, or missing markers (fail-closed)
   gen_install.py --self-test  build synthetic trees and assert drift is caught (exit 1) and a missing page
@@ -35,16 +35,16 @@ from gen_skill import parse_source, versioned_zip_basename, SKILL_SRC_PARTS  # n
 # block lives in; MARKER names the <!-- MARKER:BEGIN --> / <!-- MARKER:END --> pair replace_block splices
 # between. The skill version is read from the SAME source gen_skill parses (SKILL_SRC_PARTS), so the two
 # generators can never read a different version.
-INSTALL_PAGE_PARTS = ("site", "install-claude.html")
+INSTALL_PAGE_PARTS = ("site", "install.html")
 INSTALL_PAGE_REL = "/".join(INSTALL_PAGE_PARTS)
 MARKER = "SKILL-DOWNLOAD"
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata only,
-# it does not affect what this generator produces. site/install-claude.html is a generated block inside a
+# it does not affect what this generator produces. site/install.html is a generated block inside a
 # hand-authored page (the SKILL-DOWNLOAD markers), so it is recorded as kind block, exactly as
 # gen_disclosure declares site/disclosure.html. The source is the skill meta version.
 GENSRC_OUTPUTS = (
-    {"target": "site/install-claude.html", "kind": "block",
+    {"target": "site/install.html", "kind": "block",
      "sources": (".aiqt/core/skill/skill-source.md",),
      "regenerate": "python3 tools/gen_install.py"},
 )
