@@ -243,7 +243,7 @@
         ".aiqt/core/rules/",
         ".aiqt/core/hooks/manifest.toml"
       ],
-      "target": "site/downloads/aiqt-skill-1.0.1.zip"
+      "target": "site/downloads/aiqt-skill-1.0.2.zip"
     },
     {
       "kind": "file",

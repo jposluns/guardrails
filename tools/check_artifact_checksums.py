@@ -16,7 +16,7 @@ attest, whose history GA-3 already freezes append-only. Shape:
     version = "1.0.0"
     ...
     [release.artifacts]
-    "site/downloads/aiqt-skill-1.0.1.zip" = "sha256:<64 lowercase hex>"
+    "site/downloads/aiqt-skill-1.0.2.zip" = "sha256:<64 lowercase hex>"
     "site/downloads/aiqt-instructions.txt" = "sha256:<64 lowercase hex>"
 
 DORMANT (no release carries `artifacts`): print NOT APPLICABLE and contribute exit 0. One dormant-side
