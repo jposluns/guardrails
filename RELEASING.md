@@ -16,7 +16,7 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (the version-numbered `site/downloads/aiqt-skill-1.0.2.zip`, which the site links to, and
+   (the version-numbered `site/downloads/aiqt-skill-1.0.3.zip`, which the site links to, and
    `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
    byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
@@ -43,7 +43,7 @@ signed; the independently published digest is the authenticated reference.
    drift or portability gate. Finally, run `python3 tools/gen_install.py` to repoint the install-page
    download button at the new versioned filename.
 2. Compute. From the repository root on the frozen tree, run
-   `sha256sum site/downloads/aiqt-skill-1.0.2.zip site/downloads/aiqt-instructions.txt`. These two files
+   `sha256sum site/downloads/aiqt-skill-1.0.3.zip site/downloads/aiqt-instructions.txt`. These two files
    are the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in
    the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and

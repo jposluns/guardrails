@@ -20,7 +20,7 @@ Evidence: [What the files are](https://aiqt.ai/install#pick) [The 1.1.0 director
 
 ## What it can enforce
 
-Claim: AIQT is a behavioural standard your assistant is required to follow: visible self-checks, announced catches, and claims backed by evidence.
+Claim: AIQT is a behavioural standard your assistant is required to follow: it announces what its guardrails catch, surfaces issues instead of hiding them, and backs its claims with evidence.
 
 Limitation: It does not technically prevent a model from erring. Results still depend on the model, the platform, competing instructions, and the tools in the conversation. AIQT does not make an AI infallible, and it does not sandbox, monitor, or block anything at runtime.
 
