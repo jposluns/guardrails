@@ -21,3 +21,15 @@ roadmap = ["windows"]            # not supported at this release
 # end = 0
 # codepoints = ["U+200B"]
 # rationale = "..."
+
+# Two-space hard-break allowances (markdownlint MD009 br_spaces=2). The trailing-whitespace leg forbids
+# ALL trailing whitespace; a path listed here may carry EXACTLY two trailing spaces after non-space
+# content, the CommonMark hard break, and nothing else. One space, three or more, a tab, or a blank line
+# still fails, here and everywhere. This is the sole, disclosed residual of that leg. The shipped chat
+# skill SKILL.md renders its five-line identity header (Version, Author, Website, GitHub, Licence) with
+# these hard breaks, so it displays as five lines in sanitizing markdown viewers that honour neither a
+# trailing-backslash break nor an inline <br> (matching the cleanlanguage skill). Each row binds an
+# in-scope release path and a rationale; an unused row (no such break in the file) is fail-closed.
+[[hardbreak]]
+path = "site/downloads/aiqt/SKILL.md"
+rationale = "Chat-skill identity header: five-line Version/Author/Website/GitHub/Licence render via two-space hard breaks; sanitizing viewers drop backslash and <br> breaks."

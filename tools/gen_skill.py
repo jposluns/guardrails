@@ -58,7 +58,7 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
 # releases. The site links to the version-numbered copy; both are written from the same bytes, so
 # gen_skill --check (which compares each to disk) keeps the two byte-identical.
-ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.1.zip")  # the version-numbered copy the site
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.2.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
@@ -91,7 +91,7 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
-    {"target": "site/downloads/aiqt-skill-1.0.1.zip", "kind": "file",
+    {"target": "site/downloads/aiqt-skill-1.0.2.zip", "kind": "file",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
@@ -292,14 +292,16 @@ def resolve(source, corpus):
 
 
 def _frontmatter(data):
+    # Only `name` and `description` (matching the cleanlanguage skill). The version and licence are NOT
+    # frontmatter keys: they are carried in the visible `# AIQT™` header block below. A sanitizing skill
+    # viewer that surfaces the tail of the frontmatter would otherwise render the `license`/`version`
+    # keys as stray text between the description and that header block, so they are kept out of the
+    # frontmatter entirely (the meta version/licence still drive the header line and the zip name).
     desc = "\n".join("  " + line for line in data["description"].splitlines())
     return ("---\n"
             "name: {name}\n"
             "description: >-\n{desc}\n"
-            "license: {license}\n"
-            "version: {version}\n"
-            "---").format(name=data["meta"]["name"], desc=desc,
-                          license=data["meta"]["license"], version=data["meta"]["version"])
+            "---").format(name=data["meta"]["name"], desc=desc)
 
 
 def _conduct_block(data):
@@ -321,17 +323,19 @@ def _security_block(data):
 
 def _header_block(data):
     """The visible metadata block (cleanlanguage-style) placed directly under the SKILL.md `# AIQT™` H1:
-    five fields, each on its own rendered line. cleanlanguage forces the line breaks with two trailing
-    spaces, but the shipped-surface byte-canon gate (tools/check_byte_canon.py) forbids trailing whitespace
-    and weakening a gate is not permitted, so the first four lines use CommonMark's other hard break, a
-    trailing backslash, which renders identically and carries no trailing whitespace. The portability
-    author-header exemption (check_portability.author_header_line) matches the Author line INCLUDING that
-    backslash. Website is the [plugin] homepage value verbatim from the identity manifest (e.g.
-    https://aiqt.ai)."""
-    return ("Version: {version}\\\n"
-            "Author: {name}\\\n"
-            "Website: {homepage}\\\n"
-            "GitHub: {github}\\\n"
+    five fields, each on its own rendered line. The first four lines end in a two-space CommonMark hard
+    break (markdownlint MD009 br_spaces=2), exactly as the cleanlanguage skill does, so the block renders
+    as five lines even in sanitizing markdown viewers that honour neither a trailing-backslash break nor
+    an inline <br>. The shipped-surface byte-canon gate forbids trailing whitespace in general; a single,
+    disclosed, path-scoped hard-break allowance (byte-canon.toml [[hardbreak]] for this SKILL.md) permits
+    EXACTLY two trailing spaces on a non-blank line and nothing else, so the gate is honoured, not weakened.
+    The portability author-header exemption (check_portability.author_header_line) matches the Author line
+    INCLUDING its two trailing spaces. Website is the [plugin] homepage value verbatim from the identity
+    manifest (e.g. https://aiqt.ai)."""
+    return ("Version: {version}  \n"
+            "Author: {name}  \n"
+            "Website: {homepage}  \n"
+            "GitHub: {github}  \n"
             "Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)").format(
                 version=data["meta"]["version"], name=data["identity_name"],
                 homepage=data["identity_homepage"], github=ATTRIBUTION_SOURCE_URL)
@@ -352,7 +356,7 @@ def render_skill(data):
 
 
 def versioned_zip_basename(version):
-    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.1.zip'. This is the
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.2.zip'. This is the
     shared SHAPE helper: it spells the filename PATTERN in one place, so the build-time match assertion, the
     install-page block (gen_install.py), and any other caller derive the name the same way. It is NOT the
     single source of the concrete versioned name: that name is spelled as a literal in several spots (the

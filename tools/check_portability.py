@@ -115,7 +115,7 @@ PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 # The only shippable file that is not scannable text. It is byte-reconciled by gen_skill.py --check from
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
 # an unreadable copy fails closed rather than passing silently.
-BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.1.zip"}
+BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.2.zip"}
 
 # GD-56 attribution exemption (NARROW and REVIEWED; NOT a general operator-identity allowance). The
 # maintainer deliberately attributes both the project and himself, by name, on the two PUBLISHED chat
@@ -152,12 +152,15 @@ def attribution_line(name):
 
 def author_header_line(name):
     """The single SKILL.md header `Author: <name>` line that legitimately carries the operator name in the
-    visible metadata block. It ends with a trailing backslash: the header block uses CommonMark backslash
-    hard breaks (byte-canon forbids the trailing-space form), so the shipped line is `Author: <name>\\`, and
-    this exempt string matches it including that backslash. Exactly this string, on its own line, and only
-    in SKILL_MD_REL, is masked before the C1 scan; nothing else is exempted. A break-style change that drops
-    the backslash makes this mismatch, so the name trips C1 (fail-safe), never a silent pass."""
-    return "Author: {}\\".format(name)
+    visible metadata block. The shipped line ends with a two-space CommonMark hard break (markdownlint MD009
+    br_spaces=2, matching the cleanlanguage skill; byte-canon permits exactly this via its path-scoped
+    [[hardbreak]] allowance for SKILL.md). The C1 mask (mask_attribution_line) compares a line's STRIPPED
+    content, so this exempt string carries NO trailing whitespace and the two-space break is transparent to
+    the match. Exactly this string, as a STANDALONE stripped line and only in SKILL_MD_REL, is masked before
+    the C1 scan; nothing else is exempted. A break-style change that merges this into a neighbouring line
+    (dropping the standalone break) makes the stripped body no longer equal it, so the name trips C1
+    (fail-safe), never a silent pass."""
+    return "Author: {}".format(name)
 
 
 def mask_attribution_line(text, line):
@@ -656,7 +659,7 @@ def _build_surface(base, name, email):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(_CLEAN_MD, encoding="utf-8")
     (base / "site/downloads/aiqt-skill.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
-    (base / "site/downloads/aiqt-skill-1.0.1.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
+    (base / "site/downloads/aiqt-skill-1.0.2.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
     return base
 
 
