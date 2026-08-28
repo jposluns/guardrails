@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c444bdd55a3795540a2fef6485b5c205e1db5ba2bae5fd4f8b7275dbe9e80532"
+tree-sha256 = "08d5a3cf18a35a3fc2601fb23f68b3fe2766e78b7996db9285c251c37bb31b19"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -66,8 +66,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 8284
-sha256 = "60e4eef0a38fa28e170fb1e77f0a3e0f298295e6d704137f0c04e1551c5bd421"
+bytes = 8356
+sha256 = "fee89733009c6081abdd9e8ee3780987cd6e55f4d2a1eaa4a5d1c0d57329e187"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2031,8 +2031,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31554
-sha256 = "1c4018ac6f4b2095bb5ee9d9c6e239e9f051db2af096c9816387f326079ea05f"
+bytes = 31743
+sha256 = "f9741e6e7c4c99fbed8e7ab9d7a842de31936b7635e1cff06205e40f32fd929c"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2160,6 +2160,21 @@ bytes = 14721
 sha256 = "e5650d6b03c02bae57f67fa8a75b61ce23d187256a2c38c933b9a7da652024e6"
 
 [[sources]]
+path = "site/downloads/aiqt-instructions-1_5k.txt"
+bytes = 1494
+sha256 = "d35450714bc151c029d1e6e68bd1adeccf30545936ce41add388474217eab6e0"
+
+[[sources]]
+path = "site/downloads/aiqt-instructions-5k.txt"
+bytes = 4894
+sha256 = "b8d709a8747ccf7221ad2b7c4932e24e0dc3bc23f1cbe06339f711e27ff58150"
+
+[[sources]]
+path = "site/downloads/aiqt-instructions-8k.txt"
+bytes = 7920
+sha256 = "426a794b5cd1b2b815e3312168c0a91ed2a54b1d28450b65791afa0615da30da"
+
+[[sources]]
 path = "site/downloads/aiqt-instructions.txt"
 bytes = 16436
 sha256 = "99e59770a9c9d5415e464ac8fead8ac752aa53fe662013c465b2c2d5b2dec49b"
@@ -2223,6 +2238,11 @@ sha256 = "108111c7fc6947f92bd15cbc94bc4463bcf5c9f7b38906ff4a89f04238b81c47"
 path = "site/install.html"
 bytes = 21381
 sha256 = "817a912ffb062fc6dbe54fd2d0d7451937bb30bf23a323d8a3e08133624479cc"
+
+[[sources]]
+path = "site/js/install.js"
+bytes = 4389
+sha256 = "793cb1bfa80078c912b666105014f1673eab29199340095432691ec7874d23ef"
 
 [[sources]]
 path = "site/learn.html"

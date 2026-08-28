@@ -434,6 +434,9 @@ site/_redirects text eol=lf
 site/about.html text eol=lf
 site/development.html text eol=lf
 site/disclosure.html text eol=lf
+site/downloads/aiqt-instructions-1_5k.txt text eol=lf
+site/downloads/aiqt-instructions-5k.txt text eol=lf
+site/downloads/aiqt-instructions-8k.txt text eol=lf
 site/downloads/aiqt-instructions.txt text eol=lf
 site/downloads/aiqt-skill-1.0.3.zip binary
 site/downloads/aiqt-skill.zip binary
@@ -447,6 +450,7 @@ site/examples.html text eol=lf
 site/favicon.svg text eol=lf
 site/index.html text eol=lf
 site/install.html text eol=lf
+site/js/install.js text eol=lf
 site/learn.html text eol=lf
 site/mappings.html text eol=lf
 site/roadmap.html text eol=lf
