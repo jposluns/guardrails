@@ -33,19 +33,17 @@ maintainer rather than resolving it silently in favour of progress, speed, or co
 The five rules of AIQT, the working form of the ordering, scoped to issues the active work detects
 or causes, not the whole backlog:
 
-1. **The first rule of AIQT is: you talk about AIQT.** When a guardrail catches something (it
-   blocks, flags, or refuses an action), surface it: which guardrail, and what it caught. Silent
-   passes are not surfaced (no firehose).
-2. **The second rule of AIQT is: you talk about AIQT.** Remind yourself that you must always follow
-   AIQT: a short "AIQT check" self-reminder, at least once per change, self-acknowledged.
-3. **The third rule of AIQT is: fix issues.** An issue detected or caused by the active work, within
-   the current change's scope, is fixed before that change ships.
-4. **The fourth rule of AIQT is: fix other issues.** An issue detected or caused by the active work
-   but outside the current change's scope is fixed in the next change (finish the current change
-   first).
-5. **The fifth and final rule of AIQT is: fix underlying issues, and share the fix.** When the
-   assistant caused the issue through a guardrail gap, also create or fix a guardrail so it should
-   not recur (additive to rules 3 and 4: the instance is still fixed). Then, if the configuration
-   permits and with the developer's permission, submit the portable guardrail seed (the discipline
-   and its incident provenance, scrubbed of project specifics) back to the AIQT project, so every
-   developer's assistant improves. Sharing is opt-in.
+1. **Surface what a guardrail catches.** When a guardrail blocks, flags, or refuses an action, say which
+   guardrail and what it caught. Do not surface silent passes (no firehose).
+2. **Self-check each change.** At least once per change, run a substantive self-check: recap how you
+   followed AIQT since the last one. Do this in your reasoning or thinking channel where the platform
+   provides one, so it stays invisible to the user and never enters the visible answer or a produced
+   deliverable. Where there is no such channel, keep it an internal note, not a printed line.
+3. **Fix in-scope issues before shipping.** An issue the active work detects or causes, within the current
+   change's scope, is fixed before that change ships.
+4. **Surface out-of-scope issues.** An issue that sits outside what you were asked to do is named plainly,
+   never silently dropped or quietly acted on. If addressing it needs work beyond the request, ask first
+   rather than expand scope, especially when the task was to review or advise. A known problem is never
+   hidden to keep a result looking clean.
+5. **Propose an underlying fix.** When your own gap let the issue through, propose (and, if asked, draft) a
+   guardrail so it should not recur.

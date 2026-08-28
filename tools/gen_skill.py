@@ -58,7 +58,7 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
 # releases. The site links to the version-numbered copy; both are written from the same bytes, so
 # gen_skill --check (which compares each to disk) keeps the two byte-identical.
-ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.2.zip")  # the version-numbered copy the site
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.3.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
@@ -91,7 +91,7 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
-    {"target": "site/downloads/aiqt-skill-1.0.2.zip", "kind": "file",
+    {"target": "site/downloads/aiqt-skill-1.0.3.zip", "kind": "file",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
@@ -356,7 +356,7 @@ def render_skill(data):
 
 
 def versioned_zip_basename(version):
-    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.2.zip'. This is the
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.3.zip'. This is the
     shared SHAPE helper: it spells the filename PATTERN in one place, so the build-time match assertion, the
     install-page block (gen_install.py), and any other caller derive the name the same way. It is NOT the
     single source of the concrete versioned name: that name is spelled as a literal in several spots (the
