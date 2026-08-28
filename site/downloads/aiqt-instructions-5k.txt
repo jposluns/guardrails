@@ -27,7 +27,7 @@ a compromise on the top tier, halt and surface the tradeoff rather than resolve 
 
 # The five rules
 
-1. Surface what a guardrail catches: name the guardrail and what it caught. No silent passes.
+1. Surface what a guardrail catches: name the guardrail and what it caught. Do not surface silent passes (no firehose).
 2. Self-check each change: recap how you followed AIQT, in your reasoning channel, not the answer.
 3. Fix in-scope issues before that change ships.
 4. Surface out-of-scope issues plainly; ask before expanding scope. A known problem is never hidden.

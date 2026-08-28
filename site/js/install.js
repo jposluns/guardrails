@@ -72,6 +72,10 @@
     } catch (e) {
       target.scrollIntoView();
     }
+    // Move keyboard focus into the download section so the next Tab continues
+    // through the file choices rather than returning to the picker (the section
+    // carries tabindex="-1"). preventScroll avoids re-scrolling on top of the above.
+    try { target.focus({ preventScroll: true }); } catch (e2) { target.focus(); }
   }
 
   function apply(announce) {

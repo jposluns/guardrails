@@ -95,7 +95,7 @@
   </div>
 </section>
 
-<section id="download" class="section-alt">
+<section id="download" class="section-alt" tabindex="-1">
   <div class="wrap">
     <p class="eyebrow">Get AIQT</p>
     <h2>Get the file your assistant needs</h2>
@@ -115,10 +115,11 @@
       </div>
       <div class="card">
         <h3>The instruction file (.txt)</h3>
-        <p>For assistants that cannot use Skills, such as Gemini, Copilot, and most others. It is the
-          same standard as prose, in four sizes. Pick the largest your assistant accepts: the smaller
-          files carry less of the finer detail to fit a tighter instruction limit, so they are a
-          little less complete. That is a limit of some assistants, not of the standard.</p>
+        <p>For assistants that cannot use Skills, such as Gemini, Copilot, and most others. The standard
+          as prose, in four sizes. Pick the largest your assistant accepts: the full and 8k files carry the
+          standard in full, the 5k trims the finer detail to fit a tighter limit, and the smallest (1.5k) is
+          a compact pointer to the standard rather than the standard itself. Any shortfall is a limit of
+          some assistants, not of the standard.</p>
         <div class="cta" style="justify-content:flex-start; margin-top:1rem">
           <a class="btn primary" href="/downloads/aiqt-instructions.txt" download>Full instructions</a>
           <a class="btn ghost" href="/downloads/aiqt-instructions-8k.txt" download>Compact, 8k</a>
@@ -245,8 +246,8 @@
       <li><b>Paste the 8k file in.</b> Open the 8k instruction file, copy all of it, and paste it into
         the Instructions box.</li>
       <li><b>Add the full file as reference.</b> Find the option to add specific websites and add the
-        full instruction file URL as reference the agent can consult; the pasted instructions are what
-        it follows.</li>
+        full instruction file URL, <code>https://aiqt.ai/downloads/aiqt-instructions.txt</code>, as
+        reference the agent can consult; the pasted instructions are what it follows.</li>
       <li><b>Create and use it.</b> Click Create, then select AIQT whenever you write.</li>
     </ol>
     <p class="evidence-label" style="margin-top:1.4rem">Without an agent: the fallback</p>
@@ -282,12 +283,15 @@
   <div class="wrap">
     <p class="eyebrow">Confirm that it is on</p>
     <h2>Check that it is on</h2>
-    <p class="lead">In a new chat, ask: <i>"Are you applying the AIQT standard? Which version, and
-      what does it require of you?"</i></p>
-    <p>A correctly set-up assistant confirms that it is applying AIQT and summarizes the ordering:
-      Accuracy, Integrity, Quality, and Trust come first, then Progress, Speed, and Cost. If it does
-      not, repeat the setup steps for your assistant above, and check that the Skill or file is in
-      place and that your always-on instruction is set.</p>
+    <p class="lead">Two quick checks. First, a sanity check: in a new chat, ask <i>"Which standard are
+      you applying, and what does it require of you?"</i> A set-up assistant names AIQT and summarizes
+      the ordering: Accuracy, Integrity, Quality, and Trust first, then Progress, Speed, and Cost. This
+      shows the text loaded; it is not proof the assistant will follow it.</p>
+    <p>Second, a behaviour check, which matters more: give it a task where the standard should change
+      what it does. Ask it for <i>"the exact default timeout of a library you have not shown it."</i>
+      Applying AIQT, it should say it cannot know rather than inventing a number. If it recites the
+      ordering but fabricates the answer, the text is present but not being followed: repeat the setup
+      steps above, and check that the Skill or file is in place and your always-on instruction is set.</p>
   </div>
 </section>
 

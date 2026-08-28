@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "08d5a3cf18a35a3fc2601fb23f68b3fe2766e78b7996db9285c251c37bb31b19"
+tree-sha256 = "e7f2ec408e65f8563da4129e42b3c20e1fc2b21fdc313c6ba709a29760d724f4"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2166,8 +2166,8 @@ sha256 = "d35450714bc151c029d1e6e68bd1adeccf30545936ce41add388474217eab6e0"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-5k.txt"
-bytes = 4894
-sha256 = "b8d709a8747ccf7221ad2b7c4932e24e0dc3bc23f1cbe06339f711e27ff58150"
+bytes = 4920
+sha256 = "bf2404eb6ee60e6128e899155054c38a6b419ac12f18f3b8cfc88887ec6f3eda"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-8k.txt"
@@ -2236,13 +2236,13 @@ sha256 = "108111c7fc6947f92bd15cbc94bc4463bcf5c9f7b38906ff4a89f04238b81c47"
 
 [[sources]]
 path = "site/install.html"
-bytes = 21381
-sha256 = "817a912ffb062fc6dbe54fd2d0d7451937bb30bf23a323d8a3e08133624479cc"
+bytes = 21944
+sha256 = "80fdd34355f6261fec7bf634d4c8a55e37a17a6b3c70d4d2ac3d08427f111cff"
 
 [[sources]]
 path = "site/js/install.js"
-bytes = 4389
-sha256 = "793cb1bfa80078c912b666105014f1673eab29199340095432691ec7874d23ef"
+bytes = 4717
+sha256 = "9e408ea39bfd48477a61d172c2bb4976ebaf27da23103e94288d55ca86eabc14"
 
 [[sources]]
 path = "site/learn.html"
