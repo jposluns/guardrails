@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "2edbfa3541d1701b786eede30c83cac9a29a8f542faed900168409548549c58f"
+tree-sha256 = "413184ce27b48f93dd7bdde0888ecbfb3d1e1e95bff028008439f564d307650a"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2151,8 +2151,8 @@ sha256 = "8ca072b55f50437ee15998f999c9ed387e9228af5357402678a181c9e1fc7b8c"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14305
-sha256 = "80f5c3174e80eb62249f7826eb87ed07830da64a3c845e6a79cf5fedb5b52677"
+bytes = 14279
+sha256 = "5ae9f809de9234e34186c7470057c6f1c37891aea7de6b018d1f82a2c49aac6d"
 
 [[sources]]
 path = "site/disclosure.html"
@@ -2216,33 +2216,33 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 14481
-sha256 = "077e2f8e1ee57ac9e8c9866c85eaf63c2629e3c0276e7119e5bcc271c6e2a0c6"
+bytes = 15243
+sha256 = "2a7857e2d49482948d83f450d4919e49d834b4aa9726c746f9304674fa8022ac"
 
 [[sources]]
 path = "site/install-chatgpt.html"
-bytes = 9078
-sha256 = "fe712693b3d2ac4cf9bda7b03b5abe5aa3c3f84f7f08483439b37165a85c8324"
+bytes = 9045
+sha256 = "65cb32772d0494b9cc97180e640de05aa5b8e7494e6740d3120d7a3be8b88b7c"
 
 [[sources]]
 path = "site/install-claude.html"
-bytes = 9648
-sha256 = "955ca5203b739094ad5cfbdeb2a575a780da56bcabfa54921aa0bc2aa7c6ed49"
+bytes = 9816
+sha256 = "51b20b2396da22e16a1e766538e507123a87e8585afc724550b29062c8f40211"
 
 [[sources]]
 path = "site/install-copilot.html"
-bytes = 8792
-sha256 = "5a0e984726ae1077145408a0239c425002ec6a2fdfa4fad33a16aef1705e2a44"
+bytes = 8807
+sha256 = "d52b3dd81c008e3f483dd35d5beb3556741ef64684d326a898ba7e4238ba135d"
 
 [[sources]]
 path = "site/install-gemini.html"
-bytes = 8893
-sha256 = "746cd898f73d4415820ad2f98956d0e5214cbe3be76e7eb1f85c37de60223538"
+bytes = 8908
+sha256 = "176dc8a4b85236d054819ce01d647340ff2bc678dce57ab1e6ad626df6345cd2"
 
 [[sources]]
 path = "site/install-other.html"
-bytes = 7637
-sha256 = "83e1802c78c64e4c8bfda4016f369e2c01b174bf3ae802f4570daae067b22fa3"
+bytes = 7604
+sha256 = "e56f488a72799127efa63fb09a7c276fb2062aefcd027e15a43547112abbc210"
 
 [[sources]]
 path = "site/install.html"
