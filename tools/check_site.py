@@ -22,6 +22,7 @@ parser accepts as well-balanced but which break rendering/behaviour. Download-ar
 tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
 """
 import os
+import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -220,6 +221,58 @@ def classify(v):
     return unquote(parts.path), parts.fragment
 
 
+_LOGO_RE = re.compile(r'<a class="logo".*?</a>', re.S)
+
+
+def logo_findings(pages):
+    """Findings for header-logo drift across pages. `pages` is a list of (rel, text). The logo block is
+    duplicated per page (no page generator yet), so every page that carries one must carry the SAME bytes;
+    any block differing from the majority (canonical) is reported. A page without a logo is not a finding."""
+    logos = {}
+    for rel, text in pages:
+        match = _LOGO_RE.search(text)
+        if match:
+            logos.setdefault(match.group(0), []).append(rel)
+    if len(logos) <= 1:
+        return []
+    canonical = max(logos, key=lambda block: len(logos[block]))
+    out = []
+    for block, rels in logos.items():
+        if block == canonical:
+            continue
+        for rel in rels:
+            out.append("{}: header logo block differs from the canonical logo (logos must be "
+                       "byte-identical across pages)".format(rel))
+    return out
+
+
+def _self_test():
+    good = '<a class="logo" href="/">L</a>'
+    bad = '<a class="logo" href="/">L&trade;</a>'
+    failures = []
+    cases = [
+        ("all identical -> no finding", [("a.html", good), ("b.html", good), ("c.html", good)], 0),
+        ("one outlier -> one finding", [("a.html", good), ("b.html", good), ("c.html", bad)], 1),
+        ("page without a logo is not a finding", [("a.html", good), ("b.html", "<p>no logo</p>")], 0),
+        ("empty set -> no finding", [], 0),
+    ]
+    for label, pages, want in cases:
+        got = len(logo_findings(pages))
+        if got != want:
+            failures.append("{}: expected {} finding(s), got {}".format(label, want, got))
+    # the outlier must be the one named (canonical is the majority)
+    named = logo_findings([("keep.html", good), ("keep2.html", good), ("drift.html", bad)])
+    if not (len(named) == 1 and named[0].startswith("drift.html")):
+        failures.append("outlier naming: expected drift.html named, got {}".format(named))
+    if failures:
+        print("SELF-TEST FAIL:")
+        for x in failures:
+            print("  - " + x)
+        return 1
+    print("PASS: check_site logo-consistency self-test ({} cases)".format(len(cases)))
+    return 0
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     site = root / "site"
@@ -298,6 +351,9 @@ def main():
                 # HTML fragment navigation (raw match, else decoded match).
                 if ids is not None and frag not in ids and unquote(frag) not in ids:
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
+    # Logo consistency (M-04): the header logo block is duplicated per page (no page generator yet), so it
+    # must stay byte-identical on every page that carries it; an outlier is drift.
+    findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
     if findings:
         print("FAIL: {} site-integrity issue(s)".format(len(findings)))
         for finding in sorted(set(findings)):
@@ -308,4 +364,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        sys.exit(_self_test())
     sys.exit(main())

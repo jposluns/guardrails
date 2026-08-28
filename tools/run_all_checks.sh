@@ -56,6 +56,7 @@ run_gate "portability-selftest" python3 tools/check_portability.py --self-test
 run_gate "portability" python3 tools/check_portability.py
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
+run_gate "site-selftest" python3 tools/check_site.py --self-test
 run_gate "site"      python3 tools/check_site.py
 run_gate "overclaim-selftest" python3 tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 tools/check_overclaim.py
