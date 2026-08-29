@@ -488,6 +488,7 @@ tools/check_release_delta.py text eol=lf
 tools/check_rule_placement.py text eol=lf
 tools/check_secrets.py text eol=lf
 tools/check_site.py text eol=lf
+tools/check_site_versions.py text eol=lf
 tools/check_sized_instructions.py text eol=lf
 tools/check_standards_currency.py text eol=lf
 tools/check_standards_urls_live.py text eol=lf
