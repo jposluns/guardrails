@@ -380,7 +380,7 @@
           "default": "block",
           "id": "gensrc-failclose",
           "platform": "ci",
-          "residue": "A registry-driven fail-close gate: for every target the gensrc registry declares, it corrupts a disposable sandbox copy (the real tree is never written) and asserts the generator's --check rejects it - a text target fails closed to exit 2, the one binary target drifts to exit 1, and the floor is that a corrupted target never yields exit 0. It is the durable form of the F-142b sweep and catches an F-154-class generator that does not consult its target. It exercises --check not regeneration, models unreadable as invalid UTF-8, probes one representative member per tree, recognizes only the 'python3 tools/gen_<stem>.py' regenerate grammar, and does not judge the semantic correctness of generated content.",
+          "residue": "A registry-driven fail-close gate: for every target the gensrc registry declares, it corrupts a disposable sandbox copy (the real tree is never written) and asserts the generator's --check rejects it - a text target fails closed to exit 2, the one binary target drifts to exit 1, and the floor is that a corrupted target never yields exit 0. It is the durable form of the F-142b sweep and catches an F-154-class generator that does not consult its target. It exercises --check not regeneration, models unreadable as invalid UTF-8, probes every regular-file member of a tree, recognizes only the 'python3 tools/gen_<stem>.py' regenerate grammar, and does not judge the semantic correctness of generated content.",
           "script": "tools/check_gensrc_failclose.py"
         },
         {
