@@ -30,7 +30,13 @@
 #   platform  "ci" (the Quality workflow plus its local mirror; a neutrality dimension, not an abstraction)
 #   default   "block" (a failing gate exits nonzero; no roster step carries continue-on-error)
 #   class     the EN-5 enforceability letter, restricted to a (deterministic gate) or c (partial) here;
-#             b is the hook axis and never appears in a gates manifest, d is never authored on a control
+#             b is the hook axis and never appears in a gates manifest, d is never authored on a control.
+#             The a-versus-c line is TOTALITY over the examined class, not determinism of the scan (the
+#             full rubric lives in tools/gen_enforceability.py): a gate is "a" only when a violation
+#             INSIDE the surface it examines is ALWAYS caught; a gate that is deterministic in execution
+#             yet covers only a recognizable SUBSET of its violation surface (a denylist an unlisted term
+#             or a novel paraphrase can slip, a scanner a member of the class can evade) is "c". A gate's
+#             residue names that missed subset so the class letter and the residue tell one honest story.
 #   residue   REQUIRED, never empty: what this gate does NOT catch, so the ledger stays honest
 #
 # AUTHOR-GRADED LIMIT. The class letter and the residue are maintainer-authored assertions; this
@@ -208,7 +214,7 @@ default = "block"
 class = "c"
 residue = "A pattern scanner for hardcoded credentials: it catches recognizable provider-token prefixes and assignments of a literal to a credential-named variable. It misses a high-entropy string with no telltale name or prefix, an encoded secret, and a secret in a binary (the measured residue of 2026-08-08, shared with gitleaks). Detection here is a compensating control, never a substitute for keeping the secret out of the repository in the first place."
 
-# --- explicit-empty: linkage arguable, none claimed, rules = [], class "a" ------------------------------
+# --- remaining gates: some linkage-arguable (rules = []), some gensrc-cited; class a (total) or c (partial) per the totality test above ---
 
 [[gate]]
 id = "leaks"
@@ -216,8 +222,8 @@ script = "tools/check_leaks.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "A denylist scan for specific known private strings across the repository. Its linkage to any single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
+class = "c"
+residue = "A best-effort denylist scan for known internal host specifics and codenames. It covers a recognizable SUBSET of the leak surface: per its own docstring (tools/check_leaks.py) deliberate obfuscation (mid-word splits, HTML entities, zero-width characters) can evade the hashed codename layer, binary and archive contents are not unpacked, and the structural patterns are scoped to this host's layout, so a novel or obfuscated private string outside those patterns slips it (class c, partial, the check_secrets archetype). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
 
 [[gate]]
 id = "msg-leaks"
@@ -225,7 +231,7 @@ script = "tools/check_msg_leaks.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
+class = "c"
 residue = "A denylist scan for known private strings and host specifics in the commit-message and PR-metadata channels the file leak gate does not reach: the commit messages in a change's range, the PR title and body, and the head ref. On a public repository it is post-publication DETECTION, not prevention, and cannot un-expose already-pushed text. Its coverage depends on the CI event running at all: a commit carrying a CI-skip annotation, or a pull request in an unmergeable state, can suppress the run, and a description edited after the check is re-scanned only where the workflow subscribes to edit events. The post-merge run scans the landed commit messages, not the pull-request description, so a value present only in a description that never enters the final message is outside that path. The hash layer is evadable by deliberate obfuscation; file contents (the file leak gate and gitleaks own those), reviews and comments, and author identity are out of scope. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
@@ -234,8 +240,8 @@ script = "tools/check_portability.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that the shippable surface can land on a stranger's machine unchanged: no operator identity outside its attribution, no repo-operational vocabulary, no exemption markers, no unscannable file classes. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that the shippable surface can land on a stranger's machine unchanged: no operator identity outside its attribution, no repo-operational vocabulary, no exemption markers, no unscannable file classes. It is a best-effort deny-list over an open vocabulary: a novel non-portable term or an unlisted operator-identity form outside the recognized set can slip it, so it covers a recognizable subset of the non-portability surface, not the whole of it (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "dashes"
@@ -243,8 +249,8 @@ script = "tools/check_no_dashes.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It flags en and em dashes anywhere in the scanned surface. Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
+class = "c"
+residue = "It flags literal en and em dash characters in each scanned text file. It is total over the project's own trusted, well-formed UTF-8 content, but covers a recognizable SUBSET of the dash surface (class c, partial): an HTML entity such as &ndash; or &#8211; renders as a dash yet is not decoded, and a file that is not valid UTF-8 is skipped wholesale (a fail-open the sibling check_links.py instead treats as a finding; recorded separately for hardening). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
 
 [[gate]]
 id = "links"
@@ -252,8 +258,8 @@ script = "tools/check_links.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that internal document links resolve to a real target. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that internal document links in Markdown files resolve to a real target. It covers a recognizable SUBSET: its matcher recognizes inline-style links [text](target) only, so a broken reference-style link [text][ref] is not resolved (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "site"
@@ -261,8 +267,8 @@ script = "tools/check_site.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks the published site surface for integrity. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks the published site surface for integrity (dashes, link and anchor resolution, basic HTML validity and tag structure). It covers a recognizable SUBSET: per its own docstring (tools/check_site.py) the subtrees of svg/math and of textarea are not structurally validated and links and ids inside them are not resolved (a self-described deferred coverage gap), so a defect inside such a subtree passes (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "overclaim"
@@ -270,7 +276,7 @@ script = "tools/check_overclaim.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
+class = "c"
 residue = "A negation- and title-aware best-effort deny-list of marketing (site-only) and release-integrity (all-surface) overclaim vocabulary over site HTML, the hand-authored repo prose roster, and every registry-enumerated textual generated output. A banned release-integrity term flags regardless of tense and is cleared only by a directly-adjacent honest denial or a third-party control-title that wholly contains it. It cannot catch a novel paraphrase; the third-party title allowlist and the adjacency guard are maintainer-calibrated; it polices wording, not whether the underlying integrity mechanism works. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
@@ -279,8 +285,8 @@ script = "tools/check_footer.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks per-file footer coverage across the surface. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that every site/**/*.html outside an explicit allowlist carries a /disclosure link INSIDE its <nav>, failing closed if a non-exempt page lacks it or the allowlist drifts (B-10 repurposed this gate from footer coverage to nav coverage; the filename is retained as its gate identity). It is total over the project's own trusted, well-formed rendered nav markup, but covers a recognizable SUBSET (class c, partial): a /disclosure anchor inside an unrendered <template> or a hidden nav satisfies the structural test without being real navigation, and its attribute reader takes the last of a duplicated href (the first-wins fix applied to check_newtab in task-9 is not yet carried here; recorded separately for hardening). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "newtab"
@@ -289,7 +295,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It checks that every external site link opens in a new tab with a noopener rel. It is a site UX and reverse-tabnabbing-safety invariant, not a corpus-rule linkage, so none is claimed here."
+residue = "It checks that every external site link in site/**/*.html (HTML <a href>, SVG <a xlink:href> when plain href is absent, and <area href>) opens in a new tab with a noopener rel, and flags any <base href> fail-closed. It is total over that hyperlink-element surface: it decodes HTML entity references in attribute values and applies WHATWG URL normalization with fail-closed external classification (first-duplicate-attribute semantics), so an entity-encoded or obfuscated href is still decoded, inspected, and classified. It does not cover navigation outside that http(s)/protocol-relative-href surface: a javascript: or other non-http href, script-driven navigation, and declarative redirects via meta refresh, <form action>, or <button formaction> are not inspected (a surface-boundary declaration, not an in-surface evasion of the hrefs it examines), so class a holds on that honest boundary. It is a site UX and reverse-tabnabbing-safety invariant, not a corpus-rule linkage, so none is claimed here."
 
 [[gate]]
 id = "install-page"
@@ -378,8 +384,8 @@ script = "tools/check_reference_facts.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that hand-authored copies of manifest-derived facts (the publisher-family parentheticals, the standards-README schema enum table, the closed-set parity of the programmatic kind/status dicts, the deferred-frameworks negative check, and the subset-denominator invariant) agree with the manifests. It checks only the enumerated fact copies, not arbitrary prose, and it trusts each manifest's catalogue declaration rather than proving edition-completeness offline. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that hand-authored copies of manifest-derived facts (the publisher-family parentheticals, the standards-README schema enum table, the closed-set parity of the programmatic kind/status dicts, the deferred-frameworks negative check, and the subset-denominator invariant) agree with the manifests. The positive fact-copy legs are roster-bounded and fail closed on a missing copy, but two of its legs are NEGATIVE text scans of the rendered pages that an entity-encoded or reworded form renders past: the subset-denominator leg (an 'N of M' regex with a literal space, evaded by 3&#32;of&#32;3) and the deferred-frameworks leg (a 'Not yet vendored' substring test, evaded by an entity-encoded or reworded framework name), so the gate covers a recognizable SUBSET (class c, partial); the gen_mappings render branch is the primary control and these legs are defence in depth. It checks only the enumerated fact copies, not arbitrary prose, and it trusts each manifest's catalogue declaration rather than proving edition-completeness offline. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "conformance"
@@ -415,7 +421,7 @@ rules = ["gensrc"]
 platform = "ci"
 default = "block"
 class = "a"
-residue = "A registry-driven fail-close gate: for every target the gensrc registry declares, it corrupts a disposable sandbox copy (the real tree is never written) and asserts the generator's --check rejects it - a text target fails closed to exit 2, the one binary target drifts to exit 1, and the floor is that a corrupted target never yields exit 0. It is the durable form of the F-142b sweep and catches an F-154-class generator that does not consult its target. It exercises --check not regeneration, models unreadable as invalid UTF-8, probes one representative member per tree, recognizes only the 'python3 tools/gen_<stem>.py' regenerate grammar, and does not judge the semantic correctness of generated content."
+residue = "A registry-driven fail-close gate: for every target the gensrc registry declares, it corrupts a disposable sandbox copy (the real tree is never written) and asserts the generator's --check rejects it - a text target fails closed to exit 2, the one binary target drifts to exit 1, and the floor is that a corrupted target never yields exit 0. It is the durable form of the F-142b sweep and catches an F-154-class generator that does not consult its target. It exercises --check not regeneration, models unreadable as invalid UTF-8, probes every regular-file member of a tree, recognizes only the 'python3 tools/gen_<stem>.py' regenerate grammar, and does not judge the semantic correctness of generated content."
 
 [[gate]]
 id = "artifact-checksums"
@@ -423,8 +429,8 @@ script = "tools/check_artifact_checksums.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "A published-artefact checksum gate. It ships DORMANT: with no [release.artifacts] recorded it prints NOT APPLICABLE and asserts no active control today, so the release-integrity linkage (secpub) is arguable and deferred until it arms, none claimed here. When armed it hashes only the LATEST artifacts-carrying release against the working tree and checks each digest appears verbatim on the evidence page. Disclosed residuals (the gate docstring carries the full text): disarming the armed release's own artifacts table returns the gate to dormant (B1; the forward ratchet constrains only later releases), an older release's recorded digests are not re-hashed (B2), the recorded artifact SET is not checked for completeness so a release recording an incomplete or unrelated-only set leaves a changed artifact unattested (B3), A1's path check is lexical while hashing follows symlinks so a recorded path symlinked outside the published tree is hashed anyway (B4), and the D1/A5 evidence scan is a lowercase substring test that a digest inside an HTML comment (M1), a bare prefix-less digest (M2), or an uppercase or substring-of-a-longer-run token (M3) can slip. The LA-2 PR-2 arming layer closes B1/B2, with the set-completeness (B3), real-path containment (B4), and evidence-token (M3) hardenings landing at arming too."
+class = "c"
+residue = "A published-artefact checksum gate, class c (partial): even while DORMANT its active honesty invariant D1 covers only a subset (the M1/M2/M3 evasions below defeat it), and the armed decision procedure is partial too, so dormancy does not make it total; reassess this residue at LA-2 arming. It ships DORMANT: with no [release.artifacts] recorded it prints NOT APPLICABLE, so the release-integrity linkage (secpub) is arguable and deferred until it arms, none claimed here. When armed it hashes only the LATEST artifacts-carrying release against the working tree and checks each digest appears verbatim on the evidence page. Disclosed residuals (the gate docstring carries the full text): disarming the armed release's own artifacts table returns the gate to dormant (B1; the forward ratchet constrains only later releases), an older release's recorded digests are not re-hashed (B2), the recorded artifact SET is not checked for completeness so a release recording an incomplete or unrelated-only set leaves a changed artifact unattested (B3), A1's path check is lexical while hashing follows symlinks so a recorded path symlinked outside the published tree is hashed anyway (B4), and the D1/A5 evidence scan is a lowercase substring test that a digest inside an HTML comment (M1), a bare prefix-less digest (M2), or an uppercase or substring-of-a-longer-run token (M3) can slip. The LA-2 PR-2 arming layer closes B1/B2, with the set-completeness (B3), real-path containment (B4), and evidence-token (M3) hardenings landing at arming too."
 
 [[gate]]
 id = "renderers-drift"
@@ -480,7 +486,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "It proves the crosswalk fields are present and well-formed: the archive digest chain is immutable (directory name equals recorded hash equals recomputed payload), every predecessor id is in the 8.3 namespace with a source-digest tying it to the immutable archived bytes, every predecessor is mapped (zero-unmapped computed, never trusted), every successor quote is a verbatim contiguous substring of the pinned inventory clause, and each 8.5 verdict carries the fixed token with a reviewer distinct from the author in both name and declared family. It CANNOT prove the human verdict is correct: an 8.5 semantic-equivalence judgment or an 8.2 completeness attestation that is field-complete and name-and-family-distinct but substantively wrong (a bad-faith or mistaken review) passes. Verdict truth is human judgment; the authenticated result-record upgrade is deferred to the adopter-experience report envelope. In this repo the live leg reports NOT APPLICABLE (the pack is not an adopter install); its assurance is the self-test over synthetic trees. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It proves the crosswalk fields are present and well-formed: the archive digest chain is immutable (directory name equals recorded hash equals recomputed payload), every predecessor id is in the 8.3 namespace with a source-digest tying it to the immutable archived bytes, every predecessor is mapped (zero-unmapped computed, never trusted), every successor quote is a verbatim contiguous substring of the pinned inventory clause, and each 8.5 verdict carries the fixed token with a reviewer distinct from the author in both name and declared family. It CANNOT prove the human verdict is correct: an 8.5 semantic-equivalence judgment or an 8.2 completeness attestation that is field-complete and name-and-family-distinct but substantively wrong (a bad-faith or mistaken review) passes. Verdict truth is human judgment; the authenticated result-record upgrade is deferred to the adopter-experience report envelope. It also carries the tool's own disclosed mechanical CLASS-C RESIDUALS D5/D6 (the successor inventory is validated for self-consistency but not resolved against the pinned release, and pin.toml migration mode is not parsed; deferred to Step 7). In this repo the live leg reports NOT APPLICABLE (the pack is not an adopter install); its assurance is the self-test over synthetic trees. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "migrate-crashinject"
