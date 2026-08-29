@@ -214,7 +214,7 @@ default = "block"
 class = "c"
 residue = "A pattern scanner for hardcoded credentials: it catches recognizable provider-token prefixes and assignments of a literal to a credential-named variable. It misses a high-entropy string with no telltale name or prefix, an encoded secret, and a secret in a binary (the measured residue of 2026-08-08, shared with gitleaks). Detection here is a compensating control, never a substitute for keeping the secret out of the repository in the first place."
 
-# --- explicit-empty: linkage arguable, none claimed, rules = []; class a or c per the totality test -----
+# --- remaining gates: some linkage-arguable (rules = []), some gensrc-cited; class a (total) or c (partial) per the totality test above ---
 
 [[gate]]
 id = "leaks"
@@ -294,8 +294,8 @@ script = "tools/check_newtab.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "c"
-residue = "It checks that every external site link in site/**/*.html (HTML <a href>, SVG <a xlink:href> when plain href is absent, and <area href>) opens in a new tab with a noopener rel, and flags any <base href> fail-closed. It is total over the project's own trusted, well-formed hyperlink markup (first-duplicate-attribute semantics), but covers a recognizable SUBSET (class c, partial): script-driven navigation and an entity-encoded href lie outside what it inspects. It is a site UX and reverse-tabnabbing-safety mistake-catcher, not a corpus-rule linkage, so none is claimed here."
+class = "a"
+residue = "It checks that every external site link in site/**/*.html (HTML <a href>, SVG <a xlink:href> when plain href is absent, and <area href>) opens in a new tab with a noopener rel, and flags any <base href> fail-closed. It is total over that hyperlink-element surface: it decodes HTML entity references in attribute values and applies WHATWG URL normalization with fail-closed external classification (first-duplicate-attribute semantics), so an entity-encoded or obfuscated href is still decoded, inspected, and classified. The only navigation it does not cover, script-driven navigation, is outside the hyperlink-element surface it examines (a surface-boundary declaration, not an in-surface evasion), so class a holds. It is a site UX and reverse-tabnabbing-safety invariant, not a corpus-rule linkage, so none is claimed here."
 
 [[gate]]
 id = "install-page"
@@ -384,8 +384,8 @@ script = "tools/check_reference_facts.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that hand-authored copies of manifest-derived facts (the publisher-family parentheticals, the standards-README schema enum table, the closed-set parity of the programmatic kind/status dicts, the deferred-frameworks negative check, and the subset-denominator invariant) agree with the manifests. It checks only the enumerated fact copies, not arbitrary prose, and it trusts each manifest's catalogue declaration rather than proving edition-completeness offline. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that hand-authored copies of manifest-derived facts (the publisher-family parentheticals, the standards-README schema enum table, the closed-set parity of the programmatic kind/status dicts, the deferred-frameworks negative check, and the subset-denominator invariant) agree with the manifests. The positive fact-copy legs are roster-bounded and fail closed on a missing copy, but the subset-denominator leg is a NEGATIVE text scan of the rendered pages (an 'N of M' regex with a literal space) that an entity-encoded form such as 3&#32;of&#32;3 renders past without matching, so the gate covers a recognizable SUBSET (class c, partial); the gen_mappings render branch is the primary control and this leg is defence in depth. It checks only the enumerated fact copies, not arbitrary prose, and it trusts each manifest's catalogue declaration rather than proving edition-completeness offline. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "conformance"
@@ -486,7 +486,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "It proves the crosswalk fields are present and well-formed: the archive digest chain is immutable (directory name equals recorded hash equals recomputed payload), every predecessor id is in the 8.3 namespace with a source-digest tying it to the immutable archived bytes, every predecessor is mapped (zero-unmapped computed, never trusted), every successor quote is a verbatim contiguous substring of the pinned inventory clause, and each 8.5 verdict carries the fixed token with a reviewer distinct from the author in both name and declared family. It CANNOT prove the human verdict is correct: an 8.5 semantic-equivalence judgment or an 8.2 completeness attestation that is field-complete and name-and-family-distinct but substantively wrong (a bad-faith or mistaken review) passes. Verdict truth is human judgment; the authenticated result-record upgrade is deferred to the adopter-experience report envelope. In this repo the live leg reports NOT APPLICABLE (the pack is not an adopter install); its assurance is the self-test over synthetic trees. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It proves the crosswalk fields are present and well-formed: the archive digest chain is immutable (directory name equals recorded hash equals recomputed payload), every predecessor id is in the 8.3 namespace with a source-digest tying it to the immutable archived bytes, every predecessor is mapped (zero-unmapped computed, never trusted), every successor quote is a verbatim contiguous substring of the pinned inventory clause, and each 8.5 verdict carries the fixed token with a reviewer distinct from the author in both name and declared family. It CANNOT prove the human verdict is correct: an 8.5 semantic-equivalence judgment or an 8.2 completeness attestation that is field-complete and name-and-family-distinct but substantively wrong (a bad-faith or mistaken review) passes. Verdict truth is human judgment; the authenticated result-record upgrade is deferred to the adopter-experience report envelope. It also carries the tool's own disclosed mechanical CLASS-C RESIDUALS D5/D6 (the successor inventory is validated for self-consistency but not resolved against the pinned release, and pin.toml migration mode is not parsed; deferred to Step 7). In this repo the live leg reports NOT APPLICABLE (the pack is not an adopter install); its assurance is the self-test over synthetic trees. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "migrate-crashinject"
