@@ -1,2 +1,7 @@
 /index-new / 301
 /draft / 301
+/install-claude /install 301
+/install-chatgpt /install 301
+/install-gemini /install 301
+/install-copilot /install 301
+/install-other /install 301
