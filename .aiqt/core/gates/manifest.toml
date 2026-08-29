@@ -30,7 +30,13 @@
 #   platform  "ci" (the Quality workflow plus its local mirror; a neutrality dimension, not an abstraction)
 #   default   "block" (a failing gate exits nonzero; no roster step carries continue-on-error)
 #   class     the EN-5 enforceability letter, restricted to a (deterministic gate) or c (partial) here;
-#             b is the hook axis and never appears in a gates manifest, d is never authored on a control
+#             b is the hook axis and never appears in a gates manifest, d is never authored on a control.
+#             The a-versus-c line is TOTALITY over the examined class, not determinism of the scan (the
+#             full rubric lives in tools/gen_enforceability.py): a gate is "a" only when a violation
+#             INSIDE the surface it examines is ALWAYS caught; a gate that is deterministic in execution
+#             yet covers only a recognizable SUBSET of its violation surface (a denylist an unlisted term
+#             or a novel paraphrase can slip, a scanner a member of the class can evade) is "c". A gate's
+#             residue names that missed subset so the class letter and the residue tell one honest story.
 #   residue   REQUIRED, never empty: what this gate does NOT catch, so the ledger stays honest
 #
 # AUTHOR-GRADED LIMIT. The class letter and the residue are maintainer-authored assertions; this
@@ -225,7 +231,7 @@ script = "tools/check_msg_leaks.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
+class = "c"
 residue = "A denylist scan for known private strings and host specifics in the commit-message and PR-metadata channels the file leak gate does not reach: the commit messages in a change's range, the PR title and body, and the head ref. On a public repository it is post-publication DETECTION, not prevention, and cannot un-expose already-pushed text. Its coverage depends on the CI event running at all: a commit carrying a CI-skip annotation, or a pull request in an unmergeable state, can suppress the run, and a description edited after the check is re-scanned only where the workflow subscribes to edit events. The post-merge run scans the landed commit messages, not the pull-request description, so a value present only in a description that never enters the final message is outside that path. The hash layer is evadable by deliberate obfuscation; file contents (the file leak gate and gitleaks own those), reviews and comments, and author identity are out of scope. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
@@ -234,8 +240,8 @@ script = "tools/check_portability.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that the shippable surface can land on a stranger's machine unchanged: no operator identity outside its attribution, no repo-operational vocabulary, no exemption markers, no unscannable file classes. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that the shippable surface can land on a stranger's machine unchanged: no operator identity outside its attribution, no repo-operational vocabulary, no exemption markers, no unscannable file classes. It is a best-effort deny-list over an open vocabulary: a novel non-portable term or an unlisted operator-identity form outside the recognized set can slip it, so it covers a recognizable subset of the non-portability surface, not the whole of it (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "dashes"
@@ -270,7 +276,7 @@ script = "tools/check_overclaim.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
+class = "c"
 residue = "A negation- and title-aware best-effort deny-list of marketing (site-only) and release-integrity (all-surface) overclaim vocabulary over site HTML, the hand-authored repo prose roster, and every registry-enumerated textual generated output. A banned release-integrity term flags regardless of tense and is cleared only by a directly-adjacent honest denial or a third-party control-title that wholly contains it. It cannot catch a novel paraphrase; the third-party title allowlist and the adjacency guard are maintainer-calibrated; it polices wording, not whether the underlying integrity mechanism works. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
