@@ -214,7 +214,7 @@ default = "block"
 class = "c"
 residue = "A pattern scanner for hardcoded credentials: it catches recognizable provider-token prefixes and assignments of a literal to a credential-named variable. It misses a high-entropy string with no telltale name or prefix, an encoded secret, and a secret in a binary (the measured residue of 2026-08-08, shared with gitleaks). Detection here is a compensating control, never a substitute for keeping the secret out of the repository in the first place."
 
-# --- explicit-empty: linkage arguable, none claimed, rules = [], class "a" ------------------------------
+# --- explicit-empty: linkage arguable, none claimed, rules = []; class a or c per the totality test -----
 
 [[gate]]
 id = "leaks"
@@ -249,8 +249,8 @@ script = "tools/check_no_dashes.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It flags en and em dashes anywhere in the scanned surface. Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
+class = "c"
+residue = "It flags literal en and em dash characters in each scanned text file. It is total over the project's own trusted, well-formed UTF-8 content, but covers a recognizable SUBSET of the dash surface (class c, partial): an HTML entity such as &ndash; or &#8211; renders as a dash yet is not decoded, and a file that is not valid UTF-8 is skipped wholesale (a fail-open the sibling check_links.py instead treats as a finding; recorded separately for hardening). Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
 
 [[gate]]
 id = "links"
@@ -285,8 +285,8 @@ script = "tools/check_footer.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that every site/*.html outside an explicit allowlist carries a /disclosure link INSIDE its <nav>, failing closed if a non-exempt page lacks it or the allowlist drifts (B-10 repurposed this gate from footer coverage to nav coverage; the filename is retained as its gate identity). It is total over that nav-link surface. Its linkage to a single corpus rule is arguable, so none is claimed here."
+class = "c"
+residue = "It checks that every site/**/*.html outside an explicit allowlist carries a /disclosure link INSIDE its <nav>, failing closed if a non-exempt page lacks it or the allowlist drifts (B-10 repurposed this gate from footer coverage to nav coverage; the filename is retained as its gate identity). It is total over the project's own trusted, well-formed rendered nav markup, but covers a recognizable SUBSET (class c, partial): a /disclosure anchor inside an unrendered <template> or a hidden nav satisfies the structural test without being real navigation, and its attribute reader takes the last of a duplicated href (the first-wins fix applied to check_newtab in task-9 is not yet carried here; recorded separately for hardening). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "newtab"
@@ -294,8 +294,8 @@ script = "tools/check_newtab.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
-residue = "It checks that every external site link (HTML <a href>, SVG <a xlink:href> when plain href is absent, and <area href>) opens in a new tab with a noopener rel, and flags any <base href> fail-closed. It is total over those hyperlink-element surfaces; per its own docstring (tools/check_newtab.py) it does NOT cover other or future navigation surfaces such as script-driven navigation, which lie outside the hyperlink-element surface it examines. It is a site UX and reverse-tabnabbing-safety mistake-catcher, not a corpus-rule linkage, so none is claimed here."
+class = "c"
+residue = "It checks that every external site link in site/**/*.html (HTML <a href>, SVG <a xlink:href> when plain href is absent, and <area href>) opens in a new tab with a noopener rel, and flags any <base href> fail-closed. It is total over the project's own trusted, well-formed hyperlink markup (first-duplicate-attribute semantics), but covers a recognizable SUBSET (class c, partial): script-driven navigation and an entity-encoded href lie outside what it inspects. It is a site UX and reverse-tabnabbing-safety mistake-catcher, not a corpus-rule linkage, so none is claimed here."
 
 [[gate]]
 id = "install-page"
