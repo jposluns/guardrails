@@ -289,7 +289,7 @@
       "sources": [
         ".aiqt/core/skill/skill-source.md"
       ],
-      "target": "site/install-claude.html"
+      "target": "site/install.html"
     },
     {
       "kind": "block",

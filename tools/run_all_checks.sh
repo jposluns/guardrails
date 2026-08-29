@@ -97,6 +97,10 @@ run_gate "disclosure-selftest" python3 tools/gen_disclosure.py --self-test
 run_gate "disclosure-drift"    python3 tools/gen_disclosure.py --check
 run_gate "install-selftest" python3 tools/gen_install.py --self-test
 run_gate "install-drift"    python3 tools/gen_install.py --check
+run_gate "install-page-selftest" python3 tools/check_install_page.py --self-test
+run_gate "install-page" python3 tools/check_install_page.py
+run_gate "sized-instructions-selftest" python3 tools/check_sized_instructions.py --self-test
+run_gate "sized-instructions" python3 tools/check_sized_instructions.py
 run_gate "notice-drift"    python3 tools/gen_notice.py --check
 run_gate "claude-drift"    python3 tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 tools/gen_adapters.py --check

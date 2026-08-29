@@ -353,3 +353,31 @@ section{padding:3.25rem 0}
 .sidebar{top:3.6rem; height:calc(100vh - 3.6rem)}
 @media (max-width:860px){ .topbar .topformula{display:none} }
 @media (max-width:900px){ .topbar .navtoggle{display:inline-flex} }
+
+/* ================= consolidated install page: platform picker + in-place filter ================= */
+/* The picker cards double as filter controls. Only /js/install.js sets data-family on the root, so every
+   hiding rule below is inert when scripts are blocked, fail, or are disabled, and the whole page stays
+   visible (progressive enhancement). Reuses AIQT's own .platform-actions / .platform-button / .card tokens;
+   no new palette. */
+html[data-family] section[data-family-section]{display:none}
+html[data-family="claude"] section[data-family-section="claude"],
+html[data-family="chatgpt"] section[data-family-section="chatgpt"],
+html[data-family="gemini"] section[data-family-section="gemini"],
+html[data-family="copilot"] section[data-family-section="copilot"],
+html[data-family="other"] section[data-family-section="other"]{display:block}
+
+/* the selected card, marked with aria-current by the script (accent border + faint accent tint) */
+.platform-button[aria-current="true"]{border-color:var(--accent); background:rgba(94,176,239,.14)}
+:root[data-theme="light"] .platform-button[aria-current="true"]{background:rgba(29,111,208,.10)}
+@media (prefers-color-scheme: light){ :root:not([data-theme]) .platform-button[aria-current="true"]{background:rgba(29,111,208,.10)} }
+.platform-button[aria-current="true"] strong{text-decoration:underline; text-underline-offset:3px; text-decoration-thickness:2px}
+
+/* the "show all" reset lives under the picker; hidden until the script reveals it. .btn sets
+   display:inline-block, which outranks the UA [hidden] rule, so a hidden .btn needs this to stay hidden. */
+.family-reset{margin:1.1rem 0 0}
+#family-reset[hidden]{display:none}
+
+/* per-section "last verified" stamp and the section jump-links */
+.verified{margin:-.4rem 0 1.1rem; font-size:.92rem; color:var(--faint)}
+.section-links{font-size:1.02rem}
+.section-links a{font-weight:650}
