@@ -143,6 +143,7 @@
 .aiqt/enforceability.json text eol=lf
 .aiqt/gensrc.json text eol=lf
 .aiqt/manifest.toml text eol=lf
+.aiqt/record-sections.toml.example text eol=lf
 .aiqt/release/announce-snippet.txt text eol=lf
 .aiqt/release/root.txt text eol=lf
 .aiqt/standards/README.md text eol=lf
@@ -494,6 +495,7 @@ tools/check_no_dashes.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
 tools/check_record_drift.py text eol=lf
+tools/check_record_sections.py text eol=lf
 tools/check_reference_facts.py text eol=lf
 tools/check_release_build.py text eol=lf
 tools/check_release_delta.py text eol=lf

@@ -107,6 +107,11 @@ path = ".aiqt/gensrc.json"
 class = "pack-immutable"
 
 [[release-class]]
+path = ".aiqt/record-sections.toml.example"
+class = "pack-immutable"
+note = "Adopter example for tools/check_record_sections.py; deliberately NOT the gate's live default path (.aiqt/record-sections.toml), so the gate stays NOT APPLICABLE until an adopter opts in."
+
+[[release-class]]
 path = ".claude/RULES-INDEX.md"
 class = "pack-immutable"
 

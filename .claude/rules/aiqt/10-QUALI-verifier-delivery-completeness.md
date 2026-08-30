@@ -15,7 +15,10 @@ judged by a single criterion: the delivery carries the positive evidence of a fi
 verification agreed on in advance, whether that agreed evidence is a completion marker the verifier emits,
 the explicit verdict the verification asked for, or both. A delivery that lacks that agreed evidence, or
 that is truncated, empty, or errored, is treated as no verdict, never as a pass, a vote, or a finding-free
-result. Completeness is never inferred from the length or volume of the output or from the mere absence of
+result.
+A capture piped through a truncating sink is a degraded delivery, not a verdict, even when its retained
+prefix appears complete.
+Completeness is never inferred from the length or volume of the output or from the mere absence of
 a reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean
 one when judged by silence or size. A delivery that fails this test is re-dispatched and contributes
 nothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not

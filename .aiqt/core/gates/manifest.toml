@@ -516,6 +516,15 @@ class = "a"
 residue = "Total over the surface it examines: an OPEN merge_pending row carrying a TYPED ref (pr:N, decision:X) whose merge or record evidence exists in the declared truth sources always fails the gate. It reads only typed structured refs; a narrative number in prose, an untyped row, or a register kept outside the declared surface is out of scope by design (D9), and drift the truth sources themselves cannot see (an unpushed local merge, a PR merged under a subject with no (#N) marker) passes. In a checkout with no orchestration registry the live leg is NOT APPLICABLE (the record is machine-local by design) and the self-test carries the assurance; that scope boundary is printed, never silent."
 
 [[gate]]
+id = "record-sections"
+script = "tools/check_record_sections.py"
+rules = ["recncl"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "Partial over a best-effort, adopter-configured surface. It proves preservation only for column-zero H2 headings that the adopter's own regular expressions select and that are newly introduced on the branch (present at the branch tip, absent at the unique merge-base); it catches a clean section-drop but MISSES a section that was reworded, renamed, or moved (a changed heading reads as a new-and-dropped pair, not a preserved one), never compares section bodies, does not cover edits to a heading already present at merge-base, and cannot tell a valid supersession from an opt-out marker an author simply added. Any record path or heading outside the config, and any grammar the pattern does not match, is outside its surface. Missing or ambiguous inputs inside the declared surface (a duplicate selected heading, an unreadable declared record, an unresolvable ref, a non-unique merge-base, an uninferable branch tip) fail closed (exit 2); with no adopter config present the gate is NOT APPLICABLE by design, and pack CI exercises only the synthetic self-test while the adopter owns the live post-merge invocation."
+
+[[gate]]
 id = "mistakes-register"
 script = "tools/check_mistakes_register.py"
 rules = ["mstreg", "secaud"]

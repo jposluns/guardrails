@@ -1679,7 +1679,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 13
 end-line = 16
 canonical-text = "A verifier's output counts as a verdict only when the verifier actually delivered one. Completeness is\njudged by a single criterion: the delivery carries the positive evidence of a finished verdict that the\nverification agreed on in advance, whether that agreed evidence is a completion marker the verifier emits,\nthe explicit verdict the verification asked for, or both."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.2"
@@ -1688,79 +1688,88 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 16
 end-line = 18
 canonical-text = "A delivery that lacks that agreed evidence, or\nthat is truncated, empty, or errored, is treated as no verdict, never as a pass, a vote, or a finding-free\nresult."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.3"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 18
-end-line = 20
+start-line = 21
+end-line = 23
 canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.4"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 18
-end-line = 20
+start-line = 21
+end-line = 23
 canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.5"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 20
-end-line = 22
+start-line = 23
+end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.6"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 20
-end-line = 22
+start-line = 23
+end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.7"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 20
-end-line = 22
+start-line = 23
+end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.8"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 22
-end-line = 24
+start-line = 25
+end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.9"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 22
-end-line = 24
+start-line = 25
+end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdlv.10"
 corpus-id = "vrfdlv"
 source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
-start-line = 22
-end-line = 24
+start-line = 25
+end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "7f7226a7d06aa83989751ac35d3ec99774373a7fc1dd0ac2c3d14604508613e2"
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+
+[[clause]]
+clause-id = "vrfdlv.11"
+corpus-id = "vrfdlv"
+source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
+start-line = 19
+end-line = 20
+canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even when its retained\nprefix appears complete."
+source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
 
 [[clause]]
 clause-id = "vrfdiv.1"
@@ -4244,7 +4253,7 @@ source-path = ".aiqt/core/rules/trust-reconcile-record-against-reality.md"
 start-line = 15
 end-line = 15
 canonical-text = "A durable record is authoritative only while it still matches what is actually in use or in effect."
-source-digest = "baa0289386994127d65d2668e020859202d7e3866ba4c12e5396eee8c68e5923"
+source-digest = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
 
 [[clause]]
 clause-id = "recncl.2"
@@ -4253,7 +4262,7 @@ source-path = ".aiqt/core/rules/trust-reconcile-record-against-reality.md"
 start-line = 16
 end-line = 18
 canonical-text = "Periodically, and at defined checkpoints (such\nas resume and close), reconcile what is recorded or approved against the real state, and treat any\ndivergence as a finding to resolve rather than a discrepancy to leave standing."
-source-digest = "baa0289386994127d65d2668e020859202d7e3866ba4c12e5396eee8c68e5923"
+source-digest = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
 
 [[clause]]
 clause-id = "recncl.3"
@@ -4262,7 +4271,7 @@ source-path = ".aiqt/core/rules/trust-reconcile-record-against-reality.md"
 start-line = 16
 end-line = 18
 canonical-text = "Periodically, and at defined checkpoints (such\nas resume and close), reconcile what is recorded or approved against the real state, and treat any\ndivergence as a finding to resolve rather than a discrepancy to leave standing."
-source-digest = "baa0289386994127d65d2668e020859202d7e3866ba4c12e5396eee8c68e5923"
+source-digest = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
 
 [[clause]]
 clause-id = "recncl.4"
@@ -4271,7 +4280,16 @@ source-path = ".aiqt/core/rules/trust-reconcile-record-against-reality.md"
 start-line = 18
 end-line = 20
 canonical-text = "The reconciliation runs\nagainst observed reality, not the record's own last-known value, so a record can never certify itself\ncurrent merely because nothing has updated it."
-source-digest = "baa0289386994127d65d2668e020859202d7e3866ba4c12e5396eee8c68e5923"
+source-digest = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
+
+[[clause]]
+clause-id = "recncl.5"
+corpus-id = "recncl"
+source-path = ".aiqt/core/rules/trust-reconcile-record-against-reality.md"
+start-line = 20
+end-line = 21
+canonical-text = "A reconciliation preserves every committed record section\nor explicitly marks a supersession."
+source-digest = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
 
 [[clause]]
 clause-id = "sescls.1"
