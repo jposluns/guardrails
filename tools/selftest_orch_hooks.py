@@ -665,6 +665,10 @@ def main():
               _verdict(bg("bash -c 'eval \"python3 build.py | tail &\"'", rib=False)), "ask")
         check("trunc/fg-nested-synchronous-overasks",
               _verdict(bg("bash -c 'bash -c \"echo hi\"'", rib=False)), "ask")
+        # round 25/26 (claude): a WRAPPER-PREFIXED nested shell ('env bash -c "...&"') must be caught too -
+        # the carrier check scans EVERY token (not just the command word), mirroring its sibling detectors.
+        check("trunc/fg-wrapper-prefixed-nested-async-asks",
+              _verdict(bg("bash -c 'env bash -c \"python3 build.py | tail &\"'", rib=False)), "ask")
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time

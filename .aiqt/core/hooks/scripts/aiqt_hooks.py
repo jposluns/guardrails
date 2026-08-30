@@ -4661,17 +4661,20 @@ def _orch_token_backgrounds(token):
     (e.g. a trailing backslash) may still background a truncator in bash, so it is treated as a POSSIBLE
     backgrounding signal, never a silent clean pass; the shell-token gate in the caller keeps a non-shell
     unparseable argument out of scope. A token that PARSES INTO a MULTI-WORD sub-command whose command word
-    is itself a shell/eval ('bash -c "producer | tail &"' AS a token) may hide a deeper '&' through a FURTHER
-    quoting level a single pass cannot see (round 23/24, gemini NESTING), so it too fails closed; a BARE
-    shell word (a single token, e.g. 'bash') is not a sub-command and does not trigger, so 'bash -c "echo
-    hi"' still ALLOWs. This closes the class by construction rather than chasing each nesting depth."""
+    contains a shell/eval (scanning EVERY token, mirroring the sibling detectors so a wrapper-prefixed nested
+    shell 'env bash -c "...&"' is caught too, round 25/26 claude - a command-word-only scan was strictly
+    weaker than its siblings) may hide a deeper '&' through a FURTHER quoting level a single pass cannot see
+    (round 23/24, gemini NESTING), so it too fails closed; a BARE shell word (a single token, e.g. 'bash') is
+    not a sub-command and does not trigger, so 'bash -c "echo hi"' still ALLOWs. A shell reached only through
+    a value the lexer cannot resolve (a $VAR/command-substitution/computed shell name) is the disclosed
+    adversarial name-trust residual, not covered - this is an accidental-case guard, not adversarial-grade."""
     try:
         segs = _segments(token)
     except ValueError:
         return True
     if any(sep == "&" for _t, sep in segs):
         return True
-    return any(len(tk) > 1 and _command_word(tk) in _ORCH_SHELLS
+    return any(len(tk) > 1 and any(t.rsplit("/", 1)[-1] in _ORCH_SHELLS for t in tk)
                for chain, _term in _orch_pipeline_chains(segs) for tk, _s in chain if tk)
 
 
