@@ -236,6 +236,12 @@ def _read_word(command, i, n):
         c = command[i]
         if c in " \t\n" or c in _METACHARS:
             break
+        if c == "\\" and i + 1 < n and command[i + 1] == "\n":
+            # A backslash-newline is a LINE CONTINUATION: it is removed entirely and does NOT start or
+            # contribute to a word, so 'git \<newline> commit' is [git, commit], never [git, "", commit]
+            # (a synthetic empty argv element that mis-set the subcommand and defeated the sibling guards).
+            i += 2
+            continue
         started = True
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             j = command.find("'", i + 1)
@@ -274,12 +280,10 @@ def _read_word(command, i, n):
                 i += 1
             all_digits = False
             continue
-        if c == "\\":  # unquoted escape: the next character is literal (a line continuation is removed)
+        if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
+            # was already consumed above, before the word could start)
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
-            if command[i + 1] == "\n":
-                i += 2
-                continue
             chars.append(command[i + 1])
             all_digits = False
             i += 2
@@ -366,13 +370,20 @@ def _classify_redirect(op, src_fd, target, t_opaque):
 
 def _target_class(target, t_opaque):
     """Classify a redirect target: 'opaque' when it was formed with an unquoted expansion/substitution/
-    glob/brace/tilde (dynamic, unresolvable), 'file-dev' when it is a static path under /dev or /proc (a
-    console/terminal or a stdout/stderr descriptor path, which still reaches the review surface), else a
-    static 'file-real' ordinary path."""
+    glob/brace/tilde (dynamic, unresolvable) OR carries a '..' component (it can traverse to a device or
+    anywhere and cannot be proven a plain file); 'file-dev' when it is a static path that resolves under
+    /dev or /proc (a console/terminal or a stdout/stderr descriptor path, which still reaches the review
+    surface); else a static 'file-real' ordinary path. The path is LEXICALLY normalized (os.path.normpath,
+    never touching the filesystem) BEFORE classifying, so /tmp/../dev/stdout is recognized as a /dev target
+    rather than passing as a plain /tmp file; a '..' that normpath cannot resolve away (a relative escape
+    such as ../../../dev/stdout) is treated as unprovable ('opaque'), never a proven real file."""
     if t_opaque:
         return "opaque"
-    if _DEV_PROC_TARGET_RE.match(target):
+    norm = os.path.normpath(target)
+    if _DEV_PROC_TARGET_RE.match(norm) or _DEV_PROC_TARGET_RE.match(target):
         return "file-dev"
+    if ".." in norm.replace("\\", "/").split("/") or ".." in target.replace("\\", "/").split("/"):
+        return "opaque"  # a '..' component -> could resolve to a device; cannot be proven a plain file
     return "file-real"
 
 
@@ -402,7 +413,9 @@ def _lex_command(command):
         k = at + oplen
         while k < n and command[k] in " \t":  # inline whitespace before the target (never a newline)
             k += 1
-        if k >= n or command[k] == "\n" or command[k] in _METACHARS:
+        # A redirect target that begins with an unquoted '#' is a comment where a filename must be (bash
+        # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
+        if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
         target, t_opaque, started, _digits, k2 = _read_word(command, k, n)
         if not started:
@@ -419,6 +432,14 @@ def _lex_command(command):
         if c == "\n":
             end_segment("", i, i + 1)
             i += 1
+            continue
+        if c == "#":
+            # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of the
+            # line is ignored, so a redirect or pipe that is actually commented out (git diff # > /tmp/x)
+            # never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally inside
+            # _read_word and never reaches this word-start position.
+            nl = command.find("\n", i)
+            i = n if nl == -1 else nl
             continue
         if c in _METACHARS:
             op, kind, oplen = _match_operator(command, i, n)
@@ -809,12 +830,48 @@ def _token_possible_producer(argv):
     return False
 
 
+def _has_producer_surface(argv):
+    """True when any argv word (by basename) is a producer surface. Used with an OPAQUE segment to widen
+    the possible-producer scope, so a quoting/expansion form that could resolve to a git command word (an
+    ANSI-C $'g'it, a $VAR that expands to git) alongside a producer surface is never silently ALLOWED."""
+    return any(word.rsplit("/", 1)[-1] in _PRODUCER_SURFACES for word in argv)
+
+
 def _is_possible_producer(seg):
     """A POSSIBLE producer (the fail-safe ASK scope): a git word followed by a producer surface, seen either
     in the segment's cleaned argv (_token_possible_producer, robust to quote fragmentation) OR by a broad
     raw-text probe over the segment (which over-matches quoted prose such as echo 'git diff' - a deliberate
-    over-ASK, never an over-ALLOW). It never establishes an ALLOW; it only widens the ASK/DENY scope."""
-    return _token_possible_producer(seg.argv) or bool(_RAW_DIFF_PRODUCER_RE.search(seg.raw))
+    over-ASK, never an over-ALLOW), OR an OPAQUE segment (one carrying an unquoted expansion, substitution,
+    or ANSI-C/other quoting the lexer cannot resolve to a literal command word) that also carries a producer
+    surface, so $'g'it diff (which bash runs as git diff) cannot slip through as no-producer. It never
+    establishes an ALLOW; it only widens the ASK/DENY scope."""
+    return (_token_possible_producer(seg.argv)
+            or bool(_RAW_DIFF_PRODUCER_RE.search(seg.raw))
+            or (seg.opaque_shell and _has_producer_surface(seg.argv)))
+
+
+# git diff/log write the diff to a --output/-o file instead of stdout, so a shell redirect or a pipe is a
+# DECOY when --output is present (proofs C and D must not apply). --output/-o takes a file value, inline
+# (--output=X / -oX) or separated (--output X / -o X).
+def _diff_output_diversion(argv):
+    """Return (present, target) for a git --output/-o diff-output diversion before any '--' boundary, or
+    (False, None). The target decides console vs file: the diff lands there, not on stdout."""
+    end = len(argv)
+    for j, word in enumerate(argv):
+        if word in _DIFF_END_OF_OPTIONS:
+            end = j
+            break
+    i = 0
+    while i < end:
+        word = argv[i]
+        if word in ("--output", "-o"):
+            return True, (argv[i + 1] if i + 1 < len(argv) else None)
+        if word.startswith("--output="):
+            return True, word[len("--output="):]
+        if word.startswith("-o") and not word.startswith("--") and len(word) > 2:
+            return True, word[2:]
+        i += 1
+    return False, None
 
 
 def _final_stdout_dest(redirects):
@@ -870,14 +927,23 @@ def _seg_stdout_reaches_console(seg, segments, index):
 
 
 def _is_console_dump(seg, segments, index):
-    """True when a producer segment is CONFIRMED to emit a console patch: it is a git diff producer, it does
-    not emit only a summary listing, and its stdout is proven to reach a console (not diverted to a real
-    file, not an unprovable descriptor/pipe target). Used only to choose DENY over ASK; its absence never
-    establishes an ALLOW."""
+    """True when a producer segment is CONFIRMED to emit a console patch: its command word is PROVABLY git
+    (a literal 'git' or a path to it, so an opaque/expansion command word this guard cannot resolve is never
+    a confirmed dump - it routes to ASK instead), it is a git diff producer, it does not emit only a summary
+    listing, and its output is proven to reach a console. When the producer diverts its output with
+    --output/-o, THAT target decides (a /dev,/proc console target is a dump; a file or dynamic target is not
+    a confirmed dump, so it ASKS) and any shell redirect or pipe is a decoy. Otherwise stdout governs. Used
+    only to choose DENY over ASK; its absence never establishes an ALLOW."""
+    if _command_word(seg.argv) != "git":
+        return False  # an opaque/wrapped command word is not a proven git dump -> ASK, never DENY
     if not _is_diff_producer(seg.argv):
         return False
     if _diff_emits_only_summary(seg.argv):
         return False
+    diverted, out_target = _diff_output_diversion(seg.argv)
+    if diverted:
+        # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
+        return out_target is not None and _target_class(out_target, False) == "file-dev"
     return _seg_stdout_reaches_console(seg, segments, index) == "console"
 
 
@@ -977,6 +1043,8 @@ def _diff_proof_realfile(segments):
         return False
     if not _is_possible_producer(seg):
         return False
+    if _diff_output_diversion(seg.argv)[0]:
+        return False  # --output/-o governs where the diff lands; the shell redirect is a decoy
     return _final_stdout_dest(seg.redirects) == "file-real"
 
 
@@ -994,6 +1062,8 @@ def _diff_proof_pager(segments):
         return False
     if not stage1.argv or stage1.argv[0] != "git" or not _is_possible_producer(stage1):
         return False
+    if _diff_output_diversion(stage1.argv)[0]:
+        return False  # --output/-o diverts the diff off the pipe; the pager is a decoy
     if stage2.redirects or stage2.opaque_shell:
         return False
     return len(stage2.argv) == 1 and stage2.argv[0] in _PAGERS

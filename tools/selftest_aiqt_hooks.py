@@ -2028,6 +2028,25 @@ def main():
                 _redir("git diff > $OUT"), [(">", 1, "$OUT", "opaque", "opaque")])
         texpect("(tok-15) /dev target classifies file-dev",
                 _redir("git diff > /dev/tty"), [(">", 1, "/dev/tty", "file-dev", "file-dev")])
+        # A backslash-newline line-continuation JOINS and NEVER injects a synthetic empty argv element.
+        texpect("(tok-16a) boundary backslash-newline is dropped, no empty argv element",
+                _argv("git \\\n commit -m x"), [["git", "commit", "-m", "x"]])
+        texpect("(tok-16b) mid-word backslash-newline joins the word",
+                _argv("git di\\\nff"), [["git", "diff"]])
+        texpect("(tok-16c) a genuine QUOTED empty operand '' is preserved (not a synthetic empty)",
+                _argv("git commit -m ''"), [["git", "commit", "-m", ""]])
+        # A '#' at a word boundary starts a comment; a mid-word '#' is literal.
+        texpect("(tok-17a) word-boundary '#' comments out the rest of the line (redirect ignored)",
+                (_argv("git diff # > /tmp/x"), _redir("git diff # > /tmp/x")),
+                ([["git", "diff"]], []))
+        texpect("(tok-17b) mid-word '#' stays literal",
+                _argv("git commit -m ticket#123"), [["git", "commit", "-m", "ticket#123"]])
+        # A '..'-normalized device target and a decoy-real target under '..' do not classify file-real.
+        texpect("(tok-18a) '/tmp/../dev/stdout' normalizes to a /dev device target",
+                _redir("git diff > /tmp/../dev/stdout"),
+                [(">", 1, "/tmp/../dev/stdout", "file-dev", "file-dev")])
+        texpect("(tok-18b) a '..' escape target is unprovable (opaque), never file-real",
+                _redir("git diff > ../out.txt"), [(">", 1, "../out.txt", "opaque", "opaque")])
         # Unsupported constructs are cannot-evaluate (ValueError), never partial argv.
         for _bad, _why in [("git diff <<'EOF'\nx\nEOF", "heredoc"),
                            ("git diff <(echo x)", "process substitution"),
@@ -2171,6 +2190,43 @@ def main():
         dexpect("(l11-e20) diff plumbing stays ASK, not benign (only git log gets proof E)",
                 "git diff-tree", "ask")
 
+        # === L11 QA fix round (tri-family blockers on PR #163). Each vector FAILS without its fix. =========
+        # BLOCKER 2: an unquoted '#' at a word boundary is a comment; a redirect/pipe that is commented out
+        # must NOT earn proof C/D (the diff goes to the CONSOLE). Mid-word '#' stays literal (gw-ba/bb).
+        dexpect("(qa-b2a) '#'-commented redirect does not earn proof C -> console dump denies",
+                "git diff HEAD^ HEAD # > /tmp/x", "deny")
+        dexpect("(qa-b2b) '#'-commented pipe does not earn proof D -> console dump denies",
+                "git diff # | less", "deny")
+        dexpect("(qa-b2c) a mid-word '#' is still literal, not a comment (regression lock)",
+                "git diff --output=out#1.txt", "ask")
+        # BLOCKER 3: ANSI-C / $'...' quoting that resolves to a git command word is UNPROVEN -> never ALLOW.
+        dexpect("(qa-b3a) $'g'it diff (bash runs git diff) never ALLOWs (opaque command word -> ASK)",
+                "$'g'it diff HEAD^ HEAD", "ask")
+        dexpect("(qa-b3b) a $VAR command word beside a producer surface never ALLOWs",
+                "$GIT diff HEAD", "ask")
+        # BLOCKER 4: a --output/-o diversion means the shell redirect/pipe is a decoy; proofs C/D disabled.
+        dexpect("(qa-b4a) --output=/dev/tty with a decoy real-file redirect denies (console dump)",
+                "git diff --output=/dev/tty > realfile.txt", "deny")
+        dexpect("(qa-b4b) git log -p --output=/dev/tty with a decoy redirect denies",
+                "git log -p --output=/dev/tty > f.txt", "deny")
+        dexpect("(qa-b4c) --output=/dev/tty piped to less denies (pager decoy)",
+                "git diff --output=/dev/tty | less", "deny")
+        dexpect("(qa-b4d) bare --output=/dev/tty denies (console)", "git diff --output=/dev/tty", "deny")
+        dexpect("(qa-b4e) --output=realfile.txt asks (diverted to a file, not a proof-C shell redirect)",
+                "git diff --output=realfile.txt", "ask")
+        dexpect("(qa-b4f) separated --output realfile.txt asks", "git diff --output realfile.txt", "ask")
+        # BLOCKER 5: a redirect target that resolves to a device via '..' or a relative path must NOT earn
+        # proof C; a genuine plain-file redirect still ALLOWs.
+        dexpect("(qa-b5a) '> /tmp/../dev/stdout' normalizes to a device -> denies",
+                "git diff > /tmp/../dev/stdout", "deny")
+        dexpect("(qa-b5b) '> ../../../dev/stdout' has an unprovable '..' escape -> asks",
+                "git diff > ../../../dev/stdout", "ask")
+        dexpect("(qa-b5c) a '..'-bearing non-device target is unprovable -> asks",
+                "git diff > ../out.txt", "ask")
+        dexpect("(qa-b5d) a genuine plain-file redirect still allows (no over-DENY regression)",
+                "git diff > out.txt", "allow")
+        dexpect("(qa-b5e) a relative sub-path plain file still allows", "git diff > sub/out.txt", "allow")
+
         # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
         pexpect("(pl-v1) '-o --force' is the push-option value, not force",
                 "git push -o --force origin main", "allow", cwd=plr)
@@ -2251,6 +2307,10 @@ def main():
         # A redirect target '--'/'--help' is a filename, never an argv boundary or a help flag.
         pexpect("(pl-l11g) redirect-target '--help' does not mask a force-push (target removed)",
                 "git push --force origin main > --help", "deny", cwd=plr)
+        # QA BLOCKER 1: a backslash-newline line-continuation must NOT inject a synthetic empty argv
+        # element (which mis-set the subcommand and defeated the guard); it joins as bash does -> DENY.
+        pexpect("(qa-b1-pl) backslash-newline force-push does not slip via an empty argv element, denies",
+                "git \\\n push --force origin main", "deny", cwd=plr)
 
         # gatdis (EN-5 PR-B): decision-signal battery for the gate-weakening guard.
         # === gate_weakening (gatdis): a git hook bypass + a swallowed or truncated checker ============
@@ -2399,6 +2459,10 @@ def main():
         # A QUOTED redirect-shaped option value stays argv and does not mask the bypass verb.
         gexpect("(gw-l11e) a quoted '>' -m value does not hide the trailing --no-verify, denies",
                 "git commit -m '>' --no-verify", "deny")
+        # QA BLOCKER 1: a backslash-newline continuation must not inject an empty argv element that hid the
+        # bypass subcommand from the gate-weakening scan -> DENY.
+        gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
+                "git \\\n commit --no-verify -m x", "deny")
 
         # === L11: git_discard redirect regression locks (prsunc) - a redirect is still non-pristine ->
         # ASK; no redirect may become a new ALLOW, and the clean-parse lossy scan sees redirect-free argv ==
@@ -2429,6 +2493,10 @@ def main():
                  'git commit -m "Co-Authored-By: Claude <c@x>" >/dev/null', "deny")
         ciexpect("(ci-l11d) a redirected commit with no AI identity allows",
                  "git commit -m fix >/dev/null", "allow")
+        # QA BLOCKER 1: a backslash-newline continuation must not inject an empty argv element that hid the
+        # commit subcommand (which had made the AI --author invisible) -> DENY.
+        ciexpect("(ci-b1) backslash-newline AI-author commit does not slip via an empty argv element, denies",
+                 "git \\\n commit --author='Claude <c@x>' -m y", "deny")
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
