@@ -4674,6 +4674,10 @@ def _orch_token_backgrounds(token):
         return True
     if any(sep == "&" for _t, sep in segs):
         return True
+    if _has_coproc(segs):
+        return True  # `coproc` backgrounds with no '&' (round 27, gemini: 'bash -c "coproc tail"'); bash
+        # backgrounds ONLY via '&' or coproc, so '&'-sep + coproc + the nested-carrier scan below is the
+        # COMPLETE lexable backgrounding set - no third construct to chase.
     return any(len(tk) > 1 and any(t.rsplit("/", 1)[-1] in _ORCH_SHELLS for t in tk)
                for chain, _term in _orch_pipeline_chains(segs) for tk, _s in chain if tk)
 

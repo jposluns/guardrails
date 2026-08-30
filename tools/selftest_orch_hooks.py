@@ -669,6 +669,11 @@ def main():
         # the carrier check scans EVERY token (not just the command word), mirroring its sibling detectors.
         check("trunc/fg-wrapper-prefixed-nested-async-asks",
               _verdict(bg("bash -c 'env bash -c \"python3 build.py | tail &\"'", rib=False)), "ask")
+        # round 27 (gemini): 'coproc' backgrounds with NO '&'; nested in a wrapper body it evades the
+        # top-level _has_coproc, so _orch_token_backgrounds now detects coproc too. Bash backgrounds ONLY
+        # via '&' or coproc, so this completes the lexable backgrounding set.
+        check("trunc/fg-nested-coproc-asks",
+              _verdict(bg("bash -c 'coproc tail >/dev/null'", rib=False)), "ask")
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time
