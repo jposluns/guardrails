@@ -4388,7 +4388,9 @@ def orch_truncation_guard(data):
     guard, and it ASKS the operator to confirm. It never proves capture through
     shell syntax and never DENIES a parsed command; the cost is that a non-trivial background dispatch asks
     for confirmation rather than being proven, a deliberate trade of coverage for a guarantee of no
-    false-allow. A foreground call is out of scope (the harness returns its output directly)."""
+    shell-syntax false-allow; what the invoked program itself does at runtime (detach, daemonize, or
+    redirect its output) is out of view, a disclosed residual. A foreground call is out of scope (the
+    harness returns its output directly)."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)

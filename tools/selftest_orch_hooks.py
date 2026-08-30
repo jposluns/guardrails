@@ -606,8 +606,8 @@ def main():
           "cannot-evaluate; the schedule path denies on cannot-evaluate with a three-denial cap and "
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
-          "row; the truncation guard denies an uncaptured truncated background dispatch and honours "
-          "the tee-before-truncator escape; the ledger records launches and completions; the resume "
+          "row; the truncation guard allows a plain metacharacter-free background command and asks on "
+          "any shell syntax or reserved word; the ledger records launches and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; and the prompt stamp "
           "resets guard counters from genuine human input")
     return 0
