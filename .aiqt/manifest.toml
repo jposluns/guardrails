@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "22da66e23e43329bcbf4b896e473d509ef0a83f0d3337e9044011cb71271dfeb"
+tree-sha256 = "66d81c8d1e61d3af091c99b69c29fb6431b851008717df6d15a218e8de095543"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -66,8 +66,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 9757
-sha256 = "9378dc942c708863c534dbcd90ad73453d5c38f3369520d717bb1807f4fe6a18"
+bytes = 9826
+sha256 = "97fdb6f9c8849a24bf575a3377092e4f92ed7971bd8fdcd97d44c5a757c880f2"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2031,8 +2031,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 31921
-sha256 = "9660ce6574690517cb9a5f0a2c91a416ebb1a69923a56a324afb5b2827ff241b"
+bytes = 31949
+sha256 = "e840fbc535545270d1180d9aa3edb94ba5c74ccdc954db3f37fdee3ba062e0ec"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2263,6 +2263,11 @@ sha256 = "a99f03b2979dbb05616496bf51069fad663005bf18857d68d1ffc7565051cc19"
 path = "site/robots.txt"
 bytes = 269
 sha256 = "4af241b735cd232d6d688a808865a2448d90a47dce196d956aa026063fdd27ac"
+
+[[sources]]
+path = "site/rule5.html"
+bytes = 9696
+sha256 = "edf9d16ceb3cbc4876b688459b0a9a746c17a99783d19d61ca054862826e3d0b"
 
 [[sources]]
 path = "site/standard.html"
