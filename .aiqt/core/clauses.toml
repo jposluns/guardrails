@@ -671,7 +671,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 18
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "89bcb5c950626fb6a48eb494638e0571ea0f259ed0e9c8aa1c626dd165f23698"
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
 
 [[clause]]
 clause-id = "gatdis.2"
@@ -680,7 +680,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 18
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "89bcb5c950626fb6a48eb494638e0571ea0f259ed0e9c8aa1c626dd165f23698"
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
 
 [[clause]]
 clause-id = "gatdis.3"
@@ -689,7 +689,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 19
 end-line = 20
 canonical-text = "A failing gate is signal;\nunderstand why it failed before considering any override."
-source-digest = "89bcb5c950626fb6a48eb494638e0571ea0f259ed0e9c8aa1c626dd165f23698"
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
 
 [[clause]]
 clause-id = "gatdis.4"
@@ -698,7 +698,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "89bcb5c950626fb6a48eb494638e0571ea0f259ed0e9c8aa1c626dd165f23698"
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
 
 [[clause]]
 clause-id = "gatdis.5"
@@ -707,7 +707,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "89bcb5c950626fb6a48eb494638e0571ea0f259ed0e9c8aa1c626dd165f23698"
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
 
 [[clause]]
 clause-id = "gatdis.6"
@@ -716,7 +716,25 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "89bcb5c950626fb6a48eb494638e0571ea0f259ed0e9c8aa1c626dd165f23698"
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+
+[[clause]]
+clause-id = "gatdis.7"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 24
+end-line = 26
+canonical-text = "A gate verdict is trusted only when it is read from the gate's own unmasked termination status, or from\na structured terminal result bound to the exact revision under gate; a downstream pipeline's status, a\ntruncated delivery, a textual success token, or a result for a different revision is not that verdict."
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+
+[[clause]]
+clause-id = "gatdis.8"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 26
+end-line = 29
+canonical-text = "A\npending, missing, ambiguous, malformed, unknown, or unreadable result is unverified, never a pass, and the\ngated action stays a separate step, withheld until terminal success is observed, so a check folded into the\nsame unverified apply or merge does not establish the checkpoint."
+source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
 
 [[clause]]
 clause-id = "gensrc.1"
