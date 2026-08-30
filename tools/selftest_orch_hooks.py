@@ -406,8 +406,21 @@ def main():
         check("trunc/head-denies", _verdict(bg("python3 build.py | head -20")), "deny")
         check("trunc/sed-n-denies", _verdict(bg("python3 build.py | sed -n 1,5p")), "deny")
         check("trunc/grep-m-denies", _verdict(bg("python3 build.py | grep -m 3 fail")), "deny")
-        check("trunc/tee-then-tail-allows",
-              _verdict(bg("python3 build.py | tee full.out | tail -5")), "allow")
+        # A tee is a FULL capture only as the terminal stage or with its stdout diverted off the
+        # pipe; a tee feeding a further stage that may close early cannot be proven full -> ASK
+        # (round 31). tee|head SIGPIPEs tee (partial file); an unrecognized tee flag writes nothing.
+        check("trunc/tee-then-tail-asks",
+              _verdict(bg("python3 build.py | tee full.out | tail -5")), "ask")
+        check("trunc/tee-then-head-asks",
+              _verdict(bg("python3 build.py | tee full.out | head -1")), "ask")
+        check("trunc/tee-terminal-allows",
+              _verdict(bg("python3 build.py | tee full.out")), "allow")
+        check("trunc/tee-stdout-devnull-diverted-allows",
+              _verdict(bg("python3 build.py | tee full.out >/dev/null | tail -5")), "allow")
+        check("trunc/tee-append-terminal-allows",
+              _verdict(bg("python3 build.py | tee -a full.out")), "allow")
+        check("trunc/tee-unknown-flag-asks",
+              _verdict(bg("python3 build.py | tee --definitely-invalid invalid.out | tail -1")), "ask")
         check("trunc/tail-then-tee-denies",
               _verdict(bg("python3 build.py | tail -5 | tee full.out")), "deny")
         check("trunc/tee-devnull-denies",
@@ -458,8 +471,8 @@ def main():
         check("trunc/shell-c-pipeline-denies",
               _verdict(bg("bash -c 'python3 build.py | tail -5'")), "deny")
         check("trunc/shell-c-plain-allows", _verdict(bg("sh -c 'python3 build.py'")), "allow")
-        check("trunc/shell-c-tee-allows",
-              _verdict(bg("bash -c 'python3 build.py | tee real.out | tail -5'")), "allow")
+        check("trunc/shell-c-tee-asks",
+              _verdict(bg("bash -c 'python3 build.py | tee real.out | tail -5'")), "ask")
         check("trunc/shell-c-nested-denies",
               _verdict(bg("bash -c 'bash -c \"python3 build.py | tail\"'")), "deny")
         check("trunc/stdin-redirect-tee-denies",
@@ -525,8 +538,8 @@ def main():
               _verdict(bg("bash -lc 'python3 build.py | tail -5'")), "ask")
         check("trunc/shell-c-clustered-euc-asks",
               _verdict(bg("sh -euc 'python3 build.py | tail -5'")), "ask")
-        check("trunc/shell-c-exact-tee-allows",
-              _verdict(bg("bash -c 'python3 build.py | tee real.out | tail -5'")), "allow")
+        check("trunc/shell-c-exact-tee-asks",
+              _verdict(bg("bash -c 'python3 build.py | tee real.out | tail -5'")), "ask")
         check("trunc/shell-c-exact-tail-denies",
               _verdict(bg("bash -c 'python3 build.py | tail -5'")), "deny")
         # inner inline-& orphans the stream (wrapper exits first) -> ASK.

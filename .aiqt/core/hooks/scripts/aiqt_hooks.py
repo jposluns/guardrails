@@ -4490,6 +4490,32 @@ def _tee_cat_info_flagged(stage_words):
     return False
 
 
+_TEE_SAFE_SHORT = frozenset(("a", "i", "p", "u"))  # -a append, -i ignore-interrupts, -p, -u: preserve capture
+
+
+def _tee_flag_unknown(stage_words):
+    """True when a tee stage carries an option that is neither a known passthrough-preserving flag nor an
+    info flag: an UNRECOGNIZED option makes tee exit with an error and write no capture file, so its target
+    must not be credited as a capture (fail-closed: unknown flag -> unprovable/ASK, round 31). Honors '--'."""
+    for w in stage_words:
+        if w == "--":
+            return False  # end of options; the rest are operands
+        if not w.startswith("-") or w == "-":
+            continue  # an operand, or the '-' stdin marker
+        if w.startswith("--") and len(w) > 2:
+            key = w[2:].split("=", 1)[0]
+            if any(name.startswith(key) for name in
+                   ("help", "version", "append", "ignore-interrupts", "output-error")):
+                continue  # a known long flag (info flags copy nothing; the rest preserve capture)
+            return True  # any other long option is unrecognized -> tee errors
+        if w == "-h":
+            continue  # short help
+        if len(w) > 1 and all(c in _TEE_SAFE_SHORT for c in w[1:]):
+            continue  # a cluster of known short flags
+        return True  # an unrecognized short option
+    return False
+
+
 def _orch_chain_capture_proof(chain, rib):
     """Three-valued proof that a pipeline chain's FULL producer stdout provably reaches a durable,
     readable capture before any non-identity transform: returns 'capture', 'no-capture', or
@@ -4499,10 +4525,14 @@ def _orch_chain_capture_proof(chain, rib):
     stream is still the live stream at this point; opaque_seen softens a no-capture to unprovable,
     because a target the guard cannot judge must not read as a definite miss. A real redirect proves
     FULL capture only on the producer stage or an identity stage (tee, or cat with no operands); a real
-    redirect after an unknown transform captures the already-reduced output, so it never sets captured."""
+    redirect after an unknown transform captures the already-reduced output, so it never sets captured.
+    A tee's passthrough capture is FULL only when the tee is the pipeline's terminal stage or its own
+    stdout is diverted off the pipe, so a tee feeding a further stage that may close early is ASK."""
     captured = False
     intact = True
     opaque_seen = False
+    _stage_positions = [i for i, (tk, _s) in enumerate(chain) if tk]
+    _last_idx = _stage_positions[-1] if _stage_positions else -1
     for idx, (tokens, _sep) in enumerate(chain):
         word = _command_word(tokens)
         operands = _stage_operands(tokens)
@@ -4512,15 +4542,21 @@ def _orch_chain_capture_proof(chain, rib):
         info_flagged = _tee_cat_info_flagged(_stage_words(tokens))
         # cat is an identity passthrough ONLY as bare `cat` or with just stdin markers ('-'/'--'); any
         # transforming flag (cat -s squeezes blanks, cat -n numbers, ...) makes it a transform.
-        is_identity = (not info_flagged) and (word == "tee" or (word == "cat"
-                                              and all(w in ("-", "--", "-u") for w in _stage_words(tokens))))
+        is_identity = (not info_flagged) and (
+            (word == "tee" and not _tee_flag_unknown(_stage_words(tokens)))
+            or (word == "cat" and all(w in ("-", "--", "-u") for w in _stage_words(tokens))))
         if idx > 0 and _has_stdin_redirect(tokens):
             # a stdin redirect discards the piped producer stream: this stage reads the redirected
             # source, so its own tee/redirect capture the replacement (the 'and intact' guards below then
             # refuse to credit them) and nothing downstream sees the producer stream (CX stdin finding).
             intact = False
         if word == "tee" and not info_flagged:
-            if any("(" in t or ")" in t for t in tokens):
+            if _tee_flag_unknown(_stage_words(tokens)):
+                # an UNRECOGNIZED tee flag makes tee error and write no capture file (round 31): its
+                # operand must not be credited, so the stage is unprovable, never a silent capture.
+                if not captured:
+                    opaque_seen = True
+            elif any("(" in t or ")" in t for t in tokens):
                 # a process/command substitution in the tee args (e.g. 'tee >(head)', which the lexer
                 # splits into '>(' + 'head') is NOT a durable file capture, so no operand credits it.
                 if not captured:
@@ -4529,7 +4565,16 @@ def _orch_chain_capture_proof(chain, rib):
                 for a in operands:
                     cls = _sink_target(a)
                     if cls == "real" and intact:
-                        captured = True  # tee captures its INPUT; full only while the stream in is full
+                        # tee captures its INPUT (full only while the stream in is full), BUT its
+                        # passthrough stdout also continues down the pipe: a DOWNSTREAM stage that closes
+                        # early ('tee f | head') SIGPIPEs tee before the full stream is written, leaving a
+                        # PARTIAL file. The capture is provably FULL only when tee is the TERMINAL stage OR
+                        # its own stdout is diverted off the pipe (a real/devproc redirect on the tee); a
+                        # tee feeding a further pipe stage is unprovable -> ASK (round 31).
+                        if idx == _last_idx or _last_stdout_redirect(tokens) in ("real", "devproc"):
+                            captured = True
+                        elif not captured:
+                            opaque_seen = True
                     elif cls == "opaque" and not captured:
                         opaque_seen = True
         redirect = _last_stdout_redirect(tokens)
@@ -4772,7 +4817,7 @@ def orch_truncation_guard(data):
         if rib or "&" in command or re.search(r"(^|[\s;&|(){}])coproc(\s|$)", command):
             return _ask("AIQT rule trkasy: this background dispatch could not be parsed, so the guard "
                         "cannot prove its full output is captured. Confirm the full output lands in a "
-                        "real file ('| tee <file>' before any filter), or run it in the foreground.",
+                        "real file ('| tee <file>' as the final stage), or run it in the foreground.",
                         "AIQT guardrail: asked on an unparseable in-scope dispatch (fail-safe).")
         return _allow()
     # SCOPE. Grouping (paren/fused) makes the lexical parse unreliable: a backgrounded such command is
@@ -4792,7 +4837,7 @@ def orch_truncation_guard(data):
                 "AIQT rules trkasy/vrfdlv: this background dispatch uses shell grouping or a compound "
                 "command (while/for/if/{ }/subshell) the guard cannot parse reliably, so it cannot prove "
                 "the full output is captured. Confirm the full output lands in a real file ('| tee <real "
-                "file>' before any filter), or simplify the dispatch to a plain pipeline.",
+                "file>' as the final stage), or simplify the dispatch to a plain pipeline.",
                 "AIQT guardrail: asked on a backgrounded grouped/compound dispatch the parser cannot prove.")
         return _allow()
     in_scope = _orch_in_scope_chains(list(_orch_pipeline_chains(segments)), rib)
@@ -4815,7 +4860,7 @@ def orch_truncation_guard(data):
         return _deny(
             "AIQT rules trkasy/vrfdlv: a background dispatch drops the full producer output before any "
             "durable capture, so the tracked deliverable's completion signal cannot carry the full "
-            "result. Mechanical fix: insert '| tee <real file>' BEFORE any filter (tee to /dev/null "
+            "result. Mechanical fix: insert '| tee <real file>' as the FINAL stage (tee to /dev/null "
             "does not count), or redirect the producer's own stdout to a real file, or drop the filter "
             "and read the full output.",
             "AIQT guardrail: denied a background dispatch that drops its full output before capture.")
@@ -4823,8 +4868,8 @@ def orch_truncation_guard(data):
         return _ask(
             "AIQT rules trkasy/vrfdlv: the guard cannot prove this background dispatch's full output is "
             "captured (an inline '&' orphans the stream, or the capture target is not a plain real "
-            "file). Confirm the full output lands in a real file ('| tee <real file>' before any "
-            "filter), or use run_in_background so the harness binds the full stream to the completion "
+            "file). Confirm the full output lands in a real file ('| tee <real file>' as the final "
+            "stage), or use run_in_background so the harness binds the full stream to the completion "
             "signal.",
             "AIQT guardrail: asked on a background dispatch whose full-output capture is unproven.")
     return _allow()
