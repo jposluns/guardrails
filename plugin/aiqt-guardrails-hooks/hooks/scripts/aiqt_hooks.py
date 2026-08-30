@@ -204,6 +204,11 @@ def _lex_line(line):
     Raises ValueError on a shell parse error (e.g. an unbalanced quote), so the caller can fall back."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # bash treats '#' as a comment only at a word start; shlex's default
+    # '#' commenters strips a MID-word '#' (e.g. '--rev=abc#1'), silently dropping a downstream
+    # truncator and false-ALLOWing. Disabling it lexes '#' literally (bash-faithful mid-word); a
+    # word-initial '# comment' then over-tokenizes into extra words, a safe-direction over-ASK,
+    # never a hidden ALLOW (round 32).
     return list(lexer)
 
 
@@ -4490,29 +4495,21 @@ def _tee_cat_info_flagged(stage_words):
     return False
 
 
-_TEE_SAFE_SHORT = frozenset(("a", "i", "p", "u"))  # -a append, -i ignore-interrupts, -p, -u: preserve capture
-
-
 def _tee_flag_unknown(stage_words):
-    """True when a tee stage carries an option that is neither a known passthrough-preserving flag nor an
-    info flag: an UNRECOGNIZED option makes tee exit with an error and write no capture file, so its target
-    must not be credited as a capture (fail-closed: unknown flag -> unprovable/ASK, round 31). Honors '--'."""
+    """True when a tee stage carries any option other than the two that provably still capture the full
+    input, '-a'/'--append'. Every other flag either errors (an unknown option, a '=value' on a valueless
+    flag such as '--append=x', an invalid short such as '-u') or copies nothing ('--help'/'--version'), so
+    its target must not be credited as a capture (fail-closed: any unvouched flag -> unprovable/ASK, round
+    32). An exact-match allowlist avoids the '=value'/cluster/abbreviation edges a parsing allowlist accreted.
+    Honors '--' (tokens after it are operands, not flags)."""
     for w in stage_words:
         if w == "--":
             return False  # end of options; the rest are operands
         if not w.startswith("-") or w == "-":
             continue  # an operand, or the '-' stdin marker
-        if w.startswith("--") and len(w) > 2:
-            key = w[2:].split("=", 1)[0]
-            if any(name.startswith(key) for name in
-                   ("help", "version", "append", "ignore-interrupts", "output-error")):
-                continue  # a known long flag (info flags copy nothing; the rest preserve capture)
-            return True  # any other long option is unrecognized -> tee errors
-        if w == "-h":
-            continue  # short help
-        if len(w) > 1 and all(c in _TEE_SAFE_SHORT for c in w[1:]):
-            continue  # a cluster of known short flags
-        return True  # an unrecognized short option
+        if w in ("-a", "--append"):
+            continue  # append still writes the full input
+        return True  # any other flag: tee may error or copy nothing -> not a provable capture
     return False
 
 
@@ -4526,8 +4523,8 @@ def _orch_chain_capture_proof(chain, rib):
     because a target the guard cannot judge must not read as a definite miss. A real redirect proves
     FULL capture only on the producer stage or an identity stage (tee, or cat with no operands); a real
     redirect after an unknown transform captures the already-reduced output, so it never sets captured.
-    A tee's passthrough capture is FULL only when the tee is the pipeline's terminal stage or its own
-    stdout is diverted off the pipe, so a tee feeding a further stage that may close early is ASK."""
+    A tee's passthrough capture is FULL only when the tee is the pipeline's terminal stage, so a tee
+    feeding any further stage that may close its pipe early is ASK."""
     captured = False
     intact = True
     opaque_seen = False
@@ -4566,12 +4563,13 @@ def _orch_chain_capture_proof(chain, rib):
                     cls = _sink_target(a)
                     if cls == "real" and intact:
                         # tee captures its INPUT (full only while the stream in is full), BUT its
-                        # passthrough stdout also continues down the pipe: a DOWNSTREAM stage that closes
+                        # passthrough stdout also continues down the pipe: ANY downstream stage that closes
                         # early ('tee f | head') SIGPIPEs tee before the full stream is written, leaving a
-                        # PARTIAL file. The capture is provably FULL only when tee is the TERMINAL stage OR
-                        # its own stdout is diverted off the pipe (a real/devproc redirect on the tee); a
-                        # tee feeding a further pipe stage is unprovable -> ASK (round 31).
-                        if idx == _last_idx or _last_stdout_redirect(tokens) in ("real", "devproc"):
+                        # PARTIAL file, and a devproc redirect like '>/dev/stdout' or '>&1' re-opens fd1 to
+                        # that same pipe rather than diverting it (round 32). The capture is provably FULL
+                        # only when tee is the pipeline's TERMINAL stage; a tee feeding any further stage is
+                        # unprovable -> ASK.
+                        if idx == _last_idx:
                             captured = True
                         elif not captured:
                             opaque_seen = True

@@ -415,8 +415,20 @@ def main():
               _verdict(bg("python3 build.py | tee full.out | head -1")), "ask")
         check("trunc/tee-terminal-allows",
               _verdict(bg("python3 build.py | tee full.out")), "allow")
-        check("trunc/tee-stdout-devnull-diverted-allows",
-              _verdict(bg("python3 build.py | tee full.out >/dev/null | tail -5")), "allow")
+        # round 32: TERMINAL-ONLY. A mid-chain tee with a stdout redirect still ASKs - a devproc target
+        # like /dev/stdout or >&1 re-opens fd1 to the SAME pipe, not off it; only a TERMINAL tee credits
+        # a capture. An unvouched tee flag (invalid -u, or --append=x that errors) and a mid-word "#"
+        # (lexed literally now, so the truncator is visible) are all handled.
+        check("trunc/tee-stdout-devnull-mid-asks",
+              _verdict(bg("python3 build.py | tee full.out >/dev/null | tail -5")), "ask")
+        check("trunc/tee-stdout-devstdout-mid-asks",
+              _verdict(bg("python3 build.py | tee full.out >/dev/stdout | head -1")), "ask")
+        check("trunc/tee-flag-u-asks",
+              _verdict(bg("python3 build.py | tee -u full.out")), "ask")
+        check("trunc/tee-append-eqvalue-asks",
+              _verdict(bg("python3 build.py | tee --append=x full.out")), "ask")
+        check("trunc/comment-midword-hash-denies",
+              _verdict(bg("./build.sh --rev=abc#1 | head -5")), "deny")
         check("trunc/tee-append-terminal-allows",
               _verdict(bg("python3 build.py | tee -a full.out")), "allow")
         check("trunc/tee-unknown-flag-asks",
