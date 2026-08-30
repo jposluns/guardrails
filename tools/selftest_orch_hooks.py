@@ -656,6 +656,15 @@ def main():
               _verdict(bg("( bash -c 'python3 build.py | tail & true' )", rib=False)), "ask")
         check("trunc/fg-compound-hidden-async-asks",
               _verdict(bg("if true; then bash -c 'python3 build.py | tail & x'; fi", rib=False)), "ask")
+        # round 23/24 (gemini): a '&' buried under TWO quoting levels (a nested shell/eval wrapper) is
+        # caught by construction - a token that parses into a multi-word shell/eval sub-command fails
+        # closed. A nested-but-SYNCHRONOUS wrapper is an accepted safe-direction over-ASK.
+        check("trunc/fg-nested-shellc-async-asks",
+              _verdict(bg("bash -c 'bash -c \"python3 build.py | tail &\"'", rib=False)), "ask")
+        check("trunc/fg-nested-eval-async-asks",
+              _verdict(bg("bash -c 'eval \"python3 build.py | tail &\"'", rib=False)), "ask")
+        check("trunc/fg-nested-synchronous-overasks",
+              _verdict(bg("bash -c 'bash -c \"echo hi\"'", rib=False)), "ask")
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time

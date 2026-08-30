@@ -4660,11 +4660,19 @@ def _orch_token_backgrounds(token):
     over-fire. An UNPARSEABLE token FAILS CLOSED -> True (round 22, claude): a shell body shlex cannot lex
     (e.g. a trailing backslash) may still background a truncator in bash, so it is treated as a POSSIBLE
     backgrounding signal, never a silent clean pass; the shell-token gate in the caller keeps a non-shell
-    unparseable argument out of scope."""
+    unparseable argument out of scope. A token that PARSES INTO a MULTI-WORD sub-command whose command word
+    is itself a shell/eval ('bash -c "producer | tail &"' AS a token) may hide a deeper '&' through a FURTHER
+    quoting level a single pass cannot see (round 23/24, gemini NESTING), so it too fails closed; a BARE
+    shell word (a single token, e.g. 'bash') is not a sub-command and does not trigger, so 'bash -c "echo
+    hi"' still ALLOWs. This closes the class by construction rather than chasing each nesting depth."""
     try:
-        return any(sep == "&" for _t, sep in _segments(token))
+        segs = _segments(token)
     except ValueError:
         return True
+    if any(sep == "&" for _t, sep in segs):
+        return True
+    return any(len(tk) > 1 and _command_word(tk) in _ORCH_SHELLS
+               for chain, _term in _orch_pipeline_chains(segs) for tk, _s in chain if tk)
 
 
 def _orch_foreground_hidden_async(segments):

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "6cab25e56f809da5d9e1b78ae19c9e5dd6dd05073f951ea5b6e3f540439fc5b8"
+tree-sha256 = "8264728c14ba0347fb71d4a139623bf443daf90d67ea83783b9c708985276a4c"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,13 +46,13 @@ sha256 = "6f0c245c659cfdd94a9894fc33ec955f05827ea618df62a789f6e2ef1ef58a29"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 72327
-sha256 = "8e3284e411bf7f7c5c93c64380f1e9dd5e7d8bb61526f0b841b0ea58303d5179"
+bytes = 72855
+sha256 = "fa39bbd5a945573546d0fb64737a24a371d0448cefebf9355276c2f332678e61"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 342923
-sha256 = "3c67978bd0cf26b0e93bd1796939d23e35569fb90ac0a4524cad58b762a83850"
+bytes = 343602
+sha256 = "dfea372f656fbc196e6bde593fc1502976cbe92e979bfe6f54bd20ebd8f30c62"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -711,8 +711,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 162172
-sha256 = "d838f4236e8e3380c6252f72a0f1f0e17b68caedc2f576116ebcf0fb0d16f0cd"
+bytes = 163756
+sha256 = "dbf90755b3c226b998f0848f4b10993eb41408ad7ebc05acadf7edfefd3b3a25"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
@@ -2146,8 +2146,8 @@ sha256 = "e55c4dfb586da15eac1017960ad3ab4f2ce71caf6d4542447342290b388782b0"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 342923
-sha256 = "3c67978bd0cf26b0e93bd1796939d23e35569fb90ac0a4524cad58b762a83850"
+bytes = 343602
+sha256 = "dfea372f656fbc196e6bde593fc1502976cbe92e979bfe6f54bd20ebd8f30c62"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2646,8 +2646,8 @@ sha256 = "0872a2a1ca87af08d94c41c80909095a65ccee5140d32bd000306519fb0294b2"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 51863
-sha256 = "692dd0aece2c47675de264a68094220404aa1577eee8a911425e7c9ee57ee511"
+bytes = 52583
+sha256 = "9e81f34caea5a05ed50d1ffbff28f866172f19bb9516f3400d2f2f5cfb7474ed"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
