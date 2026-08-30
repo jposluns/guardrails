@@ -81,6 +81,10 @@ PREFIXES = [
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "Slack token"),
     (re.compile(r"\bxapp-[A-Za-z0-9-]{10,}"), "Slack app-level token"),
     (re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"), "private key block"),
+    # A JWT: a base64url header that always begins 'eyJ' (base64 of '{"'), then two more base64url
+    # segments. Distinctive 3-segment shape -> low false-positive risk. Local parity with CI's gitleaks
+    # for this class (GD-113; the private-key-block class above was already covered).
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), "JWT (JSON Web Token)"),
 ]
 
 # A credential-named variable assigned a literal of real length.
@@ -269,12 +273,25 @@ def _self_test() -> int:
     if "tools/check_secrets.py" not in SKIP_PATHS or "check_secrets.py" in SKIP_PATHS:
         failures.append("SKIP_PATHS must be repo-relative-path-scoped, not basename")
 
+    # PREFIXES token-shape coverage (GD-113): fixtures assembled from parts (SECP), no contiguous literal.
+    def prefix_hit(text):
+        return any(rx.search(text) for rx, _label in PREFIXES)
+    jwt = "eyJ" + "abcdefghij" + "." + "eyJzdWIiOjEyMw" + "." + "s1gnatureAbc123"
+    pem = "-----BEGIN " + "RSA PRIVATE KEY" + "-----"
+    prefix_cases = [(jwt, True), (pem, True),
+                    ("eyJustAWord in some prose here", False),
+                    ("just.some.dotted.words go here", False)]
+    for text, want in prefix_cases:
+        if prefix_hit(text) != want:
+            failures.append("PREFIXES {!r}: want {}, got {}".format(text, want, prefix_hit(text)))
+
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  " + f)
         return 1
-    print("SELF-TEST PASS: {} ASSIGN + {} scan-candidate cases".format(len(cases), len(names)))
+    print("SELF-TEST PASS: {} ASSIGN + {} scan-candidate + {} PREFIXES cases".format(
+        len(cases), len(names), len(prefix_cases)))
     return 0
 
 
