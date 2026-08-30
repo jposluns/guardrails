@@ -4384,27 +4384,38 @@ def _orch_foreground_detach(command):
     that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
     detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
     `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
-    pipe-stderr operators, and any single-quoted, double-quoted, or backslash-escaped ampersand. A
-    dedicated quote- and escape-tracking scan is used, NOT _segments: that helper strips quote and escape
-    provenance and classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire.
+    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
+    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
+    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
+    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    word-start `#` comment so a commented-out `&` does not prompt.
+
+    AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
+    unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
+    unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
+    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports a detach
+    (True -> ASK) rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored.
+
     NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
     model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
-    runtime detachers such as nohup/setsid/disown/coproc) errs toward reporting a bare `&` where an
-    ampersand is ambiguous, a safe-direction over-ask, and is otherwise a disclosed residual, never a
-    silent miss turned into a hidden allow."""
+    runtime detachers such as nohup/setsid/disown/coproc) is a disclosed residual; where such a construct
+    still leaves an unquoted bare `&`, or leaves the scan inside an unbalanced quote, it errs toward the
+    ASK, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
+    here and is a silent-allow residual disclosed in the manifest."""
     in_single = in_double = escaped = False
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
+    word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if escaped:
-            escaped, prev_dup = False, False
+            escaped, prev_dup, word_start = False, False, False
             i += 1
             continue
         if in_single:
             if ch == "'":
                 in_single = False
-            prev_dup = False
+            prev_dup, word_start = False, False
             i += 1
             continue
         if in_double:
@@ -4412,39 +4423,47 @@ def _orch_foreground_detach(command):
                 escaped = True
             elif ch == '"':
                 in_double = False
-            prev_dup = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of the line is not code
+            break
+        if ch.isspace():
+            prev_dup, word_start = False, True
             i += 1
             continue
         if ch == "\\":
-            escaped, prev_dup = True, False
+            escaped, prev_dup, word_start = True, False, False
             i += 1
             continue
         if ch == "'":
-            in_single, prev_dup = True, False
+            in_single, prev_dup, word_start = True, False, False
             i += 1
             continue
         if ch == '"':
-            in_double, prev_dup = True, False
+            in_double, prev_dup, word_start = True, False, False
             i += 1
             continue
         if ch == "&":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt == "&":  # `&&` logical AND: not a detach
-                prev_dup = False
+                prev_dup, word_start = False, False
                 i += 2
                 continue
             if nxt == ">":  # `&>` / `&>>` redirect: not a detach
-                prev_dup = False
+                prev_dup, word_start = False, False
                 i += 1
                 continue
             if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
-                prev_dup = False
+                prev_dup, word_start = False, False
                 i += 1
                 continue
             return True  # an executable bare `&` control operator: a foreground detach
-        prev_dup = ch in (">", "<", "|")
+        prev_dup, word_start = ch in (">", "<", "|"), False
         i += 1
-    return False
+    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; fail
+    # toward ASK rather than silently allow a possibly-real detach it could not see.
+    return in_single or in_double
 
 
 def orch_truncation_guard(data):

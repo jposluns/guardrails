@@ -18,7 +18,13 @@ value (a reference to an allowed variable), not that the variable resolves at ru
 target. Proving the live value points at the intended checkout is exetgt's runtime confirmation, outside a
 static scanner. Class c (partial): configured paths, command and option forms, wrappers, aliases, dynamic
 construction, command substitution, and shell grammar this scanner does not model all bound its coverage;
-the residue names that missed subset.
+the residue names that missed subset. To dogfood grdinp, the gate reconciles its own control inputs
+against the real source before yielding a verdict: a command or option selector that matches nothing in
+the scanned surface, a duplicate selector, or an overlapping path selector is a cannot-evaluate that fails
+closed (exit 2), never a silent clean pass. Backslash-newline continuations are joined so a split sink is
+seen whole, an unquoted word-start `#` comment is dropped, detection is anchored to the real command-word
+position (a configured name used as an argument or in a comment is not mistaken for an invocation), and
+bundled short-option clusters are matched.
 
 Configuration schema (`.aiqt/derived-command-parameters.toml`), all fields REQUIRED and adopter-authored:
 
@@ -58,6 +64,7 @@ from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not 
 CONFIG_REL = ".aiqt/derived-command-parameters.toml"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")           # a kebab-case binding identifier
 VAR_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")  # a $VAR or ${VAR} reference (anchored below)
+ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")       # a NAME=value assignment preceding a command word
 BINDING_KEYS = frozenset(("id", "paths", "commands", "options", "reference-variables"))
 _SEPARATORS = frozenset(("|", "||", "&&", "&", ";", "(", ")", "|&"))
 
@@ -75,13 +82,17 @@ def split_tokens(line):
     line as one token rather than raising, so a prose apostrophe or an unbalanced quote in a declared file
     can never crash the scan (there is no unparseable-line branch; the scan is best-effort by design, per
     the residue). This is not a shell parser: it does not expand, and it groups only on whitespace, so a
-    separator with no surrounding space stays inside its token."""
+    separator with no surrounding space stays inside its token. An unquoted, word-start `#` begins a comment
+    that runs to end of line and is dropped, so a commented-out sink is not scanned; a `#` inside a token
+    (a#b) or inside quotes ('#') is not a comment and stays in its token."""
     tokens = []
     i, n = 0, len(line)
     while i < n:
         if line[i].isspace():
             i += 1
             continue
+        if line[i] == "#":  # an unquoted, word-start comment: the rest of the line is dropped
+            break
         buf = []
         while i < n and not line[i].isspace():
             ch = line[i]
@@ -123,42 +134,87 @@ def classify_value(token, ref_vars):
     return "literal"
 
 
-def scan_line(line, commands, options, ref_vars):
-    """Scan one line for a declared sink and return a list of (option, kind) findings, kind in
-    {'literal', 'missing'}. For each token whose basename is a configured command, the tokens AFTER it up
-    to the next shell separator or the next configured command word are its argument window; a configured
-    option in that window, in separated (--opt value) or attached (--opt=value) form, has its value
-    classified. A reference produces no finding; a literal or a missing/empty value does. Multiple command
-    occurrences on one line are each scanned. Best-effort (class c): the argument window is lexical, not a
-    real parse of pipelines or grouping."""
+def match_option(tok, option):
+    """Match one argument token against one declared option, returning ('separated', None) when the value
+    is the NEXT token, ('attached', value) when the value is carried in the same token, or None for no
+    match. A LONG option (--name) matches tok == '--name' (separated) or '--name=value' (attached). A SHORT
+    option (a dash and a single character, -x) matches that letter inside a single-dash cluster (-x, -ax,
+    -axVALUE): the letters before it are other short flags, and whatever FOLLOWS it in the cluster is its
+    attached value, or, when it is the last letter, the value is the next token (shell short-option-with-
+    argument semantics). A token beginning with '--' is never read as a short cluster. This handles bundled
+    short options so a declared option inside a cluster is not slipped past (best-effort class c: it does
+    not resolve which earlier cluster letters themselves take a value)."""
+    if len(option) == 2 and option[0] == "-" and option[1] != "-":
+        if not tok.startswith("-") or tok.startswith("--"):
+            return None
+        pos = tok.find(option[1], 1)
+        if pos == -1:
+            return None
+        remainder = tok[pos + 1:]
+        return ("attached", remainder) if remainder else ("separated", None)
+    if tok == option:
+        return ("separated", None)
+    if tok.startswith(option + "="):
+        return ("attached", tok[len(option) + 1:])
+    return None
+
+
+def scan_line(line, commands, options, ref_vars, telemetry=None):
+    """Scan one logical line for a declared sink and return a list of (option, kind) findings, kind in
+    {'literal', 'missing'}. Detection is ANCHORED to the real command-word position: a token is a command
+    word only at the start of the line or immediately after a shell separator, after skipping any leading
+    NAME=value assignments, so a configured command name appearing as an ARGUMENT (echo sample-tool ...) or
+    inside a comment is not mistaken for an invocation. When the command word's basename is configured, the
+    tokens AFTER it up to the next shell separator are its argument window; a configured option in that
+    window, in separated (--opt value), attached (--opt=value), or bundled short (-xt value) form, has its
+    value classified. A reference produces no finding; a literal or a missing/empty value does. Multiple
+    command occurrences on one line are each scanned. When telemetry is given, the command basenames and
+    option names actually matched are recorded into it, so run() can reconcile the config's selectors
+    against the real source (grdinp). Best-effort (class c): the argument window is lexical, not a real
+    parse of pipelines or grouping, and a wrapper (sudo/env) in command-word position is not unwrapped."""
     findings = []
     tokens = split_tokens(line)
     n = len(tokens)
-    for idx, token in enumerate(tokens):
-        if command_basename(token) not in commands:
+    idx = 0
+    at_command_word = True  # the start of the line is a command-word position
+    while idx < n:
+        tok = tokens[idx]
+        if tok in _SEPARATORS:
+            at_command_word = True
+            idx += 1
             continue
+        if not at_command_word:
+            idx += 1
+            continue
+        if ENV_ASSIGN_RE.match(tok):
+            idx += 1  # a leading NAME=value assignment precedes the command word
+            continue
+        at_command_word = False
+        base = command_basename(tok)
+        if base not in commands:
+            idx += 1
+            continue
+        if telemetry is not None:
+            telemetry["commands"].add(base)
         j = idx + 1
-        while j < n:
-            tok = tokens[j]
-            if tok in _SEPARATORS or command_basename(tok) in commands:
-                break
+        while j < n and tokens[j] not in _SEPARATORS:
             matched_option = None
-            attached_value = None
+            form = value = None
             for option in options:
-                if tok == option:
+                match = match_option(tokens[j], option)
+                if match is not None:
                     matched_option = option
-                    break
-                if tok.startswith(option + "="):
-                    matched_option = option
-                    attached_value = tok[len(option) + 1:]
+                    form, value = match
                     break
             if matched_option is None:
                 j += 1
                 continue
-            if attached_value is not None:
-                if attached_value == "":
+            if telemetry is not None:
+                telemetry["options"].add(matched_option)
+            if form == "attached":
+                if value == "":
                     findings.append((matched_option, "missing"))
-                elif classify_value(attached_value, ref_vars) == "literal":
+                elif classify_value(value, ref_vars) == "literal":
                     findings.append((matched_option, "literal"))
                 j += 1
                 continue
@@ -171,6 +227,7 @@ def scan_line(line, commands, options, ref_vars):
             if classify_value(tokens[j + 1], ref_vars) == "literal":
                 findings.append((matched_option, "literal"))
             j += 2
+        idx = j
     return findings
 
 
@@ -180,9 +237,15 @@ def _req_str_list(table, key, where, allow_empty=False):
     value = table.get(key)
     if not isinstance(value, list) or (not value and not allow_empty):
         raise GateError("{}: {!r} must be a non-empty array of strings".format(where, key))
+    seen = set()
     for element in value:
         if not isinstance(element, str) or not element.strip():
             raise GateError("{}: {!r} contains a non-string or empty element".format(where, key))
+        # A duplicate selector is a malformed control (grdinp): it double-counts a match and cannot be
+        # reconciled soundly against the source, so fail closed rather than silently dedup and pass.
+        if element in seen:
+            raise GateError("{}: {!r} contains a duplicate element {!r}".format(where, key, element))
+        seen.add(element)
     return value
 
 
@@ -288,11 +351,41 @@ def resolve_surface(root, selector):
     return [target]
 
 
-def scan_file(root, path, binding):
+def _ends_with_continuation(text):
+    """True when text ends with an ODD run of backslashes, i.e. a backslash-newline line continuation (an
+    even run is an escaped backslash, not a continuation)."""
+    count = 0
+    k = len(text) - 1
+    while k >= 0 and text[k] == "\\":
+        count += 1
+        k -= 1
+    return count % 2 == 1
+
+
+def join_continuations(text):
+    """Yield (lineno, logical_line) pairs, joining backslash-newline continuations so a sink split across a
+    continuation is scanned whole (a command word split from its option, or an option from its value, is
+    otherwise missed and reads clean). lineno is the physical line where the logical line STARTS. The
+    trailing continuation backslash is removed and the next physical line appended directly, matching shell
+    backslash-newline semantics."""
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        start = i + 1
+        buf = lines[i]
+        while _ends_with_continuation(buf) and i + 1 < n:
+            buf = buf[:-1] + lines[i + 1]
+            i += 1
+        yield start, buf
+        i += 1
+
+
+def scan_file(root, path, binding, telemetry):
     """Scan one declared surface file for a binding's sinks. Read fail-closed: an OSError or a non-UTF-8
     file is exit 2 (an unreadable declared surface is never a clean skip). Returns a list of finding
     strings naming the binding id, the repo-relative path and line, and the option, WITHOUT echoing the
-    literal value (it may be sensitive)."""
+    literal value (it may be sensitive). telemetry accumulates the commands and options actually matched,
+    so run() can reconcile the config's selectors against the real source."""
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -307,8 +400,8 @@ def scan_file(root, path, binding):
     commands = set(binding["commands"])
     ref_vars = set(binding["reference-variables"])
     findings = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        for option, kind in scan_line(line, commands, binding["options"], ref_vars):
+    for lineno, line in join_continuations(text):
+        for option, kind in scan_line(line, commands, binding["options"], ref_vars, telemetry):
             if kind == "literal":
                 findings.append("{}:{}: binding {!r} option {!r} carries a hardcoded literal value; derive "
                                 "it from the authoritative source or reference an allowed variable".format(
@@ -341,12 +434,36 @@ def run(root):
         findings = []
         scanned = 0
         for binding in bindings:
+            # Resolve each path selector separately and detect overlap: a file produced by more than one
+            # selector (an exact duplicate, or an exact path also swept by a directory prefix such as
+            # ["cmd/run.sh", "cmd/**"]) is a malformed control that would double-scan, so fail closed.
             files = []
+            seen_files = set()
             for selector in binding["paths"]:
-                files.extend(resolve_surface(root, selector))
-            for path in sorted(set(files)):
+                for path in resolve_surface(root, selector):
+                    if path in seen_files:
+                        raise GateError("configuration {} binding {!r}: path selector {!r} overlaps another "
+                                        "selector at {}".format(CONFIG_REL, binding["id"], selector,
+                                                                path.relative_to(root)))
+                    seen_files.add(path)
+                    files.append(path)
+            telemetry = {"commands": set(), "options": set()}
+            for path in sorted(files):
                 scanned += 1
-                findings.extend(scan_file(root, path, binding))
+                findings.extend(scan_file(root, path, binding, telemetry))
+            # Reconcile the config's command and option selectors against the real scanned source (grdinp):
+            # a selector that matches NOTHING (a typo, or a stale surface) cannot be evaluated, so it is a
+            # cannot-evaluate that fails closed (exit 2), never a silent clean pass.
+            unmatched_commands = [c for c in binding["commands"] if c not in telemetry["commands"]]
+            if unmatched_commands:
+                raise GateError("configuration {} binding {!r}: command selector(s) {} matched no command "
+                                "word in the scanned surface (cannot-evaluate)".format(
+                                    CONFIG_REL, binding["id"], ", ".join(map(repr, unmatched_commands))))
+            unmatched_options = [o for o in binding["options"] if o not in telemetry["options"]]
+            if unmatched_options:
+                raise GateError("configuration {} binding {!r}: option selector(s) {} matched no option in "
+                                "the scanned surface (cannot-evaluate)".format(
+                                    CONFIG_REL, binding["id"], ", ".join(map(repr, unmatched_options))))
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -438,6 +555,57 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
     if classify_value("owner/repo", ref_vars) != "literal":
         failures.append("classify_value credited a bare literal")
 
+    # (finding C) command-word anchoring and comment stripping: a configured command name used as an
+    # ARGUMENT to another command, or inside an unquoted word-start comment, is not an invocation and must
+    # not fire. Without the fix each of these FALSE-FIRES a literal.
+    if kinds("echo sample-tool --target owner/repo"):
+        failures.append("a configured command used as an argument (not a command word) fired")
+    if kinds("# sample-tool --target owner/repo"):
+        failures.append("a fully commented-out sink fired")
+    if kinds("sample-tool --target $CURRENT_TARGET # sample-tool --target owner/repo") != []:
+        failures.append("a trailing comment carrying a literal sink fired")
+    # a leading NAME=value assignment precedes the command word and is skipped, so the sink is still seen.
+    if kinds("FOO=bar sample-tool --target owner/repo") != ["literal"]:
+        failures.append("a command word behind a leading env-assignment was not anchored")
+    # a `#` inside a token (not word-start) is not a comment.
+    if kinds("sample-tool --target a#b/repo") != ["literal"]:
+        failures.append("a mid-token '#' was wrongly treated as a comment")
+
+    # (finding D) bundled short-option clusters: a declared short option inside a cluster (-xt for -x -t)
+    # is still matched, in both separated (value is the next token) and attached (-tVALUE) forms. Without
+    # the fix the cluster slips past tok==option / tok.startswith(option+'=') and the literal is missed.
+    def kinds_short(line):
+        return [k for _opt, k in scan_line(line, commands, ["-t"], ref_vars)]
+    if kinds_short("sample-tool -xt owner/repo") != ["literal"]:
+        failures.append("a bundled short option with a separated literal value was not matched")
+    if kinds_short("sample-tool -xtowner/repo") != ["literal"]:
+        failures.append("a bundled short option with an attached literal value was not matched")
+    if kinds_short("sample-tool -xt $CURRENT_TARGET"):
+        failures.append("a bundled short option with an allowed reference value was flagged")
+    if kinds_short("sample-tool -t owner/repo") != ["literal"]:
+        failures.append("a bare short option with a separated literal value was not matched")
+    if kinds_short("sample-tool -xr owner/repo"):
+        failures.append("a cluster not containing the declared short option was matched")
+
+    # (finding A) telemetry records exactly the commands and options actually matched, so run() can
+    # reconcile the config's selectors against the real source.
+    telem = {"commands": set(), "options": set()}
+    scan_line("sample-tool --target owner/repo", commands, options, ref_vars, telem)
+    if telem["commands"] != {"sample-tool"} or telem["options"] != {"--target"}:
+        failures.append("scan_line telemetry did not record the matched command and option")
+    telem = {"commands": set(), "options": set()}
+    scan_line("echo not-a-sink here", commands, options, ref_vars, telem)
+    if telem["commands"] or telem["options"]:
+        failures.append("scan_line telemetry recorded a match where the command word was not configured")
+
+    # (finding B) backslash-newline continuations join so a sink split across the break is seen whole; the
+    # logical line's reported number is where it STARTS. Without the join the split sink is missed.
+    joined = list(join_continuations("sample-tool \\\n  --target owner/repo\n"))
+    if joined != [(1, "sample-tool   --target owner/repo")]:
+        failures.append("join_continuations did not join a command split from its option at the start line")
+    if not _ends_with_continuation("a \\") or _ends_with_continuation("a \\\\"):
+        failures.append("_ends_with_continuation mis-graded an odd/even trailing backslash run")
+
     # --- end-to-end layer over a real synthetic tree (runs where a writable tempdir exists) -------------
     import shutil
     import tempfile
@@ -475,12 +643,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
                 failures.append("e2e: an absent configuration expected NOT APPLICABLE exit 0")
 
             # (b) a clean derived surface passes.
-            r = _fresh("clean", good_cfg, {"cmd/resume.md": "run sample-tool --target $CURRENT_TARGET\n"})
+            r = _fresh("clean", good_cfg, {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
             if _run_quiet(r) != 0:
                 failures.append("e2e: a derived surface expected exit 0")
 
             # (c) a hardcoded literal fails exit 1.
-            r = _fresh("literal", good_cfg, {"cmd/resume.md": "run sample-tool --target sample-org/repo\n"})
+            r = _fresh("literal", good_cfg, {"cmd/resume.md": "sample-tool --target sample-org/repo\n"})
             if _run_quiet(r) != 1:
                 failures.append("e2e: a hardcoded literal expected exit 1")
 
@@ -563,6 +731,64 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
             else:
                 if _run_quiet(r) != 2:
                     failures.append("e2e: a dangling-symlink configuration expected fail-closed exit 2")
+
+            # (o) SELECTOR RECONCILIATION (finding A): a command selector that matches nothing in the
+            # scanned surface (a typo) is a cannot-evaluate, exit 2, not a silent clean pass.
+            r = _fresh("typo-command", good_cfg.replace('commands = ["sample-tool"]', 'commands = ["typo-tool"]'),
+                       {"cmd/resume.md": "sample-tool --target sample-org/repo\n"})
+            if _run_quiet(r) != 2:
+                failures.append("e2e: a command selector matching nothing expected cannot-evaluate exit 2")
+
+            # (p) an option selector that matches nothing (a typo) is likewise a cannot-evaluate, exit 2.
+            r = _fresh("typo-option", good_cfg.replace('options = ["--target"]', 'options = ["--typo"]'),
+                       {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+            if _run_quiet(r) != 2:
+                failures.append("e2e: an option selector matching nothing expected cannot-evaluate exit 2")
+
+            # (q) a duplicate path selector is a malformed control, exit 2.
+            r = _fresh("dup-path", good_cfg.replace('paths = ["cmd/resume.md"]',
+                                                    'paths = ["cmd/resume.md", "cmd/resume.md"]'),
+                       {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+            if _run_quiet(r) != 2:
+                failures.append("e2e: a duplicate path selector expected fail-closed exit 2")
+
+            # (r) an overlapping path selector (an exact path also swept by a directory prefix) is a
+            # malformed control that would double-scan, exit 2.
+            r = _fresh("overlap-path", good_cfg.replace('paths = ["cmd/resume.md"]',
+                                                        'paths = ["cmd/resume.md", "cmd/**"]'),
+                       {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+            if _run_quiet(r) != 2:
+                failures.append("e2e: an overlapping path selector expected fail-closed exit 2")
+
+            # (s) a duplicate option selector is a malformed control, exit 2.
+            r = _fresh("dup-option", good_cfg.replace('options = ["--target"]',
+                                                      'options = ["--target", "--target"]'),
+                       {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+            if _run_quiet(r) != 2:
+                failures.append("e2e: a duplicate option selector expected fail-closed exit 2")
+
+            # (t) LINE-CONTINUATION (finding B): a sink whose command word is split from its option/value
+            # by a backslash-newline is joined and seen whole, so the literal fails exit 1 (without the
+            # join it is missed and reads clean).
+            r = _fresh("continuation", good_cfg,
+                       {"cmd/resume.md": "sample-tool \\\n  --target sample-org/repo\n"})
+            if _run_quiet(r) != 1:
+                failures.append("e2e: a sink split across a line continuation was not scanned whole")
+
+            # (u) COMMENT + ANCHORING (finding C): a real derived sink plus a commented-out literal sink is
+            # clean, exit 0 (without the comment strip the comment's literal false-fires exit 1).
+            r = _fresh("comment", good_cfg,
+                       {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"
+                                         "# sample-tool --target sample-org/repo\n"})
+            if _run_quiet(r) != 0:
+                failures.append("e2e: a commented-out literal sink false-fired")
+
+            # (v) BUNDLED SHORT OPTION (finding D): a declared short option inside a cluster (-xt) carries
+            # the literal target value, exit 1 (without cluster handling it is missed and reads clean).
+            r = _fresh("short-cluster", good_cfg.replace('options = ["--target"]', 'options = ["-t"]'),
+                       {"cmd/resume.md": "sample-tool -xt sample-org/repo\n"})
+            if _run_quiet(r) != 1:
+                failures.append("e2e: a bundled short-option literal value was not scanned")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -571,17 +797,23 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
         for f in failures:
             print("  - " + f)
         return 1
-    core = ("tokenization stays total on unbalanced quotes, value classification credits only an allowed "
-            "bare/braced/double-quoted reference (never a single-quoted, non-allowed, or substituted "
-            "value), command words match by basename (not by containment), the argument window is bounded, "
-            "and multiple sinks are all checked")
+    core = ("tokenization stays total on unbalanced quotes and drops an unquoted word-start comment, value "
+            "classification credits only an allowed bare/braced/double-quoted reference (never a "
+            "single-quoted, non-allowed, or substituted value), detection is anchored to the real "
+            "command-word position (an argument or commented occurrence does not fire) past a leading "
+            "env-assignment, command words match by basename (not by containment), bundled short-option "
+            "clusters are matched, backslash-newline continuations join a split sink, the argument window "
+            "is bounded, telemetry records the matched selectors, and multiple sinks are all checked")
     if skipped:
         print("SELF-TEST PASS (PARTIAL): {}; SKIPPED (UNVERIFIED this run): {}".format(
             core, "; ".join(skipped)))
     else:
         print("SELF-TEST PASS: {}; and the end-to-end layer holds (NOT APPLICABLE, clean pass, literal "
               "finding, malformed-version/duplicate-id/empty-scope/absolute/escaping/unmatched/non-UTF-8/"
-              "symlink-surface/dangling-symlink-config fail-closed, and directory-prefix scanning)"
+              "symlink-surface/dangling-symlink-config fail-closed, directory-prefix scanning, selector "
+              "reconciliation of an unmatched-command/unmatched-option/duplicate-path/overlapping-path/"
+              "duplicate-option control failing closed, a line-continuation split sink scanned whole, a "
+              "commented-out literal not firing, and a bundled short-option value scanned)"
               .format(core))
     return 0
 
