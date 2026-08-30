@@ -2199,6 +2199,17 @@ def main():
                 "git diff # | less", "deny")
         dexpect("(qa-b2c) a mid-word '#' is still literal, not a comment (regression lock)",
                 "git diff --output=out#1.txt", "ask")
+        # COMPOSITION (backslash-newline + '#'): after a continuation join, a '#' now at a word boundary
+        # must be re-recognized as a comment, so the commented-out redirect/pipe earns no proof C/D.
+        dexpect("(qa-b2d) continuation then word-boundary '#' comments out the redirect -> console dump denies",
+                "git diff \\\n# > out.txt", "deny")
+        dexpect("(qa-b2e) continuation then '#' comments out the pipe -> console dump denies",
+                "git diff \\\n# | less", "deny")
+        texpect("(tok-16d) a continuation-exposed '#' starts a comment (no literal '#' argv, no redirect)",
+                (_argv("git diff \\\n# > out.txt"), _redir("git diff \\\n# > out.txt")),
+                ([["git", "diff"]], []))
+        texpect("(tok-16e) a continuation-joined MID-word '#' stays literal (di\\<nl>ff#x -> diff#x)",
+                _argv("git di\\\nff#x"), [["git", "diff#x"]])
         # BLOCKER 3: ANSI-C / $'...' quoting that resolves to a git command word is UNPROVEN -> never ALLOW.
         dexpect("(qa-b3a) $'g'it diff (bash runs git diff) never ALLOWs (opaque command word -> ASK)",
                 "$'g'it diff HEAD^ HEAD", "ask")

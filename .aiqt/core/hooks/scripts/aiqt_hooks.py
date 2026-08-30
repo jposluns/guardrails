@@ -242,6 +242,14 @@ def _read_word(command, i, n):
             # (a synthetic empty argv element that mis-set the subcommand and defeated the sibling guards).
             i += 2
             continue
+        if c == "#" and not started:
+            # A '#' still at a WORD BOUNDARY (the word has not begun) starts a comment, even when the
+            # boundary was EXPOSED by a preceding continuation join ('git diff \<newline># > out.txt'):
+            # break so the caller re-applies its end-of-line comment handling rather than reading '#' as a
+            # literal word (which would tokenize a commented-out redirect/pipe and earn a false proof).
+            # A mid-word '#' (started is True, e.g. ticket#123 or a continuation-joined di\<newline>ff#x)
+            # is left literal below.
+            break
         started = True
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             j = command.find("'", i + 1)
