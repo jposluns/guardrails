@@ -148,7 +148,7 @@ def main():
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: no internal host specifics or known codenames in tracked content")
+    print("PASS: no internal host specifics or known codenames in the scanned working tree")
     return 0
 
 
