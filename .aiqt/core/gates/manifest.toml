@@ -505,3 +505,39 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "A crash-injection self-test of the 9.3 journal-first cutover engine: for every kill point in its enumerated matrix (after the lock, after each preimage, after the preimage set, a torn INTENT, after INTENT, after each apply op, a torn payload mid-write, a torn COMPLETE, after COMPLETE, plus mid-rollback, torn rollback markers, and a torn directory-mode restore between the mkdir and the chmod), a real subprocess dies there and a fresh process recovers the synthetic tree from the journal ALONE to exactly the prestate or the verified poststate, terminal and idempotent, in both directions, across flat-file, nested-create, and nested-remove trees; it also exercises the inert 10.6 reverse-replay primitive (build_inverse_ops) directly over a completed cutover's INTENT ops, inverting each op in reverse dependency order (the un-adopt CLI and workflow are Section 12 step 7, not this slice). It proves crash recovery over that enumerated matrix on synthetic trees; it does NOT cover a non-quiescent tree (quiescence of the effective tree, not the prestate check, is what excludes a concurrent final-component swap), an arbitrary external writer mutating the tree during an open cutover is outside the transaction guarantee, and PID reuse on a platform with no readable process start-time cannot be distinguished (it reads as possibly-live, and the lock is never seized). Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "record-drift"
+script = "tools/check_record_drift.py"
+rules = ["recncl", "chtrk1"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "Total over the surface it examines: an OPEN merge_pending row carrying a TYPED ref (pr:N, decision:X) whose merge or record evidence exists in the declared truth sources always fails the gate. It reads only typed structured refs; a narrative number in prose, an untyped row, or a register kept outside the declared surface is out of scope by design (D9), and drift the truth sources themselves cannot see (an unpushed local merge, a PR merged under a subject with no (#N) marker) passes. In a checkout with no orchestration registry the live leg is NOT APPLICABLE (the record is machine-local by design) and the self-test carries the assurance; that scope boundary is printed, never silent."
+
+[[gate]]
+id = "mistakes-register"
+script = "tools/check_mistakes_register.py"
+rules = ["mstreg", "secaud"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "Total over the declared register: a broken digest chain or sequence, a reused id, an illegal status transition, a rewrite of anchored or merge-base rows, and an unverifiable landed row always fail; a declared-but-unreadable register is exit 2. A same-authority local file offers no protection against an actor who rewrites the WHOLE chain and the anchor together, which defeats the untracked mode (the tracked mode is bounded by merge-base history instead), so rewrites are DETECTABLE within those bounds, never prevented; adopters needing real separation bind the same interface to a server-side append store. The landed-row check proves the cited commit and check path exist, not that the check semantically guards the mistake. In a checkout with no registry the live leg is NOT APPLICABLE with the self-test as assurance."
+
+[[gate]]
+id = "orch-behaviour-selftest"
+script = "tools/selftest_orch_hooks.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the orchestrator-integrity handler behaviours end to end over hermetic fixtures (the acceptance vectors), judged on structured verdicts. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
+
+[[gate]]
+id = "aei-enumerator-selftest"
+script = "tools/aei_backlog_md.py"
+rules = ["grdinp"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "The reference enumerator's own grammar and fail-closed vectors: a malformed item-shaped line, an unknown token or blocker kind, and a duplicate id are enumeration errors (exit 3), never silently dropped items, and an empty backlog is a valid empty enumeration distinct from a parse failure. It proves the reference provider's contract, not any adopter's provider; the doctor probes those live."

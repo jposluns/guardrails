@@ -113,6 +113,7 @@ a bad invocation.
 """
 import datetime
 import json
+import math
 import os
 import re
 import shlex
@@ -124,6 +125,11 @@ import tempfile
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
+# Events whose handlers must NEVER exit 2 on an ERROR path (a deliberate handler deny may still
+# return 2 where the platform documents exit 2 as the block: Stop and TeammateIdle). SessionStart
+# cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
+# PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
+FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
 
 
 # --- decision constructors ---------------------------------------------------------------------------
@@ -189,7 +195,7 @@ def _deny_missing_tool_name(rule):
 # judges one command at a time on correctly-tokenized input. A parse error (unbalanced quotes) raises
 # ValueError; the callers fall back to a conservative raw-string scan rather than silent-allow.
 # Best-effort still: it does not defeat deliberate escaping/obfuscation (recorded in the manifest residue).
-_SEGMENT_OPERATORS = frozenset((";", "|", "||", "&&", "&", "(", ")"))
+_SEGMENT_OPERATORS = frozenset((";", "|", "|&", "||", "&&", "&", "(", ")"))
 
 
 def _lex_line(line):
@@ -433,12 +439,15 @@ _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat
 # diff into an interactive reader, not a console wall; cat/tee/anything else is not a pager.
 _INFO_FLAGS = frozenset(("--help", "-h"))
 _PAGERS = frozenset(("less", "more", "most", "pager"))
-_REDIRECT_TOKENS = frozenset((">", ">>"))  # stdout to a file; a grouped '>&'/'&>' fd-dup is not here
+_REDIRECT_TOKENS = frozenset((">", ">>", ">|"))  # stdout to a file (>| is noclobber-override, same
+# diversion as >); a grouped '>&'/'&>'/'&>>' fd-dup is handled by _is_stdout_fd_dup, not here
+_ORCH_STDIN_REDIR = frozenset(("<", "<<", "<<<", "<>", "<&"))  # input redirects (file/heredoc/here-string/
+# read-write open/fd-dup) that, on fd0, break a pipe; '<>'/'<&' added round 20
 # A redirect target UNDER /dev/ or /proc/ is never a real diff-output file: it lands on a console or
 # terminal (/dev/tty, /dev/pts/N, /dev/console), or on stdout/stderr (/dev/stdout, /dev/stderr,
 # /dev/fd/N, /proc/self/fd/1, /proc/PID/fd/N), so a diff sent there still reaches the review surface. A
 # real diff-output file is an ordinary path, never under one of these two trees.
-_DEV_PROC_TARGET_RE = re.compile(r"^/(?:dev|proc)/")
+_DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
 # Fallback-only regexes over the RAW command string, used when shlex cannot parse the command (see
 # _diff_source_fallback). SUMMARY/REDIRECT mirror the token escapes; the producer regex is a loose
 # 'git ... diff|show|range-diff' probe. Conservative on a parse failure: deny a plausible producer.
@@ -500,7 +509,7 @@ def _is_stdout_fd_dup(tokens, i):
     `>&file`/`&>file` that redirects BOTH streams to a real file is classified here as a to-descriptor dup
     and DENIED; that is a safe-direction over-deny (recoverable via `> file`), a disclosed residual (F-119)."""
     tok = tokens[i]
-    if tok == "&>":
+    if tok in ("&>", "&>>"):  # '&>' and '&>>' both redirect stdout+stderr (truncate / append) to a target
         return True
     if tok == ">&":
         prev = tokens[i - 1] if i > 0 else ""
@@ -3536,6 +3545,1591 @@ def gensrc_guard(data):
     return _ask(reason, banner)
 
 
+# --- the orchestrator-integrity suite ----------------------------------------------------------
+# One registry, one state directory, one PURE decision core (decide_yield), one delivery substrate; the
+# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: with no
+# .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session repo root it is inert (the
+# gensrc.json precedent), and the backlog guards additionally require a live orchestrator lease or a
+# declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
+# stop path fails OPEN (a guard error can never wedge a session); the schedule path fails CLOSED on
+# cannot-evaluate (a denied tool call cannot wedge anything), bounded by a denial cap. See
+# .aiqt/core/hooks/ORCHESTRATION.md for the registry schema and the AEI v1 protocol.
+
+_ORCH_REGISTRY_FILES = (".aiqt/orchestration.local.json", ".aiqt/orchestration.json")
+_ORCH_BLOCKER_KINDS = frozenset(
+    ("tracked-task", "human-decision", "external", "foreign-lease", "not-before"))
+_ORCH_STATES = frozenset(("open", "closed", "proposed"))
+_ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
+_ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
+_ORCH_MAX_NAMED = 10          # actionable items named in a deny message
+_ORCH_MODE_RE = re.compile(r"^Operating-mode:\s*(.+?)\s*$", re.MULTILINE)
+_ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
+_ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minutes number; the "quiet" gate is applied separately
+# A human-decision blocker ref must look like a decision id (uppercase-prefixed, for example XY-12),
+# never a bare lowercase word or a session-id substring, so a common word present in the pending
+# surface cannot forge a human-decision block. Mirrors the record-drift typed-ref discipline.
+_ORCH_DECISION_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-[A-Z0-9][A-Za-z0-9-]*$")
+_ORCH_CLOCK_SKEW = 300  # seconds of tolerance for a proof timestamp slightly ahead of the guard clock
+
+
+def _orch_now():
+    """The clock-read UTC now (tstamp: a recorded timestamp is read from the clock, never recalled)."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _orch_parse_utc(text):
+    """Parse an ISO-8601 UTC string tolerantly ('Z' accepted); None on anything unparseable, so an
+    unreadable timestamp can never satisfy a freshness check."""
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        value = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value
+
+
+def _orch_root(data):
+    """The session repo root via the scrubbed rev-parse primitive, or None (out of scope)."""
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    return _recovery_toplevel(cwd)
+
+
+def _orch_registry(root):
+    """Load the orchestration registry: ('absent', None) when neither registry file exists (the suite
+    is inert by design), ('ok', dict) on a schema-valid registry, ('bad', detail) otherwise. The
+    machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
+    .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous."""
+    for rel in _ORCH_REGISTRY_FILES:
+        path = os.path.join(root, *rel.split("/"))
+        try:
+            if not os.path.lexists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return ("bad", "{}: {}".format(rel, exc))
+        if not isinstance(data, dict) or type(data.get("version")) is not int \
+                or data.get("version") != 1:
+            return ("bad", "{}: not a version-1 registry object".format(rel))
+        return ("ok", data)
+    return ("absent", None)
+
+
+def _orch_path(root, value):
+    """Resolve a registry-declared path: absolute kept, relative joined onto the repo root; None for
+    a non-string or empty value."""
+    if not isinstance(value, str) or not value:
+        return None
+    return value if os.path.isabs(value) else os.path.join(root, value)
+
+
+def _orch_state_dir_for_root(root):
+    """The machine-written state directory for a repo root: the registry's state_dir when declared,
+    else ${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/."""
+    status, reg = _orch_registry(root)
+    declared = _orch_path(root, (reg or {}).get("state_dir")) if status == "ok" else None
+    if declared:
+        return declared
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"),
+                                                            ".local", "state")
+    key = __import__("hashlib").sha256(root.encode("utf-8", "replace")).hexdigest()[:16]
+    return os.path.join(base, "aiqt-guardrails", "orch", key)
+
+
+def _orch_append_jsonl(path, obj):
+    """Best-effort JSONL append (parents created). Returns True on success; the CALLER decides what a
+    failed write means (a recorder surfaces it; a guard never changes its decision over it)."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(obj, sort_keys=True) + "\n")
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _orch_read_jsonl(path):
+    """Read a JSONL file: (rows, bad_line_count), or (None, 0) when the file is absent or unreadable,
+    so a caller can distinguish nothing-recorded from cannot-read (chkfcl)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except FileNotFoundError:
+        return ([], 0)
+    except (OSError, ValueError):
+        return (None, 0)
+    rows, bad = [], 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            bad += 1
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+        else:
+            bad += 1  # valid JSON but not an object (null/list/number): malformed, never coerced to {}
+    return (rows, bad)
+
+
+def _orch_guard_event(root, kind, decision, detail):
+    """Append one guard-events row (the over-fire metric and the mistakes-register feed)."""
+    sd = _orch_state_dir_for_root(root)
+    return _orch_append_jsonl(os.path.join(sd, "guard-events.jsonl"),
+                              {"ts": _orch_now().isoformat(), "kind": kind,
+                               "decision": decision, "detail": detail})
+
+
+def _orch_turn_state(root):
+    """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
+    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
+    path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
+    try:
+        if not os.path.lexists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _orch_save_turn_state(root, state):
+    sd = _orch_state_dir_for_root(root)
+    try:
+        os.makedirs(sd, exist_ok=True)
+        with open(os.path.join(sd, "turn-state.json"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh, sort_keys=True)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _orch_mode(reg, root):
+    """The lowercased Operating-mode value from the declared mode record, or None (undeclared,
+    unreadable, or no mode line): the fail-open answer for the ask blocker."""
+    path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
+        reg.get("mode"), dict) else None)
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = _ORCH_MODE_RE.search(text)
+    return m.group(1).lower() if m else None
+
+
+def _orch_scope_live(reg, root, session_id=None):
+    """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
+    within max_age_hours when declared) OR a declared mode record carries a mode line. When the lease
+    declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must additionally
+    NAME that session_id, so a co-located NON-holder session (a bounded worker) does not inherit the
+    global backlog (CX-M3). Where the lease records no comparable session identity, scope is repo-coarse
+    (a co-located session may inherit the backlog): a disclosed residual, not a strict boundary."""
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    if lease:
+        path = _orch_path(root, lease.get("path"))
+        if path:
+            try:
+                st = os.stat(path)
+                fresh = True
+                max_age = lease.get("max_age_hours")
+                if isinstance(max_age, (int, float)) and max_age > 0:
+                    age = _orch_now().timestamp() - st.st_mtime
+                    # a future mtime (age below -skew) is anomalous (clock skew or tamper) and never reads
+                    # as fresh forever; a small future skew is tolerated (CX future-mtime finding).
+                    fresh = -_ORCH_CLOCK_SKEW <= age <= max_age * 3600
+                if st.st_size > 0 and fresh:
+                    if lease.get("holder_is_session_id"):
+                        # STRICT opt-in holder scoping: the caller must carry a session id AND the lease
+                        # must be readable AND name that id as a whole token; anything else is a NON-holder
+                        # (a co-located worker or an id-less session never inherits the global backlog).
+                        if not (isinstance(session_id, str) and session_id):
+                            return False
+                        try:
+                            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                                held = fh.read()
+                        except OSError:
+                            return False
+                        return _orch_token_present(session_id, held)
+                    return True
+            except OSError:
+                if lease.get("holder_is_session_id"):
+                    return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
+                # otherwise an absent/unreadable lease is not live; fall through to the mode check
+    return _orch_mode(reg, root) is not None
+
+
+def _orch_escape_active(reg, root):
+    path = _orch_path(root, (reg.get("escape") or {}).get("path") if isinstance(
+        reg.get("escape"), dict) else None)
+    if not path:
+        path = os.path.join(_orch_state_dir_for_root(root), _ORCH_ESCAPE_NAME)
+    try:
+        return os.path.lexists(path)
+    except OSError:
+        return False
+
+
+def validate_enumeration(obj):
+    """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
+    duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
+    payload is an error, never an empty backlog (grdinp: a parse failure is a distinct cannot-evaluate,
+    not a clean pass)."""
+    if not isinstance(obj, dict):
+        return (None, "payload is not a JSON object")
+    version = obj.get("version")
+    if type(version) is not int or version != 1:
+        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+    gen = obj.get("generated_at_utc")
+    gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
+    if gen_ts is None:
+        return (None, "missing or unparseable generated_at_utc")
+    if (gen_ts - _orch_now()).total_seconds() > _ORCH_CLOCK_SKEW:
+        return (None, "generated_at_utc is in the future")
+    source = obj.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("locator"), str) \
+            or not source.get("locator").strip():
+        return (None, "missing or malformed source (a non-blank locator is required)")
+    items = obj.get("items")
+    if not isinstance(items, list):
+        return (None, "items is not a list")
+    seen, out = set(), []
+    for raw in items:
+        if not isinstance(raw, dict):
+            return (None, "an item is not an object")
+        iid = raw.get("id")
+        if not isinstance(iid, str) or not iid:
+            return (None, "an item has no string id")
+        if iid in seen:
+            return (None, "duplicate item id {!r}".format(iid))
+        seen.add(iid)
+        title = raw.get("title")
+        if title is not None and not isinstance(title, str):
+            return (None, "item {} has a non-string title".format(iid))
+        state = raw.get("state")
+        if state not in _ORCH_STATES:
+            return (None, "item {} has invalid state {!r}".format(iid, state))
+        granted = raw.get("granted")
+        if not isinstance(granted, bool):
+            return (None, "item {} has a non-boolean granted".format(iid))
+        blocker = raw.get("blocker")
+        if blocker is not None:
+            if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
+                    or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
+                return (None, "item {} has a malformed blocker".format(iid))
+            ev = blocker.get("evidence")
+            obs = blocker.get("observed_at_utc")
+            if (ev is not None and not isinstance(ev, str)) \
+                    or (obs is not None and not isinstance(obs, str)):
+                return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
+                        .format(iid))
+        out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
+                    "state": state, "granted": granted, "blocker": blocker})
+    return (out, None)
+
+
+def _orch_enumerate(reg, root):
+    """Run the registry enumerator: ('ok', items) or (status, detail) where status is NO_ENUMERATOR or
+    ENUMERATOR_ERROR. The enumeration is always FRESH (never a list or a 'drained' claim from the
+    agent's context), via the fixed argv array the registry declares (no shell string)."""
+    spec = reg.get("enumerator")
+    if not isinstance(spec, dict):
+        return ("NO_ENUMERATOR", "the registry declares no enumerator")
+    argv = spec.get("argv")
+    if not isinstance(argv, list) or not argv or not all(
+            isinstance(a, str) and a for a in argv):
+        return ("ENUMERATOR_ERROR", "enumerator argv is not a list of non-empty strings")
+    timeout = spec.get("timeout")
+    timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
+    if result.returncode != 0:
+        return ("ENUMERATOR_ERROR",
+                "enumerator exit {}: {}".format(result.returncode, (result.stderr or "")[:200]))
+    try:
+        payload = json.loads(result.stdout)
+    except ValueError as exc:
+        return ("ENUMERATOR_ERROR", "enumerator output is not JSON: {}".format(exc))
+    items, err = validate_enumeration(payload)
+    if err:
+        return ("ENUMERATOR_ERROR", err)
+    return ("ok", items)
+
+
+def _orch_live_ledger_ids(root, task_hours):
+    """Task ids that are LIVE: the LAST ledger event for the id is a launch (relaunch after a completion
+    counts as live again), the wake route is EXACTLY True (a non-bool truthy like "false" does not count),
+    and the launch age is within the staleness horizon and not in the future beyond a small skew tolerance.
+    Returns (live_set, readable, detail): readable is False when the ledger is unreadable OR carries any
+    malformed line (a cannot-evaluate the caller must NOT treat as 'no live task')."""
+    rows, bad = _orch_read_jsonl(os.path.join(_orch_state_dir_for_root(root),
+                                              "dispatch-ledger.jsonl"))
+    if rows is None:
+        return (set(), False, "dispatch ledger unreadable")
+    now = _orch_now()
+    last = {}
+    schema_bad = 0
+    for row in rows:
+        event = row.get("event")
+        if event not in ("launch", "complete"):
+            continue  # a row for neither event is not a ledger record: ignored, not counted malformed
+        # a launch/complete row MUST carry a str task_id and a str ts; a launch MUST carry a bool wake.
+        # A schema-invalid dict row (e.g. a launch missing ts) is MALFORMED, not a silently-ignored row,
+        # so a tracked item cannot be demoted to actionable by a half-written record (CX-R4-1).
+        if not isinstance(row.get("task_id"), str) or _orch_parse_utc(row.get("ts")) is None \
+                or (event == "launch" and not isinstance(row.get("wake"), bool)):
+            schema_bad += 1  # ts must PARSE, not merely be a string (a 'banana' ts is malformed, CX-R5-2)
+            continue
+        last[row["task_id"]] = row  # file order: the LAST valid event per tid wins (relaunch = live)
+    live = set()
+    for tid, row in last.items():
+        if row.get("event") != "launch" or row.get("wake") is not True:
+            continue
+        ts = _orch_parse_utc(row.get("ts"))
+        if ts is not None and -_ORCH_CLOCK_SKEW <= (now - ts).total_seconds() <= task_hours * 3600:
+            live.add(tid)
+    # an unparseable OR schema-invalid line means some rows could not be trusted: report readable=False so
+    # the caller HOLDS a tracked item (cannot-evaluate) rather than hard-denying a stop.
+    readable = bad == 0 and schema_bad == 0
+    detail = "{} malformed ledger line(s) skipped".format(bad) if bad else ""
+    return (live, readable, detail)
+
+
+def _orch_pending_haystack(reg, root):
+    """The human-decision proof surface: the DECLARED pending-decisions record ONLY. The machine-written
+    pending-asks keys are NOT decision rows and are excluded (an ask key session::tool_use could otherwise
+    forge a row via the id-colon match, CX-R4-2). Returns None when no surface is declared or it is
+    unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate), never
+    demoting it to actionable and hard-denying a stop."""
+    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    declared = _orch_path(root, rec.get("pending_decisions"))
+    if not declared:
+        return None
+    try:
+        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def classify_backlog(items, live_ids, ledger_readable, pending_haystack, staleness):
+    """Pure classification of a VALID enumeration (step 5). Returns actionable/waiting/blocked/
+    cannot_evaluate/proposed. A proof SOURCE that cannot be read (ledger unreadable-or-malformed, or
+    pending_haystack is None) puts the item in cannot_evaluate: the stop path surfaces it and fails OPEN
+    (never hard-denies), while the schedule path DENIES on it (missing evidence never licenses an idle)."""
+    now = _orch_now()
+    ext_hours = _orch_validate("staleness", staleness)[1]["external_hours"]
+    out = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": []}
+    for it in items:
+        if it["state"] == "closed":
+            continue
+        if it["state"] == "proposed" or not it["granted"]:
+            out["proposed"].append(it["id"])
+            continue
+        blocker = it["blocker"]
+        if not blocker:
+            out["actionable"].append((it["id"], it["title"], "no blocker recorded"))
+            continue
+        kind, ref = blocker["kind"], blocker["ref"]
+        if kind == "tracked-task":
+            if not ledger_readable:
+                # readable checked FIRST: a partially-malformed ledger cannot be trusted even for an id
+                # that happens to appear live in a good row (CX-R5-1), so the item is HELD.
+                out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
+                                               "ledger unreadable/malformed; held"))
+            elif ref in live_ids:
+                out["waiting"].append((it["id"], "tracked-task", ref))
+            else:
+                out["actionable"].append((it["id"], it["title"],
+                                          "tracked-task ref {} resolves to no live ledger row"
+                                          .format(ref)))
+        elif kind == "human-decision":
+            if pending_haystack is None:
+                out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
+                                               "pending surface unreadable; held"))
+            elif not _ORCH_DECISION_ID_RE.match(ref):
+                out["actionable"].append((it["id"], it["title"],
+                                          "human-decision ref {!r} is not a decision id".format(ref)))
+            elif re.search(r"(?m)^[ \t]*(?:\|[ \t]*{0}[ \t]*\||{0}[ \t]*:)".format(re.escape(ref)),
+                           pending_haystack):
+                out["blocked"].append((it["id"], "human-decision", ref))
+            else:
+                out["actionable"].append((it["id"], it["title"],
+                                          "ref {} is not at a pending-decision row-id position".format(ref)))
+        elif kind in ("external", "foreign-lease"):
+            observed = _orch_parse_utc(blocker.get("observed_at_utc"))
+            age = (now - observed).total_seconds() if observed is not None else None
+            fresh = age is not None and -_ORCH_CLOCK_SKEW <= age <= ext_hours * 3600
+            if (blocker.get("evidence") or "").strip() and fresh:
+                out["blocked"].append((it["id"], kind, ref))
+            else:
+                out["actionable"].append((it["id"], it["title"],
+                                          "{} blocker has no fresh (non-future) evidence".format(kind)))
+        elif kind == "not-before":
+            when = _orch_parse_utc(ref)
+            if when is not None and now < when:
+                out["blocked"].append((it["id"], "not-before", ref))
+            else:
+                out["actionable"].append((it["id"], it["title"],
+                                          "not-before constraint unparseable or already met"))
+    return out
+
+
+def decide_yield(ctx):
+    """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
+    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
+    Returns (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
+    kind = ctx["kind"]
+    disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
+                   + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
+                   + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
+                   + [("actionable", i, t, w) for i, t, w in ctx["actionable"]]
+                   + [("proposed", i, "", "") for i in ctx["proposed"]])
+    if ctx["escape"]:
+        return ("ALLOW", "operator escape artefact present (logged)", disposition)
+    if kind != "schedule_idle" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
+        return ("ALLOW_WITH_FINDINGS",
+                "loop bound reached after {} denial(s); yielding with the unresolved items as "
+                "findings rather than re-firing".format(ctx["counter"]), disposition)
+    if ctx["enum_status"] != "ok":
+        if kind == "schedule_idle":
+            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
+                return ("ALLOW_WITH_FINDINGS",
+                        "{} schedule denials on an unchanged basis; a guard that can be farmed "
+                        "trains its own bypass, so this yield proceeds with findings"
+                        .format(ctx["schedule_denials"]), disposition)
+            return ("DENY",
+                    "the backlog is not enumerable ({}: {}); missing evidence never licenses a new "
+                    "idle or wake. Fix the enumerator or the registry, or stop instead (the stop "
+                    "path records this as a finding)".format(ctx["enum_status"],
+                                                             ctx["enum_detail"]), disposition)
+        return ("ALLOW_WITH_FINDINGS",
+                "the backlog is not enumerable ({}: {}); the yield proceeds and this is recorded as "
+                "a finding, never described as a drained backlog".format(
+                    ctx["enum_status"], ctx["enum_detail"]), disposition)
+    # ITEM-LEVEL cannot-evaluate (an unreadable proof source for a specific item) is missing evidence: the
+    # schedule path DENIES (never licenses an idle), the stop path surfaces it and fails OPEN.
+    if ctx.get("cannot_evaluate", []) and kind == "schedule_idle":
+        if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
+            return ("ALLOW_WITH_FINDINGS",
+                    "{} schedule denials on an unchanged basis; yielding with findings"
+                    .format(ctx["schedule_denials"]), disposition)
+        return ("DENY",
+                "a proof source for {} open item(s) is unreadable (cannot-evaluate); missing evidence "
+                "never licenses a new idle or wake. Fix the source or stop instead."
+                .format(len(ctx.get("cannot_evaluate", []))), disposition)
+    if not ctx["actionable"]:
+        rechecked = ctx["waiting"] + ctx["blocked"]
+        if kind == "schedule_idle" and rechecked and ctx["wake_named"] is False:
+            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
+                # anti-farming: wake-hygiene denials are cap-relieved like every other schedule DENY, so
+                # a repeated unnamed idle on an unchanged basis yields with findings rather than forever.
+                return ("ALLOW_WITH_FINDINGS",
+                        "{} schedule denials on an unchanged basis; yielding with findings"
+                        .format(ctx["schedule_denials"]), disposition)
+            return ("DENY",
+                    "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
+                    "pending: {}".format(
+                        ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
+        if ctx.get("cannot_evaluate", []):
+            return ("ALLOW_WITH_FINDINGS",
+                    "{} item(s) could not be evaluated (unreadable proof source); yielding with them as "
+                    "findings rather than hard-denying (stop-path fail-open)."
+                    .format(len(ctx.get("cannot_evaluate", []))), disposition)
+        return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
+                disposition)
+    if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
+            and ctx["basis_unchanged"]:
+        return ("ALLOW_WITH_FINDINGS",
+                "{} schedule denials on an unchanged basis; yielding with findings"
+                .format(ctx["schedule_denials"]), disposition)
+    named = ctx["actionable"][:_ORCH_MAX_NAMED]
+    more = len(ctx["actionable"]) - len(named)
+    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    if more > 0:
+        listing += "; and {} more".format(more)
+    return ("DENY",
+            "AIQT rules setcmp/cntdef: {} granted open item(s) are actionable: {}. Two legal exits: "
+            "do one of them, or record a proven blocker on each (a live tracked-task ref, a matching "
+            "pending-decision row, fresh external evidence, or a not-before time). A fired timer or "
+            "an existing cron is neither.".format(len(ctx["actionable"]), listing), disposition)
+
+
+_ORCH_MAX_HORIZON_HOURS = 8760   # a staleness horizon beyond one year is out of range
+_ORCH_COUNTER_MAX = 9999         # a denial counter beyond this is out of range (domain sanity)
+
+
+def _v_exact_int(value, lo, hi):
+    """An exact int in [lo, hi], else None (bool is rejected: True/False are not counts)."""
+    return value if type(value) is int and lo <= value <= hi else None
+
+
+def _v_finite_pos(value, hi):
+    """A finite number in (0, hi], else None (bool, NaN, and Infinity are rejected)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not math.isfinite(value) or value <= 0 or value > hi:
+        return None
+    return value
+
+
+def _orch_validate(boundary, raw):
+    """The single validation membrane for a decision-input trust boundary. Returns ('ok', typed) with
+    the boundary's fields validated (an invalid field is None where the caller applies the fail-safe
+    direction, or already defaulted where the safe value is a default), or ('cannot-evaluate', detail)
+    for an unregistered boundary. Every decision input is registered in _ORCH_SCHEMAS, so a new field
+    cannot be read without a schema, and the validation-coverage gate holds the readers to this entry."""
+    schema = _ORCH_SCHEMAS.get(boundary)
+    if schema is None:
+        return ("cannot-evaluate", "no schema for boundary {!r}".format(boundary))
+    return schema(raw)
+
+
+def _schema_staleness(raw):
+    """A staleness horizon fails OPEN to the 24h default: a malformed horizon can neither age out valid
+    evidence (a negative or NaN value) nor never age it out (Infinity), and never raises in arithmetic."""
+    d = raw if isinstance(raw, dict) else {}
+    th = _v_finite_pos(d.get("task_hours"), _ORCH_MAX_HORIZON_HOURS)
+    eh = _v_finite_pos(d.get("external_hours"), _ORCH_MAX_HORIZON_HOURS)
+    return ("ok", {"task_hours": th if th is not None else 24,
+                   "external_hours": eh if eh is not None else 24})
+
+
+def _schema_turn_state(raw):
+    """A counter is 0 when its key is ABSENT on a readable turn-state (a fresh count), the value when
+    present and valid, and None when present-but-malformed OR the whole turn-state is unreadable (raw is
+    not a dict). The CALLER maps None to the fail-safe direction (stop -> the loop bound, so a malformed
+    or unreadable counter never licenses unbounded denies; schedule -> 0, so it never buys cap relief).
+    schedule_basis is a string or None."""
+    if not isinstance(raw, dict):
+        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None})
+
+    def _count(key):
+        return 0 if key not in raw else _v_exact_int(raw[key], 0, _ORCH_COUNTER_MAX)
+    basis = raw.get("schedule_basis")
+    return ("ok", {"stop_denials": _count("stop_denials"),
+                   "schedule_denials": _count("schedule_denials"),
+                   "schedule_basis": basis if isinstance(basis, str) else None})
+
+
+_ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
+
+
+def _orch_token_present(needle, hay):
+    """Whole-token (word-boundaried) presence test, so 'ci-7' does not match 'xci-70' and 's1' does not
+    match 's10' (CX-M5/M8): the guard's id/ref matching is never a bare substring."""
+    if not needle or not hay:
+        return False
+    return re.search(r"(?<![A-Za-z0-9_-]){}(?![A-Za-z0-9_-])".format(re.escape(needle)), hay) is not None
+
+
+def _orch_build_ctx(reg, root, kind, data, wake_text=None):
+    """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
+    (ctx, turn_state_or_None)."""
+    staleness = _orch_validate("staleness", reg.get("staleness"))[1]
+    task_hours = staleness["task_hours"]
+    ts = _orch_turn_state(root)
+    tstate = _orch_validate("turn_state", ts)[1]
+    # stop counter fails OPEN to the loop bound (an unreadable counter never licenses unbounded denies);
+    # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief, CX-R4-3).
+    counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
+    schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
+    status, payload = _orch_enumerate(reg, root)
+    if status == "ok":
+        live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours)
+        classes = classify_backlog(payload, live_ids, ledger_readable,
+                                   _orch_pending_haystack(reg, root), staleness)
+        enum_detail = ""
+        # D12: tag each id with its class so an item flipping between classes reads as a CHANGED basis (an
+        # untagged merge let such a flip collide to the same basis and skip fresh handling). CONV4-CX2 +
+        # CONV6-C: waiting/blocked carry their blocker KIND:REF (a changed recheck obligation, e.g. a
+        # blocker ref vendor-A->vendor-B, is a changed basis) and proposed (p:) its membership, so any
+        # genuine backlog change resets the denial count rather than inheriting premature cap relief.
+        basis = json.dumps(sorted(
+            ["a:" + i for i, _t, _w in classes["actionable"]]
+            + ["c:" + i for i, _c, _p in classes["cannot_evaluate"]]
+            + ["w:{}:{}:{}".format(i, k, r) for i, k, r in classes["waiting"]]
+            + ["b:{}:{}:{}".format(i, k, r) for i, k, r in classes["blocked"]]
+            + ["p:" + i for i in classes["proposed"]]))
+    else:
+        classes = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": []}
+        enum_detail = payload
+        basis = status
+    wake_named = None
+    rechecked = classes["waiting"] + classes["blocked"]
+    if kind == "schedule_idle" and rechecked:
+        wake_named = any(_orch_token_present(i, wake_text) or _orch_token_present(p, wake_text)
+                         for i, _c, p in rechecked)
+    basis_unchanged = tstate["schedule_basis"] == basis
+    ctx = {"kind": kind, "escape": _orch_escape_active(reg, root),
+           "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
+           "counter": counter, "enum_status": status, "enum_detail": enum_detail,
+           "actionable": classes["actionable"], "waiting": classes["waiting"],
+           "blocked": classes["blocked"], "cannot_evaluate": classes["cannot_evaluate"],
+           "proposed": classes["proposed"],
+           "wake_named": wake_named, "schedule_denials": schedule_denials,
+           "basis_unchanged": basis_unchanged}
+    return ctx, (ts if isinstance(ts, dict) else None), basis
+
+
+def _orch_record_denial(root, ts, kind, basis):
+    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
+    successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
+    a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
+    loop bound and would otherwise re-deny forever."""
+    state = dict(ts or {})
+    if kind == "schedule_idle":
+        prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
+        prior = prior if prior is not None else 0
+        # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
+        # never buy premature cap relief on this one.
+        state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
+        state["schedule_basis"] = basis
+    else:
+        prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
+        state["stop_denials"] = (prior if prior is not None else 0) + 1
+    return _orch_save_turn_state(root, state)
+
+
+def _orch_stop_family(data, event_name, kind):
+    """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
+    mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN throughout."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
+    if status == "bad":
+        return _stop_warn("AIQT guardrail: the orchestration registry could not be read "
+                          "({}); the {} proceeds and this is a recorded finding.".format(reg,
+                                                                                         event_name))
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()
+    ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
+    verdict, reason, disposition = decide_yield(ctx)
+    if verdict == "DENY":
+        if not _orch_record_denial(root, ts, kind, basis):
+            warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
+                    "failing OPEN with findings rather than re-denying. Underlying: " + reason)
+            _orch_guard_event(root, event_name, "allow_unpersistable", warn)
+            return _stop_warn("AIQT guardrail ({}): {}".format(event_name, warn))
+        _orch_guard_event(root, event_name, "deny", reason)
+        return (2, None, reason)
+    _orch_guard_event(root, event_name, verdict.lower(), reason)
+    if verdict == "ALLOW_WITH_FINDINGS":
+        return _stop_warn("AIQT guardrail ({}): {}".format(event_name, reason))
+    return _allow()
+
+
+def orch_stop_guard(data):
+    """setcmp/cntdef/trkasy/cnclse, Stop: deny a stop past enumerated actionable work; fail open with
+    findings on every cannot-evaluate; bounded by the guard-owned counter."""
+    return _orch_stop_family(data, "Stop", "stop")
+
+
+def orch_teammate_idle(data):
+    """The same decision core at the TeammateIdle boundary. Cannot-evaluate takes the fail-open stop
+    branch (G8): forcing continued work on missing evidence could ping-pong a session."""
+    return _orch_stop_family(data, "TeammateIdle", "stop_idle" if False else "stop")
+
+
+def _orch_register_wake(root, ts, prompt):
+    """Record the sha256 of an ALLOWED wake's prompt into turn-state wake_digests (bounded), so the
+    returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
+    the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
+    because nothing ever wrote wake_digests)."""
+    if not isinstance(prompt, str) or not prompt:
+        return
+    digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
+    state = dict(ts or {})
+    wd = state.get("wake_digests")
+    wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
+    wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
+    state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
+    _orch_save_turn_state(root, state)
+
+
+def orch_yield_tool(data):
+    """setcmp/cntdef/tstamp/estsep, PreToolUse over the scheduling tools: judge a call that parks the
+    run (schedule_idle) or ends the loop (stop=true) against a fresh enumeration. The schedule path
+    fails CLOSED on cannot-evaluate, bounded by the denial cap."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow() if status == "absent" else _ask(
+            "AIQT guardrail: the orchestration registry could not be read ({}); a "
+            "scheduling call cannot be judged, so it asks rather than silently proceeding."
+            .format(reg),
+            "AIQT guardrail: asked on a scheduling call under an unreadable orchestration registry.")
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()
+    tool = data.get("tool_name")
+    declared = reg.get("yield_tools")
+    if not isinstance(declared, list) or tool not in declared:
+        return _allow()  # inside the matcher but outside the registry roster: out of scope
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
+    wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
+    ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
+    # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
+    claim = _ORCH_QUIET_CLAIM_RE.search(wake_text or "")
+    measured_min = None
+    if isinstance(ts, dict):
+        stamp = _orch_parse_utc(ts.get("last_human_input_utc"))
+        if stamp:
+            measured_min = (_orch_now() - stamp).total_seconds() / 60.0
+    if kind == "schedule_idle" and claim and "quiet" in (wake_text or "").lower() \
+            and measured_min is not None and float(claim.group(1)) > measured_min + 1.0:
+        reason = ("AIQT rule estsep/tstamp: the call claims {} quiet minutes but the measured gap "
+                  "since the last genuine human input is {:.1f} minutes; the measured figure wins. "
+                  "Re-issue without the unmeasured claim.".format(claim.group(1), measured_min))
+        # The quiet-claim DENY has a trivial legit exit (re-issue without the claim), so it does NOT
+        # consume the schedule cap (CX-M2: repeated quiet-claim denials could otherwise farm the cap
+        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work).
+        _orch_guard_event(root, "yield-tool", "deny", reason)
+        return _deny(reason, "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
+                             "contradicts the measured figure.")
+    verdict, reason, _disposition = decide_yield(ctx)
+    if verdict == "DENY":
+        _orch_record_denial(root, ts, kind, basis)
+        _orch_guard_event(root, "yield-tool", "deny", reason)
+        return _deny(reason, "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
+    if kind == "schedule_idle":
+        # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
+        # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
+        _orch_register_wake(root, ts, tool_input.get("prompt"))
+    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+    if verdict == "ALLOW_WITH_FINDINGS":
+        return (0, {"systemMessage": "AIQT guardrail: {}".format(reason)}, None)
+    return _allow()
+
+
+def orch_ask_guard(data):
+    """cntdef/recfst bounded by humovs, PreToolUse AskUserQuestion: deny a blocking question in
+    unattended mode with the record-and-continue instruction; fail OPEN on an absent or unreadable
+    mode (this guards one mistake shape, not a security boundary). Its regression vectors are held by the behaviour self-test."""
+    if data.get("tool_name") != "AskUserQuestion":
+        return _allow()
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()  # absent OR unreadable registry: fail open, this control is advisory-shaped
+    mode = _orch_mode(reg, root)
+    if mode is None or "unattended" not in mode:
+        if mode is None:
+            _orch_guard_event(root, "ask-guard", "fail-open", "mode record absent or unreadable")
+        return _allow()
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
+    text = json.dumps(tool_input, sort_keys=True)
+    digest = __import__("hashlib").sha256(text.encode("utf-8", "replace")).hexdigest()
+    key = "{}::{}".format(data.get("session_id", ""), data.get("tool_use_id", digest[:12]))
+    pending_path = os.path.join(_orch_state_dir_for_root(root), "pending-asks.jsonl")
+    rows, _bad = _orch_read_jsonl(pending_path)
+    recorded = rows is not None and any(r.get("key") == key for r in rows)
+    if rows is not None and not recorded:
+        # A bounded REDACTED summary plus digest, never the question text (log-redaction discipline).
+        recorded = _orch_append_jsonl(pending_path, {"ts": _orch_now().isoformat(), "key": key,
+                                                     "questions": len(questions), "len": len(text),
+                                                     "digest": digest})
+    reason = ("AskUserQuestion BLOCKED: the session operating-mode is unattended. RECORD the decision "
+              "as pending (the registry's pending-decisions surface) with your recommended option and "
+              "rationale, then CONTINUE with the next authorized independent item. If the decision "
+              "sits at the human-oversight threshold (high-consequence, irreversible, or "
+              "outward-facing), record it and HOLD that item; the hold never licenses acting without "
+              "the answer. If the maintainer is in fact present, set an attended operating-mode in "
+              "the mode record first, then re-issue.")
+    _orch_guard_event(root, "ask-guard", "deny",
+                      "pending key {}{}".format(key, "" if recorded else " (NOT persisted)"))
+    banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
+              if recorded else "AIQT guardrail: denied a blocking question in unattended mode, but the "
+              "pending row could NOT be persisted; record the decision manually (nocncl).")
+    return _deny(reason, banner)
+
+
+def _orch_pipeline_chains(segments):
+    """Group _segments output into pipeline CHAINS: lists of (tokens, sep_after) joined by '|', with
+    the chain's terminating separator. Yields (chain, terminator)."""
+    chain = []
+    for tokens, sep in segments:
+        chain.append((tokens, sep))
+        if sep not in ("|", "|&"):  # '|&' pipes stdout AND stderr: still a pipe stage, not a terminator
+            yield (chain, sep)
+            chain = []
+    if chain:
+        yield (chain, "")
+
+
+def _sink_target(token):
+    """Classify a redirect or tee target token: 'opaque' when empty or shell-expandable/unresolvable
+    (a $VAR, glob, ~, or backtick, so NOT a proven capture), 'devproc' when it resolves under /dev or
+    /proc (a console/terminal, never a real capture), else 'real'. Extracted from the prior tee
+    predicate so the capture proof and the tee/redirect guards share one target classifier."""
+    if not token or any(c in token for c in "$*?[]{}~`()><|"):
+        return "opaque"  # incl. '(' / ')' (a process/command substitution target is NOT a durable
+        # file) and the redirect/pipe metachars '>' '<' '|' (a target carrying one is not a plain file)
+    if _DEV_PROC_TARGET_RE.match(os.path.normpath(token)):
+        return "devproc"
+    return "real"
+
+
+def _last_stdout_redirect(tokens):
+    """The classified target of a segment's LAST stdout redirect ('real'|'devproc'|'opaque'), or None
+    when the segment has no stdout redirect. Same last-redirect-wins and fd-dup logic as
+    _redirects_to_real_file (F-117/F-118/F-119), but returns the target class so a devproc or opaque
+    redirect target is told apart from a real one. LEXER BOUND (F-118): a '>' preceded by a bare digit
+    other than 1 is read as a non-stdout fd redirect, so the ubiquitous '2>/dev/null' keeps an earlier
+    real stdout target; the cost is that a rare SPACED 'N > target' (N != 1) that actually diverts stdout
+    tokenizes identically to an 'N>' fd redirect and is not distinguished, a disclosed residual shared
+    with the sibling guard (treating the common case correctly is worth the contrived-case miss)."""
+    target = None
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        if tok in _REDIRECT_TOKENS and i + 1 < n:
+            prev = tokens[i - 1] if i > 0 else ""
+            if prev.isdigit() and prev != "1":
+                continue  # 'N>' for N != 1 redirects a non-stdout fd; stdout still reaches the console
+            target = _sink_target(tokens[i + 1])
+        elif _is_stdout_fd_dup(tokens, i):
+            target = "devproc"  # a stdout fd-dup lands on a console/descriptor, never a real capture
+        elif tok.startswith(">") and not (
+                (tokens[i - 1] if i > 0 else "").isdigit() and (tokens[i - 1] if i > 0 else "") != "1"):
+            # FAIL-CLOSED (round 16): an unmodeled stdout-diverting operator ('>&2', '>&-', '>&file', or
+            # any future '>'-op not in _REDIRECT_TOKENS and not an fd-dup) diverts/closes stdout in a way
+            # the guard cannot classify -> opaque, so the capture proof cannot credit a real capture (ASK).
+            # A non-1-fd-prefixed form (the '>&' of '2>&1', which leaves stdout untouched) is excluded.
+            target = "opaque"
+        elif tok.startswith("<") and (tokens[i - 1] if i > 0 else "") == "1":
+            # FAIL-CLOSED (round 18): an EXPLICIT-fd1 input-side redirect ('1<>', '1<&', '1<') binds STDOUT
+            # to a file/descriptor, diverting the producer stream. A bare '<'-op (no fd, or fd0) only
+            # affects stdin and is not caught here; only the explicit '1' prefix targets stdout -> opaque.
+            target = "opaque"
+    return target
+
+
+def _stage_words(tokens):
+    """The non-redirect words after the command word (flags AND file operands), with redirect syntax
+    removed: a redirect operator and its target token, and a bare fd-number bound to a redirect (the '2'
+    the lexer splits off '2> file'). So 'cat 2>/dev/null' yields no words, 'cat -s' yields ['-s'], and
+    'cat file.txt' yields ['file.txt']; used to classify identity and to find a tee's real targets."""
+    out = []
+    i = _command_word_index(tokens) + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok in _REDIRECT_TOKENS or tok in _ORCH_STDIN_REDIR or tok in (">&", "&>", "&>>"):
+            i += 2  # skip a stdout/stdin redirect (or fd-dup) operator and its target token, so neither
+            continue  # the operator nor its source/target is mistaken for a stage word or a tee operand
+        if tok.isdigit() and i + 1 < n and (tokens[i + 1] in _REDIRECT_TOKENS
+                                            or tokens[i + 1] in (">&", "&>")):
+            i += 1  # a bare fd digit bound to a redirect is redirect syntax, not a word
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _stage_operands(tokens):
+    """The FILE operands of a stage: its words with flags removed. 'cat > out.txt' and 'cat 2>/dev/null'
+    have none (identity passthroughs), 'cat file.txt' has one, and a tee's real targets are found without
+    counting its own redirect or an fd-number bound to a stderr redirect. Honors '--': a token AFTER '--'
+    is a filename operand even if it starts with '-' (so 'tee -- --help' captures the file '--help')."""
+    out, after_ddash = [], False
+    for w in _stage_words(tokens):
+        if after_ddash:
+            out.append(w)
+        elif w == "--":
+            after_ddash = True
+        elif not w.startswith("-"):
+            out.append(w)
+    return out
+
+
+def _has_stdin_redirect(tokens):
+    """True when a stage redirects its STDIN (fd0) from a file/heredoc/here-string/read-write-open/fd-dup
+    ('<','<<','<<<','<>','<&'), discarding the piped stream from the previous stage. FD-AWARE (round 20): an
+    input operator with a NON-0 explicit fd prefix (e.g. '2<>', '1<&') targets that fd, not stdin, so it is
+    excluded here - a fd1 diversion is handled by _last_stdout_redirect; only fd0/unspecified breaks a pipe."""
+    for i, t in enumerate(tokens):
+        if t in _ORCH_STDIN_REDIR:
+            prev = tokens[i - 1] if i > 0 else ""
+            if not (prev.isdigit() and prev != "0"):
+                return True
+    return False
+
+
+def _tee_cat_info_flagged(stage_words):
+    """True when a tee/cat carries a help/version flag (which prints and copies NOTHING), so it is neither
+    identity nor capture (CONV4-CX1). Honors '--' (post-'--' tokens are filename operands, never flags,
+    CONV6-B) and GNU getopt_long unambiguous abbreviations ('--h..'->--help, '--v..'->--version, e.g.
+    'tee --ver'); '-h' short is help. The passthrough-preserving flags (-a/--append, -i, -p) do NOT count."""
+    for w in stage_words:
+        if w == "--":
+            return False  # end of options; the rest are operands, not flags
+        if w == "-h":
+            return True
+        if w.startswith("--") and len(w) > 2 and (
+                "help".startswith(w[2:]) or "version".startswith(w[2:])):
+            return True
+    return False
+
+
+def _orch_chain_capture_proof(chain, rib):
+    """Three-valued proof that a pipeline chain's FULL producer stdout provably reaches a durable,
+    readable capture before any non-identity transform: returns 'capture', 'no-capture', or
+    'unprovable'. There is NO truncator or reducer vocabulary: an unknown stage can only DENY or ASK,
+    never manufacture an ALLOW, so a novel filter opens no new hole (grdinp, by construction). captured
+    is set once the full stream has landed in a proven real file; intact holds while the full producer
+    stream is still the live stream at this point; opaque_seen softens a no-capture to unprovable,
+    because a target the guard cannot judge must not read as a definite miss. A real redirect proves
+    FULL capture only on the producer stage or an identity stage (tee, or cat with no operands); a real
+    redirect after an unknown transform captures the already-reduced output, so it never sets captured."""
+    captured = False
+    intact = True
+    opaque_seen = False
+    for idx, (tokens, _sep) in enumerate(chain):
+        word = _command_word(tokens)
+        operands = _stage_operands(tokens)
+        # An info flag (--help/-h/--version) on a tee/cat prints help/version and copies nothing, so it
+        # is neither an identity passthrough nor a capture (CONV4-CX1): it falls through to the
+        # unknown-stage handling below (which drops intact when idx>0), never crediting a target.
+        info_flagged = _tee_cat_info_flagged(_stage_words(tokens))
+        # cat is an identity passthrough ONLY as bare `cat` or with just stdin markers ('-'/'--'); any
+        # transforming flag (cat -s squeezes blanks, cat -n numbers, ...) makes it a transform.
+        is_identity = (not info_flagged) and (word == "tee" or (word == "cat"
+                                              and all(w in ("-", "--", "-u") for w in _stage_words(tokens))))
+        if idx > 0 and _has_stdin_redirect(tokens):
+            # a stdin redirect discards the piped producer stream: this stage reads the redirected
+            # source, so its own tee/redirect capture the replacement (the 'and intact' guards below then
+            # refuse to credit them) and nothing downstream sees the producer stream (CX stdin finding).
+            intact = False
+        if word == "tee" and not info_flagged:
+            if any("(" in t or ")" in t for t in tokens):
+                # a process/command substitution in the tee args (e.g. 'tee >(head)', which the lexer
+                # splits into '>(' + 'head') is NOT a durable file capture, so no operand credits it.
+                if not captured:
+                    opaque_seen = True
+            else:
+                for a in operands:
+                    cls = _sink_target(a)
+                    if cls == "real" and intact:
+                        captured = True  # tee captures its INPUT; full only while the stream in is full
+                    elif cls == "opaque" and not captured:
+                        opaque_seen = True
+        redirect = _last_stdout_redirect(tokens)
+        if redirect == "real":
+            if (idx == 0 or is_identity) and intact:
+                captured = True  # the full stream (producer output, or an identity stage's passthrough)
+        elif redirect == "devproc":
+            intact = False  # stdout diverted to a console/descriptor: the pipe no longer carries it
+        elif redirect == "opaque":
+            opaque_seen = True
+            intact = False
+        if idx != 0 and not is_identity and not captured:
+            intact = False  # an unknown transform consumed or reduced the still-full stream
+    if captured:
+        return "capture"
+    if intact:
+        # the full producer stream survives to the chain terminator
+        return "capture" if rib else "unprovable"  # rib binds stdout to TaskOutput; inline & orphans it
+    return "unprovable" if opaque_seen else "no-capture"
+
+
+_ORCH_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "mksh", "ksh93", "csh", "tcsh", "fish",
+                          "ash", "busybox", "eval"))  # command words that execute an opaque
+# command STRING (a shell via -c, or the `eval` builtin which runs its string directly). Any of them not
+# cleanly recursed via the exact `<shell> -c <body>` form is structural uncertainty -> ASK (eval has no -c,
+# so it never recurses and always ASKs). Round 14: eval added to close the disclosed eval-command residual.
+_ORCH_SHELL_C_MAX_DEPTH = 3  # bounded recursion into nested `<shell> -c <inner>` wrappers
+
+
+def _shell_c_inner(tokens):
+    """If a stage is the UNAMBIGUOUS `<shell> -c <body>` (a known shell, '-c' as the first arg after the
+    command word, body not itself an option), return the body, else None. Any other spelling is left to the
+    fail-closed any-shell-token check in _orch_chain_verdict rather than unwrapped positionally (round 13)."""
+    if _command_word(tokens) not in _ORCH_SHELLS:
+        return None
+    idx = _command_word_index(tokens)
+    # CONSERVATIVE (round 13): recurse ONLY the unambiguous `<shell> -c <body>` form - '-c' the first arg
+    # after the command word, body not itself an option. Every other spelling (options before/after -c, a
+    # clustered flag, a script/assignment operand, a leading redirect) is left to the fail-closed
+    # any-shell-token check; bash's option grammar is too rich to unwrap positionally (round-12 findings).
+    if idx + 2 < len(tokens) and tokens[idx + 1] == "-c" and not tokens[idx + 2].startswith("-"):
+        return tokens[idx + 2]
+    return None
+
+
+def _has_grouping(segments):
+    """True when shell GROUPING makes the lexical chain parse unreliable: a standalone '(' subshell open, a
+    bare '{'/'}' brace-group delimiter, a '(' in a token that is NOT a process/command substitution open
+    ('>(' '<(' '$('), or a ')' FUSED with a following control operator (')&', ')|', ');'). A split-off
+    unquoted '$(' command substitution (the lexer yields '$' then a '(' separator) is excluded at the OPEN
+    via the preceding-token check, BUT its ')' CLOSE separator is caught (round 20): a substitution/subshell
+    close severs the chain in _segments, dropping the truncating part from scope, so any bare ')' separator
+    -> grouping (a backgrounded command containing $()/<()/>()/subshell ASKs; a foreground one is out of
+    scope). This over-ASKs a backgrounded proc-sub tee, the safe-direction cost of closing the sever."""
+    for tokens, sep in segments:
+        if sep == "(" and not (tokens and tokens[-1] and tokens[-1][-1] in "><$"):
+            return True  # a standalone '(' subshell open, but NOT a split-off $(/>(/<( substitution
+        if sep == ")":
+            # a bare ')' SEPARATOR - a substitution ($()/<()/>()) or subshell CLOSE - severs the chain in
+            # _segments, dropping the truncating part from scope and orphaning a redirect fragment (round
+            # 20, claude): the flat parse is unreliable -> grouping-uncertainty (ASK when backgrounded).
+            return True
+        for t in tokens:
+            if t in ("{", "}"):
+                return True  # a bare brace-group delimiter (brace expansion stays one token, e.g. {a,b})
+            for m in re.finditer(r"\(", t):
+                if m.start() == 0 or t[m.start() - 1] not in "><$":
+                    return True
+            if re.search(r"\)[&|;]", t):
+                return True
+    return False
+
+
+def _has_backgrounding_amp(segments):
+    """True when the command is backgrounded by an unquoted '&' the parse can see: a '&' segment
+    separator, or a token ENDING in a single '&' but not '&&' (a fused backgrounding operator such as
+    ')&'). Used ONLY in the grouping branch; '&&' (and-list) and a '&' merely inside a token (e.g.
+    '2>&1') do not count."""
+    for tokens, sep in segments:
+        if sep == "&":
+            return True
+        for t in tokens:
+            if t.endswith("&") and not t.endswith("&&"):
+                return True
+    return False
+
+
+_ORCH_COMPOUND_WORDS = frozenset((
+    "while", "for", "if", "case", "until", "select", "function",
+    "do", "done", "then", "fi", "esac", "else", "elif"))
+
+
+def _has_compound_keyword(segments):
+    """True when any segment's COMMAND WORD is a shell reserved word that introduces or delimits a COMPOUND
+    command (while/for/if/case/until/select/function and the block words do/done/then/fi/esac/else/elif),
+    whose control flow the flat chain parse cannot model. Checked in command-word position only, so the
+    same word as an argument ('echo done', 'grep for x') does not over-fire. Structural uncertainty -> ASK."""
+    return any(_command_word(tokens) in _ORCH_COMPOUND_WORDS for tokens, _sep in segments if tokens)
+
+
+def _has_coproc(segments):
+    """True when the command uses the bash `coproc` keyword, which backgrounds a command (or a brace
+    group) with NO '&' terminator, so the lexical scope cannot see its backgrounding. The caller ASKs."""
+    return any(_command_word(tokens) == "coproc" for tokens, _sep in segments)
+
+
+def _orch_in_scope_chains(chains, rib):
+    """The backgrounded chains, in scope for the capture proof. Scope is per AND-OR LIST (chains joined
+    by '&&'/'||'), ended at ';', '&', or command end; a list is in scope iff rib OR it is '&'-terminated.
+    A FOREGROUND list after a backgrounded one is out of scope (CONV4-CL2)."""
+    in_scope = []
+    group = []
+    for chain, term in chains:
+        group.append(chain)
+        if term in ("&&", "||"):
+            continue
+        if rib or term == "&":
+            in_scope.extend(group)
+        group = []
+    return in_scope
+
+
+def _orch_token_backgrounds(token):
+    """True when a token, parsed as a shell fragment, carries a '&' command SEPARATOR - the reliable
+    backgrounding signal inside a shell/eval wrapper's QUOTED body ('bash -c "x | tail & echo"'), unlike a
+    token merely ENDING in '&' (which a literal 'foo&' also does, and which an inner '& cmd' misses; round
+    21, gemini). Redirect operators ('2>&1', '>&2', '&>') do NOT yield a '&' separator, so they never
+    over-fire. An UNPARSEABLE token FAILS CLOSED -> True (round 22, claude): a shell body shlex cannot lex
+    (e.g. a trailing backslash) may still background a truncator in bash, so it is treated as a POSSIBLE
+    backgrounding signal, never a silent clean pass; the shell-token gate in the caller keeps a non-shell
+    unparseable argument out of scope."""
+    try:
+        return any(sep == "&" for _t, sep in _segments(token))
+    except ValueError:
+        return True
+
+
+def _orch_foreground_hidden_async(segments):
+    """A FOREGROUND command can still launch async work that outlives its return when a shell/eval token
+    runs a QUOTED body with an inner '&' the top-level parse cannot see (round 20, codex). See the manifest
+    residue for the covered forms and the shell-token gate rationale. The backgrounding signal is a '&'
+    SEPARATOR reachable at the top level or inside a token's quoted body (round 21, gemini: a token merely
+    ending in '&' missed an inner '& cmd')."""
+    has_shell = has_bg = False
+    for tokens, sep in segments:
+        if sep == "&":
+            has_bg = True
+        for t in tokens:
+            if t.rsplit("/", 1)[-1] in _ORCH_SHELLS:
+                has_shell = True
+            if _orch_token_backgrounds(t):
+                has_bg = True
+    return has_shell and has_bg
+
+
+def _orch_shell_c_verdict(tokens, rib, depth):
+    """Verdict for a single-stage `<shell> -c <inner>` (None if the stage is not one). An outer stdout
+    redirect on the wrapper rebinds the terminal sink before the harness pipe, so it governs the sink."""
+    inner = _shell_c_inner(tokens)
+    if inner is None:
+        return None
+    outer = _last_stdout_redirect(tokens)
+    if outer is None:
+        return _orch_command_verdict(inner, rib, depth + 1)
+    if outer == "real":
+        return _orch_command_verdict(inner, True, depth + 1)
+    iv = _orch_command_verdict(inner, False, depth + 1)
+    return "capture" if iv == "capture" else ("no-capture" if outer == "devproc" else "unprovable")
+
+
+def _orch_chain_verdict(chain, rib, depth):
+    """Capture verdict for ONE chain (None if empty), recursing one bounded level into a `<shell> -c`."""
+    stages = [c for c in chain if c[0]]
+    if not stages:
+        return None
+    if len(stages) == 1 and depth < _ORCH_SHELL_C_MAX_DEPTH:
+        v = _orch_shell_c_verdict(stages[0][0], rib, depth)
+        if v is not None:
+            return v
+    # FAIL-CLOSED (Option 1, round 13): a chain with ANY shell token (bash/sh/zsh/dash, by basename) that
+    # did NOT cleanly recurse via the exact `-c <body>` form is structural uncertainty - a wrapper
+    # (sudo/env/stdbuf/xargs/nohup/timeout/leading-redirect/...) hiding a shell, or any unmodelled spelling
+    # - never credited as a plain producer -> ASK. A wrapper wrapping a NON-shell producer with a real
+    # capture ('sudo python3 > out') has no shell token and is judged by the capture proof below.
+    for tokens, _sep in chain:
+        for t in tokens:
+            if t.rsplit("/", 1)[-1] in _ORCH_SHELLS:
+                return "unprovable"
+            if "<(" in t:
+                # an INPUT process substitution '<(producer)' feeds a HIDDEN producer to this stage; the
+                # stage may truncate it (tail <(producer) > out), and the capture proof would wrongly
+                # credit the reading stage as the producer -> unprovable (round 16, fail-safe ASK).
+                return "unprovable"
+    return _orch_chain_capture_proof(chain, rib)
+
+
+def _orch_command_verdict(command, rib, depth=0):
+    """Fold the capture proof over EVERY non-empty chain of a command string (per _orch_chain_verdict),
+    used for the `<shell> -c <inner>` recursion where the whole inner runs under the wrapper's inherited
+    backgrounding, so and-or scope does not re-apply. Grouping in the inner is a conservative 'unprovable'
+    (backgrounding already applies). Worst-safe fold: any no-capture -> no-capture; else any unprovable ->
+    unprovable; else capture. Unparseable -> unprovable."""
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return "unprovable"
+    if _has_grouping(segments) or _has_coproc(segments) or _has_compound_keyword(segments):
+        return "unprovable"  # inner grouping/coproc/compound is structural uncertainty (F2), same as outer
+    verdicts = []
+    for chain, term in _orch_pipeline_chains(segments):
+        stages = [c for c in chain if c[0]]
+        if not stages:
+            continue
+        if term == "&":
+            verdicts.append("unprovable")  # inner inline-& orphans this chain (wrapper exits first)
+            continue
+        v = _orch_chain_verdict(chain, rib, depth)
+        if v is not None:
+            verdicts.append(v)
+    if not verdicts:
+        return "unprovable"  # no provable chain in a backgrounded body: fail-safe, never a silent capture
+    if "no-capture" in verdicts:
+        return "no-capture"
+    if "unprovable" in verdicts:
+        return "unprovable"
+    return "capture"
+
+
+def orch_truncation_guard(data):
+    """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to BACKGROUND dispatches: for every in-scope
+    pipeline chain, ALLOW only when the full producer stdout provably reaches a durable readable capture
+    (a real-file tee or redirect, or the harness capture that run_in_background binds to the TaskOutput
+    completion signal). A chain that provably drops the full stream is DENIED; one whose capture cannot
+    be proven is an ASK. There is NO truncator vocabulary: the verdict is a capture proof, so a novel
+    filter can only deny or ask, never open a new allow (by construction). Best-effort lexical coverage;
+    the shell-lexical and name-trust residual is disclosed in the hook manifest."""
+    if data.get("tool_name") != "Bash":
+        return _allow()
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, _reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    command = tool_input.get("command")
+    rib = tool_input.get("run_in_background") is True
+    if not isinstance(command, str) or not command:
+        if rib:
+            return _deny("AIQT rule trkasy: a background dispatch carried no readable command string; "
+                         "failing closed.",
+                         "AIQT guardrail: denied an unreadable background dispatch (fail-closed).")
+        return _allow()
+    try:
+        segments = _segments(command)
+    except ValueError:
+        # Unparseable: quoting cannot be judged, so an in-scope dispatch cannot be proven captured.
+        if rib or "&" in command:
+            return _ask("AIQT rule trkasy: this background dispatch could not be parsed, so the guard "
+                        "cannot prove its full output is captured. Confirm the full output lands in a "
+                        "real file ('| tee <file>' before any filter), or run it in the foreground.",
+                        "AIQT guardrail: asked on an unparseable in-scope dispatch (fail-safe).")
+        return _allow()
+    # SCOPE. Grouping (paren/fused) makes the lexical parse unreliable: a backgrounded such command is
+    # an ASK, a foreground one out of scope (CONV4-CL1). Paren-free: scope is per and-or list, so a
+    # foreground list after a backgrounded '&' is out of scope (CONV4-CL2).
+    if _has_coproc(segments):
+        return _ask(
+            "AIQT rules trkasy/vrfdlv: this dispatch uses `coproc`, which backgrounds a command with no "
+            "'&' the guard can see, so it cannot prove the full output is captured. Confirm the full "
+            "output lands in a real file, or run the producer as a tracked background dispatch.",
+            "AIQT guardrail: asked on a coproc dispatch whose full-output capture is unproven.")
+    if _has_grouping(segments) or _has_compound_keyword(segments):
+        # A FOREGROUND grouped/compound command is normally out of scope, but if it HIDES an async shell/
+        # eval wrapper (e.g. '{ bash -c "producer | tail & true"; }'), the grouping branch must not
+        # short-circuit to ALLOW before the hidden-async check runs (round 22, claude Finding B).
+        if rib or _has_backgrounding_amp(segments) or _orch_foreground_hidden_async(segments):
+            return _ask(
+                "AIQT rules trkasy/vrfdlv: this background dispatch uses shell grouping or a compound "
+                "command (while/for/if/{ }/subshell) the guard cannot parse reliably, so it cannot prove "
+                "the full output is captured. Confirm the full output lands in a real file ('| tee <real "
+                "file>' before any filter), or simplify the dispatch to a plain pipeline.",
+                "AIQT guardrail: asked on a backgrounded grouped/compound dispatch the parser cannot prove.")
+        return _allow()
+    in_scope = _orch_in_scope_chains(list(_orch_pipeline_chains(segments)), rib)
+    if not in_scope:
+        # A foreground shell/eval wrapper whose quoted body backgrounds a truncator (bash -c 'x|tail &')
+        # is a HIDDEN async dispatch the and-or scope missed: inspect its chains rather than ALLOW (r20).
+        if not rib and _orch_foreground_hidden_async(segments):
+            in_scope = [ch for ch, _term in _orch_pipeline_chains(segments)
+                        if any(c[0] for c in ch)]
+        if not in_scope:
+            return _allow()
+    verdicts = [v for v in (_orch_chain_verdict(ch, rib, 0) for ch in in_scope) if v is not None]
+    if not verdicts:
+        verdict = "unprovable"  # a backgrounded scope produced NO provable chain (an '&' landing on an
+        # empty chain from a grouping/proc-sub split): fail-safe ASK, never a silent ALLOW (CONV6 A-2)
+    elif "no-capture" in verdicts:
+        verdict = "no-capture"
+    elif "unprovable" in verdicts:
+        verdict = "unprovable"
+    else:
+        verdict = "capture"
+    if verdict == "no-capture":
+        return _deny(
+            "AIQT rules trkasy/vrfdlv: a background dispatch drops the full producer output before any "
+            "durable capture, so the tracked deliverable's completion signal cannot carry the full "
+            "result. Mechanical fix: insert '| tee <real file>' BEFORE any filter (tee to /dev/null "
+            "does not count), or redirect the producer's own stdout to a real file, or drop the filter "
+            "and read the full output.",
+            "AIQT guardrail: denied a background dispatch that drops its full output before capture.")
+    if verdict == "unprovable":
+        return _ask(
+            "AIQT rules trkasy/vrfdlv: the guard cannot prove this background dispatch's full output is "
+            "captured (an inline '&' orphans the stream, or the capture target is not a plain real "
+            "file). Confirm the full output lands in a real file ('| tee <real file>' before any "
+            "filter), or use run_in_background so the harness binds the full stream to the completion "
+            "signal.",
+            "AIQT guardrail: asked on a background dispatch whose full-output capture is unproven.")
+    return _allow()
+
+
+def orch_dispatch_ledger(data):
+    """trkasy/recfst, PostToolUse (recorder, never blocks): append launch rows for background Bash and
+    registry-declared dispatch tools, completion rows for TaskOutput reads. A failed write SURFACES
+    as a non-blocking systemMessage (nocncl), never a swallowed error."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()  # only the holder session writes the shared dispatch ledger (CX-M4b)
+    tool = data.get("tool_name")
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    response = data.get("tool_response")
+    row = None
+    if tool == "TaskOutput":
+        tid = tool_input.get("task_id") or tool_input.get("taskId")
+        if isinstance(tid, str) and tid:
+            row = {"event": "complete", "task_id": tid, "tool": tool, "wake": True}
+    else:
+        dispatch_tools = reg.get("dispatch_tools") if isinstance(
+            reg.get("dispatch_tools"), list) else []
+        is_dispatch = (tool == "Bash" and tool_input.get("run_in_background") is True) \
+            or tool in dispatch_tools
+        if is_dispatch:
+            tid = None
+            observed = False
+            if isinstance(response, dict):
+                for k in ("task_id", "taskId", "id"):
+                    if isinstance(response.get(k), str) and response.get(k):
+                        tid = response[k]
+                        observed = True
+                        break
+            if tid is None:
+                basis = json.dumps(tool_input, sort_keys=True)
+                tid = "disp-" + __import__("hashlib").sha256(
+                    (basis + _orch_now().isoformat()).encode("utf-8", "replace")).hexdigest()[:12]
+            # CX-M7: only a REAL observed task id has a provable wake route; a synthesized id gets
+            # wake=false so it can never be counted as a live task that excuses an idle.
+            row = {"event": "launch", "task_id": tid, "tool": tool or "", "wake": observed}
+    if row is None:
+        return _allow()
+    row["ts"] = _orch_now().isoformat()
+    path = os.path.join(_orch_state_dir_for_root(root), "dispatch-ledger.jsonl")
+    if not _orch_append_jsonl(path, row):
+        return (0, {"systemMessage": "AIQT guardrail: the dispatch-ledger write failed; "
+                                     "the launched work may be invisible to the stop guard."}, None)
+    return _allow()
+
+
+def orch_prompt_stamp(data):
+    """tstamp/estsep, UserPromptSubmit (recorder, never blocks): stamp genuine human input from the
+    clock, classify a prompt matching a registered wake as timer-originated, and inject the measured
+    gap as context so quiet-duration reasoning uses a measured figure."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()  # only the holder session stamps/resets the shared turn-state (CX-M4b)
+    prompt = data.get("prompt")
+    ts = _orch_turn_state(root) or {}
+    digest = __import__("hashlib").sha256(
+        (prompt or "").encode("utf-8", "replace")).hexdigest() if isinstance(prompt, str) else ""
+    _wds = ts.get("wake_digests")
+    _wds = _wds if isinstance(_wds, list) else []  # a non-list wake_digests never enables substring match
+    timer_originated = digest and digest in _wds
+    prev = _orch_parse_utc(ts.get("last_human_input_utc"))
+    if not timer_originated:
+        ts["last_human_input_utc"] = _orch_now().isoformat()
+        ts["stop_denials"] = 0
+        ts["schedule_denials"] = 0
+        ts.pop("schedule_basis", None)
+        _orch_save_turn_state(root, ts)
+        return _allow()
+    # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
+    # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
+    wd = list(ts.get("wake_digests") or [])
+    if digest in wd:
+        wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
+    ts["wake_digests"] = wd
+    _orch_save_turn_state(root, ts)
+    gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
+    if prev is not None:
+        gap = "{:.1f} minutes".format((_orch_now() - prev).total_seconds() / 60.0)
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": "[aiqt-orch] This prompt is TIMER-ORIGINATED (a registered wake), not "
+                             "human input. Measured gap since the last genuine human input: {}."
+                             .format(gap)}}, None)
+
+
+def _orch_resume_probes(reg, root):
+    """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
+    finding strings; empty means the recorded state matches observed reality."""
+    findings = []
+    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    handoff_path = _orch_path(root, rec.get("handoff"))
+    if handoff_path:
+        try:
+            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
+                handoff = fh.read()
+        except OSError as exc:
+            findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
+                            .format(exc))
+            handoff = ""
+        m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
+        if m:
+            actual = _head_branch(root)
+            if actual is not None and actual != m.group(1):
+                findings.append("handoff names branch {} but HEAD is on {}".format(
+                    m.group(1), actual))
+        m = re.search(r"^Gate:\s*green\s*@\s*([0-9a-f]{7,40})\s*$", handoff, re.MULTILINE)
+        if m:
+            try:
+                env = _isolate_git_env(dict(os.environ))
+                head = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                                      capture_output=True, text=True, timeout=5, env=env)
+                sha = head.stdout.strip() if head.returncode == 0 else ""
+            except Exception:
+                sha = ""
+            if not sha or not sha.startswith(m.group(1)):
+                findings.append("handoff gate marker cites commit {} but HEAD is {}".format(
+                    m.group(1), sha[:12] or "unreadable"))
+    for key in ("findings", "pending_decisions"):
+        path = _orch_path(root, rec.get(key))
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    fh.read()
+            except OSError as exc:
+                findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
+                                .format(key, exc))
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    if lease:
+        path = _orch_path(root, lease.get("path"))
+        max_age = lease.get("max_age_hours")
+        if path:
+            try:
+                st = os.stat(path)
+                age = _orch_now().timestamp() - st.st_mtime
+                if isinstance(max_age, (int, float)) and max_age > 0 and age > max_age * 3600:
+                    findings.append("the orchestrator lease is stale (older than {}h)".format(max_age))
+                if age < -_ORCH_CLOCK_SKEW:
+                    # CONV4-G2 + CONV6-F: a FUTURE lease mtime (clock skew or tamper) is checked whenever
+                    # the lease is stattable, NOT only when a max_age horizon happens to be configured.
+                    findings.append("the orchestrator lease mtime is in the future (clock skew or tamper)")
+            except FileNotFoundError:
+                pass  # no lease yet is a legitimate resume state
+            except OSError as exc:
+                findings.append("declared lease unreadable ({}): cannot-evaluate".format(exc))
+    findings.extend(_orch_merge_pending_findings(reg, root))
+    return findings
+
+
+def _orch_merge_pending_findings(reg, root):
+    """The cheap in-hook layer of the record-drift check: an OPEN merge_pending row whose pr:N ref
+    already has first-parent merge evidence is a divergence finding. tools/check_record_drift.py is
+    the authoritative gate; this probe only feeds the resume audit."""
+    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    path = _orch_path(root, rec.get("findings"))
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
+    prs = set()
+    for line in text.splitlines():
+        if "merge_pending" in line:
+            for m in re.finditer(r"\bpr:(\d+)\b", line):
+                prs.add(m.group(1))
+    if not prs:
+        return []
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        log = subprocess.run(["git", "-C", root, "log", "--first-parent", "-n", "500",
+                              "--format=%s"], capture_output=True, text=True, timeout=10, env=env)
+        subjects = log.stdout if log.returncode == 0 else None
+    except Exception:
+        subjects = None
+    if subjects is None:
+        return ["merge evidence unreadable (git log failed): cannot-evaluate"]
+    findings = []
+    for n in sorted(prs):
+        if re.search(r"\(#{}\)".format(re.escape(n)), subjects):
+            findings.append("findings row still merge_pending on pr:{} but first-parent "
+                            "history already carries its merge".format(n))
+    return findings
+
+
+def orch_resume_audit(data):
+    """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
+    durable record against observed reality and ARM the resume barrier on divergence; a clean audit
+    clears it. Registry-scoped; silent with no registry."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
+    barrier_path = os.path.join(_orch_state_dir_for_root(root), "resume-barrier.json")
+    if status == "bad":
+        _orch_append_jsonl(barrier_path + ".unused", {})  # no-op path probe; keep posture simple
+        findings = ["the orchestration registry could not be read ({})".format(reg)]
+    else:
+        findings = _orch_resume_probes(reg, root)
+    try:
+        os.makedirs(os.path.dirname(barrier_path), exist_ok=True)
+        with open(barrier_path, "w", encoding="utf-8") as fh:
+            json.dump({"active": bool(findings), "findings": findings,
+                       "ts": _orch_now().isoformat(), "warned": False}, fh)
+    except OSError:
+        pass  # a barrier that cannot arm still surfaces below; never wedge SessionStart
+    if findings:
+        _orch_guard_event(root, "resume-audit", "findings", "; ".join(findings)[:1000])
+        return _stop_warn("AIQT guardrail (resume audit): the recorded state diverges from "
+                          "observed reality: {}. Correct the record, then re-run "
+                          "'python3 tools/orch_doctor.py --resume-audit' to clear the barrier; "
+                          "acknowledgement alone does not clear it.".format("; ".join(findings)))
+    return _allow()
+
+
+def orch_resume_barrier(data):
+    """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
+    armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
+    and the suite's own state directory stay writable, so the only exit, correcting the record, is
+    never obstructed."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()
+    sd = _orch_state_dir_for_root(root)
+    barrier_path = os.path.join(sd, "resume-barrier.json")
+    try:
+        with open(barrier_path, "r", encoding="utf-8") as fh:
+            barrier = json.load(fh)
+    except (OSError, ValueError):
+        return _allow()
+    if not isinstance(barrier, dict) or not barrier.get("active"):
+        return _allow()
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    file_path = tool_input.get("file_path")
+    if isinstance(file_path, str) and file_path:
+        allow_prefixes = [sd]
+        rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+        for key in ("findings", "pending_decisions", "handoff"):
+            p = _orch_path(root, rec.get(key))
+            if p:
+                allow_prefixes.append(p)
+        for rel in _ORCH_REGISTRY_FILES:
+            allow_prefixes.append(os.path.join(root, *rel.split("/")))
+        target = os.path.realpath(file_path)
+        for p in allow_prefixes:
+            rp = os.path.realpath(p)
+            if target == rp or target.startswith(rp.rstrip(os.sep) + os.sep):
+                return _allow()  # the exit path (fixing the record) is always writable
+    if barrier.get("warned"):
+        return _allow()  # surface once per arming, never a nag wall
+    barrier["warned"] = True
+    try:
+        with open(barrier_path, "w", encoding="utf-8") as fh:
+            json.dump(barrier, fh)
+    except OSError:
+        pass
+    return (0, {"systemMessage": (
+        "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
+        "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
+        "record first, then clear the barrier with 'python3 tools/orch_doctor.py --resume-audit'."
+        .format("; ".join(barrier.get("findings") or [])[:500]))}, None)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -3547,14 +5141,25 @@ HANDLERS = {
     "gate_weakening": gate_weakening,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
+    "orch_stop_guard": orch_stop_guard,
+    "orch_teammate_idle": orch_teammate_idle,
+    "orch_yield_tool": orch_yield_tool,
+    "orch_ask_guard": orch_ask_guard,
+    "orch_truncation_guard": orch_truncation_guard,
+    "orch_dispatch_ledger": orch_dispatch_ledger,
+    "orch_prompt_stamp": orch_prompt_stamp,
+    "orch_resume_audit": orch_resume_audit,
+    "orch_resume_barrier": orch_resume_barrier,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
-# design: a Stop/SubagentStop handler must NEVER exit 2, because a hard Stop block could re-fire on the
-# forced continuation and wedge the session (no stop_hook_active field, no documented loop bound), so on
-# ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it emits a
-# non-blocking systemMessage warning and exits 0. Only a PreToolUse handler fails closed via exit 2.
+# design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
+# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop
+# bound), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
+# emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is the intended
+# exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse handler
+# fails closed via exit 2 on error.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -3565,16 +5170,25 @@ HANDLER_EVENT = {
     "gate_weakening": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
+    "orch_stop_guard": "Stop",
+    "orch_teammate_idle": "TeammateIdle",
+    "orch_yield_tool": PRETOOL,
+    "orch_ask_guard": PRETOOL,
+    "orch_truncation_guard": PRETOOL,
+    "orch_dispatch_ledger": "PostToolUse",
+    "orch_prompt_stamp": "UserPromptSubmit",
+    "orch_resume_audit": "SessionStart",
+    "orch_resume_barrier": PRETOOL,
 }
 
 
-def _dispatcher_stop_warn(detail):
-    """A Stop/SubagentStop dispatcher-level error, surfaced as a non-blocking WARN: {"systemMessage": ...}
-    on stdout, so main can print it and exit 0. Mirrors the handler's own _stop_warn posture so the Stop
-    layer is warn-only end to end, at the dispatcher as well as inside the handler."""
+def _dispatcher_fail_open_warn(handler_name, detail):
+    """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
+    UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
+    these paths can wedge a session, trap a teammate, or block a human prompt."""
     return {"systemMessage": (
-        "AIQT guardrail (rule cnsdif): the Stop diff-wall check could not run ({}); surfacing a warning "
-        "rather than blocking (non-blocking, so the session is never wedged).".format(detail))}
+        "AIQT guardrail: the {} check could not run ({}); surfacing a warning rather than blocking "
+        "(non-blocking by design on this event).".format(handler_name, detail))}
 
 
 def main(argv):
@@ -3591,12 +5205,12 @@ def main(argv):
               file=sys.stderr)
         return 2
     handler_name = mode
-    is_stop = HANDLER_EVENT[handler_name] in STOP_EVENTS
+    is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
-        if is_stop:
+        if is_fail_open:
             # A Stop handler NEVER exits 2, not even on a malformed invocation: WARN and exit 0.
-            print(json.dumps(_dispatcher_stop_warn("bad invocation: {}".format(detail))))
+            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"bad invocation: {}".format(detail))))
             return 0
         print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
         return 2
@@ -3606,10 +5220,10 @@ def main(argv):
             raise ValueError("payload is not a JSON object")
     except (ValueError, UnicodeDecodeError, OSError) as exc:
         # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload.
-        if is_stop:
+        if is_fail_open:
             # A Stop handler NEVER exits 2: surface a non-blocking warning and exit 0, so no Stop
             # payload (including a bare '{' or any garbage) can ever wedge the session.
-            print(json.dumps(_dispatcher_stop_warn("unreadable payload: {}".format(exc))))
+            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"unreadable payload: {}".format(exc))))
             return 0
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
@@ -3618,10 +5232,10 @@ def main(argv):
     try:
         code, stdout_obj, stderr_text = HANDLERS[handler_name](data)
     except Exception as exc:  # a handler crash is an unreadable result
-        if is_stop:
+        if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
             # pathological message): WARN and exit 0, never exit 2.
-            print(json.dumps(_dispatcher_stop_warn("handler crash: {}".format(exc))))
+            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"handler crash: {}".format(exc))))
             return 0
         # A PreToolUse handler crash fails closed (block), not pass.
         print("aiqt_hooks: handler {} failed ({}); failing closed".format(handler_name, exc),

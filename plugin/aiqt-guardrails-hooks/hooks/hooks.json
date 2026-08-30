@@ -87,6 +87,62 @@
         ]
       },
       {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_ask_guard"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_resume_barrier"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_truncation_guard"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "ScheduleWakeup|CronCreate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_yield_tool"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -115,6 +171,37 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|TaskOutput",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_dispatch_ledger"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_prompt_stamp"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -124,6 +211,49 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "diff_wall_stop"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_stop_guard"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_resume_audit"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_teammate_idle"
             ],
             "timeout": 10
           }

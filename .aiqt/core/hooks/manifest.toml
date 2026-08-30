@@ -19,7 +19,8 @@
 #   matcher  the tool-name pattern for tool events; OMITTED for non-tool events such as Stop
 #   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control)
 #   default  "block" (hard deny / exit 2), "ask", or "warn" (a non-blocking surfacing warn, exit 0,
-#            legal only on a Stop/SubagentStop event); most slice-1 controls are lexical and
+#            legal on a WARN_EVENTS event: PostToolUse, UserPromptSubmit, Stop, SubagentStop,
+#            SessionStart, or under an explicit bake stage); most slice-1 controls are lexical and
 #            zero-intent, so they ship at block
 #   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
 #            d judgement), carried through so the surface traces to its enforceability claim
@@ -28,7 +29,7 @@
 
 [plugin]
 name = "aiqt-guardrails-hooks"
-version = "0.1.0"
+version = "0.2.0"
 description = "Mechanical enforcement of AIQT Guardrails rules for Claude Code, generated from the rule corpus."
 author-name = "Jeff Posluns"
 author-email = "jeff@posluns.ca"
@@ -131,3 +132,99 @@ handler = "gensrc_guard"
 default = "ask"
 class = "c"
 residue = 'A REGISTRY-DRIVEN path guard, not a content judge: it fires only when the Write/Edit/MultiEdit file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json, read at decision time. Coverage is exactly the registry: an unregistered generated artefact is not judged (the gensrc-registry drift gate is the backstop for a stale registry), and a repo with NO registry gets no coverage at all (an ABSENT registry is the inert ALLOW by design; adopters author their own). kind=block entries are EXCLUDED by design: a mixed file carrying a generated block (CLAUDE.md, site/roadmap.html) is allowed whole, because a path guard cannot see which lines an edit touches; the block drift gates backstop those. Bash is EXCLUDED by design: regeneration itself runs through Bash (python3 tools/gen_*.py), so a hand-edit routed through Bash (sed -i, a redirect, a heredoc) is not caught; the drift gates remain the real gate. Other file-writing tools (NotebookEdit) are out of scope. The decision is an ASK, never a deny: the human approving the ask IS the opt-out (no env or magic-text bypass), and where the drift gate is configured an approved hand-edit fails it until source and derivative reconcile. Fail-safe branches never silently allow: an absent registry allows (inert), while a registry that is not a regular file (a symlink, FIFO, directory, ...; rejected by an lstat/S_ISREG probe before the open, which reads a STATIONARY non-regular registry as bad and does not block on a FIFO - a best-effort defence against the accidental case, with a registry concurrently SWAPPED to another type in the lstat-to-open window a disclosed residual, sibling to the hard-link and case/NFC-NFD aliases below), a registry that disappears in that same window (a delete race, which fails safe to ASK rather than reading as absent), an unreadable or malformed registry, an unknown registry version, a malformed entry, an unresolvable repo root (a cwd outside any git work tree, so a non-git session asks on in-scope calls), a target that canonicalizes outside the resolved repo or a containment check that cannot be cleared (it cannot be judged against the registry of this repo), an unresolvable target path, and an unreadable or malformed (empty/list/bool) tool_name or a control-character payload field all ASK; only a MISSING tool_name denies (the shared fail-closed contract). Matching is on canonicalized real paths with component-boundary tree containment, never a raw string prefix, so gen-extra/ never matches gen/ and GEN.md.bak never matches GEN.md; a hard link, a case-insensitive-filesystem alias, or a macOS NFC/NFD Unicode-normalization alias that defeats realpath equality is a disclosed residual. The repo root is the git toplevel of the SESSION cwd via the scrubbed rev-parse primitive (every ambient GIT_* removed), so an ambient decoy repo cannot redirect the registry read; in a linked worktree or a submodule the toplevel is that worktree or submodule, so a registry governs exactly the tree it sits in.'
+
+[[hook]]
+id = "orch-stop-guard"
+rules = ["setcmp", "cntdef", "trkasy", "cnclse"]  # completeness-claim + continue-by-default + tracked work + lease scope
+platform = "claude-code"
+event = "Stop"
+handler = "orch_stop_guard"
+default = "block"
+class = "b"
+residue = "REGISTRY-SCOPED: entirely inert unless an orchestration registry (.aiqt/orchestration.local.json or .aiqt/orchestration.json) is present AND a declared orchestrator lease or mode record is live, so plain Q&A sessions and bounded workers never inherit the global backlog. FAIL-OPEN by design on the stop path: an unresolvable cwd, an unreadable registry, an unreadable turn-state, an enumerator error or timeout, and an unreadable lease all ALLOW the stop, with the failure surfaced as a finding in the warn banner and the guard-events log, never a wedge. The deny is BOUNDED: the guard's own persisted counter (turn-state, reset on genuine human input) allows at most two denies per epoch, then ALLOWS WITH FINDINGS, independent of any platform loop field (none is documented on Stop; a loop-ish payload field is honoured opportunistically if one ever appears). The operator escape artefact ALLOWS unconditionally and is logged; the platform interrupt is a second, structurally unguardable escape, left uncovered on purpose. Blocker proofs are validated against their sources (the dispatch ledger, the pending-decisions surface, evidence freshness, the clock), but plausibly FABRICATED external evidence is not mechanically closable at this layer; the human-decision class proves only that a pending-decision row exists, never that the item genuinely crosses the human-oversight threshold, which stays human judgement. Coverage is the rendered roster (Stop, TeammateIdle, the yield-tool matcher): a yield primitive outside that roster is uncovered, reconciled when the toolchain register changes. The dispatch ledger sees only hooked launch tools, so a task launched through an unhooked tool costs one spurious deny and a dead task read as live permits one idle until staleness catches it, both directions bounded and logged."
+
+[[hook]]
+id = "orch-teammate-idle-guard"
+rules = ["setcmp", "cntdef", "trkasy"]
+platform = "claude-code"
+event = "TeammateIdle"
+handler = "orch_teammate_idle"
+default = "block"
+class = "b"
+residue = "The TeammateIdle binding of the same decision core as orch-stop-guard, sharing its registry/lease scoping, escape, counter bound, and guard-events logging. A deny (exit 2) prevents the teammate from going idle past enumerated actionable work. On cannot-evaluate (enumerator error, unreadable registry or state) it takes the STOP branch, failing OPEN to allow the idle with findings, because forcing continued work on missing evidence could ping-pong a session; the plan's deny-on-cannot-evaluate applies only to the tool-mediated schedule path, where a denied call cannot wedge anything. Same disclosed bounds as orch-stop-guard on ledger blind spots and fabricated blocker evidence. Fires only where the platform emits TeammateIdle (doc-confirmed 2026-08-29); platforms without the event keep only the Stop and yield-tool bindings."
+
+[[hook]]
+id = "orch-yield-tool-guard"
+rules = ["setcmp", "cntdef", "tstamp", "estsep"]
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "ScheduleWakeup|CronCreate"
+handler = "orch_yield_tool"
+default = "block"
+class = "b"
+residue = "The scheduled-yield binding of the decision core: a call that parks the run (schedule_idle) or ends the loop (a ScheduleWakeup with stop=true is classified stop) is judged against a fresh enumeration. Registry-scoped and lease-scoped like orch-stop-guard; a tool the registry's yield_tools list does not name is out of scope even inside the matcher, and a registry yield tool OUTSIDE this fixed matcher is NOT covered (the doctor flags it; a manifest matcher is fixed at generation). On the schedule path a cannot-evaluate DENIES (missing evidence never licenses new autonomy; a denied tool call cannot wedge a session), bounded by a three-denial cap on an unchanged basis, after which it ALLOWS WITH FINDINGS so the guard cannot be farmed into bypass training. That cap needs persistable, readable turn-state; when the state directory is unreadable or unwritable the denial count cannot accumulate, so the schedule path stays fail-closed to DENY (the safe direction: the run keeps working rather than idling) and the cap does not relieve. Wake hygiene: a permitted schedule must name the tracked item or blocker it will recheck in its own text, judged by token containment (a paraphrase that names neither id nor ref denies once, a disclosed over-fire). The quiet-duration check is a best-effort regex: it fires only when the call text carries a parseable minutes claim AND turn-state carries a measured gap, and then the measured figure wins; an unparseable claim or an unknown measured endpoint authorizes nothing and is not invented. A fired timer or an existing cron is never counted as a live task or a blocker."
+
+[[hook]]
+id = "orch-ask-unattended"
+rules = ["cntdef", "recfst", "humovs"]
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "AskUserQuestion"
+handler = "orch_ask_guard"
+default = "block"
+class = "b"
+residue = "Registry-scoped: inert with no registry or no declared mode record. Blocks a blocking question ONLY when the declared operating-mode record contains 'unattended'; attended modes, an absent mode line, and an unreadable mode record all fail OPEN (this guards one known mistake shape, a blocking prompt idling an unattended run; it is not a security boundary), with the fail-open logged to guard-events. The deny instruction distinguishes record-and-continue for ordinary decisions from record-and-HOLD for anything at the human-oversight threshold; the hook redirects the question and never licenses acting without the answer. Each denied ask appends ONE idempotent machine row keyed on session_id plus tool_use_id, carrying a bounded redacted summary (question count, length, digest), never the question text. Its behaviour is verified by the behaviour self-test. It cannot see a blocking prompt raised outside the AskUserQuestion tool."
+
+[[hook]]
+id = "orch-truncation-guard"
+rules = ["trkasy", "vrfdlv", "nocncl"]
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Bash"
+handler = "orch_truncation_guard"
+default = "block"
+class = "b"
+residue = "A best-effort QUOTE-AWARE LEXICAL check (the shipped shlex segmentation), SCOPED to background dispatches: a Bash call whose run_in_background is true, OR a PAREN-FREE command backgrounded by an unquoted '&', with scope then per AND-OR LIST: a chain is in scope iff run_in_background is set OR its and-or list (chains joined by '&&'/'||') is '&'-terminated, so 'a && b &' is covered while a FOREGROUND list after a backgrounded one ('producer & echo | tail') is correctly out of scope. A command using shell GROUPING - a paren, a brace group '{ ...; }', the `coproc` keyword (which backgrounds with no '&' the parse can see), a FUSED grouping token the lexer does not split off (')&', '|(', '()'), or a bare ')' SEPARATOR that closes a command/process substitution the flat parse cannot model (round 20, so 'head -1 <(producer) > out &' and 'producer | head -1 $(true) > out &' no longer sever their truncating chain into an orphan clean-looking redirect), where a backgrounding '&' can hide - makes the lexical chain parse unreliable, so a backgrounded grouped command ('( producer | tail )&', '{ producer | tail; } &') is an ASK and a foreground grouped one is out of scope; the guard does not attempt to prove capture inside grouping (the earlier claim that '( producer | tail ) &' was covered was withdrawn in round 5). A backgrounded dispatch whose scope resolves to NO provable chain (e.g. a spaced process-substitution close 'producer > >(head) &' where the '&' lands on an empty chain) fail-closes to ASK, never a silent ALLOW; and a tee/cat carrying a help/version flag (matched '--'-aware and by GNU getopt_long abbreviation, so 'tee --ver' counts) is neither an identity passthrough nor a capture. FAIL-CLOSED ALLOWLIST (round 9): the ALLOW path is an allowlist of cleanly-parsed proven captures; any structure the flat lexical parse cannot model fail-closes to ASK, never a silent ALLOW. Specifically a known-shell wrapper stage (bash/sh/zsh/dash) that does NOT cleanly recurse into an exact '-c' inner - a clustered '-lc'/'-ec'/'-euc', a quote-fragmented wrapper, or no '-c' at all - ASKs rather than being credited as a plain producer; a `<shell> -c` inner chain backgrounded by its OWN inline '&' ASKs (the wrapper exits before it finishes, orphaning the stream); and a COMPOUND command (while/for/if/case/until/select/function, detected in command-word position so the same word as an argument does not over-fire) ASKs when backgrounded. In scope the verdict is a CAPTURE PROOF with NO truncator vocabulary: it ALLOWS only when the FULL producer stdout provably reaches a durable readable capture (a real-file tee, a real-file stdout redirect on the producer or an identity stage, or the harness capture that run_in_background binds to the TaskOutput completion signal); a chain that provably drops the full stream DENIES (naming the mechanical fix); a chain whose capture cannot be proven ASKS (an inline '&' orphan, or an opaque $VAR/glob target). Because ALLOW consumes only the proof, a novel or unknown filter can only DENY or ASK, never open a new allow. A real redirect proves full capture only on the producer or an identity stage (tee, or cat with no operands), so 'producer | tail -5 > out.txt' (capturing the already-truncated output) DENIES; a tee to /dev/null or a /dev or /proc target is not a capture. Foreground filtering is OUT OF SCOPE by design, with ONE exception (round 20, codex): a FOREGROUND shell/eval wrapper whose QUOTED body backgrounds a truncator ('bash -c \"producer | tail &\"', 'eval \"...&\"', 'env bash -c \"...&\"') is a HIDDEN async dispatch - the wrapper returns before the backgrounded pipeline finishes, dropping the stream exactly as a top-level '&' would - so when a backgrounding signal ('&' separator or a token ending in a single '&') coincides with a shell/eval token present anywhere, the command is brought into scope and inspected (the shell-token verdict is 'unprovable' -> ASK) rather than silently ALLOWed; the shell-token gate keeps a literal '&' in a NON-shell argument ('grep \"foo&\" file') out of scope, and a shell name used as a bare argument stays an accepted safe-direction over-ASK. The backgrounding signal is a '&' SEPARATOR found by parsing each token (round 21/22: a token merely ENDING in '&' missed a mid-body '& cmd'); an unparseable body FAILS CLOSED to a possible-backgrounding signal (round 22, a trailing-backslash body shlex cannot lex may still background in bash). The GROUPING/COMPOUND branch consults this same detector before allowing a foreground grouped command (round 22), so a hidden async shell wrapper inside '{ }'/'( )'/if...fi ('{ bash -c \"producer | tail & true\"; }') ASKs rather than passing as safe foreground filtering; a foreground grouped command with no shell wrapper stays out of scope. It recurses one bounded level into a `<shell> -c <inner>` pipeline (so a truncation inside 'bash -c \"producer | tail\"' is caught), and treats a process or command substitution tee or redirect target as opaque (ASK, never a false capture). RESIDUAL (the shell-lexical and name-trust bound, shared with the sibling Bash guards): it does NOT catch truncation reached only through a shell function/alias/PATH shadow that renames a shell/eval/cat/tee, nor an `eval`/shell hidden inside such an indirection (an `eval` COMMAND WORD now ASKs, round 14; only an indirectly-reached one remains a residual) (a known-shell/eval wrapper not cleanly recursed now ASKs rather than silently missing (round 9/11) - a clustered '-lc'/'-ec', a quote-fragmented wrapper, nesting beyond the -c depth bound, a POSITIONAL -c that is argv to a script operand, an option between -c and its body, or a shell hidden behind ANY wrapper (sudo/env/xargs/nohup/stdbuf/a leading redirect/...). Round 13 makes this by-construction: a chain containing ANY shell token (bash/sh/zsh/dash, by basename) that is not the exact `<shell> -c <body>` form ASKs, so no wrapper spelling can hide a shell; a wrapper wrapping a NON-shell producer with a real capture ('sudo python3 > out') carries no shell token and is judged by the capture proof (ALLOW/DENY on its own merits). Inner grouping/coproc/compound inside a recursed -c body ASKs; a shell name used as a bare ARGUMENT ('grep bash | tee') is an accepted safe-direction over-ASK. The shell set covers sh/bash/zsh/dash/ksh/mksh/ksh93/csh/tcsh/fish/ash/busybox + the eval builtin (round 16); an INPUT process substitution '<(producer)' feeds a HIDDEN producer to a stage that may truncate it, so any '<(' -> ASK (round 16). The REDIRECT dimension is also fail-closed (round 16): '>|' (noclobber-override) is modeled like '>', '&>>' (append-both) like '&>', and any other '>'-starting operator not so recognized ('>&2', '>&-', a csh '>&file') is opaque (ASK); a non-1-fd-prefixed stderr dup ('2>&1') is not diverted and still allows a real-file capture; and an EXPLICIT-fd1 input-side redirect ('1<>', '1<&', '1<') that binds stdout to a file/descriptor is opaque (ASK), while a bare '<'-op (stdin only) leaves stdout captured (round 18); a stdin-side read-write '<>' or input-dup '<&' (round 20) breaks a stage's pipe input, so a stage carrying one is no longer an intact identity passthrough and the reduced stream DENIES. IRREDUCIBLE RESIDUAL (disclosed, best-effort bound): a program that runs commands INTERNALLY - awk 'system(..)', perl -e/-E, python -c, ruby -e, xargs/find -exec, su/watch/script -c, or any tool that shells out - is UNLEXABLE (the guard cannot see inside its argument string), so an internal truncation there is not caught; these are the accidental-case boundary, not covered by construction; producer-internal suppression before the stream is emitted; a SPACED 'N > target' (N != 1) that diverts stdout (the F-118 lexer ambiguity, kept so the ubiquitous '2>/dev/null' stays correct); this also means a producer whose last operand is a bare number before a real-file redirect (e.g. 'seq 1 100 > out.log &') is read as an fd-redirect and OVER-ASKS - a routine, not rare, shape, in the safe direction; a HERE-DOC body is split by the newline-based segmentation, so a line inside it that looks like a compound keyword can over-ASK, also safe-direction (an already-disclosed _segments limitation); a non-Bash dispatch tool or a daemonizing child; a `coproc` hidden inside a foreground wrapper's QUOTED body (no top-level coproc and no '&' the parse can see) rather than at the top level; stderr on an inline '&' (harness-captured under run_in_background); or an ASK rubber-stamped in attended mode; a tee or redirect target that lexically looks like a real file but is not a writable regular file (a directory, or an unwritable path) is still read as a capture, because the guard deliberately does not stat targets pre-exec (a TOCTOU race); and truncation inside the platform's own TaskOutput delivery is out of view (the vrfdlv delivery-marker discipline is the compensating layer). The releasing property: this residual no longer grows when someone invents a filter."
+
+[[hook]]
+id = "orch-dispatch-ledger"
+rules = ["trkasy", "recfst"]
+platform = "claude-code"
+event = "PostToolUse"
+matcher = "Bash|TaskOutput"
+handler = "orch_dispatch_ledger"
+default = "warn"
+class = "c"
+residue = "A RECORDING substrate, not an enforcement point: it appends launch rows (a Bash call with run_in_background true, or a registry-declared dispatch tool) and completion rows (a TaskOutput read) to the machine-written dispatch ledger the stop guard consumes as its Gap-B oracle. It never blocks; a failed ledger write is surfaced as a non-blocking systemMessage, never swallowed. Coverage is exactly the hooked tools: a launch through an unhooked tool is invisible (costing one spurious stop-guard deny), a completion that never passes through TaskOutput is invisible until the staleness horizon expires the row, and the task-id extraction from tool responses is best-effort field matching. Both blind-spot directions are bounded by staleness plus the resume audit, and disclosed at the stop guard."
+
+[[hook]]
+id = "orch-prompt-stamp"
+rules = ["tstamp", "estsep"]
+platform = "claude-code"
+event = "UserPromptSubmit"
+handler = "orch_prompt_stamp"
+default = "warn"
+class = "c"
+residue = "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses the measured figure. It never blocks. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy). An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
+
+[[hook]]
+id = "orch-resume-audit"
+rules = ["sesres", "recncl", "cnclse"]
+platform = "claude-code"
+event = "SessionStart"
+handler = "orch_resume_audit"
+default = "warn"
+class = "b"
+residue = "SessionStart cannot block at the platform (exit 2 shows stderr only, doc-confirmed 2026-08-29), so this layer SURFACES divergence and ARMS the PreToolUse resume barrier; the barrier is the mechanism. Probes, all fail-closed to a finding rather than a silent pass: the declared handoff's Branch line against the real HEAD (scrubbed read-only probe), a handoff gate marker's commit against the real HEAD commit, lease staleness, every declared record surface readable (a declared-but-unreadable surface is a cannot-evaluate FINDING, never nothing-to-check), and merge-pending rows against first-parent merge evidence. Registry-scoped; with no registry it is silent. It reads records and git state only; it cannot detect a handoff that is stale in ways its declared grammar does not carry (free-text drift), and lease MISMATCH detection is bounded to staleness because a session cannot prove its own identity against the holder field."
+
+[[hook]]
+id = "orch-resume-barrier"
+rules = ["sesres", "recncl"]
+platform = "claude-code"
+event = "PreToolUse"
+matcher = "Write|Edit|MultiEdit|NotebookEdit|Bash"
+handler = "orch_resume_barrier"
+default = "warn"
+stage = "bake"
+class = "b"
+residue = "The mutation barrier behind orch-resume-audit, shipped WARN-FIRST (stage bake, a recorded posture): while the barrier state is armed it surfaces a systemMessage on the first mutation outside the allowlist (the record surfaces, the registry files, and the suite's own state directory stay writable, so the only exit, correcting the record, is never blocked), and it blocks nothing during the bake. The flip to deny is a manifest edit (stage to enforce, default to ask/deny) taken on recorded guard-events evidence after the bake period, per the guardrail-config-integrity discipline. Bash targets are not path-judged (a command's write targets are not lexically resolvable), so Bash mutations pass with the same surfacing only. Clearing the barrier requires re-running the audit (tools/orch_doctor.py --resume-audit) against corrected records; acknowledgement alone does not clear it."

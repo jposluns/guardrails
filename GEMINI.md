@@ -43,6 +43,9 @@ named, closed set, such as that all three of the listed modules pass, are not co
 no added burden. The enumeration requirement attaches to a quantifier that asserts the whole set, and the
 higher bar attaches only to a claim that reduces work.
 
+Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a
+completion-class claim over the backlog, and it carries the same enumeration burden.
+
 ## Corroborate external claims
 
 A claim about an external fact is corroborated against a source before it is relied on or presented as
@@ -273,6 +276,9 @@ ungrounded. Such work is launched through a mechanism that tracks it to completi
 result and its failures; a launch that drops the completion signal is not a safe way to start work the caller
 relies on. Where neither its result nor its completion is genuinely needed, running the task without tracking
 it is a deliberate, recorded choice, not the default.
+
+A tracked deliverable whose output is captured only through a truncating filter is not observable
+completion: the completion signal must carry the full result, never a truncated view of it.
 
 ## Validation is a gate on apply
 
@@ -543,6 +549,14 @@ The assistant does not bury the human's review surface under raw diff, patch, or
 change as a concise summary and surfaces the full detail through the channel the environment expects, such
 as a file or artefact for tooling or the client's own diff view, rather than as an undifferentiated wall in
 its primary response, so the reader keeps a usable surface for review and oversight.
+
+## An orchestrator keeps a mistakes register
+
+A durable, append-only register records every confirmed orchestrator error and near-miss: each row names
+the mistake, the evidence reference, the rule it violated, and the guardrail it motivates. Row identifiers
+are permanent and never reused, and a row leaves the register only by a recorded status change, never by
+deletion or edit. A register row whose motivated guardrail is accepted becomes an open obligation, tracked
+to closure like any other backlog item.
 
 ## Reconcile the record against reality
 

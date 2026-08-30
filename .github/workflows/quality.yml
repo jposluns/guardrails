@@ -250,6 +250,24 @@ jobs:
       - name: Hooks behaviour self-test
         run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
 
+      - name: Orchestrator-integrity behaviour self-test
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_orch_hooks.py
+
+      - name: Record-drift self-test
+        run: python3 tools/check_record_drift.py --self-test
+
+      - name: Record-drift gate
+        run: python3 tools/check_record_drift.py
+
+      - name: Mistakes-register self-test
+        run: python3 tools/check_mistakes_register.py --self-test
+
+      - name: Mistakes-register gate
+        run: python3 tools/check_mistakes_register.py
+
+      - name: AEI enumerator self-test
+        run: python3 tools/aei_backlog_md.py --self-test
+
       - name: Skill self-test
         run: python3 tools/gen_skill.py --self-test
       - name: Skill drift
