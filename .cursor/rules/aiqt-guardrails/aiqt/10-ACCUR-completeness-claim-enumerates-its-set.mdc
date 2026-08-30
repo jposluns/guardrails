@@ -23,3 +23,6 @@ actually examined, such as that the files that were checked are clean, and an ex
 named, closed set, such as that all three of the listed modules pass, are not completeness claims and carry
 no added burden. The enumeration requirement attaches to a quantifier that asserts the whole set, and the
 higher bar attaches only to a claim that reduces work.
+
+Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a
+completion-class claim over the backlog, and it carries the same enumeration burden.

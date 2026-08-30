@@ -14,7 +14,8 @@ generated, orphan-pruned) exactly like the .cursor/rules/aiqt-guardrails/ adapte
 fail-closed: every manifest `rules` entry must name a real corpus-id in .aiqt/core/rules/ (via
 gen_rules.load_corpus), the event must be on the known-event whitelist, a tool event must carry a
 compilable matcher and a non-tool event must not, `default` must be an allowed keyword with the
-non-blocking `warn` legal only on a Stop/SubagentStop event, the named handler must exist in the
+non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, UserPromptSubmit, Stop,
+SubagentStop, SessionStart) or under an explicit bake stage, the named handler must exist in the
 source script, and `residue` must be non-empty, so a typo can never silently no-op an enforcement
 control.
   gen_hooks.py             regenerate the plugin surface
@@ -46,14 +47,25 @@ SCRIPT_NAME = "aiqt_hooks.py"
 # regardless of where the plugin is nested in this authoring repo.
 SCRIPT_PLUGIN_PATH = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + SCRIPT_NAME
 
-# The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17). A typo'd
-# event must fail closed here, never silently produce a hook no platform will fire.
-KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop")
+# The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
+# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
+# closed here, never silently produce a hook no platform will fire.
+KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop",
+                "SessionStart", "TeammateIdle")
 TOOL_EVENTS = {"PreToolUse", "PostToolUse"}  # these require a matcher; the others must omit it
-WARN_EVENTS = {"Stop", "SubagentStop"}  # the only events a non-blocking "warn" default is legal on
+# A non-blocking "warn" default is legal on every event EXCEPT PreToolUse: on a PreToolUse control a
+# silent non-decision would weaken an enforcement point, so warn there requires the explicit,
+# recorded stage = "bake" posture below. SessionStart cannot block at the platform (exit 2 only shows
+# stderr, doc-confirmed 2026-08-29), so a SessionStart control MUST declare warn: a block/ask claim
+# there would be an overclaim the platform cannot honour.
+WARN_EVENTS = {"PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart",
+               "TeammateIdle"}
+NONBLOCK_EVENTS = {"SessionStart"}  # the platform cannot block these: default must be "warn"
+STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent means "enforce"
 
-HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default", "class", "residue"}
-REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher"}
+HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default", "class", "residue",
+             "stage"}
+REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage"}
 PLUGIN_KEYS = ("name", "version", "description", "author-name", "author-email", "homepage")
 PLATFORMS = {"claude-code"}
 DEFAULTS = {"block", "ask", "warn"}
@@ -167,9 +179,16 @@ def load_manifest(path):
         default = _req_str(hook, "default", where)
         if default not in DEFAULTS:
             raise ValueError("{}: default must be one of {}".format(where, "/".join(sorted(DEFAULTS))))
-        if default == "warn" and event not in WARN_EVENTS:
-            raise ValueError("{}: default 'warn' is legal only on a {} event, not {}"
+        stage = hook.get("stage", "enforce")
+        if not isinstance(stage, str) or stage not in STAGES:
+            raise ValueError("{}: stage must be one of {}".format(where, "/".join(sorted(STAGES))))
+        if default == "warn" and event not in WARN_EVENTS and stage != "bake":
+            raise ValueError("{}: default 'warn' is legal only on a {} event, or under an explicit "
+                             "stage = \"bake\" posture on PreToolUse, not {}"
                              .format(where, "/".join(sorted(WARN_EVENTS)), event))
+        if event in NONBLOCK_EVENTS and default != "warn":
+            raise ValueError("{}: event {} cannot block at the platform, so default must be 'warn' "
+                             "(a block/ask claim there is an overclaim)".format(where, event))
         if _req_str(hook, "class", where) not in CLASSES:
             raise ValueError("{}: class must be the EN-5 letter a/b/c/d".format(where))
         _req_str(hook, "residue", where)  # required, never empty: the control's honest coverage gap
@@ -520,10 +539,11 @@ def self_test_main():
         os.chmod(manifest, 0o644)  # restore so cleanup can remove it
 
         # 11. The FULL "warn" default policy, table-driven across every known event. warn is a
-        #     non-blocking Stop-layer default, legal only on the WARN_EVENTS (Stop, SubagentStop), so the
-        #     generator must REJECT it (exit 2) on every other event and ACCEPT it on the WARN_EVENTS,
-        #     regenerating drift-clean. Converting the base tool hook to a non-tool event also drops the
-        #     now-forbidden matcher, matching a real Stop/UserPromptSubmit control.
+        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, UserPromptSubmit, Stop,
+        #     SubagentStop, SessionStart), so the generator must REJECT it (exit 2) on every other event
+        #     outside a bake stage and ACCEPT it on each WARN_EVENTS event, regenerating drift-clean.
+        #     Converting the base tool hook to a non-tool event also drops the now-forbidden matcher,
+        #     matching a real Stop/UserPromptSubmit control.
         tool_block = 'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "test_handler"\ndefault = "block"'
         for event in KNOWN_EVENTS:
             warntree = tmp / ("warn-" + event.lower())
@@ -575,6 +595,29 @@ def self_test_main():
         _mutate(baddefault, 'default = "block"', 'default = "nonesuch"')
         if run_quiet(baddefault, check=True) != 2:
             failures.append("unknown default keyword expected exit 2 (fail-closed)")
+
+        # 14. 'warn' on PreToolUse is legal ONLY under the explicit recorded stage = "bake" posture.
+        bake = tmp / "bake"
+        bake.mkdir()
+        _build_tree(bake)
+        _mutate(bake, 'default = "block"', 'default = "warn"\nstage = "bake"')
+        if run_quiet(bake, check=False) != 0 or run_quiet(bake, check=True) != 0:
+            failures.append("'warn' + stage=bake on PreToolUse expected a clean generate")
+        nostage = tmp / "nostage"
+        nostage.mkdir()
+        _build_tree(nostage)
+        _mutate(nostage, 'default = "block"', 'default = "warn"')
+        if run_quiet(nostage, check=True) != 2:
+            failures.append("'warn' on PreToolUse without stage=bake expected exit 2 (fail-closed)")
+
+        # 15. A SessionStart control cannot claim block/ask: the platform cannot block that event.
+        ssblock = tmp / "ssblock"
+        ssblock.mkdir()
+        _build_tree(ssblock)
+        _mutate(ssblock, tool_block,
+                'event = "SessionStart"\nhandler = "test_handler"\ndefault = "block"')
+        if run_quiet(ssblock, check=True) != 2:
+            failures.append("default 'block' on SessionStart expected exit 2 (an overclaim)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -591,7 +634,8 @@ def self_test_main():
           "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
-          "every non-warn event, accepted on Stop and SubagentStop); and a Stop hook renders "
+          "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
+          "PreToolUse and the SessionStart-cannot-block overclaim); and a Stop hook renders "
           "byte-identical hooks.json whether its default is 'block' or 'warn'" + note)
     return 0
 

@@ -72,6 +72,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Express authorization before execution](rules/aiqt/10-TRUST-express-authorization-before-execution.md)
 - [Human oversight and the autonomy threshold](rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md)
 - [Do not bury the review surface under raw dumps](rules/aiqt/10-TRUST-no-console-diff-dumps.md)
+- [An orchestrator keeps a mistakes register](rules/aiqt/10-TRUST-orchestrator-mistakes-register.md)
 - [Reconcile the record against reality](rules/aiqt/10-TRUST-reconcile-record-against-reality.md)
 - [Records first](rules/aiqt/10-TRUST-records-first.md)
 - [Close each session on green](rules/aiqt/10-TRUST-session-close-on-green.md)

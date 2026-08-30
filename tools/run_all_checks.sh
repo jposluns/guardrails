@@ -112,6 +112,12 @@ run_gate "hooks-selftest" python3 tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
+run_gate "orch-behaviour-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_orch_hooks.py
+run_gate "record-drift-selftest" python3 tools/check_record_drift.py --self-test
+run_gate "record-drift"          python3 tools/check_record_drift.py
+run_gate "mistakes-register-selftest" python3 tools/check_mistakes_register.py --self-test
+run_gate "mistakes-register"          python3 tools/check_mistakes_register.py
+run_gate "aei-enumerator-selftest" python3 tools/aei_backlog_md.py --self-test
 run_gate "skill-selftest"  python3 tools/gen_skill.py --self-test
 run_gate "skill-drift"     python3 tools/gen_skill.py --check
 run_gate "gensrc-registry-selftest" python3 tools/gen_gensrc.py --self-test

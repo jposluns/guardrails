@@ -2493,3 +2493,27 @@ born-release = "1.1.0"
 [[born]]
 id = "setcmp.6"
 born-release = "1.1.0"
+
+[[born]]
+id = "mstreg"
+born-release = "1.1.0"
+
+[[born]]
+id = "mstreg.1"
+born-release = "1.1.0"
+
+[[born]]
+id = "mstreg.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "mstreg.3"
+born-release = "1.1.0"
+
+[[born]]
+id = "setcmp.7"
+born-release = "1.1.0"
+
+[[born]]
+id = "trkasy.5"
+born-release = "1.1.0"

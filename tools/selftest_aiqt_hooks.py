@@ -2142,13 +2142,14 @@ def main():
                 ">/dev/null pytest || true", "allow")
 
         # gatdis round-3 (F-123 disclosed residuals): the CURRENT (unchanged) behaviour of the newly
-        # disclosed residuals, locked and visible. An embedded unquoted '#' is a shlex comment start
-        # that drops the rest of the line, so the bypass/swallow after it slips (routed to the common
-        # enforcement-hook tokenizer redesign); the two contrived safe-direction over-blocks still DENY.
-        gexpect("(gw-ba) embedded-# drops the trailing --no-verify, allows (embedded-# residual, "
-                "routed to redesign)", "git commit -m ticket#123 --no-verify", "allow")
-        gexpect("(gw-bb) embedded-# drops the '|| true' swallow, allows (embedded-# residual)",
-                "pytest foo#bar || true", "allow")
+        # round 32: the shared lexer (_lex_line) now disables shlex '#' comment-stripping, so an embedded
+        # unquoted '#' is lexed literally (bash comments only at a word start) and the bypass/swallow after
+        # it is no longer hidden - the class-wide embedded-# residual is CLOSED; the two contrived
+        # safe-direction over-blocks still DENY.
+        gexpect("(gw-ba) embedded-# no longer hides the trailing --no-verify, denies (round-32 lexer fix)",
+                "git commit -m ticket#123 --no-verify", "deny")
+        gexpect("(gw-bb) embedded-# no longer hides the '|| true' swallow, asks (round-32 lexer fix)",
+                "pytest foo#bar || true", "ask")
         gexpect("(gw-bc) a trailing --verify does not cancel --no-verify here, still denies "
                 "(disclosed --verify-cancel over-block)", "git commit --no-verify --verify -m x", "deny")
         gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "

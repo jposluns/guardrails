@@ -21,3 +21,6 @@ ungrounded. Such work is launched through a mechanism that tracks it to completi
 result and its failures; a launch that drops the completion signal is not a safe way to start work the caller
 relies on. Where neither its result nor its completion is genuinely needed, running the task without tracking
 it is a deliberate, recorded choice, not the default.
+
+A tracked deliverable whose output is captured only through a truncating filter is not observable
+completion: the completion signal must carry the full result, never a truncated view of it.
