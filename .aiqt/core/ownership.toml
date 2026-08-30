@@ -251,6 +251,10 @@ path = "site/robots.txt"
 class = "pack-immutable"
 
 [[release-class]]
+path = "site/rule5.html"
+class = "pack-immutable"
+
+[[release-class]]
 path = "site/standard.html"
 class = "pack-immutable"
 
