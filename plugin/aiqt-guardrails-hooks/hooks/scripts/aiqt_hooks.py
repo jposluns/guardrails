@@ -4665,59 +4665,6 @@ def _orch_in_scope_chains(chains, rib):
     return in_scope
 
 
-def _orch_token_backgrounds(token):
-    """True when a token, parsed as a shell fragment, carries a '&' command SEPARATOR - the reliable
-    backgrounding signal inside a shell/eval wrapper's QUOTED body ('bash -c "x | tail & echo"'), unlike a
-    token merely ENDING in '&' (which a literal 'foo&' also does, and which an inner '& cmd' misses; round
-    21, gemini). Redirect operators ('2>&1', '>&2', '&>') do NOT yield a '&' separator, so they never
-    over-fire. An UNPARSEABLE token FAILS CLOSED -> True (round 22, claude): a shell body shlex cannot lex
-    (e.g. a trailing backslash) may still background a truncator in bash, so it is treated as a POSSIBLE
-    backgrounding signal, never a silent clean pass; the shell-token gate in the caller keeps a non-shell
-    unparseable argument out of scope. A token that PARSES INTO a MULTI-WORD sub-command whose command word
-    contains a shell/eval (scanning EVERY token, mirroring the sibling detectors so a wrapper-prefixed nested
-    shell 'env bash -c "...&"' is caught too, round 25/26 claude - a command-word-only scan was strictly
-    weaker than its siblings) may hide a deeper '&' through a FURTHER quoting level a single pass cannot see
-    (round 23/24, gemini NESTING), so it too fails closed; a BARE shell word (a single token, e.g. 'bash') is
-    not a sub-command and does not trigger, so 'bash -c "echo hi"' still ALLOWs. A shell reached only through
-    a value the lexer cannot resolve (a $VAR/command-substitution/computed shell name) is the disclosed
-    adversarial name-trust residual, not covered - this is an accidental-case guard, not adversarial-grade."""
-    try:
-        segs = _segments(token)
-    except ValueError:
-        return True
-    if any(sep == "&" for _t, sep in segs):
-        return True
-    if _has_coproc(segs):
-        return True  # `coproc` backgrounds with no '&' (round 27, gemini: 'bash -c "coproc tail"'); bash
-        # backgrounds ONLY via '&' or coproc, so '&'-sep + coproc + the nested-carrier scan below is the
-        # COMPLETE lexable backgrounding set - no third construct to chase.
-    stages = [tk for chain, _term in _orch_pipeline_chains(segs) for tk, _s in chain if tk]
-    # a real sub-command (more than a lone bare word) containing a shell/eval basename in ANY token,
-    # INCLUDING a bare shell as a pipeline stage receiving a piped script ('echo "...&" | bash', round 29
-    # gemini), is a possible hidden-async carrier. A lone bare word (the wrapper name itself, total 1) is not.
-    if sum(len(tk) for tk in stages) > 1:
-        return any(t.rsplit("/", 1)[-1] in _ORCH_SHELLS for tk in stages for t in tk)
-    return False
-
-
-def _orch_foreground_hidden_async(segments):
-    """A FOREGROUND command can still launch async work that outlives its return when a shell/eval token
-    runs a QUOTED body with an inner '&' the top-level parse cannot see (round 20, codex). See the manifest
-    residue for the covered forms and the shell-token gate rationale. The backgrounding signal is a '&'
-    SEPARATOR reachable at the top level or inside a token's quoted body (round 21, gemini: a token merely
-    ending in '&' missed an inner '& cmd')."""
-    has_shell = has_bg = False
-    for tokens, sep in segments:
-        if sep == "&":
-            has_bg = True
-        for t in tokens:
-            if t.rsplit("/", 1)[-1] in _ORCH_SHELLS:
-                has_shell = True
-            if _orch_token_backgrounds(t):
-                has_bg = True
-    return has_shell and has_bg
-
-
 def _orch_shell_c_verdict(tokens, rib, depth):
     """Verdict for a single-stage `<shell> -c <inner>` (None if the stage is not one). An outer stdout
     redirect on the wrapper rebinds the terminal sink before the harness pipe, so it governs the sink."""
@@ -4838,10 +4785,9 @@ def orch_truncation_guard(data):
             "output lands in a real file, or run the producer as a tracked background dispatch.",
             "AIQT guardrail: asked on a coproc dispatch whose full-output capture is unproven.")
     if _has_grouping(segments) or _has_compound_keyword(segments):
-        # A FOREGROUND grouped/compound command is normally out of scope, but if it HIDES an async shell/
-        # eval wrapper (e.g. '{ bash -c "producer | tail & true"; }'), the grouping branch must not
-        # short-circuit to ALLOW before the hidden-async check runs (round 22, claude Finding B).
-        if rib or _has_backgrounding_amp(segments) or _orch_foreground_hidden_async(segments):
+        # A FOREGROUND grouped/compound command is out of scope (ALLOW); a backgrounded one (rib, or an
+        # unquoted '&' anywhere) cannot be parsed into reliable chains, so it fail-safes to ASK.
+        if rib or _has_backgrounding_amp(segments):
             return _ask(
                 "AIQT rules trkasy/vrfdlv: this background dispatch uses shell grouping or a compound "
                 "command (while/for/if/{ }/subshell) the guard cannot parse reliably, so it cannot prove "
@@ -4851,13 +4797,10 @@ def orch_truncation_guard(data):
         return _allow()
     in_scope = _orch_in_scope_chains(list(_orch_pipeline_chains(segments)), rib)
     if not in_scope:
-        # A foreground shell/eval wrapper whose quoted body backgrounds a truncator (bash -c 'x|tail &')
-        # is a HIDDEN async dispatch the and-or scope missed: inspect its chains rather than ALLOW (r20).
-        if not rib and _orch_foreground_hidden_async(segments):
-            in_scope = [ch for ch, _term in _orch_pipeline_chains(segments)
-                        if any(c[0] for c in ch)]
-        if not in_scope:
-            return _allow()
+        # A foreground command is out of scope: this guard governs only background dispatches, so async
+        # work a foreground command launches internally is not its concern (the tracked deliverable is
+        # dispatched with run_in_background, which the rib=TRUE path covers directly).
+        return _allow()
     verdicts = [v for v in (_orch_chain_verdict(ch, rib, 0) for ch in in_scope) if v is not None]
     if not verdicts:
         verdict = "unprovable"  # a backgrounded scope produced NO provable chain (an '&' landing on an

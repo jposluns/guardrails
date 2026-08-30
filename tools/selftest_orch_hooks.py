@@ -625,63 +625,16 @@ def main():
               _verdict(bg("python3 build.py | tee <> /dev/null > real.out &", rib=False)), "deny")
         check("trunc/stdin-dup-breaks-pipe-denies",
               _verdict(bg("python3 build.py | tee <& 3 > real.out &", rib=False)), "deny")
-        # round 20 (codex): a FOREGROUND shell/eval wrapper whose quoted body backgrounds a truncator is a
-        # HIDDEN async dispatch the and-or scope missed -> inspect it (shell-token verdict -> ASK), never
-        # a silent ALLOW. Covers 'bash -c', 'eval', and a wrapper hiding a shell ('env bash -c').
-        check("trunc/fg-shellc-inner-amp-asks",
-              _verdict(bg("bash -c 'seq 1 100 | tail -1 &'", rib=False)), "ask")
-        check("trunc/fg-eval-inner-amp-asks",
-              _verdict(bg("eval 'python3 build.py | tail &'", rib=False)), "ask")
-        check("trunc/fg-envwrap-inner-amp-asks",
-              _verdict(bg("env bash -c 'python3 build.py | tail &'", rib=False)), "ask")
         # regression: a foreground wrapper WITHOUT an inner '&', and a literal '&' in a NON-shell
         # argument, both stay correctly OUT OF SCOPE (foreground filtering is out of scope by design).
         check("trunc/fg-shellc-no-amp-out-of-scope",
               _verdict(bg("bash -c 'python3 build.py | tail'", rib=False)), "allow")
         check("trunc/fg-literal-amp-nonshell-out-of-scope",
               _verdict(bg("grep 'foo&' file", rib=False)), "allow")
-        # round 21/22 (gemini, claude Finding A): an inner '&' NOT at the body's end (a mid-body '& cmd')
-        # must still be caught - the reliable signal is a '&' SEPARATOR in the parsed body, not a token
-        # ending in '&'. round 22 (claude Finding C): an UNPARSEABLE body (trailing backslash) fails CLOSED.
-        check("trunc/fg-shellc-midbody-amp-asks",
-              _verdict(bg("bash -c 'python3 build.py | tail & true'", rib=False)), "ask")
-        check("trunc/fg-shellc-unparseable-body-asks",
-              _verdict(bg("bash -c 'seq 1 100 | tail -1 & echo \\'", rib=False)), "ask")
-        # round 22 (claude Finding B): a FOREGROUND grouped/compound command that HIDES an async shell
-        # wrapper must not short-circuit to ALLOW - the grouping branch now consults the hidden-async
-        # detector. A foreground grouped command with NO shell wrapper stays out of scope (regression).
-        check("trunc/fg-grouped-hidden-async-asks",
-              _verdict(bg("{ bash -c 'python3 build.py | tail & true'; }", rib=False)), "ask")
-        check("trunc/fg-subshell-hidden-async-asks",
-              _verdict(bg("( bash -c 'python3 build.py | tail & true' )", rib=False)), "ask")
-        check("trunc/fg-compound-hidden-async-asks",
-              _verdict(bg("if true; then bash -c 'python3 build.py | tail & x'; fi", rib=False)), "ask")
-        # round 23/24 (gemini): a '&' buried under TWO quoting levels (a nested shell/eval wrapper) is
-        # caught by construction - a token that parses into a multi-word shell/eval sub-command fails
-        # closed. A nested-but-SYNCHRONOUS wrapper is an accepted safe-direction over-ASK.
-        check("trunc/fg-nested-shellc-async-asks",
-              _verdict(bg("bash -c 'bash -c \"python3 build.py | tail &\"'", rib=False)), "ask")
-        check("trunc/fg-nested-eval-async-asks",
-              _verdict(bg("bash -c 'eval \"python3 build.py | tail &\"'", rib=False)), "ask")
-        check("trunc/fg-nested-synchronous-overasks",
-              _verdict(bg("bash -c 'bash -c \"echo hi\"'", rib=False)), "ask")
-        # round 25/26 (claude): a WRAPPER-PREFIXED nested shell ('env bash -c "...&"') must be caught too -
-        # the carrier check scans EVERY token (not just the command word), mirroring its sibling detectors.
-        check("trunc/fg-wrapper-prefixed-nested-async-asks",
-              _verdict(bg("bash -c 'env bash -c \"python3 build.py | tail &\"'", rib=False)), "ask")
-        # round 27 (gemini): 'coproc' backgrounds with NO '&'; nested in a wrapper body it evades the
-        # top-level _has_coproc, so _orch_token_backgrounds now detects coproc too. Bash backgrounds ONLY
-        # via '&' or coproc, so this completes the lexable backgrounding set.
-        check("trunc/fg-nested-coproc-asks",
-              _verdict(bg("bash -c 'coproc tail >/dev/null'", rib=False)), "ask")
         # round 29/30 (claude Finding 1): coproc after a pipeline prefix (time/!) is still a coproc bash
         # recognizes, in BOTH rib modes - a plain command-word test missed it.
         check("trunc/time-coproc-asks", _verdict(bg("time coproc producer", rib=True)), "ask")
         check("trunc/bang-coproc-fg-asks", _verdict(bg("! coproc producer", rib=False)), "ask")
-        # round 29/30 (gemini): a bare shell as a pipeline receiver of a piped script ('echo "...&" | bash')
-        # is a hidden-async carrier - the carrier scan now counts total tokens, so a bare-shell stage counts.
-        check("trunc/fg-piped-to-shell-asks",
-              _verdict(bg("bash -c 'echo \"ls | tail &\" | bash'", rib=False)), "ask")
         # round 29/30 (claude Finding 2): a shlex-unparseable command carrying coproc and no '&' now ASKs.
         check("trunc/unparseable-coproc-asks",
               _verdict(bg("coproc grep 'unbalanced", rib=False)), "ask")
