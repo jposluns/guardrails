@@ -4630,10 +4630,23 @@ def _has_compound_keyword(segments):
     return any(_command_word(tokens) in _ORCH_COMPOUND_WORDS for tokens, _sep in segments if tokens)
 
 
+_ORCH_PIPELINE_PREFIX = frozenset(("time", "!", "-p"))  # bash pipeline-prefix words that precede a command
+
+
 def _has_coproc(segments):
     """True when the command uses the bash `coproc` keyword, which backgrounds a command (or a brace
-    group) with NO '&' terminator, so the lexical scope cannot see its backgrounding. The caller ASKs."""
-    return any(_command_word(tokens) == "coproc" for tokens, _sep in segments)
+    group) with NO '&' terminator, so the lexical scope cannot see its backgrounding. The caller ASKs.
+    `coproc` is a reserved word in COMMAND-WORD position, INCLUDING after a pipeline prefix ('time coproc',
+    '! coproc', 'time -p coproc'), which a plain command-word test misses (round 29, claude Finding 1)."""
+    for tokens, _sep in segments:
+        if _command_word(tokens) == "coproc":
+            return True
+        i = 0
+        while i < len(tokens) and tokens[i] in _ORCH_PIPELINE_PREFIX:
+            i += 1
+        if i < len(tokens) and tokens[i] == "coproc":
+            return True
+    return False
 
 
 def _orch_in_scope_chains(chains, rib):
@@ -4678,8 +4691,13 @@ def _orch_token_backgrounds(token):
         return True  # `coproc` backgrounds with no '&' (round 27, gemini: 'bash -c "coproc tail"'); bash
         # backgrounds ONLY via '&' or coproc, so '&'-sep + coproc + the nested-carrier scan below is the
         # COMPLETE lexable backgrounding set - no third construct to chase.
-    return any(len(tk) > 1 and any(t.rsplit("/", 1)[-1] in _ORCH_SHELLS for t in tk)
-               for chain, _term in _orch_pipeline_chains(segs) for tk, _s in chain if tk)
+    stages = [tk for chain, _term in _orch_pipeline_chains(segs) for tk, _s in chain if tk]
+    # a real sub-command (more than a lone bare word) containing a shell/eval basename in ANY token,
+    # INCLUDING a bare shell as a pipeline stage receiving a piped script ('echo "...&" | bash', round 29
+    # gemini), is a possible hidden-async carrier. A lone bare word (the wrapper name itself, total 1) is not.
+    if sum(len(tk) for tk in stages) > 1:
+        return any(t.rsplit("/", 1)[-1] in _ORCH_SHELLS for tk in stages for t in tk)
+    return False
 
 
 def _orch_foreground_hidden_async(segments):
@@ -4801,8 +4819,10 @@ def orch_truncation_guard(data):
     try:
         segments = _segments(command)
     except ValueError:
-        # Unparseable: quoting cannot be judged, so an in-scope dispatch cannot be proven captured.
-        if rib or "&" in command:
+        # Unparseable: quoting cannot be judged, so an in-scope dispatch cannot be proven captured. A raw
+        # `coproc` token backgrounds with no '&', so probe for it too (round 29, claude Finding 2: a
+        # shlex-unparseable coproc command, e.g. ANSI-C $'...' quoting, otherwise reached ALLOW at rib=false).
+        if rib or "&" in command or re.search(r"(^|[\s;&|(){}])coproc(\s|$)", command):
             return _ask("AIQT rule trkasy: this background dispatch could not be parsed, so the guard "
                         "cannot prove its full output is captured. Confirm the full output lands in a "
                         "real file ('| tee <file>' before any filter), or run it in the foreground.",

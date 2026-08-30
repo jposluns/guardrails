@@ -674,6 +674,17 @@ def main():
         # via '&' or coproc, so this completes the lexable backgrounding set.
         check("trunc/fg-nested-coproc-asks",
               _verdict(bg("bash -c 'coproc tail >/dev/null'", rib=False)), "ask")
+        # round 29/30 (claude Finding 1): coproc after a pipeline prefix (time/!) is still a coproc bash
+        # recognizes, in BOTH rib modes - a plain command-word test missed it.
+        check("trunc/time-coproc-asks", _verdict(bg("time coproc producer", rib=True)), "ask")
+        check("trunc/bang-coproc-fg-asks", _verdict(bg("! coproc producer", rib=False)), "ask")
+        # round 29/30 (gemini): a bare shell as a pipeline receiver of a piped script ('echo "...&" | bash')
+        # is a hidden-async carrier - the carrier scan now counts total tokens, so a bare-shell stage counts.
+        check("trunc/fg-piped-to-shell-asks",
+              _verdict(bg("bash -c 'echo \"ls | tail &\" | bash'", rib=False)), "ask")
+        # round 29/30 (claude Finding 2): a shlex-unparseable command carrying coproc and no '&' now ASKs.
+        check("trunc/unparseable-coproc-asks",
+              _verdict(bg("coproc grep 'unbalanced", rib=False)), "ask")
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time
