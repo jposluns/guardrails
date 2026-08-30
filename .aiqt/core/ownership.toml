@@ -251,6 +251,22 @@ path = "site/robots.txt"
 class = "pack-immutable"
 
 [[release-class]]
+path = "site/rule1.html"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/rule2.html"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/rule3.html"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/rule4.html"
+class = "pack-immutable"
+
+[[release-class]]
 path = "site/rule5.html"
 class = "pack-immutable"
 
