@@ -432,6 +432,36 @@ def main():
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
         check("trunc/foreground-tee-allows", _verdict(bg("python3 build.py | tee f", rib=False)), "allow")
         check("trunc/empty-bg-denies", _verdict(bg("")), "deny")
+        # L-GS1 / trkasy: foreground bare-& detach coverage. A plain foreground call stays out of scope, but
+        # a bare `&` detaches a child into untracked async work -> ASK. The shell forms that also carry an
+        # ampersand but do NOT detach (&&, &>, &>>, <&, >&, |&, and any quoted or escaped &) stay ALLOW; the
+        # narrow scanner over-asks (never silently allows) on grammar it cannot model.
+        check("trunc/fg-detach-trailing-asks", _verdict(bg("long_job &", rib=False)), "ask")
+        check("trunc/fg-detach-between-asks", _verdict(bg("worker & echo done", rib=False)), "ask")
+        check("trunc/fg-detach-grouped-asks", _verdict(bg("( long_job & )", rib=False)), "ask")
+        check("trunc/fg-detach-newline-asks", _verdict(bg("long_job &\necho next", rib=False)), "ask")
+        # a later `wait` does not clear it: the lexical hook cannot prove the correct child is awaited.
+        check("trunc/fg-detach-then-wait-asks", _verdict(bg("worker & wait", rib=False)), "ask")
+        check("trunc/fg-logical-and-allows", _verdict(bg("build && test", rib=False)), "allow")
+        check("trunc/fg-amp-redirect-allows", _verdict(bg("build &> out.log", rib=False)), "allow")
+        check("trunc/fg-amp-redirect-append-allows", _verdict(bg("build &>> out.log", rib=False)), "allow")
+        check("trunc/fg-dup-stdout-allows", _verdict(bg("build 2>&1", rib=False)), "allow")
+        check("trunc/fg-dup-lt-allows", _verdict(bg("read x <&3", rib=False)), "allow")
+        check("trunc/fg-pipe-stderr-allows", _verdict(bg("build |& tee log", rib=False)), "allow")
+        check("trunc/fg-single-quoted-amp-allows", _verdict(bg("echo 'a & b'", rib=False)), "allow")
+        check("trunc/fg-double-quoted-amp-allows", _verdict(bg('echo "a & b"', rib=False)), "allow")
+        check("trunc/fg-escaped-amp-allows", _verdict(bg("echo a \\& b", rib=False)), "allow")
+        # direct scanner unit checks (the quote/escape provenance _segments cannot carry): a quoted or an
+        # escaped redirect char before `&` is still a real detach, while a genuine dup redirect is not.
+        check("trunc/scan-quoted-redirect-detach", aiqt_hooks._orch_foreground_detach('echo ">" &'), True)
+        check("trunc/scan-escaped-gt-then-detach", aiqt_hooks._orch_foreground_detach("echo \\>&"), True)
+        check("trunc/scan-real-dup-not-detach", aiqt_hooks._orch_foreground_detach("cmd 2>&1"), False)
+        # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
+        ti = Fixture(tmp, "trunc-inert")
+        (ti.root / ".aiqt" / "orchestration.local.json").unlink()
+        check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+            ti.payload("PreToolUse", "Bash",
+                       {"command": "long_job &", "run_in_background": False}))), "allow")
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time

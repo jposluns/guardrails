@@ -4379,6 +4379,74 @@ _ORCH_SHELL_KEYWORDS = frozenset((
     "do", "done", "in", "function", "time", "coproc"))
 
 
+def _orch_foreground_detach(command):
+    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
+    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
+    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
+    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
+    pipe-stderr operators, and any single-quoted, double-quoted, or backslash-escaped ampersand. A
+    dedicated quote- and escape-tracking scan is used, NOT _segments: that helper strips quote and escape
+    provenance and classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire.
+    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
+    model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
+    runtime detachers such as nohup/setsid/disown/coproc) errs toward reporting a bare `&` where an
+    ampersand is ambiguous, a safe-direction over-ask, and is otherwise a disclosed residual, never a
+    silent miss turned into a hidden allow."""
+    in_single = in_double = escaped = False
+    prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            escaped, prev_dup = False, False
+            i += 1
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            prev_dup = False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            prev_dup = False
+            i += 1
+            continue
+        if ch == "\\":
+            escaped, prev_dup = True, False
+            i += 1
+            continue
+        if ch == "'":
+            in_single, prev_dup = True, False
+            i += 1
+            continue
+        if ch == '"':
+            in_double, prev_dup = True, False
+            i += 1
+            continue
+        if ch == "&":
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt == "&":  # `&&` logical AND: not a detach
+                prev_dup = False
+                i += 2
+                continue
+            if nxt == ">":  # `&>` / `&>>` redirect: not a detach
+                prev_dup = False
+                i += 1
+                continue
+            if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
+                prev_dup = False
+                i += 1
+                continue
+            return True  # an executable bare `&` control operator: a foreground detach
+        prev_dup = ch in (">", "<", "|")
+        i += 1
+    return False
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -4392,7 +4460,11 @@ def orch_truncation_guard(data):
     shell-syntax false-allow; whether the output actually reaches durable capture is a run-time property
     (the invoked program's own behaviour, or a platform limit such as the harness output ceiling) that is
     out of view here and is confirmed by the post-execution delivery-marker discipline, a disclosed
-    residual. A foreground call is out of scope (the harness returns its output directly)."""
+    residual. A foreground call is in scope only for one NARROW case (L-GS1 / trkasy): shell syntax that
+    DETACHES a child with a bare `&` still launches asynchronous work the foreground tool call does not
+    track, so a readable foreground command carrying such an operator ASKS the operator to use the tracked
+    background dispatch instead; every other foreground call remains out of scope (the harness returns its
+    output directly)."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -4405,7 +4477,22 @@ def orch_truncation_guard(data):
     command = tool_input.get("command")
     rib = tool_input.get("run_in_background") is True
     if not rib:
-        return _allow()  # foreground is out of scope by design
+        # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
+        # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
+        # are then lost. On a readable foreground command carrying such an operator, ASK the operator to use
+        # the platform's tracked background dispatch (run_in_background) and collect its completion, keep the
+        # command foreground and wait, or confirm the detached result is genuinely irrelevant. An unreadable
+        # or non-detaching foreground command stays out of scope (ALLOW): approving this ASK does not itself
+        # create tracking, and converting to run_in_background=true is what lets the dispatch ledger record it.
+        if isinstance(command, str) and _orch_foreground_detach(command):
+            return _ask(
+                "AIQT rule trkasy: this foreground command detaches a child with a bare '&', launching "
+                "asynchronous work this tool call does not track, so its result and failure are lost. Use "
+                "the platform's tracked background dispatch (run_in_background) and collect its completion, "
+                "keep the command in the foreground and wait for it, or confirm the detached result and "
+                "completion are genuinely not needed.",
+                "AIQT guardrail: asked on a foreground bare-& detach (untracked asynchronous work).")
+        return _allow()  # foreground without a bare-& detach operator is out of scope by design
     if not isinstance(command, str) or not command:
         return _deny(
             "AIQT rule trkasy: a background dispatch carried no readable command string; failing closed.",

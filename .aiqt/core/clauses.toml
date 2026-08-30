@@ -230,7 +230,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "c97db11ee26462345f8b77800f1c343281159ff492c0a61ee028e60cd01ea382"
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
 
 [[clause]]
 clause-id = "grdinp.2"
@@ -239,7 +239,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "c97db11ee26462345f8b77800f1c343281159ff492c0a61ee028e60cd01ea382"
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
 
 [[clause]]
 clause-id = "grdinp.3"
@@ -248,7 +248,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "c97db11ee26462345f8b77800f1c343281159ff492c0a61ee028e60cd01ea382"
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
 
 [[clause]]
 clause-id = "grdinp.4"
@@ -257,7 +257,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "c97db11ee26462345f8b77800f1c343281159ff492c0a61ee028e60cd01ea382"
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
 
 [[clause]]
 clause-id = "grdinp.5"
@@ -266,7 +266,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "c97db11ee26462345f8b77800f1c343281159ff492c0a61ee028e60cd01ea382"
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
 
 [[clause]]
 clause-id = "grdinp.6"
@@ -275,7 +275,16 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "c97db11ee26462345f8b77800f1c343281159ff492c0a61ee028e60cd01ea382"
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+
+[[clause]]
+clause-id = "grdinp.7"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 30
+end-line = 33
+canonical-text = "A value hardcoded into a reusable command, or carried over from the source the\ncommand was copied or templated from, is not evidence of the target the command now runs against: it is\nderived from the authoritative source at the point of use, or validated against it, before the guard\nrelies on it."
+source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
 
 [[clause]]
 clause-id = "estsep.1"
@@ -1301,7 +1310,7 @@ source-path = ".aiqt/core/rules/quali-confirm-execution-target.md"
 start-line = 13
 end-line = 15
 canonical-text = "Before an operation with side effects runs, the assistant confirms by observation which concrete\nsystem the ambient context points at: the active account, profile, cluster, database, remote, or\nenvironment tier."
-source-digest = "d111c88fff1a236105741029af70f9e15b5c38787f3dc5864d66d2344f93c880"
+source-digest = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
 
 [[clause]]
 clause-id = "exetgt.2"
@@ -1310,7 +1319,7 @@ source-path = ".aiqt/core/rules/quali-confirm-execution-target.md"
 start-line = 15
 end-line = 16
 canonical-text = "A production-class target is selected explicitly, never inherited silently from\nambient state, and when the target cannot be confirmed the operation holds until it can be."
-source-digest = "d111c88fff1a236105741029af70f9e15b5c38787f3dc5864d66d2344f93c880"
+source-digest = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
 
 [[clause]]
 clause-id = "exetgt.3"
@@ -1319,7 +1328,7 @@ source-path = ".aiqt/core/rules/quali-confirm-execution-target.md"
 start-line = 15
 end-line = 16
 canonical-text = "A production-class target is selected explicitly, never inherited silently from\nambient state, and when the target cannot be confirmed the operation holds until it can be."
-source-digest = "d111c88fff1a236105741029af70f9e15b5c38787f3dc5864d66d2344f93c880"
+source-digest = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
 
 [[clause]]
 clause-id = "exetgt.4"
@@ -1328,7 +1337,7 @@ source-path = ".aiqt/core/rules/quali-confirm-execution-target.md"
 start-line = 18
 end-line = 21
 canonical-text = "Configuration copied or templated from another context, another host, repository,\naccount, or environment tier, is re-read and re-verified against the intended target before first use:\nevery path, remote, account, and endpoint it carries is confirmed to point at the target, never trusted\non the strength of having worked at its origin."
-source-digest = "d111c88fff1a236105741029af70f9e15b5c38787f3dc5864d66d2344f93c880"
+source-digest = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
 
 [[clause]]
 clause-id = "exetgt.5"
@@ -1337,7 +1346,16 @@ source-path = ".aiqt/core/rules/quali-confirm-execution-target.md"
 start-line = 18
 end-line = 21
 canonical-text = "Configuration copied or templated from another context, another host, repository,\naccount, or environment tier, is re-read and re-verified against the intended target before first use:\nevery path, remote, account, and endpoint it carries is confirmed to point at the target, never trusted\non the strength of having worked at its origin."
-source-digest = "d111c88fff1a236105741029af70f9e15b5c38787f3dc5864d66d2344f93c880"
+source-digest = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
+
+[[clause]]
+clause-id = "exetgt.6"
+corpus-id = "exetgt"
+source-path = ".aiqt/core/rules/quali-confirm-execution-target.md"
+start-line = 23
+end-line = 25
+canonical-text = "A reusable command that carries a context-specific identifier, path, remote, account, or endpoint is\nconfirmed against the concrete checkout and target before it runs, never trusted because it was correct in\nthe repository or template it came from."
+source-digest = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
 
 [[clause]]
 clause-id = "dfdpth.1"
@@ -4487,7 +4505,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 16
 end-line = 17
 canonical-text = "A unit of work whose result or completion the caller depends on is launched so its outcome stays observable,\nnever discarded at the moment it starts."
-source-digest = "ca3ffd472023f70b29074105189fb3754e38b479dd7115e14b19bbf931421782"
+source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
 
 [[clause]]
 clause-id = "trkasy.2"
@@ -4496,7 +4514,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 20
 end-line = 21
 canonical-text = "Such work is launched through a mechanism that tracks it to completion and surfaces both its\nresult and its failures;"
-source-digest = "ca3ffd472023f70b29074105189fb3754e38b479dd7115e14b19bbf931421782"
+source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
 
 [[clause]]
 clause-id = "trkasy.3"
@@ -4505,7 +4523,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 21
 end-line = 22
 canonical-text = "a launch that drops the completion signal is not a safe way to start work the caller\nrelies on."
-source-digest = "ca3ffd472023f70b29074105189fb3754e38b479dd7115e14b19bbf931421782"
+source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
 
 [[clause]]
 clause-id = "trkasy.4"
@@ -4514,7 +4532,7 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 22
 end-line = 23
 canonical-text = "Where neither its result nor its completion is genuinely needed, running the task without tracking\nit is a deliberate, recorded choice, not the default."
-source-digest = "ca3ffd472023f70b29074105189fb3754e38b479dd7115e14b19bbf931421782"
+source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
 
 [[clause]]
 clause-id = "setcmp.7"
@@ -4532,7 +4550,16 @@ source-path = ".aiqt/core/rules/integ-track-launched-work.md"
 start-line = 25
 end-line = 26
 canonical-text = "A tracked deliverable whose output is captured only through a truncating filter is not observable\ncompletion: the completion signal must carry the full result, never a truncated view of it."
-source-digest = "ca3ffd472023f70b29074105189fb3754e38b479dd7115e14b19bbf931421782"
+source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
+
+[[clause]]
+clause-id = "trkasy.6"
+corpus-id = "trkasy"
+source-path = ".aiqt/core/rules/integ-track-launched-work.md"
+start-line = 30
+end-line = 32
+canonical-text = "Such work is launched through a tracked\nbackground mechanism that keeps its completion observable; where its result and completion are genuinely\nnot needed, detaching it is a deliberate, recorded choice, not a reflex."
+source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab74"
 
 [[clause]]
 clause-id = "mstreg.1"
