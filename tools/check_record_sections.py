@@ -12,9 +12,10 @@ The default post-merge ref is HEAD. With no --branch-ref, HEAD must be an ordina
 its first parent is the pre-merge target and its second parent is the branch tip. For a squash/rebase merge,
 or any other integration whose post-merge commit does not retain the branch parent, the caller must keep the
 branch ref available and pass --branch-ref. --base-ref is optional; absent it, the gate requires exactly one
-merge-base between the post-merge commit's first parent and the branch tip. An explicit --base-ref must itself
-name a real merge-base of the target and branch (the unique merge-base, or one of them when several exist); a
-base that is only a common ancestor is rejected.
+merge-base between the post-merge commit's first parent and the branch tip. An explicit --base-ref is accepted
+only when the target and branch have a unique merge-base and the supplied ref names it; if they have more than
+one merge-base, or the ref is only a common ancestor, it is rejected (two merge-bases can disagree on a
+section, so accepting one would let a real drop read as pre-existing).
 
 Config schema:
 
@@ -33,19 +34,21 @@ Exit convention:
      APPLICABLE when the default config is absent AND was not present at the pre-merge target, because this
      checkout never adopted the gate
   1  at least one in-scope branch-owned heading was dropped from the post-merge commit
-  2  malformed or unreadable config/input, a default config the merge itself removed, an unresolvable ref, a
-     missing declared branch record, duplicate selected headings, a non-unique merge-base when the gate
-     computes the base itself, an explicit --base-ref that is not a merge-base, or a branch ref that cannot
-     be inferred
+  2  malformed or unreadable config/input, a config path that is a symlink, a default config the merge itself
+     removed, an unresolvable ref (including an unresolvable post-merge ref while the removal check runs), a
+     missing declared branch record, duplicate selected headings, a non-unique merge-base on either the
+     default or the explicit-base path, an explicit --base-ref that is not that unique merge-base, or a branch
+     ref that cannot be inferred
 
 RESIDUAL. This gate proves heading preservation only for newly introduced headings selected by the adopter's
 patterns. It does not compare section bodies, cover edits to a heading already present at merge-base, detect a
 renamed heading as preserved, or prove that an opt-out marker represents a valid supersession. A record path
-or heading outside the config is outside its surface. An explicit --base-ref is constrained to a real
-merge-base of the target and branch, not merely a common ancestor, so it cannot suppress a branch-owned
-section by naming an ancestor that already contains it; a non-unique merge-base fails closed only on the
-default path, where the gate computes the base itself. Those boundaries are deliberate and printed in the
-PASS result; missing or ambiguous inputs inside the declared surface fail closed.
+or heading outside the config is outside its surface. An explicit --base-ref is accepted only when the target
+and branch have a unique merge-base and the supplied ref names it; a non-unique merge-base fails closed on both
+the default and the explicit-base paths, so an explicit base cannot mask a drop by naming one of several
+merge-bases or a mere common ancestor. A config path that is a symlink is fail-closed rather than followed, and
+an unresolvable post-merge ref fails closed rather than reading as never-adopted. Those boundaries are
+deliberate and printed in the PASS result; missing or ambiguous inputs inside the declared surface fail closed.
 """
 import argparse
 import io
@@ -126,12 +129,26 @@ def _repository_root(root):
 
 def _contained_config_path(root, value):
     candidate = Path(value) if Path(value).is_absolute() else root / value
+    # Reject a symlinked config BEFORE resolve() would follow it. A symlink at the config path (dangling
+    # or resolving) is fail-closed: following it lets an in-repo symlink swap the target that the load
+    # and the removal-detection both examine. Checked with lstat (is_symlink) so the link itself, not
+    # its target, is what is judged.
+    if _config_is_symlink(candidate):
+        raise GateError("config path {} is a symlink; a symlinked config is not followed".format(value))
     try:
         resolved = candidate.resolve(strict=False)
         resolved.relative_to(root)
     except (OSError, ValueError):
         raise GateError("config path must resolve inside the repository root")
     return resolved
+
+
+def _config_is_symlink(path):
+    """True when path itself is a symbolic link. An I/O error resolving it is fail-closed as a symlink."""
+    try:
+        return path.is_symlink()
+    except OSError:
+        return True
 
 
 def _record_path(value, where):
@@ -149,7 +166,14 @@ def _record_path(value, where):
 
 
 def load_config(path, allow_absent=False):
-    """Return (marker, record specs), or None only for an absent default adopter config."""
+    """Return (marker, record specs), or None only for an absent default adopter config.
+
+    A config path that is a symlink is fail-closed here too, so a caller that reaches load_config with an
+    unresolved path (the self-test, or any direct caller) cannot bypass the symlink guard: only a
+    genuinely absent, not-a-symlink default config yields None (NOT APPLICABLE).
+    """
+    if _config_is_symlink(path):
+        raise GateError("config path {} is a symlink; a symlinked config is not followed".format(path))
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -266,11 +290,16 @@ def resolve_graph(root, post_merge_ref, branch_ref=None, base_ref=None):
     if base_ref is not None:
         base = _resolve_commit(root, base_ref, "base ref")
         bases = _merge_base_all(root, target, branch)
-        if bases and base not in bases:
+        if len(bases) > 1:
             raise GateError(
-                "explicit base ref is not a merge-base of target and branch; a supplied --base-ref "
-                "must name a real merge-base (the unique one, or one of several), not merely a "
-                "common ancestor")
+                "target and branch have {} merge-bases; an explicit --base-ref is accepted only when "
+                "the merge-base is unique, matching the default path (two merge-bases can disagree on "
+                "a section, so accepting one would let a real drop read as pre-existing)"
+                .format(len(bases)))
+        if bases and base != bases[0]:
+            raise GateError(
+                "explicit base ref is not the unique merge-base of target and branch; a supplied "
+                "--base-ref must name that merge-base, not merely a common ancestor")
     else:
         base = _merge_base(root, target, branch)
     _require_ancestor(root, base, target, "base-to-target")
@@ -348,21 +377,21 @@ def _config_removed_by_merge(root, config_rel, post_merge_ref):
 
     Distinguishes an adopter that DELETED the config in this merge (silently disabling the gate) from
     one that never adopted it. The pre-merge target is the post-merge commit's first parent; the config
-    is read from that commit's tree at config_rel, the repo-relative path that was looked for. When no
-    target parent can be established (a parentless post-merge commit, or an unresolvable ref or tree),
-    the question cannot be answered, so this reports False and the caller keeps NOT APPLICABLE rather
-    than crashing.
+    is read from that commit's tree at config_rel, the repo-relative path that was looked for.
+
+    A genuinely UNRESOLVABLE input is not swallowed: an unresolvable post-merge ref, a malformed parent
+    list, or an unreadable target tree raises GateError and the caller fails closed (exit 2), matching
+    the convention for unresolvable inputs. The one case that legitimately reports False is a resolvable
+    but PARENTLESS post-merge commit (a root commit): it has no pre-merge target to have removed the
+    config from, so absence there is genuinely never-adopted, not a masked removal.
     """
     if config_rel is None:
         return False
-    try:
-        post_merge = _resolve_commit(root, post_merge_ref, "post-merge ref")
-        parents = _parents(root, post_merge)
-        if not parents:
-            return False
-        return _tree_text(root, parents[0], config_rel) is not None
-    except GateError:
+    post_merge = _resolve_commit(root, post_merge_ref, "post-merge ref")
+    parents = _parents(root, post_merge)
+    if not parents:
         return False
+    return _tree_text(root, parents[0], config_rel) is not None
 
 
 def _repo_relative(root, config_path):
@@ -721,6 +750,135 @@ def self_test():
                 "non-merge-base explicit base is rejected",
                 _quiet_run(cx, cx_config, True, cx_post, None, cx_c),
                 2)
+
+            # MAJOR A (cannot-evaluate must fail closed, not open): with the default config absent AND
+            # an unresolvable post-merge ref, the removal check cannot answer, so the gate fails closed
+            # (exit 2) rather than reporting NOT APPLICABLE. config_path was deleted by the finding-2
+            # vector above, so it is genuinely absent (and not a symlink) here.
+            expect(
+                "unresolvable post-merge ref fails closed when config is absent",
+                _quiet_run(
+                    root, config_path, False, "no-such-ref-xyz", None, None),
+                2)
+
+            # MAJOR B (symlinked config must fail closed): replacing the default config with an in-repo
+            # dangling symlink must not let path resolution point the removal check at the wrong target.
+            # A symlinked config (dangling or resolving) is fail-closed; only a genuinely absent,
+            # not-a-symlink default config is NOT APPLICABLE. Driven through main() so the containment
+            # path (which resolves the symlink) is exercised, with the config present at the target
+            # parent so a bypass would otherwise read NOT APPLICABLE.
+            symlink_config = root / ".aiqt" / "record-sections.toml"
+            if symlink_config.is_symlink() or symlink_config.exists():
+                symlink_config.unlink()
+            os.symlink("missing.toml", str(symlink_config))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                symlink_rc = main(
+                    ["--root", str(root), "--post-merge-ref", bad])
+            symlink_config.unlink()
+            expect("symlinked default config fails closed", symlink_rc, 2)
+
+            # MAJOR C (explicit base with MULTIPLE merge-bases): when target and branch have two real
+            # merge-bases that DISAGREE on the section (one contains it, one does not), accepting the
+            # section-containing base would let a genuine drop read as pre-existing. An explicit
+            # --base-ref is accepted only when the merge-base is unique, matching the default path.
+            cxc = Path(directory) / "disagree"
+            cxc.mkdir()
+            _selftest_git(cxc, ["init", "-q", "-b", "main"])
+            _selftest_git(cxc, ["config", "user.name", "AIQT Self-Test"])
+            _selftest_git(
+                cxc, ["config", "user.email", "selftest@example.invalid"])
+            (cxc / ".aiqt").mkdir()
+            (cxc / ".aiqt" / "record-sections.toml").write_text(
+                'schema-version = 1\n'
+                'opt-out-marker = "<!-- aiqt-record-section: superseded -->"'
+                '\n\n'
+                '[[record]]\n'
+                'path = "records.md"\n'
+                "heading-pattern = "
+                "'^## [0-9]{4}-[0-9]{2}-[0-9]{2}(?: .+)?$'\n",
+                encoding="utf-8")
+            (cxc / "records.md").write_text(no_section, encoding="utf-8")
+            _selftest_git(cxc, ["add", "-A"])
+            _selftest_git(cxc, ["commit", "-q", "-m", "R, no section"])
+            cxc_r = _selftest_git(cxc, ["rev-parse", "HEAD"])
+            cxc_r_tree = _selftest_git(cxc, ["rev-parse", "HEAD^{tree}"])
+            _selftest_git(cxc, ["checkout", "-q", "-b", "with-section", cxc_r])
+            (cxc / "records.md").write_text(with_section, encoding="utf-8")
+            _selftest_git(cxc, ["add", "-A"])
+            _selftest_git(
+                cxc, ["commit", "-q", "-m", "L carries the section"])
+            cxc_l = _selftest_git(cxc, ["rev-parse", "HEAD"])
+            cxc_l_tree = _selftest_git(cxc, ["rev-parse", "HEAD^{tree}"])
+            _selftest_git(cxc, ["checkout", "-q", "-b", "no-section", cxc_r])
+            (cxc / "other.txt").write_text("o\n", encoding="utf-8")
+            _selftest_git(cxc, ["add", "-A"])
+            _selftest_git(cxc, ["commit", "-q", "-m", "Rt, no section"])
+            cxc_rt = _selftest_git(cxc, ["rev-parse", "HEAD"])
+            cxc_target = _selftest_git(
+                cxc,
+                ["commit-tree", cxc_r_tree, "-p", cxc_l, "-p", cxc_rt],
+                input_text="target merge, no section\n")
+            cxc_branch = _selftest_git(
+                cxc,
+                ["commit-tree", cxc_l_tree, "-p", cxc_rt, "-p", cxc_l],
+                input_text="branch merge, with section\n")
+            cxc_post = _selftest_git(
+                cxc,
+                ["commit-tree", cxc_r_tree,
+                 "-p", cxc_target, "-p", cxc_branch],
+                input_text="post-merge drops the section\n")
+            cxc_config = cxc / ".aiqt" / "record-sections.toml"
+            expect(
+                "disagreeing merge-bases fail closed with no explicit base",
+                _quiet_run(cxc, cxc_config, True, cxc_post, None, None),
+                2)
+            expect(
+                "explicit base with multiple merge-bases is rejected",
+                _quiet_run(cxc, cxc_config, True, cxc_post, None, cxc_l),
+                2)
+
+            # Companion to MAJOR C (unique-merge-base membership): with a UNIQUE merge-base M, an
+            # explicit --base-ref that is only a common ancestor (an ancestor of M that still carries
+            # the section) is rejected, so it cannot mask a drop where the merge-base is unique.
+            cxu = Path(directory) / "unique-base"
+            cxu.mkdir()
+            _selftest_git(cxu, ["init", "-q", "-b", "main"])
+            _selftest_git(cxu, ["config", "user.name", "AIQT Self-Test"])
+            _selftest_git(
+                cxu, ["config", "user.email", "selftest@example.invalid"])
+            (cxu / ".aiqt").mkdir()
+            (cxu / ".aiqt" / "record-sections.toml").write_text(
+                cxc_config.read_text(encoding="utf-8"), encoding="utf-8")
+            (cxu / "records.md").write_text(with_section, encoding="utf-8")
+            _selftest_git(cxu, ["add", "-A"])
+            _selftest_git(cxu, ["commit", "-q", "-m", "C carries the section"])
+            cxu_c = _selftest_git(cxu, ["rev-parse", "HEAD"])
+            (cxu / "records.md").write_text(no_section, encoding="utf-8")
+            _selftest_git(cxu, ["add", "-A"])
+            _selftest_git(cxu, ["commit", "-q", "-m", "M removes the section"])
+            cxu_m = _selftest_git(cxu, ["rev-parse", "HEAD"])
+            cxu_m_tree = _selftest_git(cxu, ["rev-parse", "HEAD^{tree}"])
+            _selftest_git(cxu, ["checkout", "-q", "-b", "u-target", cxu_m])
+            (cxu / "u.txt").write_text("u\n", encoding="utf-8")
+            _selftest_git(cxu, ["add", "-A"])
+            _selftest_git(cxu, ["commit", "-q", "-m", "target change"])
+            cxu_target = _selftest_git(cxu, ["rev-parse", "HEAD"])
+            _selftest_git(cxu, ["checkout", "-q", "-b", "u-branch", cxu_m])
+            (cxu / "records.md").write_text(with_section, encoding="utf-8")
+            _selftest_git(cxu, ["add", "-A"])
+            _selftest_git(
+                cxu, ["commit", "-q", "-m", "branch re-adds the section"])
+            cxu_branch = _selftest_git(cxu, ["rev-parse", "HEAD"])
+            cxu_post = _selftest_git(
+                cxu,
+                ["commit-tree", cxu_m_tree,
+                 "-p", cxu_target, "-p", cxu_branch],
+                input_text="post-merge drops the section\n")
+            cxu_config = cxu / ".aiqt" / "record-sections.toml"
+            expect(
+                "unique merge-base, non-merge-base explicit ancestor rejected",
+                _quiet_run(cxu, cxu_config, True, cxu_post, None, cxu_c),
+                2)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print("error: self-test could not build its synthetic git fixture "
               "({}); fail-closed".format(exc), file=sys.stderr)
@@ -736,8 +894,9 @@ def self_test():
           "squash-like explicit refs, section-local opt-out, "
           "duplicate-heading ambiguity, malformed config, uninferable "
           "branch, absent default adopter config, ambient GIT_ redirection, "
-          "config removed by the merge, and a non-merge-base explicit base "
-          "all produce the required 0/1/2 decisions")
+          "config removed by the merge, an unresolvable post-merge ref, a "
+          "symlinked config, and an explicit base that is not the unique "
+          "merge-base all produce the required 0/1/2 decisions")
     return 0
 
 
@@ -759,8 +918,9 @@ def _parser():
         help="branch tip ref; inferred from the second parent when omitted")
     parser.add_argument(
         "--base-ref",
-        help="merge-base ref; computed from target and branch when omitted. An explicit value must be a "
-             "real merge-base, not merely a common ancestor")
+        help="merge-base ref; computed from target and branch when omitted. An explicit value is accepted "
+             "only when the merge-base is unique and the value names it; a non-unique merge-base or a mere "
+             "common ancestor is rejected")
     parser.add_argument(
         "--self-test",
         action="store_true",
