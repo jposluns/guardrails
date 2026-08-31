@@ -3076,6 +3076,344 @@ def main():
         finally:
             os.lstat = _real_lstat
 
+        # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
+        # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the
+        # pre-GS-7 handler answered differently (it allowed a drive-relative file_path, was blind to
+        # MultiEdit/NotebookEdit/Grep, fail-opened on a malformed tool_input at the search-root branch,
+        # and had no Bash linkage at all). It pins three layers: (a) the native-path predicate that
+        # rejects drive-relative 'C:file', bare 'C:', and leading-backslash '\\file' while accepting a
+        # drive-absolute or UNC path, plus the tool_input-must-be-a-mapping fail-closed; (b) the widened
+        # matcher over MultiEdit (file_path), NotebookEdit (notebook_path), and Grep (path), each field
+        # name fixed against the live Claude Code tool schema, with the rootless Glob/Grep carve-out
+        # re-affirmed; and (c) the conservative Bash floor that ASKS on a relative cd/pushd destination or
+        # a relative redirection target and allows an absolute one, never denying and never judging an
+        # arbitrary command operand.
+        def _reduce(handler, data):
+            code, stdout_obj, _stderr = handler(data)
+            if code == 0 and stdout_obj is None:
+                return "allow"
+            if code == 0 and isinstance(stdout_obj, dict):
+                return stdout_obj.get("hookSpecificOutput", {}).get("permissionDecision", "unexpected")
+            return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
+
+        def apexpect(label, tool, tool_input, want):
+            got = _reduce(aiqt_hooks.absolute_paths,
+                          {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input})
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        def bcmd(label, command, want):
+            got = _reduce(aiqt_hooks.bash_absolute_paths,
+                          {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                           "tool_input": {"command": command}})
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # --- Layer a: native-path predicate over the required-absolute file_path branch --------------
+        apexpect("(ap-a1) Read absolute file_path allows", "Read", {"file_path": rp}, "allow")
+        apexpect("(ap-a2) Read relative file_path denies", "Read", {"file_path": "rel/x"}, "deny")
+        apexpect("(ap-a3) Edit drive-relative 'C:file' denies (native predicate)", "Edit",
+                 {"file_path": "C:file"}, "deny")
+        apexpect("(ap-a4) Write bare drive 'C:' denies (native predicate)", "Write",
+                 {"file_path": "C:"}, "deny")
+        apexpect("(ap-a5) Write leading-backslash '\\file' denies (native predicate)", "Write",
+                 {"file_path": "\\file"}, "deny")
+        apexpect("(ap-a6) Write drive-absolute 'C:\\x' allows", "Write", {"file_path": "C:\\x"}, "allow")
+        apexpect("(ap-a7) Write drive-absolute forward 'C:/x' allows", "Write",
+                 {"file_path": "C:/x"}, "allow")
+        apexpect("(ap-a8) Write UNC '\\\\srv\\share' allows", "Write",
+                 {"file_path": "\\\\srv\\share"}, "allow")
+        apexpect("(ap-a9) Read tilde '~/x' denies (not expanded, fail-closed)", "Read",
+                 {"file_path": "~/x"}, "deny")
+        apexpect("(ap-a10) Read empty file_path denies (fail-closed)", "Read", {"file_path": ""}, "deny")
+        apexpect("(ap-a11) Read missing file_path denies (fail-closed)", "Read", {}, "deny")
+        apexpect("(ap-a12) Read non-string file_path denies (fail-closed)", "Read",
+                 {"file_path": 5}, "deny")
+        # tool_input must be a mapping BEFORE any branch: a None or list payload fails closed for an
+        # in-scope tool (the search-root fail-open the old 'or {}' collapse allowed is now closed), while
+        # an out-of-scope tool still allows (the matcher governs).
+        apexpect("(ap-a13) Read tool_input None fails closed (mapping guard)", "Read", None, "deny")
+        apexpect("(ap-a14) Glob tool_input a list fails closed (was fail-open at search-root)", "Glob",
+                 [], "deny")
+        apexpect("(ap-a15) Grep tool_input None fails closed (mapping guard)", "Grep", None, "deny")
+        apexpect("(ap-a16) out-of-scope tool with non-dict tool_input allows (matcher governs)", "Bash",
+                 None, "allow")
+        apexpect("(ap-a17) missing tool_name denies (fail-closed)-> via absolute_paths", None,
+                 {"file_path": "rel"}, "deny")
+
+        # --- Layer b: widened matcher over MultiEdit / NotebookEdit / Grep, live-schema field names ---
+        apexpect("(ap-b1) MultiEdit relative file_path denies", "MultiEdit",
+                 {"file_path": "rel/x", "edits": []}, "deny")
+        apexpect("(ap-b2) MultiEdit absolute file_path allows", "MultiEdit",
+                 {"file_path": rp, "edits": []}, "allow")
+        apexpect("(ap-b3) MultiEdit missing file_path denies (fail-closed)", "MultiEdit",
+                 {"edits": []}, "deny")
+        apexpect("(ap-b4) NotebookEdit relative notebook_path denies", "NotebookEdit",
+                 {"notebook_path": "nb.ipynb"}, "deny")
+        apexpect("(ap-b5) NotebookEdit absolute notebook_path allows", "NotebookEdit",
+                 {"notebook_path": rp + "/nb.ipynb"}, "allow")
+        apexpect("(ap-b6) NotebookEdit missing notebook_path denies (fail-closed)", "NotebookEdit",
+                 {"new_source": "x"}, "deny")
+        apexpect("(ap-b7) Grep relative path search root denies", "Grep",
+                 {"pattern": "x", "path": "rel"}, "deny")
+        apexpect("(ap-b8) Grep absolute path search root allows", "Grep",
+                 {"pattern": "x", "path": rp}, "allow")
+        apexpect("(ap-b9) Grep rootless (no path) allows (carve-out)", "Grep", {"pattern": "x"}, "allow")
+        apexpect("(ap-b10) Grep empty path denies (fail-closed)", "Grep",
+                 {"pattern": "x", "path": ""}, "deny")
+        # carve-out re-affirmed for the pre-existing Glob wiring, unchanged by GS-7
+        apexpect("(ap-b11) Glob rootless (no path) allows (carve-out)", "Glob",
+                 {"pattern": "*.py"}, "allow")
+        apexpect("(ap-b12) Glob relative path denies", "Glob", {"pattern": "*.py", "path": "rel"}, "deny")
+        apexpect("(ap-b13) Glob absolute path allows", "Glob", {"pattern": "*.py", "path": rp}, "allow")
+
+        # --- Layer c: conservative Bash floor over cd/pushd operands and redirect targets ------------
+        bcmd("(ap-c1) cd absolute allows", "cd {} && ls".format(rp), "allow")
+        bcmd("(ap-c2) cd relative asks", "cd sub", "ask")
+        bcmd("(ap-c3) cd ../parent relative asks", "cd ../x", "ask")
+        bcmd("(ap-c4) cd ./here relative asks", "cd ./x", "ask")
+        bcmd("(ap-c5) pushd relative asks", "pushd rel", "ask")
+        bcmd("(ap-c6) pushd absolute allows", "pushd {}".format(rp), "allow")
+        bcmd("(ap-c7) cd opaque '$DIR' asks (unresolvable)", "cd $DIR", "ask")
+        bcmd("(ap-c8) cd rooted-with-expansion '/$X/y' allows (always absolute)", "cd /$X/y", "allow")
+        bcmd("(ap-c9) cd bare (HOME) allows", "cd", "allow")
+        bcmd("(ap-c10) cd '-' (OLDPWD) allows", "cd -", "allow")
+        bcmd("(ap-c11) pushd bare (stack swap) allows", "pushd", "allow")
+        bcmd("(ap-c12) pushd '+1' rotation allows (no path)", "pushd +1", "allow")
+        bcmd("(ap-c13) cd option then absolute allows (option skipped)", "cd -P {}".format(rp), "allow")
+        bcmd("(ap-c14) cd option then relative asks (option skipped, dest judged)", "cd -P rel", "ask")
+        bcmd("(ap-c15) pushd '-n' then relative asks", "pushd -n rel", "ask")
+        bcmd("(ap-c16) relative redirect target asks", "echo hi > out.txt", "ask")
+        bcmd("(ap-c17) absolute redirect target allows", "echo hi > {}/out.txt".format(rp), "allow")
+        bcmd("(ap-c18) relative append redirect asks", "echo hi >> log", "ask")
+        bcmd("(ap-c19) relative input redirect asks", "sort < data.txt", "ask")
+        bcmd("(ap-c20) absolute input redirect allows", "sort < {}/data.txt".format(rp), "allow")
+        bcmd("(ap-c21) fd duplication '2>&1' allows (descriptor, no path)", "cat x 2>&1", "allow")
+        bcmd("(ap-c22) absolute /dev redirect allows", "cat x 2>/dev/null", "allow")
+        bcmd("(ap-c23) opaque redirect target '$F' asks", "echo hi > $F", "ask")
+        bcmd("(ap-c24) non-cd relative operand NOT judged (allows)", "cat rel.txt", "allow")
+        bcmd("(ap-c25) compound with a relative redirect asks", "cd {} && echo x > out.txt".format(rp),
+             "ask")
+        bcmd("(ap-c26) compound all-absolute allows", "cd {} && cat {}/f".format(rp, rp), "allow")
+        bcmd("(ap-c27) unparseable command with no earlier relative position allows (disclosed residual)",
+             'git checkout -- "unbalanced', "allow")
+        bcmd("(ap-c28) empty command asks (cannot read)", "", "ask")
+        # GS-7 fix: per-SEGMENT partial lex so a resolvable relative cd/redirect in the PARSEABLE PREFIX
+        # still ASKS even when a LATER segment is unparseable (pre-fix, one lexer ValueError over the whole
+        # command discarded every parsed segment and ALLOWED). Fails-when-reverted: these were "allow".
+        bcmd("(ap-c34) relative cd before a heredoc asks (prefix inspected, GS-7 FIX 1)",
+             "cd .aiqt; cat <<EOF > /dev/null\nx\nEOF\npwd", "ask")
+        bcmd("(ap-c35) relative redirect before a here-string asks (prefix inspected, GS-7 FIX 1)",
+             "echo hi > out.txt; cat <<<x", "ask")
+        bcmd("(ap-c36) relative cd before a process substitution asks (prefix inspected, GS-7 FIX 1)",
+             "cd rel; cat <(printf x)", "ask")
+        # boundary: an unparseable construct with NO earlier resolvable position stays a disclosed ALLOW
+        # (a cd/redirect WITHIN or AFTER the construct is uninspected, not over-asked on every heredoc).
+        bcmd("(ap-c37) heredoc with no earlier relative position allows (disclosed residual, GS-7 FIX 1)",
+             "cat <<EOF\nx\nEOF", "allow")
+        # GS-7 FIX 2: a real relative destination beginning '-'/'+' is the destination, not an option; '--'
+        # ends option processing. Pre-fix ^[-+] skipped every such token -> None -> ALLOW. Fails-when-reverted.
+        bcmd("(ap-c38) 'cd -- -relative' asks ('--' ends options, dest judged, GS-7 FIX 2)",
+             "cd -- -relative", "ask")
+        bcmd("(ap-c39) 'cd +relative' asks (a real relative dir name, GS-7 FIX 2)", "cd +relative", "ask")
+        bcmd("(ap-c40) 'cd -relative' asks (a real relative dir name, GS-7 FIX 2)", "cd -relative", "ask")
+        # the real option/rotation forms still allow (not regressed by FIX 2)
+        bcmd("(ap-c41) 'cd -- /abs' allows (post-'--' absolute destination)", "cd -- {}".format(rp),
+             "allow")
+        bcmd("(ap-c42) 'cd -e -L /abs' allows (real cd option flags skipped)", "cd -e -L {}".format(rp),
+             "allow")
+        # GS-7 FIX 3: an UNQUOTED CURRENT-USER tilde ('~', '~/x') is cwd-independent (expands to $HOME) ->
+        # ALLOW, matching bare 'cd'; pre-fix it ASKED (an ASK-fatigue over-fire that trained the 'cd' rewrite
+        # bypass). An opaque '$VAR' still cannot be proven absolute and ASKS. Fails-when-reverted (tilde).
+        bcmd("(ap-c43) 'cd ~' allows (current-user tilde expands to $HOME, GS-7 FIX 3)", "cd ~", "allow")
+        bcmd("(ap-c44) 'cd ~/foo' allows (current-user tilde path, GS-7 FIX 3)", "cd ~/foo", "allow")
+        # GS-7 round-2 MAJOR 4: a '~user'/'~user/x' names another account's home whose EXISTENCE the hook
+        # cannot verify (an unresolved login name leaves the word RELATIVE), so the ALLOW is NARROWED to the
+        # current-user forms and '~user' now ASKS (was a false ALLOW pre-round-2). Fails-when-reverted.
+        bcmd("(ap-c45) 'cd ~user/x' asks (~user existence unverifiable, GS-7 round-2 MAJOR 4)",
+             "cd ~user/x", "ask")
+        bcmd("(ap-c45b) 'cd ~user' asks (~user existence unverifiable, GS-7 round-2 MAJOR 4)",
+             "cd ~user", "ask")
+        bcmd("(ap-c46) 'cd $HOME' asks (opaque expansion, not provably absolute, GS-7 FIX 3)",
+             "cd $HOME", "ask")
+        bcmd("(ap-c47) 'cd \"$HOME\"' asks (opaque expansion, GS-7 FIX 3)", 'cd "$HOME"', "ask")
+        # a QUOTED '~' is a literal relative directory named '~', not tilde expansion: still ASKS (the
+        # per-token LEADING-UNQUOTED-tilde flag tells the unquoted, expanded form from the quoted one).
+        bcmd("(ap-c48) quoted 'cd \"~/foo\"' asks (quoted tilde is literal-relative, GS-7 FIX 3)",
+             'cd "~/foo"', "ask")
+        # GS-7 round-2 MAJOR 1: a QUOTED leading tilde with an UNQUOTED OPAQUE tail ('$'/glob/brace) is NOT
+        # tilde-expanded by bash (the '~' is quoted, so the word stays RELATIVE), yet pre-round-2 it was a
+        # false ALLOW because the token-wide opacity flag was mistaken for an unquoted-tilde signal. The
+        # LEADING-UNQUOTED-tilde flag now gates the tilde-ALLOW, so every quoted-leading-tilde form ASKS
+        # while the genuine unquoted '~/$VAR' stays ALLOW. Fails-when-reverted (all the ASK cases were ALLOW).
+        bcmd("(ap-c49) 'cd \"~\"/x*' asks (quoted tilde + glob tail, not expanded, GS-7 round-2 MAJOR 1)",
+             'cd "~"/x*', "ask")
+        bcmd("(ap-c50) 'cd \"~\"/x?' asks (quoted tilde + glob tail, GS-7 round-2 MAJOR 1)",
+             'cd "~"/x?', "ask")
+        bcmd("(ap-c51) 'cd \"~\"/{a}' asks (quoted tilde + brace tail, GS-7 round-2 MAJOR 1)",
+             'cd "~"/{a}', "ask")
+        bcmd("(ap-c52) 'cd \"~\"/$V' asks (quoted tilde + expansion tail, GS-7 round-2 MAJOR 1)",
+             'cd "~"/$V', "ask")
+        bcmd("(ap-c53) \"cd '~'/x*\" asks (single-quoted tilde + glob tail, GS-7 round-2 MAJOR 1)",
+             "cd '~'/x*", "ask")
+        bcmd("(ap-c54) 'cd \"~/repo\"*' asks (quoted tilde path + glob, GS-7 round-2 MAJOR 1)",
+             'cd "~/repo"*', "ask")
+        bcmd("(ap-c55) 'cd \\\\~/$VAR' asks (escaped tilde + expansion tail, GS-7 round-2 MAJOR 1)",
+             'cd \\~/$VAR', "ask")
+        bcmd("(ap-c56) 'cd \"\"~/x' asks (empty-quote-preceded tilde is not leading, GS-7 round-2 MAJOR 1)",
+             'cd ""~/x', "ask")
+        # the genuine unquoted leading tilde with an opaque tail STAYS ALLOW (regression guard for MAJOR 1)
+        bcmd("(ap-c57) 'cd ~/$VAR' allows (unquoted leading tilde expands to $HOME, GS-7 round-2 MAJOR 1)",
+             "cd ~/$VAR", "allow")
+        # GS-7 round-2 MAJOR 2: a relative redirect target fully parsed BEFORE an unparseable construct in
+        # the SAME in-progress segment ('cat > out.txt <<EOF...', 'cat > out.txt <(...)') is now inspected
+        # (the in-progress segment is recovered on the partial-lex exception path) and ASKS; pre-round-2 the
+        # whole in-progress segment was discarded, a false ALLOW. Fails-when-reverted (both were ALLOW).
+        bcmd("(ap-c58) redirect target before a heredoc asks (in-progress seg recovered, GS-7 round-2 MAJOR 2)",
+             "cat > out.txt <<EOF\nx\nEOF", "ask")
+        bcmd("(ap-c59) redirect target before a proc-subst asks (in-progress seg recovered, GS-7 round-2 MAJOR 2)",
+             "cat > out.txt <(printf x)", "ask")
+        # boundary preserved: a construct with NO earlier resolvable position in the in-progress segment
+        # stays a disclosed ALLOW; a cd/redirect AFTER the construct stays uninspected (disclosed residual).
+        bcmd("(ap-c60) heredoc with only a command word before it allows (disclosed residual, GS-7 round-2)",
+             "cat <<EOF\nx\nEOF", "allow")
+        bcmd("(ap-c61) relative cd AFTER a proc-subst stays allow (position after construct, GS-7 round-2)",
+             "cat <(x); cd rel", "allow")
+        # GS-7 round-2 MAJOR 3: a lone '-' destination AFTER '--' is still the $OLDPWD shortcut in bash
+        # (empirically /tmp->/opt), so 'cd -- -' ALLOWS; pre-round-2 the OLDPWD check ran only during option
+        # processing, so post-'--' the '-' was mis-read as a relative name and ASKED. Fails-when-reverted.
+        bcmd("(ap-c62) 'cd -- -' allows (lone '-' after '--' is $OLDPWD, GS-7 round-2 MAJOR 3)",
+             "cd -- -", "allow")
+        # regression guards for MAJOR 3: a real relative name after '--' still ASKS, and 'cd -- --' (a dir
+        # literally named '--', which bash resolves against the cwd) stays ASK - NOT a false OLDPWD allow.
+        bcmd("(ap-c63) 'cd -- rel' asks (post-'--' relative name, GS-7 round-2 MAJOR 3 guard)",
+             "cd -- rel", "ask")
+        bcmd("(ap-c64) 'cd -- --' asks (post-'--' relative dir named '--', GS-7 round-2 MAJOR 3 guard)",
+             "cd -- --", "ask")
+        # GS-7 round-3 MAJOR 1: bash expands a leading '~' ONLY when the WHOLE tilde-prefix (from '~' to the
+        # first UNQUOTED '/' or end of word) is unquoted/unescaped. A QUOTE or ESCAPE anywhere in that prefix
+        # disables expansion and the word stays RELATIVE - even when the DECODED token is fully literal ('~/x')
+        # with no opacity flag. Pre-round-3 argv_leading_tilde was set merely because the FIRST char was an
+        # unquoted '~', so all of these were false ALLOWs. The prefix is now tracked per-character in _read_word,
+        # so each ASKS. Fails-when-reverted (every case here was ALLOW on the round-2 code).
+        bcmd("(ap-c65) 'cd ~\"/x\"' asks (quoted '/' in tilde-prefix, not expanded, GS-7 round-3 MAJOR 1)",
+             'cd ~"/x"', "ask")
+        bcmd("(ap-c66) \"cd ~''\" asks (empty single-quote in tilde-prefix, GS-7 round-3 MAJOR 1)",
+             "cd ~''", "ask")
+        bcmd("(ap-c67) 'cd ~\"\"/x' asks (empty double-quote before the '/', GS-7 round-3 MAJOR 1)",
+             'cd ~""/x', "ask")
+        bcmd("(ap-c68) \"cd ~'/x'\" asks (single-quoted '/x' tail in prefix, GS-7 round-3 MAJOR 1)",
+             "cd ~'/x'", "ask")
+        bcmd("(ap-c69) 'cd ~\\\\/x' asks (escaped '/' in tilde-prefix, GS-7 round-3 MAJOR 1)",
+             "cd ~\\/x", "ask")
+        bcmd("(ap-c70) 'cd ~\"/\"$V' asks (quoted '/' then expansion, prefix quoted, GS-7 round-3 MAJOR 1)",
+             'cd ~"/"$V', "ask")
+        bcmd("(ap-c71) 'cd ~\"/x\" <(printf x)' asks (quoted-prefix tilde in a partial-lex compose, round-3)",
+             'cd ~"/x" <(printf x)', "ask")
+        # regression guard for round-3 MAJOR 1: an unquoted tilde-prefix closed by an unquoted '/' STAYS ALLOW,
+        # even with an opaque '$VAR' AFTER the '/', because material after the prefix does not block expansion.
+        bcmd("(ap-c72) 'cd ~/$VAR' allows (whole tilde-prefix unquoted, GS-7 round-3 MAJOR 1 guard)",
+             "cd ~/$VAR", "allow")
+        # GS-7 round-3 MAJOR 2: an inline OLDPWD= assignment overrides $OLDPWD for that command, so a lone '-'
+        # destination (incl. post-'--') no longer resolves to a cwd-independent prior dir - bash cds to the
+        # assigned value, which can be RELATIVE ('OLDPWD=.. cd -- -' -> '..'). The floor cannot prove the value
+        # absolute, so a lone '-' with an inline OLDPWD= present now ASKS. Pre-round-3 it was a false ALLOW.
+        # Fails-when-reverted. Without an inline OLDPWD=, 'cd -' / 'cd -- -' STAY ALLOW (guards below).
+        bcmd("(ap-c73) 'OLDPWD=.. cd -- -' asks (inline OLDPWD= overrides $OLDPWD, GS-7 round-3 MAJOR 2)",
+             "OLDPWD=.. cd -- -", "ask")
+        bcmd("(ap-c74) 'OLDPWD=.. cd -' asks (inline OLDPWD= overrides $OLDPWD, GS-7 round-3 MAJOR 2)",
+             "OLDPWD=.. cd -", "ask")
+        bcmd("(ap-c75) 'OLDPWD=.. pushd -- -' asks (inline OLDPWD= overrides $OLDPWD, GS-7 round-3 MAJOR 2)",
+             "OLDPWD=.. pushd -- -", "ask")
+        bcmd("(ap-c76) plain 'cd -- -' still allows (no inline OLDPWD=, GS-7 round-3 MAJOR 2 guard)",
+             "cd -- -", "allow")
+        bcmd("(ap-c77) plain 'cd -' still allows (no inline OLDPWD=, GS-7 round-3 MAJOR 2 guard)",
+             "cd -", "allow")
+        # GS-7 round-4 CONSERVATIVE CONSOLIDATION. Four codex MAJORs, resolved by SHRINKING the fragile ALLOW
+        # set (any leading env-assignment -> the cwd-independent cd destinations ASK) rather than enumerating
+        # variable names, plus a redirect-tilde consistency fix. Each behavioural case below fails-when-reverted.
+        # MAJOR 1 (under-block): '_ENV_ASSIGN_RE' matched 'NAME=' but not the APPEND 'NAME+=', so 'OLDPWD+=..'
+        # was mistaken for the command word and the following cd never examined -> false ALLOW of a relative cd.
+        # The regex now recognizes '+=', so the assignment is skipped, cd is examined, and the lone '-' ASKS.
+        bcmd("(ap-c78) 'OLDPWD+=.. cd -' asks (append-assignment now recognized, GS-7 round-4 MAJOR 1)",
+             "OLDPWD+=.. cd -", "ask")
+        bcmd("(ap-c78b) 'unset OLDPWD; OLDPWD+=.. cd -' asks (append-assignment in a later segment, round-4)",
+             "unset OLDPWD; OLDPWD+=.. cd -", "ask")
+        # MAJOR 2 (under-block): a BARE 'cd' with an inline HOME= (or HOME+=) assignment cds to the redirected
+        # $HOME, which can be relative, but the no-operand branch treated bare cd as unconditionally
+        # cwd-independent. ANY leading assignment now makes the bare-cd (no-operand) $HOME default ASK.
+        bcmd("(ap-c79) 'HOME=.. cd' asks (bare cd -> redirected $HOME, GS-7 round-4 MAJOR 2)",
+             "HOME=.. cd", "ask")
+        bcmd("(ap-c79b) 'HOME+=.. cd' asks (append-assignment bare cd -> $HOME, GS-7 round-4 MAJOR 2)",
+             "HOME+=.. cd", "ask")
+        bcmd("(ap-c79c) 'HOME=.. pushd' asks (bare pushd default, any leading assignment, round-4 MAJOR 2)",
+             "HOME=.. pushd", "ask")
+        # MAJOR 4 (over-fire fixed): a redirect target whose CLEAN leading tilde-prefix expands to $HOME is
+        # absolute, but the redirect parser discarded the leading-tilde signal so '> ~/x' was classed opaque
+        # and ASKED, inconsistent with 'cd ~/x' ALLOW. The signal is now propagated, so a clean-tilde redirect
+        # target ALLOWs, while a quoted or complex-prefix tilde still ASKS - matching the cd tilde rule exactly.
+        bcmd("(ap-c80) 'printf x > ~/x' allows (clean-tilde redirect target -> $HOME, GS-7 round-4 MAJOR 4)",
+             "printf x > ~/x", "allow")
+        bcmd("(ap-c80b) 'printf x > ~/\"x\"' allows (quote AFTER the prefix '/' does not block, round-4 MAJOR 4)",
+             'printf x > ~/"x"', "allow")
+        bcmd("(ap-c80c) 'printf x > ~/$V' allows (expansion after the prefix '/' does not block, round-4 MAJOR 4)",
+             "printf x > ~/$V", "allow")
+        bcmd("(ap-c80d) 'printf x >> ~/log' allows (append redirect, clean-tilde target, round-4 MAJOR 4)",
+             "printf x >> ~/log", "allow")
+        bcmd("(ap-c80e) 'printf x > ~' allows (bare '~' target expands to $HOME, round-4 MAJOR 4)",
+             "printf x > ~", "allow")
+        # regression guards for MAJOR 4: a QUOTED or complex-prefix tilde redirect target is NOT expanded and
+        # still ASKS (matching cd), and a plain relative redirect target is unaffected.
+        bcmd("(ap-c81) 'printf x > \"~\"/x' asks (quoted tilde is literal-relative, GS-7 round-4 MAJOR 4 guard)",
+             'printf x > "~"/x', "ask")
+        bcmd("(ap-c81b) 'printf x > ~\"/x\"' asks (quote inside the tilde-prefix, round-4 MAJOR 4 guard)",
+             'printf x > ~"/x"', "ask")
+        bcmd("(ap-c81c) 'printf x > out.txt' asks (plain relative redirect target unaffected, round-4 guard)",
+             "printf x > out.txt", "ask")
+        bcmd("(ap-c81d) 'printf x > /tmp/x' allows (absolute redirect target unaffected, round-4 guard)",
+             "printf x > /tmp/x", "allow")
+        # MAJOR 3 (DISCLOSED conservative over-fire, PINNED): an assignment NAME quoted or escaped
+        # ('\"OLDPWD\"=.. cd -', 'OLD\"PWD\"=.. cd -', 'OLDP\\WD=.. cd -') is a COMMAND to bash (command-not-found;
+        # cd never runs), so it does not actually reach cd. But the DECODED token is assignment-shaped
+        # ('OLDPWD=..'), so under the round-4 'any leading assignment -> ASK' rule these ASK. This is an
+        # intentional conservative over-fire on an assignment-shaped token bash would reject anyway; it is
+        # DISCLOSED in the manifest residue, and PINNED here so it cannot silently drift. Not chased with
+        # assignment-name quote provenance (that parser complexity is deliberately declined).
+        bcmd("(ap-c82) '\"OLDPWD\"=.. cd -' asks (disclosed conservative over-fire, GS-7 round-4 MAJOR 3)",
+             '"OLDPWD"=.. cd -', "ask")
+        bcmd("(ap-c82b) 'OLD\"PWD\"=.. cd -' asks (disclosed conservative over-fire, GS-7 round-4 MAJOR 3)",
+             'OLD"PWD"=.. cd -', "ask")
+        bcmd("(ap-c82c) 'OLDP\\WD=.. cd -' asks (escaped name, disclosed conservative over-fire, round-4 MAJOR 3)",
+             "OLDP\\WD=.. cd -", "ask")
+        # non-regression + the deliberate conservative CONSEQUENCE of the shrink: with NO leading assignment
+        # the cwd-independent forms STAY ALLOW; a benign leading assignment ('FOO=x') now makes them ASK (the
+        # disclosed cost of not enumerating variable names).
+        bcmd("(ap-c83) plain bare 'cd' still allows (no leading assignment, GS-7 round-4 guard)", "cd", "allow")
+        bcmd("(ap-c83b) plain 'cd -' still allows (no leading assignment, GS-7 round-4 guard)", "cd -", "allow")
+        bcmd("(ap-c83c) plain 'cd -- -' still allows (no leading assignment, GS-7 round-4 guard)",
+             "cd -- -", "allow")
+        bcmd("(ap-c84) 'FOO=x cd -' asks (any leading assignment -> lone '-' ASKS, round-4 conservative cost)",
+             "FOO=x cd -", "ask")
+        bcmd("(ap-c84b) 'FOO=x cd' asks (any leading assignment -> bare-cd $HOME ASKS, round-4 conservative cost)",
+             "FOO=x cd", "ask")
+        # malformed / out-of-scope payloads for the Bash floor
+        _bap = aiqt_hooks.bash_absolute_paths
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": 5}}) != "ask":
+            failures.append("(ap-c29) non-string command must ASK (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": None}) != "ask":
+            failures.append("(ap-c30) non-mapping tool_input must ASK (cannot read command)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {}}) != "ask":
+            failures.append("(ap-c31) missing command must ASK (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Read",
+                          "tool_input": {"command": "cd rel"}}) != "allow":
+            failures.append("(ap-c32) out-of-scope tool must allow (matcher governs)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": None,
+                          "tool_input": {"command": "cd rel"}}) != "deny":
+            failures.append("(ap-c33) missing tool_name must DENY (fail-closed contract)")
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3183,7 +3521,35 @@ def main():
           "path), a repo dir name with a trailing SPACE or a trailing NEWLINE keeps its toplevel (only "
           "git's single trailing-newline terminator is stripped, not every trailing newline) so the "
           "registered target still ASKS, an absent registry is the inert ALLOW, a mis-wired event "
-          "HARD-BLOCKS (exit 2), and only a MISSING tool_name DENIES")
+          "HARD-BLOCKS (exit 2), and only a MISSING tool_name DENIES. The absolute-paths guard "
+          "(abspth, GS-7) is proven across both linkages: the native-path predicate DENIES a "
+          "drive-relative 'C:file', a bare 'C:', a leading-backslash path, a tilde, an empty, and a "
+          "plain relative file_path while ALLOWING a POSIX-absolute, a drive-absolute, and a UNC path; "
+          "the widened typed-path matcher judges MultiEdit (legacy-compat wire) and NotebookEdit "
+          "(notebook_path) as required-absolute and Grep alongside Glob as an optional search root with "
+          "the rootless carve-out re-affirmed, each field name fixed against the tool schema; a tool_input "
+          "that is not a mapping fails closed for an in-scope tool (the old search-root fail-open is "
+          "closed) while an out-of-scope tool allows; and the conservative Bash floor ASKS a relative or "
+          "opaque cd/pushd destination and a relative or opaque redirection target, ALLOWS an absolute "
+          "one, an UNQUOTED CURRENT-USER tilde ('~', '~/x') as cwd-independent (gated on a LEADING-unquoted-"
+          "tilde flag, so a QUOTED leading tilde even with an unquoted opaque tail - \"~\"/x*, '~'/x?, "
+          "\"~\"/$V - ASKS, and a '~user' whose account existence is unverifiable ASKS; a CLEAN-tilde "
+          "REDIRECT target now ALLOWS consistently ('> ~/x', '> ~/\"x\"', '> ~/$V'), while a quoted or "
+          "complex-prefix tilde redirect target ('> \"~\"/x', '> ~\"/x\"') keeps ASKing, GS-7 round-4 "
+          "MAJOR 4), while an opaque '$VAR' still ASKS, a bare cd, the OLDPWD 'cd -' INCLUDING the post-'--' "
+          "'cd -- -', the real cd/pushd option flags, a pushd rotation, and a descriptor duplication ALLOW "
+          "ONLY absent a leading inline env-assignment; the GS-7 round-4 CONSERVATIVE CONSOLIDATION shrinks "
+          "that ALLOW set so ANY leading env-assignment (any name, '=' or '+=', even an assignment-SHAPED "
+          "token bash would reject) makes the cwd-independent 'cd -'/'cd -- -'/bare 'cd' ASK - 'OLDPWD+=.. "
+          "cd -', 'HOME=.. cd', 'HOME+=.. cd', '\"OLDPWD\"=.. cd -' (the last a DISCLOSED over-fire), and the "
+          "benign 'FOO=x cd -'/'FOO=x cd' as its deliberate cost - without enumerating variable names; "
+          "treats a relative "
+          "dir name beginning '-'/'+' as the destination ('cd -- -rel', 'cd +rel') and ASKS while a "
+          "post-'--' dir literally named '--' ('cd -- --') stays ASK, does NOT judge an arbitrary command "
+          "operand, inspects the parseable PREFIX before an unparseable construct INCLUDING the in-progress "
+          "segment's redirect targets parsed before it ('cat > out.txt <<EOF' ASKS on out.txt) so an "
+          "earlier relative cd/redirect still ASKS (only a position within or after the construct is a "
+          "disclosed-residual allow), and never denies except on a missing tool_name")
     return 0
 
 
