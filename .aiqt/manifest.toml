@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "4370134a57ae9233684ea614246a99536e53173a046b3f07f02250d0ee3bcb4e"
+tree-sha256 = "31f7d294b1bc8e51e8ac8f57d086549384264ee9da1b85110a3baccb90eb51b2"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 57202
-sha256 = "70df29d38061eb7e1f2a83d00fd0f14a626f9089f2d29d02760504f769ed0fee"
+bytes = 57201
+sha256 = "b813db4b1535bbc80aead17ad20bec583c36c4e7bd906d5741083520c4fcb4a7"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
