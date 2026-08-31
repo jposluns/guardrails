@@ -3222,19 +3222,74 @@ def main():
              "allow")
         bcmd("(ap-c42) 'cd -e -L /abs' allows (real cd option flags skipped)", "cd -e -L {}".format(rp),
              "allow")
-        # GS-7 FIX 3: an UNQUOTED literal tilde is cwd-independent (expands to an absolute home) -> ALLOW,
-        # matching bare 'cd'; pre-fix it ASKED (an ASK-fatigue over-fire that trained the 'cd' rewrite
+        # GS-7 FIX 3: an UNQUOTED CURRENT-USER tilde ('~', '~/x') is cwd-independent (expands to $HOME) ->
+        # ALLOW, matching bare 'cd'; pre-fix it ASKED (an ASK-fatigue over-fire that trained the 'cd' rewrite
         # bypass). An opaque '$VAR' still cannot be proven absolute and ASKS. Fails-when-reverted (tilde).
-        bcmd("(ap-c43) 'cd ~' allows (literal tilde expands to absolute home, GS-7 FIX 3)", "cd ~", "allow")
-        bcmd("(ap-c44) 'cd ~/foo' allows (literal tilde path, GS-7 FIX 3)", "cd ~/foo", "allow")
-        bcmd("(ap-c45) 'cd ~user/x' allows (literal ~user home, GS-7 FIX 3)", "cd ~user/x", "allow")
+        bcmd("(ap-c43) 'cd ~' allows (current-user tilde expands to $HOME, GS-7 FIX 3)", "cd ~", "allow")
+        bcmd("(ap-c44) 'cd ~/foo' allows (current-user tilde path, GS-7 FIX 3)", "cd ~/foo", "allow")
+        # GS-7 round-2 MAJOR 4: a '~user'/'~user/x' names another account's home whose EXISTENCE the hook
+        # cannot verify (an unresolved login name leaves the word RELATIVE), so the ALLOW is NARROWED to the
+        # current-user forms and '~user' now ASKS (was a false ALLOW pre-round-2). Fails-when-reverted.
+        bcmd("(ap-c45) 'cd ~user/x' asks (~user existence unverifiable, GS-7 round-2 MAJOR 4)",
+             "cd ~user/x", "ask")
+        bcmd("(ap-c45b) 'cd ~user' asks (~user existence unverifiable, GS-7 round-2 MAJOR 4)",
+             "cd ~user", "ask")
         bcmd("(ap-c46) 'cd $HOME' asks (opaque expansion, not provably absolute, GS-7 FIX 3)",
              "cd $HOME", "ask")
         bcmd("(ap-c47) 'cd \"$HOME\"' asks (opaque expansion, GS-7 FIX 3)", 'cd "$HOME"', "ask")
         # a QUOTED '~' is a literal relative directory named '~', not tilde expansion: still ASKS (the
-        # per-token opacity flag tells the unquoted, expanded form from the quoted, literal one).
+        # per-token LEADING-UNQUOTED-tilde flag tells the unquoted, expanded form from the quoted one).
         bcmd("(ap-c48) quoted 'cd \"~/foo\"' asks (quoted tilde is literal-relative, GS-7 FIX 3)",
              'cd "~/foo"', "ask")
+        # GS-7 round-2 MAJOR 1: a QUOTED leading tilde with an UNQUOTED OPAQUE tail ('$'/glob/brace) is NOT
+        # tilde-expanded by bash (the '~' is quoted, so the word stays RELATIVE), yet pre-round-2 it was a
+        # false ALLOW because the token-wide opacity flag was mistaken for an unquoted-tilde signal. The
+        # LEADING-UNQUOTED-tilde flag now gates the tilde-ALLOW, so every quoted-leading-tilde form ASKS
+        # while the genuine unquoted '~/$VAR' stays ALLOW. Fails-when-reverted (all the ASK cases were ALLOW).
+        bcmd("(ap-c49) 'cd \"~\"/x*' asks (quoted tilde + glob tail, not expanded, GS-7 round-2 MAJOR 1)",
+             'cd "~"/x*', "ask")
+        bcmd("(ap-c50) 'cd \"~\"/x?' asks (quoted tilde + glob tail, GS-7 round-2 MAJOR 1)",
+             'cd "~"/x?', "ask")
+        bcmd("(ap-c51) 'cd \"~\"/{a}' asks (quoted tilde + brace tail, GS-7 round-2 MAJOR 1)",
+             'cd "~"/{a}', "ask")
+        bcmd("(ap-c52) 'cd \"~\"/$V' asks (quoted tilde + expansion tail, GS-7 round-2 MAJOR 1)",
+             'cd "~"/$V', "ask")
+        bcmd("(ap-c53) \"cd '~'/x*\" asks (single-quoted tilde + glob tail, GS-7 round-2 MAJOR 1)",
+             "cd '~'/x*", "ask")
+        bcmd("(ap-c54) 'cd \"~/repo\"*' asks (quoted tilde path + glob, GS-7 round-2 MAJOR 1)",
+             'cd "~/repo"*', "ask")
+        bcmd("(ap-c55) 'cd \\\\~/$VAR' asks (escaped tilde + expansion tail, GS-7 round-2 MAJOR 1)",
+             'cd \\~/$VAR', "ask")
+        bcmd("(ap-c56) 'cd \"\"~/x' asks (empty-quote-preceded tilde is not leading, GS-7 round-2 MAJOR 1)",
+             'cd ""~/x', "ask")
+        # the genuine unquoted leading tilde with an opaque tail STAYS ALLOW (regression guard for MAJOR 1)
+        bcmd("(ap-c57) 'cd ~/$VAR' allows (unquoted leading tilde expands to $HOME, GS-7 round-2 MAJOR 1)",
+             "cd ~/$VAR", "allow")
+        # GS-7 round-2 MAJOR 2: a relative redirect target fully parsed BEFORE an unparseable construct in
+        # the SAME in-progress segment ('cat > out.txt <<EOF...', 'cat > out.txt <(...)') is now inspected
+        # (the in-progress segment is recovered on the partial-lex exception path) and ASKS; pre-round-2 the
+        # whole in-progress segment was discarded, a false ALLOW. Fails-when-reverted (both were ALLOW).
+        bcmd("(ap-c58) redirect target before a heredoc asks (in-progress seg recovered, GS-7 round-2 MAJOR 2)",
+             "cat > out.txt <<EOF\nx\nEOF", "ask")
+        bcmd("(ap-c59) redirect target before a proc-subst asks (in-progress seg recovered, GS-7 round-2 MAJOR 2)",
+             "cat > out.txt <(printf x)", "ask")
+        # boundary preserved: a construct with NO earlier resolvable position in the in-progress segment
+        # stays a disclosed ALLOW; a cd/redirect AFTER the construct stays uninspected (disclosed residual).
+        bcmd("(ap-c60) heredoc with only a command word before it allows (disclosed residual, GS-7 round-2)",
+             "cat <<EOF\nx\nEOF", "allow")
+        bcmd("(ap-c61) relative cd AFTER a proc-subst stays allow (position after construct, GS-7 round-2)",
+             "cat <(x); cd rel", "allow")
+        # GS-7 round-2 MAJOR 3: a lone '-' destination AFTER '--' is still the $OLDPWD shortcut in bash
+        # (empirically /tmp->/opt), so 'cd -- -' ALLOWS; pre-round-2 the OLDPWD check ran only during option
+        # processing, so post-'--' the '-' was mis-read as a relative name and ASKED. Fails-when-reverted.
+        bcmd("(ap-c62) 'cd -- -' allows (lone '-' after '--' is $OLDPWD, GS-7 round-2 MAJOR 3)",
+             "cd -- -", "allow")
+        # regression guards for MAJOR 3: a real relative name after '--' still ASKS, and 'cd -- --' (a dir
+        # literally named '--', which bash resolves against the cwd) stays ASK - NOT a false OLDPWD allow.
+        bcmd("(ap-c63) 'cd -- rel' asks (post-'--' relative name, GS-7 round-2 MAJOR 3 guard)",
+             "cd -- rel", "ask")
+        bcmd("(ap-c64) 'cd -- --' asks (post-'--' relative dir named '--', GS-7 round-2 MAJOR 3 guard)",
+             "cd -- --", "ask")
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -3370,13 +3425,17 @@ def main():
           "that is not a mapping fails closed for an in-scope tool (the old search-root fail-open is "
           "closed) while an out-of-scope tool allows; and the conservative Bash floor ASKS a relative or "
           "opaque cd/pushd destination and a relative or opaque redirection target, ALLOWS an absolute "
-          "one, an UNQUOTED literal tilde ('~', '~/x', '~user') as cwd-independent while a QUOTED '~' and "
-          "an opaque '$VAR' still ASK, a bare or OLDPWD cd, the real cd/pushd option flags, a pushd "
-          "rotation, and a descriptor duplication; treats a relative dir name beginning '-'/'+' as the "
-          "destination ('cd -- -rel', 'cd +rel') and ASKS, does NOT judge an arbitrary command operand, "
-          "inspects the parseable PREFIX before an unparseable construct (an earlier relative cd/redirect "
-          "still ASKS; only a position within or after the construct is a disclosed-residual allow), and "
-          "never denies except on a missing tool_name")
+          "one, an UNQUOTED CURRENT-USER tilde ('~', '~/x') as cwd-independent (gated on a LEADING-unquoted-"
+          "tilde flag, so a QUOTED leading tilde even with an unquoted opaque tail - \"~\"/x*, '~'/x?, "
+          "\"~\"/$V - ASKS, and a '~user' whose account existence is unverifiable ASKS), while an opaque "
+          "'$VAR' still ASKS, a bare cd, the OLDPWD 'cd -' INCLUDING the post-'--' 'cd -- -', the real "
+          "cd/pushd option flags, a pushd rotation, and a descriptor duplication ALLOW; treats a relative "
+          "dir name beginning '-'/'+' as the destination ('cd -- -rel', 'cd +rel') and ASKS while a "
+          "post-'--' dir literally named '--' ('cd -- --') stays ASK, does NOT judge an arbitrary command "
+          "operand, inspects the parseable PREFIX before an unparseable construct INCLUDING the in-progress "
+          "segment's redirect targets parsed before it ('cat > out.txt <<EOF' ASKS on out.txt) so an "
+          "earlier relative cd/redirect still ASKS (only a position within or after the construct is a "
+          "disclosed-residual allow), and never denies except on a missing tool_name")
     return 0
 
 

@@ -219,24 +219,34 @@ _Redirect = collections.namedtuple("_Redirect", ("op", "src_fd", "target", "targ
 # A segment record: argv (the quote-decoded words the program receives, REDIRECTION ABSENT), sep_after (the
 # operator that ended it, one of _SEGMENT_OPERATORS, or "" at a newline/command end), redirects (the ordered
 # redirect records), raw (the raw slice of this segment), opaque_shell (True when the segment carried an
-# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on), and argv_opaque (the
+# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on), argv_opaque (the
 # per-token opacity flags PARALLEL to argv: True where THAT word carried an unquoted expansion/glob/brace or
-# a leading tilde, so a consumer can tell an unquoted, shell-expanded '~/x' from a quoted, literal '~/x').
+# a leading tilde, so a consumer can tell an unquoted, shell-expanded '~/x' from a quoted, literal '~/x'),
+# and argv_leading_tilde (the per-token flags PARALLEL to argv: True ONLY where THAT word's LEADING character
+# is an UNQUOTED tilde, so bash tilde-expansion applies and the word expands to an absolute home. This is a
+# STRICTER signal than argv_opaque, which any unquoted expansion/glob/brace ANYWHERE in the token also sets;
+# a quoted leading tilde with an unquoted tail, e.g. "~"/x*, carries argv_opaque for the wrong reason but
+# NOT argv_leading_tilde, so it is correctly not read as an expanded '~').
 _Segment = collections.namedtuple(
-    "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque"))
+    "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
+                 "argv_leading_tilde"))
 
 
 def _read_word(command, i, n):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
-    newline, or metacharacter). Returns (text, opaque, started, all_digits, new_i): text is the quote/escape
-    decoded word, opaque is True if it carried an unquoted expansion/substitution/glob/brace/leading-tilde,
-    started is True once any character (even an empty '' quote) began the word, all_digits is True only when
-    the whole word is UNQUOTED decimal digits (an IO_NUMBER candidate). Stops at an unquoted space, tab,
-    newline, or metacharacter. Raises ValueError on an unbalanced quote or an unterminated escape."""
+    newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
+    the quote/escape decoded word, opaque is True if it carried an unquoted
+    expansion/substitution/glob/brace/leading-tilde, started is True once any character (even an empty ''
+    quote) began the word, all_digits is True only when the whole word is UNQUOTED decimal digits (an
+    IO_NUMBER candidate), leading_tilde is True ONLY when the word's LEADING character is an UNQUOTED tilde
+    (bash tilde-expansion applies), which a quoted, escaped, or non-leading tilde does not set. Stops at an
+    unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
+    unterminated escape."""
     chars = []
     opaque = False
     started = False
     all_digits = True
+    leading_tilde = False
     while i < n:
         c = command[i]
         if c in " \t\n" or c in _METACHARS:
@@ -255,6 +265,7 @@ def _read_word(command, i, n):
             # A mid-word '#' (started is True, e.g. ticket#123 or a continuation-joined di\<newline>ff#x)
             # is left literal below.
             break
+        was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
             j = command.find("'", i + 1)
@@ -302,13 +313,21 @@ def _read_word(command, i, n):
             i += 2
             continue
         # an ordinary unquoted character
-        if c in _OPAQUE_WORD_CHARS or (c == "~" and not chars):
+        if c == "~" and not was_started:
+            # A LEADING unquoted tilde is bash tilde-expansion (cwd-independent home): record it as such AND
+            # mark the word opaque (no diff-source ALLOW proof may rest on the expanded value). Nothing has
+            # begun the word before it, so an empty "" quote or any other char ahead of the '~' (""~, x~)
+            # leaves was_started True and this branch is not taken - matching bash, which expands only a '~'
+            # at the very start of the word.
+            opaque = True
+            leading_tilde = True
+        elif c in _OPAQUE_WORD_CHARS:
             opaque = True
         if not c.isdigit():
             all_digits = False
         chars.append(c)
         i += 1
-    return "".join(chars), opaque, started, all_digits, i
+    return "".join(chars), opaque, started, all_digits, leading_tilde, i
 
 
 def _match_operator(command, i, n):
@@ -424,15 +443,18 @@ def _lex_command(command, partial=False):
     segments = []
     argv = []
     argv_opaque = []
+    argv_leading_tilde = []
     redirects = []
     opaque = [False]
     seg_start = [0]
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque)))
+                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                  list(argv_leading_tilde)))
         del argv[:]
         del argv_opaque[:]
+        del argv_leading_tilde[:]
         del redirects[:]
         opaque[0] = False
         seg_start[0] = next_start
@@ -445,7 +467,7 @@ def _lex_command(command, partial=False):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, _ltilde, k2 = _read_word(command, k, n)
         if not started:
             raise ValueError("malformed redirect target")
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque))
@@ -482,7 +504,7 @@ def _lex_command(command, partial=False):
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
-            text, w_opaque, started, all_digits, j = _read_word(command, i, n)
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
             # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
             # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
             # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
@@ -499,14 +521,23 @@ def _lex_command(command, partial=False):
             if started:
                 argv.append(text)
                 argv_opaque.append(w_opaque)
+                argv_leading_tilde.append(w_leading_tilde)
                 if w_opaque:
                     opaque[0] = True
             i = j
         end_segment("", n, n)
     except ValueError:
-        # partial mode recovers the COMPLETE segments lexed before the unparseable construct (the Bash
-        # abspth floor still inspects that prefix); the default contract re-raises for every other caller.
+        # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
+        # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
+        # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
+        # thereby still inspected by the Bash abspth floor); a position WITHIN or AFTER the unparseable
+        # construct stays uninspected, a disclosed residual. The default contract re-raises for every
+        # other caller.
         if partial:
+            if argv or redirects:
+                segments.append(_Segment(list(argv), "", list(redirects),
+                                         command[seg_start[0]:], opaque[0], list(argv_opaque),
+                                         list(argv_leading_tilde)))
             return segments, False
         raise
     if partial:
@@ -1323,13 +1354,16 @@ def commit_identity(data):
 
 
 # --- abspth: relative path where the tool requires absolute ------------------------------------------
-# Read/Write/Edit/MultiEdit require an absolute file_path, and NotebookEdit an absolute notebook_path,
-# by the tool's own contract, so the rule's relative-to-a-named-root carve-out never applies to them.
-# Glob and Grep are honoured under the carve-out: their `pattern` is legitimately relative to a named
-# search root and is never judged, but their optional `path` search root should be absolute. Every field
-# name here is fixed against the live Claude Code tool schema (Read/Write/Edit/MultiEdit -> file_path,
-# NotebookEdit -> notebook_path, Glob/Grep -> optional path), never assumed.
-FILE_PATH_TOOLS = ("Read", "Write", "Edit", "MultiEdit")   # contract-absolute `file_path`
+# Read, Write, and Edit require an absolute file_path, and NotebookEdit an absolute notebook_path, by the
+# tool's own contract, so the rule's relative-to-a-named-root carve-out never applies to them. MultiEdit is
+# kept on the same file_path wire for LEGACY COMPATIBILITY only: it is NOT in the current Claude Code
+# built-in tool index, so its mapping is retained solely to cover an adopter on an older or re-enabled
+# MultiEdit, never as an assertion that MultiEdit is a current/live tool. Glob and Grep are honoured under
+# the carve-out: their `pattern` is legitimately relative to a named search root and is never judged, but
+# their optional `path` search root should be absolute. Each field name is bound to a Claude Code tool
+# schema (Read/Write/Edit -> file_path, NotebookEdit -> notebook_path, Glob/Grep -> optional path), with
+# MultiEdit -> file_path the legacy-compat wire above, never assumed.
+FILE_PATH_TOOLS = ("Read", "Write", "Edit", "MultiEdit")   # contract-absolute `file_path` (MultiEdit: legacy-compat wire)
 NOTEBOOK_PATH_TOOLS = ("NotebookEdit",)                    # contract-absolute `notebook_path`
 SEARCH_ROOT_TOOLS = ("Glob", "Grep")                       # optional `path` search root; carve-out
 
@@ -1436,22 +1470,28 @@ _CD_BUILTINS = frozenset(("cd", "pushd"))
 # relative directory NAME (the destination), matching the comment 'the first token that is not an option'.
 _CD_OPT_BUNDLE_RE = re.compile(r"^-[LPe@n]+$")  # cd -L/-P/-e/-@ and pushd -n, singly or bundled (-LP, -nL)
 _PUSHD_ROTATION_RE = re.compile(r"^[-+][0-9]+$")  # pushd +N/-N: a stack index, not a filesystem path
-# An UNQUOTED literal tilde destination (~, ~/path, ~user, ~user/path) is tilde-EXPANDED by the shell to an
-# absolute home directory, so it is cwd-independent exactly like an absolute path; a QUOTED '~' (a literal
-# directory named '~') is not expanded and stays relative, told apart by the token's own opacity flag (an
-# unquoted leading tilde sets it, a quoted one does not). A '~$X' mixing an expansion is not this pure form.
-_LITERAL_TILDE_RE = re.compile(r"^~([A-Za-z_][A-Za-z0-9_-]*)?(/.*)?$")
+# An UNQUOTED CURRENT-USER tilde destination (~ or ~/path) is tilde-EXPANDED by the shell to $HOME, an
+# absolute directory, so it is cwd-independent exactly like an absolute path. This is NARROWED to the
+# current-user forms only: a '~user'/'~user/path' names another account's home whose EXISTENCE the hook
+# cannot verify (an unresolved login name leaves the word RELATIVE), so it is NOT proven absolute here and
+# ASKS; and the '~-'/'~+'/'~N' directory-stack forms likewise ASK. A QUOTED '~' (a literal directory named
+# '~') is not expanded and stays relative; the LEADING-UNQUOTED-tilde flag (argv_leading_tilde), not the
+# broader opacity flag, tells the expanded form from a quoted one whose unquoted tail merely carries opacity.
+_LITERAL_TILDE_RE = re.compile(r"^~(/.*)?$")
 
 
-def _cd_destination_reason(word, argv, argv_opaque):
+def _cd_destination_reason(word, argv, argv_leading_tilde):
     """For a cd/pushd segment, return a reason string when its destination operand is relative or
-    unresolvable (opaque), else None: an absolute destination, an unquoted literal-tilde one (it expands to
-    an absolute home), or no destination at all (cd -> HOME, pushd -> swap the stack top), is cwd-independent
-    here. Only the FIRST non-option token is the destination; the real cd/pushd option flags, cd '-', and a
-    pushd +N/-N rotation name no relative path and are skipped, while '--' ends option processing so the next
-    token is the destination even when it begins '-'/'+'. An operand carrying an unexpanded expansion never
-    reads as absolute unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS
-    while an absolute '/$X/y' allows. argv_opaque is the per-token opacity flags parallel to argv."""
+    unresolvable (opaque), else None: an absolute destination, an unquoted current-user tilde one ('~' or
+    '~/path', which expands to $HOME), the OLDPWD 'cd -', or no destination at all (cd -> HOME, pushd -> swap
+    the stack top), is cwd-independent here. Only the FIRST non-option token is the destination; the real
+    cd/pushd option flags and a pushd +N/-N rotation name no relative path and are skipped, while '--' ends
+    option processing so the next token is the destination even when it begins '-'/'+'. A lone '-' is the
+    $OLDPWD shortcut wherever it lands as the destination, including as the post-'--' destination ('cd -- -',
+    which bash still resolves to $OLDPWD). An operand carrying an unexpanded expansion never reads as absolute
+    unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an absolute
+    '/$X/y' allows. argv_leading_tilde is the per-token LEADING-UNQUOTED-tilde flags parallel to argv (True
+    only where the word's leading char is an unquoted tilde, so tilde-expansion applies)."""
     idx = _command_word_index(argv) + 1  # skip leading env-assignments and the command word itself
     end_of_options = False
     for pos in range(idx, len(argv)):
@@ -1460,15 +1500,16 @@ def _cd_destination_reason(word, argv, argv_opaque):
             if tok == "--":
                 end_of_options = True  # everything after '--' is an operand, not an option
                 continue
-            if tok == "-":
-                continue  # cd '-': the $OLDPWD previous-directory shortcut, an absolute prior dir
             if _CD_OPT_BUNDLE_RE.match(tok):
                 continue  # a cd/pushd option flag or bundle (-L/-P/-e/-@/-n): not a destination path
             if word == "pushd" and _PUSHD_ROTATION_RE.match(tok):
                 continue  # pushd +N/-N: a directory-stack rotation index, not a filesystem path
         # end-of-options, or the first token that is not an option: this is the destination operand.
-        if argv_opaque[pos] and _LITERAL_TILDE_RE.match(tok):
-            return None  # an unquoted literal tilde expands to an absolute home: cwd-independent
+        if tok == "-":
+            continue  # cd '-': the $OLDPWD previous-directory shortcut (an absolute prior dir), even
+            # after '--' where bash still treats a lone '-' destination as $OLDPWD, not a relative name
+        if argv_leading_tilde[pos] and _LITERAL_TILDE_RE.match(tok):
+            return None  # an unquoted current-user tilde ('~', '~/x') expands to $HOME: cwd-independent
         if _is_absolute(tok):
             return None
         return "a relative {} destination {!r}".format(word, tok)
@@ -1508,7 +1549,7 @@ def bash_absolute_paths(data):
     for seg in segments:
         word = _command_word(seg.argv)
         if word in _CD_BUILTINS:
-            reason = _cd_destination_reason(word, seg.argv, seg.argv_opaque)
+            reason = _cd_destination_reason(word, seg.argv, seg.argv_leading_tilde)
             if reason is not None:
                 reasons.append(reason)
         for redirect in seg.redirects:
