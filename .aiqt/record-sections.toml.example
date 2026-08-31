@@ -1,0 +1,11 @@
+# Adopter example: record-section preservation gate (tools/check_record_sections.py).
+# An adopter declares the Markdown record files whose newly added column-zero H2 sections a merge must
+# preserve, and the heading pattern that selects them. Replace the example record below with the real
+# record files and patterns for your project. A branch-owned section may instead carry opt-out-marker as
+# an exact whole line inside that section to declare it superseded rather than dropped.
+schema-version = 1
+opt-out-marker = "<!-- aiqt-record-section: superseded -->"
+
+[[record]]
+path = "docs/decision-log.md"
+heading-pattern = '^## [0-9]{4}-[0-9]{2}-[0-9]{2}(?: .+)?$'

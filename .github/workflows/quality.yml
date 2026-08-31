@@ -267,6 +267,9 @@ jobs:
       - name: Record-drift gate
         run: python3 tools/check_record_drift.py
 
+      - name: Record-section preservation self-test
+        run: python3 tools/check_record_sections.py --self-test
+
       - name: Mistakes-register self-test
         run: python3 tools/check_mistakes_register.py --self-test
 

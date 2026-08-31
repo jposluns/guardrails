@@ -117,6 +117,7 @@ run_gate "hooks-behaviour-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/
 run_gate "orch-behaviour-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_orch_hooks.py
 run_gate "record-drift-selftest" python3 tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 tools/check_record_drift.py
+run_gate "record-sections-selftest" python3 tools/check_record_sections.py --self-test
 run_gate "mistakes-register-selftest" python3 tools/check_mistakes_register.py --self-test
 run_gate "mistakes-register"          python3 tools/check_mistakes_register.py
 run_gate "aei-enumerator-selftest" python3 tools/aei_backlog_md.py --self-test
