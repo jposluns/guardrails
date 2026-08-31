@@ -302,6 +302,11 @@ class = "pack-immutable"
 # --- concern-2: reserved-namespace / adopter-state patterns (ZERO tracked entries; NO-STRAYS exempt) ----
 
 [[namespace-class]]
+path = ".aiqt/derived-command-parameters.toml"
+class = "adopter-state"
+note = "Adopter-authored configuration for tools/check_derived_command_parameters.py; reserved, never a pack-shipped file (absent = gate NOT APPLICABLE)."
+
+[[namespace-class]]
 path = ".aiqt/pin.toml"
 class = "adopter-state"
 

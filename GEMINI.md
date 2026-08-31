@@ -85,6 +85,14 @@ a consequential action withholding rather than firing on an unverified basis, ne
 verdict the guard never reached. Inputs absent from the author's own examples are a particular silent-failure
 risk.
 
+A command or control parameter that names the repository, target, or other context an artefact will act
+on is itself such an input. A value hardcoded into a reusable command, or carried over from the source the
+command was copied or templated from, is not evidence of the target the command now runs against: it is
+derived from the authoritative source at the point of use, or validated against it, before the guard
+relies on it. A guard whose own logic is correct still answers about the wrong target when the parameter
+it was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a
+cannot-evaluate, not a clean pass.
+
 ## Measured and estimated figures stay separate
 
 A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an
@@ -193,6 +201,13 @@ understand why it failed before considering any override. A security floor, a de
 floor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only
 through the maintainer's explicit, recorded authorization.
 
+A gate verdict is trusted only when it is read from the gate's own unmasked termination status, or from
+a structured terminal result bound to the exact revision under gate; a downstream pipeline's status, a
+truncated delivery, a textual success token, or a result for a different revision is not that verdict. A
+pending, missing, ambiguous, malformed, unknown, or unreadable result is unverified, never a pass, and the
+gated action stays a separate step, withheld until terminal success is observed, so a check folded into the
+same unverified apply or merge does not establish the checkpoint.
+
 ## A generated artefact is changed only through its source
 
 A derived or generated artefact is never hand-edited; it changes only by changing its source and
@@ -280,6 +295,12 @@ it is a deliberate, recorded choice, not the default.
 A tracked deliverable whose output is captured only through a truncating filter is not observable
 completion: the completion signal must carry the full result, never a truncated view of it.
 
+Shell syntax that detaches a child from an otherwise foreground call launches asynchronous work no less
+than an explicit background dispatch does: the foreground call returns while the detached child runs on,
+so its result and its failure are lost unless they are collected. Such work is launched through a tracked
+background mechanism that keeps its completion observable; where its result and completion are genuinely
+not needed, detaching it is a deliberate, recorded choice, not a reflex.
+
 ## Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
@@ -343,6 +364,13 @@ a wrong action. Configuration copied or templated from another context, another 
 account, or environment tier, is re-read and re-verified against the intended target before first use:
 every path, remote, account, and endpoint it carries is confirmed to point at the target, never trusted
 on the strength of having worked at its origin.
+
+A reusable command that carries a context-specific identifier, path, remote, account, or endpoint is
+confirmed against the concrete checkout and target before it runs, never trusted because it was correct in
+the repository or template it came from. The command derives that parameter for the target it is now aimed
+at, or confirms the retained value points there; a literal left in place from the command's origin is not
+that confirmation, and a command aimed by it at the wrong target is a wrong action however correct its
+logic.
 
 ## Defence in depth by default
 

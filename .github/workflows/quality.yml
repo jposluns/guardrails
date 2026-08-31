@@ -74,6 +74,14 @@ jobs:
       - name: Portability
         run: python3 tools/check_portability.py
 
+      # Derive-don't-hardcode: an adopter-parameterized scan flagging a hardcoded target-specific literal
+      # at an adopter-declared command sink (grdinp/exetgt). Adopter-declared: NOT APPLICABLE in this repo,
+      # which ships no .aiqt/derived-command-parameters.toml.
+      - name: Derived command parameters self-test
+        run: python3 tools/check_derived_command_parameters.py --self-test
+      - name: Derived command parameters
+        run: python3 tools/check_derived_command_parameters.py
+
       - name: Dashes
         run: python3 tools/check_no_dashes.py
 

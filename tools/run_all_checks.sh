@@ -54,6 +54,8 @@ run_gate "leaks"     python3 tools/check_leaks.py
 run_gate "msg-leaks-selftest" python3 tools/check_msg_leaks.py --self-test  # real scan needs CI event context
 run_gate "portability-selftest" python3 tools/check_portability.py --self-test
 run_gate "portability" python3 tools/check_portability.py
+run_gate "derived-command-parameters-selftest" python3 tools/check_derived_command_parameters.py --self-test
+run_gate "derived-command-parameters" python3 tools/check_derived_command_parameters.py
 run_gate "dashes"    python3 tools/check_no_dashes.py
 run_gate "links"     python3 tools/check_links.py
 run_gate "site-selftest" python3 tools/check_site.py --self-test

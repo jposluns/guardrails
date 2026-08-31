@@ -111,12 +111,12 @@ on exit 0. No Stop invocation can reach exit 2 for any input; only a PreToolUse 
 exit 2, and only a genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on
 a bad invocation.
 """
+import collections
 import datetime
 import json
 import math
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -184,57 +184,319 @@ def _deny_missing_tool_name(rule):
                  .format(rule))
 
 
-# --- shell command segmentation (quote-aware) --------------------------------------------------------
-# Tokenize the Bash command with a shell lexer that RESPECTS quoting (GD-24 fix round 3: the naive
-# whitespace/separator split caused false-allows, because a ';' or '(' inside a quoted commit message,
-# or a quoted global-option value with a space, was split at the wrong place). shlex(posix=True,
-# punctuation_chars=True) with whitespace_split keeps a separator or space INSIDE a quoted string as
-# part of that one token (quotes stripped), and yields the shell operators ; | || && & ( ) as distinct
-# tokens ONLY when unquoted. We then group the token list into SEGMENTS on those operator tokens and on
-# newlines (each line is lexed on its own, so an unquoted newline is a hard separator), so each control
-# judges one command at a time on correctly-tokenized input. A parse error (unbalanced quotes) raises
-# ValueError; the callers fall back to a conservative raw-string scan rather than silent-allow.
-# Best-effort still: it does not defeat deliberate escaping/obfuscation (recorded in the manifest residue).
+# --- shared raw-command tokenizer (quote/redirect-aware) ---------------------------------------------
+# ONE raw-character lexical pass over the Bash command, shared by every lexical Bash hook (diff-source,
+# commit-identity, protected-line, gate-weakening, and git-discard's lossy scan). It decides quoting and
+# REDIRECTION from RAW character positions and quote provenance BEFORE any token stream exists, so a shell
+# redirection ANYWHERE in a command (leading, interspersed, or trailing: 'git >/dev/null commit', '>out
+# pytest') is recorded as redirect metadata and REMOVED from the argv the handlers judge, closing the
+# post-tokenize redirect-pollution class shared across the hooks. A naive post-tokenize strip was proven
+# unsafe (a quoted '>' or a numeric option value was over-stripped into a silent allow, prtbrn round-10
+# revert), so the strip happens HERE, from raw positions, where quote provenance and fd adjacency are still
+# visible - never reconstructed from already-tokenized words.
+#
+# It is a LEXER, not a shell parser: it models the recognized redirection and separator grammar and, for
+# any construct it does not model - a heredoc ('<<'/'<<-'), a here-string ('<<<'), a process substitution
+# ('<('/'>('), a '{fd}>' redirect, a malformed or unterminated redirect, an unbalanced quote or escape,
+# or a NUL - it RAISES ValueError so the caller falls back to its conservative raw scan rather than
+# returning partial argv (never a partially-cleaned command). An expansion or command substitution ('$',
+# '$( )', backtick) or a glob/brace/tilde is not modelled either: it marks the segment OPAQUE (the same
+# residual the earlier tokenizer disclosed), so no diff-source ALLOW proof can rest on it.
 _SEGMENT_OPERATORS = frozenset((";", "|", "|&", "||", "&&", "&", "(", ")"))
+_METACHARS = "<>|&;()"  # unquoted, unescaped: begin an operator (redirect or separator)
+# An unquoted expansion/substitution/glob/brace makes a word (and its segment) OPAQUE: no summary/file/pager
+# proof may rest on it. A LEADING '~' is tilde expansion; a mid-word '~' is literal (HEAD~1), handled below.
+_OPAQUE_WORD_CHARS = frozenset(("$", "`", "*", "?", "[", "{"))
+_FD_VAR_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")  # a bash {varname}> fd-var redirect (unsupported)
+
+# A redirect record: op (the operator text), src_fd (the effective source fd, or None for the both-streams
+# '&>' forms), target (the decoded target word), target_class (static-real 'file-real', a console/device
+# 'file-dev' under /dev or /proc, a numeric/'-' 'descriptor', or a dynamic 'opaque'), and stdout_effect
+# (what this redirect does to STDOUT: '' none, or 'file-real'/'file-dev'/'descriptor'/'opaque').
+_Redirect = collections.namedtuple("_Redirect", ("op", "src_fd", "target", "target_class", "stdout_effect"))
+# A segment record: argv (the quote-decoded words the program receives, REDIRECTION ABSENT), sep_after (the
+# operator that ended it, one of _SEGMENT_OPERATORS, or "" at a newline/command end), redirects (the ordered
+# redirect records), raw (the raw slice of this segment), and opaque_shell (True when the segment carried an
+# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on).
+_Segment = collections.namedtuple("_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell"))
 
 
-def _lex_line(line):
-    """The quote-aware token list of one line. Quotes are stripped; a separator or space inside a quoted
-    string stays part of its one token; the shell operators are yielded as distinct unquoted tokens.
-    Raises ValueError on a shell parse error (e.g. an unbalanced quote), so the caller can fall back."""
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""  # bash treats '#' as a comment only at a word start; shlex's default
-    # '#' commenters strips a MID-word '#' (e.g. '--rev=abc#1'), silently dropping a downstream
-    # truncator and false-ALLOWing. Disabling it lexes '#' literally (bash-faithful mid-word); a
-    # word-initial '# comment' then over-tokenizes into extra words, a safe-direction over-ASK,
-    # never a hidden ALLOW (round 32).
-    return list(lexer)
+def _read_word(command, i, n):
+    """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
+    newline, or metacharacter). Returns (text, opaque, started, all_digits, new_i): text is the quote/escape
+    decoded word, opaque is True if it carried an unquoted expansion/substitution/glob/brace/leading-tilde,
+    started is True once any character (even an empty '' quote) began the word, all_digits is True only when
+    the whole word is UNQUOTED decimal digits (an IO_NUMBER candidate). Stops at an unquoted space, tab,
+    newline, or metacharacter. Raises ValueError on an unbalanced quote or an unterminated escape."""
+    chars = []
+    opaque = False
+    started = False
+    all_digits = True
+    while i < n:
+        c = command[i]
+        if c in " \t\n" or c in _METACHARS:
+            break
+        if c == "\\" and i + 1 < n and command[i + 1] == "\n":
+            # A backslash-newline is a LINE CONTINUATION: it is removed entirely and does NOT start or
+            # contribute to a word, so 'git \<newline> commit' is [git, commit], never [git, "", commit]
+            # (a synthetic empty argv element that mis-set the subcommand and defeated the sibling guards).
+            i += 2
+            continue
+        if c == "#" and not started:
+            # A '#' still at a WORD BOUNDARY (the word has not begun) starts a comment, even when the
+            # boundary was EXPOSED by a preceding continuation join ('git diff \<newline># > out.txt'):
+            # break so the caller re-applies its end-of-line comment handling rather than reading '#' as a
+            # literal word (which would tokenize a commented-out redirect/pipe and earn a false proof).
+            # A mid-word '#' (started is True, e.g. ticket#123 or a continuation-joined di\<newline>ff#x)
+            # is left literal below.
+            break
+        started = True
+        if c == "'":  # single quote: everything literal, no escapes, until the next "'"
+            j = command.find("'", i + 1)
+            if j < 0:
+                raise ValueError("unterminated single quote")
+            chars.append(command[i + 1:j])
+            all_digits = False
+            i = j + 1
+            continue
+        if c == '"':  # double quote: backslash escapes only "\ $ ` and newline; $ and backtick are opaque
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError("unterminated double quote")
+                d = command[i]
+                if d == '"':
+                    i += 1
+                    break
+                if d == "\\":
+                    if i + 1 >= n:
+                        raise ValueError("unterminated escape")
+                    e = command[i + 1]
+                    if e in '"\\$`':
+                        chars.append(e)
+                        i += 2
+                        continue
+                    if e == "\n":  # line continuation inside a double quote: both characters removed
+                        i += 2
+                        continue
+                    chars.append("\\")  # a backslash before any other char is literal inside "..."
+                    i += 1
+                    continue
+                if d in "$`":
+                    opaque = True
+                chars.append(d)
+                i += 1
+            all_digits = False
+            continue
+        if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
+            # was already consumed above, before the word could start)
+            if i + 1 >= n:
+                raise ValueError("unterminated escape")
+            chars.append(command[i + 1])
+            all_digits = False
+            i += 2
+            continue
+        # an ordinary unquoted character
+        if c in _OPAQUE_WORD_CHARS or (c == "~" and not chars):
+            opaque = True
+        if not c.isdigit():
+            all_digits = False
+        chars.append(c)
+        i += 1
+    return "".join(chars), opaque, started, all_digits, i
+
+
+def _match_operator(command, i, n):
+    """Classify the operator at index i (a metacharacter). Returns (op, kind, length): kind is 'sep' for a
+    segment separator, 'redirect' for a recognized redirection, or 'cannot' for an unsupported construct
+    (a heredoc/here-string '<<', or a process substitution '<('/'>('). Longest-first: '&>>'/'&>' before '&',
+    '>>'/'>|'/'>&' before '>', '<>'/'<&' before '<', '||'/'|&' before '|'."""
+    c = command[i]
+    nx = command[i + 1] if i + 1 < n else ""
+    nx2 = command[i + 2] if i + 2 < n else ""
+    if c == "&":
+        if nx == ">":
+            return ("&>>", "redirect", 3) if nx2 == ">" else ("&>", "redirect", 2)
+        if nx == "&":
+            return "&&", "sep", 2
+        return "&", "sep", 1
+    if c == ">":
+        if nx == ">":
+            return ">>", "redirect", 2
+        if nx == "|":
+            return ">|", "redirect", 2
+        if nx == "&":
+            return ">&", "redirect", 2
+        if nx == "(":
+            return ">(", "cannot", 2  # process substitution
+        return ">", "redirect", 1
+    if c == "<":
+        if nx == "<":
+            return "<<", "cannot", 2  # heredoc / here-string (<<, <<-, <<<)
+        if nx == "(":
+            return "<(", "cannot", 2  # process substitution
+        if nx == ">":
+            return "<>", "redirect", 2
+        if nx == "&":
+            return "<&", "redirect", 2
+        return "<", "redirect", 1
+    if c == "|":
+        if nx == "|":
+            return "||", "sep", 2
+        if nx == "&":
+            return "|&", "sep", 2
+        return "|", "sep", 1
+    return c, "sep", 1  # ';', '(', ')'
+
+
+def _classify_redirect(op, src_fd, target, t_opaque):
+    """Build a _Redirect from a recognized operator, its explicit source fd (or None), and the decoded
+    target. Computes the target class and the effect on STDOUT (last-redirect-wins is applied by the
+    caller). '&>'/'&>>' send both streams to the target (stdout affected); '>'/'>>'/'>|' affect stdout only
+    when the effective source fd is 1; '>&' is fd duplication/close for a numeric or '-' target (descriptor,
+    affecting stdout only from fd 1) or the csh both-streams-to-file form for a static word; the input
+    forms '<'/'<>'/'<&' never touch stdout."""
+    if op in ("&>", "&>>"):
+        tclass = _target_class(target, t_opaque)
+        return _Redirect(op, None, target, tclass, tclass)  # both streams -> stdout affected
+    if op in (">", ">>", ">|"):
+        src = 1 if src_fd is None else src_fd
+        tclass = _target_class(target, t_opaque)
+        return _Redirect(op, src, target, tclass, tclass if src == 1 else "")
+    if op == ">&":
+        src = 1 if src_fd is None else src_fd
+        if (not t_opaque) and (target == "-" or target.isdigit()):
+            tclass = "descriptor"  # fd duplication or close, never a proven file
+        else:
+            tclass = _target_class(target, t_opaque)  # csh '>&file' both-streams-to-file form
+        return _Redirect(op, src, target, tclass, tclass if src == 1 else "")
+    # input redirects ('<', '<>', '<&'): never a stdout effect
+    src = 0 if src_fd is None else src_fd
+    tclass = "descriptor" if op == "<&" else _target_class(target, t_opaque)
+    return _Redirect(op, src, target, tclass, "")
+
+
+def _target_class(target, t_opaque):
+    """Classify a redirect target: 'opaque' when it was formed with an unquoted expansion/substitution/
+    glob/brace/tilde (dynamic, unresolvable) OR carries a '..' component (it can traverse to a device or
+    anywhere and cannot be proven a plain file); 'file-dev' when it is a static path that resolves under
+    /dev or /proc (a console/terminal or a stdout/stderr descriptor path, which still reaches the review
+    surface); else a static 'file-real' ordinary path. The path is LEXICALLY normalized (os.path.normpath,
+    never touching the filesystem) BEFORE classifying, so /tmp/../dev/stdout is recognized as a /dev target
+    rather than passing as a plain /tmp file. Two cwd-dependent forms are NOT proven a plain file and route
+    to 'opaque' (ASK): a '..' that normpath cannot resolve away (a relative escape such as
+    ../../../dev/stdout), and a RELATIVE target whose normalized first component is 'dev' or 'proc'
+    (dev/stdout, ./dev/stdout, proc/self/fd/1), which from cwd '/' or via a 'dev'/'proc' symlink IS the
+    device the absolute form names but from a working tree is an ordinary relative file. The ABSOLUTE
+    /dev,/proc form stays 'file-dev' (DENY, an unambiguous device); the relative form only ASKS, so a
+    legitimate write into a repo's own dev/ or proc/ subdirectory is surfaced, not hard-blocked."""
+    if t_opaque:
+        return "opaque"
+    norm = os.path.normpath(target)
+    if _DEV_PROC_TARGET_RE.match(norm) or _DEV_PROC_TARGET_RE.match(target):
+        return "file-dev"
+    if _REL_DEV_PROC_TARGET_RE.match(norm):
+        return "opaque"  # a relative dev/proc-leading target is cwd-dependent: could BE the device
+    if ".." in norm.replace("\\", "/").split("/") or ".." in target.replace("\\", "/").split("/"):
+        return "opaque"  # a '..' component -> could resolve to a device; cannot be proven a plain file
+    return "file-real"
+
+
+def _lex_command(command):
+    """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
+    escape, a NUL, or an unsupported construct (a heredoc/here-string, a process substitution, a '{fd}>'
+    redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on a
+    partially-cleaned command. Linear, non-recursive, stdlib-only."""
+    if "\x00" in command:
+        raise ValueError("NUL in command")
+    n = len(command)
+    segments = []
+    argv = []
+    redirects = []
+    opaque = [False]
+    seg_start = [0]
+
+    def end_segment(sep, op_start, next_start):
+        segments.append(_Segment(list(argv), sep, list(redirects),
+                                  command[seg_start[0]:op_start], opaque[0]))
+        del argv[:]
+        del redirects[:]
+        opaque[0] = False
+        seg_start[0] = next_start
+
+    def consume_redirect(op, oplen, at, src_fd):
+        k = at + oplen
+        while k < n and command[k] in " \t":  # inline whitespace before the target (never a newline)
+            k += 1
+        # A redirect target that begins with an unquoted '#' is a comment where a filename must be (bash
+        # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
+        if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
+            raise ValueError("malformed redirect: no target")
+        target, t_opaque, started, _digits, k2 = _read_word(command, k, n)
+        if not started:
+            raise ValueError("malformed redirect target")
+        redirects.append(_classify_redirect(op, src_fd, target, t_opaque))
+        return k2
+
+    i = 0
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "\n":
+            end_segment("", i, i + 1)
+            i += 1
+            continue
+        if c == "#":
+            # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of the
+            # line is ignored, so a redirect or pipe that is actually commented out (git diff # > /tmp/x)
+            # never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally inside
+            # _read_word and never reaches this word-start position.
+            nl = command.find("\n", i)
+            i = n if nl == -1 else nl
+            continue
+        if c in _METACHARS:
+            op, kind, oplen = _match_operator(command, i, n)
+            if kind == "sep":
+                end_segment(op, i, i + oplen)
+                i += oplen
+                continue
+            if kind == "cannot":
+                raise ValueError("unsupported shell construct: {}".format(op))
+            i = consume_redirect(op, oplen, i, None)
+            continue
+        text, w_opaque, started, all_digits, j = _read_word(command, i, n)
+        # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect operator
+        # is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' -> fd 2; but
+        # '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep the word in argv.
+        if all_digits and text and j < n and command[j] in "<>":
+            op, kind, oplen = _match_operator(command, j, n)
+            if kind == "redirect":
+                i = consume_redirect(op, oplen, j, int(text))
+                continue
+            if kind == "cannot":
+                raise ValueError("unsupported shell construct: {}".format(op))
+        # A '{varname}>' fd-var redirect is not modelled: cannot-evaluate rather than a partial word.
+        if text and j < n and command[j] in "<>" and _FD_VAR_RE.match(text):
+            raise ValueError("unsupported {fd} redirect")
+        if started:
+            argv.append(text)
+            if w_opaque:
+                opaque[0] = True
+        i = j
+    end_segment("", n, n)
+    return segments
 
 
 def _segments(command):
-    """Group a command into SEGMENTS, quote-aware. Returns a list of (tokens, sep_after): tokens is the
-    quote-stripped token list of the segment (never containing an operator token), and sep_after is the
-    operator token that ended it (one of _SEGMENT_OPERATORS) or "" at a line end or the command end. The
-    command is split into segments on the shell operators ; | || && & ( ) and on newlines. '( git diff )'
-    yields a segment [git, diff] (the parens are separators), closing the subshell/grouping bypass.
-    Raises ValueError on a shell parse error so callers can fall back conservatively."""
-    # Splice bash line-continuations (a backslash immediately before a newline joins the continued line)
-    # BEFORE splitting on newlines, so a continued command lexes as one line instead of raising. Residual:
-    # a backslash-newline inside single quotes is a literal in bash and is over-spliced by this naive
-    # replace (an accepted, astronomically-rare edge).
-    command = command.replace("\\\n", "")
-    result = []
-    for line in command.split("\n"):
-        current = []
-        for tok in _lex_line(line):
-            if tok in _SEGMENT_OPERATORS:
-                result.append((current, tok))
-                current = []
-            else:
-                current.append(tok)
-        result.append((current, ""))
-    return result
+    """Compatibility projection over _lex_command: a list of (argv, sep_after) tuples, argv being the
+    quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
+    longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
+    parse error or unsupported construct so callers fall back conservatively. Existing consumers
+    (protected_line, gate_weakening, git_discard's lossy scan, find_ai_authorship) read redirect-free
+    argv automatically; diff_source_pretool uses the richer _Segment records directly."""
+    return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
 
 
 # A leading inline shell env-var assignment (FOO=bar) that PREFIXES a command, e.g. the GIT_PAGER=cat in
@@ -282,7 +544,7 @@ def _git_subcommand(tokens):
     """The git subcommand of a segment whose command word is git: the first non-option token after the
     command word, skipping any leading env-assignment prefix and the git global options. An
     arg-consuming global option in its space-separated form (-C DIR, --git-dir DIR, ...) skips two tokens
-    (its value is now its own token, per shlex) so the value is not read as the subcommand; the
+    (its value is now its own token, per the tokenizer) so the value is not read as the subcommand; the
     '--opt=value' form and any other leading '-' token skip one. None when there is no subcommand
     token."""
     i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
@@ -425,40 +687,74 @@ def diff_wall_stop(data):
 
 
 # --- cnsdif (PreToolUse): a bare console diff at the source -------------------------------------------
-# Layer A of the F-36 catch: deny a Bash command that renders a version-control diff to the console.
-# Quote-aware segmented (shlex; split on ; && || | & ( ) and newlines), so a bare 'git diff' chained
-# AFTER an allowed form, or grouped in a subshell '( git diff )', is still caught. A diff-producer
-# segment is ALLOWED (excluded from denial) in four cases, each judged PER DIFF SEGMENT on that
-# segment's own tokens (never a raw substring): (1) an INFO FLAG on the segment (--help or -h) is a help
-# invocation, not a diff; (2) a SUMMARY flag (--stat etc.) with NO co-present patch flag (-p/-u/--patch*)
-# is a listing, not a raw diff; (3) the segment's LAST stdout redirect targets a REAL non-console file
-# (an ordinary path, not one under /dev/ or /proc/), diverting the diff off the review surface; (4) a PAGER PIPE, the segment piped
-# (an unquoted '|') into a known interactive pager (less/more/most/pager), is interactive review rather
-# than a console wall. Cases 1 and 4 were restored in GD-24 fix round 7 after fix round 6 over-corrected
-# them to DENY; a pipe to cat/tee/anything else still denies. No comment escape exists (GD-24 fix round 6
-# dropped the fragile '# allow-diff' quote-parsing bug surface, and it stays removed): an opt-in
-# anti-diff-dump hook blocks console diffs, and these allows cover the legitimate non-wall cases.
+# Layer A of the F-36 catch, redesigned FAIL-SAFE-BY-CONSTRUCTION (GD-112 AIRTIGHT-NARROW philosophy, the
+# same one applied to the truncation guard): rather than enumerating every dumping form of git (an
+# unbounded shell + git-option grammar, GD-34/F-119), it proves the SAFE form or DENIES/ASKS. It works on
+# the shared quote/redirect-aware tokenizer (_lex_command), so a redirection anywhere in the command is
+# recorded as metadata and removed from argv, closing the redirect-pollution class. A git diff-PRODUCER is
+# ALLOWED only when the WHOLE command matches one of FOUR closed proofs: (A) an exact metacharacter-free
+# help invocation (git <producer> --help/-h); (B) an exact summary-only command (a metacharacter-free
+# 'git <producer> ... --stat/--name-only/...' whose only other option may be --no-patch); (C) a single
+# simple command whose command word is literally 'git', a possible producer, whose LAST stdout redirect is
+# proven to land on a static non-/dev,/proc file (last-redirect-wins over the raw redirect metadata); or
+# (D) an exact two-stage terminal pager pipeline 'git <producer> | less/more/most/pager'. A producer that
+# is confirmed to emit a console patch (a default diff/show/range-diff, or a patch-flagged listing) and
+# fits no proof DENIES; any other producer-capable-but-unproven form (a wrapper, a pathed git, quotes, a
+# compound, extra summary modifiers, a dynamic redirect target, a pipe to a non-pager) ASKS. The ALLOW path
+# deliberately does NOT parse the full git/shell option grammar, so it over-ASKS (a git log carrying any
+# extra flag, quoted prose) rather than risk a false ALLOW; the residual is disclosed in the manifest. A
+# fifth proof (E) ALLOWs a benign 'git log' commit listing (bare, --oneline, or bare operands, no diff).
 _PATCH_FLAGS = frozenset(("-p", "-u"))
 _SUMMARY_FLAGS = frozenset(("--stat", "--name-only", "--name-status", "--numstat", "--shortstat"))
-# An info flag turns a diff subcommand into a help invocation, not a diff dump. A pager pipe sends the
-# diff into an interactive reader, not a console wall; cat/tee/anything else is not a pager.
 _INFO_FLAGS = frozenset(("--help", "-h"))
 _PAGERS = frozenset(("less", "more", "most", "pager"))
-_REDIRECT_TOKENS = frozenset((">", ">>", ">|"))  # stdout to a file (>| is noclobber-override, same
-# diversion as >); a grouped '>&'/'&>'/'&>>' fd-dup is handled by _is_stdout_fd_dup, not here
-_ORCH_STDIN_REDIR = frozenset(("<", "<<", "<<<", "<>", "<&"))  # input redirects (file/heredoc/here-string/
-# read-write open/fd-dup) that, on fd0, break a pipe; '<>'/'<&' added round 20
-# A redirect target UNDER /dev/ or /proc/ is never a real diff-output file: it lands on a console or
-# terminal (/dev/tty, /dev/pts/N, /dev/console), or on stdout/stderr (/dev/stdout, /dev/stderr,
-# /dev/fd/N, /proc/self/fd/1, /proc/PID/fd/N), so a diff sent there still reaches the review surface. A
-# real diff-output file is an ordinary path, never under one of these two trees.
+# The producer-capable git SURFACES (a git word followed later by one of these makes a segment a POSSIBLE
+# producer, the fail-safe ASK scope). 'show' covers a plain 'git show' and 'git stash show'.
+_PRODUCER_SURFACES = frozenset((
+    "diff", "show", "range-diff", "log", "diff-tree", "diff-index", "diff-files", "format-patch"))
+# The summary-capable producers for the proof-B and proof-A exact forms (format-patch writes files, never a
+# summary listing, so it is excluded here).
+_SUMMARY_PRODUCERS = frozenset((
+    "diff", "show", "range-diff", "log", "diff-tree", "diff-index", "diff-files"))
+# Proof E (benign 'git log' commit-listing): an EXACT, curated allowlist of git log options that are BOTH
+# value-free (they never consume a following word: any optional value is inline '=value' only, so a bare
+# operand is never a swallowed value) AND provably diff-free (they affect only commit-listing display or
+# traversal, never a patch or a file-list). Kept exact, never a fuzzy pattern: 'git log' renders a patch
+# ONLY with a patch-generating flag (-p/-u/--patch* and kin), and a summary/file-list form (--stat,
+# --numstat, --shortstat, --name-only, --name-status) EMITS output so is NOT here (--stat and kin are proof
+# B). Any OTHER option - a patch flag, a summary/file-list flag, a pickaxe (-G/-S) whose diff behaviour
+# depends on a co-present -p, a value-taking option (--format, -n <count>, --author=, --since=, --grep=), or
+# any unknown flag - is NOT admitted and routes to the unchanged airtight-narrow default (ASK, or DENY when
+# a patch flag confirms a console patch).
+_BENIGN_LOG_OPTS = frozenset((
+    "--oneline", "--graph", "--decorate", "--no-decorate", "--abbrev-commit", "--reverse", "--all"))
+# A pipe to one of these known console/truncating sinks is a confirmed console dump (DENY); a pipe to a
+# pager is proof D (ALLOW); a pipe to anything else is unprovable (ASK).
+_CONSOLE_SINKS = frozenset(("cat", "tee", "head", "tail"))
+_DIFF_END_OF_OPTIONS = frozenset(("--", "--end-of-options"))
+# Shell reserved words that change execution without a metacharacter (so the plain-command charset alone
+# would admit them); an exact token match excludes them from the proof-A/B metacharacter-free forms.
+_DIFF_RESERVED_WORDS = frozenset((
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until",
+    "do", "done", "in", "function", "time", "coproc"))
+# The conservative metacharacter-free character set for the proof-A/B forms (letters, digits, space, tab,
+# and the punctuation '_ - . / = : @ , + %'), so the whole command carries no quote, redirect, separator,
+# expansion, substitution, grouping, glob, or comment - matching the GD-112 truncation-guard charset.
+_DIFF_PLAIN_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
+# A redirect target UNDER /dev/ or /proc/ is never a real diff-output file: it lands on a console/terminal
+# (/dev/tty, /dev/pts/N, /dev/console) or on a stdout/stderr descriptor path (/dev/stdout, /dev/stderr,
+# /dev/fd/N, /proc/self/fd/1, /proc/PID/fd/N), so a diff sent there still reaches the review surface.
 _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
-# Fallback-only regexes over the RAW command string, used when shlex cannot parse the command (see
-# _diff_source_fallback). SUMMARY/REDIRECT mirror the token escapes; the producer regex is a loose
-# 'git ... diff|show|range-diff' probe. Conservative on a parse failure: deny a plausible producer.
-SUMMARY_RE = re.compile(r"(?:^|\s)--(?:stat|name-only|name-status|numstat|shortstat)\b")
-REDIRECT_TO_FILE_RE = re.compile(r"(?<![0-9&>])[12]?>>?\s*(?![&|])\S")
-_RAW_DIFF_PRODUCER_RE = re.compile(r"(?is)\bgit\b.*?\b(?:diff|show|range-diff)\b")
+# A RELATIVE target whose normalized FIRST component is 'dev' or 'proc' (dev/stdout, ./dev/stdout,
+# proc/self/fd/1) is CWD-DEPENDENT: from cwd '/', or where a 'dev'/'proc' symlink exists, it resolves to
+# the very device the absolute form names, but from an ordinary working tree it is a plain relative file.
+# It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
+# real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
+_REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
+# Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
+# command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
+_RAW_DIFF_PRODUCER_RE = re.compile(
+    r"(?is)\bgit\b.*?\b(?:diff|show|range-diff|log|diff-tree|diff-index|diff-files|format-patch)\b")
 
 
 def _has_patch_flag(tokens):
@@ -505,74 +801,27 @@ def _is_diff_producer(tokens):
     return False
 
 
-def _is_stdout_fd_dup(tokens, i):
-    """True when the token at index i is an fd-duplication that redirects STDOUT (to another descriptor
-    or a console), so it is never a real-file diff output: '&>' (redirects both streams), and '>&' (from
-    '>&1', '>&2', or a bare '>&') UNLESS an explicit non-stdout source fd precedes it (the '2' of a
-    '2>&1', which redirects stderr and leaves stdout untouched). Used by the last-redirect-wins scan so a
-    trailing stdout fd-dup after a real-file redirect flips the segment back to a console dump. A csh-style
-    `>&file`/`&>file` that redirects BOTH streams to a real file is classified here as a to-descriptor dup
-    and DENIED; that is a safe-direction over-deny (recoverable via `> file`), a disclosed residual (F-119)."""
-    tok = tokens[i]
-    if tok in ("&>", "&>>"):  # '&>' and '&>>' both redirect stdout+stderr (truncate / append) to a target
-        return True
-    if tok == ">&":
-        prev = tokens[i - 1] if i > 0 else ""
-        return not (prev.isdigit() and prev != "1")
-    return False
-
-
-def _redirects_to_real_file(tokens):
-    """True when a segment's LAST stdout redirect sends stdout to a REAL, non-console file. Judged on the
-    segment's OWN token stream (never a raw substring), LAST-redirect-wins: a segment may carry more than
-    one stdout redirect and only the last one governs where stdout finally lands, so 'git diff >/dev/tty
-    >/tmp/x' diverts to a real file (allow) while 'git diff >/tmp/x >/dev/tty' ends on the console (deny).
-    A '>'/'>>' token whose target is an ordinary path is a real-file redirect; a target under /dev/ or
-    /proc/ (a console/terminal, /dev/stdout, /dev/stderr, /dev/fd/N, /proc/self/fd/1, ...) is NOT, because
-    the diff still reaches the console there. The fd-duplication forms ('>&1', '>&2', '1>&2', '2>&1', '&>',
-    '>&') tokenize as their own '>&'/'&>' tokens, never a '>'/'>>' token, and a stdout fd-dup as the last
-    redirect also lands on a console/descriptor, so it is not a real-file redirect either. The tokenized
-    form '2> file' (which shlex splits into '2', '>', 'file') redirects a non-stdout fd, so a '>'/'>>'
-    preceded by a bare fd digit other than 1 is not a stdout real-file redirect (F-118). shlex cannot
-    distinguish `2>` (an fd-2 redirect) from `2 > file` (a bare operand `2` plus a stdout redirect) - both
-    tokenize identically - so a `>`/`>>` preceded by a bare fd digit other than 1 always takes the
-    fail-safe non-stdout reading; the rare spaced `N > file` form is a safe over-deny, and the ambiguous
-    `> realfile ... N > /dev/stdout` combination is a disclosed inherent residual (F-117/F-119)."""
-    last_is_real_file = False
-    n = len(tokens)
-    for i, tok in enumerate(tokens):
-        if tok in _REDIRECT_TOKENS and i + 1 < n:
-            prev = tokens[i - 1] if i > 0 else ""
-            if prev.isdigit() and prev != "1":
-                continue  # 'N>' for N != 1 redirects a non-stdout fd (e.g. '2>' stderr); stdout still
-                          # reaches the console, so this is not a stdout real-file redirect (F-118)
-            last_is_real_file = not _DEV_PROC_TARGET_RE.match(tokens[i + 1])
-        elif _is_stdout_fd_dup(tokens, i):
-            last_is_real_file = False
-    return last_is_real_file
-
-
 def _has_info_flag(tokens):
     """True when a segment carries an info flag (--help or -h) as a GENUINE help invocation: git would
     show the subcommand's manual rather than run it, so the segment renders no diff and lands no push or
-    commit. Judged on the segment's own token stream (never a raw substring), modelled on git's own
-    argument parsing (F-117):
+    commit. It receives the shell-CLEANED argv (the shared _lex_command has already removed shell
+    redirection), so a --help/-h that was a redirect TARGET is no longer in the token stream at all; the
+    two remaining git-argument-parsing cases (F-117) still apply:
       - END-OF-OPTIONS: after a '--' or '--end-of-options' token every argument is positional (a pathspec or refspec), so a
         --help/-h at or after the first '--' is NOT help (git runs the command); only earlier tokens
         are considered.
       - VALUE / OPTION SLOT: a --help/-h that is the VALUE of a preceding separated option
         (git commit -m --help, git push -o --help --force) is that option's argument, not a help flag,
         so a token whose PREDECESSOR starts with '-' does not count.
-      - REDIRECT TARGET: a --help/-h that is a shell redirect target (git ... > --help) is a filename,
-        not a git argument, so a token whose predecessor is a redirect operator (a token of only the
-        characters '<>&|') does not count.
     An info flag counts only when its predecessor is a plain word (the subcommand, an operand, or a
     consumed value), exactly where git treats it as help. Fail-safe by construction: every 'git actually
     runs it' shape is excluded, and incompleteness of any value-option list can never cause a silent
-    allow. The safe-direction residual is an over-ask/over-deny on ANY complete option placed immediately
-    before help (a valueless flag, git commit --amend --help, or an attached-value flag, git commit
-    -mfoo --help / git push -ofoo --help --force), where git shows help but the preceding '-' token makes
-    this treat the segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
+    allow. The redirect-target exclusion (a predecessor made only of the characters '<>&|') is retained as
+    a harmless belt-and-braces guard, though the tokenizer no longer surfaces a redirect operator here. The
+    safe-direction residual is an over-ask/over-deny on ANY complete option placed immediately before help
+    (a valueless flag, git commit --amend --help, or an attached-value flag, git commit -mfoo --help / git
+    push -ofoo --help --force), where git shows help but the preceding '-' token makes this treat the
+    segment as live; recoverable, re-issue as 'git <subcommand> --help'."""
     end = len(tokens)
     for j, tok in enumerate(tokens):
         if tok == "--" or tok == "--end-of-options":  # git's two end-of-options spellings (F-117)
@@ -586,44 +835,287 @@ def _has_info_flag(tokens):
     return False
 
 
-def _piped_to_pager(segments, index):
-    """True when the diff-producer segment at `index` is piped (an unquoted '|' separator token) directly
-    into a known interactive pager (less, more, most, pager): interactive review, not a console wall.
-    Judged on the segment's sep_after and the NEXT segment's command word, both from the quote-aware
-    token stream. A pipe to cat, tee, or anything else is NOT a pager pipe and still denies; a non-'|'
-    separator (a ';', '&&', ...) is not a pipe and never qualifies."""
-    _tokens, sep_after = segments[index]
-    if sep_after != "|":
+def _token_possible_producer(argv):
+    """True when the cleaned argv carries a 'git' word (by basename, so /usr/bin/git counts) followed LATER
+    by a producer-capable surface (diff/show/range-diff/log/diff-tree/diff-index/diff-files/format-patch;
+    'show' also covers 'git stash show'). This is the token half of the possible-producer scope: it catches
+    a quote-fragmented producer (g'it' d'iff' -> git diff) that a raw regex over the still-quoted text
+    cannot see."""
+    seen_git = False
+    for word in argv:
+        base = word.rsplit("/", 1)[-1]
+        if seen_git and base in _PRODUCER_SURFACES:
+            return True
+        if base == "git":
+            seen_git = True
+    return False
+
+
+def _has_producer_surface(argv):
+    """True when any argv word (by basename) is a producer surface. Used with an OPAQUE segment to widen
+    the possible-producer scope, so a quoting/expansion form that could resolve to a git command word (an
+    ANSI-C $'g'it, a $VAR that expands to git) alongside a producer surface is never silently ALLOWED."""
+    return any(word.rsplit("/", 1)[-1] in _PRODUCER_SURFACES for word in argv)
+
+
+def _is_possible_producer(seg):
+    """A POSSIBLE producer (the fail-safe ASK scope): a git word followed by a producer surface, seen either
+    in the segment's cleaned argv (_token_possible_producer, robust to quote fragmentation) OR by a broad
+    raw-text probe over the segment (which over-matches quoted prose such as echo 'git diff' - a deliberate
+    over-ASK, never an over-ALLOW), OR an OPAQUE segment (one carrying an unquoted expansion, substitution,
+    or ANSI-C/other quoting the lexer cannot resolve to a literal command word) that also carries a producer
+    surface, so $'g'it diff (which bash runs as git diff) cannot slip through as no-producer. It never
+    establishes an ALLOW; it only widens the ASK/DENY scope."""
+    return (_token_possible_producer(seg.argv)
+            or bool(_RAW_DIFF_PRODUCER_RE.search(seg.raw))
+            or (seg.opaque_shell and _has_producer_surface(seg.argv)))
+
+
+# git diff/log write the diff to a --output/-o file instead of stdout, so a shell redirect or a pipe is a
+# DECOY when --output is present (proofs C and D must not apply). --output/-o takes a file value, inline
+# (--output=X / -oX) or separated (--output X / -o X).
+def _diff_output_diversion(argv):
+    """Return (present, target) for a git --output/-o diff-output diversion before any '--' boundary, or
+    (False, None). The target decides console vs file: the diff lands there, not on stdout."""
+    end = len(argv)
+    for j, word in enumerate(argv):
+        if word in _DIFF_END_OF_OPTIONS:
+            end = j
+            break
+    i = 0
+    while i < end:
+        word = argv[i]
+        if word in ("--output", "-o"):
+            return True, (argv[i + 1] if i + 1 < len(argv) else None)
+        if word.startswith("--output="):
+            return True, word[len("--output="):]
+        if word.startswith("-o") and not word.startswith("--") and len(word) > 2:
+            return True, word[2:]
+        i += 1
+    return False, None
+
+
+def _final_stdout_dest(redirects):
+    """The classification of the segment's FINAL stdout-affecting redirect (last-redirect-wins), or None
+    when no redirect touches stdout: 'file-real' a static non-/dev,/proc path, 'file-dev' a /dev,/proc
+    console/descriptor path, 'descriptor' an fd duplication (e.g. 1>&2, unprovable as a file), or 'opaque'
+    a dynamic target."""
+    dest = None
+    for red in redirects:
+        if red.stdout_effect:
+            dest = red.stdout_effect
+    return dest
+
+
+def _diff_emits_only_summary(argv):
+    """Role-aware: True when a producer's OPTION region (before a '--'/'--end-of-options' boundary) carries
+    a summary selector (--stat/--name-only/--name-status/--numstat/--shortstat, bare or '=value') and NO
+    patch flag (-p/-u/--patch*). Distinguishes a genuine summary listing (git diff -M --stat, which is not a
+    console patch dump and so ASKS rather than DENIES) from a summary token in a NON-option position (git
+    diff -- --stat, a pathspec: a real dump) and from a summary with a co-present patch flag (git diff
+    --stat -p, still a full patch dump)."""
+    has_summary = False
+    has_patch = False
+    for word in argv:
+        if word in _DIFF_END_OF_OPTIONS:
+            break
+        if word.split("=", 1)[0] in _SUMMARY_FLAGS:
+            has_summary = True
+        if word in _PATCH_FLAGS or word.startswith("--patch"):
+            has_patch = True
+    return has_summary and not has_patch
+
+
+def _seg_stdout_reaches_console(seg, segments, index):
+    """Where a producer segment's stdout goes: 'file' (a static real file, NOT a console dump), 'console' (a
+    /dev,/proc target, or a pipe into a known console/truncating sink cat/tee/head/tail, or a plain producer
+    with no diversion), or 'unprovable' (a descriptor or dynamic redirect target, a both-streams '|&' pipe,
+    or a pipe into a pager or any other command whose downstream this guard does not follow)."""
+    dest = _final_stdout_dest(seg.redirects)
+    if dest == "file-real":
+        return "file"
+    if dest in ("descriptor", "opaque"):
+        return "unprovable"
+    if seg.sep_after == "|":
+        nxt = index + 1
+        word = _command_word(segments[nxt].argv) if nxt < len(segments) else ""
+        return "console" if word in _CONSOLE_SINKS else "unprovable"
+    if seg.sep_after == "|&":
+        return "unprovable"
+    if dest == "file-dev":
+        return "console"
+    return "console"  # no stdout redirect and no pipe: straight to the console
+
+
+def _is_console_dump(seg, segments, index):
+    """True when a producer segment is CONFIRMED to emit a console patch: its command word is PROVABLY git
+    (a literal 'git' or a path to it, so an opaque/expansion command word this guard cannot resolve is never
+    a confirmed dump - it routes to ASK instead), it is a git diff producer, it does not emit only a summary
+    listing, and its output is proven to reach a console. When the producer diverts its output with
+    --output/-o, THAT target decides (a /dev,/proc console target is a dump; a file or dynamic target is not
+    a confirmed dump, so it ASKS) and any shell redirect or pipe is a decoy. Otherwise stdout governs. Used
+    only to choose DENY over ASK; its absence never establishes an ALLOW."""
+    if _command_word(seg.argv) != "git":
+        return False  # an opaque/wrapped command word is not a proven git dump -> ASK, never DENY
+    if not _is_diff_producer(seg.argv):
         return False
-    nxt = index + 1
-    if nxt >= len(segments):
+    if _diff_emits_only_summary(seg.argv):
         return False
-    return _command_word(segments[nxt][0]) in _PAGERS
+    diverted, out_target = _diff_output_diversion(seg.argv)
+    if diverted:
+        # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
+        return out_target is not None and _target_class(out_target, False) == "file-dev"
+    return _seg_stdout_reaches_console(seg, segments, index) == "console"
+
+
+def _diff_proof_help(command):
+    """Proof A: an EXACT metacharacter-free help invocation. Allows only 'git <producer> --help/-h' (or the
+    exact 'git stash show --help/-h'); any extra option, operand, wrapper, path, quote, or shell syntax
+    fails. A --help that reached this command as an option value, a path, or a redirect target cannot form
+    this exact shape (the metacharacter-free requirement rules out a redirect, and an option value/path
+    changes the exact word list)."""
+    if not _DIFF_PLAIN_RE.fullmatch(command):
+        return False
+    words = command.split()
+    if words[:1] != ["git"]:
+        return False
+    if len(words) == 3 and words[1] in _PRODUCER_SURFACES and words[2] in _INFO_FLAGS:
+        return True
+    return len(words) == 4 and words[1:3] == ["stash", "show"] and words[3] in _INFO_FLAGS
+
+
+def _diff_proof_summary(command):
+    """Proof B: an EXACT summary-only command. Requires a metacharacter-free single simple command (the
+    conservative charset, no shell reserved word), the first resolved words literally 'git' and a
+    summary-capable producer ('git stash show' handled explicitly), at least one exact summary selector
+    before a '--'/'--end-of-options' boundary, and no other option-like word before the boundary except an
+    exact --no-patch (bare operands are allowed). Any extra option (git diff -M --stat, git diff --stat=80),
+    a wrapper, a path, an assignment, or a quote fails, routing to ASK rather than another growing option
+    table."""
+    if not _DIFF_PLAIN_RE.fullmatch(command):
+        return False
+    words = command.split()
+    if _DIFF_RESERVED_WORDS & set(words):
+        return False
+    if words[:1] != ["git"]:
+        return False
+    if words[1:2] == ["stash"]:
+        if words[2:3] != ["show"]:
+            return False
+        opts = words[3:]
+    elif len(words) >= 2 and words[1] in _SUMMARY_PRODUCERS:
+        opts = words[2:]
+    else:
+        return False
+    boundary = len(opts)
+    for j, word in enumerate(opts):
+        if word in _DIFF_END_OF_OPTIONS:
+            boundary = j
+            break
+    has_selector = False
+    for word in opts[:boundary]:
+        if word in _SUMMARY_FLAGS:
+            has_selector = True
+        elif word.startswith("-") and word != "--no-patch":
+            return False
+    return has_selector
+
+
+def _diff_proof_log_listing(command):
+    """Proof E (Architect-directed refinement): a benign 'git log' COMMIT LISTING that provably emits no diff
+    to the console. Requires a metacharacter-free single simple command (the conservative charset, no shell
+    reserved word, so no redirect and no pipe), the first resolved words literally 'git' and 'log', and every
+    option-like word before a '--'/'--end-of-options' boundary drawn from the exact _BENIGN_LOG_OPTS
+    allowlist (bare revision/pathspec operands are allowed, and an option there is valueless so no operand is
+    a swallowed value). Any patch flag, pickaxe, value-taking option, or unknown flag fails this proof and
+    routes to the unchanged default (ASK, or DENY on a confirmed patch). This is EXACT-form, not a fuzzy
+    'anything without -p' allow: an unknown flag is never proven benign."""
+    if not _DIFF_PLAIN_RE.fullmatch(command):
+        return False
+    words = command.split()
+    if _DIFF_RESERVED_WORDS & set(words):
+        return False
+    if words[:2] != ["git", "log"]:
+        return False
+    opts = words[2:]
+    boundary = len(opts)
+    for j, word in enumerate(opts):
+        if word in _DIFF_END_OF_OPTIONS:
+            boundary = j
+            break
+    for word in opts[:boundary]:
+        if word.startswith("-") and word not in _BENIGN_LOG_OPTS:
+            return False
+    return True
+
+
+def _diff_proof_realfile(segments):
+    """Proof C: a single simple command whose command word is literally 'git', a possible producer, with no
+    opaque shell feature, whose FINAL stdout redirect (last-redirect-wins over the raw redirect metadata) is
+    proven to land on a static non-/dev,/proc file. Supports leading, interspersed, and trailing redirects
+    without token pollution; a dynamic target, a descriptor duplication, or a /dev,/proc target is not a
+    proof."""
+    if len(segments) != 1:
+        return False
+    seg = segments[0]
+    if seg.opaque_shell:
+        return False
+    if not seg.argv or seg.argv[0] != "git":  # literal 'git': no assignment prefix, wrapper, or path
+        return False
+    if not _is_possible_producer(seg):
+        return False
+    if _diff_output_diversion(seg.argv)[0]:
+        return False  # --output/-o governs where the diff lands; the shell redirect is a decoy
+    return _final_stdout_dest(seg.redirects) == "file-real"
+
+
+def _diff_proof_pager(segments):
+    """Proof D: an EXACT two-stage terminal pager pipeline. Stage 1 is a plain literal unwrapped 'git'
+    possible producer with no redirection or opaque feature; the separator is exactly '|' (not '|&'); stage
+    2 is exactly one command word (less/more/most/pager) with no options, operands, redirection, or opaque
+    feature, and it is the terminal stage (no later pipe)."""
+    if len(segments) != 2:
+        return False
+    stage1, stage2 = segments
+    if stage1.sep_after != "|" or stage2.sep_after != "":
+        return False
+    if stage1.redirects or stage1.opaque_shell:
+        return False
+    if not stage1.argv or stage1.argv[0] != "git" or not _is_possible_producer(stage1):
+        return False
+    if _diff_output_diversion(stage1.argv)[0]:
+        return False  # --output/-o diverts the diff off the pipe; the pager is a decoy
+    if stage2.redirects or stage2.opaque_shell:
+        return False
+    return len(stage2.argv) == 1 and stage2.argv[0] in _PAGERS
 
 
 def _diff_source_fallback(command):
-    """FAIL-SAFE conservative check when shlex cannot parse the command (unbalanced quotes): we cannot
-    segment safely, so scan the RAW string. If it invokes a git diff-producer with no summary flag and no
-    redirect-to-file escape, deny; never silent-allow a plausibly-violating command on a parse failure.
-    Documented as best-effort: a genuinely clean but unparseable command may deny."""
-    if _RAW_DIFF_PRODUCER_RE.search(command) and not (
-            SUMMARY_RE.search(command) or REDIRECT_TO_FILE_RE.search(command)):
-        return _deny(
-            "AIQT rule cnsdif (no-console-diff-dumps): the command could not be parsed by the shell "
-            "lexer (likely unbalanced quotes) and it appears to render a version-control diff to the "
-            "console with no summary or redirect-to-file escape; failing closed. Re-issue with a "
-            "summary form or a redirect to a real file.",
-            "AIQT guardrail: denied an unparseable command that appears to dump a console diff (rule "
-            "cnsdif, fail-safe).")
+    """FAIL-SAFE conservative check when _lex_command cannot parse the command (an unbalanced quote or an
+    unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
+    broad raw probe) ASKS, everything else ALLOWS. An unparseable command can never earn an ALLOW from a
+    summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
+    unparseable command is surfaced for confirmation rather than proven either way."""
+    if _RAW_DIFF_PRODUCER_RE.search(command):
+        return _ask(
+            "AIQT rule cnsdif (no-console-diff-dumps): the shared tokenizer could not parse this command "
+            "(an unbalanced quote, or a heredoc/process-substitution/other construct it does not model) "
+            "and it appears to invoke a git diff-producer. This guard deliberately does not parse the "
+            "full shell/git grammar, so it cannot prove where the output lands; confirm, or re-issue a "
+            "parseable summary form (--stat), a redirect to a real file (> file), or a pager (| less).",
+            "AIQT guardrail: asked on an unparseable command that appears to invoke a git diff-producer "
+            "(rule cnsdif).")
     return _allow()
 
 
 def diff_source_pretool(data):
-    """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash: deny a Bash command that dumps a bare
-    console diff. A diff-producer segment is allowed only when, on its own tokens, it carries an info
-    flag (--help/-h, a help invocation), a summary flag with no co-present patch flag, its LAST stdout
-    redirect to a real non-console file, or is piped into a known interactive pager (less/more/most/pager).
-    A diff segment matching none of these is denied."""
+    """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash. FAIL-SAFE-BY-CONSTRUCTION: a git diff-producer
+    is ALLOWED only when the WHOLE command matches one of five closed proofs (exact help, exact summary, a
+    benign 'git log' commit listing, a single simple command proven to redirect stdout to a real file, or an
+    exact terminal pager pipeline);
+    a producer confirmed to emit a console patch and fitting no proof DENIES; any other producer-capable but
+    unproven form ASKS. Across a compound or multiple producers, DENY outranks ASK: every possible producer
+    must clear a proof, and a multi-command form is never admitted merely because one segment is safe."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -639,32 +1131,36 @@ def diff_source_pretool(data):
             "string, so the diff-source check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
     try:
-        segments = _segments(command)
+        segments = _lex_command(command)
     except ValueError:
         return _diff_source_fallback(command)
-    for index, (tokens, _sep) in enumerate(segments):
-        if _command_word(tokens) != "git":
-            continue
-        if not _is_diff_producer(tokens):
-            continue
-        # Allowed cases, each judged on THIS segment's own tokens (never a raw substring): an info flag
-        # (--help/-h, a help invocation, not a diff), a summary flag, a redirect of stdout to a real
-        # non-console file, or a pipe into a known interactive pager.
-        if _has_info_flag(tokens):
-            continue
-        if _has_summary_flag(tokens) and not _has_patch_flag(tokens):
-            continue
-        if _redirects_to_real_file(tokens):
-            continue
-        if _piped_to_pager(segments, index):
-            continue
-        reason = ("AIQT rule cnsdif (no-console-diff-dumps): this command renders a version-control "
-                  "diff to the console, burying the review surface under a raw dump. Use a summary form "
-                  "(--stat, --name-only, --name-status, --numstat), redirect the diff to a real file "
-                  "(> file), or pipe it into a pager (| less), not the console.")
-        return _deny(reason,
-                     "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
-    return _allow()
+    possibles = [(index, seg) for index, seg in enumerate(segments) if _is_possible_producer(seg)]
+    if not possibles:
+        return _allow()  # no producer-capable form anywhere: the bounded true boundary allows
+    # AIRTIGHT-NARROW ALLOW: only when the WHOLE command is one of the five closed proofs.
+    if (_diff_proof_help(command) or _diff_proof_summary(command)
+            or _diff_proof_log_listing(command)
+            or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
+        return _allow()
+    # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
+    # compound), and any remaining producer-capable-but-unproven form ASKS.
+    for index, seg in possibles:
+        if _is_console_dump(seg, segments, index):
+            return _deny(
+                "AIQT rule cnsdif (no-console-diff-dumps): this command renders a version-control diff to "
+                "the console, burying the review surface under a raw dump. Use a summary form (--stat, "
+                "--name-only, --name-status, --numstat), redirect the diff to a real file (> file), or "
+                "pipe it into a pager (| less), not the console.",
+                "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
+    return _ask(
+        "AIQT rule cnsdif (no-console-diff-dumps): this command is producer-capable (it can render a "
+        "version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed git, "
+        "quotes, a compound, an extra option, a dynamic redirect target, or a pipe to a non-pager. This "
+        "guard deliberately does not parse the complete shell/git option grammar; confirm it is not a "
+        "console dump, or re-issue an exact summary form (--stat), a redirect to a real file (> file), or "
+        "an exact pager pipeline (git diff | less).",
+        "AIQT guardrail: asked on a producer-capable command outside the guard's proven-safe forms "
+        "(rule cnsdif).")
 
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
@@ -687,7 +1183,7 @@ CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by\s*:?\s*([^\n]{1,160})")
 # value in the '-c user.name=VALUE' inline shape.
 GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
-# Fallback-only raw-string contexts, used when shlex cannot parse the command (see
+# Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command (see
 # _commit_identity_fallback). A value runs to whitespace or a shell separator/quote.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
@@ -754,7 +1250,7 @@ def find_ai_authorship(command):
 
 
 def _commit_identity_fallback(command):
-    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quotes): scan the RAW
+    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): scan the RAW
     string for an AI identity in a Co-Authored-By trailer, an --author value, a git-identity env var, or
     a user.name/user.email value; deny on a hit. Never silent-allow a plausibly-violating command on a
     parse failure."""
@@ -921,7 +1417,7 @@ def absolute_paths(data):
 # assignment wins). A `(.+)` capture would ignore the empty final assignment and wrongly honour the earlier 1.
 _DISCARD_OPTOUT_RE = re.compile(r"^GUARDRAIL_ALLOW_DISCARD=(.*)$")
 _DISCARD_FALSY = frozenset(("", "0", "false", "no", "off"))  # value (case-insensitive) that is NOT truthy
-# Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote). We cannot
+# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct). We cannot
 # segment safely, so scan the RAW string for git AND a recognized work-losing verb: any of the
 # always-lossy verbs, or 'branch' in ANY form. On the raw path we do NOT parse branch flags: an unparseable
 # 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' cannot be told from a create or a list, so ANY
@@ -1659,7 +2155,7 @@ def _segment_dir_simple(tokens):
 
 
 def _git_discard_fallback(command, cwd=None):
-    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quote): we cannot
+    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
     segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
     command, so it cannot soundly trust an opt-out-looking prefix inside it (a quoted-falsy `="0"`, an
     interspersed `OTHER=x`, an opt-out on a DIFFERENT command `...=1 true; git`, a captured-truthy `0;` all
@@ -1673,7 +2169,7 @@ def _git_discard_fallback(command, cwd=None):
     Class C: an unparseable command reaching an ASK is a NON-PRISTINE discard, so it gets the SAME
     best-effort SESSION-CWD snapshot the non-pristine path takes (base resolvable + tree not provably
     clean) BEFORE returning the ASK, so a discard that is asked-then-approved is still recoverable. Without
-    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, shlex ValueError) reached ASK with NO recovery
+    it, `git reset --hard <<'EOF'\\n'\\nEOF` (Bash-valid, a tokenizer ValueError) reached ASK with NO recovery
     ref. The snapshot is decision-INDEPENDENT and best-effort against the session repo only (the verb is
     unparseable, so the ledger label is a generic 'discard'); on snapshot fail the decision stays ASK with
     the failure surfaced."""
@@ -2387,7 +2883,7 @@ _PUSH_LONG_ARG_OPTS = frozenset((
     "--push-option", "--repo", "--receive-pack", "--exec", "--recurse-submodules"))
 _PUSH_SHORT_ARG_OPTS = frozenset(("o",))  # bare letter: the char-scan tests body chars; '-o <val>' skips its value, attached '-o<val>' does not
 
-# Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote);
+# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_DIFF_PRODUCER_RE / _RAW_LOSSY_VERB_RE posture: conservative, over-matching, never
 # a silent allow. _RAW_PUSH_RE/_RAW_COMMIT_RE pair git with the verb in one pattern ((?is): case-fold,
 # '.' spans newlines). _RAW_PUSH_FORCE_RE spots a force or sweep spelling: '--for[a-z-]*' covers
@@ -2694,7 +3190,7 @@ def _commit_on_protected(tokens, cwd):
 
 
 def _protected_line_fallback(command):
-    """FAIL-SAFE conservative raw scan for the two cases the parsed path cannot judge: shlex could not
+    """FAIL-SAFE conservative raw scan for the two cases the parsed path cannot judge: the tokenizer could not
     parse the command (unbalanced quotes), OR git is hidden under a command-word wrapper (env/sudo/...).
     An apparent git force-push (any -f/--force/--for.../--mirror/--all form, or a '+'-refspec anchored
     to start, whitespace, or either quote character, so a quoted '+main:main' under sudo is caught), or
@@ -2898,7 +3394,7 @@ _GATE_ALTS = (
     "the artefact it guards. A genuinely broken hook or check is repaired or retired at its source "
     "through a reviewed change, never bypassed for one run.")
 
-# Fallback-only raw-string probes, used when shlex cannot parse the command (unbalanced quote);
+# Fallback-only raw-string probes, used when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct);
 # mirrors the _RAW_PUSH_RE posture: conservative, over-matching, never a silent allow. '--no-ver'
 # deliberately also hits '--no-verbose' (an over-deny on the unparseable path only); the short cluster
 # probe requires a whitespace-preceded single-dash token so a long option ('--amend') never matches.
@@ -2988,7 +3484,7 @@ def _is_checker_segment(tokens):
 
 
 def _gate_weakening_fallback(command):
-    """FAIL-SAFE conservative scan when shlex cannot parse the command (unbalanced quotes): an apparent
+    """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster ASKS (the raw string cannot bind the cluster to its subcommand, so it cannot
     prove the -n is the bypass rather than an unrelated flag); a checker keyword next to a raw swallow
@@ -3116,7 +3612,7 @@ def gate_weakening(data):
 # pattern label is named. Best-effort, targeting the accidental paste/commit, not an adversary: it does
 # NOT catch an entropy-only secret with no recognizable shape, a secret written by a tool other than
 # Write/Edit/MultiEdit/Bash, or a secret split across tokens/lines or built by concatenation; on the
-# Bash path the command string is scanned as RAW TEXT (not shlex-tokenized, not executed), so a secret
+# Bash path the command string is scanned as RAW TEXT (not tokenized by the shared lexer, not executed), so a secret
 # assembled by concatenation or supplied through a shell variable or expansion is missed, but a redirect
 # or an embedded '#' does NOT cause a Bash-path miss; and it does not catch a base64/obfuscated form.
 #
@@ -4379,6 +4875,103 @@ _ORCH_SHELL_KEYWORDS = frozenset((
     "do", "done", "in", "function", "time", "coproc"))
 
 
+def _orch_foreground_detach(command):
+    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
+    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
+    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
+    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
+    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
+    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
+    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
+    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
+    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
+    is still caught rather than smuggled past.
+
+    AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
+    unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
+    unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
+    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports a detach
+    (True -> ASK) rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored.
+
+    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
+    model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
+    runtime detachers such as nohup/setsid/disown/coproc) is a disclosed residual; where such a construct
+    still leaves an unquoted bare `&`, or leaves the scan inside an unbalanced quote, it errs toward the
+    ASK, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
+    here and is a silent-allow residual disclosed in the manifest."""
+    in_single = in_double = escaped = False
+    prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
+    word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            escaped, prev_dup, word_start = False, False, False
+            i += 1
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of THIS line is not code
+            # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command. Skip
+            # to the next newline and resume the scan, so a real bare `&` on a LATER line is not smuggled
+            # past by a comment on an earlier one. Breaking the whole scan here silently allowed exactly that
+            # (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the comment-obscured detach.
+            nl = command.find("\n", i)
+            if nl == -1:
+                break  # no later line: the comment runs to the end of the string, nothing more to scan
+            i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
+            continue
+        if ch.isspace():
+            prev_dup, word_start = False, True
+            i += 1
+            continue
+        if ch == "\\":
+            escaped, prev_dup, word_start = True, False, False
+            i += 1
+            continue
+        if ch == "'":
+            in_single, prev_dup, word_start = True, False, False
+            i += 1
+            continue
+        if ch == '"':
+            in_double, prev_dup, word_start = True, False, False
+            i += 1
+            continue
+        if ch == "&":
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt == "&":  # `&&` logical AND: not a detach
+                prev_dup, word_start = False, False
+                i += 2
+                continue
+            if nxt == ">":  # `&>` / `&>>` redirect: not a detach
+                prev_dup, word_start = False, False
+                i += 1
+                continue
+            if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
+                prev_dup, word_start = False, False
+                i += 1
+                continue
+            return True  # an executable bare `&` control operator: a foreground detach
+        prev_dup, word_start = ch in (">", "<", "|"), False
+        i += 1
+    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; fail
+    # toward ASK rather than silently allow a possibly-real detach it could not see.
+    return in_single or in_double
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -4392,7 +4985,11 @@ def orch_truncation_guard(data):
     shell-syntax false-allow; whether the output actually reaches durable capture is a run-time property
     (the invoked program's own behaviour, or a platform limit such as the harness output ceiling) that is
     out of view here and is confirmed by the post-execution delivery-marker discipline, a disclosed
-    residual. A foreground call is out of scope (the harness returns its output directly)."""
+    residual. A foreground call is in scope only for one NARROW case (L-GS1 / trkasy): shell syntax that
+    DETACHES a child with a bare `&` still launches asynchronous work the foreground tool call does not
+    track, so a readable foreground command carrying such an operator ASKS the operator to use the tracked
+    background dispatch instead; every other foreground call remains out of scope (the harness returns its
+    output directly)."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -4405,7 +5002,22 @@ def orch_truncation_guard(data):
     command = tool_input.get("command")
     rib = tool_input.get("run_in_background") is True
     if not rib:
-        return _allow()  # foreground is out of scope by design
+        # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
+        # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
+        # are then lost. On a readable foreground command carrying such an operator, ASK the operator to use
+        # the platform's tracked background dispatch (run_in_background) and collect its completion, keep the
+        # command foreground and wait, or confirm the detached result is genuinely irrelevant. An unreadable
+        # or non-detaching foreground command stays out of scope (ALLOW): approving this ASK does not itself
+        # create tracking, and converting to run_in_background=true is what lets the dispatch ledger record it.
+        if isinstance(command, str) and _orch_foreground_detach(command):
+            return _ask(
+                "AIQT rule trkasy: this foreground command detaches a child with a bare '&', launching "
+                "asynchronous work this tool call does not track, so its result and failure are lost. Use "
+                "the platform's tracked background dispatch (run_in_background) and collect its completion, "
+                "keep the command in the foreground and wait for it, or confirm the detached result and "
+                "completion are genuinely not needed.",
+                "AIQT guardrail: asked on a foreground bare-& detach (untracked asynchronous work).")
+        return _allow()  # foreground without a bare-& detach operator is out of scope by design
     if not isinstance(command, str) or not command:
         return _deny(
             "AIQT rule trkasy: a background dispatch carried no readable command string; failing closed.",
