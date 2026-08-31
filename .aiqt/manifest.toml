@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "6ada948fc716d13e85a999865cd78a2f00bf84e64ef54e9e84c21bd4d64d5964"
+tree-sha256 = "957feede24adf0e287c78416be8579d8f8fe4ff98929fb05456100a73d6a5705"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2671,8 +2671,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 21362
-sha256 = "82c303f703674835d58a58fcb67d210064661cb9ca7f5d42c38ae5e6fefd0b37"
+bytes = 47328
+sha256 = "7abd07f5ed04cbedbb3f2867d52ac68b33280d10ba8133eed45faede79314320"
 
 [[sources]]
 path = "tools/gen_skill.py"
