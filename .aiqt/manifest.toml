@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "0038e2f948ddde11e174ef5e163376e3e5fd7344c0716620347e47cc5aed0cb1"
+tree-sha256 = "c51f4c4a90a1d779e78a2abc8cfee141a9f578f4800192a73e1599dbdfedc186"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2466,8 +2466,8 @@ sha256 = "c364b5bec9bdb9eab3a06e41722adc38397198273e6fbb8c7e372765524af36b"
 
 [[sources]]
 path = "tools/check_record_sections.py"
-bytes = 50820
-sha256 = "070348a281b9c264877f7246b1ac0e7819266788ec3a76557e21413bde245341"
+bytes = 59754
+sha256 = "fccd0c81aa8e568d0f186892fa631ad6ebc3d5e2677c39c6de6d8fd740764c11"
 
 [[sources]]
 path = "tools/check_reference_facts.py"

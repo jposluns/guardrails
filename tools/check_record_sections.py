@@ -14,7 +14,12 @@ or any other integration whose post-merge commit does not retain the branch pare
 branch ref available and pass --branch-ref. When the post-merge commit does retain two parents, its second
 parent is the observable branch tip, so an explicit --branch-ref must name that second parent; a --branch-ref
 that disagrees with it is fail-closed, because pointing it at the first parent would compare against the wrong
-tip and mask a drop. --base-ref is optional; absent it, the gate requires exactly one
+tip and mask a drop. A post-merge commit with THREE OR MORE parents (an octopus merge) is not evaluable and
+fails closed, with or without --branch-ref: this gate validates one branch integration per merge, so checking
+a single named branch of an octopus would leave a section dropped from another parent unchecked, and requiring
+--branch-ref to name any non-first parent is not enough because a section-free second parent is itself such a
+parent. Integrate through two-parent merges, or run the gate on the two-parent merge that landed each branch.
+--base-ref is optional; absent it, the gate requires exactly one
 merge-base between the post-merge commit's first parent and the branch tip. An explicit --base-ref is accepted
 only when the target and branch have a unique merge-base and the supplied ref names it; if they have more than
 one merge-base, or the ref is only a common ancestor, it is rejected (two merge-bases can disagree on a
@@ -37,12 +42,13 @@ Exit convention:
      APPLICABLE when the default config is absent AND was not present at the pre-merge target, because this
      checkout never adopted the gate
   1  at least one in-scope branch-owned heading was dropped from the post-merge commit
-  2  malformed or unreadable config/input, a config path whose final or any parent component is a symlink, a
-     default config the merge itself removed, an unresolvable ref (including an unresolvable post-merge ref
-     while the removal check runs), a missing declared branch record, duplicate selected headings, a
-     non-unique merge-base on either the default or the explicit-base path, an explicit --base-ref that is not
-     that unique merge-base, a branch ref that cannot be inferred, or an explicit --branch-ref that disagrees
-     with the observable second parent of a two-parent post-merge commit
+  2  malformed or unreadable config/input, a config path that crosses a symlink in any component of its
+     resolved form or that resolves outside the repository root, a default config the merge itself removed, an
+     unresolvable ref (including an unresolvable post-merge ref while the removal check runs), a missing
+     declared branch record, duplicate selected headings, a non-unique merge-base on either the default or the
+     explicit-base path, an explicit --base-ref that is not that unique merge-base, a branch ref that cannot be
+     inferred, an explicit --branch-ref that disagrees with the observable second parent of a two-parent
+     post-merge commit, or an octopus (three-or-more-parent) post-merge commit
 
 RESIDUAL. This gate proves heading preservation only for newly introduced headings selected by the adopter's
 patterns. It does not compare section bodies, cover edits to a heading already present at merge-base, detect a
@@ -50,9 +56,10 @@ renamed heading as preserved, or prove that an opt-out marker represents a valid
 or heading outside the config is outside its surface. An explicit --base-ref is accepted only when the target
 and branch have a unique merge-base and the supplied ref names it; a non-unique merge-base fails closed on both
 the default and the explicit-base paths, so an explicit base cannot mask a drop by naming one of several
-merge-bases or a mere common ancestor. A config path whose final or any parent component is a symlink is
-fail-closed rather than followed, and an unresolvable post-merge ref fails closed rather than reading as
-never-adopted.
+merge-bases or a mere common ancestor. A config path is judged on its honestly-canonicalized (realpath) form,
+so a path that crosses a symlink in any component is fail-closed rather than followed, whatever `..`, ENOENT,
+or lexical-prefix form it takes; an octopus (three-or-more-parent) merge is not evaluable and fails closed;
+and an unresolvable post-merge ref fails closed rather than reading as never-adopted.
 
 The config is trusted adopter input to this preservation check, so the gate does not defend the config's own
 integrity: rewriting the adopter's config so its heading-pattern selects fewer or no headings (semantic
@@ -142,20 +149,41 @@ def _repository_root(root):
 
 
 def _contained_config_path(root, value):
+    """Return the honestly-canonicalized config path, fail-closed on any symlink or escape.
+
+    The config path is judged on its REAL, fully-resolved form, never on a lexical guess. The round-2/3
+    guard walked the raw path components with lstat and asked relative_to(root) lexically; both are
+    bypassable, because a nonexistent leading component plus `..` (`x/../ln/...`) makes each incremental
+    lstat hit ENOENT (so is_symlink returns False) while resolve() still follows the symlink, and a
+    lexically non-contained absolute form (one that escapes the root's textual prefix through `..` or a
+    process-relative alias such as the current-directory link, then resolves back inside) trips the
+    ValueError early-return yet still resolves into the root. Per the project's symlink-resolution rule
+    we reject on the resolved path instead: canonicalize with realpath (which follows every symlink and
+    collapses `.`/`..`), require the REAL target to sit under the (already canonical) root, AND reject if
+    canonicalization CROSSED any symlink. A symlink was crossed exactly when the honest realpath differs
+    from the purely lexical normalization of the same absolute candidate, since both collapse
+    `.`/`..`/separators identically and only realpath additionally follows links. This holds regardless
+    of `..`, ENOENT, or lexical-prefix form.
+    """
     candidate = Path(value) if Path(value).is_absolute() else root / value
-    # Reject a symlink in ANY component of the config path BEFORE resolve() would follow it. A symlink
-    # at the final component OR at any parent directory (dangling or resolving) is fail-closed: following
-    # it lets an in-repo symlink swap the target that the load and the removal-detection both examine.
-    # Checking only the final component (the round-2 behaviour) missed a symlinked parent directory that
-    # still redirects the path. Each component is judged with lstat (is_symlink), so the link itself, not
-    # its target, is what is judged.
-    _reject_symlinked_config_component(root, candidate)
+    # candidate is already absolute (root is canonical), so neither call depends on the process cwd.
+    # Pass the RAW candidate string, never a pre-collapsed one: os.path.abspath/normpath would fold
+    # `..` lexically BEFORE realpath runs, which would neutralize a `symlink/..` ordering (a crossed
+    # symlink whose target then climbs back under root) and hide the crossing. realpath honours POSIX
+    # order (resolve each symlink, THEN apply the following `..`), so it and the purely lexical normpath
+    # diverge whenever, and only whenever, a symlink was actually crossed.
+    text = str(candidate)
+    real = Path(os.path.realpath(text))
+    lexical = Path(os.path.normpath(text))
     try:
-        resolved = candidate.resolve(strict=False)
-        resolved.relative_to(root)
-    except (OSError, ValueError):
+        real.relative_to(root)
+    except ValueError:
         raise GateError("config path must resolve inside the repository root")
-    return resolved
+    if real != lexical:
+        raise GateError(
+            "config path {} crosses a symlink (resolves to {}); a symlinked config path is not "
+            "followed".format(value, real))
+    return real
 
 
 def _config_is_symlink(path):
@@ -164,32 +192,6 @@ def _config_is_symlink(path):
         return path.is_symlink()
     except OSError:
         return True
-
-
-def _reject_symlinked_config_component(root, candidate):
-    """Fail closed if the config path, or any component of it below root, is a symlink.
-
-    The round-2 guard judged only the final component, so a symlinked PARENT directory (for example a
-    symlinked `.aiqt/`) still redirected the target that the load and the removal check both read. root
-    is canonical (resolved strict in _repository_root), so only the components below it are examined,
-    each with lstat via _config_is_symlink; a symlink anywhere in the chain is fail-closed.
-    """
-    try:
-        parts = candidate.relative_to(root).parts
-    except ValueError:
-        # Not lexically under root: judge the final component here, and let the resolve-based
-        # containment check below reject a path that escapes the root through a parent.
-        if _config_is_symlink(candidate):
-            raise GateError(
-                "config path {} is a symlink; a symlinked config is not followed".format(candidate))
-        return
-    current = root
-    for part in parts:
-        current = current / part
-        if _config_is_symlink(current):
-            raise GateError(
-                "config path component {} is a symlink; a symlinked config path is not followed"
-                .format(current))
 
 
 def _record_path(value, where):
@@ -320,11 +322,27 @@ def resolve_graph(root, post_merge_ref, branch_ref=None, base_ref=None):
     if not parents:
         raise GateError("post-merge commit has no first parent")
     target = parents[0]
+    if len(parents) > 2:
+        # An octopus merge integrates several branches at once, so a single --branch-ref cannot
+        # represent all of them: validating one named branch would leave a section dropped from
+        # another non-first parent completely unchecked (round-3 FIX A guarded only len==2, so a
+        # bogus --branch-ref on an octopus masked a drop). This gate's model is one branch per
+        # merge, so a 3+-parent merge is not evaluable and fails closed rather than checking a
+        # subset and reading clean. Requiring branch in parents[1:] is not enough: a section-free
+        # second parent is itself in parents[1:], yet checking it alone still hides another
+        # parent's dropped section.
+        raise GateError(
+            "post-merge commit has {} parents (an octopus merge); this gate validates a single "
+            "branch integration and cannot faithfully check a simultaneous multi-branch merge, "
+            "so an octopus merge is not evaluable and fails closed. Integrate branches through "
+            "two-parent merges, or run the gate per branch on the two-parent merge that landed it"
+            .format(len(parents)))
     if branch_ref is None:
         if len(parents) != 2:
             raise GateError(
                 "cannot infer the branch tip: post-merge commit must have exactly two parents; "
-                "pass --branch-ref for squash, rebase, or octopus integration")
+                "pass --branch-ref for a squash or rebase integration whose branch tip is not "
+                "retained as a parent")
         branch = parents[1]
     else:
         branch = _resolve_commit(root, branch_ref, "branch ref")
@@ -611,6 +629,38 @@ def self_test():
                 _quiet_run(root, config_path, True, bad, target, None),
                 2)
 
+            # Round-4 FIX A (octopus / 3+ parent merge is not evaluable and fails closed): round-3's
+            # disagreement guard fired only on len(parents)==2, so a 3+-parent (octopus) merge accepted
+            # a bogus --branch-ref and masked a drop. Build an octopus post-merge commit whose tree is
+            # target_tree (so `topic`'s section is dropped) with parents [target, topic, octo_extra];
+            # `topic` introduced the section, `octo_extra` is section-free. With ANY --branch-ref (the
+            # first parent, the section-owning parent, or a section-free parent) an octopus cannot be
+            # faithfully validated by this single-branch gate, so it fails closed. Pre-fix, the first
+            # parent and the section-free parent both read exit 0 PASS, masking the drop.
+            _selftest_git(root, ["checkout", "-q", "-b", "octo-extra", base])
+            (root / "octo-extra.txt").write_text("x\n", encoding="utf-8")
+            _selftest_git(root, ["add", "-A"])
+            _selftest_git(
+                root, ["commit", "-q", "-m", "octopus third parent, no section"])
+            octo_extra = _selftest_git(root, ["rev-parse", "HEAD"])
+            octopus = _selftest_git(
+                root,
+                ["commit-tree", target_tree, "-p", target, "-p", topic,
+                 "-p", octo_extra],
+                input_text="octopus drops the section\n")
+            expect(
+                "octopus merge fails closed with --branch-ref at the first parent",
+                _quiet_run(root, config_path, True, octopus, target, None),
+                2)
+            expect(
+                "octopus merge fails closed with --branch-ref at a section-free parent",
+                _quiet_run(root, config_path, True, octopus, octo_extra, None),
+                2)
+            expect(
+                "octopus merge fails closed with --branch-ref at the section-owning parent",
+                _quiet_run(root, config_path, True, octopus, topic, None),
+                2)
+
             # Round-3 FIX B (symlinked PARENT component): the round-2 guard checked only the final path
             # component, so a symlinked parent directory still redirected the config the load and the
             # removal check read. Point --config through a symlinked parent (linkdir -> .aiqt); a symlink
@@ -628,6 +678,77 @@ def self_test():
             expect(
                 "symlinked parent component in the config path fails closed",
                 symlink_parent_rc, 2)
+
+            # Round-4 FIX B (a crossed symlink hidden by ENOENT-masked '..' or lexical non-containment):
+            # the round-3 guard walked the RAW components with lstat and asked relative_to(root)
+            # lexically, so a nonexistent-component + '..' (x/../ln/...) made each incremental lstat hit
+            # ENOENT (is_symlink -> False) while resolve() still followed the symlink, and a lexically
+            # non-contained absolute form (../ back into root) tripped the ValueError early-return that
+            # checked only the final component. Both followed the symlink and read the redirected config.
+            # The fix judges the honest realpath. Point an in-repo symlink `ln` at a decoy dir holding a
+            # never-matching (narrowed) config; on the dropped-section merge `bad`, following it would
+            # read exit 0 PASS, so each bypass masks the drop. Both must fail closed on the realpath.
+            decoy_dir = root / "decoy-cfg"
+            decoy_dir.mkdir()
+            (decoy_dir / "record-sections.toml").write_text(
+                'schema-version = 1\n'
+                'opt-out-marker = "<!-- aiqt-record-section: superseded -->"\n\n'
+                '[[record]]\n'
+                'path = "records.md"\n'
+                "heading-pattern = '^## NEVER-MATCHES-ANY-REAL-HEADING$'\n",
+                encoding="utf-8")
+            link = root / "ln"
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            os.symlink("decoy-cfg", str(link))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                enoent_dotdot_rc = main(
+                    ["--root", str(root), "--config",
+                     "x/../ln/record-sections.toml", "--post-merge-ref", bad])
+            escape_value = "{}/../{}/{}/ln/record-sections.toml".format(
+                root.parent, root.parent.name, root.name)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                lexical_escape_rc = main(
+                    ["--root", str(root), "--config", escape_value,
+                     "--post-merge-ref", bad])
+            link.unlink()
+            expect(
+                "ENOENT-masked '..' prefix crossing a symlink fails closed",
+                enoent_dotdot_rc, 2)
+            expect(
+                "lexically non-contained form crossing a symlink fails closed",
+                lexical_escape_rc, 2)
+
+            # Round-4 FIX B, symlink-BEFORE-'..' ordering: the config path must be judged on the RAW
+            # candidate, never a pre-collapsed one. A `symlink/../name` crosses the symlink and then
+            # climbs, so the honest realpath resolves the link FIRST (POSIX order) and lands off the
+            # lexical guess, while a lexical pre-collapse would fold `symlink/..` away and hide the
+            # crossing. Symlink `lnn` -> a nested real dir, and a narrowed decoy at root/shadow-cfg:
+            # `lnn/../shadow-cfg/record-sections.toml` resolves (realpath) to root/<nested>/shadow-cfg
+            # (absent) but a pre-collapse would read the root/shadow-cfg decoy and mask the drop, so the
+            # crossing must fail closed on the realpath rather than read the decoy.
+            (root / "nest-dir" / "inner").mkdir(parents=True)
+            shadow_dir = root / "shadow-cfg"
+            shadow_dir.mkdir()
+            (shadow_dir / "record-sections.toml").write_text(
+                'schema-version = 1\n'
+                'opt-out-marker = "<!-- aiqt-record-section: superseded -->"\n\n'
+                '[[record]]\n'
+                'path = "records.md"\n'
+                "heading-pattern = '^## NEVER-MATCHES-ANY-REAL-HEADING$'\n",
+                encoding="utf-8")
+            nested_link = root / "lnn"
+            if nested_link.is_symlink() or nested_link.exists():
+                nested_link.unlink()
+            os.symlink("nest-dir/inner", str(nested_link))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                symlink_then_dotdot_rc = main(
+                    ["--root", str(root), "--config",
+                     "lnn/../shadow-cfg/record-sections.toml", "--post-merge-ref", bad])
+            nested_link.unlink()
+            expect(
+                "a symlink crossed before '..' fails closed, not folded away",
+                symlink_then_dotdot_rc, 2)
 
             _selftest_git(
                 root, ["checkout", "-q", "-b", "optout", base])
@@ -972,7 +1093,9 @@ def self_test():
           "branch, absent default adopter config, ambient GIT_ redirection, "
           "config removed by the merge, an unresolvable post-merge ref, a "
           "symlinked config, a symlinked parent component of the config path, "
-          "an explicit base that is not the unique merge-base, and an explicit "
+          "a config path crossing a symlink via an ENOENT-masked '..' prefix or "
+          "a lexically non-contained form, an octopus (3+ parent) merge, an "
+          "explicit base that is not the unique merge-base, and an explicit "
           "--branch-ref disagreeing with the observable second parent all "
           "produce the required 0/1/2 decisions")
     return 0
