@@ -11,7 +11,10 @@ explicit declaration that the section was superseded.
 The default post-merge ref is HEAD. With no --branch-ref, HEAD must be an ordinary two-parent merge commit:
 its first parent is the pre-merge target and its second parent is the branch tip. For a squash/rebase merge,
 or any other integration whose post-merge commit does not retain the branch parent, the caller must keep the
-branch ref available and pass --branch-ref. --base-ref is optional; absent it, the gate requires exactly one
+branch ref available and pass --branch-ref. When the post-merge commit does retain two parents, its second
+parent is the observable branch tip, so an explicit --branch-ref must name that second parent; a --branch-ref
+that disagrees with it is fail-closed, because pointing it at the first parent would compare against the wrong
+tip and mask a drop. --base-ref is optional; absent it, the gate requires exactly one
 merge-base between the post-merge commit's first parent and the branch tip. An explicit --base-ref is accepted
 only when the target and branch have a unique merge-base and the supplied ref names it; if they have more than
 one merge-base, or the ref is only a common ancestor, it is rejected (two merge-bases can disagree on a
@@ -34,11 +37,12 @@ Exit convention:
      APPLICABLE when the default config is absent AND was not present at the pre-merge target, because this
      checkout never adopted the gate
   1  at least one in-scope branch-owned heading was dropped from the post-merge commit
-  2  malformed or unreadable config/input, a config path that is a symlink, a default config the merge itself
-     removed, an unresolvable ref (including an unresolvable post-merge ref while the removal check runs), a
-     missing declared branch record, duplicate selected headings, a non-unique merge-base on either the
-     default or the explicit-base path, an explicit --base-ref that is not that unique merge-base, or a branch
-     ref that cannot be inferred
+  2  malformed or unreadable config/input, a config path whose final or any parent component is a symlink, a
+     default config the merge itself removed, an unresolvable ref (including an unresolvable post-merge ref
+     while the removal check runs), a missing declared branch record, duplicate selected headings, a
+     non-unique merge-base on either the default or the explicit-base path, an explicit --base-ref that is not
+     that unique merge-base, a branch ref that cannot be inferred, or an explicit --branch-ref that disagrees
+     with the observable second parent of a two-parent post-merge commit
 
 RESIDUAL. This gate proves heading preservation only for newly introduced headings selected by the adopter's
 patterns. It does not compare section bodies, cover edits to a heading already present at merge-base, detect a
@@ -46,9 +50,19 @@ renamed heading as preserved, or prove that an opt-out marker represents a valid
 or heading outside the config is outside its surface. An explicit --base-ref is accepted only when the target
 and branch have a unique merge-base and the supplied ref names it; a non-unique merge-base fails closed on both
 the default and the explicit-base paths, so an explicit base cannot mask a drop by naming one of several
-merge-bases or a mere common ancestor. A config path that is a symlink is fail-closed rather than followed, and
-an unresolvable post-merge ref fails closed rather than reading as never-adopted. Those boundaries are
-deliberate and printed in the PASS result; missing or ambiguous inputs inside the declared surface fail closed.
+merge-bases or a mere common ancestor. A config path whose final or any parent component is a symlink is
+fail-closed rather than followed, and an unresolvable post-merge ref fails closed rather than reading as
+never-adopted.
+
+The config is trusted adopter input to this preservation check, so the gate does not defend the config's own
+integrity: rewriting the adopter's config so its heading-pattern selects fewer or no headings (semantic
+narrowing that makes real sections stop matching) is a change to that trusted config, not a dropped section
+this gate detects. Guarding the config against adversarial narrowing is out of this gate's threat model; it is
+the config-integrity surface's concern, not this one's.
+
+Those boundaries are deliberate; the PASS result prints only the scope note that it compares selected new
+headings and not bodies or pre-existing headings, so the other boundaries above live here rather than in that
+line. Missing or ambiguous inputs inside the declared surface fail closed.
 """
 import argparse
 import io
@@ -129,12 +143,13 @@ def _repository_root(root):
 
 def _contained_config_path(root, value):
     candidate = Path(value) if Path(value).is_absolute() else root / value
-    # Reject a symlinked config BEFORE resolve() would follow it. A symlink at the config path (dangling
-    # or resolving) is fail-closed: following it lets an in-repo symlink swap the target that the load
-    # and the removal-detection both examine. Checked with lstat (is_symlink) so the link itself, not
+    # Reject a symlink in ANY component of the config path BEFORE resolve() would follow it. A symlink
+    # at the final component OR at any parent directory (dangling or resolving) is fail-closed: following
+    # it lets an in-repo symlink swap the target that the load and the removal-detection both examine.
+    # Checking only the final component (the round-2 behaviour) missed a symlinked parent directory that
+    # still redirects the path. Each component is judged with lstat (is_symlink), so the link itself, not
     # its target, is what is judged.
-    if _config_is_symlink(candidate):
-        raise GateError("config path {} is a symlink; a symlinked config is not followed".format(value))
+    _reject_symlinked_config_component(root, candidate)
     try:
         resolved = candidate.resolve(strict=False)
         resolved.relative_to(root)
@@ -149,6 +164,32 @@ def _config_is_symlink(path):
         return path.is_symlink()
     except OSError:
         return True
+
+
+def _reject_symlinked_config_component(root, candidate):
+    """Fail closed if the config path, or any component of it below root, is a symlink.
+
+    The round-2 guard judged only the final component, so a symlinked PARENT directory (for example a
+    symlinked `.aiqt/`) still redirected the target that the load and the removal check both read. root
+    is canonical (resolved strict in _repository_root), so only the components below it are examined,
+    each with lstat via _config_is_symlink; a symlink anywhere in the chain is fail-closed.
+    """
+    try:
+        parts = candidate.relative_to(root).parts
+    except ValueError:
+        # Not lexically under root: judge the final component here, and let the resolve-based
+        # containment check below reject a path that escapes the root through a parent.
+        if _config_is_symlink(candidate):
+            raise GateError(
+                "config path {} is a symlink; a symlinked config is not followed".format(candidate))
+        return
+    current = root
+    for part in parts:
+        current = current / part
+        if _config_is_symlink(current):
+            raise GateError(
+                "config path component {} is a symlink; a symlinked config path is not followed"
+                .format(current))
 
 
 def _record_path(value, where):
@@ -287,6 +328,13 @@ def resolve_graph(root, post_merge_ref, branch_ref=None, base_ref=None):
         branch = parents[1]
     else:
         branch = _resolve_commit(root, branch_ref, "branch ref")
+        if len(parents) == 2 and branch != parents[1]:
+            raise GateError(
+                "post-merge commit has two parents, so its second parent is the observable branch "
+                "tip; an explicit --branch-ref must name that second parent, not a different commit "
+                "(a --branch-ref pointing at the first parent or elsewhere would compare against the "
+                "wrong tip and could mask a dropped section). Omit --branch-ref to use the observed "
+                "second parent, or pass the second parent's own ref")
     if base_ref is not None:
         base = _resolve_commit(root, base_ref, "base ref")
         bases = _merge_base_all(root, target, branch)
@@ -552,6 +600,34 @@ def self_test():
                 "one-parent branch inference ambiguity",
                 _quiet_run(root, config_path, True, target, None, None),
                 2)
+
+            # Round-3 FIX A (branch-ref must match the observable second parent): `bad` is a two-parent
+            # merge that drops the section. Passing its FIRST parent (target) as --branch-ref made the
+            # gate compare target against itself (empty owned set) and read clean. When the post-merge
+            # commit has two parents, its second parent is the observable branch tip, so a --branch-ref
+            # that disagrees with it fails closed rather than masking the drop.
+            expect(
+                "explicit --branch-ref disagreeing with the observable second parent fails closed",
+                _quiet_run(root, config_path, True, bad, target, None),
+                2)
+
+            # Round-3 FIX B (symlinked PARENT component): the round-2 guard checked only the final path
+            # component, so a symlinked parent directory still redirected the config the load and the
+            # removal check read. Point --config through a symlinked parent (linkdir -> .aiqt); a symlink
+            # at ANY component of the config path fails closed. Driven through main() so the containment
+            # path is exercised; `good` is a clean merge that would otherwise read PASS.
+            link_parent = root / "linkdir"
+            if link_parent.is_symlink() or link_parent.exists():
+                link_parent.unlink()
+            os.symlink(".aiqt", str(link_parent))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                symlink_parent_rc = main(
+                    ["--root", str(root), "--config",
+                     "linkdir/record-sections.toml", "--post-merge-ref", good])
+            link_parent.unlink()
+            expect(
+                "symlinked parent component in the config path fails closed",
+                symlink_parent_rc, 2)
 
             _selftest_git(
                 root, ["checkout", "-q", "-b", "optout", base])
@@ -895,8 +971,10 @@ def self_test():
           "duplicate-heading ambiguity, malformed config, uninferable "
           "branch, absent default adopter config, ambient GIT_ redirection, "
           "config removed by the merge, an unresolvable post-merge ref, a "
-          "symlinked config, and an explicit base that is not the unique "
-          "merge-base all produce the required 0/1/2 decisions")
+          "symlinked config, a symlinked parent component of the config path, "
+          "an explicit base that is not the unique merge-base, and an explicit "
+          "--branch-ref disagreeing with the observable second parent all "
+          "produce the required 0/1/2 decisions")
     return 0
 
 
