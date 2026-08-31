@@ -383,13 +383,20 @@ def _target_class(target, t_opaque):
     /dev or /proc (a console/terminal or a stdout/stderr descriptor path, which still reaches the review
     surface); else a static 'file-real' ordinary path. The path is LEXICALLY normalized (os.path.normpath,
     never touching the filesystem) BEFORE classifying, so /tmp/../dev/stdout is recognized as a /dev target
-    rather than passing as a plain /tmp file; a '..' that normpath cannot resolve away (a relative escape
-    such as ../../../dev/stdout) is treated as unprovable ('opaque'), never a proven real file."""
+    rather than passing as a plain /tmp file. Two cwd-dependent forms are NOT proven a plain file and route
+    to 'opaque' (ASK): a '..' that normpath cannot resolve away (a relative escape such as
+    ../../../dev/stdout), and a RELATIVE target whose normalized first component is 'dev' or 'proc'
+    (dev/stdout, ./dev/stdout, proc/self/fd/1), which from cwd '/' or via a 'dev'/'proc' symlink IS the
+    device the absolute form names but from a working tree is an ordinary relative file. The ABSOLUTE
+    /dev,/proc form stays 'file-dev' (DENY, an unambiguous device); the relative form only ASKS, so a
+    legitimate write into a repo's own dev/ or proc/ subdirectory is surfaced, not hard-blocked."""
     if t_opaque:
         return "opaque"
     norm = os.path.normpath(target)
     if _DEV_PROC_TARGET_RE.match(norm) or _DEV_PROC_TARGET_RE.match(target):
         return "file-dev"
+    if _REL_DEV_PROC_TARGET_RE.match(norm):
+        return "opaque"  # a relative dev/proc-leading target is cwd-dependent: could BE the device
     if ".." in norm.replace("\\", "/").split("/") or ".." in target.replace("\\", "/").split("/"):
         return "opaque"  # a '..' component -> could resolve to a device; cannot be proven a plain file
     return "file-real"
@@ -738,6 +745,12 @@ _DIFF_PLAIN_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
 # (/dev/tty, /dev/pts/N, /dev/console) or on a stdout/stderr descriptor path (/dev/stdout, /dev/stderr,
 # /dev/fd/N, /proc/self/fd/1, /proc/PID/fd/N), so a diff sent there still reaches the review surface.
 _DEV_PROC_TARGET_RE = re.compile(r"^/+(?:dev|proc)(?:/|$)")
+# A RELATIVE target whose normalized FIRST component is 'dev' or 'proc' (dev/stdout, ./dev/stdout,
+# proc/self/fd/1) is CWD-DEPENDENT: from cwd '/', or where a 'dev'/'proc' symlink exists, it resolves to
+# the very device the absolute form names, but from an ordinary working tree it is a plain relative file.
+# It therefore cannot be proven a plain file lexically, so it is routed OPAQUE (ASK), never a proven
+# real-file ALLOW - matching how a '..' escape (equally cwd-dependent) is handled.
+_REL_DEV_PROC_TARGET_RE = re.compile(r"^(?:dev|proc)(?:/|$)")
 # Fallback-only broad producer probe over the RAW command, used only when _lex_command cannot parse the
 # command: an apparent 'git ... <producer>' ASKS (never a silent allow, never a regex-earned allow).
 _RAW_DIFF_PRODUCER_RE = re.compile(

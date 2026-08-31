@@ -2047,6 +2047,14 @@ def main():
                 [(">", 1, "/tmp/../dev/stdout", "file-dev", "file-dev")])
         texpect("(tok-18b) a '..' escape target is unprovable (opaque), never file-real",
                 _redir("git diff > ../out.txt"), [(">", 1, "../out.txt", "opaque", "opaque")])
+        # A RELATIVE dev/proc-leading target is cwd-dependent (from cwd '/' it IS the device): opaque, never
+        # file-real. The ABSOLUTE form stays file-dev (tok-15); a nested 'dev' component stays a plain file.
+        texpect("(tok-18c) relative 'dev/stdout' is cwd-dependent -> opaque, never file-real",
+                _redir("git diff > dev/stdout"), [(">", 1, "dev/stdout", "opaque", "opaque")])
+        texpect("(tok-18d) relative './proc/self/fd/1' normalizes to a proc-leading target -> opaque",
+                _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
+        texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
+                _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
         # Unsupported constructs are cannot-evaluate (ValueError), never partial argv.
         for _bad, _why in [("git diff <<'EOF'\nx\nEOF", "heredoc"),
                            ("git diff <(echo x)", "process substitution"),
@@ -2241,6 +2249,19 @@ def main():
         dexpect("(qa-b5d) a genuine plain-file redirect still allows (no over-DENY regression)",
                 "git diff > out.txt", "allow")
         dexpect("(qa-b5e) a relative sub-path plain file still allows", "git diff > sub/out.txt", "allow")
+        # BLOCKER 5 (round 4): a RELATIVE dev/proc-leading redirect target is cwd-dependent (from cwd '/' or
+        # via a dev/proc symlink it IS the device the absolute form names), so it must NOT earn proof C's
+        # file-real ALLOW; it ASKS. The absolute form still DENIES; a nested 'dev' stays a plain-file ALLOW.
+        dexpect("(qa-b5f) '> dev/stdout' is cwd-dependent (could be the device) -> asks, not a silent allow",
+                "git diff > dev/stdout", "ask")
+        dexpect("(qa-b5g) '> ./dev/stdout' normalizes to a dev-leading target -> asks",
+                "git diff > ./dev/stdout", "ask")
+        dexpect("(qa-b5h) '> proc/self/fd/1' is a relative proc-leading target -> asks",
+                "git diff > proc/self/fd/1", "ask")
+        dexpect("(qa-b5i) the absolute device form still denies (no under-block change)",
+                "git diff > /dev/stdout", "deny")
+        dexpect("(qa-b5j) a nested 'dev' component ('git diff > foo/dev/x') is a plain file -> allows",
+                "git diff > foo/dev/x", "allow")
 
         # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
         pexpect("(pl-v1) '-o --force' is the push-option value, not force",
