@@ -9,7 +9,8 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_wall_stop      Stop        cnsdif  surface (WARN) a unified-diff wall in the final assistant message
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
-  absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
+  absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
+  bash_absolute_paths PreToolUse  abspth  ask on a relative cd/pushd operand or redirect target in Bash
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
@@ -116,6 +117,7 @@ import datetime
 import json
 import math
 import os
+import pathlib
 import re
 import shutil
 import stat
@@ -211,27 +213,56 @@ _FD_VAR_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")  # a bash {varname}> fd
 
 # A redirect record: op (the operator text), src_fd (the effective source fd, or None for the both-streams
 # '&>' forms), target (the decoded target word), target_class (static-real 'file-real', a console/device
-# 'file-dev' under /dev or /proc, a numeric/'-' 'descriptor', or a dynamic 'opaque'), and stdout_effect
-# (what this redirect does to STDOUT: '' none, or 'file-real'/'file-dev'/'descriptor'/'opaque').
-_Redirect = collections.namedtuple("_Redirect", ("op", "src_fd", "target", "target_class", "stdout_effect"))
+# 'file-dev' under /dev or /proc, a numeric/'-' 'descriptor', or a dynamic 'opaque'), stdout_effect
+# (what this redirect does to STDOUT: '' none, or 'file-real'/'file-dev'/'descriptor'/'opaque'), and
+# target_leading_tilde (True only when the target begins with an UNQUOTED, whole-prefix-unquoted '~' that
+# bash tilde-expands AND that expansion is a current-user '~'/'~/x', so the target is absolute like $HOME;
+# the abspth Bash floor reads it so a '> ~/x' redirect is ALLOW-consistent with a 'cd ~/x' destination).
+_Redirect = collections.namedtuple(
+    "_Redirect", ("op", "src_fd", "target", "target_class", "stdout_effect", "target_leading_tilde"))
 # A segment record: argv (the quote-decoded words the program receives, REDIRECTION ABSENT), sep_after (the
 # operator that ended it, one of _SEGMENT_OPERATORS, or "" at a newline/command end), redirects (the ordered
-# redirect records), raw (the raw slice of this segment), and opaque_shell (True when the segment carried an
-# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on).
-_Segment = collections.namedtuple("_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell"))
+# redirect records), raw (the raw slice of this segment), opaque_shell (True when the segment carried an
+# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on), argv_opaque (the
+# per-token opacity flags PARALLEL to argv: True where THAT word carried an unquoted expansion/glob/brace or
+# a leading tilde, so a consumer can tell an unquoted, shell-expanded '~/x' from a quoted, literal '~/x'),
+# and argv_leading_tilde (the per-token flags PARALLEL to argv: True ONLY where THAT word begins with an
+# UNQUOTED tilde AND the WHOLE tilde-prefix - '~' up to the first unquoted '/' or end of word - is unquoted
+# and unescaped, which is exactly when bash tilde-expansion applies and the word expands to an absolute home.
+# This is a STRICTER signal than argv_opaque, which any unquoted expansion/glob/brace ANYWHERE in the token
+# also sets; a quoted leading tilde with an unquoted tail, e.g. "~"/x*, and a leading tilde whose PREFIX
+# carries a quote or escape, e.g. ~"/x" or ~\/x, are correctly NOT read as an expanded '~').
+_Segment = collections.namedtuple(
+    "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
+                 "argv_leading_tilde"))
 
 
 def _read_word(command, i, n):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
-    newline, or metacharacter). Returns (text, opaque, started, all_digits, new_i): text is the quote/escape
-    decoded word, opaque is True if it carried an unquoted expansion/substitution/glob/brace/leading-tilde,
-    started is True once any character (even an empty '' quote) began the word, all_digits is True only when
-    the whole word is UNQUOTED decimal digits (an IO_NUMBER candidate). Stops at an unquoted space, tab,
-    newline, or metacharacter. Raises ValueError on an unbalanced quote or an unterminated escape."""
+    newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
+    the quote/escape decoded word, opaque is True if it carried an unquoted
+    expansion/substitution/glob/brace/leading-tilde, started is True once any character (even an empty ''
+    quote) began the word, all_digits is True only when the whole word is UNQUOTED decimal digits (an
+    IO_NUMBER candidate), leading_tilde is True ONLY when the word begins with an UNQUOTED tilde AND the
+    WHOLE tilde-prefix (from that '~' up to the first UNQUOTED '/' or end of word) is unquoted and unescaped,
+    which is exactly when bash tilde-expansion applies. A quoted, escaped, or non-leading tilde does not set
+    it, and neither does a quote or escape ANYWHERE in the tilde-prefix (e.g. ~"/x", ~'', or an escaped '/'
+    after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
+    not block it. Stops at an
+    unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
+    unterminated escape."""
     chars = []
     opaque = False
     started = False
     all_digits = True
+    leading_tilde = False
+    # tilde_prefix_open: True while we are still INSIDE the tilde-prefix (from a leading unquoted '~' up to
+    # the first UNQUOTED '/', or end of word). Bash expands the leading '~' ONLY when the WHOLE tilde-prefix
+    # is unquoted and unescaped; any quoted or escaped character in that span disables expansion and the word
+    # stays RELATIVE. So while the prefix is open, a single-quote, double-quote, or backslash escape CONTAMINATES
+    # it: leading_tilde is cleared. An unquoted '/' CLOSES the prefix cleanly (leading_tilde stays set), so
+    # material AFTER it - 'cd ~/$VAR' - never blocks the expansion.
+    tilde_prefix_open = False
     while i < n:
         c = command[i]
         if c in " \t\n" or c in _METACHARS:
@@ -250,8 +281,12 @@ def _read_word(command, i, n):
             # A mid-word '#' (started is True, e.g. ticket#123 or a continuation-joined di\<newline>ff#x)
             # is left literal below.
             break
+        was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
+            if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
+                leading_tilde = False
+                tilde_prefix_open = False
             j = command.find("'", i + 1)
             if j < 0:
                 raise ValueError("unterminated single quote")
@@ -260,6 +295,9 @@ def _read_word(command, i, n):
             i = j + 1
             continue
         if c == '"':  # double quote: backslash escapes only "\ $ ` and newline; $ and backtick are opaque
+            if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
+                leading_tilde = False
+                tilde_prefix_open = False
             i += 1
             while True:
                 if i >= n:
@@ -290,6 +328,9 @@ def _read_word(command, i, n):
             continue
         if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
             # was already consumed above, before the word could start)
+            if tilde_prefix_open:  # an escape inside the tilde-prefix disables bash expansion: stays relative
+                leading_tilde = False
+                tilde_prefix_open = False
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
             chars.append(command[i + 1])
@@ -297,13 +338,26 @@ def _read_word(command, i, n):
             i += 2
             continue
         # an ordinary unquoted character
-        if c in _OPAQUE_WORD_CHARS or (c == "~" and not chars):
+        if c == "~" and not was_started:
+            # A LEADING unquoted tilde is bash tilde-expansion (cwd-independent home): record it as such AND
+            # mark the word opaque (no diff-source ALLOW proof may rest on the expanded value). Nothing has
+            # begun the word before it, so an empty "" quote or any other char ahead of the '~' (""~, x~)
+            # leaves was_started True and this branch is not taken - matching bash, which expands only a '~'
+            # at the very start of the word.
             opaque = True
+            leading_tilde = True
+            tilde_prefix_open = True  # begin tracking the tilde-prefix; a later quote/escape voids the tilde
+        elif c in _OPAQUE_WORD_CHARS:
+            opaque = True
+        elif c == "/" and tilde_prefix_open:
+            # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
+            # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
+            tilde_prefix_open = False
         if not c.isdigit():
             all_digits = False
         chars.append(c)
         i += 1
-    return "".join(chars), opaque, started, all_digits, i
+    return "".join(chars), opaque, started, all_digits, leading_tilde, i
 
 
 def _match_operator(command, i, n):
@@ -349,31 +403,35 @@ def _match_operator(command, i, n):
     return c, "sep", 1  # ';', '(', ')'
 
 
-def _classify_redirect(op, src_fd, target, t_opaque):
-    """Build a _Redirect from a recognized operator, its explicit source fd (or None), and the decoded
-    target. Computes the target class and the effect on STDOUT (last-redirect-wins is applied by the
-    caller). '&>'/'&>>' send both streams to the target (stdout affected); '>'/'>>'/'>|' affect stdout only
-    when the effective source fd is 1; '>&' is fd duplication/close for a numeric or '-' target (descriptor,
-    affecting stdout only from fd 1) or the csh both-streams-to-file form for a static word; the input
-    forms '<'/'<>'/'<&' never touch stdout."""
+def _classify_redirect(op, src_fd, target, t_opaque, t_leading_tilde=False):
+    """Build a _Redirect from a recognized operator, its explicit source fd (or None), the decoded target,
+    and the target's clean-leading-tilde signal. Computes the target class and the effect on STDOUT
+    (last-redirect-wins is applied by the caller). '&>'/'&>>' send both streams to the target (stdout
+    affected); '>'/'>>'/'>|' affect stdout only when the effective source fd is 1; '>&' is fd
+    duplication/close for a numeric or '-' target (descriptor, affecting stdout only from fd 1) or the csh
+    both-streams-to-file form for a static word; the input forms '<'/'<>'/'<&' never touch stdout.
+    tilde_abs is the ALREADY-GATED clean-tilde flag (an unquoted current-user '~'/'~/x' the shell expands to
+    an absolute $HOME): it is stored on the record so the abspth floor allows such a target without
+    re-deriving the gate, exactly as the cd/pushd destination path does."""
+    tilde_abs = t_leading_tilde and bool(_LITERAL_TILDE_RE.match(target))
     if op in ("&>", "&>>"):
         tclass = _target_class(target, t_opaque)
-        return _Redirect(op, None, target, tclass, tclass)  # both streams -> stdout affected
+        return _Redirect(op, None, target, tclass, tclass, tilde_abs)  # both streams -> stdout affected
     if op in (">", ">>", ">|"):
         src = 1 if src_fd is None else src_fd
         tclass = _target_class(target, t_opaque)
-        return _Redirect(op, src, target, tclass, tclass if src == 1 else "")
+        return _Redirect(op, src, target, tclass, tclass if src == 1 else "", tilde_abs)
     if op == ">&":
         src = 1 if src_fd is None else src_fd
         if (not t_opaque) and (target == "-" or target.isdigit()):
             tclass = "descriptor"  # fd duplication or close, never a proven file
         else:
             tclass = _target_class(target, t_opaque)  # csh '>&file' both-streams-to-file form
-        return _Redirect(op, src, target, tclass, tclass if src == 1 else "")
+        return _Redirect(op, src, target, tclass, tclass if src == 1 else "", tilde_abs)
     # input redirects ('<', '<>', '<&'): never a stdout effect
     src = 0 if src_fd is None else src_fd
     tclass = "descriptor" if op == "<&" else _target_class(target, t_opaque)
-    return _Redirect(op, src, target, tclass, "")
+    return _Redirect(op, src, target, tclass, "", tilde_abs)
 
 
 def _target_class(target, t_opaque):
@@ -389,7 +447,12 @@ def _target_class(target, t_opaque):
     (dev/stdout, ./dev/stdout, proc/self/fd/1), which from cwd '/' or via a 'dev'/'proc' symlink IS the
     device the absolute form names but from a working tree is an ordinary relative file. The ABSOLUTE
     /dev,/proc form stays 'file-dev' (DENY, an unambiguous device); the relative form only ASKS, so a
-    legitimate write into a repo's own dev/ or proc/ subdirectory is surfaced, not hard-blocked."""
+    legitimate write into a repo's own dev/ or proc/ subdirectory is surfaced, not hard-blocked.
+
+    A clean-leading-tilde target ('~'/'~/x') is intentionally left 'opaque' HERE (the tilde marks the word
+    opaque): the abspth Bash floor reads the separate _Redirect.target_leading_tilde flag to allow it,
+    consistent with the cd/pushd destination, WITHOUT reclassifying the target for the other consumers of
+    this shared classifier (the L11 diff-source layer, which keeps its own tilde-target policy)."""
     if t_opaque:
         return "opaque"
     norm = os.path.normpath(target)
@@ -402,24 +465,35 @@ def _target_class(target, t_opaque):
     return "file-real"
 
 
-def _lex_command(command):
+def _lex_command(command, partial=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (a heredoc/here-string, a process substitution, a '{fd}>'
     redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on a
-    partially-cleaned command. Linear, non-recursive, stdlib-only."""
-    if "\x00" in command:
-        raise ValueError("NUL in command")
+    partially-cleaned command. Linear, non-recursive, stdlib-only.
+
+    When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
+    the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
+    first unparseable construct and complete is False when such a construct truncated the scan (True when
+    the whole command parsed). This lets the Bash abspth floor still inspect a resolvable PREFIX (an
+    earlier relative cd/redirect) even when a LATER segment is unparseable, rather than discarding every
+    parsed segment on the first heredoc/here-string/process-substitution. The default partial=False keeps
+    the list-returning, raise-on-error contract every other caller relies on."""
     n = len(command)
     segments = []
     argv = []
+    argv_opaque = []
+    argv_leading_tilde = []
     redirects = []
     opaque = [False]
     seg_start = [0]
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0]))
+                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque),
+                                  list(argv_leading_tilde)))
         del argv[:]
+        del argv_opaque[:]
+        del argv_leading_tilde[:]
         del redirects[:]
         opaque[0] = False
         seg_start[0] = next_start
@@ -432,60 +506,81 @@ def _lex_command(command):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
         if not started:
             raise ValueError("malformed redirect target")
-        redirects.append(_classify_redirect(op, src_fd, target, t_opaque))
+        redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
         return k2
 
-    i = 0
-    while i < n:
-        c = command[i]
-        if c in " \t":
-            i += 1
-            continue
-        if c == "\n":
-            end_segment("", i, i + 1)
-            i += 1
-            continue
-        if c == "#":
-            # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of the
-            # line is ignored, so a redirect or pipe that is actually commented out (git diff # > /tmp/x)
-            # never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally inside
-            # _read_word and never reaches this word-start position.
-            nl = command.find("\n", i)
-            i = n if nl == -1 else nl
-            continue
-        if c in _METACHARS:
-            op, kind, oplen = _match_operator(command, i, n)
-            if kind == "sep":
-                end_segment(op, i, i + oplen)
-                i += oplen
+    try:
+        if "\x00" in command:
+            raise ValueError("NUL in command")
+        i = 0
+        while i < n:
+            c = command[i]
+            if c in " \t":
+                i += 1
                 continue
-            if kind == "cannot":
-                raise ValueError("unsupported shell construct: {}".format(op))
-            i = consume_redirect(op, oplen, i, None)
-            continue
-        text, w_opaque, started, all_digits, j = _read_word(command, i, n)
-        # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect operator
-        # is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' -> fd 2; but
-        # '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep the word in argv.
-        if all_digits and text and j < n and command[j] in "<>":
-            op, kind, oplen = _match_operator(command, j, n)
-            if kind == "redirect":
-                i = consume_redirect(op, oplen, j, int(text))
+            if c == "\n":
+                end_segment("", i, i + 1)
+                i += 1
                 continue
-            if kind == "cannot":
-                raise ValueError("unsupported shell construct: {}".format(op))
-        # A '{varname}>' fd-var redirect is not modelled: cannot-evaluate rather than a partial word.
-        if text and j < n and command[j] in "<>" and _FD_VAR_RE.match(text):
-            raise ValueError("unsupported {fd} redirect")
-        if started:
-            argv.append(text)
-            if w_opaque:
-                opaque[0] = True
-        i = j
-    end_segment("", n, n)
+            if c == "#":
+                # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of
+                # the line is ignored, so a redirect or pipe that is actually commented out (git diff # >
+                # /tmp/x) never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally
+                # inside _read_word and never reaches this word-start position.
+                nl = command.find("\n", i)
+                i = n if nl == -1 else nl
+                continue
+            if c in _METACHARS:
+                op, kind, oplen = _match_operator(command, i, n)
+                if kind == "sep":
+                    end_segment(op, i, i + oplen)
+                    i += oplen
+                    continue
+                if kind == "cannot":
+                    raise ValueError("unsupported shell construct: {}".format(op))
+                i = consume_redirect(op, oplen, i, None)
+                continue
+            text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n)
+            # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
+            # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
+            # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
+            if all_digits and text and j < n and command[j] in "<>":
+                op, kind, oplen = _match_operator(command, j, n)
+                if kind == "redirect":
+                    i = consume_redirect(op, oplen, j, int(text))
+                    continue
+                if kind == "cannot":
+                    raise ValueError("unsupported shell construct: {}".format(op))
+            # A '{varname}>' fd-var redirect is not modelled: cannot-evaluate rather than a partial word.
+            if text and j < n and command[j] in "<>" and _FD_VAR_RE.match(text):
+                raise ValueError("unsupported {fd} redirect")
+            if started:
+                argv.append(text)
+                argv_opaque.append(w_opaque)
+                argv_leading_tilde.append(w_leading_tilde)
+                if w_opaque:
+                    opaque[0] = True
+            i = j
+        end_segment("", n, n)
+    except ValueError:
+        # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
+        # positions of the IN-PROGRESS segment that were fully parsed BEFORE it (an earlier relative
+        # cd/redirect in the SAME, still-open segment - e.g. the 'out.txt' of 'cat > out.txt <<EOF' - is
+        # thereby still inspected by the Bash abspth floor); a position WITHIN or AFTER the unparseable
+        # construct stays uninspected, a disclosed residual. The default contract re-raises for every
+        # other caller.
+        if partial:
+            if argv or redirects:
+                segments.append(_Segment(list(argv), "", list(redirects),
+                                         command[seg_start[0]:], opaque[0], list(argv_opaque),
+                                         list(argv_leading_tilde)))
+            return segments, False
+        raise
+    if partial:
+        return segments, True
     return segments
 
 
@@ -499,14 +594,19 @@ def _segments(command):
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
 
 
-# A leading inline shell env-var assignment (FOO=bar) that PREFIXES a command, e.g. the GIT_PAGER=cat in
-# 'GIT_PAGER=cat git diff'. Such assignments are SKIPPED when resolving a segment's command word and its
-# git subcommand, so that form resolves to command word 'git' / subcommand 'diff' and is judged like a
-# bare 'git diff' rather than slipping through as a non-git command word. The any-segment
-# identity-assignment scan still inspects these same tokens for an AI name (GIT_AUTHOR_NAME=Claude ...).
-# Best-effort, per the manifest residue: the 'env VAR=x git ...' command form and the 'command git ...'
-# builtin remain out of scope.
-_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
+# e.g. the GIT_PAGER=cat in 'GIT_PAGER=cat git diff'. Such assignments are SKIPPED when resolving a
+# segment's command word and its git subcommand, so that form resolves to command word 'git' / subcommand
+# 'diff' and is judged like a bare 'git diff' rather than slipping through as a non-git command word. The
+# APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
+# left the append-assignment mistaken for the command word, so the following cd was never examined. The
+# any-segment identity-assignment scan still inspects these same tokens for an AI name
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
+# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
+# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
+# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
+# over-fire (disclosed in the manifest residue), never an under-block.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
 def _command_word_index(tokens):
@@ -1298,20 +1398,31 @@ def commit_identity(data):
 
 
 # --- abspth: relative path where the tool requires absolute ------------------------------------------
-# Read/Write/Edit require an absolute file_path by the tool's own contract, so the rule's carve-out
-# never applies to them. Glob is honoured under the carve-out: its `pattern` is legitimately relative
-# to a named root and is never judged, but its optional `path` search root should be absolute.
-FILE_PATH_TOOLS = ("Read", "Write", "Edit")
-DRIVE_RE = re.compile(r"^[A-Za-z]:")     # a Windows drive-letter path (C:\, C:/, or drive-relative C:x)
+# Read, Write, and Edit require an absolute file_path, and NotebookEdit an absolute notebook_path, by the
+# tool's own contract, so the rule's relative-to-a-named-root carve-out never applies to them. MultiEdit is
+# kept on the same file_path wire for LEGACY COMPATIBILITY only: it is NOT in the current Claude Code
+# built-in tool index, so its mapping is retained solely to cover an adopter on an older or re-enabled
+# MultiEdit, never as an assertion that MultiEdit is a current/live tool. Glob and Grep are honoured under
+# the carve-out: their `pattern` is legitimately relative to a named search root and is never judged, but
+# their optional `path` search root should be absolute. Each field name is bound to a Claude Code tool
+# schema (Read/Write/Edit -> file_path, NotebookEdit -> notebook_path, Glob/Grep -> optional path), with
+# MultiEdit -> file_path the legacy-compat wire above, never assumed.
+FILE_PATH_TOOLS = ("Read", "Write", "Edit", "MultiEdit")   # contract-absolute `file_path` (MultiEdit: legacy-compat wire)
+NOTEBOOK_PATH_TOOLS = ("NotebookEdit",)                    # contract-absolute `notebook_path`
+SEARCH_ROOT_TOOLS = ("Glob", "Grep")                       # optional `path` search root; carve-out
 
 
 def _is_absolute(path):
-    """POSIX absolute, Windows drive-letter (C:\\, C:/, or drive-relative C:x), a drive-relative path
-    with a leading backslash (\\x), or UNC (\\\\server). A ~-prefixed path is NOT absolute: these tools
-    do not expand it, so it would resolve relative to a literal ~ directory. Accepting the Windows
-    drive-letter and leading-backslash forms avoids a Windows-path false positive; on POSIX a legitimate
-    relative path never takes those shapes."""
-    return path.startswith("/") or path.startswith("\\") or bool(DRIVE_RE.match(path))
+    """Absolute under the runtime's own path semantics, not a lexical drive-letter guess: a POSIX
+    absolute path (PurePosixPath.is_absolute) OR a Windows path carrying BOTH a drive and a root
+    (PureWindowsPath.is_absolute), so a UNC \\\\server\\share and a drive-absolute C:\\ / C:/ count, while
+    a drive-RELATIVE 'C:file', a bare 'C:', and a rooted-but-driveless '\\file' are correctly NOT
+    absolute (each still resolves against a current directory, or a per-drive current directory, on
+    Windows). A '~'-prefixed, empty, or otherwise relative path is likewise not absolute: these tools do
+    not expand '~', so it would resolve against a literal '~' directory. Deferring to the stdlib
+    predicate closes the drive-relative false positives the old lexical `^[A-Za-z]:` / leading-backslash
+    union accepted (C:file, C:, \\file all read as absolute there)."""
+    return pathlib.PurePosixPath(path).is_absolute() or pathlib.PureWindowsPath(path).is_absolute()
 
 
 def _deny_relative(tool, field, value):
@@ -1323,43 +1434,215 @@ def _deny_relative(tool, field, value):
                  "(rule abspth).".format(field))
 
 
+def _abspth_check_required(tool, field, value):
+    """A field the tool's contract requires to be absolute (Read/Write/Edit/MultiEdit file_path,
+    NotebookEdit notebook_path): fail closed when it is absent or not a non-empty string, allow when it
+    is absolute, deny when it is relative."""
+    if not isinstance(value, str) or not value:
+        return _deny(
+            "AIQT rule abspth (absolute-paths): the {} payload carried no readable {}, so the "
+            "absolute-path check could not run; failing closed.".format(tool, field),
+            "AIQT guardrail: denied a {} call with no readable {} (rule abspth, fail-closed)."
+            .format(tool, field))
+    if _is_absolute(value):
+        return _allow()
+    return _deny_relative(tool, field, value)
+
+
+def _abspth_check_search_root(tool, path):
+    """The optional `path` search root of Glob/Grep. Carve-out: a rootless call (no path) names the
+    current directory as the root against which the relative pattern is legitimately judged, so allow;
+    a present search root should be absolute, and a present-but-unreadable one fails closed."""
+    if path is None:
+        return _allow()  # rootless: the pattern's named root is the current directory (carve-out)
+    if not isinstance(path, str) or not path:
+        return _deny(
+            "AIQT rule abspth (absolute-paths): the {} payload carried an unreadable path search root, "
+            "so the absolute-path check could not run; failing closed.".format(tool),
+            "AIQT guardrail: denied a {} call with an unreadable path (rule abspth, fail-closed)."
+            .format(tool))
+    if _is_absolute(path):
+        return _allow()
+    return _deny_relative(tool, "path search root", path)
+
+
 def absolute_paths(data):
-    """abspth (quali/absolute-paths), PreToolUse on Read|Write|Edit|Glob: deny a relative path where
-    the tool requires absolute, honouring the rule's carve-out for a Glob pattern."""
+    """abspth (quali/absolute-paths), PreToolUse on Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep:
+    deny a relative path where the tool's contract requires absolute, honouring the rule's carve-out for
+    the relative search pattern of Glob and Grep."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: absolute_paths wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool = data.get("tool_name")
     if tool is None:
         return _deny_missing_tool_name("abspth")
-    tool_input = data.get("tool_input") or {}
-    if tool in FILE_PATH_TOOLS:
-        file_path = tool_input.get("file_path")
-        if not isinstance(file_path, str) or not file_path:
+    in_scope = tool in FILE_PATH_TOOLS or tool in NOTEBOOK_PATH_TOOLS or tool in SEARCH_ROOT_TOOLS
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        # A falsy or malformed tool_input previously collapsed to {} and let the search-root branch take
+        # its allow path (fail-open). Require a mapping first: for any in-scope tool a payload that is not
+        # a readable mapping fails closed; an out-of-scope tool (the matcher governs) allows.
+        if in_scope:
             return _deny(
-                "AIQT rule abspth (absolute-paths): the {} payload carried no readable file_path, so "
-                "the absolute-path check could not run; failing closed.".format(tool),
-                "AIQT guardrail: denied a {} call with no readable file_path (rule abspth, "
+                "AIQT rule abspth (absolute-paths): the {} payload was not a readable mapping, so the "
+                "absolute-path check could not run; failing closed.".format(tool),
+                "AIQT guardrail: denied a {} call with an unreadable tool_input (rule abspth, "
                 "fail-closed).".format(tool))
-        if _is_absolute(file_path):
-            return _allow()
-        return _deny_relative(tool, "file_path", file_path)
-    if tool == "Glob":
-        # Carve-out: `pattern` is legitimately relative to the named search root and is never judged.
-        # The optional `path` search root, when given, should be absolute; when absent, the current
-        # directory is the named root, which the carve-out permits, so allow.
-        path = tool_input.get("path")
-        if path is None:
-            return _allow()
-        if not isinstance(path, str) or not path:
-            return _deny(
-                "AIQT rule abspth (absolute-paths): the Glob payload carried an unreadable path search "
-                "root, so the absolute-path check could not run; failing closed.",
-                "AIQT guardrail: denied a Glob call with an unreadable path (rule abspth, fail-closed).")
-        if _is_absolute(path):
-            return _allow()
-        return _deny_relative("Glob", "path search root", path)
+        return _allow()
+    if tool in FILE_PATH_TOOLS:
+        return _abspth_check_required(tool, "file_path", tool_input.get("file_path"))
+    if tool in NOTEBOOK_PATH_TOOLS:
+        return _abspth_check_required(tool, "notebook_path", tool_input.get("notebook_path"))
+    if tool in SEARCH_ROOT_TOOLS:
+        return _abspth_check_search_root(tool, tool_input.get("path"))
     return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+
+
+# --- abspth (Bash floor): a relative cd/pushd or redirect target resolved against the cwd ------------
+# A SEPARATE PreToolUse linkage of the same rule onto Bash, reusing the shared quote/redirect-aware
+# lexer (_lex_command / _command_word). CONSERVATIVE FLOOR, ASK-defaulting: it judges only two positions
+# that silently depend on the current directory - a cd/pushd DESTINATION operand, and a redirection
+# TARGET - and NEVER an arbitrary command operand (a relative argument to some other command is not
+# judged, to avoid over-firing). A relative or unresolvable such position ASKS; an absolute position, and
+# a command carrying neither, allow. It never denies: the human confirming is the opt-out.
+_CD_BUILTINS = frozenset(("cd", "pushd"))
+# cd/pushd option tokens that name NO destination path: the real option flags (cd -L/-P/-e/-@, pushd -n,
+# and bundled combos like -LP), which are a limited closed set, NOT any '-'/'+'-prefixed token. A lone '-'
+# is cd's $OLDPWD previous-directory shortcut (an absolute prior dir, cwd-independent); '--' ENDS option
+# processing so the NEXT token is the destination even when it begins '-'/'+'; and pushd's +N/-N is a
+# numeric directory-stack rotation. A '+relative' or '-relative' that is NOT one of these is a real
+# relative directory NAME (the destination), matching the comment 'the first token that is not an option'.
+_CD_OPT_BUNDLE_RE = re.compile(r"^-[LPe@n]+$")  # cd -L/-P/-e/-@ and pushd -n, singly or bundled (-LP, -nL)
+_PUSHD_ROTATION_RE = re.compile(r"^[-+][0-9]+$")  # pushd +N/-N: a stack index, not a filesystem path
+# An UNQUOTED CURRENT-USER tilde destination (~ or ~/path) is tilde-EXPANDED by the shell to $HOME, an
+# absolute directory, so it is cwd-independent exactly like an absolute path. This is NARROWED to the
+# current-user forms only: a '~user'/'~user/path' names another account's home whose EXISTENCE the hook
+# cannot verify (an unresolved login name leaves the word RELATIVE), so it is NOT proven absolute here and
+# ASKS; and the '~-'/'~+'/'~N' directory-stack forms likewise ASK. A QUOTED '~' (a literal directory named
+# '~') is not expanded and stays relative; the LEADING-UNQUOTED-tilde flag (argv_leading_tilde), not the
+# broader opacity flag, tells the expanded form from a quoted one whose unquoted tail merely carries opacity.
+_LITERAL_TILDE_RE = re.compile(r"^~(/.*)?$")
+# CONSERVATIVE CONSOLIDATION (round-4). Any inline env-assignment PREFIXING a cd/pushd command
+# ('OLDPWD=.. cd -', 'HOME=.. cd', and the append forms 'OLDPWD+=.. cd -'/'HOME+=.. cd') can redirect where
+# the cwd-INDEPENDENT destinations land: an inline OLDPWD= redirects the lone '-' ($OLDPWD) shortcut, and an
+# inline HOME= redirects the bare 'cd' (no operand -> $HOME) default, in each case to a value the floor
+# cannot prove absolute ('..'). Rather than enumerate OLDPWD/HOME by name (fragile: it misses the '+='
+# append form, and the earlier OLDPWD-only check never covered the bare-cd HOME default), the floor takes
+# the conservative stance that ANY leading assignment (any name, '=' or '+=', and even an assignment-SHAPED
+# token bash would reject because its name was quoted) makes those two otherwise-cwd-independent
+# destinations ASK. A plain zero-assignment 'cd -'/'cd -- -'/bare 'cd' keeps its ALLOW. The consequence
+# 'FOO=x cd -' -> ASK is a deliberate conservative over-fire, disclosed in the manifest residue.
+
+
+def _cd_destination_reason(word, argv, argv_leading_tilde):
+    """For a cd/pushd segment, return a reason string when its destination operand is relative or
+    unresolvable (opaque), else None: an absolute destination, an unquoted current-user tilde one ('~' or
+    '~/path', which expands to $HOME), the OLDPWD 'cd -', or no destination at all (cd -> HOME, pushd -> swap
+    the stack top), is cwd-independent here. Only the FIRST non-option token is the destination; the real
+    cd/pushd option flags and a pushd +N/-N rotation name no relative path and are skipped, while '--' ends
+    option processing so the next token is the destination even when it begins '-'/'+'. A lone '-' is the
+    $OLDPWD shortcut wherever it lands as the destination, including as the post-'--' destination ('cd -- -',
+    which bash still resolves to $OLDPWD), and a NO-operand cd/pushd is the $HOME/stack-swap default; both are
+    cwd-independent UNLESS the command carries ANY leading inline env-assignment ('OLDPWD=.. cd -- -',
+    'HOME=.. cd', 'OLDPWD+=.. cd -'), which can redirect the destination to a value the floor cannot prove
+    absolute, so those two forms then ASK. This is the conservative consolidation (round-4): the trigger is
+    the mere PRESENCE of a leading assignment, not its variable name, so the '+=' append form and the bare-cd
+    HOME default are covered without name enumeration. An operand carrying an unexpanded expansion never reads
+    as absolute unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an
+    absolute '/$X/y' allows. argv_leading_tilde is the per-token LEADING-UNQUOTED-tilde flags parallel to argv
+    (True only where the word's leading char is an unquoted tilde, so tilde-expansion applies)."""
+    cmd_idx = _command_word_index(argv)  # boundary: argv[:cmd_idx] are the leading env-assignments
+    # ANY leading assignment (any name, '=' or '+=') can redirect the cwd-independent destinations ('cd -',
+    # bare 'cd'), so it can no longer be trusted; presence, not the variable name, is the trigger.
+    has_leading_assignment = cmd_idx > 0
+    idx = cmd_idx + 1  # skip leading env-assignments and the command word itself
+    end_of_options = False
+    for pos in range(idx, len(argv)):
+        tok = argv[pos]
+        if not end_of_options:
+            if tok == "--":
+                end_of_options = True  # everything after '--' is an operand, not an option
+                continue
+            if _CD_OPT_BUNDLE_RE.match(tok):
+                continue  # a cd/pushd option flag or bundle (-L/-P/-e/-@/-n): not a destination path
+            if word == "pushd" and _PUSHD_ROTATION_RE.match(tok):
+                continue  # pushd +N/-N: a directory-stack rotation index, not a filesystem path
+        # end-of-options, or the first token that is not an option: this is the destination operand.
+        if tok == "-":
+            if has_leading_assignment:
+                # a leading inline env-assignment can redirect $OLDPWD to a value the floor cannot prove abs
+                return ("a {} destination '-' that a leading inline env-assignment can redirect off $OLDPWD"
+                        .format(word))
+            continue  # cd '-': the $OLDPWD previous-directory shortcut (an absolute prior dir), even
+            # after '--' where bash still treats a lone '-' destination as $OLDPWD, not a relative name
+        if argv_leading_tilde[pos] and _LITERAL_TILDE_RE.match(tok):
+            return None  # an unquoted current-user tilde ('~', '~/x') expands to $HOME: cwd-independent
+        if _is_absolute(tok):
+            return None
+        return "a relative {} destination {!r}".format(word, tok)
+    # no destination operand: cd -> HOME, pushd -> stack swap, cwd-independent UNLESS a leading inline
+    # env-assignment (e.g. HOME=..) can redirect that default to a value the floor cannot prove absolute.
+    if has_leading_assignment:
+        return ("a bare {} (no operand) whose $HOME default a leading inline env-assignment can redirect"
+                .format(word))
+    return None
+
+
+def bash_absolute_paths(data):
+    """abspth (quali/absolute-paths) Bash floor, PreToolUse on Bash: ASK when a Bash command shifts the
+    working directory through a relative cd/pushd operand, or names a relative redirection target, since
+    either resolves against a working directory that can silently differ between calls. Conservative
+    floor: it judges only those two cwd-dependent positions, defaults any relative or unresolvable one to
+    ASK (never a silent allow of such a position), does not judge an arbitrary command operand, and does
+    not deny."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("abspth")
+    if tool != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command:
+        # Cannot read the command to resolve either position: the floor asks rather than silently allows.
+        return _ask(
+            "AIQT rule abspth (absolute-paths): the Bash payload carried no readable command string, so "
+            "the relative-cwd check could not run; confirm the command uses absolute paths.",
+            "AIQT guardrail: asked on a Bash call with no readable command (rule abspth).")
+    # Partial lex so an unparseable construct (a heredoc, here-string, process substitution, {fd} redirect,
+    # or an unbalanced quote or escape) no longer discards every segment before it: a resolvable relative
+    # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
+    # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
+    # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
+    segments = _lex_command(command, partial=True)[0]
+    reasons = []
+    for seg in segments:
+        word = _command_word(seg.argv)
+        if word in _CD_BUILTINS:
+            reason = _cd_destination_reason(word, seg.argv, seg.argv_leading_tilde)
+            if reason is not None:
+                reasons.append(reason)
+        for redirect in seg.redirects:
+            if redirect.target_class == "descriptor":
+                continue  # a numeric/'-' fd duplication or close names no filesystem path
+            if redirect.target_leading_tilde:
+                continue  # an unquoted current-user '~'/'~/x' target expands to $HOME (absolute), as cd's
+            if redirect.target_class == "opaque" or not _is_absolute(redirect.target):
+                reasons.append("a relative redirection target {!r}".format(redirect.target))
+    if reasons:
+        seen = []
+        for reason in reasons:  # de-duplicate while preserving order so the banner stays bounded
+            if reason not in seen:
+                seen.append(reason)
+        return _ask(
+            "AIQT rule abspth (absolute-paths): this command carries {} that resolve(s) against the "
+            "current working directory, which can silently differ between calls. Re-issue with absolute "
+            "paths, or confirm the working directory is the intended one.".format("; ".join(seen)),
+            "AIQT guardrail: asked on a relative cd or redirection target in a Bash command "
+            "(rule abspth).")
+    return _allow()
 
 
 # --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
@@ -5316,6 +5599,7 @@ HANDLERS = {
     "diff_source_pretool": diff_source_pretool,
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
+    "bash_absolute_paths": bash_absolute_paths,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "gate_weakening": gate_weakening,
@@ -5345,6 +5629,7 @@ HANDLER_EVENT = {
     "diff_source_pretool": PRETOOL,
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
+    "bash_absolute_paths": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "gate_weakening": PRETOOL,
