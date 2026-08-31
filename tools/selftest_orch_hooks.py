@@ -481,6 +481,113 @@ def main():
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
 
+        # ---------- component 3b: the detached-dispatch guard (EN-9 / trkasy) ----------
+        # A SEPARATE sibling of the truncation guard: it hard-DENIES a bare-& backgrounding of a DECLARED
+        # worker (registry key worker_launch_commands), foreground / wrapped / pipeline / subshell, and inside
+        # a literal shell -c; a bare-& inside $( ) command substitution is CAPTURED (parent waits) and ALLOWS.
+        d = Fixture(tmp, "detach")
+        _dreg = d.root / ".aiqt" / "orchestration.local.json"
+
+        def _set_workers(val, present=True):
+            reg = json.loads(_dreg.read_text(encoding="utf-8"))
+            reg.pop("worker_launch_commands", None)
+            if present:
+                reg["worker_launch_commands"] = val
+            _dreg.write_text(json.dumps(reg), encoding="utf-8")
+
+        _set_workers(["orch-verify"])
+        det = lambda cmd, rib=False: aiqt_hooks.orch_detached_dispatch_guard(
+            d.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
+        # Lexer-contract pins (the EN-7 dependency): a bare backgrounding operator is sep_after == "&", and
+        # &&, &>, >&, 2>&1, and a quoted & are NOT. A later EN-7 refactor that breaks this contract fails HERE
+        # rather than silently breaking the guard.
+        _seps = lambda cmd: [s for (_a, s) in aiqt_hooks._segments(cmd)]
+        check("detach/lex-bare-amp-is-amp", "&" in _seps("orch-verify x &"), True)
+        check("detach/lex-logical-and-not-amp", "&" in _seps("orch-verify x && echo ok"), False)
+        check("detach/lex-amp-redirect-not-amp", "&" in _seps("orch-verify x &> run.log"), False)
+        check("detach/lex-redirect-amp-not-amp", "&" in _seps("orch-verify x >& run.log"), False)
+        check("detach/lex-dup-2gt1-not-amp", "&" in _seps("orch-verify x 2>&1 | tee run.log"), False)
+        check("detach/lex-quoted-amp-not-amp", "&" in _seps("echo 'launch worker &'"), False)
+        # FIRE (deny): the proven bare-& detach of a declared worker. Vectors 1-10 flip to ALLOW if the
+        # sep_after == "&" detection is removed, so these tests fail-when-reverted.
+        check("detach/fire-fg-trailing", _verdict(det("orch-verify --brief x &")), "deny")
+        check("detach/fire-fg-newline", _verdict(det("orch-verify x &\necho next")), "deny")
+        check("detach/fire-nohup", _verdict(det("nohup orch-verify x &")), "deny")
+        check("detach/fire-setsid", _verdict(det("setsid orch-verify x &")), "deny")
+        check("detach/fire-sudo", _verdict(det("sudo orch-verify x &")), "deny")
+        check("detach/fire-subshell", _verdict(det("( orch-verify x & )")), "deny")
+        check("detach/fire-then-cmd", _verdict(det("orch-verify x & echo done")), "deny")
+        check("detach/fire-pipeline", _verdict(det("orch-verify x | tee run.log &")), "deny")
+        check("detach/fire-env-timeout", _verdict(det("env FOO=bar timeout 30 orch-verify x &")), "deny")
+        check("detach/fire-shell-c-literal", _verdict(det("bash -c 'orch-verify x &'")), "deny")
+        # run_in_background is IGNORED for scoping (it tracks the wrapper shell, not a child the shell detaches).
+        check("detach/fire-rib-true", _verdict(det("orch-verify x &", rib=True)), "deny")
+        # NO-FIRE (allow): a non-detach & shape, a non-worker background, a foreground worker, and (Option A)
+        # every $( ) command-substitution form. Vectors 11-15 and 18 flip to DENY if detection widens back to a
+        # raw & regex, so these fail-when-reverted too.
+        check("detach/allow-logical-and", _verdict(det("orch-verify x && echo ok")), "allow")
+        check("detach/allow-amp-redirect", _verdict(det("orch-verify x &> run.log")), "allow")
+        check("detach/allow-redirect-amp", _verdict(det("orch-verify x >& run.log")), "allow")
+        check("detach/allow-dup-2gt1-pipe", _verdict(det("orch-verify x 2>&1 | tee run.log")), "allow")
+        check("detach/allow-quoted-amp", _verdict(det("echo 'launch worker &'")), "allow")
+        check("detach/allow-nonworker-bg", _verdict(det("sleep 5 &")), "allow")
+        check("detach/allow-foreground-worker", _verdict(det("orch-verify x")), "allow")
+        check("detach/allow-cmdsub", _verdict(det("result=$(orch-verify x &)")), "allow")
+        check("detach/allow-cmdsub-nested", _verdict(det("a=$(b=$(orch-verify x &))")), "allow")
+        # a real subshell is NOT a command substitution and DENIES, pinning the $( ) vs ( ) discrimination.
+        check("detach/deny-subshell-not-cmdsub", _verdict(det("( orch-verify x & )")), "deny")
+        # backtick command substitution: the launcher glues into a non-command-word token, so it does not fire
+        # (a disclosed non-catch, not a scope); pinned so a future lexer change is caught.
+        check("detach/allow-backtick", _verdict(det("x=`orch-verify y &`")), "allow")
+        # arithmetic $(( a & b )): the & is bitwise-AND inside a substitution scope and the operands are not
+        # command words, so it never fires.
+        check("detach/allow-arith-amp", _verdict(det("echo $(( 1 & 2 ))")), "allow")
+        # a declared worker basename that appears as an ARGUMENT, not the command word, is not a launch.
+        check("detach/allow-worker-as-arg", _verdict(det("echo orch-verify &")), "allow")
+        # Scope and cannot-evaluate posture. Undeclared / empty -> inert ALLOW; malformed control -> DENY.
+        _set_workers([])
+        check("detach/inert-empty-list", _verdict(det("orch-verify x &")), "allow")
+        _set_workers(None, present=False)
+        check("detach/inert-undeclared", _verdict(det("orch-verify x &")), "allow")
+        _set_workers("orch-verify")  # a bare string, not a list: malformed control
+        check("detach/malformed-nonlist-denies", _verdict(det("orch-verify x &")), "deny")
+        _set_workers([""])  # a list with an empty entry: malformed control
+        check("detach/malformed-empty-entry-denies", _verdict(det("orch-verify x &")), "deny")
+        _set_workers(["orch-verify"])
+        # In scope, no readable command string -> fail closed (DENY).
+        check("detach/no-command-denies", _verdict(aiqt_hooks.orch_detached_dispatch_guard(
+            d.payload("PreToolUse", "Bash", {"run_in_background": False}))), "deny")
+        # UNPARSEABLE command: ASK on a worker word co-occurring with an apparent bare-&, else ALLOW.
+        check("detach/unparseable-worker-amp-asks", _verdict(det('orch-verify x " &')), "ask")
+        check("detach/unparseable-no-worker-allows", _verdict(det('foo x " &')), "allow")
+        # A present-but-BAD registry (version != 1) is a cannot-evaluate: fail closed (DENY).
+        _badver = json.loads(_dreg.read_text(encoding="utf-8"))
+        _badver["version"] = 2
+        _dreg.write_text(json.dumps(_badver), encoding="utf-8")
+        check("detach/bad-registry-denies", _verdict(det("orch-verify x &")), "deny")
+        _restore = json.loads(_dreg.read_text(encoding="utf-8"))
+        _restore["version"] = 1
+        _restore["worker_launch_commands"] = ["orch-verify"]
+        _dreg.write_text(json.dumps(_restore), encoding="utf-8")  # restore a valid version-1 registry
+        check("detach/restored-registry-fires", _verdict(det("orch-verify x &")), "deny")
+        # a bare-& acquires NO new prompt when there is no orchestration registry at all.
+        di = Fixture(tmp, "detach-inert")
+        (di.root / ".aiqt" / "orchestration.local.json").unlink()
+        check("detach/inert-no-registry", _verdict(aiqt_hooks.orch_detached_dispatch_guard(
+            di.payload("PreToolUse", "Bash", {"command": "orch-verify x &", "run_in_background": False}))),
+              "allow")
+        # structural fail-closed: a mis-wired event hard-blocks; a missing tool_name denies; a non-Bash tool
+        # is out of scope (allow).
+        check("detach/wrong-event-hardblocks", _verdict(aiqt_hooks.orch_detached_dispatch_guard(
+            {"hook_event_name": "Stop", "tool_name": "Bash", "cwd": str(d.root),
+             "tool_input": {"command": "orch-verify x &"}})), "block2")
+        check("detach/missing-tool-name-denies", _verdict(aiqt_hooks.orch_detached_dispatch_guard(
+            {"hook_event_name": "PreToolUse", "cwd": str(d.root),
+             "tool_input": {"command": "orch-verify x &"}})), "deny")
+        check("detach/non-bash-tool-allows", _verdict(aiqt_hooks.orch_detached_dispatch_guard(
+            {"hook_event_name": "PreToolUse", "tool_name": "Read", "cwd": str(d.root),
+             "tool_input": {"file_path": "/x"}})), "allow")
+
         # ---------- Surface B: the validation membrane ----------
         import time as _time
         check("vB/exact-int-valid", aiqt_hooks._v_exact_int(3, 0, 9999), 3)
