@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "9eaa46a56969d82aa5a94ca30811d90e4b9bd60d3de233fdf45da7a8e71a3636"
+tree-sha256 = "b0aa8d8316d40ea724e76216ba85dd7679a758299d116065dacb211845a1e272"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,13 +46,13 @@ sha256 = "6f0c245c659cfdd94a9894fc33ec955f05827ea618df62a789f6e2ef1ef58a29"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 78867
-sha256 = "94f6378b927e592841c44ccb00a4ffc8f5e917832a9385ba0207bdc532b85b2a"
+bytes = 80111
+sha256 = "1bc4320aa503a70a1cb4a1743bc07c9126c72b9ada4887ad4b4593f14eb239aa"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 368168
-sha256 = "9ff67f037f0ffd549b4c7153a08518fa9cdcd534dfb348604251124f90b42080"
+bytes = 371562
+sha256 = "87a2a86fc17ebff10986b7a7691dbd1ad83e925e0ad231f5274a8a18861368a2"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -716,8 +716,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 168753
-sha256 = "f4c28c3f79be5042fec9b8c2e9742f6538ea4568a34f2a9ad88e7671120237d7"
+bytes = 169997
+sha256 = "944ebb0f2409ffcdfaf96b2049a0ae8c06a426e0731bc638f290e20d82d00f92"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
@@ -2166,8 +2166,8 @@ sha256 = "202dbf5bd8489b45aabd9730efc8c7bc9dee109dc30059c743c0b7648462a050"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 368168
-sha256 = "9ff67f037f0ffd549b4c7153a08518fa9cdcd534dfb348604251124f90b42080"
+bytes = 371562
+sha256 = "87a2a86fc17ebff10986b7a7691dbd1ad83e925e0ad231f5274a8a18861368a2"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2696,8 +2696,8 @@ sha256 = "34897bf9d8c579554f1ef9509bd44be8391c054e0277ce5affbb76b7d92836b3"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 257730
-sha256 = "d8aa6d973f8e282b280a66d0c80abbd8e055a8d452d3815bf1abc5aea68a9623"
+bytes = 260949
+sha256 = "0256d1bbeb9d54041a12d342f8ae19a355b02b423d0ddecdd40fa617bb6d9caf"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"

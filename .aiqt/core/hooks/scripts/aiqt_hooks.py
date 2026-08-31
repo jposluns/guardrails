@@ -222,11 +222,12 @@ _Redirect = collections.namedtuple("_Redirect", ("op", "src_fd", "target", "targ
 # unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on), argv_opaque (the
 # per-token opacity flags PARALLEL to argv: True where THAT word carried an unquoted expansion/glob/brace or
 # a leading tilde, so a consumer can tell an unquoted, shell-expanded '~/x' from a quoted, literal '~/x'),
-# and argv_leading_tilde (the per-token flags PARALLEL to argv: True ONLY where THAT word's LEADING character
-# is an UNQUOTED tilde, so bash tilde-expansion applies and the word expands to an absolute home. This is a
-# STRICTER signal than argv_opaque, which any unquoted expansion/glob/brace ANYWHERE in the token also sets;
-# a quoted leading tilde with an unquoted tail, e.g. "~"/x*, carries argv_opaque for the wrong reason but
-# NOT argv_leading_tilde, so it is correctly not read as an expanded '~').
+# and argv_leading_tilde (the per-token flags PARALLEL to argv: True ONLY where THAT word begins with an
+# UNQUOTED tilde AND the WHOLE tilde-prefix - '~' up to the first unquoted '/' or end of word - is unquoted
+# and unescaped, which is exactly when bash tilde-expansion applies and the word expands to an absolute home.
+# This is a STRICTER signal than argv_opaque, which any unquoted expansion/glob/brace ANYWHERE in the token
+# also sets; a quoted leading tilde with an unquoted tail, e.g. "~"/x*, and a leading tilde whose PREFIX
+# carries a quote or escape, e.g. ~"/x" or ~\/x, are correctly NOT read as an expanded '~').
 _Segment = collections.namedtuple(
     "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque",
                  "argv_leading_tilde"))
@@ -238,8 +239,12 @@ def _read_word(command, i, n):
     the quote/escape decoded word, opaque is True if it carried an unquoted
     expansion/substitution/glob/brace/leading-tilde, started is True once any character (even an empty ''
     quote) began the word, all_digits is True only when the whole word is UNQUOTED decimal digits (an
-    IO_NUMBER candidate), leading_tilde is True ONLY when the word's LEADING character is an UNQUOTED tilde
-    (bash tilde-expansion applies), which a quoted, escaped, or non-leading tilde does not set. Stops at an
+    IO_NUMBER candidate), leading_tilde is True ONLY when the word begins with an UNQUOTED tilde AND the
+    WHOLE tilde-prefix (from that '~' up to the first UNQUOTED '/' or end of word) is unquoted and unescaped,
+    which is exactly when bash tilde-expansion applies. A quoted, escaped, or non-leading tilde does not set
+    it, and neither does a quote or escape ANYWHERE in the tilde-prefix (e.g. ~"/x", ~'', or an escaped '/'
+    after the tilde stay relative), while a quote or expansion AFTER the prefix-closing '/' (e.g. ~/$VAR) does
+    not block it. Stops at an
     unquoted space, tab, newline, or metacharacter. Raises ValueError on an unbalanced quote or an
     unterminated escape."""
     chars = []
@@ -247,6 +252,13 @@ def _read_word(command, i, n):
     started = False
     all_digits = True
     leading_tilde = False
+    # tilde_prefix_open: True while we are still INSIDE the tilde-prefix (from a leading unquoted '~' up to
+    # the first UNQUOTED '/', or end of word). Bash expands the leading '~' ONLY when the WHOLE tilde-prefix
+    # is unquoted and unescaped; any quoted or escaped character in that span disables expansion and the word
+    # stays RELATIVE. So while the prefix is open, a single-quote, double-quote, or backslash escape CONTAMINATES
+    # it: leading_tilde is cleared. An unquoted '/' CLOSES the prefix cleanly (leading_tilde stays set), so
+    # material AFTER it - 'cd ~/$VAR' - never blocks the expansion.
+    tilde_prefix_open = False
     while i < n:
         c = command[i]
         if c in " \t\n" or c in _METACHARS:
@@ -268,6 +280,9 @@ def _read_word(command, i, n):
         was_started = started  # whether the word had begun BEFORE this char (a leading tilde needs it False)
         started = True
         if c == "'":  # single quote: everything literal, no escapes, until the next "'"
+            if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
+                leading_tilde = False
+                tilde_prefix_open = False
             j = command.find("'", i + 1)
             if j < 0:
                 raise ValueError("unterminated single quote")
@@ -276,6 +291,9 @@ def _read_word(command, i, n):
             i = j + 1
             continue
         if c == '"':  # double quote: backslash escapes only "\ $ ` and newline; $ and backtick are opaque
+            if tilde_prefix_open:  # a quote inside the tilde-prefix disables bash expansion: stays relative
+                leading_tilde = False
+                tilde_prefix_open = False
             i += 1
             while True:
                 if i >= n:
@@ -306,6 +324,9 @@ def _read_word(command, i, n):
             continue
         if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
             # was already consumed above, before the word could start)
+            if tilde_prefix_open:  # an escape inside the tilde-prefix disables bash expansion: stays relative
+                leading_tilde = False
+                tilde_prefix_open = False
             if i + 1 >= n:
                 raise ValueError("unterminated escape")
             chars.append(command[i + 1])
@@ -321,8 +342,13 @@ def _read_word(command, i, n):
             # at the very start of the word.
             opaque = True
             leading_tilde = True
+            tilde_prefix_open = True  # begin tracking the tilde-prefix; a later quote/escape voids the tilde
         elif c in _OPAQUE_WORD_CHARS:
             opaque = True
+        elif c == "/" and tilde_prefix_open:
+            # an UNQUOTED '/' ends the tilde-prefix cleanly: the leading '~' stays an expansion, and anything
+            # after this '/' (an opaque '$VAR', a quote) no longer blocks it. 'cd ~/$VAR' remains an ALLOW.
+            tilde_prefix_open = False
         if not c.isdigit():
             all_digits = False
         chars.append(c)
@@ -1478,6 +1504,11 @@ _PUSHD_ROTATION_RE = re.compile(r"^[-+][0-9]+$")  # pushd +N/-N: a stack index, 
 # '~') is not expanded and stays relative; the LEADING-UNQUOTED-tilde flag (argv_leading_tilde), not the
 # broader opacity flag, tells the expanded form from a quoted one whose unquoted tail merely carries opacity.
 _LITERAL_TILDE_RE = re.compile(r"^~(/.*)?$")
+# An inline OLDPWD= assignment PREFIXING the command (OLDPWD=.. cd -- -) overrides $OLDPWD for that command,
+# so a lone '-' destination no longer resolves to a cwd-independent prior dir: bash cds to the assigned
+# value, which can be relative ('..'). The floor cannot prove the assigned value absolute, so a lone '-'
+# with an inline OLDPWD= present ASKS rather than allowing on the usual $OLDPWD assumption.
+_OLDPWD_ASSIGN_RE = re.compile(r"^OLDPWD=")
 
 
 def _cd_destination_reason(word, argv, argv_leading_tilde):
@@ -1488,11 +1519,17 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
     cd/pushd option flags and a pushd +N/-N rotation name no relative path and are skipped, while '--' ends
     option processing so the next token is the destination even when it begins '-'/'+'. A lone '-' is the
     $OLDPWD shortcut wherever it lands as the destination, including as the post-'--' destination ('cd -- -',
-    which bash still resolves to $OLDPWD). An operand carrying an unexpanded expansion never reads as absolute
+    which bash still resolves to $OLDPWD), UNLESS the command carries an inline OLDPWD= assignment
+    ('OLDPWD=.. cd -- -'), which overrides $OLDPWD to a value the floor cannot prove absolute, so the lone '-'
+    then ASKS. An operand carrying an unexpanded expansion never reads as absolute
     unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an absolute
     '/$X/y' allows. argv_leading_tilde is the per-token LEADING-UNQUOTED-tilde flags parallel to argv (True
     only where the word's leading char is an unquoted tilde, so tilde-expansion applies)."""
-    idx = _command_word_index(argv) + 1  # skip leading env-assignments and the command word itself
+    cmd_idx = _command_word_index(argv)  # boundary: argv[:cmd_idx] are the leading env-assignments
+    # An inline OLDPWD= among the leading assignments makes a lone '-' destination relative-capable (bash cds
+    # to the assigned value, e.g. 'OLDPWD=.. cd -- -' -> '..'), so it can no longer be trusted as $OLDPWD.
+    oldpwd_inline = any(_OLDPWD_ASSIGN_RE.match(tok) for tok in argv[:cmd_idx])
+    idx = cmd_idx + 1  # skip leading env-assignments and the command word itself
     end_of_options = False
     for pos in range(idx, len(argv)):
         tok = argv[pos]
@@ -1506,6 +1543,10 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
                 continue  # pushd +N/-N: a directory-stack rotation index, not a filesystem path
         # end-of-options, or the first token that is not an option: this is the destination operand.
         if tok == "-":
+            if oldpwd_inline:
+                # an inline OLDPWD= assignment redirected $OLDPWD to a value the floor cannot prove absolute
+                return "a relative {} destination '-' (inline OLDPWD= assignment overrides $OLDPWD)".format(
+                    word)
             continue  # cd '-': the $OLDPWD previous-directory shortcut (an absolute prior dir), even
             # after '--' where bash still treats a lone '-' destination as $OLDPWD, not a relative name
         if argv_leading_tilde[pos] and _LITERAL_TILDE_RE.match(tok):

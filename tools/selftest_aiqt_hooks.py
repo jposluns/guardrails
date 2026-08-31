@@ -3290,6 +3290,45 @@ def main():
              "cd -- rel", "ask")
         bcmd("(ap-c64) 'cd -- --' asks (post-'--' relative dir named '--', GS-7 round-2 MAJOR 3 guard)",
              "cd -- --", "ask")
+        # GS-7 round-3 MAJOR 1: bash expands a leading '~' ONLY when the WHOLE tilde-prefix (from '~' to the
+        # first UNQUOTED '/' or end of word) is unquoted/unescaped. A QUOTE or ESCAPE anywhere in that prefix
+        # disables expansion and the word stays RELATIVE - even when the DECODED token is fully literal ('~/x')
+        # with no opacity flag. Pre-round-3 argv_leading_tilde was set merely because the FIRST char was an
+        # unquoted '~', so all of these were false ALLOWs. The prefix is now tracked per-character in _read_word,
+        # so each ASKS. Fails-when-reverted (every case here was ALLOW on the round-2 code).
+        bcmd("(ap-c65) 'cd ~\"/x\"' asks (quoted '/' in tilde-prefix, not expanded, GS-7 round-3 MAJOR 1)",
+             'cd ~"/x"', "ask")
+        bcmd("(ap-c66) \"cd ~''\" asks (empty single-quote in tilde-prefix, GS-7 round-3 MAJOR 1)",
+             "cd ~''", "ask")
+        bcmd("(ap-c67) 'cd ~\"\"/x' asks (empty double-quote before the '/', GS-7 round-3 MAJOR 1)",
+             'cd ~""/x', "ask")
+        bcmd("(ap-c68) \"cd ~'/x'\" asks (single-quoted '/x' tail in prefix, GS-7 round-3 MAJOR 1)",
+             "cd ~'/x'", "ask")
+        bcmd("(ap-c69) 'cd ~\\\\/x' asks (escaped '/' in tilde-prefix, GS-7 round-3 MAJOR 1)",
+             "cd ~\\/x", "ask")
+        bcmd("(ap-c70) 'cd ~\"/\"$V' asks (quoted '/' then expansion, prefix quoted, GS-7 round-3 MAJOR 1)",
+             'cd ~"/"$V', "ask")
+        bcmd("(ap-c71) 'cd ~\"/x\" <(printf x)' asks (quoted-prefix tilde in a partial-lex compose, round-3)",
+             'cd ~"/x" <(printf x)', "ask")
+        # regression guard for round-3 MAJOR 1: an unquoted tilde-prefix closed by an unquoted '/' STAYS ALLOW,
+        # even with an opaque '$VAR' AFTER the '/', because material after the prefix does not block expansion.
+        bcmd("(ap-c72) 'cd ~/$VAR' allows (whole tilde-prefix unquoted, GS-7 round-3 MAJOR 1 guard)",
+             "cd ~/$VAR", "allow")
+        # GS-7 round-3 MAJOR 2: an inline OLDPWD= assignment overrides $OLDPWD for that command, so a lone '-'
+        # destination (incl. post-'--') no longer resolves to a cwd-independent prior dir - bash cds to the
+        # assigned value, which can be RELATIVE ('OLDPWD=.. cd -- -' -> '..'). The floor cannot prove the value
+        # absolute, so a lone '-' with an inline OLDPWD= present now ASKS. Pre-round-3 it was a false ALLOW.
+        # Fails-when-reverted. Without an inline OLDPWD=, 'cd -' / 'cd -- -' STAY ALLOW (guards below).
+        bcmd("(ap-c73) 'OLDPWD=.. cd -- -' asks (inline OLDPWD= overrides $OLDPWD, GS-7 round-3 MAJOR 2)",
+             "OLDPWD=.. cd -- -", "ask")
+        bcmd("(ap-c74) 'OLDPWD=.. cd -' asks (inline OLDPWD= overrides $OLDPWD, GS-7 round-3 MAJOR 2)",
+             "OLDPWD=.. cd -", "ask")
+        bcmd("(ap-c75) 'OLDPWD=.. pushd -- -' asks (inline OLDPWD= overrides $OLDPWD, GS-7 round-3 MAJOR 2)",
+             "OLDPWD=.. pushd -- -", "ask")
+        bcmd("(ap-c76) plain 'cd -- -' still allows (no inline OLDPWD=, GS-7 round-3 MAJOR 2 guard)",
+             "cd -- -", "allow")
+        bcmd("(ap-c77) plain 'cd -' still allows (no inline OLDPWD=, GS-7 round-3 MAJOR 2 guard)",
+             "cd -", "allow")
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
