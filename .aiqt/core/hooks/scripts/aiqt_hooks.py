@@ -5596,15 +5596,20 @@ def orch_resume_barrier(data):
 # --- write-scope guard (EN-8, wrtscp) ----------------------------------------------------------------
 # Confine the sole orchestrator's guarded-tool writes to a harness-set per-slice scope declaration, and
 # hard-deny writes to frozen paths and to other repositories as a floor the declaration cannot lower.
-# It reuses the orchestration substrate (_orch_state_dir_for_root for the out-of-tree declaration,
-# _orch_guard_event for the over-fire metric), the scrubbed git primitive (_recovery_toplevel), and the
+# It reuses the orchestration substrate (_orch_state_dir_for_root for the registry-declared state_dir the
+# declaration lives at, _orch_guard_event for the over-fire metric), the scrubbed git primitive
+# (_recovery_toplevel), and the
 # gensrc containment/loader idiom (_gensrc_within, the lstat->S_ISREG->byte-bound->UTF-8->JSON taxonomy).
 # TWO arming inputs, each fail-open on ABSENCE only: the per-slice declaration (slice confinement) and the
-# committed frozen floor (frozen denial). The structural other-repo/nested-repo denial and the frozen-floor
-# denial are ALWAYS-ON; only slice confinement is fail-open on a missing declaration. Once armed, every
-# cannot-evaluate resolves to DENY. See the write-scope residue in .aiqt/core/hooks/manifest.toml.
+# committed frozen floor (frozen denial). The structural other-repo/nested-repo denial applies to every
+# covered write whose repository root resolves (a covered write whose root cannot be resolved is DENIED, not
+# allowed); the frozen-floor denial fires whenever a floor is present, and an armed session additionally
+# requires one, so an un-armed session with a genuinely-absent floor is inert there. Only slice confinement
+# is fail-open on a missing declaration. Once armed, every cannot-evaluate resolves to DENY. See the
+# write-scope residue in .aiqt/core/hooks/manifest.toml.
 _WRTSCP_TOOLS = ("Write", "Edit", "MultiEdit")   # same matcher as gensrc_guard; MultiEdit carries one file_path
-_WRTSCP_DECL_REL = "write-scope.json"            # under <state_dir>, OUT OF TREE (harness-set, per slice)
+_WRTSCP_DECL_REL = "write-scope.json"            # under the registry-declared <state_dir> (harness-set, per
+                                                 # slice; out of the slice tree by default, possibly in-tree)
 _WRTSCP_FLOOR_REL = os.path.join(".aiqt", "frozen.json")  # in-tree committed floor (gen_manifest-generated)
 _WRTSCP_VERSION = 1
 _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are small; a larger one is malformed
@@ -5672,14 +5677,24 @@ def _wrtscp_read_json_artifact(path, max_bytes):
 
 
 def _load_write_scope(root):
-    """Read <state_dir>/write-scope.json AT DECISION TIME (the harness-set per-slice declaration, OUT OF
-    TREE, so it never contaminates the slice diff and a guarded write cannot reach it) and return
-    ('absent', None), ('bad', detail), or ('ok', {slice, worktree_root, allow}). `allow` is the parsed list
-    of (kind, body) entries (possibly empty; an empty allow list is valid and means every covered in-repo
-    write is out of scope). The version pin excludes JSON `true` (type(v) is int, not `== 1`, because
-    True == 1 in Python). worktree_root is validated as a non-empty string here; its equality with the
-    hook's own canonicalized root is checked in the handler (a stale/copied declaration is BAD there).
-    ABSENT is the fail-open state (no slice confinement); every present-but-unreadable outcome is BAD."""
+    """Read <state_dir>/write-scope.json AT DECISION TIME (the harness-set per-slice declaration; it lives
+    at the orchestration registry's declared state_dir, out of the slice tree BY DEFAULT but MAY be in-tree
+    when the registry declares an in-tree state_dir, so the out-of-tree placement is a harness convention,
+    not a guarantee) and return ('absent', None), ('bad', detail), or ('ok', {slice, worktree_root, allow}).
+    `allow` is the parsed list of (kind, body) entries (possibly empty; an empty allow list is valid and
+    means every covered in-repo write is out of scope). The version pin excludes JSON `true` (type(v) is
+    int, not `== 1`, because True == 1 in Python). worktree_root is validated as a non-empty string here; its
+    equality with the hook's own canonicalized root is checked in the handler (a stale/copied declaration is
+    BAD there). ABSENT is the fail-open state (no slice confinement); every present-but-unreadable outcome is
+    BAD. The registry that LOCATES the declaration is itself part of this read: a 'bad' (unreadable or
+    malformed) registry is a cannot-evaluate returned as BAD here (fail-closed), never a silent XDG-default
+    fallback that would report the declaration absent and DISARM confinement. _orch_state_dir_for_root is
+    left unchanged for its other callers; this fail-closure is local to the write-scope read."""
+    reg_status, reg_detail = _orch_registry(root)
+    if reg_status == "bad":
+        return ("bad", "{}: the orchestration registry that locates the write-scope declaration is "
+                       "unreadable or malformed, a cannot-evaluate that denies rather than silently "
+                       "disarming confinement".format(reg_detail))
     path = os.path.join(_orch_state_dir_for_root(root), _WRTSCP_DECL_REL)
     status, obj = _wrtscp_read_json_artifact(path, _WRTSCP_MAX_BYTES)
     if status == "absent":
@@ -5828,30 +5843,45 @@ def write_scope_guard(data):
     set, wowo01 (workers-produce-inert-data) as the apply-stage discipline over the sole writer, and exetgt
     (confirm-execution-target): the other-repo denial is its mechanical form for writes.
 
-    TWO arming inputs, each fail-open on ABSENCE only. The out-of-tree per-slice declaration
-    <state_dir>/write-scope.json arms SLICE CONFINEMENT (absent -> un-armed, inert confinement; present ->
-    armed, every uncertainty denies). The in-tree committed frozen floor .aiqt/frozen.json arms the FROZEN
-    layer (absent -> the frozen layer is inert; present -> the floor is enforced). The structural other-repo
-    /nested-repo denial and the frozen-floor denial are ALWAYS-ON; only slice confinement is fail-open on a
-    missing declaration. The one principled fail-open is ABSENCE (no confinement is in effect, the same
-    inert boundary gensrc and the orchestration suite use); once armed every cannot-evaluate resolves to
-    DENY. Out-of-scope is a DENY, never an ASK: an ASK would hand the confined actor the click-through on
-    its own confinement and would wedge an unattended run; the remedy is the harness re-declaring the slice.
-    The declaration is machine-set inert data, never authored by the assistant through a guarded tool; the
-    residual Bash-write path to the state dir is defence in depth, not categorical (disclosed below).
+    TWO arming inputs, each fail-open on ABSENCE only. The per-slice declaration
+    <state_dir>/write-scope.json (at the registry-declared state_dir, out of the slice tree by default) arms
+    SLICE CONFINEMENT (absent -> un-armed, inert confinement; present -> armed, every uncertainty denies).
+    The in-tree committed frozen floor .aiqt/frozen.json arms the FROZEN layer (absent -> the frozen layer is
+    inert un-armed; present -> the floor is enforced). The structural other-repo/nested-repo denial applies
+    to every covered write whose repository root resolves, and a covered write whose root CANNOT be resolved
+    is denied (fail-closed), not allowed. The frozen-floor denial fires whenever a floor is PRESENT, and an
+    armed session additionally REQUIRES a floor (an armed session with a genuinely-absent floor denies); only
+    an un-armed session with a genuinely-absent floor leaves the frozen layer inert, so the frozen denial is
+    not unconditionally always-on. Slice confinement is fail-open on a missing declaration; the principled
+    fail-open is genuine ABSENCE (of a declaration or floor: no confinement in effect, the same inert
+    boundary gensrc and the orchestration suite use). A cannot-evaluate FAULT is not absence: a resolution
+    or probe ERROR (an unresolvable session root, a root or target canonicalization fault, a containment
+    fault, or a nested-repo probe fault) on a covered write DENIES whether or not the session is armed, and
+    never allows an unverified write; and once armed every cannot-evaluate resolves to DENY. Out-of-scope is a DENY, never an ASK:
+    an ASK would hand the confined actor the click-through on its own confinement and would wedge an
+    unattended run; the remedy is the harness re-declaring the slice. The declaration is machine-set inert
+    data, never authored by the assistant through a guarded tool; the residual Bash-write path to the state
+    dir is defence in depth, not categorical (disclosed below).
 
     RESIDUAL (disclose-guard-residuals): a PATH guard, not a content judge; it decides where a write lands,
     never what it writes. Covers only PreToolUse Write/Edit/MultiEdit carrying a readable file_path.
     Bash-mediated writes (redirects, sed -i, cp, mv, tee, an editor launched in Bash), NotebookEdit,
-    filesystem MCP tools, and any write outside the platform's hook path are NOT caught; the classify-frozen
-    CI gate backstops committed frozen changes at merge, but nothing backstops an uncommitted,
-    out-of-scope-mutable, or cross-repository write through those channels. The declaration is machine-local
-    and session-scoped (CI cannot observe it). Realpath closes symlink escapes present at check time but not
-    a post-check swap, hard-link alias, or bind-mount change (TOCTOU); an OS-level write sandbox is the
-    stronger overlapping control. The floor is enforced against the manifest CLASS set {derived,
-    manifest-self, archive}; a change to that class set is itself a guardrail-config change needing explicit
-    authorization, and the floor proves membership in its declared selector set only, not that the
-    generation-time class mapping is semantically complete."""
+    filesystem MCP tools, and any write outside the platform's hook path are NOT caught; the committed frozen
+    floor .aiqt/frozen.json is a generated, drift-gated output backstopped at merge by the manifest-gen-drift
+    gate (tools/gen_manifest.py --check), the gensrc-registry-drift gate (tools/gen_gensrc.py --check), and
+    the independent manifest-integrity verifier (tools/check_manifest.py), but nothing backstops an
+    uncommitted, out-of-scope-mutable, or cross-repository write through those channels. The declaration is
+    machine-local and session-scoped (CI cannot observe it). Realpath closes symlink escapes present at check
+    time but not a post-check swap, hard-link alias, or bind-mount change (TOCTOU); an OS-level write sandbox
+    is the stronger overlapping control. The floor is enforced against the manifest CLASS set {derived,
+    manifest-self, archive}. That floor's RUNTIME value is un-lowerable by the constrained actor through the
+    guarded tools (a guarded Write/Edit/MultiEdit to .aiqt/frozen.json is itself on the floor and denied);
+    but its DEFINITION (FROZEN_CLASSES in tools/gen_manifest.py) is generator source that lands through
+    pull-request review PLUS the drift gate, which detects an INCONSISTENT floor (a committed frozen.json
+    that does not match a fresh regeneration), NOT an unauthorized-but-internally-consistent redefinition of
+    the class set followed by regeneration. An independent floor-authorization mechanism is out of this
+    hook's scope. The floor proves membership in its declared selector set only, not that the generation-time
+    class mapping is semantically complete."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: write_scope_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -5888,13 +5918,24 @@ def write_scope_guard(data):
                             "denied a {} whose file_path carried a control character".format(tool_name))
     cwd = data.get("cwd")
     if not isinstance(cwd, str) or not cwd:
-        return _allow()  # row 5: the declaration is unlocatable without a root -> inert (disclosed residual)
+        # A covered write whose session cwd is missing or unreadable has no resolvable repository root, so
+        # containment cannot be evaluated at all; a covered write that cannot be cleared is DENIED
+        # (fail-closed), never the old inert allow that let an unlocatable-root write through (row 5).
+        return _wrtscp_deny(None, "unresolvable session root (no cwd)",
+                            "the {} payload carried no readable cwd, so the session repository root cannot "
+                            "be resolved and the write cannot be cleared for containment; a covered write "
+                            "whose scope cannot be evaluated is denied".format(tool_name),
+                            "denied a {} (session root unresolvable, no cwd)".format(tool_name))  # row 5
     # The scrubbed rev-parse primitive (every ambient GIT_* removed), so an ambient decoy repo cannot
-    # redirect the reads; None means a non-git session, whose declaration is unlocatable -> degrade to the
-    # un-armed inert posture (row 5; "armed with an unresolvable root" is not directly observable).
+    # redirect the reads; None means a non-git session, whose repository root is unresolvable, so a covered
+    # write cannot be cleared for containment and is DENIED (fail-closed) rather than allowed.
     root = _recovery_toplevel(cwd)
     if root is None:
-        return _allow()  # row 5
+        return _wrtscp_deny(None, "unresolvable session root (non-git)",
+                            "the {} session is not in a resolvable git repository, so the session repository "
+                            "root cannot be resolved and the write cannot be cleared for containment; a "
+                            "covered write whose scope cannot be evaluated is denied".format(tool_name),
+                            "denied a {} (session root unresolvable, non-git)".format(tool_name))  # row 5
     decl_status, decl = _load_write_scope(root)
     armed = decl_status != "absent"
     try:
@@ -5905,7 +5946,11 @@ def write_scope_guard(data):
                                 "the session repo root could not be canonicalized, so the write cannot be "
                                 "cleared against the armed slice", "denied a {} (unresolvable repo root, "
                                 "armed)".format(tool_name))                                  # row 15
-        return _allow()                                                                     # row 11
+        return _wrtscp_deny(root, "root canonicalization fault (cannot-evaluate)",
+                            "the session repo root could not be canonicalized, so the write target's "
+                            "containment could not be proven; a cannot-evaluate denies rather than allowing "
+                            "an unverified write",
+                            "denied a {} (repo root canonicalization fault)".format(tool_name))  # row 11 (fault -> deny)
     if not _is_absolute(file_path):
         # A relative file_path can only arrive via MultiEdit (abs-paths covers the rest). Un-armed EN-8
         # makes no cwd-trusting determination (the sibling absolute_paths hook owns the relative case);
@@ -5924,7 +5969,11 @@ def write_scope_guard(data):
                                 "the {} target path could not be canonicalized, so it cannot be cleared "
                                 "against the armed slice".format(tool_name),
                                 "denied a {} (unresolvable target, armed)".format(tool_name))  # row 15
-        return _allow()                                                                     # row 11
+        return _wrtscp_deny(root, "target canonicalization fault (cannot-evaluate)",
+                            "the {} target path could not be canonicalized, so its containment could not be "
+                            "proven; a cannot-evaluate denies rather than allowing an unverified write"
+                            .format(tool_name),
+                            "denied a {} (target canonicalization fault)".format(tool_name))  # row 11 (fault -> deny)
     if armed and decl_status == "bad":
         return _wrtscp_deny(root, "declaration bad",
                             "{}; an armed session cannot clear a write against an unreadable declaration "
@@ -5941,7 +5990,7 @@ def write_scope_guard(data):
                                 "the write-scope declaration's worktree_root does not resolve to this repo "
                                 "(a stale, copied, or moved declaration), so it cannot confine this tree",
                                 "denied a {} (declaration worktree_root mismatch)".format(tool_name))  # row 13
-    # --- ALWAYS-ON structural other-repo / nested-repo denial (rows 7, 16) ---
+    # --- Structural other-repo / nested-repo denial, in BOTH regimes once the root resolves (rows 7, 16) ---
     within = _gensrc_within(target, root_c)
     if within == "err":
         if armed:
@@ -5949,7 +5998,11 @@ def write_scope_guard(data):
                                 "the write target's containment against this repo could not be resolved, so "
                                 "it cannot be cleared against the armed slice",
                                 "denied a {} (containment fault, armed)".format(tool_name))  # row 15
-        return _allow()                                                                     # row 11
+        return _wrtscp_deny(root, "containment fault (cannot-evaluate)",
+                            "the write target's containment against this repo could not be resolved, so a "
+                            "no-match could not be proven; a cannot-evaluate denies rather than allowing an "
+                            "unverified write",
+                            "denied a {} (containment fault)".format(tool_name))  # row 11 (fault -> deny)
     slice_name = decl["slice"] if armed else None
     if within == "out":
         return _wrtscp_deny(root, "outside toplevel",
@@ -5965,14 +6018,19 @@ def write_scope_guard(data):
                                 "the write target's repository could not be resolved, so it cannot be "
                                 "cleared against the armed slice",
                                 "denied a {} (nested-repo probe fault, armed)".format(tool_name))  # row 15
-        return _allow()                                                                     # row 11
+        return _wrtscp_deny(root, "nested-repo probe fault (cannot-evaluate)",
+                            "the write target's repository could not be resolved, so it could not be proven "
+                            "the target is not in a nested or foreign repository; a cannot-evaluate denies "
+                            "rather than allowing an unverified write",
+                            "denied a {} (nested-repo probe fault)".format(tool_name))  # row 11 (fault -> deny)
     if nested:
         return _wrtscp_deny(root, "nested/foreign repo",
                             "the write target sits in a NESTED or FOREIGN git repository under or beside "
                             "this repo ({}); it is denied as a floor the scope declaration cannot lower. "
                             "Run the write from a session rooted in that repo.".format(target),
                             "denied a {} to a nested or foreign repository".format(tool_name))  # rows 7/16
-    # --- ALWAYS-ON frozen-floor denial (rows 8, 9, 10, 17, 18) ---
+    # --- Frozen-floor denial (rows 8, 9, 10, 17, 18): fires whenever a floor is PRESENT, and an armed
+    # session additionally requires one; only an un-armed session with a genuinely-absent floor is inert ---
     floor_status, floor = _load_frozen_floor(root)
     if floor_status == "bad":
         return _wrtscp_deny(root, "floor bad",

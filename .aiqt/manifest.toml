@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "1fdc5fdd9bda3d89b9577421e54e2a7ad89adc0c1be42af5b650b27f34062b2a"
+tree-sha256 = "23b18e6df902b83e0d9d08f32e29f606b3c22b99418d12ec34adedce8f925585"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 57201
-sha256 = "b813db4b1535bbc80aead17ad20bec583c36c4e7bd906d5741083520c4fcb4a7"
+bytes = 57238
+sha256 = "4a98cb78d79496e754256e297ab45061ea5af80a3a6f314a1613a3fcbc58ca60"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -51,8 +51,8 @@ sha256 = "857dda719903f0b8ba9da983c03671f6a244b55bf8cef0c9ce1d26daeda020aa"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 402865
-sha256 = "b1001258fa4e41cdea3b35a71b7396001ef61c314a70bc68af1bddc238319b58"
+bytes = 408562
+sha256 = "24fde26dcc360e1a2f7acaa1cfd17497f47981a6c47374df4d79cf82c7d8b6fd"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -716,8 +716,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 187753
-sha256 = "edbdb8b0284911c999930421bb0463690ed962af0ec459ac99f27cc315b469b4"
+bytes = 187790
+sha256 = "4ef05aee5c6dbd33ae1158d4fd1581150d1b42a3b6fe4697dd10dcc14f3cc271"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2171,8 +2171,8 @@ sha256 = "b0216198cfc1b4ca1bb4b486e11790c1d27d67c9b1470490bc4ab0e0aef42a80"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 402865
-sha256 = "b1001258fa4e41cdea3b35a71b7396001ef61c314a70bc68af1bddc238319b58"
+bytes = 408562
+sha256 = "24fde26dcc360e1a2f7acaa1cfd17497f47981a6c47374df4d79cf82c7d8b6fd"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2716,8 +2716,8 @@ sha256 = "de6be4150994de21192b1fa9d400ca73062e15b3802f1eeb5bfa44926ca00bf5"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 282273
-sha256 = "9db9409260c1e82ad3a2376397daae00789214b2742f9524e24b44af66aaf8e0"
+bytes = 289384
+sha256 = "9611fb7652e4404784b4eedfc64228237c80a48282f475abc9ba63afcf09020b"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

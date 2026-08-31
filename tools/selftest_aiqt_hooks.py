@@ -3620,9 +3620,100 @@ def main():
                  "Read", rp_j("src", "x.py"), ws_rp)
         wsexpect("(ws-event) a mis-wired non-PreToolUse event hard-blocks (exit 2)", "block2",
                  "Write", rp_j("src", "x.py"), ws_rp, event="Stop")
-        # A non-git session cannot locate the declaration -> inert allow (row 5).
-        wsexpect("(ws-nongit) a non-git session is inert (root unlocatable, row 5)", "allow",
-                 "Write", os.path.join(str(tmp), "plainfile.txt"), tmp)
+        # FIX 2 (MAJOR 3): a covered write whose session root cannot be resolved DENIES (fail-closed),
+        # never the old inert allow. A non-git session (row 5) and a payload with no cwd both deny.
+        wsexpect("(ws-nongit) a non-git session denies a covered write (root unresolvable, fail-closed)",
+                 "deny", "Write", os.path.join(str(tmp), "plainfile.txt"), tmp)
+        ws_nocwd_got = wsdecide("Write", rp_j("src", "x.py"), None)
+        if ws_nocwd_got != "deny":
+            failures.append("(ws-nocwd) a covered write whose payload carries no cwd must deny (session "
+                            "root unresolvable, FIX 2), got {}".format(ws_nocwd_got))
+
+        # --- FIX 2 extension (codex MAJOR 3): un-armed cannot-evaluate FAULT paths DENY (fail-closed) ---
+        # A resolution or probe ERROR on a covered write is a cannot-evaluate: the guard cannot PROVE the
+        # target is in-repo / not-nested, so it DENIES rather than allowing an unverified write. UN-ARMED
+        # (ws_rp disarmed, no floor); OLD code returned _allow() (row 11) at each site, so each assertion is
+        # fail-to-pass by construction. Faults are injected deterministically and restored in a finally,
+        # mirroring the gensrc gs-ac/gs-ad idiom; judged by the STRUCTURED verdict, never by grepping prose.
+        ws_disarm(ws_rp)
+        ws_nofloor(ws_rp)
+        _ws_fault_fp = rp_j("src", "x.py")
+        _ws_real_realpath = os.path.realpath
+        _ws_real_commonpath = os.path.commonpath
+        # Site 1 (aiqt_hooks.py row 11): the SESSION-ROOT canonicalization fault. The first realpath call in
+        # the covered path is root_c (_recovery_toplevel uses no realpath), so a raising realpath fires it.
+        def _ws_raise_realpath_all(*_a, **_k):
+            raise OSError("injected root_c realpath fault (ws-fault-rootc)")
+        try:
+            os.path.realpath = _ws_raise_realpath_all
+            wsexpect("(ws-fault-rootc) an un-armed root canonicalization fault DENIES (cannot-evaluate, was "
+                     "a row-11 allow)", "deny", "Write", _ws_fault_fp, ws_rp)
+        finally:
+            os.path.realpath = _ws_real_realpath
+        # Site 2 (row 11): the TARGET canonicalization fault only (root_c must still resolve).
+        def _ws_raise_realpath_target(path, *_a, **_k):
+            if path == _ws_fault_fp:
+                raise OSError("injected target realpath fault (ws-fault-target)")
+            return _ws_real_realpath(path)
+        try:
+            os.path.realpath = _ws_raise_realpath_target
+            wsexpect("(ws-fault-target) an un-armed target canonicalization fault DENIES (cannot-evaluate, "
+                     "was a row-11 allow)", "deny", "Write", _ws_fault_fp, ws_rp)
+        finally:
+            os.path.realpath = _ws_real_realpath
+        # Site 3 (row 11): the CONTAINMENT fault via a raising commonpath (_gensrc_within returns 'err').
+        def _ws_raise_commonpath(*_a, **_k):
+            raise ValueError("injected commonpath fault (ws-fault-contain)")
+        try:
+            os.path.commonpath = _ws_raise_commonpath
+            wsexpect("(ws-fault-contain) an un-armed containment fault DENIES (_gensrc_within 'err', "
+                     "cannot-evaluate, was a row-11 allow)", "deny", "Write", _ws_fault_fp, ws_rp)
+        finally:
+            os.path.commonpath = _ws_real_commonpath
+        # Site 4 (row 11): the NESTED-REPO probe fault (the codex-named case) via a None-returning probe.
+        _ws_real_nested = aiqt_hooks._wrtscp_nested_repo
+        try:
+            aiqt_hooks._wrtscp_nested_repo = lambda *_a, **_k: None
+            wsexpect("(ws-fault-nested) an un-armed nested-repo probe fault DENIES (cannot-evaluate, the "
+                     "codex MAJOR 3 case, was a row-11 allow)", "deny", "Write", _ws_fault_fp, ws_rp)
+        finally:
+            aiqt_hooks._wrtscp_nested_repo = _ws_real_nested
+
+        # --- FIX 1 (BLOCKER 2): a BAD orchestration registry cannot silently disarm confinement ---
+        # The registry LOCATES the write-scope declaration. When it is unreadable/malformed, the old code
+        # fell back to the XDG-default state dir, found no declaration there, read the session as UN-ARMED,
+        # and ALLOWED an out-of-slice write. The fix returns BAD (fail-closed) for a bad registry, so an
+        # armed session denies. Built to fail on the old path: the declaration lives at a registry-DECLARED
+        # in-tree state_dir, so a valid registry arms and confines to src/, and corrupting only the registry
+        # must NOT drop that confinement. Judged by the STRUCTURED verdict, never by grepping prose.
+        try:
+            ws_reg = tmp / "wsreg"
+            ws_reg.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(ws_reg)],
+                           check=True, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the write-scope registry fixture: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        reg_j = lambda *p: os.path.join(str(ws_reg), *p)
+        reg_registry = ws_reg / ".aiqt" / "orchestration.local.json"
+        reg_registry.parent.mkdir(parents=True, exist_ok=True)
+        # A version-1 registry declaring an in-tree state_dir (relative -> joined onto the repo root). This
+        # proves the declaration MAY live in-tree (the corrected out-of-tree disclosure) and that a valid
+        # registry locates it there.
+        reg_registry.write_text(json.dumps({"version": 1, "state_dir": ".aiqt/orch-state"}),
+                                encoding="utf-8")
+        ws_floor(ws_reg, WS_FLOOR)
+        ws_arm(ws_reg, ["src/"])   # ws_state_dir reads the registry, so this writes into .aiqt/orch-state/
+        wsexpect("(ws-reg-ok-in) a valid registry arms via its declared in-tree state_dir; in-scope allows",
+                 "allow", "Write", reg_j("src", "x.py"), ws_reg)
+        wsexpect("(ws-reg-ok-out) a valid registry arms via its declared state_dir; out-of-scope denies",
+                 "deny", "Write", reg_j("tools", "y.py"), ws_reg)
+        # Corrupt ONLY the registry; the armed declaration stays present in .aiqt/orch-state/.
+        reg_registry.write_text("{ not json", encoding="utf-8")
+        wsexpect("(ws-reg-bad) a BAD registry with the declaration still present DENIES an out-of-slice "
+                 "write (FIX 1: a cannot-evaluate registry cannot silently disarm; old code ALLOWED)",
+                 "deny", "Write", reg_j("tools", "y.py"), ws_reg)
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -3773,8 +3864,15 @@ def main():
           "cannot-evaluate once armed DENIES (a malformed/boolean-version/worktree_root-mismatch "
           "declaration, an absent or malformed floor, a relative file_path) while a MISSING tool_name, a "
           "non-dict tool_input, a missing file_path, and a control-character file_path DENY as malformed "
-          "calls, a relative path and a non-git session are inert un-armed, Bash and Read are out of the "
-          "matcher (the disclosed Bash residual), and a mis-wired event hard-blocks (exit 2)")
+          "calls; a relative file_path is inert un-armed (the sibling absolute_paths hook owns it); a "
+          "covered write whose session root cannot be resolved (a non-git session or a payload with no cwd) "
+          "DENIES fail-closed (FIX 2, MAJOR 3), as does every un-armed cannot-evaluate FAULT (an injected "
+          "root or target canonicalization fault, a containment fault, and the codex-named nested-repo probe "
+          "fault) that OLD code allowed at row 11; a BAD orchestration registry that locates the declaration "
+          "DENIES an armed session's out-of-slice write rather than silently disarming via the XDG-default "
+          "fallback (FIX 1, BLOCKER 2), proven against a declaration that MAY live in-tree at the "
+          "registry-declared state_dir; Bash and Read are out of the matcher (the disclosed Bash residual); "
+          "and a mis-wired event hard-blocks (exit 2)")
     return 0
 
 
