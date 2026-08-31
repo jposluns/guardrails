@@ -112,6 +112,9 @@ GENSRC_OUTPUTS = (
     {"target": "site/rule1.html", "kind": "file",
      "sources": ("docs/_shell.html", "docs/rule1.md"),
      "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/rule2.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/rule2.md"),
+     "regenerate": "python3 tools/gen_site.py"},
 )
 
 DOCS_DIR = "docs"
@@ -1302,7 +1305,13 @@ def _self_test():
         (td2 / "docs").mkdir()
         (td2 / "site").mkdir()
         (td2 / "docs" / "_shell.html").write_text(nav_base, encoding="utf-8")
-        (td2 / "docs" / "rule1.md").write_text(frontmatter + "hello\n", encoding="utf-8")
+        # Populate every docs/*.md source the live GENSRC_OUTPUTS declares, so this baseline exercises
+        # the real registry and stays valid as pages are migrated in (a hardcoded single source would
+        # fail closed on the next declared-but-absent page).
+        for src_rel, _tgt in _declared_md_sources():
+            src_path = td2 / src_rel
+            src_path.parent.mkdir(parents=True, exist_ok=True)
+            src_path.write_text(frontmatter + "hello\n", encoding="utf-8")
         case_count += 1
         if _run_main(td2, []) != 0:
             failures.append("discovery baseline generate: expected exit 0")

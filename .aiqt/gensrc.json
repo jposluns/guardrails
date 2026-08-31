@@ -316,6 +316,15 @@
         "docs/rule1.md"
       ],
       "target": "site/rule1.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/rule2.md"
+      ],
+      "target": "site/rule2.html"
     }
   ],
   "version": 1
