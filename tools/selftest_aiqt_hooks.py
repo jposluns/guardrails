@@ -3329,6 +3329,73 @@ def main():
              "cd -- -", "allow")
         bcmd("(ap-c77) plain 'cd -' still allows (no inline OLDPWD=, GS-7 round-3 MAJOR 2 guard)",
              "cd -", "allow")
+        # GS-7 round-4 CONSERVATIVE CONSOLIDATION. Four codex MAJORs, resolved by SHRINKING the fragile ALLOW
+        # set (any leading env-assignment -> the cwd-independent cd destinations ASK) rather than enumerating
+        # variable names, plus a redirect-tilde consistency fix. Each behavioural case below fails-when-reverted.
+        # MAJOR 1 (under-block): '_ENV_ASSIGN_RE' matched 'NAME=' but not the APPEND 'NAME+=', so 'OLDPWD+=..'
+        # was mistaken for the command word and the following cd never examined -> false ALLOW of a relative cd.
+        # The regex now recognizes '+=', so the assignment is skipped, cd is examined, and the lone '-' ASKS.
+        bcmd("(ap-c78) 'OLDPWD+=.. cd -' asks (append-assignment now recognized, GS-7 round-4 MAJOR 1)",
+             "OLDPWD+=.. cd -", "ask")
+        bcmd("(ap-c78b) 'unset OLDPWD; OLDPWD+=.. cd -' asks (append-assignment in a later segment, round-4)",
+             "unset OLDPWD; OLDPWD+=.. cd -", "ask")
+        # MAJOR 2 (under-block): a BARE 'cd' with an inline HOME= (or HOME+=) assignment cds to the redirected
+        # $HOME, which can be relative, but the no-operand branch treated bare cd as unconditionally
+        # cwd-independent. ANY leading assignment now makes the bare-cd (no-operand) $HOME default ASK.
+        bcmd("(ap-c79) 'HOME=.. cd' asks (bare cd -> redirected $HOME, GS-7 round-4 MAJOR 2)",
+             "HOME=.. cd", "ask")
+        bcmd("(ap-c79b) 'HOME+=.. cd' asks (append-assignment bare cd -> $HOME, GS-7 round-4 MAJOR 2)",
+             "HOME+=.. cd", "ask")
+        bcmd("(ap-c79c) 'HOME=.. pushd' asks (bare pushd default, any leading assignment, round-4 MAJOR 2)",
+             "HOME=.. pushd", "ask")
+        # MAJOR 4 (over-fire fixed): a redirect target whose CLEAN leading tilde-prefix expands to $HOME is
+        # absolute, but the redirect parser discarded the leading-tilde signal so '> ~/x' was classed opaque
+        # and ASKED, inconsistent with 'cd ~/x' ALLOW. The signal is now propagated, so a clean-tilde redirect
+        # target ALLOWs, while a quoted or complex-prefix tilde still ASKS - matching the cd tilde rule exactly.
+        bcmd("(ap-c80) 'printf x > ~/x' allows (clean-tilde redirect target -> $HOME, GS-7 round-4 MAJOR 4)",
+             "printf x > ~/x", "allow")
+        bcmd("(ap-c80b) 'printf x > ~/\"x\"' allows (quote AFTER the prefix '/' does not block, round-4 MAJOR 4)",
+             'printf x > ~/"x"', "allow")
+        bcmd("(ap-c80c) 'printf x > ~/$V' allows (expansion after the prefix '/' does not block, round-4 MAJOR 4)",
+             "printf x > ~/$V", "allow")
+        bcmd("(ap-c80d) 'printf x >> ~/log' allows (append redirect, clean-tilde target, round-4 MAJOR 4)",
+             "printf x >> ~/log", "allow")
+        bcmd("(ap-c80e) 'printf x > ~' allows (bare '~' target expands to $HOME, round-4 MAJOR 4)",
+             "printf x > ~", "allow")
+        # regression guards for MAJOR 4: a QUOTED or complex-prefix tilde redirect target is NOT expanded and
+        # still ASKS (matching cd), and a plain relative redirect target is unaffected.
+        bcmd("(ap-c81) 'printf x > \"~\"/x' asks (quoted tilde is literal-relative, GS-7 round-4 MAJOR 4 guard)",
+             'printf x > "~"/x', "ask")
+        bcmd("(ap-c81b) 'printf x > ~\"/x\"' asks (quote inside the tilde-prefix, round-4 MAJOR 4 guard)",
+             'printf x > ~"/x"', "ask")
+        bcmd("(ap-c81c) 'printf x > out.txt' asks (plain relative redirect target unaffected, round-4 guard)",
+             "printf x > out.txt", "ask")
+        bcmd("(ap-c81d) 'printf x > /tmp/x' allows (absolute redirect target unaffected, round-4 guard)",
+             "printf x > /tmp/x", "allow")
+        # MAJOR 3 (DISCLOSED conservative over-fire, PINNED): an assignment NAME quoted or escaped
+        # ('\"OLDPWD\"=.. cd -', 'OLD\"PWD\"=.. cd -', 'OLDP\\WD=.. cd -') is a COMMAND to bash (command-not-found;
+        # cd never runs), so it does not actually reach cd. But the DECODED token is assignment-shaped
+        # ('OLDPWD=..'), so under the round-4 'any leading assignment -> ASK' rule these ASK. This is an
+        # intentional conservative over-fire on an assignment-shaped token bash would reject anyway; it is
+        # DISCLOSED in the manifest residue, and PINNED here so it cannot silently drift. Not chased with
+        # assignment-name quote provenance (that parser complexity is deliberately declined).
+        bcmd("(ap-c82) '\"OLDPWD\"=.. cd -' asks (disclosed conservative over-fire, GS-7 round-4 MAJOR 3)",
+             '"OLDPWD"=.. cd -', "ask")
+        bcmd("(ap-c82b) 'OLD\"PWD\"=.. cd -' asks (disclosed conservative over-fire, GS-7 round-4 MAJOR 3)",
+             'OLD"PWD"=.. cd -', "ask")
+        bcmd("(ap-c82c) 'OLDP\\WD=.. cd -' asks (escaped name, disclosed conservative over-fire, round-4 MAJOR 3)",
+             "OLDP\\WD=.. cd -", "ask")
+        # non-regression + the deliberate conservative CONSEQUENCE of the shrink: with NO leading assignment
+        # the cwd-independent forms STAY ALLOW; a benign leading assignment ('FOO=x') now makes them ASK (the
+        # disclosed cost of not enumerating variable names).
+        bcmd("(ap-c83) plain bare 'cd' still allows (no leading assignment, GS-7 round-4 guard)", "cd", "allow")
+        bcmd("(ap-c83b) plain 'cd -' still allows (no leading assignment, GS-7 round-4 guard)", "cd -", "allow")
+        bcmd("(ap-c83c) plain 'cd -- -' still allows (no leading assignment, GS-7 round-4 guard)",
+             "cd -- -", "allow")
+        bcmd("(ap-c84) 'FOO=x cd -' asks (any leading assignment -> lone '-' ASKS, round-4 conservative cost)",
+             "FOO=x cd -", "ask")
+        bcmd("(ap-c84b) 'FOO=x cd' asks (any leading assignment -> bare-cd $HOME ASKS, round-4 conservative cost)",
+             "FOO=x cd", "ask")
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -3466,9 +3533,17 @@ def main():
           "opaque cd/pushd destination and a relative or opaque redirection target, ALLOWS an absolute "
           "one, an UNQUOTED CURRENT-USER tilde ('~', '~/x') as cwd-independent (gated on a LEADING-unquoted-"
           "tilde flag, so a QUOTED leading tilde even with an unquoted opaque tail - \"~\"/x*, '~'/x?, "
-          "\"~\"/$V - ASKS, and a '~user' whose account existence is unverifiable ASKS), while an opaque "
-          "'$VAR' still ASKS, a bare cd, the OLDPWD 'cd -' INCLUDING the post-'--' 'cd -- -', the real "
-          "cd/pushd option flags, a pushd rotation, and a descriptor duplication ALLOW; treats a relative "
+          "\"~\"/$V - ASKS, and a '~user' whose account existence is unverifiable ASKS; a CLEAN-tilde "
+          "REDIRECT target now ALLOWS consistently ('> ~/x', '> ~/\"x\"', '> ~/$V'), while a quoted or "
+          "complex-prefix tilde redirect target ('> \"~\"/x', '> ~\"/x\"') keeps ASKing, GS-7 round-4 "
+          "MAJOR 4), while an opaque '$VAR' still ASKS, a bare cd, the OLDPWD 'cd -' INCLUDING the post-'--' "
+          "'cd -- -', the real cd/pushd option flags, a pushd rotation, and a descriptor duplication ALLOW "
+          "ONLY absent a leading inline env-assignment; the GS-7 round-4 CONSERVATIVE CONSOLIDATION shrinks "
+          "that ALLOW set so ANY leading env-assignment (any name, '=' or '+=', even an assignment-SHAPED "
+          "token bash would reject) makes the cwd-independent 'cd -'/'cd -- -'/bare 'cd' ASK - 'OLDPWD+=.. "
+          "cd -', 'HOME=.. cd', 'HOME+=.. cd', '\"OLDPWD\"=.. cd -' (the last a DISCLOSED over-fire), and the "
+          "benign 'FOO=x cd -'/'FOO=x cd' as its deliberate cost - without enumerating variable names; "
+          "treats a relative "
           "dir name beginning '-'/'+' as the destination ('cd -- -rel', 'cd +rel') and ASKS while a "
           "post-'--' dir literally named '--' ('cd -- --') stays ASK, does NOT judge an arbitrary command "
           "operand, inspects the parseable PREFIX before an unparseable construct INCLUDING the in-progress "

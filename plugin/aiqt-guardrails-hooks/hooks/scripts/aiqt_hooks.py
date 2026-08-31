@@ -213,9 +213,13 @@ _FD_VAR_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")  # a bash {varname}> fd
 
 # A redirect record: op (the operator text), src_fd (the effective source fd, or None for the both-streams
 # '&>' forms), target (the decoded target word), target_class (static-real 'file-real', a console/device
-# 'file-dev' under /dev or /proc, a numeric/'-' 'descriptor', or a dynamic 'opaque'), and stdout_effect
-# (what this redirect does to STDOUT: '' none, or 'file-real'/'file-dev'/'descriptor'/'opaque').
-_Redirect = collections.namedtuple("_Redirect", ("op", "src_fd", "target", "target_class", "stdout_effect"))
+# 'file-dev' under /dev or /proc, a numeric/'-' 'descriptor', or a dynamic 'opaque'), stdout_effect
+# (what this redirect does to STDOUT: '' none, or 'file-real'/'file-dev'/'descriptor'/'opaque'), and
+# target_leading_tilde (True only when the target begins with an UNQUOTED, whole-prefix-unquoted '~' that
+# bash tilde-expands AND that expansion is a current-user '~'/'~/x', so the target is absolute like $HOME;
+# the abspth Bash floor reads it so a '> ~/x' redirect is ALLOW-consistent with a 'cd ~/x' destination).
+_Redirect = collections.namedtuple(
+    "_Redirect", ("op", "src_fd", "target", "target_class", "stdout_effect", "target_leading_tilde"))
 # A segment record: argv (the quote-decoded words the program receives, REDIRECTION ABSENT), sep_after (the
 # operator that ended it, one of _SEGMENT_OPERATORS, or "" at a newline/command end), redirects (the ordered
 # redirect records), raw (the raw slice of this segment), opaque_shell (True when the segment carried an
@@ -399,31 +403,35 @@ def _match_operator(command, i, n):
     return c, "sep", 1  # ';', '(', ')'
 
 
-def _classify_redirect(op, src_fd, target, t_opaque):
-    """Build a _Redirect from a recognized operator, its explicit source fd (or None), and the decoded
-    target. Computes the target class and the effect on STDOUT (last-redirect-wins is applied by the
-    caller). '&>'/'&>>' send both streams to the target (stdout affected); '>'/'>>'/'>|' affect stdout only
-    when the effective source fd is 1; '>&' is fd duplication/close for a numeric or '-' target (descriptor,
-    affecting stdout only from fd 1) or the csh both-streams-to-file form for a static word; the input
-    forms '<'/'<>'/'<&' never touch stdout."""
+def _classify_redirect(op, src_fd, target, t_opaque, t_leading_tilde=False):
+    """Build a _Redirect from a recognized operator, its explicit source fd (or None), the decoded target,
+    and the target's clean-leading-tilde signal. Computes the target class and the effect on STDOUT
+    (last-redirect-wins is applied by the caller). '&>'/'&>>' send both streams to the target (stdout
+    affected); '>'/'>>'/'>|' affect stdout only when the effective source fd is 1; '>&' is fd
+    duplication/close for a numeric or '-' target (descriptor, affecting stdout only from fd 1) or the csh
+    both-streams-to-file form for a static word; the input forms '<'/'<>'/'<&' never touch stdout.
+    tilde_abs is the ALREADY-GATED clean-tilde flag (an unquoted current-user '~'/'~/x' the shell expands to
+    an absolute $HOME): it is stored on the record so the abspth floor allows such a target without
+    re-deriving the gate, exactly as the cd/pushd destination path does."""
+    tilde_abs = t_leading_tilde and bool(_LITERAL_TILDE_RE.match(target))
     if op in ("&>", "&>>"):
         tclass = _target_class(target, t_opaque)
-        return _Redirect(op, None, target, tclass, tclass)  # both streams -> stdout affected
+        return _Redirect(op, None, target, tclass, tclass, tilde_abs)  # both streams -> stdout affected
     if op in (">", ">>", ">|"):
         src = 1 if src_fd is None else src_fd
         tclass = _target_class(target, t_opaque)
-        return _Redirect(op, src, target, tclass, tclass if src == 1 else "")
+        return _Redirect(op, src, target, tclass, tclass if src == 1 else "", tilde_abs)
     if op == ">&":
         src = 1 if src_fd is None else src_fd
         if (not t_opaque) and (target == "-" or target.isdigit()):
             tclass = "descriptor"  # fd duplication or close, never a proven file
         else:
             tclass = _target_class(target, t_opaque)  # csh '>&file' both-streams-to-file form
-        return _Redirect(op, src, target, tclass, tclass if src == 1 else "")
+        return _Redirect(op, src, target, tclass, tclass if src == 1 else "", tilde_abs)
     # input redirects ('<', '<>', '<&'): never a stdout effect
     src = 0 if src_fd is None else src_fd
     tclass = "descriptor" if op == "<&" else _target_class(target, t_opaque)
-    return _Redirect(op, src, target, tclass, "")
+    return _Redirect(op, src, target, tclass, "", tilde_abs)
 
 
 def _target_class(target, t_opaque):
@@ -439,7 +447,12 @@ def _target_class(target, t_opaque):
     (dev/stdout, ./dev/stdout, proc/self/fd/1), which from cwd '/' or via a 'dev'/'proc' symlink IS the
     device the absolute form names but from a working tree is an ordinary relative file. The ABSOLUTE
     /dev,/proc form stays 'file-dev' (DENY, an unambiguous device); the relative form only ASKS, so a
-    legitimate write into a repo's own dev/ or proc/ subdirectory is surfaced, not hard-blocked."""
+    legitimate write into a repo's own dev/ or proc/ subdirectory is surfaced, not hard-blocked.
+
+    A clean-leading-tilde target ('~'/'~/x') is intentionally left 'opaque' HERE (the tilde marks the word
+    opaque): the abspth Bash floor reads the separate _Redirect.target_leading_tilde flag to allow it,
+    consistent with the cd/pushd destination, WITHOUT reclassifying the target for the other consumers of
+    this shared classifier (the L11 diff-source layer, which keeps its own tilde-target policy)."""
     if t_opaque:
         return "opaque"
     norm = os.path.normpath(target)
@@ -493,10 +506,10 @@ def _lex_command(command, partial=False):
         # treats '#' at a word start as a comment, so the redirect has no target): cannot-evaluate, ASK.
         if k >= n or command[k] == "\n" or command[k] in _METACHARS or command[k] == "#":
             raise ValueError("malformed redirect: no target")
-        target, t_opaque, started, _digits, _ltilde, k2 = _read_word(command, k, n)
+        target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n)
         if not started:
             raise ValueError("malformed redirect target")
-        redirects.append(_classify_redirect(op, src_fd, target, t_opaque))
+        redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
         return k2
 
     try:
@@ -581,14 +594,19 @@ def _segments(command):
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
 
 
-# A leading inline shell env-var assignment (FOO=bar) that PREFIXES a command, e.g. the GIT_PAGER=cat in
-# 'GIT_PAGER=cat git diff'. Such assignments are SKIPPED when resolving a segment's command word and its
-# git subcommand, so that form resolves to command word 'git' / subcommand 'diff' and is judged like a
-# bare 'git diff' rather than slipping through as a non-git command word. The any-segment
-# identity-assignment scan still inspects these same tokens for an AI name (GIT_AUTHOR_NAME=Claude ...).
-# Best-effort, per the manifest residue: the 'env VAR=x git ...' command form and the 'command git ...'
-# builtin remain out of scope.
-_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A leading inline shell env-var assignment (FOO=bar or the APPEND form FOO+=bar) that PREFIXES a command,
+# e.g. the GIT_PAGER=cat in 'GIT_PAGER=cat git diff'. Such assignments are SKIPPED when resolving a
+# segment's command word and its git subcommand, so that form resolves to command word 'git' / subcommand
+# 'diff' and is judged like a bare 'git diff' rather than slipping through as a non-git command word. The
+# APPEND '+=' form (OLDPWD+=..) is a real bash assignment prefix too, so it is recognized here; missing it
+# left the append-assignment mistaken for the command word, so the following cd was never examined. The
+# any-segment identity-assignment scan still inspects these same tokens for an AI name
+# (GIT_AUTHOR_NAME=Claude ...). Best-effort, per the manifest residue: the 'env VAR=x git ...' command form
+# and the 'command git ...' builtin remain out of scope. This matches the DECODED token, so an
+# assignment-SHAPED token whose NAME was quoted or escaped ("OLDPWD"=.. -> decoded OLDPWD=..) also matches;
+# bash would treat that as a command, not an assignment, so recognizing it is a deliberate conservative
+# over-fire (disclosed in the manifest residue), never an under-block.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
 
 def _command_word_index(tokens):
@@ -1504,11 +1522,16 @@ _PUSHD_ROTATION_RE = re.compile(r"^[-+][0-9]+$")  # pushd +N/-N: a stack index, 
 # '~') is not expanded and stays relative; the LEADING-UNQUOTED-tilde flag (argv_leading_tilde), not the
 # broader opacity flag, tells the expanded form from a quoted one whose unquoted tail merely carries opacity.
 _LITERAL_TILDE_RE = re.compile(r"^~(/.*)?$")
-# An inline OLDPWD= assignment PREFIXING the command (OLDPWD=.. cd -- -) overrides $OLDPWD for that command,
-# so a lone '-' destination no longer resolves to a cwd-independent prior dir: bash cds to the assigned
-# value, which can be relative ('..'). The floor cannot prove the assigned value absolute, so a lone '-'
-# with an inline OLDPWD= present ASKS rather than allowing on the usual $OLDPWD assumption.
-_OLDPWD_ASSIGN_RE = re.compile(r"^OLDPWD=")
+# CONSERVATIVE CONSOLIDATION (round-4). Any inline env-assignment PREFIXING a cd/pushd command
+# ('OLDPWD=.. cd -', 'HOME=.. cd', and the append forms 'OLDPWD+=.. cd -'/'HOME+=.. cd') can redirect where
+# the cwd-INDEPENDENT destinations land: an inline OLDPWD= redirects the lone '-' ($OLDPWD) shortcut, and an
+# inline HOME= redirects the bare 'cd' (no operand -> $HOME) default, in each case to a value the floor
+# cannot prove absolute ('..'). Rather than enumerate OLDPWD/HOME by name (fragile: it misses the '+='
+# append form, and the earlier OLDPWD-only check never covered the bare-cd HOME default), the floor takes
+# the conservative stance that ANY leading assignment (any name, '=' or '+=', and even an assignment-SHAPED
+# token bash would reject because its name was quoted) makes those two otherwise-cwd-independent
+# destinations ASK. A plain zero-assignment 'cd -'/'cd -- -'/bare 'cd' keeps its ALLOW. The consequence
+# 'FOO=x cd -' -> ASK is a deliberate conservative over-fire, disclosed in the manifest residue.
 
 
 def _cd_destination_reason(word, argv, argv_leading_tilde):
@@ -1519,16 +1542,19 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
     cd/pushd option flags and a pushd +N/-N rotation name no relative path and are skipped, while '--' ends
     option processing so the next token is the destination even when it begins '-'/'+'. A lone '-' is the
     $OLDPWD shortcut wherever it lands as the destination, including as the post-'--' destination ('cd -- -',
-    which bash still resolves to $OLDPWD), UNLESS the command carries an inline OLDPWD= assignment
-    ('OLDPWD=.. cd -- -'), which overrides $OLDPWD to a value the floor cannot prove absolute, so the lone '-'
-    then ASKS. An operand carrying an unexpanded expansion never reads as absolute
-    unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an absolute
-    '/$X/y' allows. argv_leading_tilde is the per-token LEADING-UNQUOTED-tilde flags parallel to argv (True
-    only where the word's leading char is an unquoted tilde, so tilde-expansion applies)."""
+    which bash still resolves to $OLDPWD), and a NO-operand cd/pushd is the $HOME/stack-swap default; both are
+    cwd-independent UNLESS the command carries ANY leading inline env-assignment ('OLDPWD=.. cd -- -',
+    'HOME=.. cd', 'OLDPWD+=.. cd -'), which can redirect the destination to a value the floor cannot prove
+    absolute, so those two forms then ASK. This is the conservative consolidation (round-4): the trigger is
+    the mere PRESENCE of a leading assignment, not its variable name, so the '+=' append form and the bare-cd
+    HOME default are covered without name enumeration. An operand carrying an unexpanded expansion never reads
+    as absolute unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an
+    absolute '/$X/y' allows. argv_leading_tilde is the per-token LEADING-UNQUOTED-tilde flags parallel to argv
+    (True only where the word's leading char is an unquoted tilde, so tilde-expansion applies)."""
     cmd_idx = _command_word_index(argv)  # boundary: argv[:cmd_idx] are the leading env-assignments
-    # An inline OLDPWD= among the leading assignments makes a lone '-' destination relative-capable (bash cds
-    # to the assigned value, e.g. 'OLDPWD=.. cd -- -' -> '..'), so it can no longer be trusted as $OLDPWD.
-    oldpwd_inline = any(_OLDPWD_ASSIGN_RE.match(tok) for tok in argv[:cmd_idx])
+    # ANY leading assignment (any name, '=' or '+=') can redirect the cwd-independent destinations ('cd -',
+    # bare 'cd'), so it can no longer be trusted; presence, not the variable name, is the trigger.
+    has_leading_assignment = cmd_idx > 0
     idx = cmd_idx + 1  # skip leading env-assignments and the command word itself
     end_of_options = False
     for pos in range(idx, len(argv)):
@@ -1543,10 +1569,10 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
                 continue  # pushd +N/-N: a directory-stack rotation index, not a filesystem path
         # end-of-options, or the first token that is not an option: this is the destination operand.
         if tok == "-":
-            if oldpwd_inline:
-                # an inline OLDPWD= assignment redirected $OLDPWD to a value the floor cannot prove absolute
-                return "a relative {} destination '-' (inline OLDPWD= assignment overrides $OLDPWD)".format(
-                    word)
+            if has_leading_assignment:
+                # a leading inline env-assignment can redirect $OLDPWD to a value the floor cannot prove abs
+                return ("a {} destination '-' that a leading inline env-assignment can redirect off $OLDPWD"
+                        .format(word))
             continue  # cd '-': the $OLDPWD previous-directory shortcut (an absolute prior dir), even
             # after '--' where bash still treats a lone '-' destination as $OLDPWD, not a relative name
         if argv_leading_tilde[pos] and _LITERAL_TILDE_RE.match(tok):
@@ -1554,7 +1580,12 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
         if _is_absolute(tok):
             return None
         return "a relative {} destination {!r}".format(word, tok)
-    return None  # no destination operand: cwd-independent (cd -> HOME, pushd -> stack swap)
+    # no destination operand: cd -> HOME, pushd -> stack swap, cwd-independent UNLESS a leading inline
+    # env-assignment (e.g. HOME=..) can redirect that default to a value the floor cannot prove absolute.
+    if has_leading_assignment:
+        return ("a bare {} (no operand) whose $HOME default a leading inline env-assignment can redirect"
+                .format(word))
+    return None
 
 
 def bash_absolute_paths(data):
@@ -1596,6 +1627,8 @@ def bash_absolute_paths(data):
         for redirect in seg.redirects:
             if redirect.target_class == "descriptor":
                 continue  # a numeric/'-' fd duplication or close names no filesystem path
+            if redirect.target_leading_tilde:
+                continue  # an unquoted current-user '~'/'~/x' target expands to $HOME (absolute), as cd's
             if redirect.target_class == "opaque" or not _is_absolute(redirect.target):
                 reasons.append("a relative redirection target {!r}".format(redirect.target))
     if reasons:
