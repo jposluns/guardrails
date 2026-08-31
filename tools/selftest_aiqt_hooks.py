@@ -343,10 +343,10 @@ def main():
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
         # === EN-6 round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
-        # The raw fallback (shlex ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
+        # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
         # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
         # longer slip past the old '-D'/'--delete'-only raw check into a silent ALLOW; every form ASKS.
-        _br_hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes shlex raise -> raw fallback
+        _br_hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes the tokenizer raise -> raw fallback
         expect("(r19a-1) unparseable branch -d -f asks (was a silent allow)",
                "git branch -d -f topic" + _br_hd, "ask", cwd=rp)
         expect("(r19a-2) unparseable branch -df (clustered) asks",
@@ -529,8 +529,8 @@ def main():
         # every opt-out-looking prefix on an unparseable in-scope discard now ASKS. The five raw variants that
         # previously wrung a silent ALLOW out of the raw scan (quoted-falsy that reads truthy raw, an
         # interspersed other assignment, an opt-out leading a DIFFERENT command, a `0;` captured truthy, and a
-        # quoted "false"), each on an unparseable heredoc discard (the lone quote makes shlex raise), must ASK.
-        _hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc whose lone ' makes shlex raise -> raw fallback
+        # quoted "false"), each on an unparseable heredoc discard (the lone quote makes the tokenizer raise), must ASK.
+        _hd = " <<'EOF'\n'\nEOF"  # Bash-valid heredoc whose lone ' makes the tokenizer raise -> raw fallback
         expect("(r15-raw-quotedfalsy) quoted-falsy opt-out on unparseable discard -> ASK",
                'GUARDRAIL_ALLOW_DISCARD="0" git reset --hard' + _hd, "ask", cwd=rp)
         expect("(r15-raw-interspersed) interspersed other assignment on unparseable discard -> ASK",
@@ -1271,12 +1271,12 @@ def main():
             failures.append("(rec-viewoverride-trace-file) the guard's git calls must scrub GIT_TRACE; no "
                             "trace file may be written")
 
-        # (rec-heredoc) C: a Bash-valid but shlex-UNPARSEABLE discard (an unbalanced quote inside a quoted
+        # (rec-heredoc) C: a Bash-valid but tokenizer-UNPARSEABLE discard (an unbalanced quote inside a quoted
         # heredoc) reaches the raw-lossy fallback. It must ASK and, on a dirty tree, take a best-effort
         # recovery snapshot FIRST - before the fix the ValueError path returned ASK with NO recovery ref.
         rec_hd = _init_repo(tmp / "rec-heredoc")
         (rec_hd / "file.txt").write_text("committed line\nheredoc dirty\n", encoding="utf-8")
-        hd_cmd = "git reset --hard <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes shlex raise
+        hd_cmd = "git reset --hard <<'EOF'\n'\nEOF"  # Bash-valid heredoc; the lone ' makes the tokenizer raise
         got_hd = _decision(handler, hd_cmd, cwd=str(rec_hd))
         if got_hd != "ask":
             failures.append("(rec-heredoc) an unparseable in-scope discard must ASK, got {}".format(got_hd))
@@ -1951,18 +1951,318 @@ def main():
                 "git push --push-option marker origin main", "allow", cwd=plr)
         pexpect("(f117r7-x1) embedded-quote flag in the raw fallback is a DISCLOSED inherent residual",
                 "env git push -'f' origin main", "allow", cwd=plr)
-        dexpect("(f117r7-d) clustered patch flag -wp is a DISCLOSED cnsdif residual (allows; routed F-119)",
-                "git log -wp", "allow")
-        dexpect("(f117r7-e) pickaxe -Sfoo is not mis-read as a patch flag (allows a listing)",
-                "git log -Sfoo", "allow")
-        dexpect("(f117r7-f) wrapped git diff is a DISCLOSED cnsdif residual (allows; routed F-119)",
-                "env git diff", "allow")
-        dexpect("(f117r7-g) wrapper over a non-producer allows", "env git status", "allow")
-        dexpect("(f117r7-i) common summary git diff -M --stat still allows (not over-denied)",
-                "git diff -M --stat", "allow")
-        dexpect("(f117r7-x2) -S --stat pickaxe-value is a DISCLOSED residual (allows)",
-                "git diff -S --stat", "allow")
-        dexpect("(f117r7-j) genuine git log -p still denies", "git log -p", "deny")
+        # L11 AIRTIGHT-NARROW redesign: the former F-119 disclosed silent-allow residuals now ASK. A
+        # producer-capable form outside the four closed proofs (extra summary modifiers, a wrapper, a
+        # benign 'git log', a pickaxe listing) is producer-capable-but-unproven -> ASK, never ALLOW.
+        dexpect("(f117r7-d) clustered patch flag -wp is now an ASK (L11: producer-capable, unproven)",
+                "git log -wp", "ask")
+        dexpect("(f117r7-e) pickaxe -Sfoo git log is now an ASK (L11: producer-capable, unproven listing)",
+                "git log -Sfoo", "ask")
+        dexpect("(f117r7-f) wrapped git diff is now an ASK (L11: a wrapper fits no proof)",
+                "env git diff", "ask")
+        dexpect("(f117r7-g) wrapper over a non-producer allows (no producer surface)", "env git status", "allow")
+        dexpect("(f117r7-i) git diff -M --stat now ASKS (L11: an extra option fails the exact summary proof)",
+                "git diff -M --stat", "ask")
+        dexpect("(f117r7-x2) -S --stat pickaxe-value now ASKS (L11: an extra option fails proof B)",
+                "git diff -S --stat", "ask")
+        dexpect("(f117r7-j) genuine git log -p still denies (confirmed console patch)", "git log -p", "deny")
+
+        # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
+        # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
+        # future tokenizer regression is caught at the tokenizer, not only through a handler outcome.
+        def _argv(command):
+            return [seg.argv for seg in aiqt_hooks._lex_command(command)]
+
+        def _redir(command, index=0):
+            return [(r.op, r.src_fd, r.target, r.target_class, r.stdout_effect)
+                    for r in aiqt_hooks._lex_command(command)[index].redirects]
+
+        def texpect(label, got, want):
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # A redirect anywhere (leading, interspersed, trailing) is removed from argv; a stderr redirect
+        # keeps stdout on the console.
+        texpect("(tok-1) 2>/dev/null before the subcommand is removed",
+                _argv("git 2>/dev/null push --force origin main"),
+                [["git", "push", "--force", "origin", "main"]])
+        # A SPACED bare '2' is an operand, not an IO_NUMBER, and the '>' is the default stdout redirect.
+        texpect("(tok-2) '2 > out' keeps '2' as argv, '>' is stdout",
+                _argv("git 2 > out push --force origin main"),
+                [["git", "2", "push", "--force", "origin", "main"]])
+        # A quoted operator value is preserved as argv, never read as a redirect.
+        texpect("(tok-3) quoted '>' option value stays argv",
+                _argv("git push -o '>' --force origin main"),
+                [["git", "push", "-o", ">", "--force", "origin", "main"]])
+        # A quoted numeric option value stays argv; the later '>' is the stdout redirect (removed).
+        texpect("(tok-4) quoted numeric option value '2' stays argv",
+                _argv("git push --repo '2' > /dev/null --force origin main"),
+                [["git", "push", "--repo", "2", "--force", "origin", "main"]])
+        # A redirect TARGET '--' is removed and never becomes an argv boundary; a trailing '--help' after
+        # it is an ordinary git argument.
+        texpect("(tok-5) redirect target '--' is removed, '--help' stays argv",
+                _argv("git push --force origin main > -- --help"),
+                [["git", "push", "--force", "origin", "main", "--help"]])
+        texpect("(tok-6) leading redirect before a non-git checker is removed",
+                _argv("> /dev/null pytest || true"), [["pytest"], ["true"]])
+        texpect("(tok-7) leading redirect before the git subcommand is removed",
+                _argv("git >out commit --no-verify"), [["git", "commit", "--no-verify"]])
+        # stdout effects and last-redirect-wins.
+        texpect("(tok-8) '>out 2>&1': stdout=file-real, stderr dup does not change stdout",
+                _redir("git diff >out 2>&1"),
+                [(">", 1, "out", "file-real", "file-real"), (">&", 2, "1", "descriptor", "")])
+        texpect("(tok-9) '2>&1 >out': last stdout redirect (>out) wins",
+                _redir("git diff 2>&1 >out"),
+                [(">&", 2, "1", "descriptor", ""), (">", 1, "out", "file-real", "file-real")])
+        texpect("(tok-10) '>out 1>&2': stdout becomes descriptor-bound (unprovable)",
+                _redir("git diff >out 1>&2"),
+                [(">", 1, "out", "file-real", "file-real"), (">&", 1, "2", "descriptor", "descriptor")])
+        texpect("(tok-11) '&>out': both streams to a real file",
+                _redir("git diff &>out"), [("&>", None, "out", "file-real", "file-real")])
+        texpect("(tok-12) '2>out': only stderr diverted, no stdout effect",
+                _redir("git diff 2>out"), [(">", 2, "out", "file-real", "")])
+        # An escaped or quoted operator-shaped word stays argv; a dynamic and a /dev target classify.
+        texpect("(tok-13) escaped '\\>' stays argv",
+                _argv(r"git diff \> file"), [["git", "diff", ">", "file"]])
+        texpect("(tok-14) dynamic target classifies opaque",
+                _redir("git diff > $OUT"), [(">", 1, "$OUT", "opaque", "opaque")])
+        texpect("(tok-15) /dev target classifies file-dev",
+                _redir("git diff > /dev/tty"), [(">", 1, "/dev/tty", "file-dev", "file-dev")])
+        # A backslash-newline line-continuation JOINS and NEVER injects a synthetic empty argv element.
+        texpect("(tok-16a) boundary backslash-newline is dropped, no empty argv element",
+                _argv("git \\\n commit -m x"), [["git", "commit", "-m", "x"]])
+        texpect("(tok-16b) mid-word backslash-newline joins the word",
+                _argv("git di\\\nff"), [["git", "diff"]])
+        texpect("(tok-16c) a genuine QUOTED empty operand '' is preserved (not a synthetic empty)",
+                _argv("git commit -m ''"), [["git", "commit", "-m", ""]])
+        # A '#' at a word boundary starts a comment; a mid-word '#' is literal.
+        texpect("(tok-17a) word-boundary '#' comments out the rest of the line (redirect ignored)",
+                (_argv("git diff # > /tmp/x"), _redir("git diff # > /tmp/x")),
+                ([["git", "diff"]], []))
+        texpect("(tok-17b) mid-word '#' stays literal",
+                _argv("git commit -m ticket#123"), [["git", "commit", "-m", "ticket#123"]])
+        # A '..'-normalized device target and a decoy-real target under '..' do not classify file-real.
+        texpect("(tok-18a) '/tmp/../dev/stdout' normalizes to a /dev device target",
+                _redir("git diff > /tmp/../dev/stdout"),
+                [(">", 1, "/tmp/../dev/stdout", "file-dev", "file-dev")])
+        texpect("(tok-18b) a '..' escape target is unprovable (opaque), never file-real",
+                _redir("git diff > ../out.txt"), [(">", 1, "../out.txt", "opaque", "opaque")])
+        # A RELATIVE dev/proc-leading target is cwd-dependent (from cwd '/' it IS the device): opaque, never
+        # file-real. The ABSOLUTE form stays file-dev (tok-15); a nested 'dev' component stays a plain file.
+        texpect("(tok-18c) relative 'dev/stdout' is cwd-dependent -> opaque, never file-real",
+                _redir("git diff > dev/stdout"), [(">", 1, "dev/stdout", "opaque", "opaque")])
+        texpect("(tok-18d) relative './proc/self/fd/1' normalizes to a proc-leading target -> opaque",
+                _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
+        texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
+                _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
+        # Unsupported constructs are cannot-evaluate (ValueError), never partial argv.
+        for _bad, _why in [("git diff <<'EOF'\nx\nEOF", "heredoc"),
+                           ("git diff <(echo x)", "process substitution"),
+                           ("cat <<<word", "here-string"),
+                           ('git diff "unbalanced', "unbalanced quote")]:
+            try:
+                aiqt_hooks._lex_command(_bad)
+                failures.append("(tok-cannot) {} must raise ValueError, did not".format(_why))
+            except ValueError:
+                pass
+
+        # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
+        dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
+        dexpect("(l11-d2) git show HEAD denies", "git show HEAD", "deny")
+        dexpect("(l11-d3) git range-diff A B denies", "git range-diff A B", "deny")
+        dexpect("(l11-d4) sudo git diff asks (wrapper)", "sudo git diff", "ask")
+        dexpect("(l11-d5) command /usr/bin/git show asks (wrapper + path)",
+                "command /usr/bin/git show", "ask")
+        dexpect("(l11-d6) quote-fragmented g'it' d'iff' denies (cleaned argv resolves directly)",
+                "g'it' d'iff'", "deny")
+        dexpect("(l11-d7) 'git status && env git diff' asks (compound + wrapper)",
+                "git status && env git diff", "ask")
+        dexpect("(l11-d8) reverse-order 'env git diff && git status' asks",
+                "env git diff && git status", "ask")
+        dexpect("(l11-d9) echo 'git diff' asks (disclosed broad-scope over-match)",
+                "echo 'git diff'", "ask")
+        dexpect("(l11-d10) env git status allows (no producer surface)", "env git status", "allow")
+        # Exact summary selectors allow; extra summary modifiers ASK.
+        dexpect("(l11-s1) git diff --stat allows", "git diff --stat", "allow")
+        dexpect("(l11-s2) git show --name-only HEAD allows", "git show --name-only HEAD", "allow")
+        dexpect("(l11-s3) git diff --numstat allows", "git diff --numstat", "allow")
+        dexpect("(l11-s4) git diff --stat --no-patch allows (--no-patch is the sole extra option)",
+                "git diff --stat --no-patch", "allow")
+        dexpect("(l11-s5) -M --stat asks", "git diff -M --stat", "ask")
+        dexpect("(l11-s6) -U3 --stat asks", "git diff -U3 --stat", "ask")
+        dexpect("(l11-s7) --cc --stat asks", "git show --cc --stat", "ask")
+        dexpect("(l11-s8) --stat=80 asks (not an exact selector)", "git diff --stat=80", "ask")
+        dexpect("(l11-s9) --stat -p denies (patch flag)", "git diff --stat -p", "deny")
+        dexpect("(l11-s10) -- --stat denies (pathspec, not a summary)", "git diff -- --stat", "deny")
+        dexpect("(l11-s11) git stash show --stat allows", "git stash show --stat", "allow")
+        # Exact help allows; help as an option value/redirect target does not earn help ALLOW.
+        dexpect("(l11-h1) git diff --help allows", "git diff --help", "allow")
+        dexpect("(l11-h2) git range-diff -h allows", "git range-diff -h", "allow")
+        dexpect("(l11-h3) git diff --stat --help asks (extra option, not the exact help form)",
+                "git diff --stat --help", "ask")
+        # Real-file / fd / last-wins diversions.
+        dexpect("(l11-c1) leading '>out.patch git diff' allows", ">out.patch git diff", "allow")
+        dexpect("(l11-c2) interspersed 'git >out.patch diff' allows", "git >out.patch diff", "allow")
+        dexpect("(l11-c3) quoted-target 'git diff 1>>\"review out.patch\"' allows",
+                'git diff 1>>"review out.patch"', "allow")
+        dexpect("(l11-c4) 'git diff &>out.patch' allows", "git diff &>out.patch", "allow")
+        dexpect("(l11-c5) 'git diff >out 2>&1' allows", "git diff >out 2>&1", "allow")
+        dexpect("(l11-c6) 'git diff >out 1>&2' asks (stdout descriptor-bound, unprovable)",
+                "git diff >out 1>&2", "ask")
+        dexpect("(l11-c7) 'git diff >/dev/tty >out' allows (last-wins real file)",
+                "git diff >/dev/tty >out", "allow")
+        dexpect("(l11-c8) 'git diff >out >/dev/tty' denies (last-wins console)",
+                "git diff >out >/dev/tty", "deny")
+        dexpect("(l11-c9) 'git diff 2 >out' allows (2 is argv, stdout diverted)",
+                "git diff 2 >out", "allow")
+        dexpect("(l11-c10) 'git diff 2>out' denies (only stderr diverted)", "git diff 2>out", "deny")
+        dexpect("(l11-c11) dynamic target 'git diff > $OUT' asks", "git diff > $OUT", "ask")
+        dexpect("(l11-c12) tilde target 'git diff > ~/out.patch' asks", "git diff > ~/out.patch", "ask")
+        # A RAW /dev,/proc-prefixed target is a device and DENIES even if a '..' would normalize elsewhere:
+        # conservative raw-prefix classification over-blocks in the SAFE direction (round-3 codex note).
+        dexpect("(l11-c13) raw '/dev/..' target 'git diff > /dev/../tmp/out.txt' denies (over-block, safe)",
+                "git diff > /dev/../tmp/out.txt", "deny")
+        # Exact terminal pager allows; wrapped/optioned/downstream pager variants ASK.
+        dexpect("(l11-p1) git diff | less allows", "git diff | less", "allow")
+        dexpect("(l11-p2) git diff | less -R asks", "git diff | less -R", "ask")
+        dexpect("(l11-p3) git diff | env less asks", "git diff | env less", "ask")
+        dexpect("(l11-p4) git diff | less | cat asks (later pipe)", "git diff | less | cat", "ask")
+        dexpect("(l11-p5) git diff |& less asks", "git diff |& less", "ask")
+        dexpect("(l11-p6) env git diff | less asks (wrapped stage 1)", "env git diff | less", "ask")
+        # A pipe to a known console/truncating sink is a confirmed dump -> DENY.
+        dexpect("(l11-p7) git diff | cat denies", "git diff | cat", "deny")
+        dexpect("(l11-p8) git diff | tee out.log denies", "git diff | tee out.log", "deny")
+        dexpect("(l11-p9) git diff | head denies", "git diff | head", "deny")
+        dexpect("(l11-p10) git diff | tail -20 denies", "git diff | tail -20", "deny")
+        # Unparseable apparent producer ASKS (never a regex-earned allow); a non-producer allows.
+        dexpect("(l11-f1) unparseable apparent producer asks", 'git diff "unbalanced', "ask")
+        dexpect("(l11-f2) unparseable non-producer allows", 'ls -la "unbalanced', "allow")
+        # Disclosed boundary lock: a non-git alias/name that omits a detectable git word is ALLOWED (the
+        # guard targets git producers, not an arbitrary renamed tool).
+        dexpect("(l11-r1) DISCLOSED boundary: a non-git 'mydiff' name allows (no git word to detect)",
+                "mydiff --color", "allow")
+
+        # === L11 proof E (Architect refinement): a benign 'git log' commit listing ALLOWS; a git log with
+        # any extra/unknown flag, a patch flag, a redirect, or a pipe stays airtight-narrow ================
+        dexpect("(l11-e1) bare git log allows (proof E: a listing, no diff)", "git log", "allow")
+        dexpect("(l11-e2) git log --oneline allows (proof E)", "git log --oneline", "allow")
+        dexpect("(l11-e3) git log --stat allows (proof B summary, unchanged)", "git log --stat", "allow")
+        dexpect("(l11-e4) git log with a bare revision operand allows (proof E)", "git log main", "allow")
+        dexpect("(l11-e5) git log --oneline with an operand allows (proof E)",
+                "git log --oneline origin/main", "allow")
+        dexpect("(l11-e6) git log with a post-'--' pathspec allows (proof E)", "git log -- src", "allow")
+        dexpect("(l11-e7) git log --oneline | less allows (proof D pager, stage 1 is a producer)",
+                "git log --oneline | less", "allow")
+        dexpect("(l11-e8) git log --oneline > out.txt allows (proof C real-file diversion)",
+                "git log --oneline > out.txt", "allow")
+        # The value-free, provably-diff-free display/traversal flags are on the exact allowlist and ALLOW,
+        # alone and combined (the classic inspection command).
+        dexpect("(l11-e9a) git log --graph allows (benign traversal flag)", "git log --graph", "allow")
+        dexpect("(l11-e9b) git log --decorate allows", "git log --decorate", "allow")
+        dexpect("(l11-e9c) git log --no-decorate allows", "git log --no-decorate", "allow")
+        dexpect("(l11-e9d) git log --abbrev-commit allows", "git log --abbrev-commit", "allow")
+        dexpect("(l11-e9e) git log --reverse allows", "git log --reverse", "allow")
+        dexpect("(l11-e9f) git log --all allows", "git log --all", "allow")
+        dexpect("(l11-e10a) git log --graph --oneline --decorate --all allows (the classic listing)",
+                "git log --graph --oneline --decorate --all", "allow")
+        dexpect("(l11-e10b) benign flags with a bare operand allow",
+                "git log --graph --abbrev-commit --reverse main", "allow")
+        dexpect("(l11-e10c) git log --name-only allows via proof B (a file-list summary, like git diff "
+                "--name-only), not proof E", "git log --name-only", "allow")
+        # Value-taking / unknown / count flags are NOT proven benign -> ASK (Architect's airtight line):
+        # a value-swallowing option is exactly the grammar this design refuses to parse.
+        dexpect("(l11-e11) git log -5 asks (a numeric count flag is not on the allowlist)",
+                "git log -5", "ask")
+        dexpect("(l11-e11b) git log -n 5 asks (a value-taking count option)", "git log -n 5", "ask")
+        dexpect("(l11-e11c) git log --author=x asks (a value-taking filter)", "git log --author=x", "ask")
+        dexpect("(l11-e11d) git log --since=yesterday asks (value-taking)",
+                "git log --since=yesterday", "ask")
+        dexpect("(l11-e11e) git log --grep=fix asks (value-taking)", "git log --grep=fix", "ask")
+        dexpect("(l11-e12) git log --format=%H asks (a value-taking option)",
+                "git log --format=%H", "ask")
+        dexpect("(l11-e12b) git log --graph --format=%H asks (a benign flag plus a value-taking one)",
+                "git log --graph --format=%H", "ask")
+        # The provably-hard cases: a pickaxe -G/-S WITHOUT -p shows no patch, but its diff behaviour depends
+        # on a co-present -p this guard does not model, so it is NOT proven benign -> ASK (never ALLOW).
+        dexpect("(l11-e13) git log -G foo asks (pickaxe, diff behaviour depends on -p, not proven benign)",
+                "git log -G foo", "ask")
+        dexpect("(l11-e14) git log -S foo asks (pickaxe, not proven benign)", "git log -S foo", "ask")
+        dexpect("(l11-e15) git log -p still denies (confirmed console patch, unchanged)",
+                "git log -p", "deny")
+        dexpect("(l11-e16) git log -p --oneline denies (a patch flag co-present with a benign one)",
+                "git log -p --oneline", "deny")
+        dexpect("(l11-e16b) git log --graph -p denies (a patch flag overrides the benign traversal flag)",
+                "git log --graph -p", "deny")
+        dexpect("(l11-e17) a wrapped git log asks (proof E requires the literal command word git)",
+                "env git log", "ask")
+        dexpect("(l11-e18) git log in a compound denies when a later segment is a confirmed dump",
+                "git log && git diff", "deny")
+        dexpect("(l11-e19) git log --oneline HEAD~5 asks (the '~' is outside the conservative charset)",
+                "git log --oneline HEAD~5", "ask")
+        dexpect("(l11-e20) diff plumbing stays ASK, not benign (only git log gets proof E)",
+                "git diff-tree", "ask")
+
+        # === L11 QA fix round (tri-family blockers on PR #163). Each vector FAILS without its fix. =========
+        # BLOCKER 2: an unquoted '#' at a word boundary is a comment; a redirect/pipe that is commented out
+        # must NOT earn proof C/D (the diff goes to the CONSOLE). Mid-word '#' stays literal (gw-ba/bb).
+        dexpect("(qa-b2a) '#'-commented redirect does not earn proof C -> console dump denies",
+                "git diff HEAD^ HEAD # > /tmp/x", "deny")
+        dexpect("(qa-b2b) '#'-commented pipe does not earn proof D -> console dump denies",
+                "git diff # | less", "deny")
+        dexpect("(qa-b2c) a mid-word '#' is still literal, not a comment (regression lock)",
+                "git diff --output=out#1.txt", "ask")
+        # COMPOSITION (backslash-newline + '#'): after a continuation join, a '#' now at a word boundary
+        # must be re-recognized as a comment, so the commented-out redirect/pipe earns no proof C/D.
+        dexpect("(qa-b2d) continuation then word-boundary '#' comments out the redirect -> console dump denies",
+                "git diff \\\n# > out.txt", "deny")
+        dexpect("(qa-b2e) continuation then '#' comments out the pipe -> console dump denies",
+                "git diff \\\n# | less", "deny")
+        texpect("(tok-16d) a continuation-exposed '#' starts a comment (no literal '#' argv, no redirect)",
+                (_argv("git diff \\\n# > out.txt"), _redir("git diff \\\n# > out.txt")),
+                ([["git", "diff"]], []))
+        texpect("(tok-16e) a continuation-joined MID-word '#' stays literal (di\\<nl>ff#x -> diff#x)",
+                _argv("git di\\\nff#x"), [["git", "diff#x"]])
+        # BLOCKER 3: ANSI-C / $'...' quoting that resolves to a git command word is UNPROVEN -> never ALLOW.
+        dexpect("(qa-b3a) $'g'it diff (bash runs git diff) never ALLOWs (opaque command word -> ASK)",
+                "$'g'it diff HEAD^ HEAD", "ask")
+        dexpect("(qa-b3b) a $VAR command word beside a producer surface never ALLOWs",
+                "$GIT diff HEAD", "ask")
+        # BLOCKER 4: a --output/-o diversion means the shell redirect/pipe is a decoy; proofs C/D disabled.
+        dexpect("(qa-b4a) --output=/dev/tty with a decoy real-file redirect denies (console dump)",
+                "git diff --output=/dev/tty > realfile.txt", "deny")
+        dexpect("(qa-b4b) git log -p --output=/dev/tty with a decoy redirect denies",
+                "git log -p --output=/dev/tty > f.txt", "deny")
+        dexpect("(qa-b4c) --output=/dev/tty piped to less denies (pager decoy)",
+                "git diff --output=/dev/tty | less", "deny")
+        dexpect("(qa-b4d) bare --output=/dev/tty denies (console)", "git diff --output=/dev/tty", "deny")
+        dexpect("(qa-b4e) --output=realfile.txt asks (diverted to a file, not a proof-C shell redirect)",
+                "git diff --output=realfile.txt", "ask")
+        dexpect("(qa-b4f) separated --output realfile.txt asks", "git diff --output realfile.txt", "ask")
+        # BLOCKER 5: a redirect target that resolves to a device via '..' or a relative path must NOT earn
+        # proof C; a genuine plain-file redirect still ALLOWs.
+        dexpect("(qa-b5a) '> /tmp/../dev/stdout' normalizes to a device -> denies",
+                "git diff > /tmp/../dev/stdout", "deny")
+        dexpect("(qa-b5b) '> ../../../dev/stdout' has an unprovable '..' escape -> asks",
+                "git diff > ../../../dev/stdout", "ask")
+        dexpect("(qa-b5c) a '..'-bearing non-device target is unprovable -> asks",
+                "git diff > ../out.txt", "ask")
+        dexpect("(qa-b5d) a genuine plain-file redirect still allows (no over-DENY regression)",
+                "git diff > out.txt", "allow")
+        dexpect("(qa-b5e) a relative sub-path plain file still allows", "git diff > sub/out.txt", "allow")
+        # BLOCKER 5 (round 4): a RELATIVE dev/proc-leading redirect target is cwd-dependent (from cwd '/' or
+        # via a dev/proc symlink it IS the device the absolute form names), so it must NOT earn proof C's
+        # file-real ALLOW; it ASKS. The absolute form still DENIES; a nested 'dev' stays a plain-file ALLOW.
+        dexpect("(qa-b5f) '> dev/stdout' is cwd-dependent (could be the device) -> asks, not a silent allow",
+                "git diff > dev/stdout", "ask")
+        dexpect("(qa-b5g) '> ./dev/stdout' normalizes to a dev-leading target -> asks",
+                "git diff > ./dev/stdout", "ask")
+        dexpect("(qa-b5h) '> proc/self/fd/1' is a relative proc-leading target -> asks",
+                "git diff > proc/self/fd/1", "ask")
+        dexpect("(qa-b5i) the absolute device form still denies (no under-block change)",
+                "git diff > /dev/stdout", "deny")
+        dexpect("(qa-b5j) a nested 'dev' component ('git diff > foo/dev/x') is a plain file -> allows",
+                "git diff > foo/dev/x", "allow")
+
         # Force detection is VALUE-AWARE: a force spelling in an option-value position is not a flag.
         pexpect("(pl-v1) '-o --force' is the push-option value, not force",
                 "git push -o --force origin main", "allow", cwd=plr)
@@ -2021,6 +2321,32 @@ def main():
                 "git commit -m 'x' && git push --force origin main", "deny", cwd=plr)
         pexpect("(pl-m1) a git_discard verb is out of protected_line scope (disjoint controls)",
                 "git reset --hard", "allow", cwd=plr)
+
+        # === L11 cross-hook redirect vectors (protected_line): the useful round-10 tests RESTORED via the
+        # shared raw-aware tokenizer, plus the two regressions that caused the naive-strip revert ==========
+        # A redirect anywhere no longer hides the subcommand, operand, or force flag.
+        pexpect("(pl-l11a) redirect before 'push' does not hide the protected force-push, denies",
+                "git 2>/dev/null push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-l11b) leading redirect before 'push' does not hide the force-push, denies",
+                ">/dev/null git push --force origin main", "deny", cwd=plr)
+        pexpect("(pl-l11c) redirect before 'commit' does not hide the direct protected commit, asks",
+                "git >/dev/null commit -m fix", "ask", cwd=plr)
+        pexpect("(pl-l11d) trailing stderr redirect does not defeat the refspec-less HEAD probe, denies",
+                "git push --force 2>/dev/null", "deny", cwd=plr)
+        # The two round-10 regressions the naive post-tokenize strip mishandled: a QUOTED '>' option value
+        # must stay the -o value (still catching the real --force), and a QUOTED numeric option value must
+        # stay argv (not swallowed as a redirect fd), while an interspersed real redirect is still removed.
+        pexpect("(pl-l11e) '-o \">\"' keeps the quoted '>' value and still catches force, denies",
+                "git push -o '>' --force origin main", "deny", cwd=plr)
+        pexpect("(pl-l11f) '--repo \"2\" > /dev/null --force' keeps numeric 2, real redirect removed, denies",
+                "git push --repo '2' > /dev/null --force origin main", "deny", cwd=plr)
+        # A redirect target '--'/'--help' is a filename, never an argv boundary or a help flag.
+        pexpect("(pl-l11g) redirect-target '--help' does not mask a force-push (target removed)",
+                "git push --force origin main > --help", "deny", cwd=plr)
+        # QA BLOCKER 1: a backslash-newline line-continuation must NOT inject a synthetic empty argv
+        # element (which mis-set the subcommand and defeated the guard); it joins as bash does -> DENY.
+        pexpect("(qa-b1-pl) backslash-newline force-push does not slip via an empty argv element, denies",
+                "git \\\n push --force origin main", "deny", cwd=plr)
 
         # gatdis (EN-5 PR-B): decision-signal battery for the gate-weakening guard.
         # === gate_weakening (gatdis): a git hook bypass + a swallowed or truncated checker ============
@@ -2136,16 +2462,17 @@ def main():
         gexpect("(gw-av) pytest || true still asks (adjacency lock)", "pytest || true", "ask")
         gexpect("(gw-aw) pytest ; true allows (';' is not a swallow)", "pytest ; true", "allow")
         gexpect("(gw-ax) am -n still denies (bare short -n is the bypass)", "git am -n", "deny")
-        gexpect("(gw-ay) redirect before the git subcommand slips, allows (disclosed F1/F2)",
-                "git >/dev/null commit --no-verify -m x", "allow")
-        gexpect("(gw-az) redirect before the checker word slips, allows (disclosed F1/F2)",
-                ">/dev/null pytest || true", "allow")
+        # L11 shared raw-aware tokenizer: a redirect anywhere in the command is removed from argv, so the
+        # former F1/F2 redirect-pollution slips are CLOSED. The bypass/checker is no longer hidden.
+        gexpect("(gw-ay) redirect before the git subcommand no longer slips, denies (L11 tokenizer)",
+                "git >/dev/null commit --no-verify -m x", "deny")
+        gexpect("(gw-az) redirect before the checker word no longer slips, asks (L11 tokenizer)",
+                ">/dev/null pytest || true", "ask")
 
-        # gatdis round-3 (F-123 disclosed residuals): the CURRENT (unchanged) behaviour of the newly
-        # round 32: the shared lexer (_lex_line) now disables shlex '#' comment-stripping, so an embedded
-        # unquoted '#' is lexed literally (bash comments only at a word start) and the bypass/swallow after
-        # it is no longer hidden - the class-wide embedded-# residual is CLOSED; the two contrived
-        # safe-direction over-blocks still DENY.
+        # gatdis round-3 (F-123 disclosed residuals): the shared L11 tokenizer (_lex_command) treats a '#'
+        # as an ordinary word character (it does no comment-stripping), so an embedded unquoted '#' is lexed
+        # literally and the bypass/swallow after it is no longer hidden - the class-wide embedded-# residual
+        # stays CLOSED; the two contrived safe-direction over-blocks still DENY.
         gexpect("(gw-ba) embedded-# no longer hides the trailing --no-verify, denies (round-32 lexer fix)",
                 "git commit -m ticket#123 --no-verify", "deny")
         gexpect("(gw-bb) embedded-# no longer hides the '|| true' swallow, asks (round-32 lexer fix)",
@@ -2154,6 +2481,58 @@ def main():
                 "(disclosed --verify-cancel over-block)", "git commit --no-verify --verify -m x", "deny")
         gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
                 "(disclosed clustered-help over-block)", "git commit -hn -m x", "deny")
+
+        # === L11: the F1/F2 redirect-pollution slips are CLOSED by the shared raw-aware tokenizer =========
+        # A redirect anywhere no longer hides the --no-verify bypass or the checker command word.
+        gexpect("(gw-l11a) redirect before the subcommand no longer hides --no-verify, denies",
+                "git >/dev/null commit --no-verify -m x", "deny")
+        gexpect("(gw-l11b) trailing redirect does not hide --no-verify, denies",
+                "git commit --no-verify -m x >/dev/null", "deny")
+        gexpect("(gw-l11c) leading redirect before the checker no longer hides the swallow, asks",
+                ">/dev/null pytest || true", "ask")
+        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink, asks",
+                "pytest 2>/dev/null | head", "ask")
+        # A QUOTED redirect-shaped option value stays argv and does not mask the bypass verb.
+        gexpect("(gw-l11e) a quoted '>' -m value does not hide the trailing --no-verify, denies",
+                "git commit -m '>' --no-verify", "deny")
+        # QA BLOCKER 1: a backslash-newline continuation must not inject an empty argv element that hid the
+        # bypass subcommand from the gate-weakening scan -> DENY.
+        gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
+                "git \\\n commit --no-verify -m x", "deny")
+
+        # === L11: git_discard redirect regression locks (prsunc) - a redirect is still non-pristine ->
+        # ASK; no redirect may become a new ALLOW, and the clean-parse lossy scan sees redirect-free argv ==
+        gd_repo = _init_repo(tmp / "gd-redir")
+        (gd_repo / "dirty.txt").write_text("x\n")  # untracked -> a probed-dirty tree
+        gdr = str(gd_repo)
+        expect("(gd-l11a) redirected 'reset --hard' is non-pristine -> ASK (no new allow)",
+               "git reset --hard >/dev/null", "ask", cwd=gdr)
+        expect("(gd-l11b) redirected 'checkout' is non-pristine -> ASK",
+               "git checkout -- dirty.txt 2>/dev/null", "ask", cwd=gdr)
+        expect("(gd-l11c) redirected 'clean -f' is non-pristine -> ASK",
+               "git clean -f >/dev/null", "ask", cwd=gdr)
+
+        # === L11 cross-hook redirect vectors (commit_identity): a redirect no longer hides an AI --author,
+        # a co-author trailer, or an identity assignment ==================================================
+        cig = aiqt_hooks.commit_identity
+
+        def ciexpect(label, command, want):
+            got = _decision(cig, command)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        ciexpect("(ci-l11a) redirect before 'commit' does not hide an AI --author, denies",
+                 'git >/dev/null commit --author="Claude <c@x>" -m x', "deny")
+        ciexpect("(ci-l11b) a leading AI identity assignment survives, a trailing redirect is removed, denies",
+                 "GIT_AUTHOR_NAME=Claude git commit -m x >/dev/null", "deny")
+        ciexpect("(ci-l11c) an AI co-author trailer in a redirected commit denies",
+                 'git commit -m "Co-Authored-By: Claude <c@x>" >/dev/null', "deny")
+        ciexpect("(ci-l11d) a redirected commit with no AI identity allows",
+                 "git commit -m fix >/dev/null", "allow")
+        # QA BLOCKER 1: a backslash-newline continuation must not inject an empty argv element that hid the
+        # commit subcommand (which had made the AI --author invisible) -> DENY.
+        ciexpect("(ci-b1) backslash-newline AI-author commit does not slip via an empty argv element, denies",
+                 "git \\\n commit --author='Claude <c@x>' -m y", "deny")
 
         # secsec (EN-5 PR-C): decision-signal battery for the secrets-shift-left guard.
         # === secrets_shift_left (secsec): an obvious hardcoded secret in a Write/Edit/Bash write-form ==
