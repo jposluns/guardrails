@@ -9,7 +9,8 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_wall_stop      Stop        cnsdif  surface (WARN) a unified-diff wall in the final assistant message
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
-  absolute_paths      PreToolUse  abspth  deny a relative path where the tool requires absolute
+  absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
+  bash_absolute_paths PreToolUse  abspth  ask on a relative cd/pushd operand or redirect target in Bash
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
@@ -116,6 +117,7 @@ import datetime
 import json
 import math
 import os
+import pathlib
 import re
 import shutil
 import stat
@@ -1298,20 +1300,28 @@ def commit_identity(data):
 
 
 # --- abspth: relative path where the tool requires absolute ------------------------------------------
-# Read/Write/Edit require an absolute file_path by the tool's own contract, so the rule's carve-out
-# never applies to them. Glob is honoured under the carve-out: its `pattern` is legitimately relative
-# to a named root and is never judged, but its optional `path` search root should be absolute.
-FILE_PATH_TOOLS = ("Read", "Write", "Edit")
-DRIVE_RE = re.compile(r"^[A-Za-z]:")     # a Windows drive-letter path (C:\, C:/, or drive-relative C:x)
+# Read/Write/Edit/MultiEdit require an absolute file_path, and NotebookEdit an absolute notebook_path,
+# by the tool's own contract, so the rule's relative-to-a-named-root carve-out never applies to them.
+# Glob and Grep are honoured under the carve-out: their `pattern` is legitimately relative to a named
+# search root and is never judged, but their optional `path` search root should be absolute. Every field
+# name here is fixed against the live Claude Code tool schema (Read/Write/Edit/MultiEdit -> file_path,
+# NotebookEdit -> notebook_path, Glob/Grep -> optional path), never assumed.
+FILE_PATH_TOOLS = ("Read", "Write", "Edit", "MultiEdit")   # contract-absolute `file_path`
+NOTEBOOK_PATH_TOOLS = ("NotebookEdit",)                    # contract-absolute `notebook_path`
+SEARCH_ROOT_TOOLS = ("Glob", "Grep")                       # optional `path` search root; carve-out
 
 
 def _is_absolute(path):
-    """POSIX absolute, Windows drive-letter (C:\\, C:/, or drive-relative C:x), a drive-relative path
-    with a leading backslash (\\x), or UNC (\\\\server). A ~-prefixed path is NOT absolute: these tools
-    do not expand it, so it would resolve relative to a literal ~ directory. Accepting the Windows
-    drive-letter and leading-backslash forms avoids a Windows-path false positive; on POSIX a legitimate
-    relative path never takes those shapes."""
-    return path.startswith("/") or path.startswith("\\") or bool(DRIVE_RE.match(path))
+    """Absolute under the runtime's own path semantics, not a lexical drive-letter guess: a POSIX
+    absolute path (PurePosixPath.is_absolute) OR a Windows path carrying BOTH a drive and a root
+    (PureWindowsPath.is_absolute), so a UNC \\\\server\\share and a drive-absolute C:\\ / C:/ count, while
+    a drive-RELATIVE 'C:file', a bare 'C:', and a rooted-but-driveless '\\file' are correctly NOT
+    absolute (each still resolves against a current directory, or a per-drive current directory, on
+    Windows). A '~'-prefixed, empty, or otherwise relative path is likewise not absolute: these tools do
+    not expand '~', so it would resolve against a literal '~' directory. Deferring to the stdlib
+    predicate closes the drive-relative false positives the old lexical `^[A-Za-z]:` / leading-backslash
+    union accepted (C:file, C:, \\file all read as absolute there)."""
+    return pathlib.PurePosixPath(path).is_absolute() or pathlib.PureWindowsPath(path).is_absolute()
 
 
 def _deny_relative(tool, field, value):
@@ -1323,43 +1333,157 @@ def _deny_relative(tool, field, value):
                  "(rule abspth).".format(field))
 
 
+def _abspth_check_required(tool, field, value):
+    """A field the tool's contract requires to be absolute (Read/Write/Edit/MultiEdit file_path,
+    NotebookEdit notebook_path): fail closed when it is absent or not a non-empty string, allow when it
+    is absolute, deny when it is relative."""
+    if not isinstance(value, str) or not value:
+        return _deny(
+            "AIQT rule abspth (absolute-paths): the {} payload carried no readable {}, so the "
+            "absolute-path check could not run; failing closed.".format(tool, field),
+            "AIQT guardrail: denied a {} call with no readable {} (rule abspth, fail-closed)."
+            .format(tool, field))
+    if _is_absolute(value):
+        return _allow()
+    return _deny_relative(tool, field, value)
+
+
+def _abspth_check_search_root(tool, path):
+    """The optional `path` search root of Glob/Grep. Carve-out: a rootless call (no path) names the
+    current directory as the root against which the relative pattern is legitimately judged, so allow;
+    a present search root should be absolute, and a present-but-unreadable one fails closed."""
+    if path is None:
+        return _allow()  # rootless: the pattern's named root is the current directory (carve-out)
+    if not isinstance(path, str) or not path:
+        return _deny(
+            "AIQT rule abspth (absolute-paths): the {} payload carried an unreadable path search root, "
+            "so the absolute-path check could not run; failing closed.".format(tool),
+            "AIQT guardrail: denied a {} call with an unreadable path (rule abspth, fail-closed)."
+            .format(tool))
+    if _is_absolute(path):
+        return _allow()
+    return _deny_relative(tool, "path search root", path)
+
+
 def absolute_paths(data):
-    """abspth (quali/absolute-paths), PreToolUse on Read|Write|Edit|Glob: deny a relative path where
-    the tool requires absolute, honouring the rule's carve-out for a Glob pattern."""
+    """abspth (quali/absolute-paths), PreToolUse on Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep:
+    deny a relative path where the tool's contract requires absolute, honouring the rule's carve-out for
+    the relative search pattern of Glob and Grep."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: absolute_paths wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool = data.get("tool_name")
     if tool is None:
         return _deny_missing_tool_name("abspth")
-    tool_input = data.get("tool_input") or {}
-    if tool in FILE_PATH_TOOLS:
-        file_path = tool_input.get("file_path")
-        if not isinstance(file_path, str) or not file_path:
+    in_scope = tool in FILE_PATH_TOOLS or tool in NOTEBOOK_PATH_TOOLS or tool in SEARCH_ROOT_TOOLS
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        # A falsy or malformed tool_input previously collapsed to {} and let the search-root branch take
+        # its allow path (fail-open). Require a mapping first: for any in-scope tool a payload that is not
+        # a readable mapping fails closed; an out-of-scope tool (the matcher governs) allows.
+        if in_scope:
             return _deny(
-                "AIQT rule abspth (absolute-paths): the {} payload carried no readable file_path, so "
-                "the absolute-path check could not run; failing closed.".format(tool),
-                "AIQT guardrail: denied a {} call with no readable file_path (rule abspth, "
+                "AIQT rule abspth (absolute-paths): the {} payload was not a readable mapping, so the "
+                "absolute-path check could not run; failing closed.".format(tool),
+                "AIQT guardrail: denied a {} call with an unreadable tool_input (rule abspth, "
                 "fail-closed).".format(tool))
-        if _is_absolute(file_path):
-            return _allow()
-        return _deny_relative(tool, "file_path", file_path)
-    if tool == "Glob":
-        # Carve-out: `pattern` is legitimately relative to the named search root and is never judged.
-        # The optional `path` search root, when given, should be absolute; when absent, the current
-        # directory is the named root, which the carve-out permits, so allow.
-        path = tool_input.get("path")
-        if path is None:
-            return _allow()
-        if not isinstance(path, str) or not path:
-            return _deny(
-                "AIQT rule abspth (absolute-paths): the Glob payload carried an unreadable path search "
-                "root, so the absolute-path check could not run; failing closed.",
-                "AIQT guardrail: denied a Glob call with an unreadable path (rule abspth, fail-closed).")
-        if _is_absolute(path):
-            return _allow()
-        return _deny_relative("Glob", "path search root", path)
+        return _allow()
+    if tool in FILE_PATH_TOOLS:
+        return _abspth_check_required(tool, "file_path", tool_input.get("file_path"))
+    if tool in NOTEBOOK_PATH_TOOLS:
+        return _abspth_check_required(tool, "notebook_path", tool_input.get("notebook_path"))
+    if tool in SEARCH_ROOT_TOOLS:
+        return _abspth_check_search_root(tool, tool_input.get("path"))
     return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+
+
+# --- abspth (Bash floor): a relative cd/pushd or redirect target resolved against the cwd ------------
+# A SEPARATE PreToolUse linkage of the same rule onto Bash, reusing the shared quote/redirect-aware
+# lexer (_lex_command / _command_word). CONSERVATIVE FLOOR, ASK-defaulting: it judges only two positions
+# that silently depend on the current directory - a cd/pushd DESTINATION operand, and a redirection
+# TARGET - and NEVER an arbitrary command operand (a relative argument to some other command is not
+# judged, to avoid over-firing). A relative or unresolvable such position ASKS; an absolute position, and
+# a command carrying neither, allow. It never denies: the human confirming is the opt-out.
+_CD_BUILTINS = frozenset(("cd", "pushd"))
+# A leading '-'/'+' token in a cd/pushd argument list is never a relative destination path: cd's option
+# flags (-L/-P/-e/-@) and its lone '-' (the $OLDPWD previous-directory shortcut), and pushd's -n/-L/-P and
+# its +N/-N rotation selector, all begin with '-' or '+'. The FIRST token that does not is the destination.
+_CD_NON_DEST_RE = re.compile(r"^[-+]")
+
+
+def _cd_destination_reason(word, argv):
+    """For a cd/pushd segment, return a reason string when its destination operand is relative or
+    unresolvable (opaque), else None: an absolute destination, or no destination at all (cd -> HOME,
+    pushd -> swap the stack top), is cwd-independent here. Only the FIRST non-option token is the
+    destination; option flags, cd '-', and a pushd +N/-N rotation name no relative path and are skipped.
+    An operand carrying an unexpanded expansion never reads as absolute unless it is literally rooted
+    (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an absolute '/$X/y' allows."""
+    idx = _command_word_index(argv) + 1  # skip leading env-assignments and the command word itself
+    for tok in argv[idx:]:
+        if _CD_NON_DEST_RE.match(tok):
+            continue  # an option flag, cd '-', or a pushd +N/-N rotation: not a destination path
+        if _is_absolute(tok):
+            return None
+        return "a relative {} destination {!r}".format(word, tok)
+    return None  # no destination operand: cwd-independent (cd -> HOME, pushd -> stack swap)
+
+
+def bash_absolute_paths(data):
+    """abspth (quali/absolute-paths) Bash floor, PreToolUse on Bash: ASK when a Bash command shifts the
+    working directory through a relative cd/pushd operand, or names a relative redirection target, since
+    either resolves against a working directory that can silently differ between calls. Conservative
+    floor: it judges only those two cwd-dependent positions, defaults any relative or unresolvable one to
+    ASK (never a silent allow of such a position), does not judge an arbitrary command operand, and does
+    not deny."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("abspth")
+    if tool != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command:
+        # Cannot read the command to resolve either position: the floor asks rather than silently allows.
+        return _ask(
+            "AIQT rule abspth (absolute-paths): the Bash payload carried no readable command string, so "
+            "the relative-cwd check could not run; confirm the command uses absolute paths.",
+            "AIQT guardrail: asked on a Bash call with no readable command (rule abspth).")
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        # An unparseable command (a heredoc, here-string, process substitution, {fd} redirect, or an
+        # unbalanced quote or escape) exposes no resolvable cd/redirect position, so no relative position
+        # is identified; it is left to the human's own permission flow rather than over-asking on every
+        # such command (a disclosed residual). This is the conservative-floor boundary, not a proof of
+        # safety.
+        return _allow()
+    reasons = []
+    for seg in segments:
+        word = _command_word(seg.argv)
+        if word in _CD_BUILTINS:
+            reason = _cd_destination_reason(word, seg.argv)
+            if reason is not None:
+                reasons.append(reason)
+        for redirect in seg.redirects:
+            if redirect.target_class == "descriptor":
+                continue  # a numeric/'-' fd duplication or close names no filesystem path
+            if redirect.target_class == "opaque" or not _is_absolute(redirect.target):
+                reasons.append("a relative redirection target {!r}".format(redirect.target))
+    if reasons:
+        seen = []
+        for reason in reasons:  # de-duplicate while preserving order so the banner stays bounded
+            if reason not in seen:
+                seen.append(reason)
+        return _ask(
+            "AIQT rule abspth (absolute-paths): this command carries {} that resolve(s) against the "
+            "current working directory, which can silently differ between calls. Re-issue with absolute "
+            "paths, or confirm the working directory is the intended one.".format("; ".join(seen)),
+            "AIQT guardrail: asked on a relative cd or redirection target in a Bash command "
+            "(rule abspth).")
+    return _allow()
 
 
 # --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
@@ -5316,6 +5440,7 @@ HANDLERS = {
     "diff_source_pretool": diff_source_pretool,
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
+    "bash_absolute_paths": bash_absolute_paths,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "gate_weakening": gate_weakening,
@@ -5345,6 +5470,7 @@ HANDLER_EVENT = {
     "diff_source_pretool": PRETOOL,
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
+    "bash_absolute_paths": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "gate_weakening": PRETOOL,

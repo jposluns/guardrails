@@ -3076,6 +3076,146 @@ def main():
         finally:
             os.lstat = _real_lstat
 
+        # === abspth: absolute paths across typed-path tools and the Bash cwd floor (GS-7) ============
+        # FAILING-FIRST battery: no abspth coverage existed before GS-7, and every case here is one the
+        # pre-GS-7 handler answered differently (it allowed a drive-relative file_path, was blind to
+        # MultiEdit/NotebookEdit/Grep, fail-opened on a malformed tool_input at the search-root branch,
+        # and had no Bash linkage at all). It pins three layers: (a) the native-path predicate that
+        # rejects drive-relative 'C:file', bare 'C:', and leading-backslash '\\file' while accepting a
+        # drive-absolute or UNC path, plus the tool_input-must-be-a-mapping fail-closed; (b) the widened
+        # matcher over MultiEdit (file_path), NotebookEdit (notebook_path), and Grep (path), each field
+        # name fixed against the live Claude Code tool schema, with the rootless Glob/Grep carve-out
+        # re-affirmed; and (c) the conservative Bash floor that ASKS on a relative cd/pushd destination or
+        # a relative redirection target and allows an absolute one, never denying and never judging an
+        # arbitrary command operand.
+        def _reduce(handler, data):
+            code, stdout_obj, _stderr = handler(data)
+            if code == 0 and stdout_obj is None:
+                return "allow"
+            if code == 0 and isinstance(stdout_obj, dict):
+                return stdout_obj.get("hookSpecificOutput", {}).get("permissionDecision", "unexpected")
+            return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
+
+        def apexpect(label, tool, tool_input, want):
+            got = _reduce(aiqt_hooks.absolute_paths,
+                          {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input})
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        def bcmd(label, command, want):
+            got = _reduce(aiqt_hooks.bash_absolute_paths,
+                          {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                           "tool_input": {"command": command}})
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # --- Layer a: native-path predicate over the required-absolute file_path branch --------------
+        apexpect("(ap-a1) Read absolute file_path allows", "Read", {"file_path": rp}, "allow")
+        apexpect("(ap-a2) Read relative file_path denies", "Read", {"file_path": "rel/x"}, "deny")
+        apexpect("(ap-a3) Edit drive-relative 'C:file' denies (native predicate)", "Edit",
+                 {"file_path": "C:file"}, "deny")
+        apexpect("(ap-a4) Write bare drive 'C:' denies (native predicate)", "Write",
+                 {"file_path": "C:"}, "deny")
+        apexpect("(ap-a5) Write leading-backslash '\\file' denies (native predicate)", "Write",
+                 {"file_path": "\\file"}, "deny")
+        apexpect("(ap-a6) Write drive-absolute 'C:\\x' allows", "Write", {"file_path": "C:\\x"}, "allow")
+        apexpect("(ap-a7) Write drive-absolute forward 'C:/x' allows", "Write",
+                 {"file_path": "C:/x"}, "allow")
+        apexpect("(ap-a8) Write UNC '\\\\srv\\share' allows", "Write",
+                 {"file_path": "\\\\srv\\share"}, "allow")
+        apexpect("(ap-a9) Read tilde '~/x' denies (not expanded, fail-closed)", "Read",
+                 {"file_path": "~/x"}, "deny")
+        apexpect("(ap-a10) Read empty file_path denies (fail-closed)", "Read", {"file_path": ""}, "deny")
+        apexpect("(ap-a11) Read missing file_path denies (fail-closed)", "Read", {}, "deny")
+        apexpect("(ap-a12) Read non-string file_path denies (fail-closed)", "Read",
+                 {"file_path": 5}, "deny")
+        # tool_input must be a mapping BEFORE any branch: a None or list payload fails closed for an
+        # in-scope tool (the search-root fail-open the old 'or {}' collapse allowed is now closed), while
+        # an out-of-scope tool still allows (the matcher governs).
+        apexpect("(ap-a13) Read tool_input None fails closed (mapping guard)", "Read", None, "deny")
+        apexpect("(ap-a14) Glob tool_input a list fails closed (was fail-open at search-root)", "Glob",
+                 [], "deny")
+        apexpect("(ap-a15) Grep tool_input None fails closed (mapping guard)", "Grep", None, "deny")
+        apexpect("(ap-a16) out-of-scope tool with non-dict tool_input allows (matcher governs)", "Bash",
+                 None, "allow")
+        apexpect("(ap-a17) missing tool_name denies (fail-closed)-> via absolute_paths", None,
+                 {"file_path": "rel"}, "deny")
+
+        # --- Layer b: widened matcher over MultiEdit / NotebookEdit / Grep, live-schema field names ---
+        apexpect("(ap-b1) MultiEdit relative file_path denies", "MultiEdit",
+                 {"file_path": "rel/x", "edits": []}, "deny")
+        apexpect("(ap-b2) MultiEdit absolute file_path allows", "MultiEdit",
+                 {"file_path": rp, "edits": []}, "allow")
+        apexpect("(ap-b3) MultiEdit missing file_path denies (fail-closed)", "MultiEdit",
+                 {"edits": []}, "deny")
+        apexpect("(ap-b4) NotebookEdit relative notebook_path denies", "NotebookEdit",
+                 {"notebook_path": "nb.ipynb"}, "deny")
+        apexpect("(ap-b5) NotebookEdit absolute notebook_path allows", "NotebookEdit",
+                 {"notebook_path": rp + "/nb.ipynb"}, "allow")
+        apexpect("(ap-b6) NotebookEdit missing notebook_path denies (fail-closed)", "NotebookEdit",
+                 {"new_source": "x"}, "deny")
+        apexpect("(ap-b7) Grep relative path search root denies", "Grep",
+                 {"pattern": "x", "path": "rel"}, "deny")
+        apexpect("(ap-b8) Grep absolute path search root allows", "Grep",
+                 {"pattern": "x", "path": rp}, "allow")
+        apexpect("(ap-b9) Grep rootless (no path) allows (carve-out)", "Grep", {"pattern": "x"}, "allow")
+        apexpect("(ap-b10) Grep empty path denies (fail-closed)", "Grep",
+                 {"pattern": "x", "path": ""}, "deny")
+        # carve-out re-affirmed for the pre-existing Glob wiring, unchanged by GS-7
+        apexpect("(ap-b11) Glob rootless (no path) allows (carve-out)", "Glob",
+                 {"pattern": "*.py"}, "allow")
+        apexpect("(ap-b12) Glob relative path denies", "Glob", {"pattern": "*.py", "path": "rel"}, "deny")
+        apexpect("(ap-b13) Glob absolute path allows", "Glob", {"pattern": "*.py", "path": rp}, "allow")
+
+        # --- Layer c: conservative Bash floor over cd/pushd operands and redirect targets ------------
+        bcmd("(ap-c1) cd absolute allows", "cd {} && ls".format(rp), "allow")
+        bcmd("(ap-c2) cd relative asks", "cd sub", "ask")
+        bcmd("(ap-c3) cd ../parent relative asks", "cd ../x", "ask")
+        bcmd("(ap-c4) cd ./here relative asks", "cd ./x", "ask")
+        bcmd("(ap-c5) pushd relative asks", "pushd rel", "ask")
+        bcmd("(ap-c6) pushd absolute allows", "pushd {}".format(rp), "allow")
+        bcmd("(ap-c7) cd opaque '$DIR' asks (unresolvable)", "cd $DIR", "ask")
+        bcmd("(ap-c8) cd rooted-with-expansion '/$X/y' allows (always absolute)", "cd /$X/y", "allow")
+        bcmd("(ap-c9) cd bare (HOME) allows", "cd", "allow")
+        bcmd("(ap-c10) cd '-' (OLDPWD) allows", "cd -", "allow")
+        bcmd("(ap-c11) pushd bare (stack swap) allows", "pushd", "allow")
+        bcmd("(ap-c12) pushd '+1' rotation allows (no path)", "pushd +1", "allow")
+        bcmd("(ap-c13) cd option then absolute allows (option skipped)", "cd -P {}".format(rp), "allow")
+        bcmd("(ap-c14) cd option then relative asks (option skipped, dest judged)", "cd -P rel", "ask")
+        bcmd("(ap-c15) pushd '-n' then relative asks", "pushd -n rel", "ask")
+        bcmd("(ap-c16) relative redirect target asks", "echo hi > out.txt", "ask")
+        bcmd("(ap-c17) absolute redirect target allows", "echo hi > {}/out.txt".format(rp), "allow")
+        bcmd("(ap-c18) relative append redirect asks", "echo hi >> log", "ask")
+        bcmd("(ap-c19) relative input redirect asks", "sort < data.txt", "ask")
+        bcmd("(ap-c20) absolute input redirect allows", "sort < {}/data.txt".format(rp), "allow")
+        bcmd("(ap-c21) fd duplication '2>&1' allows (descriptor, no path)", "cat x 2>&1", "allow")
+        bcmd("(ap-c22) absolute /dev redirect allows", "cat x 2>/dev/null", "allow")
+        bcmd("(ap-c23) opaque redirect target '$F' asks", "echo hi > $F", "ask")
+        bcmd("(ap-c24) non-cd relative operand NOT judged (allows)", "cat rel.txt", "allow")
+        bcmd("(ap-c25) compound with a relative redirect asks", "cd {} && echo x > out.txt".format(rp),
+             "ask")
+        bcmd("(ap-c26) compound all-absolute allows", "cd {} && cat {}/f".format(rp, rp), "allow")
+        bcmd("(ap-c27) unparseable command allows (disclosed residual, no identified position)",
+             'git checkout -- "unbalanced', "allow")
+        bcmd("(ap-c28) empty command asks (cannot read)", "", "ask")
+        # malformed / out-of-scope payloads for the Bash floor
+        _bap = aiqt_hooks.bash_absolute_paths
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": 5}}) != "ask":
+            failures.append("(ap-c29) non-string command must ASK (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": None}) != "ask":
+            failures.append("(ap-c30) non-mapping tool_input must ASK (cannot read command)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {}}) != "ask":
+            failures.append("(ap-c31) missing command must ASK (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Read",
+                          "tool_input": {"command": "cd rel"}}) != "allow":
+            failures.append("(ap-c32) out-of-scope tool must allow (matcher governs)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": None,
+                          "tool_input": {"command": "cd rel"}}) != "deny":
+            failures.append("(ap-c33) missing tool_name must DENY (fail-closed contract)")
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3183,7 +3323,19 @@ def main():
           "path), a repo dir name with a trailing SPACE or a trailing NEWLINE keeps its toplevel (only "
           "git's single trailing-newline terminator is stripped, not every trailing newline) so the "
           "registered target still ASKS, an absent registry is the inert ALLOW, a mis-wired event "
-          "HARD-BLOCKS (exit 2), and only a MISSING tool_name DENIES")
+          "HARD-BLOCKS (exit 2), and only a MISSING tool_name DENIES. The absolute-paths guard "
+          "(abspth, GS-7) is proven across both linkages: the native-path predicate DENIES a "
+          "drive-relative 'C:file', a bare 'C:', a leading-backslash path, a tilde, an empty, and a "
+          "plain relative file_path while ALLOWING a POSIX-absolute, a drive-absolute, and a UNC path; "
+          "the widened typed-path matcher judges MultiEdit and NotebookEdit (notebook_path) as "
+          "required-absolute and Grep alongside Glob as an optional search root with the rootless "
+          "carve-out re-affirmed, each field name fixed against the live tool schema; a tool_input that "
+          "is not a mapping fails closed for an in-scope tool (the old search-root fail-open is closed) "
+          "while an out-of-scope tool allows; and the conservative Bash floor ASKS a relative or opaque "
+          "cd/pushd destination and a relative or opaque redirection target, ALLOWS an absolute one, a "
+          "bare or OLDPWD cd, a pushd rotation, and a descriptor duplication, does NOT judge an arbitrary "
+          "command operand, allows an unparseable command as a disclosed residual, and never denies "
+          "except on a missing tool_name")
     return 0
 
 

@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Write|Edit|Glob",
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep",
         "hooks": [
           {
             "type": "command",
@@ -11,6 +11,20 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "absolute_paths"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "bash_absolute_paths"
             ],
             "timeout": 10
           }
