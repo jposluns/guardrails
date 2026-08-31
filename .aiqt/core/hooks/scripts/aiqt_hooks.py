@@ -218,9 +218,12 @@ _FD_VAR_RE = re.compile(r"^\{[A-Za-z_][A-Za-z0-9_]*\}$")  # a bash {varname}> fd
 _Redirect = collections.namedtuple("_Redirect", ("op", "src_fd", "target", "target_class", "stdout_effect"))
 # A segment record: argv (the quote-decoded words the program receives, REDIRECTION ABSENT), sep_after (the
 # operator that ended it, one of _SEGMENT_OPERATORS, or "" at a newline/command end), redirects (the ordered
-# redirect records), raw (the raw slice of this segment), and opaque_shell (True when the segment carried an
-# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on).
-_Segment = collections.namedtuple("_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell"))
+# redirect records), raw (the raw slice of this segment), opaque_shell (True when the segment carried an
+# unquoted expansion/substitution/glob/brace/tilde that no ALLOW proof may rest on), and argv_opaque (the
+# per-token opacity flags PARALLEL to argv: True where THAT word carried an unquoted expansion/glob/brace or
+# a leading tilde, so a consumer can tell an unquoted, shell-expanded '~/x' from a quoted, literal '~/x').
+_Segment = collections.namedtuple(
+    "_Segment", ("argv", "sep_after", "redirects", "raw", "opaque_shell", "argv_opaque"))
 
 
 def _read_word(command, i, n):
@@ -404,24 +407,32 @@ def _target_class(target, t_opaque):
     return "file-real"
 
 
-def _lex_command(command):
+def _lex_command(command, partial=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, or an unsupported construct (a heredoc/here-string, a process substitution, a '{fd}>'
     redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on a
-    partially-cleaned command. Linear, non-recursive, stdlib-only."""
-    if "\x00" in command:
-        raise ValueError("NUL in command")
+    partially-cleaned command. Linear, non-recursive, stdlib-only.
+
+    When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
+    the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
+    first unparseable construct and complete is False when such a construct truncated the scan (True when
+    the whole command parsed). This lets the Bash abspth floor still inspect a resolvable PREFIX (an
+    earlier relative cd/redirect) even when a LATER segment is unparseable, rather than discarding every
+    parsed segment on the first heredoc/here-string/process-substitution. The default partial=False keeps
+    the list-returning, raise-on-error contract every other caller relies on."""
     n = len(command)
     segments = []
     argv = []
+    argv_opaque = []
     redirects = []
     opaque = [False]
     seg_start = [0]
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
-                                  command[seg_start[0]:op_start], opaque[0]))
+                                  command[seg_start[0]:op_start], opaque[0], list(argv_opaque)))
         del argv[:]
+        del argv_opaque[:]
         del redirects[:]
         opaque[0] = False
         seg_start[0] = next_start
@@ -440,54 +451,66 @@ def _lex_command(command):
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque))
         return k2
 
-    i = 0
-    while i < n:
-        c = command[i]
-        if c in " \t":
-            i += 1
-            continue
-        if c == "\n":
-            end_segment("", i, i + 1)
-            i += 1
-            continue
-        if c == "#":
-            # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of the
-            # line is ignored, so a redirect or pipe that is actually commented out (git diff # > /tmp/x)
-            # never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally inside
-            # _read_word and never reaches this word-start position.
-            nl = command.find("\n", i)
-            i = n if nl == -1 else nl
-            continue
-        if c in _METACHARS:
-            op, kind, oplen = _match_operator(command, i, n)
-            if kind == "sep":
-                end_segment(op, i, i + oplen)
-                i += oplen
+    try:
+        if "\x00" in command:
+            raise ValueError("NUL in command")
+        i = 0
+        while i < n:
+            c = command[i]
+            if c in " \t":
+                i += 1
                 continue
-            if kind == "cannot":
-                raise ValueError("unsupported shell construct: {}".format(op))
-            i = consume_redirect(op, oplen, i, None)
-            continue
-        text, w_opaque, started, all_digits, j = _read_word(command, i, n)
-        # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect operator
-        # is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' -> fd 2; but
-        # '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep the word in argv.
-        if all_digits and text and j < n and command[j] in "<>":
-            op, kind, oplen = _match_operator(command, j, n)
-            if kind == "redirect":
-                i = consume_redirect(op, oplen, j, int(text))
+            if c == "\n":
+                end_segment("", i, i + 1)
+                i += 1
                 continue
-            if kind == "cannot":
-                raise ValueError("unsupported shell construct: {}".format(op))
-        # A '{varname}>' fd-var redirect is not modelled: cannot-evaluate rather than a partial word.
-        if text and j < n and command[j] in "<>" and _FD_VAR_RE.match(text):
-            raise ValueError("unsupported {fd} redirect")
-        if started:
-            argv.append(text)
-            if w_opaque:
-                opaque[0] = True
-        i = j
-    end_segment("", n, n)
+            if c == "#":
+                # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of
+                # the line is ignored, so a redirect or pipe that is actually commented out (git diff # >
+                # /tmp/x) never earns a proof. A mid-word '#' (--rev=abc#1, ticket#123) is read literally
+                # inside _read_word and never reaches this word-start position.
+                nl = command.find("\n", i)
+                i = n if nl == -1 else nl
+                continue
+            if c in _METACHARS:
+                op, kind, oplen = _match_operator(command, i, n)
+                if kind == "sep":
+                    end_segment(op, i, i + oplen)
+                    i += oplen
+                    continue
+                if kind == "cannot":
+                    raise ValueError("unsupported shell construct: {}".format(op))
+                i = consume_redirect(op, oplen, i, None)
+                continue
+            text, w_opaque, started, all_digits, j = _read_word(command, i, n)
+            # An IO_NUMBER: an entirely-unquoted-digit word IMMEDIATELY adjacent to a '<'/'>' redirect
+            # operator is that redirect's source fd, consumed as fd syntax, never left in argv. '2>file' ->
+            # fd 2; but '2 > file' (spaced), "'2'>file"/'\2>file' (quoted/escaped), and 'x2>file' keep it.
+            if all_digits and text and j < n and command[j] in "<>":
+                op, kind, oplen = _match_operator(command, j, n)
+                if kind == "redirect":
+                    i = consume_redirect(op, oplen, j, int(text))
+                    continue
+                if kind == "cannot":
+                    raise ValueError("unsupported shell construct: {}".format(op))
+            # A '{varname}>' fd-var redirect is not modelled: cannot-evaluate rather than a partial word.
+            if text and j < n and command[j] in "<>" and _FD_VAR_RE.match(text):
+                raise ValueError("unsupported {fd} redirect")
+            if started:
+                argv.append(text)
+                argv_opaque.append(w_opaque)
+                if w_opaque:
+                    opaque[0] = True
+            i = j
+        end_segment("", n, n)
+    except ValueError:
+        # partial mode recovers the COMPLETE segments lexed before the unparseable construct (the Bash
+        # abspth floor still inspects that prefix); the default contract re-raises for every other caller.
+        if partial:
+            return segments, False
+        raise
+    if partial:
+        return segments, True
     return segments
 
 
@@ -1405,23 +1428,47 @@ def absolute_paths(data):
 # judged, to avoid over-firing). A relative or unresolvable such position ASKS; an absolute position, and
 # a command carrying neither, allow. It never denies: the human confirming is the opt-out.
 _CD_BUILTINS = frozenset(("cd", "pushd"))
-# A leading '-'/'+' token in a cd/pushd argument list is never a relative destination path: cd's option
-# flags (-L/-P/-e/-@) and its lone '-' (the $OLDPWD previous-directory shortcut), and pushd's -n/-L/-P and
-# its +N/-N rotation selector, all begin with '-' or '+'. The FIRST token that does not is the destination.
-_CD_NON_DEST_RE = re.compile(r"^[-+]")
+# cd/pushd option tokens that name NO destination path: the real option flags (cd -L/-P/-e/-@, pushd -n,
+# and bundled combos like -LP), which are a limited closed set, NOT any '-'/'+'-prefixed token. A lone '-'
+# is cd's $OLDPWD previous-directory shortcut (an absolute prior dir, cwd-independent); '--' ENDS option
+# processing so the NEXT token is the destination even when it begins '-'/'+'; and pushd's +N/-N is a
+# numeric directory-stack rotation. A '+relative' or '-relative' that is NOT one of these is a real
+# relative directory NAME (the destination), matching the comment 'the first token that is not an option'.
+_CD_OPT_BUNDLE_RE = re.compile(r"^-[LPe@n]+$")  # cd -L/-P/-e/-@ and pushd -n, singly or bundled (-LP, -nL)
+_PUSHD_ROTATION_RE = re.compile(r"^[-+][0-9]+$")  # pushd +N/-N: a stack index, not a filesystem path
+# An UNQUOTED literal tilde destination (~, ~/path, ~user, ~user/path) is tilde-EXPANDED by the shell to an
+# absolute home directory, so it is cwd-independent exactly like an absolute path; a QUOTED '~' (a literal
+# directory named '~') is not expanded and stays relative, told apart by the token's own opacity flag (an
+# unquoted leading tilde sets it, a quoted one does not). A '~$X' mixing an expansion is not this pure form.
+_LITERAL_TILDE_RE = re.compile(r"^~([A-Za-z_][A-Za-z0-9_-]*)?(/.*)?$")
 
 
-def _cd_destination_reason(word, argv):
+def _cd_destination_reason(word, argv, argv_opaque):
     """For a cd/pushd segment, return a reason string when its destination operand is relative or
-    unresolvable (opaque), else None: an absolute destination, or no destination at all (cd -> HOME,
-    pushd -> swap the stack top), is cwd-independent here. Only the FIRST non-option token is the
-    destination; option flags, cd '-', and a pushd +N/-N rotation name no relative path and are skipped.
-    An operand carrying an unexpanded expansion never reads as absolute unless it is literally rooted
-    (a leading '/'), so an opaque 'cd $DIR' naturally ASKS while an absolute '/$X/y' allows."""
+    unresolvable (opaque), else None: an absolute destination, an unquoted literal-tilde one (it expands to
+    an absolute home), or no destination at all (cd -> HOME, pushd -> swap the stack top), is cwd-independent
+    here. Only the FIRST non-option token is the destination; the real cd/pushd option flags, cd '-', and a
+    pushd +N/-N rotation name no relative path and are skipped, while '--' ends option processing so the next
+    token is the destination even when it begins '-'/'+'. An operand carrying an unexpanded expansion never
+    reads as absolute unless it is literally rooted (a leading '/'), so an opaque 'cd $DIR' naturally ASKS
+    while an absolute '/$X/y' allows. argv_opaque is the per-token opacity flags parallel to argv."""
     idx = _command_word_index(argv) + 1  # skip leading env-assignments and the command word itself
-    for tok in argv[idx:]:
-        if _CD_NON_DEST_RE.match(tok):
-            continue  # an option flag, cd '-', or a pushd +N/-N rotation: not a destination path
+    end_of_options = False
+    for pos in range(idx, len(argv)):
+        tok = argv[pos]
+        if not end_of_options:
+            if tok == "--":
+                end_of_options = True  # everything after '--' is an operand, not an option
+                continue
+            if tok == "-":
+                continue  # cd '-': the $OLDPWD previous-directory shortcut, an absolute prior dir
+            if _CD_OPT_BUNDLE_RE.match(tok):
+                continue  # a cd/pushd option flag or bundle (-L/-P/-e/-@/-n): not a destination path
+            if word == "pushd" and _PUSHD_ROTATION_RE.match(tok):
+                continue  # pushd +N/-N: a directory-stack rotation index, not a filesystem path
+        # end-of-options, or the first token that is not an option: this is the destination operand.
+        if argv_opaque[pos] and _LITERAL_TILDE_RE.match(tok):
+            return None  # an unquoted literal tilde expands to an absolute home: cwd-independent
         if _is_absolute(tok):
             return None
         return "a relative {} destination {!r}".format(word, tok)
@@ -1451,20 +1498,17 @@ def bash_absolute_paths(data):
             "AIQT rule abspth (absolute-paths): the Bash payload carried no readable command string, so "
             "the relative-cwd check could not run; confirm the command uses absolute paths.",
             "AIQT guardrail: asked on a Bash call with no readable command (rule abspth).")
-    try:
-        segments = _lex_command(command)
-    except ValueError:
-        # An unparseable command (a heredoc, here-string, process substitution, {fd} redirect, or an
-        # unbalanced quote or escape) exposes no resolvable cd/redirect position, so no relative position
-        # is identified; it is left to the human's own permission flow rather than over-asking on every
-        # such command (a disclosed residual). This is the conservative-floor boundary, not a proof of
-        # safety.
-        return _allow()
+    # Partial lex so an unparseable construct (a heredoc, here-string, process substitution, {fd} redirect,
+    # or an unbalanced quote or escape) no longer discards every segment before it: a resolvable relative
+    # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
+    # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
+    # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
+    segments = _lex_command(command, partial=True)[0]
     reasons = []
     for seg in segments:
         word = _command_word(seg.argv)
         if word in _CD_BUILTINS:
-            reason = _cd_destination_reason(word, seg.argv)
+            reason = _cd_destination_reason(word, seg.argv, seg.argv_opaque)
             if reason is not None:
                 reasons.append(reason)
         for redirect in seg.redirects:

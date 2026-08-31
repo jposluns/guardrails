@@ -3195,9 +3195,46 @@ def main():
         bcmd("(ap-c25) compound with a relative redirect asks", "cd {} && echo x > out.txt".format(rp),
              "ask")
         bcmd("(ap-c26) compound all-absolute allows", "cd {} && cat {}/f".format(rp, rp), "allow")
-        bcmd("(ap-c27) unparseable command allows (disclosed residual, no identified position)",
+        bcmd("(ap-c27) unparseable command with no earlier relative position allows (disclosed residual)",
              'git checkout -- "unbalanced', "allow")
         bcmd("(ap-c28) empty command asks (cannot read)", "", "ask")
+        # GS-7 fix: per-SEGMENT partial lex so a resolvable relative cd/redirect in the PARSEABLE PREFIX
+        # still ASKS even when a LATER segment is unparseable (pre-fix, one lexer ValueError over the whole
+        # command discarded every parsed segment and ALLOWED). Fails-when-reverted: these were "allow".
+        bcmd("(ap-c34) relative cd before a heredoc asks (prefix inspected, GS-7 FIX 1)",
+             "cd .aiqt; cat <<EOF > /dev/null\nx\nEOF\npwd", "ask")
+        bcmd("(ap-c35) relative redirect before a here-string asks (prefix inspected, GS-7 FIX 1)",
+             "echo hi > out.txt; cat <<<x", "ask")
+        bcmd("(ap-c36) relative cd before a process substitution asks (prefix inspected, GS-7 FIX 1)",
+             "cd rel; cat <(printf x)", "ask")
+        # boundary: an unparseable construct with NO earlier resolvable position stays a disclosed ALLOW
+        # (a cd/redirect WITHIN or AFTER the construct is uninspected, not over-asked on every heredoc).
+        bcmd("(ap-c37) heredoc with no earlier relative position allows (disclosed residual, GS-7 FIX 1)",
+             "cat <<EOF\nx\nEOF", "allow")
+        # GS-7 FIX 2: a real relative destination beginning '-'/'+' is the destination, not an option; '--'
+        # ends option processing. Pre-fix ^[-+] skipped every such token -> None -> ALLOW. Fails-when-reverted.
+        bcmd("(ap-c38) 'cd -- -relative' asks ('--' ends options, dest judged, GS-7 FIX 2)",
+             "cd -- -relative", "ask")
+        bcmd("(ap-c39) 'cd +relative' asks (a real relative dir name, GS-7 FIX 2)", "cd +relative", "ask")
+        bcmd("(ap-c40) 'cd -relative' asks (a real relative dir name, GS-7 FIX 2)", "cd -relative", "ask")
+        # the real option/rotation forms still allow (not regressed by FIX 2)
+        bcmd("(ap-c41) 'cd -- /abs' allows (post-'--' absolute destination)", "cd -- {}".format(rp),
+             "allow")
+        bcmd("(ap-c42) 'cd -e -L /abs' allows (real cd option flags skipped)", "cd -e -L {}".format(rp),
+             "allow")
+        # GS-7 FIX 3: an UNQUOTED literal tilde is cwd-independent (expands to an absolute home) -> ALLOW,
+        # matching bare 'cd'; pre-fix it ASKED (an ASK-fatigue over-fire that trained the 'cd' rewrite
+        # bypass). An opaque '$VAR' still cannot be proven absolute and ASKS. Fails-when-reverted (tilde).
+        bcmd("(ap-c43) 'cd ~' allows (literal tilde expands to absolute home, GS-7 FIX 3)", "cd ~", "allow")
+        bcmd("(ap-c44) 'cd ~/foo' allows (literal tilde path, GS-7 FIX 3)", "cd ~/foo", "allow")
+        bcmd("(ap-c45) 'cd ~user/x' allows (literal ~user home, GS-7 FIX 3)", "cd ~user/x", "allow")
+        bcmd("(ap-c46) 'cd $HOME' asks (opaque expansion, not provably absolute, GS-7 FIX 3)",
+             "cd $HOME", "ask")
+        bcmd("(ap-c47) 'cd \"$HOME\"' asks (opaque expansion, GS-7 FIX 3)", 'cd "$HOME"', "ask")
+        # a QUOTED '~' is a literal relative directory named '~', not tilde expansion: still ASKS (the
+        # per-token opacity flag tells the unquoted, expanded form from the quoted, literal one).
+        bcmd("(ap-c48) quoted 'cd \"~/foo\"' asks (quoted tilde is literal-relative, GS-7 FIX 3)",
+             'cd "~/foo"', "ask")
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -3327,15 +3364,19 @@ def main():
           "(abspth, GS-7) is proven across both linkages: the native-path predicate DENIES a "
           "drive-relative 'C:file', a bare 'C:', a leading-backslash path, a tilde, an empty, and a "
           "plain relative file_path while ALLOWING a POSIX-absolute, a drive-absolute, and a UNC path; "
-          "the widened typed-path matcher judges MultiEdit and NotebookEdit (notebook_path) as "
-          "required-absolute and Grep alongside Glob as an optional search root with the rootless "
-          "carve-out re-affirmed, each field name fixed against the live tool schema; a tool_input that "
-          "is not a mapping fails closed for an in-scope tool (the old search-root fail-open is closed) "
-          "while an out-of-scope tool allows; and the conservative Bash floor ASKS a relative or opaque "
-          "cd/pushd destination and a relative or opaque redirection target, ALLOWS an absolute one, a "
-          "bare or OLDPWD cd, a pushd rotation, and a descriptor duplication, does NOT judge an arbitrary "
-          "command operand, allows an unparseable command as a disclosed residual, and never denies "
-          "except on a missing tool_name")
+          "the widened typed-path matcher judges MultiEdit (legacy-compat wire) and NotebookEdit "
+          "(notebook_path) as required-absolute and Grep alongside Glob as an optional search root with "
+          "the rootless carve-out re-affirmed, each field name fixed against the tool schema; a tool_input "
+          "that is not a mapping fails closed for an in-scope tool (the old search-root fail-open is "
+          "closed) while an out-of-scope tool allows; and the conservative Bash floor ASKS a relative or "
+          "opaque cd/pushd destination and a relative or opaque redirection target, ALLOWS an absolute "
+          "one, an UNQUOTED literal tilde ('~', '~/x', '~user') as cwd-independent while a QUOTED '~' and "
+          "an opaque '$VAR' still ASK, a bare or OLDPWD cd, the real cd/pushd option flags, a pushd "
+          "rotation, and a descriptor duplication; treats a relative dir name beginning '-'/'+' as the "
+          "destination ('cd -- -rel', 'cd +rel') and ASKS, does NOT judge an arbitrary command operand, "
+          "inspects the parseable PREFIX before an unparseable construct (an earlier relative cd/redirect "
+          "still ASKS; only a position within or after the construct is a disclosed-residual allow), and "
+          "never denies except on a missing tool_name")
     return 0
 
 
