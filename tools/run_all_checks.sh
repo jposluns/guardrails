@@ -68,6 +68,7 @@ run_gate "newtab-selftest" python3 tools/check_newtab.py --self-test
 run_gate "newtab" python3 tools/check_newtab.py
 run_gate "site-versions-selftest" python3 tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 tools/check_site_versions.py
+run_gate "opf-render-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_opf_render.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py
@@ -87,6 +88,12 @@ run_gate "crosswalk-schema-drift" python3 tools/gen_crosswalk.py --check
 run_gate "crosswalk-selftest"     python3 tools/check_crosswalk.py --self-test
 run_gate "crosswalk"              python3 tools/check_crosswalk.py
 run_gate "migrate-crashinject"    python3 tools/migrate.py --self-test
+# VER-CORE Section 12 step 7 (VC-7): pin lifecycle (pin.py) and the core doctor (doctor.py). The
+# self-tests exercise the plan-4.5 scenarios over synthetic installs; the live `doctor --root .` leg
+# reports NOT APPLICABLE in this repo (the pack is not an adopter install). doctor is READ-ONLY.
+run_gate "pin-selftest"           python3 tools/pin.py --self-test
+run_gate "doctor-selftest"        python3 tools/doctor.py --self-test
+run_gate "doctor"                 python3 tools/doctor.py --root .
 run_gate "rules-selftest"  python3 tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 tools/check_artifact_checksums.py

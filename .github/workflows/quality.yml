@@ -118,6 +118,9 @@ jobs:
       - name: Site version currency
         run: python3 tools/check_site_versions.py
 
+      - name: Render driver behaviour self-test
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_opf_render.py
+
       - name: Roadmap drift
         run: python3 tools/gen_roadmap.py --check
 
@@ -177,6 +180,15 @@ jobs:
         run: python3 tools/check_crosswalk.py
       - name: Migration engine crash-injection self-test
         run: python3 tools/migrate.py --self-test
+      # VER-CORE Section 12 step 7 (VC-7): pin lifecycle (pin.py) and the core doctor (doctor.py). The
+      # self-tests cover the plan-4.5 scenarios over synthetic installs; the live doctor leg reports NOT
+      # APPLICABLE in this repo (the pack is not an adopter install). The doctor is READ-ONLY by default.
+      - name: Pin lifecycle self-test
+        run: python3 tools/pin.py --self-test
+      - name: Doctor self-test
+        run: python3 tools/doctor.py --self-test
+      - name: Doctor (read-only, NA in this repo)
+        run: python3 tools/doctor.py --root .
 
       - name: Rules self-test
         run: python3 tools/gen_rules.py --self-test

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "0971340899584e78f79e2c86adb0d6da533c02857dd2120a451642dbc176252d"
+tree-sha256 = "7dc9ba547ac724092c3dd45b7aca9e3853f788a483b033a134515205684d8b66"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 51997
-sha256 = "567cce462e25d72493d70f5a9928fd1c68616648340580b3ab89ab20e07da23d"
+bytes = 57201
+sha256 = "b813db4b1535bbc80aead17ad20bec583c36c4e7bd906d5741083520c4fcb4a7"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -71,8 +71,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 10633
-sha256 = "afb8f2b345143f2379a81a8ee04d52e7ab425fa24eaa49ce6e13f7198368d80d"
+bytes = 11223
+sha256 = "709281bb449ab1bdc2621ba478a0eb5abc3c3820b0379e90e67d18014985f11f"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2071,8 +2071,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 32982
-sha256 = "368696f0d28af29cd8b54451091ab46418fcaf57270e1c82949d032cac2fed50"
+bytes = 33108
+sha256 = "657bbb4f65c797755dc4546f1c615f292062526dcffea70332b5229f9d1c274a"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2366,8 +2366,8 @@ sha256 = "817bdf856c6984fe01dc066e13b477af8328e44cf58fda04bce6b596d7bd920d"
 
 [[sources]]
 path = "tools/_journal.py"
-bytes = 64472
-sha256 = "5318f10ed3c0ad765dcf4fb8981bafe48b53d4fa3777076976c1ec7513479d02"
+bytes = 64972
+sha256 = "376dd10f129a3ce78e4125444a14bb7774acbdabc300915dbc0eab00d2880ee3"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -2560,6 +2560,11 @@ bytes = 67757
 sha256 = "9d67954344890ae531061d1580fe9550bf571723c6ab14e35131df240fa4366c"
 
 [[sources]]
+path = "tools/doctor.py"
+bytes = 27260
+sha256 = "f510516a5572198941e20bbbdba06bcca5b067209e589641d41050fdbe73f9cd"
+
+[[sources]]
 path = "tools/gen_adapters.py"
 bytes = 5633
 sha256 = "c36244d6858a4fb69f4a08be756a17e86ed9f324409cc315c232f7dfe5988197"
@@ -2571,8 +2576,8 @@ sha256 = "3c0c59a43b7adfecaec25f816ff828be507a728fb6709e87461deb87b77069aa"
 
 [[sources]]
 path = "tools/gen_changelog.py"
-bytes = 3145
-sha256 = "7aeb3e26059db37a91ce944e1d935d249721f2eec788648c466cd1e3cc5953fc"
+bytes = 2718
+sha256 = "3b2575bd2e50968caba5ad7bb2bb501933ccdc8c2881d3f850fa5d79bb371dc3"
 
 [[sources]]
 path = "tools/gen_claude.py"
@@ -2641,8 +2646,8 @@ sha256 = "7556db4481e58822bf0dcd35f66ecf5f96a1e9a5c250c1d1260b3114894d3e98"
 
 [[sources]]
 path = "tools/gen_roadmap.py"
-bytes = 4351
-sha256 = "f40e67994ea79ffa1b3942608e8c6071f74cc41a3d249a9825b5b08e8b9d3fe5"
+bytes = 3428
+sha256 = "2f91e677d1eaf446d6f4f33b754cd6a6d80cd58888a49e8784e9d4898e38c175"
 
 [[sources]]
 path = "tools/gen_rules.py"
@@ -2675,6 +2680,11 @@ bytes = 82580
 sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
+path = "tools/opf_render.py"
+bytes = 7477
+sha256 = "f9db0d0389214445e76ba144772f49f206de891507e4c392e9a52ce57893a898"
+
+[[sources]]
 path = "tools/orch_doctor.py"
 bytes = 3424
 sha256 = "58e80aa8b91779eb46a7fd93c140d8b6a41d5a62efbccc0ccc1f166c12356c82"
@@ -2690,14 +2700,24 @@ bytes = 3814
 sha256 = "a82ec5b44f3dd8a17fb5baba00e5b9972ffc9b30a2e54585d2e53c9bf90afdba"
 
 [[sources]]
+path = "tools/pin.py"
+bytes = 92386
+sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
+
+[[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 9462
-sha256 = "34897bf9d8c579554f1ef9509bd44be8391c054e0277ce5affbb76b7d92836b3"
+bytes = 10059
+sha256 = "de6be4150994de21192b1fa9d400ca73062e15b3802f1eeb5bfa44926ca00bf5"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
 bytes = 267553
 sha256 = "810f98415386ee49d74529c86817afe6fe76bad30fb5c07a9318c971d7a10632"
+
+[[sources]]
+path = "tools/selftest_opf_render.py"
+bytes = 9416
+sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"

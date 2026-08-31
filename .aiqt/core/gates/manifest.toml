@@ -433,6 +433,15 @@ class = "a"
 residue = "It exercises the shipped hook behaviours end to end. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
 
 [[gate]]
+id = "opf-render-selftest"
+script = "tools/selftest_opf_render.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the shared render/reconcile driver (tools/opf_render.py) end to end: per-target ordering on a degraded input (an earlier target's drift line and write precede a later target's materialization failure, under both --check and write, for a missing and a markerless block page), a schema error on a later target aborting before an earlier target is reconciled, a one-shot iterator target being reconciled rather than silently skipped, and an empty target set failing closed. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative scenarios with exact stdout/exit-code matches, not the driver's whole input space, and it does not re-verify the healthy byte-identical generation the drift gates own."
+
+[[gate]]
 id = "gensrc-failclose"
 script = "tools/check_gensrc_failclose.py"
 rules = ["gensrc"]
@@ -559,3 +568,23 @@ platform = "ci"
 default = "block"
 class = "a"
 residue = "The reference enumerator's own grammar and fail-closed vectors: a malformed item-shaped line, an unknown token or blocker kind, and a duplicate id are enumeration errors (exit 3), never silently dropped items, and an empty backlog is a valid empty enumeration distinct from a parse failure. It proves the reference provider's contract, not any adopter's provider; the doctor probes those live."
+
+# --- VER-CORE Section 12 step 7 (VC-7): pin lifecycle and the core doctor ------------------------------
+
+[[gate]]
+id = "pin-selftest"
+script = "tools/pin.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "An adversarial self-test suite over the ONBOARDING pin lifecycle (10.1/10.3/10.6) over synthetic installs, using real subprocess crash-injection. It covers: an initial onboarding pin (create/mkdir only) with pre-adoption capture and its one-step reverse to the exact pre-adoption state; the doctor catching a direct byte or mode mutation of an installed file against the recorded pin digest, and a directory-mode change; the strict typed pin-history chain rejecting type coercion (quorum=1 vs the string form), unknown keys, and an interior type edit; crash-safe recovery at each tested crash point (pre-intent orphan sweep, a torn payload mid-write, a partial mid-swap, and roll-forward of a complete-but-uncommitted pin) via the CONTAINED reverse swap with NO 9.3 journal; a crash-safe un-adopt via a durable intent that recover completes idempotently; a crashed re-adoption recovering to the prior un-adopted state; open pin-transition and open or symlinked migration-journal state blocking a new pin and never read as NA; a deleted transition record surfacing as MALFORMED (not a clean pass over a tampered file) with recover refusing to sweep a live pin's preimages; a malformed release record and a non-create/mkdir onboarding op each refused fail-closed; and adopter-state reads, writes, and removals fd-bound and no-follow (an open migration journal is DETECTED and blocks a pin, but is NOT reconciled by this tool - that is the deferred migration tool's job; the terminal-state read is a disclosed quiescence-bounded residual). Onboarding is CREATE/MKDIR only, a disclosed SUBSET of the spec's initial pin (which additionally captures and restores prior bytes when it overwrites a pre-existing path). Forward re-pin, rollback, and the corrupt-state carve-out are DEFERRED at this release (their anchored target validators and the adopter-experience quiescence and overlay hooks are not enacted) and REFUSE fail-closed with no marker seam. HONESTY LIMIT (10.2): with no keys the pin-history is a keyless hash chain that catches a CASUAL in-place edit of an interior row ONLY; it does NOT catch truncation of a valid tail (a dropped tail leaves a valid chain) and cannot rule out a splice (a full-access writer inserting a genuine old release row and recomputing the suffix), so the history proves NOTHING and authorizes NOTHING on its own, and the self-test asserts the tail-edit, truncation, and splice cases go uncaught rather than claiming otherwise. It exercises flow invariants on synthetic trees; it does not validate any adopter's live install. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
+id = "doctor"
+script = "tools/doctor.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "The core adopter-side doctor (plan 4.3), READ-ONLY by default: it runs the state-completeness, pin-and-manifest, history-chain, open-journal, repoints, reverse-step, transition, and unadopt-intent assertions and never performs recovery (any state-changing recovery is a separate explicit pin.py invocation with authorization). Its self-test asserts a clean absence is NA, a pin without history is MALFORMED (exit 2, never NA), and a casual in-place edit of a non-tail history row FAILs; its live --root . leg reports NOT APPLICABLE in this repo (the pack is not an adopter install). HONESTY LIMIT (10.2), stated in every chain message: with no keys the pin-history is a keyless hash chain that catches a CASUAL in-place edit of an interior row ONLY; it does NOT catch truncation of a valid tail and cannot rule out a splice, so it proves NOTHING and authorizes NOTHING on its own, and the doctor's messages DISCLOSE this limit rather than implying otherwise. It does not establish the full concern-3 set-equality (owed to the adopter-experience spec), does not judge whether a human authorization is well-founded, and reasons only over the pin-state the install actually carries. Its linkage to a single corpus rule is arguable, so none is claimed here."

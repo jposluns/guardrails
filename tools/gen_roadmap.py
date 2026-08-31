@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, replace_block, reconcile  # noqa: E402
+from opf_render import run_generator, FileTarget, BlockTarget  # noqa: E402
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. site/roadmap.html is a generated block inside
@@ -76,38 +76,16 @@ def render_site(data):
 
 
 def main():
-    check = "--check" in sys.argv[1:]
-    root = repo_root()
-    try:
-        data = load_toml(root / "roadmap.toml")
-    except (OSError, ValueError) as exc:
-        print("error: cannot read roadmap.toml: {}".format(exc))
-        return 2
-    try:
-        md = render_md(data)
-        site_inner = render_site(data)
-    except (KeyError, TypeError) as exc:
-        print("error: roadmap.toml is missing or misuses a key: {}".format(exc))
-        return 2
-    drift = False
-    if reconcile(root / "ROADMAP.md", md, check):
-        print("drift: ROADMAP.md"); drift = True
-    site = root / "site" / "roadmap.html"
-    if not site.exists():
-        print("error: site/roadmap.html not found (expected generated target)")
-        return 2
-    try:
-        new_html = replace_block(site.read_text(encoding="utf-8"), "ROADMAP", site_inner)
-    except (ValueError, OSError) as exc:
-        # OSError too: an unreadable site/roadmap.html is a read error, fail-closed exit 2, not a traceback.
-        print("error: {}".format(exc))
-        return 2
-    if reconcile(site, new_html, check):
-        print("drift: site/roadmap.html"); drift = True
-    if check and drift:
-        print("run tools/gen_roadmap.py to regenerate")
-        return 1
-    return 0
+    return run_generator(
+        sys.argv[1:],
+        source="roadmap.toml",
+        targets=(
+            FileTarget("ROADMAP.md", render_md),
+            BlockTarget("site/roadmap.html", "ROADMAP", render_site),
+        ),
+        regen_hint="run tools/gen_roadmap.py to regenerate",
+        schema_excs=(KeyError, TypeError),
+    )
 
 
 if __name__ == "__main__":

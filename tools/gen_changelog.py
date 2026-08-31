@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from opf_render import run_generator, FileTarget  # noqa: E402
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -48,29 +48,21 @@ def latest_version(data):
     return data["release"][-1]["version"]
 
 
+def render_version(data):
+    return latest_version(data) + "\n"
+
+
 def main():
-    check = "--check" in sys.argv[1:]
-    root = repo_root()
-    try:
-        data = load_toml(root / "changelog.toml")
-    except (OSError, ValueError) as exc:
-        print("error: cannot read changelog.toml: {}".format(exc))
-        return 2
-    try:
-        md = render_md(data)
-        version_text = latest_version(data) + "\n"
-    except (KeyError, IndexError, TypeError) as exc:
-        print("error: changelog.toml is missing or misuses a key: {}".format(exc))
-        return 2
-    drift = False
-    if reconcile(root / "CHANGELOG.md", md, check):
-        print("drift: CHANGELOG.md"); drift = True
-    if reconcile(root / "VERSION", version_text, check):
-        print("drift: VERSION"); drift = True
-    if check and drift:
-        print("run tools/gen_changelog.py to regenerate")
-        return 1
-    return 0
+    return run_generator(
+        sys.argv[1:],
+        source="changelog.toml",
+        targets=(
+            FileTarget("CHANGELOG.md", render_md),
+            FileTarget("VERSION", render_version),
+        ),
+        regen_hint="run tools/gen_changelog.py to regenerate",
+        schema_excs=(KeyError, IndexError, TypeError),
+    )
 
 
 if __name__ == "__main__":
