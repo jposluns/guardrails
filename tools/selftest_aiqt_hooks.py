@@ -3752,12 +3752,15 @@ def main():
                  "write (FIX A2; old code fell to XDG -> disarmed -> allow)",
                  "deny", "Write", reg_j("tools", "y.py"), ws_reg)
 
-        # (round-5 BLOCKER) The SECOND registry read must never fault-and-disarm. Old _load_write_scope
+        # (round-5 BLOCKER) The DECISION's registry read must never fault-and-disarm. Old _load_write_scope
         # validated the registry once, then called _orch_state_dir_for_root which REREAD it; a second read
         # that faulted (EACCES between the reads) fell to the XDG default and disarmed the armed session ->
-        # ALLOW. The fix resolves the state dir from the already-validated result (one read), so a second
-        # read never happens. Injected by faulting ONLY the second lstat on the registry path (the first
-        # succeeds), which the old double-read reached and the fixed single-read does not.
+        # ALLOW. The fix resolves the state dir from the already-validated result, so the DECISION in
+        # _load_write_scope rests on EXACTLY ONE registry read. (A subsequent DENIAL's best-effort guard-event
+        # logging path, _orch_guard_event -> _orch_state_dir_for_root, may perform its OWN read, but that is
+        # telemetry and never affects the decision.) Injected by faulting ONLY the second lstat on the
+        # registry path (the first succeeds), which the old double-read reached in the decision path and the
+        # fixed single-read decision does not.
         reg_registry.write_text(json.dumps({"version": 1, "state_dir": ".aiqt/orch-state"}), encoding="utf-8")
         _reg_lstat_calls = [0]
         def _ws_lstat_second_only(path, *_a, **_k):
@@ -3938,8 +3941,10 @@ def main():
           "registry (an lstat fault the old os.path.lexists swallowed to absent) and a registry declaring a "
           "present-but-empty state_dir (which old code fell to the XDG default over) both DENY (FIX A, "
           "round-3 BLOCKER), while a genuinely-absent state_dir key still selects the XDG default; faulting "
-          "ONLY the SECOND registry read (which the old double-read reached and the fixed single-read never "
-          "performs) still DENIES, closing the TOCTOU fail-open (round-5 BLOCKER); Bash and "
+          "ONLY the second registry read (which the old double-read reached in the DECISION path, while the "
+          "fixed _load_write_scope decision rests on exactly one read - a denial's best-effort guard-event "
+          "logging may still read separately without affecting the decision) still DENIES, closing the "
+          "TOCTOU fail-open (round-5 BLOCKER); Bash and "
           "Read are out of the matcher (the disclosed Bash residual); "
           "and a mis-wired event hard-blocks (exit 2)")
     return 0

@@ -4487,7 +4487,9 @@ def _orch_read_jsonl(path):
 
 
 def _orch_guard_event(root, kind, decision, detail):
-    """Append one guard-events row (the over-fire metric and the mistakes-register feed)."""
+    """Best-effort append of one guard-events row (the over-fire metric and the mistakes-register feed).
+    Returns whether the append succeeded (False on an I/O failure); the caller decides what a failure means
+    and a guard never changes its decision over it."""
     sd = _orch_state_dir_for_root(root)
     return _orch_append_jsonl(os.path.join(sd, "guard-events.jsonl"),
                               {"ts": _orch_now().isoformat(), "kind": kind,
@@ -5618,8 +5620,9 @@ def orch_resume_barrier(data):
 # --- write-scope guard (EN-8, wrtscp) ----------------------------------------------------------------
 # Confine the sole orchestrator's guarded-tool writes to a harness-set per-slice scope declaration, and
 # hard-deny writes to frozen paths and to other repositories as a floor the declaration cannot lower.
-# It reuses the orchestration substrate (_orch_state_dir_for_root for the registry-declared state_dir the
-# declaration lives at, _orch_guard_event for the over-fire metric), the scrubbed git primitive
+# It reuses the orchestration substrate (_state_dir_from_registry for the registry-declared state_dir the
+# declaration lives at, resolved from a single validated registry read, _orch_guard_event for the over-fire
+# metric), the scrubbed git primitive
 # (_recovery_toplevel), and the
 # gensrc containment/loader idiom (_gensrc_within, the lstat->S_ISREG->byte-bound->UTF-8->JSON taxonomy).
 # TWO arming inputs, each fail-open on ABSENCE only: the per-slice declaration (slice confinement) and the
@@ -5866,8 +5869,9 @@ def _wrtscp_nested_repo(target, root_c):
 
 
 def _wrtscp_deny(root, detail, reason, banner):
-    """A write-scope DENY that also appends a guard-events row (the over-fire metric) when root is
-    resolvable, so over-fire frequency is measured rather than assumed."""
+    """A write-scope DENY that also makes a BEST-EFFORT guard-events append (the over-fire metric) when root
+    is resolvable. The append is best-effort: _orch_guard_event may return False and this ignores it, so a
+    failed append neither blocks nor alters the denial and the over-fire metric may be lost for that event."""
     if root is not None:
         _orch_guard_event(root, "wrtscp", "deny", detail)
     return _deny("AIQT rule wrtscp (write-scope): {}".format(reason),
