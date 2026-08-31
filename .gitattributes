@@ -537,6 +537,7 @@ tools/gen_skill.py text eol=lf
 tools/import_cwe.py text eol=lf
 tools/leak-hashes.txt text eol=lf
 tools/migrate.py text eol=lf
+tools/opf_render.py text eol=lf
 tools/orch_doctor.py text eol=lf
 tools/orch_preflight.py text eol=lf
 tools/orch_register.py text eol=lf

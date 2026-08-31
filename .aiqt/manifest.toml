@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c0744e527ebf0e6e897647397cbf60a0d6e124fe61452a0b4062d31d30bde915"
+tree-sha256 = "4be3419fa0a69b0dd413c4b5d72f30db277459a4fd492e97df774857c0567c62"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2071,8 +2071,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 32982
-sha256 = "368696f0d28af29cd8b54451091ab46418fcaf57270e1c82949d032cac2fed50"
+bytes = 33014
+sha256 = "3533a963336c947fd32f12d5937f63befbeda2eeeea2a867058595e0dc7b566b"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2571,8 +2571,8 @@ sha256 = "3c0c59a43b7adfecaec25f816ff828be507a728fb6709e87461deb87b77069aa"
 
 [[sources]]
 path = "tools/gen_changelog.py"
-bytes = 3145
-sha256 = "7aeb3e26059db37a91ce944e1d935d249721f2eec788648c466cd1e3cc5953fc"
+bytes = 2718
+sha256 = "3b2575bd2e50968caba5ad7bb2bb501933ccdc8c2881d3f850fa5d79bb371dc3"
 
 [[sources]]
 path = "tools/gen_claude.py"
@@ -2641,8 +2641,8 @@ sha256 = "7556db4481e58822bf0dcd35f66ecf5f96a1e9a5c250c1d1260b3114894d3e98"
 
 [[sources]]
 path = "tools/gen_roadmap.py"
-bytes = 4351
-sha256 = "f40e67994ea79ffa1b3942608e8c6071f74cc41a3d249a9825b5b08e8b9d3fe5"
+bytes = 3428
+sha256 = "2f91e677d1eaf446d6f4f33b754cd6a6d80cd58888a49e8784e9d4898e38c175"
 
 [[sources]]
 path = "tools/gen_rules.py"
@@ -2673,6 +2673,11 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 path = "tools/migrate.py"
 bytes = 82580
 sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
+
+[[sources]]
+path = "tools/opf_render.py"
+bytes = 4640
+sha256 = "88dc35ae8b4956d21e9d38651bd6134cf44c92527468f0fd9f41d55a5da44a5e"
 
 [[sources]]
 path = "tools/orch_doctor.py"
