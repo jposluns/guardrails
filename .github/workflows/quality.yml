@@ -118,6 +118,9 @@ jobs:
       - name: Site version currency
         run: python3 tools/check_site_versions.py
 
+      - name: Render driver behaviour self-test
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_opf_render.py
+
       - name: Roadmap drift
         run: python3 tools/gen_roadmap.py --check
 
