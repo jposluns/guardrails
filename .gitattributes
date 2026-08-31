@@ -480,6 +480,7 @@ tools/check_artifact_checksums.py text eol=lf
 tools/check_byte_canon.py text eol=lf
 tools/check_clauses.py text eol=lf
 tools/check_crosswalk.py text eol=lf
+tools/check_derived_command_parameters.py text eol=lf
 tools/check_footer.py text eol=lf
 tools/check_gensrc_failclose.py text eol=lf
 tools/check_install_page.py text eol=lf

@@ -19,3 +19,10 @@ a wrong action. Configuration copied or templated from another context, another 
 account, or environment tier, is re-read and re-verified against the intended target before first use:
 every path, remote, account, and endpoint it carries is confirmed to point at the target, never trusted
 on the strength of having worked at its origin.
+
+A reusable command that carries a context-specific identifier, path, remote, account, or endpoint is
+confirmed against the concrete checkout and target before it runs, never trusted because it was correct in
+the repository or template it came from. The command derives that parameter for the target it is now aimed
+at, or confirms the retained value points there; a literal left in place from the command's origin is not
+that confirmation, and a command aimed by it at the wrong target is a wrong action however correct its
+logic.

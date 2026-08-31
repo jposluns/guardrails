@@ -4875,6 +4875,103 @@ _ORCH_SHELL_KEYWORDS = frozenset((
     "do", "done", "in", "function", "time", "coproc"))
 
 
+def _orch_foreground_detach(command):
+    """True when a foreground command carries an executable, unquoted, unescaped bare `&` control operator
+    that detaches a child, launching asynchronous work the foreground tool call does not track. The bare
+    detach `&` is distinguished from the shell forms that also carry an ampersand but do NOT detach: the
+    `&&` logical-AND, the `&>` and `&>>` redirects, the `<&`, `>&`, and `|&` descriptor-duplication and
+    pipe-stderr operators, any single-quoted, double-quoted, or backslash-escaped ampersand, and an `&`
+    inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
+    escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
+    classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
+    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
+    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
+    is still caught rather than smuggled past.
+
+    AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
+    unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
+    unbalanced quote, or a construct this scan does not model such as ANSI-C `$'...'` or locale `$"..."`
+    quoting, can leave the scan `inside quotes` and skip a real trailing `&`), so it reports a detach
+    (True -> ASK) rather than allowing. A genuinely balanced, quoted `&` is literal and correctly ignored.
+
+    NARROW BY CONSTRUCTION: this scans for the accidental bare-operator case only. Grammar it does not
+    model (a here-document body, a nested shell string, an alias or function that renames a detacher, and
+    runtime detachers such as nohup/setsid/disown/coproc) is a disclosed residual; where such a construct
+    still leaves an unquoted bare `&`, or leaves the scan inside an unbalanced quote, it errs toward the
+    ASK, but a detacher that carries no bare `&` (setsid worker, a nested `bash -c '... &'`) is NOT caught
+    here and is a silent-allow residual disclosed in the manifest."""
+    in_single = in_double = escaped = False
+    prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
+    word_start = True  # the next unquoted char begins a word (start of string, or after unquoted whitespace)
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            escaped, prev_dup, word_start = False, False, False
+            i += 1
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+            prev_dup, word_start = False, False
+            i += 1
+            continue
+        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of THIS line is not code
+            # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command. Skip
+            # to the next newline and resume the scan, so a real bare `&` on a LATER line is not smuggled
+            # past by a comment on an earlier one. Breaking the whole scan here silently allowed exactly that
+            # (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the comment-obscured detach.
+            nl = command.find("\n", i)
+            if nl == -1:
+                break  # no later line: the comment runs to the end of the string, nothing more to scan
+            i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
+            continue
+        if ch.isspace():
+            prev_dup, word_start = False, True
+            i += 1
+            continue
+        if ch == "\\":
+            escaped, prev_dup, word_start = True, False, False
+            i += 1
+            continue
+        if ch == "'":
+            in_single, prev_dup, word_start = True, False, False
+            i += 1
+            continue
+        if ch == '"':
+            in_double, prev_dup, word_start = True, False, False
+            i += 1
+            continue
+        if ch == "&":
+            nxt = command[i + 1] if i + 1 < n else ""
+            if nxt == "&":  # `&&` logical AND: not a detach
+                prev_dup, word_start = False, False
+                i += 2
+                continue
+            if nxt == ">":  # `&>` / `&>>` redirect: not a detach
+                prev_dup, word_start = False, False
+                i += 1
+                continue
+            if prev_dup:  # `>&` / `<&` / `|&` descriptor-dup or pipe-stderr: not a detach
+                prev_dup, word_start = False, False
+                i += 1
+                continue
+            return True  # an executable bare `&` control operator: a foreground detach
+        prev_dup, word_start = ch in (">", "<", "|"), False
+        i += 1
+    # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; fail
+    # toward ASK rather than silently allow a possibly-real detach it could not see.
+    return in_single or in_double
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -4888,7 +4985,11 @@ def orch_truncation_guard(data):
     shell-syntax false-allow; whether the output actually reaches durable capture is a run-time property
     (the invoked program's own behaviour, or a platform limit such as the harness output ceiling) that is
     out of view here and is confirmed by the post-execution delivery-marker discipline, a disclosed
-    residual. A foreground call is out of scope (the harness returns its output directly)."""
+    residual. A foreground call is in scope only for one NARROW case (L-GS1 / trkasy): shell syntax that
+    DETACHES a child with a bare `&` still launches asynchronous work the foreground tool call does not
+    track, so a readable foreground command carrying such an operator ASKS the operator to use the tracked
+    background dispatch instead; every other foreground call remains out of scope (the harness returns its
+    output directly)."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -4901,7 +5002,22 @@ def orch_truncation_guard(data):
     command = tool_input.get("command")
     rib = tool_input.get("run_in_background") is True
     if not rib:
-        return _allow()  # foreground is out of scope by design
+        # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
+        # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
+        # are then lost. On a readable foreground command carrying such an operator, ASK the operator to use
+        # the platform's tracked background dispatch (run_in_background) and collect its completion, keep the
+        # command foreground and wait, or confirm the detached result is genuinely irrelevant. An unreadable
+        # or non-detaching foreground command stays out of scope (ALLOW): approving this ASK does not itself
+        # create tracking, and converting to run_in_background=true is what lets the dispatch ledger record it.
+        if isinstance(command, str) and _orch_foreground_detach(command):
+            return _ask(
+                "AIQT rule trkasy: this foreground command detaches a child with a bare '&', launching "
+                "asynchronous work this tool call does not track, so its result and failure are lost. Use "
+                "the platform's tracked background dispatch (run_in_background) and collect its completion, "
+                "keep the command in the foreground and wait for it, or confirm the detached result and "
+                "completion are genuinely not needed.",
+                "AIQT guardrail: asked on a foreground bare-& detach (untracked asynchronous work).")
+        return _allow()  # foreground without a bare-& detach operator is out of scope by design
     if not isinstance(command, str) or not command:
         return _deny(
             "AIQT rule trkasy: a background dispatch carried no readable command string; failing closed.",

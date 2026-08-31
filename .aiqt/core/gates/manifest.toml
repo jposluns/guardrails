@@ -244,6 +244,15 @@ class = "c"
 residue = "It checks that the shippable surface can land on a stranger's machine unchanged: no operator identity outside its attribution, no repo-operational vocabulary, no exemption markers, no unscannable file classes. It is a best-effort deny-list over an open vocabulary: a novel non-portable term or an unlisted operator-identity form outside the recognized set can slip it, so it covers a recognizable subset of the non-portability surface, not the whole of it (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "derived-command-parameters"
+script = "tools/check_derived_command_parameters.py"
+rules = ["grdinp", "exetgt"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "An adopter-parameterized scan that flags a hardcoded LITERAL value at an adopter-declared command sink (a command word plus an option name in a declared command-surface file), so a reusable command derives its target-specific parameter rather than baking one in (grdinp input-soundness, exetgt templated-target re-verification). It ships NO command, option, repository, or path of its own: with no .aiqt/derived-command-parameters.toml it is NOT APPLICABLE, and a present but unusable configuration fails closed. It covers a recognizable SUBSET (class c, partial): it proves only that the declared sink is NON-LITERAL (a reference to an allowed variable), never that the variable resolves at runtime to the correct target, which is exetgt's runtime confirmation outside any static scanner. Its lexical scanner does not model pipelines and grouping precisely, credits no command substitution as derived, matches a command by basename only (an alias, a function, a wrapper, or a dynamically constructed command word slips it), and reasons only over the option forms and reference-variable names the adopter declared, so an undeclared sink, an obfuscated or constructed literal, and a forge or tool the configuration does not name are outside it."
+
+[[gate]]
 id = "dashes"
 script = "tools/check_no_dashes.py"
 rules = []

@@ -432,6 +432,54 @@ def main():
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
         check("trunc/foreground-tee-allows", _verdict(bg("python3 build.py | tee f", rib=False)), "allow")
         check("trunc/empty-bg-denies", _verdict(bg("")), "deny")
+        # L-GS1 / trkasy: foreground bare-& detach coverage. A plain foreground call stays out of scope, but
+        # a bare `&` detaches a child into untracked async work -> ASK. The shell forms that also carry an
+        # ampersand but do NOT detach (&&, &>, &>>, <&, >&, |&, and any quoted or escaped &) stay ALLOW; the
+        # narrow scanner over-asks (never silently allows) on grammar it cannot model.
+        check("trunc/fg-detach-trailing-asks", _verdict(bg("long_job &", rib=False)), "ask")
+        check("trunc/fg-detach-between-asks", _verdict(bg("worker & echo done", rib=False)), "ask")
+        check("trunc/fg-detach-grouped-asks", _verdict(bg("( long_job & )", rib=False)), "ask")
+        check("trunc/fg-detach-newline-asks", _verdict(bg("long_job &\necho next", rib=False)), "ask")
+        # a later `wait` does not clear it: the lexical hook cannot prove the correct child is awaited.
+        check("trunc/fg-detach-then-wait-asks", _verdict(bg("worker & wait", rib=False)), "ask")
+        check("trunc/fg-logical-and-allows", _verdict(bg("build && test", rib=False)), "allow")
+        check("trunc/fg-amp-redirect-allows", _verdict(bg("build &> out.log", rib=False)), "allow")
+        check("trunc/fg-amp-redirect-append-allows", _verdict(bg("build &>> out.log", rib=False)), "allow")
+        check("trunc/fg-dup-stdout-allows", _verdict(bg("build 2>&1", rib=False)), "allow")
+        check("trunc/fg-dup-lt-allows", _verdict(bg("read x <&3", rib=False)), "allow")
+        check("trunc/fg-pipe-stderr-allows", _verdict(bg("build |& tee log", rib=False)), "allow")
+        check("trunc/fg-single-quoted-amp-allows", _verdict(bg("echo 'a & b'", rib=False)), "allow")
+        check("trunc/fg-double-quoted-amp-allows", _verdict(bg('echo "a & b"', rib=False)), "allow")
+        check("trunc/fg-escaped-amp-allows", _verdict(bg("echo a \\& b", rib=False)), "allow")
+        # direct scanner unit checks (the quote/escape provenance _segments cannot carry): a quoted or an
+        # escaped redirect char before `&` is still a real detach, while a genuine dup redirect is not.
+        check("trunc/scan-quoted-redirect-detach", aiqt_hooks._orch_foreground_detach('echo ">" &'), True)
+        check("trunc/scan-escaped-gt-then-detach", aiqt_hooks._orch_foreground_detach("echo \\>&"), True)
+        check("trunc/scan-real-dup-not-detach", aiqt_hooks._orch_foreground_detach("cmd 2>&1"), False)
+        # finding E (unbalanced/ambiguous quoting fails toward ASK, never a silent allow of a real `&`): a
+        # scan that ends still inside a quote (an unbalanced quote, or an ANSI-C $'...' construct this scan
+        # does not model) could hide a real trailing `&`, so it reports a detach. Without the fix each of
+        # these ended `inside quotes` and returned False, silently allowing the real `&`.
+        check("trunc/scan-ansi-c-hidden-detach", aiqt_hooks._orch_foreground_detach(r"echo $'a\'b' & echo x"), True)
+        check("trunc/scan-unbalanced-single-asks", aiqt_hooks._orch_foreground_detach("echo 'oops & bg"), True)
+        check("trunc/fg-ansi-c-hidden-detach-asks", _verdict(bg(r"echo $'a\'b' & echo x", rib=False)), "ask")
+        # finding F (an unquoted word-start `#` comment is dropped, so a commented-out `&` does not prompt):
+        # without the fix the `&` in comment text was scanned as an operator and over-ASKED.
+        check("trunc/scan-comment-amp-not-detach", aiqt_hooks._orch_foreground_detach("echo done # & comment"), False)
+        check("trunc/scan-comment-leading-hash-not-detach", aiqt_hooks._orch_foreground_detach("# long_job &"), False)
+        # L-GS1 fix-round: a `#` comment runs only to the end of ITS line, never to the end of a multi-line
+        # command. A comment on an earlier line must NOT swallow a real bare-& detach on a later line; before
+        # the fix the whole scan broke at the first `#`, so these two silently ALLOWED (returned False).
+        check("trunc/scan-comment-then-detach-nextline", aiqt_hooks._orch_foreground_detach("echo hi  # note\nsleep 100 &"), True)
+        check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
+        check("trunc/fg-comment-then-detach-asks", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "ask")
+        check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
+        # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
+        ti = Fixture(tmp, "trunc-inert")
+        (ti.root / ".aiqt" / "orchestration.local.json").unlink()
+        check("trunc/fg-detach-inert-no-registry", _verdict(aiqt_hooks.orch_truncation_guard(
+            ti.payload("PreToolUse", "Bash",
+                       {"command": "long_job &", "run_in_background": False}))), "allow")
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time
@@ -607,7 +655,9 @@ def main():
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
           "row; the truncation guard allows a plain metacharacter-free background command and asks on "
-          "any shell syntax or reserved word; the ledger records launches and completions; the resume "
+          "any shell syntax or reserved word, asks on a foreground bare-& detach while dropping a "
+          "word-start `#` comment and failing an unbalanced/ANSI-C quote toward ASK rather than a silent "
+          "allow; the ledger records launches and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; and the prompt stamp "
           "resets guard counters from genuine human input")
     return 0
