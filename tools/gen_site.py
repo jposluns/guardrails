@@ -30,24 +30,43 @@ constructs to keep the rule pages' content authorable in prose:
 
 Frontmatter tokens are context-escaped for their HTML sink: `title` for text position (inside
 `<title>...</title>`) and every other field for quoted-attribute position (inside `content="..."` or
-`href="..."`). All substitution is single-pass via _TOKEN_RE so a substituted value is NEVER re-scanned
-for further tokens (defeats the cascading-token vector). Body content is inserted at the shell's
-single `{{content}}` position AFTER the frontmatter substitution, so a body carrying literal `{{name}}`
-in prose is inert.
+`href="..."`). Substitution is a SINGLE `_TOKEN_RE.sub` pass over the original shell that inserts the
+body `{{content}}` fragment and every frontmatter token SIMULTANEOUSLY, so a substituted value is
+NEVER re-scanned for a further token (defeats the cascading-token vector) and a body carrying literal
+`{{name}}` prose is inert. At shell load, `_validate_token_sinks` confirms each field token's actual
+parsed position (attribute value vs element text) matches its declared sink, so a later shell edit
+that moves a text-sink token into an attribute context is rejected rather than silently under-escaped.
 
 Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
   - Frontmatter escaping covers the text and quoted-attribute HTML sinks the shell places tokens in;
     a future shell that places a token inside a `<script>`, `<style>`, unquoted attribute, or URL
-    context would need a fresh sink kind added to FIELD_TO_TOKEN. The URL fields (canonical, og-url)
-    are attribute-escaped, NOT URL-scheme-validated; a maintainer-authored `javascript:` value in the
-    frontmatter would render literally into an href/content attribute.
+    context would need a fresh sink kind added to FIELD_TO_TOKEN (a token placed in an unquoted or
+    script/style context is caught by `_validate_token_sinks` as a sink mismatch and fails closed,
+    rather than rendering under-escaped). The URL fields (canonical, og-url) are attribute-escaped,
+    NOT URL-scheme-validated; a maintainer-authored `javascript:` value in the frontmatter would
+    render literally into an href/content attribute.
   - md_to_html's HTML-block pass-through preserves the block bytes exactly for the type-1 subset and
     for lines beginning with `<`; heading/paragraph/hr blocks have their trailing whole-block
-    whitespace normalized before classification, and paragraphs fold internal per-line trailing
-    whitespace into single spaces on rewrap.
+    whitespace normalized before classification, and paragraphs fold internal per-line ASCII
+    space/tab into single spaces on rewrap (non-ASCII whitespace is preserved as content). A block
+    whose first line is text but a later line opens an HTML block at column 0 is an unsupported mixed
+    block (CommonMark type-6 paragraph interruption): it is REJECTED with a fail-closed SchemaError
+    directing the author to separate the two with a blank line, never silently escaped into the
+    paragraph. Disallowed control characters (C0 except tab/newline/CR, plus DEL) in a frontmatter
+    field value or the body are rejected at the field/body boundary rather than passed through raw.
+  - Discovery enumerates docs/ RECURSIVELY (`rglob('*.md')`); every discovered `docs/**/*.md` must be
+    declared in GENSRC_OUTPUTS or `--check`/generation fails closed (exit 2), and any `.md` that is a
+    symbolic link is refused. There is no filename-prefix exemption: the only shell template
+    (`_shell.html`) is `.html`, never a `.md` discovery candidate, so an underscore-prefixed,
+    nested, or symlinked stray `.md` fails loud instead of vanishing.
   - Source and target symlink protection is a pre-check (`is_symlink()` + `resolve()` bounding); a
-    committed symlink is refused. The read/write race between the pre-check and the syscall is not
-    race-free; a concurrent attacker with write access to the working tree could still swap a path.
+    committed symlink is refused. The check/use gap between the pre-check and the read/write syscall
+    is NOT race-free (no openat/O_NOFOLLOW/beneath containment). This is an accepted residual for a
+    maintainer-run LOCAL build tool operating on repo-relative paths under docs/ and site/ in a
+    committed git tree: the closed vector is a committed symlink; the residual is a same-host actor
+    with write access to the working tree swapping a path component between the pre-check and the
+    syscall, which is outside this tool's threat model (matching the L11/L-GS1 disclosed-residual
+    precedent). A hardened deployment isolates the build at the OS level (namespaces/bind-mounts).
 
   gen_site.py           regenerate every site/<name>.html declared in GENSRC_OUTPUTS
   gen_site.py --check   fail (exit 1) if any target is out of date; exit 2 on a bad source/shell
@@ -56,6 +75,7 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
 import html
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 try:
@@ -137,8 +157,26 @@ SIDEBAR_SLUG_TO_HREF = {
 }
 
 
+# Disallowed control characters: the C0 controls (U+0000-U+001F) except tab (U+0009), line feed
+# (U+000A), and carriage return (U+000D), plus DEL (U+007F). These are anomalous in maintainer-authored
+# frontmatter and body text; they pass through HTML parsing as NULL-substitution or parse errors
+# (per the HTML/CommonMark specs), so they are rejected at the field/body boundary rather than emitted
+# raw into the page. Tab/LF/CR are legitimate whitespace and are left to the normal escaping path.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 class SchemaError(Exception):
     """A source frontmatter or body that this generator cannot render; reported at exit 2."""
+
+
+def _reject_controls(value, where, source_rel):
+    """Raise SchemaError if `value` carries a disallowed control character. `where` names the boundary
+    (a frontmatter field name or 'body') for the error message."""
+    m = _CONTROL_RE.search(value)
+    if m:
+        raise SchemaError(
+            "{}: {} contains a disallowed control character (U+{:04X})"
+            .format(source_rel, where, ord(m.group(0))))
 
 
 def split_frontmatter(source_text, source_rel):
@@ -190,6 +228,7 @@ def parse_frontmatter(fm_text, source_rel):
             raise SchemaError("{}: frontmatter is missing required key '{}'".format(source_rel, field))
         if not isinstance(data[field], str):
             raise SchemaError("{}: frontmatter key '{}' must be a string".format(source_rel, field))
+        _reject_controls(data[field], "frontmatter key '{}'".format(field), source_rel)
     if "hand-authored" in data and not isinstance(data["hand-authored"], bool):
         raise SchemaError("{}: frontmatter key 'hand-authored' must be a bool".format(source_rel))
     slug = data["sidebar-active"]
@@ -231,10 +270,62 @@ _BLANK = re.compile(r"^[ \t]*$")
 # `re.sub` over the shell so a substituted value is never re-scanned for another token.
 _TOKEN_RE = re.compile(r"\{\{([\w-]+)\}\}")
 
-# Every `<a class="navlink" ...>` in the shell whose class begins with `navlink` (the shell has none
-# with an extra modifier today, but the shell-load-time check tolerates one that renders active
-# elsewhere). The href capture group is what the reconciliation compares against SIDEBAR_SLUG_TO_HREF.
-_NAVLINK_RE = re.compile(r'<a class="navlink[^"]*" href="([^"]+)"')
+class _NavlinkCollector(HTMLParser):
+    """Collect every `<a>` whose class list contains the `navlink` token, independent of attribute
+    order, quote style, whitespace, and case. A navlink MUST carry exactly one non-empty `href`;
+    anything else (zero, multiple, or empty) is recorded as an error so a malformed navlink cannot
+    slip past the reconciliation the way a single fixed byte-layout regex allowed."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs = []
+        self.errors = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        classes = None
+        hrefs = []
+        for key, value in attrs:
+            key_l = key.lower()
+            if key_l == "class":
+                classes = value or ""
+            elif key_l == "href":
+                hrefs.append(value)
+        if classes is None or "navlink" not in classes.split():
+            return
+        if len(hrefs) != 1 or not hrefs[0]:
+            self.errors.append(
+                "a navlink carries {} href attribute(s), expected exactly one non-empty href"
+                .format(len(hrefs)))
+            return
+        self.hrefs.append(hrefs[0])
+
+
+class _TokenContextCollector(HTMLParser):
+    """Record, for each `{{name}}` token in the shell, the HTML context(s) it parses into: `attr` when
+    it sits inside an attribute value, `text` when it sits in element text. Used to validate a field
+    token's ACTUAL position against its declared sink so a shell edit cannot relocate a text-sink
+    token into an attribute (under-escaped) context unnoticed."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.contexts = {}
+
+    def _record(self, source, ctx):
+        for m in _TOKEN_RE.finditer(source):
+            self.contexts.setdefault(m.group(1), set()).add(ctx)
+
+    def handle_starttag(self, tag, attrs):
+        for _key, value in attrs:
+            if value:
+                self._record(value, "attr")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data):
+        self._record(data, "text")
 
 
 def _escape_text(value):
@@ -292,7 +383,7 @@ def _split_into_blocks(body):
     return blocks
 
 
-def md_to_html(body):
+def md_to_html(body, source_rel="<source>"):
     """Convert the bounded Markdown subset to an HTML content fragment.
 
     Blocks are separated by blank lines (`[ \\t]*$` per CommonMark §2.1). Each block is either an
@@ -310,6 +401,7 @@ def md_to_html(body):
     """
     if body == "":
         return ""
+    _reject_controls(body, "body", source_rel)
     raw_blocks = _split_into_blocks(body)
     out_blocks = []
     for block in raw_blocks:
@@ -330,8 +422,21 @@ def md_to_html(body):
             text = _escape_text(match.group(2))
             out_blocks.append("<h{level}>{text}</h{level}>".format(level=level, text=text))
             continue
-        # Paragraph: fold internal newlines into single spaces, escape, wrap in <p>.
-        text = _escape_text(" ".join(part.strip() for part in block.split("\n")))
+        # A non-HTML block whose FIRST line is text but a later line opens an HTML block at column 0
+        # is a CommonMark type-6 paragraph interruption. This bounded converter does not merge the two
+        # (that would need full type-1..6 start/end handling); rather than silently escape the HTML
+        # opener into the paragraph text (a silent-wrong render), it fails closed and directs the
+        # author to separate the blocks with a blank line.
+        for ln in block.split("\n"):
+            if ln.startswith("<"):
+                raise SchemaError(
+                    "{}: an HTML block opener ({!r}) cannot interrupt a paragraph in this bounded "
+                    "converter; separate the HTML block from the preceding text with a blank line"
+                    .format(source_rel, ln[:40]))
+        # Paragraph: fold internal newlines into single spaces, escape, wrap in <p>. Only ASCII
+        # space/tab is stripped per line so non-ASCII whitespace (e.g. U+00A0, U+2028) stays content
+        # rather than being silently deleted.
+        text = _escape_text(" ".join(part.strip(" \t") for part in block.split("\n")))
         out_blocks.append("<p>{}</p>".format(text))
     return "\n\n".join(out_blocks)
 
@@ -367,6 +472,17 @@ def _validate_shell_placeholders(shell, shell_rel):
     legitimately carried braces).
     """
     expected = set(t for (t, _) in FIELD_TO_TOKEN.values()) | {CONTENT_TOKEN}
+    # Reject any moustache opener `{{` that is not the exact start of a well-formed `{{name}}` token.
+    # _TOKEN_RE (and the substitution pass) only recognize `{{[\w-]+}}`, so a malformed shape such as
+    # `{{ foo }}`, `{{foo.bar}}`, `{{}}`, `{{title!}}`, or an unclosed `{{` is otherwise neither
+    # substituted nor rejected and ships literally to the site. Keying off the opener (not `}}`) keeps
+    # legitimate non-token braces (e.g. `{}` in inline script) from false-triggering.
+    for m in re.finditer(r"\{\{", shell):
+        if _TOKEN_RE.match(shell, m.start()) is None:
+            near = shell[m.start():m.start() + 24].split("\n", 1)[0]
+            raise SchemaError(
+                "{}: shell carries a malformed placeholder near {!r} (expected `{{{{name}}}}` with "
+                "name matching [A-Za-z0-9_-]+)".format(shell_rel, near))
     counts = {}
     for m in _TOKEN_RE.finditer(shell):
         tok = m.group(0)
@@ -386,16 +502,48 @@ def _validate_shell_placeholders(shell, shell_rel):
                 "{}: shell carries unknown placeholder {}".format(shell_rel, token))
 
 
-def _validate_shell_sidebar(shell, shell_rel):
-    """Reconcile the shell's sidebar `<a class="navlink" href="...">` set against SIDEBAR_SLUG_TO_HREF.
+def _validate_token_sinks(shell, shell_rel):
+    """Validate that each field token sits in the HTML context its declared sink assumes.
 
-    Every mapped href MUST appear exactly once as a navlink (drift in an unselected slug never
-    surfaces during rendering otherwise). Every INTERNAL navlink href (starting with `/`) MUST be in
-    the map (a shell edit that adds an internal link cannot silently produce a page whose slug list
-    fell out of sync). EXTERNAL navlinks (starting with `http://` or `https://`) are exempt: the
-    shell's `View on GitHub` link is external and not a page slug.
+    `_escape_field` escapes a value for its declared sink (text escapes `&<>`; attr additionally
+    escapes `"'`). If a shell edit relocates a text-sink token (e.g. `{{title}}`) into an attribute
+    value, the value would be under-escaped and could break out of its attribute. This parses the
+    shell and confirms each field token's ACTUAL parsed context matches its declared sink; a mismatch,
+    or a token whose context cannot be observed (e.g. it sits in a comment or an unhandled position),
+    is a SchemaError (fail-closed). `{{content}}` has no sink (body HTML inserted verbatim) and is not
+    checked here.
     """
-    hrefs = _NAVLINK_RE.findall(shell)
+    collector = _TokenContextCollector()
+    collector.feed(shell)
+    collector.close()
+    for _field, (token, sink) in FIELD_TO_TOKEN.items():
+        name = token[2:-2]
+        seen = collector.contexts.get(name, set())
+        if seen != {sink}:
+            raise SchemaError(
+                "{}: token {} is declared for the {!r} sink but parses in context {} in the shell; "
+                "its escaping would not match its actual HTML position"
+                .format(shell_rel, token, sink, sorted(seen) or "none observed"))
+
+
+def _validate_shell_sidebar(shell, shell_rel):
+    """Reconcile the shell's sidebar navlink set against SIDEBAR_SLUG_TO_HREF.
+
+    Every `<a>` whose class list contains `navlink` is parsed (via HTMLParser, so attribute order,
+    quote style, whitespace, and case do not matter and a malformed navlink cannot hide behind an
+    alternate byte layout). Each navlink MUST carry exactly one non-empty href. Every mapped href
+    MUST appear exactly once as a navlink (drift in an unselected slug never surfaces during rendering
+    otherwise). Every INTERNAL navlink href (starting with `/`) MUST be in the map (a shell edit that
+    adds an internal link cannot silently produce a page whose slug list fell out of sync). EXTERNAL
+    navlinks (starting with `http://` or `https://`) are exempt: the shell's `View on GitHub` link is
+    external and not a page slug.
+    """
+    collector = _NavlinkCollector()
+    collector.feed(shell)
+    collector.close()
+    if collector.errors:
+        raise SchemaError("{}: {}".format(shell_rel, collector.errors[0]))
+    hrefs = collector.hrefs
     counts = {}
     for h in hrefs:
         counts[h] = counts.get(h, 0) + 1
@@ -432,7 +580,7 @@ def render_page(shell, source_text, source_rel):
     """
     fm_text, body = split_frontmatter(source_text, source_rel)
     data = parse_frontmatter(fm_text, source_rel)
-    body_html = md_to_html(body)
+    body_html = md_to_html(body, source_rel)
     # Substitution map keyed by token NAME (the `{{name}}` capture group). Frontmatter values are
     # escaped for the sink their token sits in; `content` inserts the body HTML fragment verbatim
     # (md_to_html has already escaped its inline text). Both go through the same single-pass sub.
@@ -545,18 +693,26 @@ def main(argv):
     shell = _read(shell_path)
     try:
         _validate_shell_placeholders(shell, SHELL_REL)
+        _validate_token_sinks(shell, SHELL_REL)
         _validate_shell_sidebar(shell, SHELL_REL)
         entries = _declared_md_sources()
     except SchemaError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    # Discovery reconciliation: any docs/*.md not in the declared set is a silent-drop hazard (a
+    # Discovery reconciliation: any docs/**/*.md not in the declared set is a silent-drop hazard (a
     # maintainer adds docs/rule2.md but forgets to declare it, and the target is never generated).
+    # Discovery is RECURSIVE (rglob) and has NO filename-prefix exemption, so an underscore-prefixed,
+    # nested-subdirectory, or symlinked stray .md fails loud rather than silently vanishing. The only
+    # shell template (_shell.html) is .html, never a .md discovery candidate. A .md that is a symbolic
+    # link is refused outright (reading it would pull an out-of-tree file into the pipeline).
     declared_sources = {src_rel for src_rel, _ in entries}
-    discovered = tuple(sorted(p for p in docs_root.glob("*.md")
-                              if not p.name.startswith("_") and not p.is_symlink()))
+    discovered = tuple(sorted(docs_root.rglob("*.md")))
     for p in discovered:
         rel = p.relative_to(root).as_posix()
+        if p.is_symlink():
+            print("error: discovered docs source {} is a symbolic link; refusing to follow"
+                  .format(rel), file=sys.stderr)
+            return 2
         if rel not in declared_sources:
             print("error: discovered docs source {} is not declared in GENSRC_OUTPUTS"
                   .format(rel), file=sys.stderr)
@@ -923,6 +1079,152 @@ def _self_test():
     # ---- Preserve rstrip semantics for hr trailing whitespace (MINOR-11 residual) --------------
     # 39. hr with trailing whitespace still renders (documented residual: non-HTML block rstrip).
     _expect_render("hr trailing ws", frontmatter + "---   \n", "<hr>")
+
+    # ---- Malformed placeholder tokens rejected (finding 4) -------------------------------------
+    # A moustache opener that is not the exact start of a well-formed {{name}} token is rejected at
+    # load time, so a malformed token can never ship literally to the site.
+    for label, bad in (
+        ("ws-inside", "<div>{{ stray }}</div>"),
+        ("dotted", "<div>{{foo.bar}}</div>"),
+        ("empty", "<div>{{}}</div>"),
+        ("bang", "<div>{{title!}}</div>"),
+        ("unclosed", "<div>{{unclosed</div>"),
+    ):
+        _expect_raises(
+            "malformed placeholder " + label,
+            lambda b=bad: _validate_shell_placeholders(
+                tiny_shell.replace("</body>", b + "</body>"), "shell.html"),
+            SchemaError, "malformed placeholder")
+    # A well-formed but unknown token still reports as an unknown (not malformed) placeholder.
+    _expect_raises(
+        "wellformed unknown placeholder",
+        lambda: _validate_shell_placeholders(
+            tiny_shell.replace("</body>", "{{stray}}</body>"), "shell.html"),
+        SchemaError, "unknown placeholder {{stray}}")
+
+    # ---- Sidebar navlink parse robust to layout (finding 3) ------------------------------------
+    nav_base = tiny_shell.replace(
+        '<body>{{content}}</body>',
+        '<body>'
+        + ''.join('<a class="navlink" href="{}">L</a>'.format(h)
+                  for h in SIDEBAR_SLUG_TO_HREF.values())
+        + '{{content}}</body>')
+    # A duplicate navlink in an ALTERNATE attribute layout (href before class) is caught.
+    _expect_raises(
+        "navlink alt-layout duplicate",
+        lambda: _validate_shell_sidebar(
+            nav_base.replace('{{content}}',
+                             '<a href="/rule1" class="navlink">Dup</a>{{content}}'), "shell.html"),
+        SchemaError, "2 navlinks for slug 'rule1'")
+    # A duplicate navlink using single-quoted attributes is caught.
+    _expect_raises(
+        "navlink single-quote duplicate",
+        lambda: _validate_shell_sidebar(
+            nav_base.replace('{{content}}',
+                             "<a class='navlink' href='/rule2'>Dup</a>{{content}}"), "shell.html"),
+        SchemaError, "2 navlinks for slug 'rule2'")
+    # A navlink with no href is caught (not silently ignored).
+    _expect_raises(
+        "navlink missing href",
+        lambda: _validate_shell_sidebar(
+            nav_base.replace('{{content}}',
+                             '<a class="navlink">NoHref</a>{{content}}'), "shell.html"),
+        SchemaError, "0 href attribute")
+
+    # ---- Token sink matches actual HTML context (finding 5) ------------------------------------
+    # Relocating a text-sink token ({{title}}) into an attribute value is rejected at load time.
+    _expect_raises(
+        "token sink relocation",
+        lambda: _validate_token_sinks(
+            tiny_shell.replace("<title>{{title}}</title>",
+                               '<div data-title="{{title}}"></div><title>x</title>'), "shell.html"),
+        SchemaError, "declared for the 'text' sink")
+    # The well-formed tiny shell passes sink validation.
+    case_count += 1
+    try:
+        _validate_token_sinks(tiny_shell, "shell.html")
+    except SchemaError as exc:
+        failures.append("token sink ok shell: unexpected SchemaError: {}".format(exc))
+
+    # ---- Type-6 HTML-block paragraph interruption fails loud (finding 6) -----------------------
+    # A text line immediately followed by a column-0 HTML block opener is an unsupported mixed block:
+    # it fails closed rather than silently escaping the opener into the paragraph text.
+    _expect_error("type6 interruption fails loud",
+                  frontmatter + "text\n<div>x</div>\n", "cannot interrupt a paragraph")
+    # Separated by a blank line, the same input renders a paragraph then a raw HTML block.
+    _expect_render("type6 blank-separated paragraph",
+                   frontmatter + "text\n\n<div>x</div>\n", "<p>text</p>")
+    _expect_render("type6 blank-separated html",
+                   frontmatter + "text\n\n<div>x</div>\n", "<div>x</div>")
+
+    # ---- Control characters rejected at the boundary (finding 7) -------------------------------
+    # A DEL (U+007F) in a frontmatter field value is rejected (TOML accepts it; the field guard does not).
+    _expect_error("frontmatter control char",
+                  frontmatter.replace('title = "T"', 'title = "T\\u007f"'),
+                  "disallowed control character")
+    # A C0 control (U+0001) in the body is rejected.
+    _expect_error("body control char", frontmatter + "a\x01b\n", "disallowed control character")
+
+    # ---- Unicode whitespace preserved, not deleted (finding 8) ---------------------------------
+    # A line of only non-ASCII whitespace stays content (it is not an ASCII blank line), so the
+    # paragraph fold preserves it rather than silently erasing the character.
+    _expect_render("nbsp preserved", frontmatter + "One\n\u00a0\nTwo\n", "One \u00a0 Two")
+    _expect_render("u2028 preserved", frontmatter + "One\n\u2028\nTwo\n", "One \u2028 Two")
+    _expect_render("u2029 preserved", frontmatter + "One\n\u2029\nTwo\n", "One \u2029 Two")
+
+    # ---- CLI discovery reconciliation edge forms (finding 2) -----------------------------------
+    # Underscore-prefixed, nested-subdirectory, and symlinked stray .md sources fail loud (exit 2)
+    # via main(), rather than being silently skipped by a non-recursive/prefix-excluding discovery.
+    import contextlib
+    import io as _io
+    mod = sys.modules[__name__]
+
+    def _run_main(tmp_repo, argv):
+        orig = mod.repo_root
+        mod.repo_root = lambda: tmp_repo
+        buf = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                return main(argv)
+        finally:
+            mod.repo_root = orig
+
+    with tempfile.TemporaryDirectory() as td2:
+        td2 = Path(td2)
+        (td2 / "docs").mkdir()
+        (td2 / "site").mkdir()
+        (td2 / "docs" / "_shell.html").write_text(nav_base, encoding="utf-8")
+        (td2 / "docs" / "rule1.md").write_text(frontmatter + "hello\n", encoding="utf-8")
+        case_count += 1
+        if _run_main(td2, []) != 0:
+            failures.append("discovery baseline generate: expected exit 0")
+        case_count += 1
+        if _run_main(td2, ["--check"]) != 0:
+            failures.append("discovery baseline check: expected exit 0")
+        # Underscore-prefixed stray (no prefix exemption for .md).
+        stray_u = td2 / "docs" / "_stray.md"
+        stray_u.write_text(frontmatter + "x\n", encoding="utf-8")
+        case_count += 1
+        if _run_main(td2, ["--check"]) != 2:
+            failures.append("underscore stray .md: expected exit 2")
+        stray_u.unlink()
+        # Nested-subdirectory stray.
+        (td2 / "docs" / "sub").mkdir()
+        stray_n = td2 / "docs" / "sub" / "stray.md"
+        stray_n.write_text(frontmatter + "x\n", encoding="utf-8")
+        case_count += 1
+        if _run_main(td2, ["--check"]) != 2:
+            failures.append("nested stray .md: expected exit 2")
+        stray_n.unlink()
+        (td2 / "docs" / "sub").rmdir()
+        # Symlinked stray .md is refused outright.
+        if symlink_ok:
+            stray_l = td2 / "docs" / "link.md"
+            os.symlink("rule1.md", stray_l)
+            case_count += 1
+            if _run_main(td2, ["--check"]) != 2:
+                failures.append("symlink stray .md: expected exit 2")
+            stray_l.unlink()
 
     _ = stat  # `stat` imported for potential platform check; retained if the fixture path grows.
 
