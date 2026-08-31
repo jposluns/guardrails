@@ -2,10 +2,9 @@
 """Crash-durable transactional cutover journal (VER-CORE 9.3), an importable engine module. Stdlib only.
 
 Used by tools/migrate.py for cutover and recover; it also carries the INERT reverse-replay primitive
-(build_inverse_ops, 10.6) that Section 12 step 7's un-adopt will build on but which THIS VC-6 slice only
-exercises in the self-test (no un-adopt subcommand is wired here). tools/pin.py (Section 12 step 7, NOT
-built in this VC-6 slice) will reuse the low-level contained-apply helpers for the corrupt-state recovery
-carve-out ONLY; the ordinary re-pin preimage copy deliberately uses none of this journal.
+(build_inverse_ops, 10.6). tools/pin.py (Section 12 step 7) is now built: it reuses the low-level
+contained-apply helpers, and its 1.0.0 un-adopt reverses onboarding through a CONTAINED reverse-swap
+(no 9.3 journal); the corrupt-state recovery carve-out and forward re-pin remain DEFERRED at 1.0.0.
 
 CRASH-SAFETY MODEL (journal first, then apply, then complete):
   The seven normative steps (9.3, spec lines 1252 to 1339), in order, are
@@ -325,13 +324,27 @@ def read_frames(txn_dir):
     is the byte length of the clean prefix (everything before a torn tail), so recovery can truncate the
     tail before appending a terminal frame and keep the log parseable and idempotent. Any malformation
     NOT at the tail raises JournalError (9.3: a FAIL state, never silently skipped)."""
-    log = Path(txn_dir) / "frames.log"
     try:
-        raw = log.read_bytes()
+        txnfd = os.open(str(txn_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return [], False, 0
     except OSError as exc:
-        raise JournalError("cannot read journal frames.log ({})".format(exc))
+        raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
+    try:
+        try:
+            ffd = os.open("frames.log", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=txnfd)
+        except FileNotFoundError:
+            return [], False, 0
+        except OSError as exc:
+            raise JournalError("cannot read journal frames.log no-follow ({})".format(exc))
+        try:
+            if not stat.S_ISREG(os.fstat(ffd).st_mode):
+                raise JournalError("journal frames.log is not a regular file (no-follow)")
+            raw = _read_fd(ffd)
+        finally:
+            os.close(ffd)
+    finally:
+        os.close(txnfd)
     frames, off = [], 0
     while off < len(raw):
         nl = raw.find(b"\n", off)
