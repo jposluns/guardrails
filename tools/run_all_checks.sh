@@ -68,6 +68,7 @@ run_gate "newtab-selftest" python3 tools/check_newtab.py --self-test
 run_gate "newtab" python3 tools/check_newtab.py
 run_gate "site-versions-selftest" python3 tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 tools/check_site_versions.py
+run_gate "opf-render-selftest" env PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_opf_render.py
 run_gate "roadmap-drift"   python3 tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 tools/gen_changelog.py --check
 run_gate "versions"        python3 tools/check_versions.py

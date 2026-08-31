@@ -433,6 +433,15 @@ class = "a"
 residue = "It exercises the shipped hook behaviours end to end. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
 
 [[gate]]
+id = "opf-render-selftest"
+script = "tools/selftest_opf_render.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the shared render/reconcile driver (tools/opf_render.py) end to end: per-target ordering on a degraded input (an earlier target's drift line and write precede a later target's materialization failure, under both --check and write, for a missing and a markerless block page), a schema error on a later target aborting before an earlier target is reconciled, a one-shot iterator target being reconciled rather than silently skipped, and an empty target set failing closed. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative scenarios with exact stdout/exit-code matches, not the driver's whole input space, and it does not re-verify the healthy byte-identical generation the drift gates own."
+
+[[gate]]
 id = "gensrc-failclose"
 script = "tools/check_gensrc_failclose.py"
 rules = ["gensrc"]

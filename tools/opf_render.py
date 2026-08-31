@@ -8,8 +8,15 @@ source, while the load/render/reconcile/exit orchestration lives here once.
 
 Behaviour is identical to the hand-written mains it replaces: the same console strings, the same exit
 codes (0 clean, 1 drift under --check, 2 on a read or render error), and the same per-target drift
-lines in the same order. Targets are rendered before any is reconciled, so a render error never leaves
-a half-written set behind.
+lines in the same order. The driver runs in two phases so this identity holds even on a degraded input.
+First it RENDERS the payload of every target from the source, so a malformed source (raising schema_excs)
+surfaces before any target is reconciled, exactly as the hand-written mains rendered every payload inside
+one schema try/except before touching disk; a render error never leaves a half-written set behind. Then it
+MATERIALIZES and RECONCILES each target in declaration order, so an earlier target's `drift: <path>` line
+prints, and its file is written, before a later target's materialization failure aborts the run, matching
+what the hand-written mains did per target. Building every target fully before reconciling any (the shape
+this replaced) would instead let a later target's build failure suppress an earlier target's drift line and
+write, a behaviour change this ordering avoids.
 
 Stdlib only; the low-level primitives (repo_root, load_toml, reconcile, replace_block) live in
 _gen_common. This module carries no GENSRC_OUTPUTS and is not a tools/gen_*.py, so the generated-source
@@ -40,30 +47,45 @@ class FileTarget:
         self.path = path
         self.render = render
 
-    def build(self, root, data):
-        return root / self.path, self.render(data)
+    def render_payload(self, data):
+        """The schema-render step: turn the source data into this target's payload. Raises the
+        generator's schema_excs on a malformed source, before any target is reconciled."""
+        return self.render(data)
+
+    def materialize(self, root, payload):
+        """Turn the rendered payload into the (path, text) reconcile pair. A whole-file target touches
+        no disk here, so it never fails at this step."""
+        return root / self.path, payload
 
 
 class BlockTarget:
     """A generated block inside a hand-authored page: the named marker block's inner text is
     render(data) and the rest of the page is preserved.
 
-    render(data) is evaluated first, so a malformed source surfaces as the generic schema error just
-    as it did when the render call sat in the main's schema try/except; a missing page or absent
-    markers then surface as a TargetError (exit 2) with the page-specific message."""
+    render(data) is evaluated in the render phase, so a malformed source surfaces as the generic
+    schema error just as it did when the render call sat in the main's schema try/except; a missing
+    page or absent markers then surface in the materialize phase as a TargetError (exit 2) with the
+    page-specific message."""
 
     def __init__(self, path, marker, render):
         self.path = path
         self.marker = marker
         self.render = render
 
-    def build(self, root, data):
-        inner = self.render(data)
+    def render_payload(self, data):
+        """The schema-render step: render the block's inner text. Raises the generator's schema_excs
+        on a malformed source, before any target is reconciled (and before this page is read)."""
+        return self.render(data)
+
+    def materialize(self, root, payload):
+        """Splice the rendered inner text into the page's marker block, preserving the rest. Raises
+        TargetError (exit 2) when the page is missing or its markers are absent, matching the
+        page-specific messages the hand-written main printed."""
         target = root / self.path
         if not target.exists():
             raise TargetError("error: {} not found (expected generated target)".format(self.path))
         try:
-            new_text = replace_block(target.read_text(encoding="utf-8"), self.marker, inner)
+            new_text = replace_block(target.read_text(encoding="utf-8"), self.marker, payload)
         except (ValueError, OSError) as exc:
             # OSError too: an unreadable page is a read error, fail-closed exit 2, not a traceback.
             raise TargetError("error: {}".format(exc))
@@ -76,7 +98,15 @@ def run_generator(argv, *, source, targets, regen_hint, schema_excs):
     argv is the process arguments after the program name (--check selects drift-report mode). source
     is the repo-relative TOML. targets is an ordered sequence of FileTarget/BlockTarget. regen_hint is
     the line printed under --check when drift is found. schema_excs is the exception tuple that means
-    the source is missing or misuses a key (it differs per generator and is preserved exactly)."""
+    the source is missing or misuses a key (it differs per generator and is preserved exactly).
+
+    targets is materialized once (tuple), then consumed twice (render, then reconcile). Materializing
+    it fails closed on an empty declaration and prevents a one-shot iterator from being exhausted by the
+    render phase and then silently skipped by the reconcile phase (a fail-open that would return a clean
+    0 while reconciling nothing)."""
+    targets = tuple(targets)
+    if not targets:
+        raise ValueError("run_generator requires at least one target; got an empty target set")
     check = "--check" in argv
     root = repo_root()
     try:
@@ -84,18 +114,24 @@ def run_generator(argv, *, source, targets, regen_hint, schema_excs):
     except (OSError, ValueError) as exc:
         print("error: cannot read {}: {}".format(source, exc))
         return 2
-    built = []
+    # Render phase: render every target's payload from the source before any is reconciled, so a
+    # malformed source (schema_excs) aborts before a single target is written, exactly as the
+    # hand-written mains rendered every payload inside one schema try/except.
     try:
-        for target in targets:
-            built.append(target.build(root, data))
+        rendered = [(target, target.render_payload(data)) for target in targets]
     except schema_excs as exc:
         print("error: {} is missing or misuses a key: {}".format(source, exc))
         return 2
-    except TargetError as exc:
-        print(str(exc))
-        return 2
+    # Reconcile phase: materialize and reconcile each target in declaration order, so an earlier
+    # target's drift line prints (and its file is written) before a later target's materialization
+    # failure aborts the run, matching the hand-written mains' per-target ordering on every path.
     drift = False
-    for target, (path, text) in zip(targets, built):
+    for target, payload in rendered:
+        try:
+            path, text = target.materialize(root, payload)
+        except TargetError as exc:
+            print(str(exc))
+            return 2
         if reconcile(path, text, check):
             print("drift: {}".format(target.path))
             drift = True

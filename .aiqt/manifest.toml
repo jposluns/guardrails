@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "4be3419fa0a69b0dd413c4b5d72f30db277459a4fd492e97df774857c0567c62"
+tree-sha256 = "fd5d898593c6aed7d3d61a3379cd70c53257c4bb39988c5f67e716a49b2d5981"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -36,8 +36,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 51997
-sha256 = "567cce462e25d72493d70f5a9928fd1c68616648340580b3ab89ab20e07da23d"
+bytes = 52963
+sha256 = "a56d25ced82da42bdb1230ae83c7c30dc93f7dcfddda61798780e080dfcc7dfb"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2071,8 +2071,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 33014
-sha256 = "3533a963336c947fd32f12d5937f63befbeda2eeeea2a867058595e0dc7b566b"
+bytes = 33055
+sha256 = "9163dd9eef109f2ef2fc0d51944c9f242025c7379753316dd878505ca183d0f1"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2676,8 +2676,8 @@ sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
 path = "tools/opf_render.py"
-bytes = 4640
-sha256 = "88dc35ae8b4956d21e9d38651bd6134cf44c92527468f0fd9f41d55a5da44a5e"
+bytes = 7477
+sha256 = "f9db0d0389214445e76ba144772f49f206de891507e4c392e9a52ce57893a898"
 
 [[sources]]
 path = "tools/orch_doctor.py"
@@ -2696,13 +2696,18 @@ sha256 = "a82ec5b44f3dd8a17fb5baba00e5b9972ffc9b30a2e54585d2e53c9bf90afdba"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 9462
-sha256 = "34897bf9d8c579554f1ef9509bd44be8391c054e0277ce5affbb76b7d92836b3"
+bytes = 9560
+sha256 = "a10e5934a5256f723f9bf5f1ec7417cdde9e3c4c311d75c60ec474c204da640e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
 bytes = 237493
 sha256 = "70f038898e90c0fb321839b21bb322ab167231a32452e492ab1c104f2ba85089"
+
+[[sources]]
+path = "tools/selftest_opf_render.py"
+bytes = 9416
+sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
