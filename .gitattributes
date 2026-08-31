@@ -142,6 +142,7 @@
 .aiqt/core/rules/trust-trust-recovery-ext.md text eol=lf
 .aiqt/core/skill/skill-source.md text eol=lf
 .aiqt/enforceability.json text eol=lf
+.aiqt/frozen.json text eol=lf
 .aiqt/gensrc.json text eol=lf
 .aiqt/manifest.toml text eol=lf
 .aiqt/record-sections.toml.example text eol=lf

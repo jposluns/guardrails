@@ -59,6 +59,15 @@ unreadable payload field), an absent registry is the inert ALLOW, and only a mis
 Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
 mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
 
+It also covers the write-scope guard (write_scope_guard, wrtscp, EN-8): a Write/Edit/MultiEdit is confined
+to a harness-set per-slice declaration (<state_dir>/write-scope.json, out of tree) while writes to the
+frozen floor (.aiqt/frozen.json, one entry per frozen class {derived, manifest-self, archive}) and to
+other or nested git repositories are hard-denied as an un-lowerable floor. It is inert on a missing
+declaration for slice confinement, the structural and frozen denials are always-on, and every
+cannot-evaluate denies once armed. Fixtures are throwaway git repos under the temp tree (a session repo, a
+sibling repo, and a nested repo), with the declaration written into the redirected XDG_STATE_HOME and the
+floor synthesized in-tree, removed in the finally.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import contextlib
@@ -3414,6 +3423,207 @@ def main():
                           "tool_input": {"command": "cd rel"}}) != "deny":
             failures.append("(ap-c33) missing tool_name must DENY (fail-closed contract)")
 
+        # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
+        # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
+        # floor; inert on absence for slice confinement, fail-closed on cannot-evaluate once armed. Judged
+        # by the STRUCTURED (code, obj) verdict, never by grepping prose. The out-of-tree declaration lands
+        # in the harness state dir (XDG_STATE_HOME, redirected into tmp at the top of main), so it never
+        # touches the repo tree; the in-tree floor is a synthetic .aiqt/frozen.json carrying one entry of
+        # each frozen class {derived (site/downloads/), manifest-self (.aiqt/manifest.toml), archive
+        # (.aiqt/archive/)} plus the self-listed .aiqt/frozen.json, mirroring the real gen_manifest floor.
+        def wsdecide(tool, file_path, cwd, extra=None, event="PreToolUse", with_tool=True,
+                     tool_input="__default__"):
+            data = {"hook_event_name": event}
+            if with_tool:
+                data["tool_name"] = tool
+            if tool_input == "__default__":
+                ti = {}
+                if file_path is not None:
+                    ti["file_path"] = file_path
+                if extra:
+                    ti.update(extra)
+                data["tool_input"] = ti
+            elif tool_input is not None:
+                data["tool_input"] = tool_input
+            if cwd is not None:
+                data["cwd"] = cwd
+            code, obj, _s = aiqt_hooks.write_scope_guard(data)
+            if code == 2 and obj is None:
+                return "block2"
+            if code == 0 and obj is None:
+                return "allow"
+            if code == 0 and isinstance(obj, dict):
+                return obj.get("hookSpecificOutput", {}).get("permissionDecision", "unexpected")
+            return "unexpected(code={!r},obj={!r})".format(code, obj)
+
+        def ws_root_of(repo):
+            return aiqt_hooks._recovery_toplevel(str(repo))
+
+        def ws_state_dir(repo):
+            return aiqt_hooks._orch_state_dir_for_root(ws_root_of(repo))
+
+        def ws_arm(repo, allow, worktree_root="__self__", slice_name="slice-1", version=1, raw=None):
+            sd = ws_state_dir(repo)
+            os.makedirs(sd, exist_ok=True)
+            path = os.path.join(sd, "write-scope.json")
+            if raw is not None:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(raw)
+                return
+            wr = os.path.realpath(ws_root_of(repo)) if worktree_root == "__self__" else worktree_root
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"version": version, "slice": slice_name, "worktree_root": wr, "allow": allow}, fh)
+
+        def ws_disarm(repo):
+            path = os.path.join(ws_state_dir(repo), "write-scope.json")
+            if os.path.exists(path):
+                os.remove(path)
+
+        def ws_floor(repo, frozen, version=1, raw=None):
+            (repo / ".aiqt").mkdir(parents=True, exist_ok=True)
+            path = repo / ".aiqt" / "frozen.json"
+            if raw is not None:
+                path.write_text(raw, encoding="utf-8")
+                return
+            path.write_text(json.dumps({"version": version, "frozen": frozen}), encoding="utf-8")
+
+        def ws_nofloor(repo):
+            path = repo / ".aiqt" / "frozen.json"
+            if path.exists():
+                path.unlink()
+
+        def wsexpect(label, want, tool, file_path, repo, **kw):
+            got = wsdecide(tool, file_path, str(repo), **kw)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        WS_FLOOR = [".aiqt/frozen.json", ".aiqt/manifest.toml", ".aiqt/archive/", "site/downloads/"]
+        try:
+            ws_rp = tmp / "wsrepo"
+            ws_rp.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(ws_rp)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            ws_other = tmp / "wsother"
+            ws_other.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(ws_other)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            ws_nested = ws_rp / "nested"
+            ws_nested.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(ws_nested)],
+                           check=True, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the write-scope fixtures: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        rp_j = lambda *p: os.path.join(str(ws_rp), *p)
+        other_j = lambda *p: os.path.join(str(ws_other), *p)
+
+        # --- ARMED slice confinement: allow in-scope, deny out-of-scope (allow = src/) ---
+        ws_floor(ws_rp, WS_FLOOR)
+        ws_arm(ws_rp, ["src/"])
+        wsexpect("(ws-a) armed: Write an in-scope file allows", "allow", "Write", rp_j("src", "x.py"), ws_rp)
+        wsexpect("(ws-a2) armed: Edit an in-scope tree member allows", "allow",
+                 "Edit", rp_j("src", "deep", "y.py"), ws_rp)
+        wsexpect("(ws-a3) armed: MultiEdit an in-scope file allows (matcher includes MultiEdit)", "allow",
+                 "MultiEdit", rp_j("src", "x.py"), ws_rp)
+        wsexpect("(ws-b) armed: Write an out-of-scope file denies (row 21)", "deny",
+                 "Write", rp_j("tools", "y.py"), ws_rp)
+        wsexpect("(ws-b2) armed: Write an out-of-scope repo-root file denies", "deny",
+                 "Write", rp_j("README.md"), ws_rp)
+
+        # --- FROZEN-FLOOR hard-deny for EACH frozen class, EVEN WITH a permissive declaration (allow = ---
+        # --- .aiqt/ + site/, both LEGAL parents of frozen subtrees; the floor outranks the allowlist) ---
+        ws_arm(ws_rp, [".aiqt/", "site/"])
+        wsexpect("(ws-f-derived) frozen derived tree denies under a permissive allow (row 18)", "deny",
+                 "Write", rp_j("site", "downloads", "pkg.zip"), ws_rp)
+        wsexpect("(ws-f-manifest) frozen manifest-self file denies under a permissive allow (row 18)", "deny",
+                 "Edit", rp_j(".aiqt", "manifest.toml"), ws_rp)
+        wsexpect("(ws-f-archive) frozen archive tree denies under a permissive allow (row 18)", "deny",
+                 "Write", rp_j(".aiqt", "archive", "old.json"), ws_rp)
+        wsexpect("(ws-f-self) the floor's own copy denies (self-protection)", "deny",
+                 "Write", rp_j(".aiqt", "frozen.json"), ws_rp)
+        wsexpect("(ws-f-ok) a non-frozen in-allow path still allows under the permissive declaration",
+                 "allow", "Write", rp_j("site", "index.html"), ws_rp)
+
+        # --- Row 19: an allow entry wholly on the floor makes the declaration malformed -> deny ---
+        ws_arm(ws_rp, ["site/downloads/"])   # == the floor tree; wholly frozen
+        wsexpect("(ws-r19) allow entry wholly on the floor denies (declaration malformed, row 19)", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp)
+
+        # --- ARMED cannot-evaluate: every fault denies (rows 13, 14, 15, 17) ---
+        ws_arm(ws_rp, ["src/"])
+        wsexpect("(ws-rel-armed) a relative file_path denies while armed (row 14)", "deny",
+                 "Write", "rel/x.py", ws_rp)
+        ws_arm(ws_rp, ["src/"], worktree_root="/nonexistent/elsewhere")
+        wsexpect("(ws-mismatch) a worktree_root that does not resolve to this repo denies (row 13)", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp)
+        ws_arm(ws_rp, [], raw="{ not json")
+        wsexpect("(ws-decl-badjson) a malformed declaration denies while armed (row 13)", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp)
+        ws_arm(ws_rp, [], raw=json.dumps({"version": True, "slice": "s", "worktree_root": ".", "allow": []}))
+        wsexpect("(ws-decl-boolver) a boolean-true version is not int -> declaration bad denies", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp)
+        ws_arm(ws_rp, ["src/"])
+        ws_nofloor(ws_rp)
+        wsexpect("(ws-floor-absent-armed) an armed session with no committed floor denies (row 17)", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp)
+        ws_floor(ws_rp, [], raw="{ not json")
+        wsexpect("(ws-floor-bad-armed) a malformed floor denies while armed (cannot-evaluate)", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp)
+
+        # --- STRUCTURAL always-on: other-repo and nested-repo deny in BOTH regimes ---
+        ws_floor(ws_rp, WS_FLOOR)
+        ws_arm(ws_rp, ["src/"])
+        wsexpect("(ws-other-armed) a write into a sibling repo denies while armed (row 16)", "deny",
+                 "Write", other_j("z.txt"), ws_rp)
+        wsexpect("(ws-nested-armed) a write into a nested repo denies while armed (row 16)", "deny",
+                 "Write", rp_j("nested", "f.txt"), ws_rp)
+        ws_disarm(ws_rp)
+        wsexpect("(ws-other-unarmed) a write into a sibling repo denies UN-ARMED (always-on, conflict-2)",
+                 "deny", "Write", other_j("z.txt"), ws_rp)
+        wsexpect("(ws-nested-unarmed) a write into a nested repo denies UN-ARMED (always-on)", "deny",
+                 "Write", rp_j("nested", "f.txt"), ws_rp)
+
+        # --- UN-ARMED inert slice confinement + always-on frozen (floor present) ---
+        # ws_rp is disarmed; floor is WS_FLOOR.
+        wsexpect("(ws-inert-allow) un-armed: a non-frozen in-repo write allows (slice confinement off, row 12)",
+                 "allow", "Write", rp_j("anywhere", "z.txt"), ws_rp)
+        wsexpect("(ws-inert-frozen) un-armed: a frozen write still denies (floor always-on, row 8)", "deny",
+                 "Write", rp_j(".aiqt", "manifest.toml"), ws_rp)
+        wsexpect("(ws-rel-unarmed) un-armed: a relative file_path allows (abspth owns it, row 6)", "allow",
+                 "Write", "rel/x.py", ws_rp)
+        ws_floor(ws_rp, [], raw="{ not json")
+        wsexpect("(ws-floor-bad-unarmed) un-armed: a present-but-malformed floor denies (row 9)", "deny",
+                 "Write", rp_j("site", "downloads", "x.zip"), ws_rp)
+
+        # --- UN-ARMED, floor ABSENT: fully inert in-repo (frozen layer inert), structural still on ---
+        ws_nofloor(ws_rp)
+        wsexpect("(ws-nofloor-allow) un-armed + no floor: a non-frozen write allows (row 10 -> 12)", "allow",
+                 "Write", rp_j("anywhere", "z.txt"), ws_rp)
+        wsexpect("(ws-nofloor-frozenpath) un-armed + no floor: a would-be-frozen path allows (frozen inert)",
+                 "allow", "Write", rp_j("site", "downloads", "x.zip"), ws_rp)
+        wsexpect("(ws-nofloor-other) un-armed + no floor: a sibling-repo write STILL denies (structural)",
+                 "deny", "Write", other_j("z.txt"), ws_rp)
+
+        # --- Payload / matcher / event fail-closed contracts ---
+        wsexpect("(ws-notool) missing tool_name denies (shared fail-closed contract, row 3)", "deny",
+                 "Write", rp_j("src", "x.py"), ws_rp, with_tool=False)
+        wsexpect("(ws-nofp) a missing file_path denies (malformed call, row 4)", "deny",
+                 "Write", None, ws_rp)
+        wsexpect("(ws-badinput) a non-dict tool_input denies (malformed call, row 4)", "deny",
+                 "Write", None, ws_rp, tool_input=None)
+        wsexpect("(ws-ctrlchar) a control-character file_path denies (malformed)", "deny",
+                 "Write", rp_j("src", "x\x00.py"), ws_rp)
+        wsexpect("(ws-bash-oos) Bash is out of the matcher and allows (the Bash residual, disclosed)",
+                 "allow", "Bash", None, ws_rp, extra={"command": "echo hi > /tmp/x"}, tool_input={"command": "echo hi"})
+        wsexpect("(ws-read-oos) Read is out of the matcher and allows", "allow",
+                 "Read", rp_j("src", "x.py"), ws_rp)
+        wsexpect("(ws-event) a mis-wired non-PreToolUse event hard-blocks (exit 2)", "block2",
+                 "Write", rp_j("src", "x.py"), ws_rp, event="Stop")
+        # A non-git session cannot locate the declaration -> inert allow (row 5).
+        wsexpect("(ws-nongit) a non-git session is inert (root unlocatable, row 5)", "allow",
+                 "Write", os.path.join(str(tmp), "plainfile.txt"), tmp)
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3549,7 +3759,22 @@ def main():
           "operand, inspects the parseable PREFIX before an unparseable construct INCLUDING the in-progress "
           "segment's redirect targets parsed before it ('cat > out.txt <<EOF' ASKS on out.txt) so an "
           "earlier relative cd/redirect still ASKS (only a position within or after the construct is a "
-          "disclosed-residual allow), and never denies except on a missing tool_name")
+          "disclosed-residual allow), and never denies except on a missing tool_name. "
+          "The write-scope guard (EN-8, wrtscp) is proven: ARMED, a Write/Edit/MultiEdit inside the "
+          "per-slice declaration scope ALLOWS and one outside it DENIES (row 21); the frozen floor "
+          "hard-denies a write into each frozen class (derived site/downloads/, manifest-self "
+          ".aiqt/manifest.toml, archive .aiqt/archive/) and the floor's own .aiqt/frozen.json EVEN under a "
+          "permissive declaration (row 18, deny over allow), while a non-frozen in-allow path still allows; "
+          "an allow entry wholly on the floor makes the declaration malformed and DENIES (row 19); a "
+          "sibling repo and a nested repo DENY in BOTH regimes (always-on structural, the conflict-2 "
+          "resolution); UN-ARMED, a non-frozen in-repo write ALLOWS (slice confinement off) while the "
+          "frozen and other/nested-repo denials still fire, and with the floor ABSENT the frozen layer goes "
+          "inert (a would-be-frozen path allows) while the structural denial stays on; and every "
+          "cannot-evaluate once armed DENIES (a malformed/boolean-version/worktree_root-mismatch "
+          "declaration, an absent or malformed floor, a relative file_path) while a MISSING tool_name, a "
+          "non-dict tool_input, a missing file_path, and a control-character file_path DENY as malformed "
+          "calls, a relative path and a non-git session are inert un-armed, Bash and Read are out of the "
+          "matcher (the disclosed Bash residual), and a mis-wired event hard-blocks (exit 2)")
     return 0
 
 

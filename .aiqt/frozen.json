@@ -1,0 +1,11 @@
+{
+  "frozen": [
+    ".aiqt/archive/",
+    ".aiqt/frozen.json",
+    ".aiqt/manifest.toml",
+    ".aiqt/release/announce-snippet.txt",
+    ".aiqt/release/root.txt",
+    "site/downloads/"
+  ],
+  "version": 1
+}

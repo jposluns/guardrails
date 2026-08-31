@@ -62,6 +62,9 @@ MINIMUM_CLASSES = (
     ("CLAUDE.md", "managed-block", "min"),
     (".aiqt/release/**", "derived", "min"),
     ("site/downloads/**", "derived", "min"),
+    (".aiqt/frozen.json", "derived", "min"),  # EN-8 write-scope frozen floor: a generated (derived) output,
+    #                                           gen_manifest-emitted from the ownership classification, like
+    #                                           the release/ and downloads/ generated outputs above.
     ("**", "pack-immutable", "min"),   # the category default: every other in-scope pack path
 )
 

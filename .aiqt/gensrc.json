@@ -36,6 +36,14 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_manifest.py",
+      "sources": [
+        ".aiqt/core/ownership.toml"
+      ],
+      "target": ".aiqt/frozen.json"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_gensrc.py",
       "sources": [
         "tools/"

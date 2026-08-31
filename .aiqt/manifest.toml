@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "7dc9ba547ac724092c3dd45b7aca9e3853f788a483b033a134515205684d8b66"
+tree-sha256 = "1fdc5fdd9bda3d89b9577421e54e2a7ad89adc0c1be42af5b650b27f34062b2a"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,13 +46,13 @@ sha256 = "6f0c245c659cfdd94a9894fc33ec955f05827ea618df62a789f6e2ef1ef58a29"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 81662
-sha256 = "265155b55a9d3091a2dc6c4bc61ba411797d909a4294630198df2665f34f17d9"
+bytes = 87186
+sha256 = "857dda719903f0b8ba9da983c03671f6a244b55bf8cef0c9ce1d26daeda020aa"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 374733
-sha256 = "2db298ae4b2d5a33b7aa5dae7c27c001fcc41177e4e2e1b4710aec8eda5444ff"
+bytes = 402865
+sha256 = "b1001258fa4e41cdea3b35a71b7396001ef61c314a70bc68af1bddc238319b58"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -71,8 +71,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 11223
-sha256 = "709281bb449ab1bdc2621ba478a0eb5abc3c3820b0379e90e67d18014985f11f"
+bytes = 11586
+sha256 = "26989a5b7c811917d4d723ed6f9fd652d3b4bb00bbd666dc823e1f623a527ecf"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -716,13 +716,18 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 171548
-sha256 = "8527c6999ed590e42b72428146eef9fc2d9d6b82266f7ef825dea777f75542f4"
+bytes = 187753
+sha256 = "edbdb8b0284911c999930421bb0463690ed962af0ec459ac99f27cc315b469b4"
+
+[[sources]]
+path = ".aiqt/frozen.json"
+bytes = 206
+sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 7563
-sha256 = "47957ed46478024c9b0279bc1b3d4cfea4dee0bb3003925b3f7f16c925d6775b"
+bytes = 7751
+sha256 = "3c26c32789c3af7e9f428d87784ca33104efa4a7bb4ac1ef5d428c55a4b38b5f"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2071,8 +2076,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 33108
-sha256 = "657bbb4f65c797755dc4546f1c615f292062526dcffea70332b5229f9d1c274a"
+bytes = 33138
+sha256 = "0d54bc1ebe8e848c7ff1320d2b77ff767d80219937e92249beb76dc2fe5e3f28"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2161,13 +2166,13 @@ sha256 = "fb63dde4ff5c4b73baa578e3ae9c07773a91b9e6498dd77411324a71339b0a70"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
-bytes = 6534
-sha256 = "202dbf5bd8489b45aabd9730efc8c7bc9dee109dc30059c743c0b7648462a050"
+bytes = 6876
+sha256 = "b0216198cfc1b4ca1bb4b486e11790c1d27d67c9b1470490bc4ab0e0aef42a80"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 374733
-sha256 = "2db298ae4b2d5a33b7aa5dae7c27c001fcc41177e4e2e1b4710aec8eda5444ff"
+bytes = 402865
+sha256 = "b1001258fa4e41cdea3b35a71b7396001ef61c314a70bc68af1bddc238319b58"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2441,8 +2446,8 @@ sha256 = "557ed1001be7a0969298463836fb894612dec1c60d5ad45a6b3446baada1a680"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 33673
-sha256 = "450e104a293c1449dcf5474ea34e0fb3b632938e72f8cb0413e1a04004a1ebd4"
+bytes = 33992
+sha256 = "1af07280774d8d77b0f435e6b2c7091c8d66f8e86322e5dc32641f73397deafd"
 
 [[sources]]
 path = "tools/check_mappings.py"
@@ -2621,8 +2626,8 @@ sha256 = "64f2adcf49949237202e7e5e2b6770442319eab85afc813eafd1d82597de4c0c"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 52961
-sha256 = "609d391e9a3dc849730afd858867bfe5169f9b7353aa318bda7c9d3650f4a4cc"
+bytes = 58235
+sha256 = "a516110a7872fb1751ab6389d6de7cc8388b5e12c5adca4960be71565c32e37c"
 
 [[sources]]
 path = "tools/gen_mappings.py"
@@ -2711,8 +2716,8 @@ sha256 = "de6be4150994de21192b1fa9d400ca73062e15b3802f1eeb5bfa44926ca00bf5"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 267553
-sha256 = "810f98415386ee49d74529c86817afe6fe76bad30fb5c07a9318c971d7a10632"
+bytes = 282273
+sha256 = "9db9409260c1e82ad3a2376397daae00789214b2742f9524e24b44af66aaf8e0"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
