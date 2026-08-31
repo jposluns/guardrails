@@ -97,6 +97,11 @@ pattern = "tools/**"
 class = "pack-immutable"
 note = "Shipped pack tooling, byte-exact; explicitly NOT dev-only (Section 12 step 2)."
 
+[[release-class]]
+pattern = "docs/**"
+class = "pack-immutable"
+note = "Documentation Markdown sources (docs/<name>.md) and the shared shell template (docs/_shell.html) that tools/gen_site.py composes into site/<name>.html. Byte-exact shipped pack content; the site pages remain the byte-parity target of the drift gate."
+
 # --- concern-1: pack-immutable exact paths (.aiqt files, adapters, .claude/.cursor files) ---------------
 
 [[release-class]]

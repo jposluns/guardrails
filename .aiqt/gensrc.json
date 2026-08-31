@@ -315,6 +315,15 @@
         "roadmap.toml"
       ],
       "target": "site/roadmap.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/rule1.md"
+      ],
+      "target": "site/rule1.html"
     }
   ],
   "version": 1
