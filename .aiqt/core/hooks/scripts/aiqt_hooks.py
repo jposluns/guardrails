@@ -4388,7 +4388,9 @@ def _orch_foreground_detach(command):
     inside an unquoted, word-start `#` comment (comment text, not an operator). A dedicated quote- and
     escape-tracking scan is used, NOT _segments: that helper strips quote and escape provenance and
     classifies both `echo "&"` and `echo \\&` as an `&` separator, which would over-fire. It also drops a
-    word-start `#` comment so a commented-out `&` does not prompt.
+    word-start `#` comment so a commented-out `&` does not prompt, but only to the END OF THAT LINE: a
+    comment never suppresses a later line, so a real bare `&` on a subsequent line of a multi-line command
+    is still caught rather than smuggled past.
 
     AMBIGUOUS QUOTING FAILS TOWARD ASK, never toward a silent allow: a scan that ends still inside an
     unbalanced single or double quote cannot prove that a later `&` is quoted rather than an operator (an
@@ -4426,8 +4428,16 @@ def _orch_foreground_detach(command):
             prev_dup, word_start = False, False
             i += 1
             continue
-        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of the line is not code
-            break
+        if ch == "#" and word_start:  # an unquoted, word-start comment: the rest of THIS line is not code
+            # A `#` comment runs only to the end of ITS line, not to the end of a multi-line command. Skip
+            # to the next newline and resume the scan, so a real bare `&` on a LATER line is not smuggled
+            # past by a comment on an earlier one. Breaking the whole scan here silently allowed exactly that
+            # (L-GS1: `echo hi  # note\nsleep 100 &`); this fails closed on the comment-obscured detach.
+            nl = command.find("\n", i)
+            if nl == -1:
+                break  # no later line: the comment runs to the end of the string, nothing more to scan
+            i = nl  # resume at the newline; the whitespace branch consumes it and begins a new line/word
+            continue
         if ch.isspace():
             prev_dup, word_start = False, True
             i += 1

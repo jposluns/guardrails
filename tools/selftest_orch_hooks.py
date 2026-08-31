@@ -467,6 +467,12 @@ def main():
         # without the fix the `&` in comment text was scanned as an operator and over-ASKED.
         check("trunc/scan-comment-amp-not-detach", aiqt_hooks._orch_foreground_detach("echo done # & comment"), False)
         check("trunc/scan-comment-leading-hash-not-detach", aiqt_hooks._orch_foreground_detach("# long_job &"), False)
+        # L-GS1 fix-round: a `#` comment runs only to the end of ITS line, never to the end of a multi-line
+        # command. A comment on an earlier line must NOT swallow a real bare-& detach on a later line; before
+        # the fix the whole scan broke at the first `#`, so these two silently ALLOWED (returned False).
+        check("trunc/scan-comment-then-detach-nextline", aiqt_hooks._orch_foreground_detach("echo hi  # note\nsleep 100 &"), True)
+        check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
+        check("trunc/fg-comment-then-detach-asks", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "ask")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
         # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
         ti = Fixture(tmp, "trunc-inert")
