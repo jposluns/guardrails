@@ -2110,6 +2110,10 @@ def main():
         dexpect("(l11-c10) 'git diff 2>out' denies (only stderr diverted)", "git diff 2>out", "deny")
         dexpect("(l11-c11) dynamic target 'git diff > $OUT' asks", "git diff > $OUT", "ask")
         dexpect("(l11-c12) tilde target 'git diff > ~/out.patch' asks", "git diff > ~/out.patch", "ask")
+        # A RAW /dev,/proc-prefixed target is a device and DENIES even if a '..' would normalize elsewhere:
+        # conservative raw-prefix classification over-blocks in the SAFE direction (round-3 codex note).
+        dexpect("(l11-c13) raw '/dev/..' target 'git diff > /dev/../tmp/out.txt' denies (over-block, safe)",
+                "git diff > /dev/../tmp/out.txt", "deny")
         # Exact terminal pager allows; wrapped/optioned/downstream pager variants ASK.
         dexpect("(l11-p1) git diff | less allows", "git diff | less", "allow")
         dexpect("(l11-p2) git diff | less -R asks", "git diff | less -R", "ask")

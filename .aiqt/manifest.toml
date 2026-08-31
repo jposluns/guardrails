@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "350af3339906098b61ed010cd3a576ebcc9e45c706a49f90bb0858e3068c872c"
+tree-sha256 = "c677aa5d7200d787464d5f4a0ea2cfda1d0a3ff6cec71e648e03d5f03d544229"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,8 +46,8 @@ sha256 = "6f0c245c659cfdd94a9894fc33ec955f05827ea618df62a789f6e2ef1ef58a29"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 69110
-sha256 = "70a8b0724ab9649c5a403cea436ac338f1b740baafe5b106ae26f7e296af3edc"
+bytes = 69677
+sha256 = "bcae918f3ed5007b73bd7f848feb2b84a81b6933cfebb0de327bed08e6d8c038"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -711,8 +711,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 148169
-sha256 = "a8e359238e7060dd1305d109d1a079c5068e75a1b79c48e4491d1bbe6217dbb3"
+bytes = 148736
+sha256 = "f1d7655cfd7d2cdec64890a2c9a9e0b0c1f12ca9ff88cc25b5f4a572ee900299"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
@@ -2666,8 +2666,8 @@ sha256 = "0ba1de1e18908773f3c49b2f6874d3197689511e5cb830bff87d1a35ff3b8185"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 235241
-sha256 = "60be7120c0aa52fea1a4870810751ec5362f60a5197e3a3bb0e77bdf396c8c3d"
+bytes = 235621
+sha256 = "bd16bce6cc93e351e8cb25e40bdc3e3122d219e9226dffcd73c0e514b7429778"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
