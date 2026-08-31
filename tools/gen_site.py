@@ -38,27 +38,42 @@ parsed position (attribute value vs element text) matches its declared sink, so 
 that moves a text-sink token into an attribute context is rejected rather than silently under-escaped.
 
 Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
-  - Frontmatter escaping covers the text and quoted-attribute HTML sinks the shell places tokens in;
-    a future shell that places a token inside a `<script>`, `<style>`, unquoted attribute, or URL
-    context would need a fresh sink kind added to FIELD_TO_TOKEN (a token placed in an unquoted or
-    script/style context is caught by `_validate_token_sinks` as a sink mismatch and fails closed,
-    rather than rendering under-escaped). The URL fields (canonical, og-url) are attribute-escaped,
-    NOT URL-scheme-validated; a maintainer-authored `javascript:` value in the frontmatter would
-    render literally into an href/content attribute.
+  - Frontmatter escaping covers the text and quoted-attribute HTML sinks the shell places tokens in.
+    The sink validator (`_validate_token_sinks`) confirms only a COARSE attribute-vs-text position; it
+    does NOT distinguish a quoted from an unquoted attribute, nor a `<script>`/`<style>` raw-text
+    context from ordinary element text. So a future shell edit that moves a token into an UNQUOTED
+    attribute, or a text-sink token into a `<script>`/`<style>` body, is NOT detected and would render
+    under-escaped; `{{content}}` (the body fragment) is not sink-validated at all. There is no live
+    exposure at HEAD: the checked-in `_shell.html` places every token in a quoted attribute or element
+    text. This is a disclosed residual on FUTURE shell edits, consistent with the maintainer-authored-
+    shell threat model, not a live defect; closing it fully would need a quoting/raw-text-aware
+    collector (a future slice). The URL fields (canonical, og-url) are attribute-escaped, NOT
+    URL-scheme-validated; a maintainer-authored `javascript:` value in the frontmatter would render
+    literally into an href/content attribute.
   - md_to_html's HTML-block pass-through preserves the block bytes exactly for the type-1 subset and
     for lines beginning with `<`; heading/paragraph/hr blocks have their trailing whole-block
     whitespace normalized before classification, and paragraphs fold internal per-line ASCII
-    space/tab into single spaces on rewrap (non-ASCII whitespace is preserved as content). A block
-    whose first line is text but a later line opens an HTML block at column 0 is an unsupported mixed
-    block (CommonMark type-6 paragraph interruption): it is REJECTED with a fail-closed SchemaError
-    directing the author to separate the two with a blank line, never silently escaped into the
-    paragraph. Disallowed control characters (C0 except tab/newline/CR, plus DEL) in a frontmatter
-    field value or the body are rejected at the field/body boundary rather than passed through raw.
-  - Discovery enumerates docs/ RECURSIVELY (`rglob('*.md')`); every discovered `docs/**/*.md` must be
-    declared in GENSRC_OUTPUTS or `--check`/generation fails closed (exit 2), and any `.md` that is a
-    symbolic link is refused. There is no filename-prefix exemption: the only shell template
-    (`_shell.html`) is `.html`, never a `.md` discovery candidate, so an underscore-prefixed,
-    nested, or symlinked stray `.md` fails loud instead of vanishing.
+    space/tab into single spaces on rewrap (non-ASCII whitespace is preserved as content, and the
+    whole-block trailing-whitespace normalization strips only ASCII space/tab/newline). A block whose
+    first line is text but a later continuation line begins with a tag-like `<` (`<` followed by a
+    letter, `/`, `!`, or `?`) is an unsupported mixed block (CommonMark type-6 paragraph interruption):
+    it is REJECTED with a fail-closed SchemaError directing the author to separate the two with a blank
+    line, never silently escaped into the paragraph. A bare `<` followed by a space or other non-tag
+    character is treated as ordinary paragraph text and escaped, not an opener. This is conservative
+    (it also rejects CommonMark type-7 tags), a fail-loud restriction, never a silent-wrong render.
+    Disallowed control characters (C0 except tab/newline/CR, plus DEL) in a frontmatter field value or
+    the body are rejected at the field/body boundary rather than passed through raw. That control
+    rejection covers only LITERAL such characters at the field/body boundary; it does NOT decode
+    numeric character references (e.g. `&#x01;`) inside pass-through HTML blocks, and does not scrub
+    the maintainer-authored `_shell.html` template. Both are within the trusted-shell threat model.
+  - Discovery enumerates docs/ RECURSIVELY via an explicit `os.scandir` walk (NOT `rglob`, which
+    silently skips a symlinked directory and swallows a permission error on an unreadable subtree);
+    every discovered `docs/**/*.md` must be declared in GENSRC_OUTPUTS or `--check`/generation fails
+    closed (exit 2), and any `.md` that is a symbolic link is refused. An unreadable subtree or a
+    symlinked directory fails closed (exit 2) rather than vanishing: the walk refuses to follow either.
+    There is no filename-prefix exemption: the only shell template (`_shell.html`) is `.html`, never a
+    `.md` discovery candidate, so an underscore-prefixed, nested, or symlinked stray `.md` fails loud
+    instead of vanishing.
   - Source and target symlink protection is a pre-check (`is_symlink()` + `resolve()` bounding); a
     committed symlink is refused. The check/use gap between the pre-check and the read/write syscall
     is NOT race-free (no openat/O_NOFOLLOW/beneath containment). This is an accepted residual for a
@@ -73,6 +88,7 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
   gen_site.py --self-test  adversarial corpus over the bounded subset and the fail-closed paths
 """
 import html
+import os
 import re
 import sys
 from html.parser import HTMLParser
@@ -253,7 +269,13 @@ def _escape_field(value, sink):
 
 # ATX heading: `# ` up to `### `. The count of leading `#` is the heading level. A hash-only line is
 # NOT a heading; a trailing space between the hashes and the text is required (CommonMark).
-_ATX_HEADING = re.compile(r"^(#{1,3})\s+(.+?)\s*#*\s*$")
+_ATX_HEADING = re.compile(r"^(#{1,3})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+
+# An HTML block opener at column 0: `<` immediately followed by a tag-like character (a letter, `/`,
+# `!`, or `?`). Used to reject a continuation line that would interrupt a paragraph with an HTML block
+# (CommonMark type-6). A bare `<` followed by a space or other non-tag character is ordinary paragraph
+# text, not an opener, so `text\n< 5` folds into the paragraph rather than failing loud.
+_HTML_BLOCK_OPENER = re.compile(r"^<[A-Za-z/!?]")
 
 # CommonMark §4.6 type-1 HTML block opener: a line whose first characters at column 0 are one of the
 # `<script>`, `<pre>`, `<style>`, or `<textarea>` open-tag forms. The tag name is followed by a
@@ -284,6 +306,15 @@ class _NavlinkCollector(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag != "a":
             return
+        seen = set()
+        for key, _value in attrs:
+            key_l = key.lower()
+            if key_l in seen:
+                self.errors.append(
+                    "an anchor carries a duplicate {!r} attribute; a browser keeps the first and this "
+                    "parser the last, so they would disagree on the rendered link".format(key_l))
+                return
+            seen.add(key_l)
         classes = None
         hrefs = []
         for key, value in attrs:
@@ -409,8 +440,10 @@ def md_to_html(body, source_rel="<source>"):
         if block.startswith("<"):
             out_blocks.append(block)
             continue
-        # Non-HTML block: normalize whole-block trailing whitespace before classification.
-        block = block.rstrip()
+        # Non-HTML block: normalize whole-block trailing whitespace before classification. Only ASCII
+        # space/tab/newline is stripped so non-ASCII whitespace (e.g. a trailing U+00A0) stays content
+        # rather than being silently deleted.
+        block = block.rstrip(" \t\n")
         if block == "":
             continue
         if block == "---":
@@ -428,11 +461,11 @@ def md_to_html(body, source_rel="<source>"):
         # opener into the paragraph text (a silent-wrong render), it fails closed and directs the
         # author to separate the blocks with a blank line.
         for ln in block.split("\n"):
-            if ln.startswith("<"):
+            if _HTML_BLOCK_OPENER.match(ln):
                 raise SchemaError(
-                    "{}: an HTML block opener ({!r}) cannot interrupt a paragraph in this bounded "
-                    "converter; separate the HTML block from the preceding text with a blank line"
-                    .format(source_rel, ln[:40]))
+                    "{}: a continuation line beginning with an HTML tag ({!r}) cannot interrupt a "
+                    "paragraph in this bounded converter; separate the HTML block from the preceding "
+                    "text with a blank line".format(source_rel, ln[:40]))
         # Paragraph: fold internal newlines into single spaces, escape, wrap in <p>. Only ASCII
         # space/tab is stripped per line so non-ASCII whitespace (e.g. U+00A0, U+2028) stays content
         # rather than being silently deleted.
@@ -671,6 +704,46 @@ def _read(path):
         raise SystemExit(2)
 
 
+def _discover_md(docs_root, root):
+    """Recursively enumerate every docs/**/*.md, failing CLOSED on any subtree it cannot read.
+
+    Uses an explicit os.scandir walk rather than Path.rglob: rglob silently skips a symlinked directory
+    and swallows a permission error on an unreadable subtree, so a stray under either would vanish
+    instead of failing loud (a check-fails-closed violation). A symlinked directory is refused outright
+    (following it would pull an out-of-tree subtree into discovery); a listing or stat error is raised as
+    a SchemaError so main() maps it to exit 2. A .md that is itself a symlink is returned for the
+    caller's existing symlink refusal. The result is sorted for deterministic output.
+    """
+    found = []
+    stack = [docs_root]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError as exc:
+            raise SchemaError("cannot list docs subtree {}: {}".format(
+                d.relative_to(root).as_posix(), exc.strerror or exc))
+        for entry in entries:
+            p = Path(entry.path)
+            try:
+                if entry.is_symlink():
+                    if p.is_dir():
+                        raise SchemaError(
+                            "discovered docs subtree {} is a symbolic link; refusing to follow"
+                            .format(p.relative_to(root).as_posix()))
+                    if entry.name.endswith(".md"):
+                        found.append(p)
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(p)
+                elif entry.name.endswith(".md"):
+                    found.append(p)
+            except OSError as exc:
+                raise SchemaError("cannot stat docs entry {}: {}".format(
+                    p.relative_to(root).as_posix(), exc.strerror or exc))
+    return sorted(found)
+
+
 def main(argv):
     check = "--check" in argv
     root = repo_root()
@@ -701,12 +774,18 @@ def main(argv):
         return 2
     # Discovery reconciliation: any docs/**/*.md not in the declared set is a silent-drop hazard (a
     # maintainer adds docs/rule2.md but forgets to declare it, and the target is never generated).
-    # Discovery is RECURSIVE (rglob) and has NO filename-prefix exemption, so an underscore-prefixed,
-    # nested-subdirectory, or symlinked stray .md fails loud rather than silently vanishing. The only
-    # shell template (_shell.html) is .html, never a .md discovery candidate. A .md that is a symbolic
-    # link is refused outright (reading it would pull an out-of-tree file into the pipeline).
+    # Discovery is RECURSIVE (an explicit os.scandir walk, which unlike rglob fails closed on an
+    # unreadable subtree or a symlinked directory) and has NO filename-prefix exemption, so an
+    # underscore-prefixed, nested-subdirectory, or symlinked stray .md fails loud rather than silently
+    # vanishing. The only shell template (_shell.html) is .html, never a .md discovery candidate. A .md
+    # that is a symbolic link is refused outright (reading it would pull an out-of-tree file into the
+    # pipeline).
     declared_sources = {src_rel for src_rel, _ in entries}
-    discovered = tuple(sorted(docs_root.rglob("*.md")))
+    try:
+        discovered = _discover_md(docs_root, root)
+    except SchemaError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
     for p in discovered:
         rel = p.relative_to(root).as_posix()
         if p.is_symlink():
@@ -744,7 +823,6 @@ def _self_test():
     would ship a silently-wrong page. Most cases build inputs in memory; the symlink / declared-source
     cases build a small filesystem fixture under a tempdir so no host state is touched.
     """
-    import os
     import stat
     import tempfile
 
@@ -1172,6 +1250,36 @@ def _self_test():
     _expect_render("u2028 preserved", frontmatter + "One\n\u2028\nTwo\n", "One \u2028 Two")
     _expect_render("u2029 preserved", frontmatter + "One\n\u2029\nTwo\n", "One \u2029 Two")
 
+    # ---- This round's behavioural fixes (fail-to-pass) -----------------------------------------
+    # Change 5: the ATX delimiter must be ASCII space/tab. A hash followed by a non-ASCII space
+    # (U+00A0) is NOT a heading; it renders as an escaped paragraph, not <h1>.
+    _expect_render("atx nbsp delimiter not heading", frontmatter + "#\u00a0Heading\n",
+                   "<p>#\u00a0Heading</p>")
+    _expect_absent("atx nbsp delimiter no h1", frontmatter + "#\u00a0Heading\n", "<h1>")
+    # Change 4: whole-block trailing normalization strips only ASCII space/tab/newline. A trailing
+    # U+00A0 stays content, and a `---` line trailed by U+00A0 is no longer bare `---`, so it renders
+    # as a paragraph rather than <hr>.
+    _expect_render("trailing nbsp preserved", frontmatter + "One\u00a0\n", "<p>One\u00a0</p>")
+    _expect_render("hr plus nbsp is paragraph", frontmatter + "---\u00a0\n", "<p>---\u00a0</p>")
+    _expect_absent("hr plus nbsp not hr", frontmatter + "---\u00a0\n", "<hr>")
+    # Change 3: a continuation line beginning with a bare `<` + non-tag char is ordinary paragraph
+    # text (not an HTML-block opener), so `text\n< 5` folds into one escaped paragraph; a tag-like `<`
+    # continuation line still fails loud.
+    _expect_render("non-opener < folds into paragraph",
+                   frontmatter + "text\n< 5\n", "<p>text &lt; 5</p>")
+    _expect_error("tag-like < still interrupts",
+                  frontmatter + "text\n<div>x\n", "cannot interrupt a paragraph")
+    # Change 2: an anchor carrying a duplicate attribute (here `class`) fails closed at shell-load
+    # sidebar reconciliation; a browser keeps the first and this parser the last, so they would
+    # disagree on the rendered link.
+    _expect_raises(
+        "anchor duplicate class attribute",
+        lambda: _validate_shell_sidebar(
+            nav_base.replace('{{content}}',
+                             '<a class="navlink" class="dup" href="/rule1">Dup</a>{{content}}'),
+            "shell.html"),
+        SchemaError, "duplicate 'class' attribute")
+
     # ---- CLI discovery reconciliation edge forms (finding 2) -----------------------------------
     # Underscore-prefixed, nested-subdirectory, and symlinked stray .md sources fail loud (exit 2)
     # via main(), rather than being silently skipped by a non-recursive/prefix-excluding discovery.
@@ -1225,6 +1333,32 @@ def _self_test():
             if _run_main(td2, ["--check"]) != 2:
                 failures.append("symlink stray .md: expected exit 2")
             stray_l.unlink()
+        # A symlinked DIRECTORY under docs/ (containing a stray .md) fails closed: the os.scandir walk
+        # refuses to follow it, where rglob would have silently skipped the subtree.
+        if symlink_ok:
+            realdir = td2 / "realdir"
+            realdir.mkdir()
+            (realdir / "stray.md").write_text(frontmatter + "x\n", encoding="utf-8")
+            linkdir = td2 / "docs" / "linkdir"
+            os.symlink(realdir, linkdir)
+            case_count += 1
+            if _run_main(td2, ["--check"]) != 2:
+                failures.append("symlinked docs subdir: expected exit 2")
+            linkdir.unlink()
+        # An unreadable (mode 0o000) directory under docs/ fails closed: the os.scandir walk raises
+        # rather than silently skipping the subtree. Skipped under root (os.geteuid()==0), where mode
+        # 0o000 does not deny the owner and the walk would read it clean.
+        if not (hasattr(os, "geteuid") and os.geteuid() == 0):
+            secret = td2 / "docs" / "secret"
+            secret.mkdir()
+            os.chmod(secret, 0o000)
+            try:
+                case_count += 1
+                if _run_main(td2, ["--check"]) != 2:
+                    failures.append("unreadable docs subdir: expected exit 2")
+            finally:
+                os.chmod(secret, 0o755)
+                secret.rmdir()
 
     _ = stat  # `stat` imported for potential platform check; retained if the fixture path grows.
 
