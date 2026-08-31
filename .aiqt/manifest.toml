@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "f6d4ce758663456cf8cd6380254c7422e3ca244d959f634fafe29a370d9e9a23"
+tree-sha256 = "b0f93dd7c090879861097b3ecbd464ed30482d75c3b73fc3618472e77b6730cb"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,13 +46,13 @@ sha256 = "6f0c245c659cfdd94a9894fc33ec955f05827ea618df62a789f6e2ef1ef58a29"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 88629
-sha256 = "5809b0cb19f60d3d1d44c7f63b8938d9f2e1ecacb4a1164e2415fbd6a44c9f95"
+bytes = 88912
+sha256 = "bf4754c17b212212249d02df233ccb735bd282f9c9705e6c11bcf07d850c2e7c"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 410366
-sha256 = "ff06ac281e92eaf4ea0b27115c6364bebcdb8a28dfdde51c279eb126a8fe4c4a"
+bytes = 412207
+sha256 = "91f9000125e03fd2dde597e9c0f6dc11c1f7c3486f7b6b827959ae58f34d423b"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -716,8 +716,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 192119
-sha256 = "5f1c8a8499479ea5393d22ba89a11a26c1c64a612d91de6501473e19b306a4a4"
+bytes = 192968
+sha256 = "d9b19c279e1915f65c94af99446222be5b17487c4e174837b01e9a07ad6189ef"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2181,8 +2181,8 @@ sha256 = "b0216198cfc1b4ca1bb4b486e11790c1d27d67c9b1470490bc4ab0e0aef42a80"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 410366
-sha256 = "ff06ac281e92eaf4ea0b27115c6364bebcdb8a28dfdde51c279eb126a8fe4c4a"
+bytes = 412207
+sha256 = "91f9000125e03fd2dde597e9c0f6dc11c1f7c3486f7b6b827959ae58f34d423b"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2731,8 +2731,8 @@ sha256 = "de6be4150994de21192b1fa9d400ca73062e15b3802f1eeb5bfa44926ca00bf5"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 292578
-sha256 = "d7dc07bb205923885a77cdbb22a160143e54759c8a84e5af8cc22b75db0b53ed"
+bytes = 294383
+sha256 = "42a6f34e05407e6788707ff47fba0e88c162037b946553ae8064834146eb5afd"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

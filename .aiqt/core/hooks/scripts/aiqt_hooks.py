@@ -4424,17 +4424,28 @@ def _orch_path(root, value):
     return value if os.path.isabs(value) else os.path.join(root, value)
 
 
-def _orch_state_dir_for_root(root):
-    """The machine-written state directory for a repo root: the registry's state_dir when declared,
-    else ${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/."""
-    status, reg = _orch_registry(root)
-    declared = _orch_path(root, (reg or {}).get("state_dir")) if status == "ok" else None
+def _state_dir_from_registry(root, reg_data):
+    """Resolve the machine-written state directory for root from an ALREADY-READ registry dict (or None for
+    an absent registry, or an ok registry that declares no usable state_dir): the registry's state_dir when
+    it declares a usable one, else ${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/.
+    PURE: it performs NO registry read of its own, so a caller that has already validated the registry passes
+    that result here and never triggers a second, independently-faulting read (the TOCTOU fail-open where a
+    second EACCES silently downgrades a confined session to the XDG default)."""
+    declared = _orch_path(root, (reg_data or {}).get("state_dir"))
     if declared:
         return declared
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"),
                                                             ".local", "state")
     key = __import__("hashlib").sha256(root.encode("utf-8", "replace")).hexdigest()[:16]
     return os.path.join(base, "aiqt-guardrails", "orch", key)
+
+
+def _orch_state_dir_for_root(root):
+    """The machine-written state directory for a repo root: the registry's state_dir when declared, else
+    ${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/. Reads the registry ONCE and
+    delegates the resolution to the pure _state_dir_from_registry helper (a single read per call)."""
+    status, reg = _orch_registry(root)
+    return _state_dir_from_registry(root, reg if status == "ok" else None)
 
 
 def _orch_append_jsonl(path, obj):
@@ -5702,8 +5713,10 @@ def _load_write_scope(root):
     fallback that would report the declaration absent and DISARM confinement; likewise a registry that is
     'ok' but declares a PRESENT-but-malformed state_dir (a non-string or empty value, which _orch_path
     resolves to None) is BAD, while an ABSENT state_dir key legitimately selects the XDG default and stays
-    allowed. _orch_state_dir_for_root is left unchanged for its other callers; this fail-closure is local to
-    the write-scope read."""
+    allowed. The declaration directory is resolved from THIS validated registry result via the pure
+    _state_dir_from_registry helper, so _load_write_scope performs exactly ONE registry read and never a
+    second, independently-faulting one that could disarm the session; _orch_state_dir_for_root reads once and
+    delegates to the same helper for its own other callers."""
     reg_status, reg = _orch_registry(root)
     if reg_status == "bad":
         return ("bad", "{}: the orchestration registry that locates the write-scope declaration is "
@@ -5716,7 +5729,12 @@ def _load_write_scope(root):
         # session. (An ABSENT state_dir key legitimately means "use the XDG default" and is not this case.)
         return ("bad", "the orchestration registry declares a malformed state_dir; a cannot-evaluate "
                        "denies rather than disarming confinement")
-    path = os.path.join(_orch_state_dir_for_root(root), _WRTSCP_DECL_REL)
+    # Resolve the declaration directory from the registry result WE ALREADY VALIDATED above, via the pure
+    # helper: never re-read the registry here. A second read can fault independently (e.g. EACCES between the
+    # two reads) and silently fall back to XDG, disarming the session (the TOCTOU fail-open). This keeps the
+    # _orch_registry call above the ONE and only registry read performed by _load_write_scope.
+    state_dir = _state_dir_from_registry(root, reg if reg_status == "ok" else None)
+    path = os.path.join(state_dir, _WRTSCP_DECL_REL)
     status, obj = _wrtscp_read_json_artifact(path, _WRTSCP_MAX_BYTES)
     if status == "absent":
         return ("absent", None)
@@ -5870,7 +5888,10 @@ def write_scope_guard(data):
     The in-tree committed frozen floor .aiqt/frozen.json arms the FROZEN layer (absent -> the frozen layer is
     inert un-armed; present -> the floor is enforced). The structural other-repo/nested-repo denial applies
     to every covered write whose repository root resolves, and a covered write whose root CANNOT be resolved
-    is denied (fail-closed), not allowed. The frozen-floor denial fires whenever a floor is PRESENT, and an
+    is denied (fail-closed), not allowed. The root is resolved FIRST, so this unresolvable-root denial
+    precedes any relative-path handling (a non-git relative-path write denies, it does not defer); only once
+    the root resolves does an un-armed relative path defer to the sibling absolute_paths hook. The
+    frozen-floor denial fires whenever a floor is PRESENT, and an
     armed session additionally REQUIRES a floor (an armed session with a genuinely-absent floor denies); only
     an un-armed session with a genuinely-absent floor leaves the frozen layer inert, so the frozen denial is
     not unconditionally always-on. Slice confinement is fail-open on a missing declaration; the principled
