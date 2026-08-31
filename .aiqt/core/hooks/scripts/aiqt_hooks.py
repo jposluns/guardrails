@@ -4385,15 +4385,26 @@ def _orch_root(data):
 
 
 def _orch_registry(root):
-    """Load the orchestration registry: ('absent', None) when neither registry file exists (the suite
-    is inert by design), ('ok', dict) on a schema-valid registry, ('bad', detail) otherwise. The
+    """Load the orchestration registry: ('absent', None) only when a registry file is genuinely NOT PRESENT
+    (a clean lstat FileNotFoundError; the suite is inert by design), ('ok', dict) on a schema-valid
+    registry, ('bad', detail) otherwise. A present-but-unreadable registry is a cannot-evaluate returned as
+    bad, never absent: an lstat FAULT (a permission or I/O error), a read/parse error, or a non-version-1
+    object all fail closed rather than silently disarming a caller that locates confinement through it. The
     machine-local .aiqt/orchestration.local.json takes WHOLE-FILE precedence over the committed
     .aiqt/orchestration.json; there is no merge, so precedence is never ambiguous."""
     for rel in _ORCH_REGISTRY_FILES:
         path = os.path.join(root, *rel.split("/"))
         try:
-            if not os.path.lexists(path):
-                continue
+            os.lstat(path)
+        except FileNotFoundError:
+            continue                     # genuinely not present: try the next registry file
+        except OSError as exc:
+            # An lstat FAULT (e.g. a permission error) is a cannot-evaluate, NOT absence: os.path.lexists
+            # would have swallowed it to False and read a present-but-unreadable registry as absent, falling
+            # back to XDG and disarming confinement. Surface it as bad so it denies instead.
+            return ("bad", "{}: cannot stat registry path ({}); a cannot-evaluate denies rather than "
+                           "disarming confinement".format(rel, exc))
+        try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, ValueError) as exc:
@@ -5688,13 +5699,23 @@ def _load_write_scope(root):
     BAD there). ABSENT is the fail-open state (no slice confinement); every present-but-unreadable outcome is
     BAD. The registry that LOCATES the declaration is itself part of this read: a 'bad' (unreadable or
     malformed) registry is a cannot-evaluate returned as BAD here (fail-closed), never a silent XDG-default
-    fallback that would report the declaration absent and DISARM confinement. _orch_state_dir_for_root is
-    left unchanged for its other callers; this fail-closure is local to the write-scope read."""
-    reg_status, reg_detail = _orch_registry(root)
+    fallback that would report the declaration absent and DISARM confinement; likewise a registry that is
+    'ok' but declares a PRESENT-but-malformed state_dir (a non-string or empty value, which _orch_path
+    resolves to None) is BAD, while an ABSENT state_dir key legitimately selects the XDG default and stays
+    allowed. _orch_state_dir_for_root is left unchanged for its other callers; this fail-closure is local to
+    the write-scope read."""
+    reg_status, reg = _orch_registry(root)
     if reg_status == "bad":
         return ("bad", "{}: the orchestration registry that locates the write-scope declaration is "
                        "unreadable or malformed, a cannot-evaluate that denies rather than silently "
-                       "disarming confinement".format(reg_detail))
+                       "disarming confinement".format(reg))
+    if reg_status == "ok" and isinstance(reg, dict) and "state_dir" in reg \
+            and _orch_path(root, reg.get("state_dir")) is None:
+        # A PRESENT state_dir key whose value is non-string or empty is a cannot-evaluate: the old code
+        # returned None from _orch_path and silently fell back to the XDG default, disarming an armed
+        # session. (An ABSENT state_dir key legitimately means "use the XDG default" and is not this case.)
+        return ("bad", "the orchestration registry declares a malformed state_dir; a cannot-evaluate "
+                       "denies rather than disarming confinement")
     path = os.path.join(_orch_state_dir_for_root(root), _WRTSCP_DECL_REL)
     status, obj = _wrtscp_read_json_artifact(path, _WRTSCP_MAX_BYTES)
     if status == "absent":

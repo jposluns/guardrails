@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Release-manifest generator (VER-CORE 4.1/4.2, Section 12 step 2). Offline, stdlib only, fail-closed.
 
-Owns four deterministic outputs, all generated in one run from the anchored ownership map
+Owns five deterministic outputs, all generated in one run from the anchored ownership map
 (.aiqt/core/ownership.toml) and the git-tracked surface:
 
   .gitattributes                         one literal line per in-scope tracked path (3.3)
   .aiqt/manifest.toml                    SOURCES, ARTIFACTS, TREE digest, genesis (4.1)
   .aiqt/release/root.txt                 sha256:<hex> over the exact manifest bytes (5.4)
   .aiqt/release/announce-snippet.txt     ready-to-publish version + ROOT lines (5.4)
+  .aiqt/frozen.json                      the EN-8 write-scope frozen floor selectors (a derived SOURCES member)
 
 Concern-1 scope is COMPUTED BY INVERSION: all git-tracked repository paths minus the map's
 concrete-literal exclusion set; every remaining path must carry exactly one release class, with no
@@ -20,13 +21,13 @@ check_manifest.py IMPORTS this module's loader and expansion (the check_gensrc_f
 house pattern: reuse the validated loader, never fork a second parser) and independently recomputes
 every verdict from the same inputs; it never trusts this generator's output bytes.
 
-BOOTSTRAP: the four output paths are treated as IN SCOPE while still untracked whenever they are present
+BOOTSTRAP: the five output paths are treated as IN SCOPE while still untracked whenever they are present
 on disk (this run creates them, and a release commit git-adds them with the map). Write mode forces all
-four into scope; check mode adds each output that exists on disk. A MISSING output is never assumed:
+five into scope; check mode adds each output that exists on disk. A MISSING output is never assumed:
 its selector then matches nothing and the NO-STRAYS leg fails LOUD (exit 2). Drift in a present output
 is caught by byte reconciliation. This keeps the generator fail-safe with no filesystem-walk fallback.
 
-  gen_manifest.py             regenerate all four outputs
+  gen_manifest.py             regenerate all five outputs
   gen_manifest.py --check     exit 1 if any output differs from a fresh regeneration; write nothing
   gen_manifest.py --self-test build synthetic git fixtures and assert the fail-closed invariants
   gen_manifest.py --root DIR  operate on DIR instead of the repo root (fixtures)
@@ -323,7 +324,7 @@ def classify(tracked, exclusions, release, namespace, root, assume_outputs=False
     on: a stale exclusion (zero matches); an unclassified in-scope path (COMPLETENESS); a selector with
     zero matches or an untracked exact path (NO-STRAYS); two selectors matching one path (overlap); a class
     selector reaching an excluded path; a concern-2 selector matching any tracked path.
-    The universe is the tracked set PLUS this generator's own four outputs when present (or all four in
+    The universe is the tracked set PLUS this generator's own five outputs when present (or all five in
     write mode, assume_outputs=True): the release commit git-adds them, so a present-but-untracked output
     is in scope while a MISSING output is never assumed and trips NO-STRAYS. Presence is read from the
     working tree by default; a caller classifying a git commit (not the checkout) passes outputs_present, a
@@ -638,7 +639,7 @@ def run(root, check):
         return 2
     if check:
         try:
-            check_output_modes(root)  # F-236: the four outputs are generated text, index mode 100644 only.
+            check_output_modes(root)  # F-236: the five outputs are generated text, index mode 100644 only.
         except GateError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
@@ -679,7 +680,7 @@ def main():
 #   (a) a conformant fixture generates, then re-checks drift-clean, and two runs are byte-identical;
 #   (b) carve-outs: the manifest, ROOT, and snippet are absent from SOURCES; CLAUDE.md is absent from
 #       SOURCES while its managed-block row is present in ARTIFACTS; the map itself IS in SOURCES;
-#   (c) corrupting each of the four outputs fails --check (exit 1);
+#   (c) corrupting each of the five outputs fails --check (exit 1);
 #   (d) an unclassified new tracked path (COMPLETENESS), a stray/untracked exact selector (NO-STRAYS), an
 #       overlapping selector pair, a tracked concern-2 path, and a stale exclusion each exit 2;
 #   (e) a non-UTF-8 tracked file absent from [checkout].binary exits 2; declared binary passes;
@@ -983,7 +984,7 @@ def self_test_main():
 
         # (j) F-236: an output with git index mode 100755 fails closed. Generate, git-add the outputs at
         #     their 100644 mode (drift-clean), then chmod one executable and re-stage so the index mode is
-        #     100755 -> exit 2. Scoped to the four outputs; *.sh stay legitimately executable.
+        #     100755 -> exit 2. Scoped to the five outputs; *.sh stay legitimately executable.
         modef = _build_fixture(tmp / "outmode")
         run_quiet(modef, check=False)
         _git(modef, "add", "-A")
@@ -1024,7 +1025,7 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a conformant git fixture generates and regenerates drift-clean and is "
           "deterministic; SOURCES carve out the manifest, ROOT, snippet, and CLAUDE.md while the map is a "
-          "member and the managed block is an artifact; corrupting each of the four outputs fails --check "
+          "member and the managed block is an artifact; corrupting each of the five outputs fails --check "
           "(exit 1); and an unclassified path, a stray selector, an overlapping selector pair, a tracked "
           "concern-2 path, a stale exclusion, a non-UTF-8 file not declared binary, a git-less root, and a "
           "broken CLAUDE.md marker pair all fail closed (exit 2), while raw-byte hashing records a CRLF "

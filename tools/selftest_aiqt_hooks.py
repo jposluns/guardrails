@@ -60,11 +60,14 @@ Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, 
 mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
 
 It also covers the write-scope guard (write_scope_guard, wrtscp, EN-8): a Write/Edit/MultiEdit is confined
-to a harness-set per-slice declaration (<state_dir>/write-scope.json, out of tree) while writes to the
-frozen floor (.aiqt/frozen.json, one entry per frozen class {derived, manifest-self, archive}) and to
-other or nested git repositories are hard-denied as an un-lowerable floor. It is inert on a missing
-declaration for slice confinement, the structural and frozen denials are always-on, and every
-cannot-evaluate denies once armed. Fixtures are throwaway git repos under the temp tree (a session repo, a
+to a harness-set per-slice declaration (write-scope.json at the registry-declared state_dir, out of the
+slice tree by default but possibly in-tree) while writes to the frozen floor (.aiqt/frozen.json, one entry
+per frozen class {derived, manifest-self, archive}) and to other or nested git repositories are hard-denied
+as an un-lowerable floor. It is inert only on a genuine absence (a missing declaration for slice
+confinement, or a genuinely-absent floor un-armed); a covered write whose repository root is unresolvable,
+a bad/unreadable orchestration registry, and every un-armed cannot-evaluate FAULT all deny fail-closed. The
+structural denial applies whenever the root resolves and the frozen denial whenever a floor is present or
+the session is armed, and every cannot-evaluate denies once armed. Fixtures are throwaway git repos under the temp tree (a session repo, a
 sibling repo, and a nested repo), with the declaration written into the redirected XDG_STATE_HOME and the
 floor synthesized in-tree, removed in the finally.
 
@@ -3715,6 +3718,40 @@ def main():
                  "write (FIX 1: a cannot-evaluate registry cannot silently disarm; old code ALLOWED)",
                  "deny", "Write", reg_j("tools", "y.py"), ws_reg)
 
+        # --- FIX A (round-3 BLOCKER): two deeper registry fault paths that round-1 missed must DENY ---
+        # ws_reg still carries the armed declaration in its registry-declared .aiqt/orch-state, so a working
+        # registry arms + confines to src/. Both faults below leave that declaration present.
+        # (A1) An UNREADABLE-but-present registry: an lstat FAULT (not FileNotFoundError). Old _orch_registry
+        # used os.path.lexists, which swallowed the fault to False -> "absent" -> XDG fallback -> un-armed
+        # ALLOW. Injected deterministically via os.lstat raising PermissionError for the registry path only
+        # (any uid; not a chmod that root would bypass); restored in the finally.
+        reg_registry.write_text(json.dumps({"version": 1, "state_dir": ".aiqt/orch-state"}), encoding="utf-8")
+        _ws_real_lstat = os.lstat
+        _reg_path_str = str(reg_registry)
+        def _ws_lstat_perm(path, *_a, **_k):
+            try:
+                same = os.fspath(path) == _reg_path_str
+            except TypeError:
+                same = False   # an int fd is never the registry path
+            if same:
+                raise PermissionError("injected registry lstat fault (ws-reg-unreadable)")
+            return _ws_real_lstat(path, *_a, **_k)
+        try:
+            os.lstat = _ws_lstat_perm
+            wsexpect("(ws-reg-unreadable) an unreadable-but-present registry (lstat fault) DENIES an "
+                     "out-of-slice write (FIX A1; old lexists swallowed it to absent -> allow)",
+                     "deny", "Write", reg_j("tools", "y.py"), ws_reg)
+        finally:
+            os.lstat = _ws_real_lstat
+        # (A2) A registry that is OK but declares a PRESENT-but-invalid state_dir (an empty string): a
+        # cannot-evaluate. Old code returned None from _orch_path and fell to the XDG default, disarming the
+        # armed session. (An ABSENT state_dir key legitimately means "use the XDG default" and is NOT this
+        # case; that path stays allowed, exercised by ws_rp elsewhere, which carries no registry.)
+        reg_registry.write_text(json.dumps({"version": 1, "state_dir": ""}), encoding="utf-8")
+        wsexpect("(ws-reg-baddir) a registry declaring a present-but-empty state_dir DENIES an out-of-slice "
+                 "write (FIX A2; old code fell to XDG -> disarmed -> allow)",
+                 "deny", "Write", reg_j("tools", "y.py"), ws_reg)
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3871,7 +3908,11 @@ def main():
           "fault) that OLD code allowed at row 11; a BAD orchestration registry that locates the declaration "
           "DENIES an armed session's out-of-slice write rather than silently disarming via the XDG-default "
           "fallback (FIX 1, BLOCKER 2), proven against a declaration that MAY live in-tree at the "
-          "registry-declared state_dir; Bash and Read are out of the matcher (the disclosed Bash residual); "
+          "registry-declared state_dir, and the deeper registry faults deny too - an unreadable-but-present "
+          "registry (an lstat fault the old os.path.lexists swallowed to absent) and a registry declaring a "
+          "present-but-empty state_dir (which old code fell to the XDG default over) both DENY (FIX A, "
+          "round-3 BLOCKER), while a genuinely-absent state_dir key still selects the XDG default; Bash and "
+          "Read are out of the matcher (the disclosed Bash residual); "
           "and a mis-wired event hard-blocks (exit 2)")
     return 0
 
