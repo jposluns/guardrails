@@ -537,6 +537,11 @@ def _cat_file_batch(root, shas):
         if out[i:i + 1] != b"\n":
             raise SchemaError("git cat-file --batch: missing trailing delimiter after {}".format(osha))
         i += 1
+    # ALL stdout must be consumed (round-8 finding 7): trailing protocol garbage after the last response is
+    # cannot-evaluate, never silently accepted.
+    if i != len(out):
+        raise SchemaError("git cat-file --batch: {} unexpected trailing byte(s) after the last "
+                          "response".format(len(out) - i))
     return result
 
 
@@ -593,3 +598,25 @@ def materialize_tree_raw(root, commit, dest):
             raise SchemaError("cannot materialize {!r} ({})".format(path, exc))
         written.add(path)
     return written
+
+
+def materialize_fresh_repo(root, commit, dest):
+    """Materialize the committed tree at `commit` into `dest` from RAW blobs (materialize_tree_raw) and
+    re-init it as a FRESH git repository (empty config, so no filter/attribute driver from the source repo
+    can run), so the git-based authoritative checks (gen_manifest.py --check, check_manifest.py) have a
+    repository whose bytes and modes are the exact committed ones (round-8 findings 1/2). SchemaError on any
+    materialization or git failure (cannot-evaluate)."""
+    materialize_tree_raw(root, commit, dest)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    ident = ["-c", "user.name=aiqt", "-c", "user.email=aiqt@example.invalid"]
+    for args in (["init", "-q"], ident + ["add", "-A"],
+                 ident + ["commit", "-q", "-m", "materialized", "--no-verify"]):
+        try:
+            r = subprocess.run(["git", "-C", str(dest), *args], capture_output=True, env=env)
+        except OSError as exc:
+            raise SchemaError("cannot launch git to init the materialized tree ({})".format(exc))
+        if r.returncode != 0:
+            raise SchemaError("cannot init the materialized tree: {}".format(
+                r.stderr.decode("utf-8", "replace").strip()))
