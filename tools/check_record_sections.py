@@ -67,6 +67,19 @@ narrowing, which is out of this gate's threat model; an octopus (three-or-more-p
 and fails closed;
 and an unresolvable post-merge ref fails closed rather than reading as never-adopted.
 
+The decision-critical parent list, the target and branch tip that fix which record sections the branch
+owns, is read from the raw commit object (`git cat-file commit`), which reads the object's own bytes rather
+than a graph view. It is therefore immune to all three local parent-rewrite or graph-cache mechanisms:
+refs/replace/* (also disabled by --no-replace-objects), the legacy .git/info/grafts file (which
+--no-replace-objects does NOT cover), and the commit-graph performance cache (which cat-file does not
+consult). Neither a replacement ref, a grafts line, nor a crafted commit-graph can rewrite the parents the
+gate derives the owned-section set from. The gate's ancestry sanity checks (merge-base --all,
+merge-base --is-ancestor, which confirm the base is a common ancestor of target and branch) do traverse the
+graph; they run with --no-replace-objects and GIT_GRAFT_FILE pinned to an empty file, so they are
+replace- and graft-immune, and a mismatched commit-graph makes such a query error out and the gate fail
+closed (exit 2) rather than read a masked result. This closes the parent-rewrite class the owned-section
+computation depends on.
+
 The config is trusted adopter input to this preservation check, so the gate does not defend the config's own
 integrity: rewriting the adopter's config so its heading-pattern selects fewer or no headings (semantic
 narrowing that makes real sections stop matching) is a change to that trusted config, not a dropped section
@@ -109,23 +122,37 @@ class RecordSpec:
 
 
 def _clean_env():
-    """Return os.environ with the entire GIT_ family removed (allowlist stance).
+    """Return os.environ with the entire GIT_ family removed, then GIT_GRAFT_FILE pinned empty.
 
     Ambient GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR, and every other
     GIT_-prefixed variable can redirect git's whole view, including -C and --show-toplevel, to an
     attacker-controlled decoy repository, so the gate strips the family wholesale before every git call
-    and re-applies only what it sets itself, which is nothing.
+    (allowlist stance). It then re-applies exactly one variable it sets itself: GIT_GRAFT_FILE points at
+    os.devnull (a guaranteed-empty file), so no graft is read from any location. The on-disk
+    .git/info/grafts parent-rewrite mechanism is NOT disabled by --no-replace-objects (that flag covers
+    only refs/replace/*); git still honours info/grafts for the graph views merge-base --all and
+    merge-base --is-ancestor, which could otherwise let a graft that rewrites a merge's second parent to
+    a section-free tip make a real dropped section read as pre-existing. GIT_GRAFT_FILE overriding the
+    graft location to an empty file neutralizes grafts repository-wide for every git call the gate makes;
+    the parent read additionally uses the raw commit object (see _parents), which is graft-immune on its
+    own, so the two layers close the whole parent-rewrite class.
     """
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_GRAFT_FILE"] = os.devnull
+    return env
 
 
 def _git(root, args):
     """Run git without a shell and return stdout bytes. Any invocation failure is fail-closed.
 
     Every invocation carries --no-replace-objects, so a local git replacement ref (refs/replace/*)
-    cannot substitute a crafted object for a commit the gate reads. Without it, `git replace <post>
-    <obj-with-benign-parents>` rewrites the parent list `show -s --format=%P` reports, letting a real
-    merge that dropped a section masquerade as one whose branch tip owns no new section (exit 0).
+    cannot substitute a crafted object for a commit the gate reads, and runs under _clean_env with
+    GIT_GRAFT_FILE pinned to an empty file, so the legacy .git/info/grafts parent-rewrite mechanism is
+    neutralized too (--no-replace-objects does NOT cover grafts). Without both, `git replace <post>
+    <obj-with-benign-parents>` or a `.git/info/grafts` line rewrites the parent list the graph views
+    (`show -s --format=%P`, `merge-base`) report, letting a real merge that dropped a section
+    masquerade as one whose branch tip owns no new section (exit 0). The parent read itself uses the
+    raw commit object (_parents), which is graft- and replace-immune independently of these flags.
     """
     try:
         proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), *args],
@@ -306,9 +333,26 @@ def _resolve_commit(root, ref, label):
 
 
 def _parents(root, commit):
-    out = _text(_git(root, ["show", "-s", "--format=%P", commit]),
-                "post-merge parents").strip()
-    parents = out.split() if out else []
+    """Return a commit's TRUE parent oids, parsed from the raw commit object.
+
+    Reads `git cat-file commit <oid>` and takes the `parent ` header lines the object was actually
+    written with. The raw object is immune to BOTH parent-rewrite mechanisms: refs/replace/* (already
+    disabled by --no-replace-objects) and the legacy .git/info/grafts file, which git still honours for
+    the graph views `show -s --format=%P` and `log --format=%P`. A grafts file rewriting a merge's
+    second parent to a section-free tip would make those views report the rewritten parents, so a real
+    dropped section could read as a clean integration (exit 0); the raw object carries the parents the
+    commit was signed with, so no graft or replacement ref can mask the drop here. Header parsing stops
+    at the first blank line (the header/message boundary), so a message body line beginning "parent " is
+    never mistaken for a header.
+    """
+    raw = _text(_git(root, ["cat-file", "commit", commit]), "post-merge commit object")
+    parents = []
+    for line in raw.split("\n"):
+        if line == "":
+            break
+        key, _, value = line.partition(" ")
+        if key == "parent":
+            parents.append(value)
     if not all(OID_RE.fullmatch(parent) for parent in parents):
         raise GateError("post-merge parent list is malformed")
     return parents
@@ -710,6 +754,29 @@ def self_test():
                     1)
             finally:
                 _selftest_git(root, ["replace", "-d", bad])
+
+            # Round-8 FIX (an on-disk .git/info/grafts file must not mask a dropped section): the
+            # round-6 --no-replace-objects flag disables refs/replace/* only, NOT the legacy grafts
+            # mechanism, which git still honours for the graph views (`show -s --format=%P`,
+            # `merge-base`). `bad` is a real two-parent merge [target, topic] that drops topic's
+            # section (exit 1). Writing `.git/info/grafts` = `<bad> <target> <base>` rewrites bad's
+            # observed parents to [target, base] (base is a section-free tip), so pre-fix the SAME
+            # invocation read exit 0 and masked the drop. The gate now reads TRUE parents from the raw
+            # commit object via `cat-file commit` (graft- and replace-immune) and pins GIT_GRAFT_FILE
+            # to an empty file for every git call, so it reads the real second parent `topic` and still
+            # returns exit 1. The grafts file is removed afterwards so later fixtures read `bad`
+            # honestly; it also verifies the gate never depends on the stray graft persisting.
+            grafts_file = root / ".git" / "info" / "grafts"
+            grafts_file.parent.mkdir(parents=True, exist_ok=True)
+            grafts_file.write_text(
+                "{} {} {}\n".format(bad, target, base), encoding="utf-8")
+            try:
+                expect(
+                    "an on-disk .git/info/grafts file does not mask a dropped section",
+                    _quiet_run(root, config_path, True, bad, None, None),
+                    1)
+            finally:
+                grafts_file.unlink()
 
             # Round-6 FIX (legitimate `//abs` config path must not be wrongly rejected): os.path.normpath
             # keeps a POSIX-defined leading `//` that realpath collapses to `/`, so a genuine absolute
@@ -1191,9 +1258,10 @@ def self_test():
           "a lexically non-contained form, an octopus (3+ parent) merge, an "
           "explicit base that is not the unique merge-base, an explicit "
           "--branch-ref disagreeing with the observable second parent, a git "
-          "replacement ref rewriting a merge's parents, a legitimate '//abs' "
-          "config path, an embedded NUL in the config path, and a symlink "
-          "cancelled back to the same literal config path all "
+          "replacement ref rewriting a merge's parents, an on-disk "
+          ".git/info/grafts file rewriting a merge's parents, a legitimate "
+          "'//abs' config path, an embedded NUL in the config path, and a "
+          "symlink cancelled back to the same literal config path all "
           "produce the required 0/1/2 decisions")
     return 0
 
