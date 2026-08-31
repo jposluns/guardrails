@@ -42,8 +42,10 @@ Exit convention:
      APPLICABLE when the default config is absent AND was not present at the pre-merge target, because this
      checkout never adopted the gate
   1  at least one in-scope branch-owned heading was dropped from the post-merge commit
-  2  malformed or unreadable config/input, a config path that crosses a symlink in any component of its
-     resolved form or that resolves outside the repository root, a default config the merge itself removed, an
+  2  malformed or unreadable config/input, a config path whose canonicalization net-redirects through a
+     symlink (its real target differs from the literal name) or that resolves outside the repository root,
+     an invalid config path (for example one carrying an embedded NUL byte), a default config the merge
+     itself removed, an
      unresolvable ref (including an unresolvable post-merge ref while the removal check runs), a missing
      declared branch record, duplicate selected headings, a non-unique merge-base on either the default or the
      explicit-base path, an explicit --base-ref that is not that unique merge-base, a branch ref that cannot be
@@ -57,8 +59,12 @@ or heading outside the config is outside its surface. An explicit --base-ref is 
 and branch have a unique merge-base and the supplied ref names it; a non-unique merge-base fails closed on both
 the default and the explicit-base paths, so an explicit base cannot mask a drop by naming one of several
 merge-bases or a mere common ancestor. A config path is judged on its honestly-canonicalized (realpath) form,
-so a path that crosses a symlink in any component is fail-closed rather than followed, whatever `..`, ENOENT,
-or lexical-prefix form it takes; an octopus (three-or-more-parent) merge is not evaluable and fails closed;
+so a path whose canonicalization NET-REDIRECTS through a symlink (its real target differs from the literal
+name) is fail-closed rather than followed, whatever `..`, ENOENT, or lexical-prefix form it takes; a symlink
+crossed but cancelled back to the same literal path (real == lexical) is allowed and loads exactly the
+literally-named, reviewed file, since it masks nothing and any masking would additionally need config
+narrowing, which is out of this gate's threat model; an octopus (three-or-more-parent) merge is not evaluable
+and fails closed;
 and an unresolvable post-merge ref fails closed rather than reading as never-adopted.
 
 The config is trusted adopter input to this preservation check, so the gate does not defend the config's own
@@ -114,9 +120,16 @@ def _clean_env():
 
 
 def _git(root, args):
-    """Run git without a shell and return stdout bytes. Any invocation failure is fail-closed."""
+    """Run git without a shell and return stdout bytes. Any invocation failure is fail-closed.
+
+    Every invocation carries --no-replace-objects, so a local git replacement ref (refs/replace/*)
+    cannot substitute a crafted object for a commit the gate reads. Without it, `git replace <post>
+    <obj-with-benign-parents>` rewrites the parent list `show -s --format=%P` reports, letting a real
+    merge that dropped a section masquerade as one whose branch tip owns no new section (exit 0).
+    """
     try:
-        proc = subprocess.run(["git", "-C", str(root), *args], stdout=subprocess.PIPE,
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), *args],
+                              stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=30, env=_clean_env())
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise GateError("git invocation failed ({})".format(type(exc).__name__))
@@ -149,7 +162,7 @@ def _repository_root(root):
 
 
 def _contained_config_path(root, value):
-    """Return the honestly-canonicalized config path, fail-closed on any symlink or escape.
+    """Return the honestly-canonicalized config path, fail-closed on a net-redirecting symlink or escape.
 
     The config path is judged on its REAL, fully-resolved form, never on a lexical guess. The round-2/3
     guard walked the raw path components with lstat and asked relative_to(root) lexically; both are
@@ -159,27 +172,44 @@ def _contained_config_path(root, value):
     process-relative alias such as the current-directory link, then resolves back inside) trips the
     ValueError early-return yet still resolves into the root. Per the project's symlink-resolution rule
     we reject on the resolved path instead: canonicalize with realpath (which follows every symlink and
-    collapses `.`/`..`), require the REAL target to sit under the (already canonical) root, AND reject if
-    canonicalization CROSSED any symlink. A symlink was crossed exactly when the honest realpath differs
-    from the purely lexical normalization of the same absolute candidate, since both collapse
-    `.`/`..`/separators identically and only realpath additionally follows links. This holds regardless
-    of `..`, ENOENT, or lexical-prefix form.
+    collapses `.`/`..`), require the REAL target to sit under the (already canonical) root, AND reject a
+    NET-REDIRECTING canonicalization. The path net-redirected exactly when the honest realpath differs
+    from the purely lexical normalization of the same absolute candidate (both collapse
+    `.`/`..`/separators and a leading `//` identically, and only realpath additionally follows links),
+    so any symlink crossing that changes the resolved target is rejected regardless of `..`, ENOENT, or
+    lexical-prefix form. A symlink crossed but cancelled back to the same literal path (real == lexical,
+    for example `link/../real` where resolving `link` and then the following `..` lands on the same
+    place) is NOT rejected: it loads exactly the literally-named, reviewed file, so it masks nothing.
+    Masking a drop through such a path would additionally require narrowing the config it lands on, which
+    is the config-integrity surface's concern and out of this gate's threat model.
     """
-    candidate = Path(value) if Path(value).is_absolute() else root / value
     # candidate is already absolute (root is canonical), so neither call depends on the process cwd.
     # Pass the RAW candidate string, never a pre-collapsed one: os.path.abspath/normpath would fold
     # `..` lexically BEFORE realpath runs, which would neutralize a `symlink/..` ordering (a crossed
     # symlink whose target then climbs back under root) and hide the crossing. realpath honours POSIX
     # order (resolve each symlink, THEN apply the following `..`), so it and the purely lexical normpath
-    # diverge whenever, and only whenever, a symlink was actually crossed.
-    text = str(candidate)
-    real = Path(os.path.realpath(text))
-    lexical = Path(os.path.normpath(text))
+    # diverge whenever, and only whenever, a symlink NET-REDIRECTED the path (a crossing whose real
+    # target differs from the literal name); a symlink crossed but cancelled back to the same literal
+    # path leaves real == lexical and is allowed, loading exactly the literally-named file. An invalid
+    # path (for example an embedded NUL byte that reaches realpath's lstat) is fail-closed here rather
+    # than raising, since this is a validation surface.
+    try:
+        candidate = Path(value) if Path(value).is_absolute() else root / value
+        text = str(candidate)
+        real_str = os.path.realpath(text)
+        # os.path.normpath preserves a POSIX-defined leading `//` that realpath collapses to `/`; that
+        # difference is not a symlink crossing, so fold a leading run of two or more slashes to one on
+        # the lexical form, keeping real != lexical a pure net-redirection signal (without it, a
+        # legitimate `//abs/.../record-sections.toml` would be wrongly rejected).
+        lexical_str = re.sub(r"^/{2,}", "/", os.path.normpath(text))
+    except ValueError as exc:
+        raise GateError("config path is not a valid filesystem path ({})".format(type(exc).__name__))
+    real = Path(real_str)
     try:
         real.relative_to(root)
     except ValueError:
         raise GateError("config path must resolve inside the repository root")
-    if real != lexical:
+    if real_str != lexical_str:
         raise GateError(
             "config path {} crosses a symlink (resolves to {}); a symlinked config path is not "
             "followed".format(value, real))
@@ -303,8 +333,8 @@ def _merge_base(root, target, branch):
 
 def _require_ancestor(root, ancestor, descendant, label):
     try:
-        proc = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
-                               ancestor, descendant], stdout=subprocess.PIPE,
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "merge-base",
+                               "--is-ancestor", ancestor, descendant], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=30, env=_clean_env())
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise GateError("cannot validate {} ancestry ({})"
@@ -660,6 +690,70 @@ def self_test():
                 "octopus merge fails closed with --branch-ref at the section-owning parent",
                 _quiet_run(root, config_path, True, octopus, topic, None),
                 2)
+
+            # Round-6 FIX (git replacement ref must not mask a drop): the gate reads a commit's parents
+            # with `show -s --format=%P`, which honours refs/replace/*. `bad` is a real two-parent merge
+            # [target, topic] that drops topic's section (exit 1). Replacing bad's commit object with a
+            # substitute whose parents are [target, base] (a section-free branch tip) rewrites the parent
+            # list the gate sees, so pre-fix the SAME invocation read exit 0 and masked the drop. Every
+            # git call now carries --no-replace-objects, so the gate reads the real parents and still
+            # returns exit 1. The replace ref is removed afterwards so later fixtures read `bad` honestly.
+            replace_sub = _selftest_git(
+                root,
+                ["commit-tree", target_tree, "-p", target, "-p", base],
+                input_text="masking substitute with a section-free second parent\n")
+            _selftest_git(root, ["replace", bad, replace_sub])
+            try:
+                expect(
+                    "a git replacement ref does not mask a dropped section",
+                    _quiet_run(root, config_path, True, bad, None, None),
+                    1)
+            finally:
+                _selftest_git(root, ["replace", "-d", bad])
+
+            # Round-6 FIX (legitimate `//abs` config path must not be wrongly rejected): os.path.normpath
+            # keeps a POSIX-defined leading `//` that realpath collapses to `/`, so a genuine absolute
+            # config path written with a doubled leading slash made real != lexical falsely fire (exit 2).
+            # The leading-slash run is now folded on the lexical form, so the real config loads and the
+            # dropped-section merge `bad` is detected (exit 1). Driven through main() so the containment
+            # path is exercised.
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                double_slash_rc = main(
+                    ["--root", str(root), "--config", "/" + str(config_path),
+                     "--post-merge-ref", bad])
+            expect(
+                "a legitimate `//abs` config path is accepted, not rejected as a symlink",
+                double_slash_rc, 1)
+
+            # Round-6 FIX (an invalid config path fails closed, not crash): an embedded NUL byte in
+            # --config reaches realpath's lstat and raised an uncaught ValueError pre-fix; it is now a
+            # validation failure (exit 2). Reachable through the in-process interface; OS argv cannot
+            # carry a NUL.
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                nul_rc = main(
+                    ["--root", str(root), "--config", "bad\x00path",
+                     "--post-merge-ref", bad])
+            expect("an embedded NUL in the config path fails closed", nul_rc, 2)
+
+            # Round-6 accuracy pin (a symlink cancelled back to the same literal path is allowed): the
+            # guard rejects a NET-REDIRECTING crossing (real != lexical), not every symlink crossing.
+            # `cancel-link -> .aiqt`, so `cancel-link/../.aiqt/record-sections.toml` crosses the symlink
+            # yet the following `..` climbs back so realpath == normpath == the real config. It loads the
+            # literally-named reviewed config and detects the drop on `bad` (exit 1), which is the
+            # behaviour the corrected disclosure documents; this pins it against a future change that
+            # would wrongly fail it closed and contradict the disclosure.
+            cancel_link = root / "cancel-link"
+            if cancel_link.is_symlink() or cancel_link.exists():
+                cancel_link.unlink()
+            os.symlink(".aiqt", str(cancel_link))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                cancel_rc = main(
+                    ["--root", str(root), "--config",
+                     "cancel-link/../.aiqt/record-sections.toml", "--post-merge-ref", bad])
+            cancel_link.unlink()
+            expect(
+                "a symlink cancelled back to the same literal config path is allowed and detects the drop",
+                cancel_rc, 1)
 
             # Round-3 FIX B (symlinked PARENT component): the round-2 guard checked only the final path
             # component, so a symlinked parent directory still redirected the config the load and the
@@ -1095,8 +1189,11 @@ def self_test():
           "symlinked config, a symlinked parent component of the config path, "
           "a config path crossing a symlink via an ENOENT-masked '..' prefix or "
           "a lexically non-contained form, an octopus (3+ parent) merge, an "
-          "explicit base that is not the unique merge-base, and an explicit "
-          "--branch-ref disagreeing with the observable second parent all "
+          "explicit base that is not the unique merge-base, an explicit "
+          "--branch-ref disagreeing with the observable second parent, a git "
+          "replacement ref rewriting a merge's parents, a legitimate '//abs' "
+          "config path, an embedded NUL in the config path, and a symlink "
+          "cancelled back to the same literal config path all "
           "produce the required 0/1/2 decisions")
     return 0
 
