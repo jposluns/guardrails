@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "abc060f0eb4fb4fddb42b48e5cbb6950c4fe10885f9346d645cd1d91f2ac58f9"
+tree-sha256 = "4187b84cffe570eac43cbed0deeb60805878e68da37757657bf7418cb941f7c6"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -721,8 +721,8 @@ sha256 = "8527c6999ed590e42b72428146eef9fc2d9d6b82266f7ef825dea777f75542f4"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 7761
-sha256 = "3d977e8ce8a0ae99fc0fba9d6d19bf7a719468a783baf5007a2edbf462a5e89e"
+bytes = 7959
+sha256 = "db86a1a6ab4ec3004e44a2b754e5e8528d8a32e8e193192e46f74e06d84c2c21"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2071,8 +2071,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 33193
-sha256 = "1793a0635733d50713faa4ab3b9784b26f502ae9a2f66c3d17c1cecc04585e5f"
+bytes = 33219
+sha256 = "e2e47cf48d00201dcc30c0dc6c78b6fd9519424942f958fb68705282f03e48b1"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2163,6 +2163,11 @@ sha256 = "d6d0908a1f12997fe1572f5302e1661573738a6db6b85890612bf277d90d7b69"
 path = "docs/rule1.md"
 bytes = 2692
 sha256 = "12a60266191e3bf74ca1b056f0b5a9620a8212ba94ae090b44b7c6fb8d8c2b3b"
+
+[[sources]]
+path = "docs/rule2.md"
+bytes = 3041
+sha256 = "1c2dd17a23269d9be8acbd839c0ebdafaf0e77356d3d92179e6ad4fe391e5440"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
@@ -2671,8 +2676,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 71997
-sha256 = "8773ebc16dc4ae0b74a39bf5fb3ca10aed13645026c4ec79bfd5c2ac72d4a537"
+bytes = 72555
+sha256 = "00cd2916d92ea987c1552821ec6b5bc76d675487d439bcef8cae10b5e95daabf"
 
 [[sources]]
 path = "tools/gen_skill.py"
