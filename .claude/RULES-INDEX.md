@@ -14,6 +14,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Measured and estimated figures stay separate](rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md)
 - [No fabrication](rules/aiqt/10-ACCUR-no-fabrication.md)
 - [Observe before asserting behaviour](rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md)
+- [A partial read is not the whole](rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md)
 - [Read before characterizing](rules/aiqt/10-ACCUR-read-before-characterizing.md)
 - [Capture the reference when the claim is made](rules/aiqt/10-ACCUR-reference-capture.md)
 - [Reproduce a defect before fixing it](rules/aiqt/10-ACCUR-reproduce-before-fix.md)

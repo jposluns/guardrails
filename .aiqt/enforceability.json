@@ -769,6 +769,14 @@
       "status": "hook-linked"
     },
     {
+      "corpus-id": "prtwhl",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/accur-partial-read-is-not-the-whole.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "rdbchr",
       "family": "aiqt",
       "gates": [],

@@ -26,6 +26,7 @@
 .aiqt/core/rules/accur-measured-and-estimated-figures-stay-separate.md text eol=lf
 .aiqt/core/rules/accur-no-fabrication.md text eol=lf
 .aiqt/core/rules/accur-observe-before-asserting-behaviour.md text eol=lf
+.aiqt/core/rules/accur-partial-read-is-not-the-whole.md text eol=lf
 .aiqt/core/rules/accur-read-before-characterizing.md text eol=lf
 .aiqt/core/rules/accur-reference-capture.md text eol=lf
 .aiqt/core/rules/accur-reproduce-before-fix.md text eol=lf
@@ -176,6 +177,7 @@
 .claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-no-fabrication.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md text eol=lf
+.claude/rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-read-before-characterizing.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-reference-capture.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-reproduce-before-fix.md text eol=lf
@@ -299,6 +301,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-no-fabrication.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-observe-before-asserting-behaviour.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-partial-read-is-not-the-whole.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-read-before-characterizing.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-reference-capture.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-reproduce-before-fix.mdc text eol=lf
