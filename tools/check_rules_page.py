@@ -8,7 +8,9 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from html.parser import HTMLParser
 from pathlib import Path
@@ -546,6 +548,33 @@ def parse_catalog(value):
     return parser
 
 
+def network_findings(js_text):
+    """Findings for rules.js network egress. Strips comments, then requires exactly one fetch call,
+    a string literal to /downloads/ruleset.json, and rejects the named transport primitives.
+
+    COVERAGE BOUNDARY (disclosed): a recognizable-subset LEXICAL scan, not a complete egress denylist.
+    It catches a variable or second fetch TARGET (fetch(x)) and window.fetch(...). It does NOT catch an
+    aliased fetch binding (var f = window.fetch; f(x)), a computed-member call (window["fetch"](x)), a
+    dynamic import("..."), an Image()/img or script-element src assignment, or any egress whose tokens
+    it does not name. The transport check catches ONLY XMLHttpRequest, EventSource, WebSocket, and
+    sendBeacon. Those residuals are left to review and the tri-family QA; the gate's manifest residue
+    states the same boundary."""
+    findings = []
+    code = re.sub(r"/\*.*?\*/", "", js_text, flags=re.DOTALL)
+    code = re.sub(r"//[^\n]*", "", code)
+    all_fetches = re.findall(r"\bfetch\s*\(", code)
+    literal_fetches = re.findall(r"\bfetch\s*\(\s*([\"\'])(.*?)\1", code)
+    if (len(all_fetches) != 1
+            or [url for _quote, url in literal_fetches] != ["/downloads/ruleset.json"]):
+        findings.append(
+            "rules.js must make exactly one fetch call, a string literal "
+            "to /downloads/ruleset.json (a variable or computed fetch "
+            "target is rejected)")
+    if re.search(r"\b(?:XMLHttpRequest|EventSource|WebSocket|sendBeacon)\b", code):
+        findings.append("rules.js carries an additional network data path")
+    return findings
+
+
 def run(root):
     root = Path(root).resolve()
     try:
@@ -616,34 +645,7 @@ def run(root):
     code = re.sub(
         r"/\*.*?\*/", "", js_text, flags=re.DOTALL
     )
-    code = re.sub(r"//[^\n]*", "", code)
-    # Count EVERY fetch( call, not only quoted-literal ones: a variable or
-    # computed target (fetch(endpoint)) must not slip the single-path gate.
-    # Residual (disclosed): an aliased binding (var f = window.fetch; f(x))
-    # or a computed member access (window["fetch"](x)) carries no literal
-    # "fetch(" token; those are covered by the transport-name check below and
-    # named in this gate's manifest residue, not chased by this scan.
-    all_fetches = re.findall(r"\bfetch\s*\(", code)
-    literal_fetches = re.findall(
-        r"\bfetch\s*\(\s*([\"'])(.*?)\1", code
-    )
-    if (
-        len(all_fetches) != 1
-        or [url for _quote, url in literal_fetches]
-        != ["/downloads/ruleset.json"]
-    ):
-        findings.append(
-            "rules.js must make exactly one fetch call, a string literal "
-            "to /downloads/ruleset.json (a variable or computed fetch "
-            "target is rejected)"
-        )
-    if re.search(
-        r"\b(?:XMLHttpRequest|EventSource|WebSocket|sendBeacon)\b",
-        code,
-    ):
-        findings.append(
-            "rules.js carries an additional network data path"
-        )
+    findings.extend(network_findings(js_text))
 
     if findings:
         print(
@@ -770,9 +772,47 @@ def self_test_main():
         )
         return 1
 
+    if network_findings('fetch("/downloads/ruleset.json", {cache: "no-cache"});'):
+        print("SELF-TEST FAIL: a clean single-literal fetch was flagged")
+        return 1
+    for label, sample in (
+        ("variable fetch target", 'var e = "/x"; fetch(e); fetch("/downloads/ruleset.json");'),
+        ("second literal fetch", 'fetch("/downloads/ruleset.json"); fetch("/x");'),
+        ("no sanctioned fetch", 'fetch("/other.json");'),
+        ("transport primitive", 'fetch("/downloads/ruleset.json"); new WebSocket("wss://x");'),
+    ):
+        if not network_findings(sample):
+            print("SELF-TEST FAIL: network scan missed the " + label)
+            return 1
+    if network_findings('var w = window; w["fetch"]("/x"); fetch("/downloads/ruleset.json");'):
+        print("SELF-TEST FAIL: computed-member residual unexpectedly flagged")
+        return 1
+
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-rulespage-selftest-"))
+    try:
+        rows = [{"corpus-id": "selfr1", "status": "prose-only"}]
+        ok = tmp / "ok.json"
+        ok.write_text(json.dumps({"version": 1, "boundary": "b", "rules": rows}), encoding="utf-8")
+        if load_enforcement(ok) != {"selfr1": "prose-only"}:
+            print("SELF-TEST FAIL: a valid enforcement ledger did not load")
+            return 1
+        for label, boundary in (("null", None), ("empty", ""), ("whitespace", "  ")):
+            bad = tmp / "bad.json"
+            bad.write_text(json.dumps({"version": 1, "boundary": boundary, "rules": rows}), encoding="utf-8")
+            try:
+                load_enforcement(bad)
+                print("SELF-TEST FAIL: a " + label + " boundary was accepted")
+                return 1
+            except ValueError:
+                pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     print(
-        "SELF-TEST PASS: a conformant synthetic catalog passes; "
-        "fingerprint and duplicate-anchor corruptions fail."
+        "SELF-TEST PASS: a conformant synthetic catalog passes; fingerprint and "
+        "duplicate-anchor corruptions fail; the network scan catches variable/second/"
+        "transport egress while the disclosed computed-member residual slips; and a "
+        "malformed enforcement boundary fails closed."
     )
     return 0
 
