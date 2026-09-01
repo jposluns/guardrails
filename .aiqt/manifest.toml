@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "4e050c8e621e5a7407c14cef23ead838e9f2f28298e784c732e0c7316f1475ee"
+tree-sha256 = "ae3f74211af133e3862920b9ceb7514bd71e2931bd60516136b0cb5d3cbebe86"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -16,8 +16,8 @@ sha256 = "99ce8ef683462539c3f27f96ca29a1f0ac890605906306f00de6f08dae2c9234"
 
 [[sources]]
 path = ".aiqt/core/applies.toml"
-bytes = 4337
-sha256 = "4f3bbb3709006d3295e0ffed68bac6183c6949e41a68792bdb5efe9a7e9ee03f"
+bytes = 4308
+sha256 = "efb4235f11af89e26e7b07c1a18de8c4b236c7242b144a5984684fd30c9fd09d"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
