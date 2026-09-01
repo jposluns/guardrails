@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "237bdb3011dfdd725db263f26d3f450d85615f88e71302c27fdd44c2d5e96d24"
+tree-sha256 = "4e050c8e621e5a7407c14cef23ead838e9f2f28298e784c732e0c7316f1475ee"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -16,8 +16,8 @@ sha256 = "99ce8ef683462539c3f27f96ca29a1f0ac890605906306f00de6f08dae2c9234"
 
 [[sources]]
 path = ".aiqt/core/applies.toml"
-bytes = 4381
-sha256 = "0ebb713d392a2221570438da4fc53267eec442ff35017aea640180a9c2b8eee8"
+bytes = 4337
+sha256 = "4f3bbb3709006d3295e0ffed68bac6183c6949e41a68792bdb5efe9a7e9ee03f"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
@@ -46,8 +46,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 59603
-sha256 = "839068cf2dd0ebf75e212129f24796966748475a5af6bed8bc94f08005049952"
+bytes = 59681
+sha256 = "ad9c7c6b96c4ca11684cdd88f1871e61f516e12c295fc7c82ea5796686a48ead"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2471,8 +2471,8 @@ sha256 = "71f7a366e4d703c9b33a4f7c3d2f5f165260f590b62a38bd31e2c9062b8103bd"
 
 [[sources]]
 path = "tools/check_applies.py"
-bytes = 10061
-sha256 = "3d492e049188be9dbe048acebaf97d9423b7dca69b18536eb4b975b295039372"
+bytes = 10538
+sha256 = "e95bbb0dffb1fa9ab801bc3f44e387346ab0e166823b902955e38337e1364474"
 
 [[sources]]
 path = "tools/check_artifact_checksums.py"

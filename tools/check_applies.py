@@ -133,6 +133,9 @@ def coverage_findings(corpus_ids, assignments, known_conditions):
         unknown = sorted(set(conds) - set(known_conditions))
         if unknown:
             findings.append("{}: unknown condition(s): {}".format(cid, ", ".join(unknown)))
+        if "always" in conds and len(set(conds)) > 1:
+            findings.append("{}: always-subsumption: 'always' is the floor in every profile, so it must be "
+                            "the ONLY listed condition (a second tag adds no activation context)".format(cid))
     return findings
 
 
@@ -174,6 +177,8 @@ def self_test_main():
     checks.append(any("invalid" in f for f in coverage_findings(["a"], {"a": []}, known)))
     # duplicate
     checks.append(any("duplicate" in f for f in coverage_findings(["a"], {"a": ["always", "always"]}, known)))
+    # always-subsumption (always beside another condition)
+    checks.append(any("always-subsumption" in f for f in coverage_findings(["a"], {"a": ["always", "writes-code"]}, known)))
     # load_applicability rejects a bad vocab (missing always)
     import tempfile, os
     ok_bad = False
@@ -190,8 +195,8 @@ def self_test_main():
         import shutil; shutil.rmtree(d, ignore_errors=True)
     checks.append(ok_bad)
     if all(checks):
-        print("SELF-TEST PASS: coverage detects untagged/orphan/unknown/empty/duplicate; a vocab without "
-              "'always' fails closed. ({} checks)".format(len(checks)))
+        print("SELF-TEST PASS: coverage detects untagged/orphan/unknown/empty/duplicate/always-subsumption; a "
+              "vocab without 'always' fails closed. ({} checks)".format(len(checks)))
         return 0
     print("SELF-TEST FAIL: {}".format([i for i, c in enumerate(checks) if not c]))
     return 1
