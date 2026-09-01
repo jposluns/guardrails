@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Install-page tripwire: keep the platform picker static, visible, and complete.
 
-site/install.html shows five AI-family setup sections (Claude, ChatGPT, Gemini, Copilot, and any other
+site/install.html shows six AI-family setup sections (Claude, ChatGPT, Gemini, Copilot, and any other
 assistant). A progressive-enhancement filter, site/js/install.js, lets a reader narrow the page to one
 family: it sets a data-family attribute on the root element, and a CSS rule keyed on that attribute
 collapses the other family sections. The point is that this is an ENHANCEMENT. With JavaScript off, failed,
-or blocked, the attribute is never set, the guarded rule is inert, and all five sections show.
+or blocked, the attribute is never set, the guarded rule is inert, and all six sections show.
 
 This is a TRIPWIRE for the common regressions in the STATIC MARKUP, plus a check that the guarded collapse
 rule still exists. It is deliberately NOT a CSS engine or a browser: whether some NEW stylesheet rule hides
@@ -33,7 +33,7 @@ What it verifies (reliably):
      shared header's theme/nav inline handlers and the page's inline style attributes stay out of scope.
   7. The guarded collapse rules are present in site/styles.css: the hide-all rule (a SINGLE selector part
      carrying a positive, non-negated html[data-family] presence guard AND the generic [data-family-section],
-     with a real display:none) AND all five per-family reveal rules (each a single selector part with
+     with a real display:none) AND all six per-family reveal rules (each a single selector part with
      html[data-family="<fam>"] and [data-family-section="<fam>"] and display:block). The property is matched
      at a boundary, so a --custom property does not count; a :not()-negated guard, a guard and section split
      across comma selectors, or a missing reveal each fail. This catches the feature being deleted, its guard
@@ -63,7 +63,7 @@ PAGE_REL = "site/install.html"
 STYLES_REL = "site/styles.css"
 JS_REL = "site/js/install.js"
 
-FAMILIES = ["claude", "chatgpt", "gemini", "copilot", "other"]
+FAMILIES = ["claude", "chatgpt", "gemini", "copilot", "copilotstudio", "other"]
 VOID = {"meta", "link", "img", "br", "hr", "input", "source", "wbr", "col"}
 # Invisible characters a heading might be reduced to: zero-width spaces/joiner/BOM, no-break and soft-hyphen,
 # word joiner, and the bidi marks.
@@ -154,7 +154,7 @@ def hide_all_rule_present(css_text):
 def family_reveal_present(css_text, fam):
     """True iff a single selector part carries BOTH html[data-family="<fam>"] and
     [data-family-section="<fam>"] with a real display:block body: the rule that re-shows the selected
-    family. Without all five, a selected family (or all families) would stay hidden."""
+    family. Without all six, a selected family (or all families) would stay hidden."""
     guard = re.compile(
         r'(?:^|[\s>+~])html\[data-family\s*[~^$*|]?=\s*["\']?' + re.escape(fam) + r'["\']?\s*\]', re.I)
     section = re.compile(
@@ -323,7 +323,7 @@ def analyze(page_text, css_text, js_text):
         problems.append("the {} family section carries hidden, inert, aria-hidden, or the visually-hidden "
                         "class in the static markup, so it would not appear without JavaScript.".format(fam))
     for extra in parser.other_family_carriers:
-        problems.append("data-family-section appears on an unexpected element {}; only the five family "
+        problems.append("data-family-section appears on an unexpected element {}; only the six family "
                         "<section> elements may carry it.".format(extra))
     for dup_id, count in sorted(parser.id_counts.items()):
         if count > 1:
@@ -397,7 +397,7 @@ def analyze(page_text, css_text, js_text):
         problems.append("the picker or a family section carries an inline event handler {}; bind the "
                         "listener in site/js/install.js instead.".format(handler))
 
-    # 6. the guarded collapse rules still exist: the hide-all rule AND all five per-family reveal rules
+    # 6. the guarded collapse rules still exist: the hide-all rule AND all six per-family reveal rules
     if not hide_all_rule_present(css_text):
         problems.append("no guarded hide-all collapse rule found in site/styles.css: a single selector must "
                         "carry a positive html[data-family] presence guard AND the generic "
@@ -434,10 +434,10 @@ def run(root):
         for problem in problems:
             print("  - " + problem)
         return 1
-    print("PASS: the install page carries all five family sections statically and visibly, the visible "
+    print("PASS: the install page carries all six family sections statically and visibly, the visible "
           "picker and single hidden reset and announcing status region are present with no pre-set filter "
           "state, install.js is an executable external script carrying the picker logic with no inline code "
-          "in the picker or sections, and the guarded hide-all plus all five per-family reveal rules are "
+          "in the picker or sections, and the guarded hide-all plus all six per-family reveal rules are "
           "present.")
     return 0
 
@@ -447,7 +447,7 @@ def run(root):
 # ones: inline-style hiding, aria-live="off", a missing or hidden picker, an inline handler on a de-ided
 # .platform-actions, a commented-out or non-JS-type or suffixed-src (.disabled, fix B) or empty or stub or
 # comment-only (fix C) install.js, a --custom-property or :not()-negated or split or wrong-tag (fix D)
-# hide-all guard, wrong-tag (fix D) reveal rules, and all five reveal rules removed) fails; and a missing
+# hide-all guard, wrong-tag (fix D) reveal rules, and all six reveal rules removed) fails; and a missing
 # input fails closed (exit 2).
 
 def _clean_page():
@@ -583,7 +583,7 @@ def _self_test():
         ("hide-all guard and section split across selectors", clean, _split_css, _CLEAN_JS),
         ("hide-all attribute on a wrong tag (not <section>)", clean, _wrongtag_hide_css, _CLEAN_JS),
         ("reveal rules attribute on a wrong tag (not <section>)", clean, _wrongtag_reveal_css, _CLEAN_JS),
-        ("all five reveal rules removed", clean, _no_reveals_css, _CLEAN_JS),
+        ("all six reveal rules removed", clean, _no_reveals_css, _CLEAN_JS),
     ]
     for label, page, css, js in mutations:
         if not analyze(page, css, js):

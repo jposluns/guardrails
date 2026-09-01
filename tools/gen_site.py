@@ -186,6 +186,7 @@ SIDEBAR_SLUG_TO_HREF = {
     "install-chatgpt": "/install#chatgpt",
     "install-gemini": "/install#gemini",
     "install-copilot": "/install#copilot",
+    "install-copilotstudio": "/install#copilotstudio",
     "install-other": "/install#other",
     "development": "/development",
     "tech-details": "/tech-details",
