@@ -973,10 +973,19 @@
     {
       "corpus-id": "seccet",
       "family": "security",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "python-launcher-isolation",
+          "platform": "ci",
+          "residue": "A deterministic scan over a RECOGNIZABLE SUBSET of the repo's Python launcher configuration: the generated plugin hooks.json, tools/run_all_checks.sh, every regular *.yml/*.yaml under .github/workflows/, and the optional .claude/settings.json files. A direct python3 launcher there is FAILed unless it runs isolated (-I, or the full -P -E -s), so a tool-written sibling cannot shadow a stdlib import and neuter the control; the gate itself refuses to run non-isolated (exit 2) so a sibling cannot neuter the gate first, and it fails closed (exit 2) on a missing, unreadable, non-regular, or malformed input rather than passing it as clean. It does NOT catch: wrapper or indirect launchers (a bash -c string, a .sh re-launcher), $PYTHON or shell aliases and functions, a dynamically assembled argv, the programmatic subprocess children in the tools and the regenerate strings in .aiqt/gensrc.json (a separate follow-up), a script that mutates its own sys.path at runtime (which -I cannot prevent), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces, YAML or shell constructs beyond the supported line grammar, and the PATH provenance of python3 itself; a python3 token embedded in a quoted argument or a heredoc may be miscounted.",
+          "script": "tools/check_python_launcher_isolation.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "seccfg",

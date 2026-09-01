@@ -34,10 +34,9 @@ import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
-from _gen_common import is_external_url
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, replace_block, reconcile  # noqa: E402
+from _gen_common import is_external_url, repo_root, load_toml, replace_block, reconcile  # noqa: E402
 
 EN, EM = "–", "—"
 PLACEHOLDER = "[[ARCHITECT"
