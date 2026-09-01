@@ -388,6 +388,15 @@ class = "a"
 residue = "It checks that every rule source sits at its taxonomy-derived path. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "applies"
+script = "tools/check_applies.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It enforces GD-99 applicability coverage BIDIRECTIONALLY against the live corpus: every rule corpus-id has exactly one .aiqt/core/applies.toml assignment (no untagged rule), no assignment names a corpus-id absent from the corpus (no orphan), and every assignment is a non-empty list of distinct conditions drawn from .aiqt/core/applicability.toml; a missing or malformed vocabulary or assignment file, or an unreadable/empty corpus, fails closed. It validates that a tag is PRESENT and drawn from the controlled vocabulary, not that the chosen conditions are the semantically correct set for the rule (a valid-but-wrong condition still passes); semantic correctness rests on the tri-family authoring review, not this gate. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "mappings"
 script = "tools/check_mappings.py"
 rules = []

@@ -154,6 +154,8 @@ run_gate "byte-canon-selftest"   python3 -I -B tools/check_byte_canon.py --self-
 run_gate "byte-canon"            python3 -I -B tools/check_byte_canon.py
 run_gate "clauses-manifest-sources" python3 -I -B tools/check_clauses.py --genesis --with-manifest
 run_gate "placement"      python3 -I -B tools/check_rule_placement.py
+run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
+run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
