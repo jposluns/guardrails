@@ -1,5 +1,5 @@
 AIQT: a standard for your AI assistant (condensed 8k variant)
-Version 1.0.3. Licensed under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
+Version 1.0.4. Licensed under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
 Source and full text: https://github.com/jposluns/guardrails
 
 This is a CONDENSED variant of the full AIQT instructions, trimmed to fit an 8000-character limit; it

@@ -10,7 +10,7 @@ description: >-
 
 # AIQT™
 
-Version: 1.0.3  
+Version: 1.0.4  
 Author: Jeff Posluns  
 Website: https://aiqt.ai  
 GitHub: https://github.com/jposluns/guardrails  
