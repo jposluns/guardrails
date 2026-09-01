@@ -115,6 +115,15 @@ GENSRC_OUTPUTS = (
     {"target": "site/rule2.html", "kind": "file",
      "sources": ("docs/_shell.html", "docs/rule2.md"),
      "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/rule3.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/rule3.md"),
+     "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/rule4.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/rule4.md"),
+     "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/rule5.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/rule5.md"),
+     "regenerate": "python3 tools/gen_site.py"},
 )
 
 DOCS_DIR = "docs"
