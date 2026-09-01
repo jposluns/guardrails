@@ -5427,6 +5427,7 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
     (--help/--version/-h/-V, or command -v/-V) whose wrapper does not launch the target. None makes the
     caller fail toward NOT-denying (an under-block), never a false-deny."""
     n = len(argv)
+    start = i  # the first token after the wrapper word (to detect a required-option wrapper given none)
     valopts, flagopts = _wrapper_option_sets(wrapper, explicit_time)
     while i < n:
         tok = argv[i]
@@ -5459,8 +5460,18 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
             i += 1  # env NAME=value assignment prefix
             continue
         break  # a non-option token: the DURATION positional or the wrapped command word
-    if wrapper == "timeout" and i < n and _DURATION_RE.match(argv[i]):
-        i += 1  # the mandatory DURATION positional before the command
+    if wrapper == "timeout":
+        # timeout REQUIRES a DURATION before the command; without a valid one it errors and launches
+        # NOTHING (empirically `timeout orch-verify` -> invalid time interval, no exec), so a missing or
+        # invalid duration is not a launch: fail toward allow rather than false-deny the worker (round-5).
+        if i < n and _DURATION_RE.match(argv[i]):
+            i += 1
+        else:
+            return None
+    elif wrapper == "stdbuf" and i == start:
+        # stdbuf REQUIRES a buffering-mode option; with none it errors and launches nothing, so
+        # `stdbuf worker &` is not a detach: fail toward allow rather than false-deny (round-5).
+        return None
     return i
 
 
@@ -5494,6 +5505,52 @@ def _detached_command_basename(argv):
     if idx is None:
         return None
     return argv[idx].rsplit("/", 1)[-1]
+
+
+_ASSIGN_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")  # a clean unquoted env-assignment NAME= (unanchored)
+
+
+def _skip_shell_value(raw, i, n):
+    """From index i (just after a NAME= in raw), return the index past the assignment's VALUE (up to the next
+    unquoted whitespace, honoring single/double quotes and backslash), or None on an unbalanced quote."""
+    while i < n and raw[i] not in " \t":
+        c = raw[i]
+        if c == "'":
+            j = raw.find("'", i + 1)
+            if j == -1:
+                return None
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while i < n and raw[i] != '"':
+                i += 2 if raw[i] == "\\" else 1
+            if i >= n:
+                return None
+            i += 1
+        else:
+            i += 2 if c == "\\" else 1
+    return i
+
+
+def _leading_assigns_all_clean(raw, n_assign):
+    """True when raw's first n_assign shell words are each a CLEAN unquoted env-assignment (NAME[+]= with no
+    quote or backslash in the NAME): distinguishes a real env-prefix (FOO=bar worker &, a provable detach)
+    from a quote/escape-masked one ("FOO"=bar, F\\OO=bar, which bash runs as a FAILING command that launches
+    nothing). False on any masked/unresolvable leading token, so the caller fails toward allow."""
+    i, n, seen = 0, len(raw), 0
+    while seen < n_assign and i < n:
+        while i < n and raw[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        m = _ASSIGN_NAME_RE.match(raw, i)
+        if not m:
+            return False
+        i = _skip_shell_value(raw, m.end(), n)
+        if i is None:
+            return False
+        seen += 1
+    return seen == n_assign
 
 
 def _shell_c_literal(seg):
@@ -5584,23 +5641,29 @@ def _scan_detached_workers(command, worker_set, depth):
                         # backgrounded subshell whose worker ran before a hard separator is still caught
     gated = False       # True once past a &&/|| in the current AND-OR list: a worker after it runs conditionally,
                         # so a trailing '&' backgrounding the list must NOT deny it (round-3 fix, no false-deny)
+    list_worker = None  # an UNCONDITIONAL declared worker in the CURRENT AND-OR list (resets on ';'/'&'/scope,
+                        # survives '&&'/'||'): `worker && x &` backgrounds the whole list -> deny the provable
+                        # lead-worker detach, while `x; worker` (a foreground worker) does not (round-5, MAJOR-1)
     prev_sep = None     # the separator that ended the PREVIOUS segment (to spot an adjacent '((')
     verdict = (None, None)
     for seg in segments:
         sep = seg.sep_after
         word = _detached_command_basename(seg.argv)
-        if word is not None and _command_word_index(seg.argv) != 0:
-            # A LEADING shell env-assignment prefix (round-3 fix): a quote/escape-masked NAME ("FOO"=bar,
-            # F\OO=bar) decodes to a clean NAME=value the shared lexer skips, but bash runs it as a
-            # (failing) command that launches nothing, so resolving the token after it would false-deny.
-            # Fail toward allow on ANY leading-assignment segment (no lexical tail); a CLEAN env-prefix
-            # (FOO=bar worker &) is a disclosed UNDER-block, still ASKed by the sibling truncation guard.
-            # The env-WRAPPER form (env FOO=bar worker &) is unaffected (command word `env`, index 0).
+        n_assign = _command_word_index(seg.argv)
+        if word is not None and n_assign != 0 and (
+                any(seg.argv_opaque[k] for k in range(n_assign))
+                or not _leading_assigns_all_clean(seg.raw, n_assign)):
+            # a leading assignment that is either MASKED ("FOO"=bar - decodes to a clean NAME= the lexer
+            # skips but bash runs as a FAILING command) or OPAQUE/dynamic (x=$[..] legacy arithmetic, or
+            # FOO=$BAR) makes the resolved command word unreliable, so fail toward allow (round-5). A CLEAN,
+            # LITERAL env-prefix (LC_ALL=C worker &) resolves normally and is DENIED as a provable detach
+            # (restores the round-2 catch that round-3's class-elimination lost; Codex R4 BLOCKER).
             word = None
         if word is not None:
             pipeline_words.append(word)
             if word in worker_set and not gated:
-                worker_hit = word  # only an UNCONDITIONAL worker (before any &&/|| in this AND-OR list)
+                worker_hit = word   # only an UNCONDITIONAL worker (before any &&/|| in this AND-OR list)
+                list_worker = word  # the unconditional lead worker of this AND-OR list (round-5, MAJOR-1)
             if depth < _MAX_DETACH_RECURSION and suppress_depth == 0 and word in _DETACH_SHELLS:
                 inner = _shell_c_literal(seg)
                 if inner is not None:
@@ -5616,12 +5679,16 @@ def _scan_detached_workers(command, worker_set, depth):
             prev_sep = sep
             continue  # the pipeline continues; keep accumulating its command words
         if sep == "&":
-            if suppress_depth == 0 and not gated:
-                for cw in pipeline_words:
-                    if cw in worker_set:
-                        return ("deny", cw)  # a bare-& detach of a declared worker: the proven positive
+            if suppress_depth == 0:
+                if not gated:
+                    for cw in pipeline_words:
+                        if cw in worker_set:
+                            return ("deny", cw)  # a bare-& detach of a declared worker: proven positive
+                if list_worker is not None:
+                    return ("deny", list_worker)  # unconditional lead worker of a backgrounded AND-OR list
             pipeline_words = []
-            gated = False  # the '&' ends this AND-OR list; a fresh unconditional list follows
+            gated = False       # the '&' ends this AND-OR list; a fresh unconditional list follows
+            list_worker = None
             prev_sep = sep
             continue
         if sep == "(":
@@ -5632,29 +5699,32 @@ def _scan_detached_workers(command, worker_set, depth):
             else:
                 kind = "subshell"       # a plain subshell: a bare '&' here, or backgrounding the whole
                                         # subshell, IS a real detach
-            scope_stack.append((kind, pipeline_words, worker_hit, gated))  # preserve OUTER pipeline/hit/gate
+            scope_stack.append((kind, pipeline_words, worker_hit, gated, list_worker))  # preserve outer state
             if kind in ("cmdsub", "arith"):
                 suppress_depth += 1
             pipeline_words = []
             worker_hit = None           # a fresh scope: track its own worker presence
             gated = False               # a fresh AND-OR list inside the ( )
+            list_worker = None          # a fresh AND-OR list inside the ( )
             prev_sep = sep
             continue
         if sep == ")":
             if scope_stack:
-                kind, saved, saved_hit, saved_gated = scope_stack.pop()
+                kind, saved, saved_hit, saved_gated, saved_list = scope_stack.pop()
                 if kind in ("cmdsub", "arith"):
                     suppress_depth -= 1
                 gated = saved_gated      # restore the enclosing AND-OR list's conditional state
                 inner_hit = worker_hit
                 pipeline_words = saved   # RESTORE the outer pipeline so a worker word before the sub-scope
                 worker_hit = saved_hit   # still reaches the top-level '&' that closes its pipeline
+                list_worker = saved_list # restore the enclosing list's unconditional lead worker
                 if kind == "subshell" and inner_hit is not None:
                     # a subshell that CONTAINED a worker acts as a worker-bearing element of the enclosing
                     # pipeline, so a trailing '&' that backgrounds it detaches the worker (deny); a command
                     # substitution or arithmetic ')' NEVER propagates (the parent waits / nothing launches)
                     pipeline_words = saved + [inner_hit]
                     worker_hit = inner_hit
+                    list_worker = inner_hit  # a backgrounded subshell with an unconditional worker (round-5)
             else:
                 pipeline_words = []      # an unbalanced ')': nothing to restore
             prev_sep = sep
@@ -5662,7 +5732,8 @@ def _scan_detached_workers(command, worker_set, depth):
         if sep in ("&&", "||"):
             gated = True   # subsequent pipelines in this AND-OR list run conditionally (round-3 fix)
         else:
-            gated = False  # a ';' or line/command end starts a fresh, unconditional AND-OR list
+            gated = False       # a ';' or line/command end starts a fresh, unconditional AND-OR list
+            list_worker = None  # ...and drops the previous list's unconditional lead worker (round-5)
         pipeline_words = []  # a hard separator (';', '&&', '||', or line/command end): reset the pipeline
         prev_sep = sep
     return verdict
@@ -5753,10 +5824,11 @@ def orch_detached_dispatch_guard(data):
             "silently disabled; failing closed. Correct or remove the entry.",
             "AIQT guardrail: denied a Bash call because a worker_launch_commands entry has no usable "
             "basename (rule trkasy, cannot-evaluate).")
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for b in worker_bases for ch in b):
-        # A control character (NUL or other C0/DEL byte) in a declared basename never matches a real
-        # command basename, so it would silently DISARM this guard for that entry: a malformed control
-        # input that fails CLOSED (round-3 fix), never a silent disarm (10-ACCUR-guard-input-soundness).
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f for b in worker_bases for ch in b):
+        # A control character (any Unicode Cc: C0 U+00-U+1F, DEL U+7F, or C1 U+80-U+9F - round-5 broadens
+        # from C0/DEL to cover U+0085/U+009F too) in a declared basename never matches a real command
+        # basename, so it would silently DISARM this guard for that entry: a malformed control input that
+        # fails CLOSED, never a silent disarm (10-ACCUR-guard-input-soundness).
         return _deny(
             "AIQT rule trkasy (fail-closed): a worker_launch_commands basename contains a control "
             "character (a NUL or other C0/DEL byte), which no real command basename carries and which "

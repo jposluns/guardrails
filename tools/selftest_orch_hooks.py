@@ -559,22 +559,46 @@ def main():
         # (3) the bash `time` keyword accepts only -p, NOT --portability (a GNU /usr/bin/time flag); bare
         # `time --portability worker` errors and never launches. Now allow (`time -p` above still denies).
         check("detach/allow-bare-time-portability", _verdict(det("time --portability orch-verify x &")), "allow")
-        # (4) a LEADING shell env-assignment prefix (masked OR clean) fails toward allow: a masked name is a
-        # failing command that launches nothing; a clean prefix is a disclosed under-block. The env-WRAPPER
-        # form (env FOO=bar timeout 30 worker &) is unaffected and still denies (pinned above).
+        # (4/R5) a CLEAN, LITERAL leading env-prefix is a provable detach -> DENY (restores the round-2 catch
+        # that round-3's class-elimination lost; Codex R4 BLOCKER). A quote/escape-MASKED name, or an
+        # OPAQUE/dynamic value (x=$[..] legacy arithmetic, FOO=$BAR), stays ALLOW (bash runs a failing command
+        # or the value is unresolvable). The env-WRAPPER form (env FOO=bar timeout 30 worker &) is unaffected.
+        check("detach/fire-leading-assign-clean", _verdict(det("LC_ALL=C orch-verify x &")), "deny")
+        check("detach/fire-leading-assign-clean2", _verdict(det("FOO=bar orch-verify x &")), "deny")
         check("detach/allow-leading-assign-masked", _verdict(det('"FOO"=bar orch-verify x &')), "allow")
-        check("detach/allow-leading-assign-clean", _verdict(det("FOO=bar orch-verify x &")), "allow")
+        check("detach/allow-leading-assign-masked-esc", _verdict(det("F\\OO=bar orch-verify x &")), "allow")
+        check("detach/allow-leading-assign-opaque-var", _verdict(det("FOO=$BAR orch-verify x &")), "allow")
         # (5) a worker GATED behind a &&/|| conditional is not proven to run; a trailing '&' no longer denies.
         check("detach/allow-cond-and", _verdict(det("false && orch-verify x &")), "allow")
         check("detach/allow-cond-or", _verdict(det("true || orch-verify x &")), "allow")
         # an UNCONDITIONAL worker before the '&' still denies (round-3 regression pin):
         check("detach/fire-uncond-then-bg", _verdict(det("orch-verify x & echo done")), "deny")
+        # (R5 MAJOR-1) an UNCONDITIONAL LEAD worker in a backgrounded AND-OR list runs detached ('&' is lower
+        # precedence than &&/||, so bash backgrounds the whole list) -> DENY; a CONDITIONAL worker (after the
+        # operator, or behind an always-true) stays ALLOW (not proven to run).
+        check("detach/fire-uncond-lead-and", _verdict(det("orch-verify && true &")), "deny")
+        check("detach/fire-uncond-lead-or", _verdict(det("orch-verify x || true &")), "deny")
+        check("detach/fire-uncond-lead-subshell", _verdict(det("( orch-verify && true ) &")), "deny")
+        check("detach/allow-cond-subshell-true", _verdict(det("( true && orch-verify ) &")), "allow")
+        # (R5) timeout/stdbuf without their REQUIRED arg launch NOTHING -> fail toward allow (was a false-deny).
+        check("detach/allow-timeout-no-duration", _verdict(det("timeout orch-verify x &")), "allow")
+        check("detach/allow-stdbuf-no-option", _verdict(det("stdbuf orch-verify x &")), "allow")
+        check("detach/fire-timeout-with-duration", _verdict(det("timeout 5 orch-verify x &")), "deny")
+        # (R5) DISCLOSED exotic fail-opens (per the deny-only-on-accidental-proof posture): a launcher-builtin
+        # (builtin command), command/env time with a GNU option, a conditional behind an always-true, and a
+        # whole-script shell -c all ALLOW - named in the manifest residue, mitigated by the sibling ASK.
+        check("detach/allow-builtin-command-disclosed", _verdict(det("builtin command orch-verify x &")), "allow")
+        check("detach/allow-command-time-disclosed", _verdict(det("command time --portability orch-verify &")), "allow")
+        check("detach/allow-cond-colon-disclosed", _verdict(det(": && orch-verify &")), "allow")
+        check("detach/allow-shellc-wholeworker-disclosed", _verdict(det("sh -c 'orch-verify' &")), "allow")
         # (6) a control character (NUL or C0/DEL) in a DECLARED basename never matches a real command, so it
         # would silently disarm the guard for that entry: a malformed control input that fails CLOSED.
         _set_workers(["orch\x00verify"])
         check("detach/malformed-nul-basename-denies", _verdict(det("orch-verify x &")), "deny")
         _set_workers(["orch\tverify"])
         check("detach/malformed-ctrl-basename-denies", _verdict(det("orch-verify x &")), "deny")
+        _set_workers(["orch\x85verify"])  # C1 NEL U+0085: a Unicode Cc control char (round-5 broadened C0->Cc)
+        check("detach/malformed-c1-basename-denies", _verdict(det("orch-verify x &")), "deny")
         _set_workers(["orch-verify"])  # restore a valid declared set for the tests that follow
         check("detach/fire-shell-c-literal", _verdict(det("bash -c 'orch-verify x &'")), "deny")
         # run_in_background is IGNORED for scoping (it tracks the wrapper shell, not a child the shell detaches).
