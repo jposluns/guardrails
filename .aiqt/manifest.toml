@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "6b286395085bcf217f49e85447d0c6069293da154abe7baa2e0cef4e110a1f7a"
+tree-sha256 = "18e813cebd8f3538b35fa4fa6a8f694ce7067357c502fde58b03b2e4e41c2a8e"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,8 +46,8 @@ sha256 = "6f0c245c659cfdd94a9894fc33ec955f05827ea618df62a789f6e2ef1ef58a29"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 93942
-sha256 = "226a7c35776b2f4fc84ca7ec34714f397e051786ef9874f35a346f5022f207f9"
+bytes = 94496
+sha256 = "4fd81dc927c2def050a2f5b341ea37f7adbdaa139f3edbea1e9873a0d6613b97"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -716,8 +716,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 199942
-sha256 = "a0bc7042b86d5002599a83ef3e514ad1e60fe6054e279157203a778027a5bbd6"
+bytes = 200498
+sha256 = "44237238429cc8297c57db9f219f49554b7b94932bfe4956fb2c519dbaf6ccb4"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2801,8 +2801,8 @@ sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 66417
-sha256 = "a66f963a9760f933715c9608959a3b4c0bb99db58ffe7dc63064c38e052bc7e2"
+bytes = 65876
+sha256 = "b0fa897be8ceeec9f4f3e85403ad1ae4fc3896c8eae5956c285bc58fd7c1cc7d"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

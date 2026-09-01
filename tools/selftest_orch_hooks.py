@@ -522,20 +522,16 @@ def main():
         check("detach/fire-then-cmd", _verdict(det("orch-verify x & echo done")), "deny")
         check("detach/fire-pipeline", _verdict(det("orch-verify x | tee run.log &")), "deny")
         check("detach/allow-env-timeout", _verdict(det("env FOO=bar timeout 30 orch-verify x &")), "allow")
-        # (R5) A leading-decimal timeout DURATION (.5s) is a validated POSITIONAL and still DENIES; but a
-        # value-taking wrapper OPTION now FAILS TOWARD ALLOW (its value is unvalidatable; an invalid value
-        # launches nothing, so the launch is unprovable). env -a/-f and /usr/bin/time -f previously DENIED
-        # (assuming a valid value) and now ALLOW - a disclosed under-block (Codex R4 BLOCKER fix). See the
-        # dedicated R5 value-option block below for the full class incl. invalid-value vectors.
+        # SIMPLIFY: every wrapper-prefixed form ALLOWS (the guard does not inspect wrapper options at all),
+        # so timeout with any duration/option, env with any option, and /usr/bin/time all allow. Kept as
+        # representative wrapper-allow coverage.
         check("detach/allow-timeout-decimal-dur", _verdict(det("timeout .5s orch-verify x &")), "allow")
         check("detach/allow-env-argv0", _verdict(det("env -a alias orch-verify x &")), "allow")
         check("detach/allow-env-file", _verdict(det("env -f cfg orch-verify x &")), "allow")
         check("detach/allow-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "allow")
-        # FIX B (round 2, PRINCIPLE CHANGE): an UNRECOGNIZED wrapper option, a terminal/query form, or a chain
-        # deeper than the hop bound FAILS TOWARD NOT-DENYING (an under-block is the safe direction for a
-        # blocking hook; a false-deny is the harmful one). A recognized VALUELESS flag in SEPARATED form
-        # (time -p) still DENIES; a value-taking option or ANY inline =value form now ALLOWS (round-5/6).
-        # False-denies now fixed to ALLOW:
+        # SIMPLIFY: terminal/query forms, unknown flags, and every other wrapper option form all ALLOW,
+        # because a wrapper prefix makes the launch wrapper-mediated (fail toward allow). time -p ALLOWS too
+        # (time is a wrapper); there is no wrapper-option parsing left to get wrong.
         check("detach/allow-bare-time-f", _verdict(det("time -f fmt orch-verify x &")), "allow")  # keyword rejects -f
         check("detach/allow-timeout-help", _verdict(det("timeout --help orch-verify x &")), "allow")
         check("detach/allow-env-help", _verdict(det("env --help orch-verify x &")), "allow")
@@ -611,8 +607,7 @@ def main():
         check("detach/allow-timeout-no-duration", _verdict(det("timeout orch-verify x &")), "allow")
         check("detach/allow-stdbuf-no-option", _verdict(det("stdbuf orch-verify x &")), "allow")
         check("detach/allow-timeout-with-duration", _verdict(det("timeout 5 orch-verify x &")), "allow")
-        # (R5 Codex R4 BLOCKER) value-taking-wrapper-option false-deny class, now ALLOW: a recognized value
-        # option (VALID or INVALID value) makes the launch unprovable -> fail toward allow (unbounded tail).
+        # SIMPLIFY: representative wrapper-option forms, all ALLOW (the guard never parses wrapper options).
         check("detach/allow-timeout-signal-valid", _verdict(det("timeout -s TERM 5 orch-verify x &")), "allow")
         check("detach/allow-timeout-signal-invalid", _verdict(det("timeout -s BOGUS 5 orch-verify x &")), "allow")
         check("detach/allow-timeout-killafter-invalid", _verdict(det("timeout -k BOGUS 5 orch-verify x &")), "allow")
