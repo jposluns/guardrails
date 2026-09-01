@@ -646,47 +646,54 @@ def run(root):
         )
         return 2
 
-    findings = []
-    if actual_json != payload:
-        findings.append(
-            "ruleset.json does not exactly match applicability, "
-            "assignments, corpus, and enforcement"
-        )
-
-    if (
-        docs_text.count(BEGIN) != 1
-        or docs_text.count(END) != 1
-        or docs_text.find(BEGIN) > docs_text.find(END)
-    ):
-        findings.append(
-            "docs/rules.md does not carry exactly one ordered "
-            "RULESET marker pair"
-        )
-    else:
-        outside = (
-            docs_text[:docs_text.find(BEGIN)]
-            + docs_text[
-                docs_text.find(END) + len(END):
-            ]
-        )
-        if re.search(
-            r"\b[0-9]+\s+rules?\b",
-            outside,
-            re.IGNORECASE,
-        ):
+    try:
+        findings = []
+        if actual_json != payload:
             findings.append(
-                "docs/rules.md carries a literal rule count "
-                "outside the generated block"
+                "ruleset.json does not exactly match applicability, "
+                "assignments, corpus, and enforcement"
             )
 
-    findings.extend(inspect_catalog(
-        parse_catalog(docs_text), DOC_REL, payload, rules
-    ))
-    findings.extend(inspect_catalog(
-        parse_catalog(site_text), HTML_REL, payload, rules
-    ))
+        if (
+            docs_text.count(BEGIN) != 1
+            or docs_text.count(END) != 1
+            or docs_text.find(BEGIN) > docs_text.find(END)
+        ):
+            findings.append(
+                "docs/rules.md does not carry exactly one ordered "
+                "RULESET marker pair"
+            )
+        else:
+            outside = (
+                docs_text[:docs_text.find(BEGIN)]
+                + docs_text[
+                    docs_text.find(END) + len(END):
+                ]
+            )
+            if re.search(
+                r"\b[0-9]+\s+rules?\b",
+                outside,
+                re.IGNORECASE,
+            ):
+                findings.append(
+                    "docs/rules.md carries a literal rule count "
+                    "outside the generated block"
+                )
 
-    findings.extend(network_findings(js_text))
+        findings.extend(inspect_catalog(
+            parse_catalog(docs_text), DOC_REL, payload, rules
+        ))
+        findings.extend(inspect_catalog(
+            parse_catalog(site_text), HTML_REL, payload, rules
+        ))
+
+        findings.extend(network_findings(js_text))
+    except Exception as exc:  # noqa: BLE001 - a gate fails CLOSED on any unparseable input
+        print(
+            "error: cannot evaluate rules page ({}); fail-closed".format(exc),
+            file=sys.stderr,
+        )
+        return 2
 
     if findings:
         print(
@@ -811,6 +818,23 @@ def self_test_main():
         print(
             "SELF-TEST FAIL: duplicate anchor was not caught"
         )
+        return 1
+
+    # run()'s inspection fails closed on unparseable input: a malformed script URL makes urlsplit raise,
+    # which the run() try/except maps to exit 2 (proven), so the structural check never crashes or silently
+    # passes. Here we assert the underlying raise exists so a future refactor that swallowed it would fail.
+    raised = False
+    try:
+        inspect_catalog(
+            parse_catalog(fixture + '<script src="http://["></script>'),
+            "fixture",
+            payload,
+            payload["rules"],
+        )
+    except Exception:  # noqa: BLE001
+        raised = True
+    if not raised:
+        print("SELF-TEST FAIL: a malformed script URL did not raise (run() fail-closed unexercised)")
         return 1
 
     if network_findings('fetch("/downloads/ruleset.json", {cache: "no-cache"});'):
