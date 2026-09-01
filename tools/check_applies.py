@@ -45,8 +45,8 @@ def _text(row, key, where):
     return v
 
 
-def load_applicability(path):
-    """Load + fully validate applicability.toml. Returns the frozenset of condition slugs. Fails closed."""
+def load_applicability_model(path):
+    """Load and fully validate applicability.toml; return its structured model."""
     data = load_toml(Path(path))
     name = Path(path).name
     _exact_table(data, APPLICABILITY_KEYS, name)
@@ -99,7 +99,13 @@ def load_applicability(path):
     for p in profiles:
         if "always" not in p["conditions"]:
             raise ValueError("{}: profile '{}' must include 'always'".format(name, p["slug"]))
-    return known
+    return data
+
+
+def load_applicability(path):
+    """Compatibility loader returning the validated condition-slug set."""
+    data = load_applicability_model(path)
+    return frozenset(row["slug"] for row in data["condition"])
 
 
 def load_assignments(path):

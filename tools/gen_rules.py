@@ -144,6 +144,30 @@ def _check_secondary(fm, primary, name):
         seen.add(s)
 
 
+def rule_title(path):
+    """Return the first body H1, the corpus's authoritative display title."""
+    text = Path(path).read_text(encoding="utf-8")
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        raise ValueError(
+            "{}: unterminated frontmatter".format(Path(path).name)
+        )
+    body = text[end + 5:]
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            title = stripped[2:].strip()
+            if title:
+                return title
+        if stripped:
+            break
+    raise ValueError(
+        "{}: no body '# ' heading to use as the rule title".format(
+            Path(path).name
+        )
+    )
+
+
 def derive(fm, name, allowed_origins=("pack",)):
     # allowed_origins defaults to pack-only so the generator (which sources only pack rules from
     # .aiqt/core/) stays strict; the placement gate passes ("pack", "adopter") because it must accept

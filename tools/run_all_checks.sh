@@ -106,6 +106,12 @@ run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checks
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
 run_gate "mappings-page-drift" python3 -I -B tools/gen_mappings.py --check
+run_gate "ruleset-selftest" python3 -I -B tools/gen_ruleset.py --self-test
+run_gate "ruleset-drift" python3 -I -B tools/gen_ruleset.py --check
+run_gate "site-generator-selftest" python3 -I -B tools/gen_site.py --self-test
+run_gate "site-page-drift" python3 -I -B tools/gen_site.py --check
+run_gate "rules-page-selftest" python3 -I -B tools/check_rules_page.py --self-test
+run_gate "rules-page" python3 -I -B tools/check_rules_page.py
 run_gate "reference-roster-selftest" python3 -I -B tools/gen_reference_facts.py --self-test
 run_gate "reference-roster-drift" python3 -I -B tools/gen_reference_facts.py --check
 run_gate "reference-facts-selftest" python3 -I -B tools/check_reference_facts.py --self-test

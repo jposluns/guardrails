@@ -208,6 +208,17 @@
       "target": "VERSION"
     },
     {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_ruleset.py",
+      "sources": [
+        ".aiqt/core/applicability.toml",
+        ".aiqt/core/applies.toml",
+        ".aiqt/core/rules/",
+        ".aiqt/enforceability.json"
+      ],
+      "target": "docs/rules.md"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_hooks.py",
       "sources": [
@@ -311,6 +322,17 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_ruleset.py",
+      "sources": [
+        ".aiqt/core/applicability.toml",
+        ".aiqt/core/applies.toml",
+        ".aiqt/core/rules/",
+        ".aiqt/enforceability.json"
+      ],
+      "target": "site/downloads/ruleset.json"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_site.py",
       "sources": [
         "docs/_shell.html",
@@ -405,6 +427,15 @@
         "docs/rule5.md"
       ],
       "target": "site/rule5.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/rules.md"
+      ],
+      "target": "site/rules.html"
     },
     {
       "kind": "file",

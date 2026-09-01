@@ -262,6 +262,10 @@ path = "site/roadmap.html"
 class = "pack-immutable"
 
 [[release-class]]
+path = "site/rules.html"
+class = "pack-immutable"
+
+[[release-class]]
 path = "site/robots.txt"
 class = "pack-immutable"
 
@@ -307,6 +311,10 @@ class = "pack-immutable"
 
 [[release-class]]
 path = "site/js/install.js"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/js/rules.js"
 class = "pack-immutable"
 
 # --- concern-2: reserved-namespace / adopter-state patterns (ZERO tracked entries; NO-STRAYS exempt) ----

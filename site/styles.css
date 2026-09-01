@@ -381,3 +381,54 @@ html[data-family="other"] section[data-family-section="other"]{display:block}
 .verified{margin:-.4rem 0 1.1rem; font-size:.92rem; color:var(--faint)}
 .section-links{font-size:1.02rem}
 .section-links a{font-weight:650}
+/* Build Your Rule Set: progressively enhanced /rules page. */
+.rules-load-status{margin-top:1.5rem;padding:1rem 1.2rem;border:1px solid var(--line);border-radius:12px;background:var(--panel-2);color:var(--muted)}
+.rules-app{padding-bottom:3rem}
+.rules-app [hidden]{display:none!important}
+.rules-app section{padding:1.5rem 0}
+.rules-builder{margin-top:1rem;margin-bottom:2rem;padding:1.5rem!important;border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+.rules-builder fieldset{min-width:0;margin:1.4rem 0;padding:1rem 1.1rem 1.15rem;border:1px solid var(--line);border-radius:12px}
+.rules-builder legend{padding:0 .4rem;color:var(--ink);font-weight:700}
+.rules-floor{display:block;padding:.9rem 1rem;border-left:4px solid var(--accent-2);border-radius:8px;background:var(--panel-2);color:var(--muted)}
+.rules-floor strong{color:var(--ink)}
+.rules-profile-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.7rem}
+.rules-profile,.rules-actions button{font:inherit;cursor:pointer;text-align:left;color:var(--ink);border:1px solid var(--line);border-radius:10px;background:var(--panel-2);padding:.75rem .9rem}
+.rules-profile:hover,.rules-actions button:hover{border-color:var(--accent)}
+.rules-profile[data-state="active"]{border-color:var(--accent-2);box-shadow:inset 3px 0 0 var(--accent-2)}
+.rules-profile[data-state="partial"]{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.rules-profile-state{display:block;color:var(--faint);font-size:.88rem;text-transform:uppercase;letter-spacing:.05em}
+.rules-check-grid{display:grid;gap:.65rem}
+.rules-check-grid label{display:flex;gap:.55rem;align-items:flex-start;color:var(--muted)}
+.rules-check-grid input,.rules-floor input,.rules-view-switcher input{margin-top:.35rem;accent-color:var(--accent)}
+.rules-url-notice{padding:.8rem 1rem;border:1px solid var(--warn-line);border-radius:10px;background:var(--warn-tint);color:var(--ink)}
+.rules-summary{font-size:1.18rem;color:var(--ink);font-weight:650}
+.rules-export{margin-top:1.4rem;padding:1.25rem!important;border:1px solid var(--line);border-radius:12px;background:var(--panel-2)}
+.rules-export h2{font-size:1.45rem}
+.rules-actions{display:flex;flex-wrap:wrap;gap:.7rem;margin-bottom:1rem}
+.rules-export pre{max-height:18rem;overflow:auto;white-space:pre-wrap;padding:1rem;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--muted)}
+.rules-view-switcher{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.4rem;margin-bottom:.8rem}
+.rules-view-switcher label{display:inline-flex;align-items:center;gap:.45rem;padding:.45rem .85rem;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--ink)}
+.rules-group{scroll-margin-top:5rem}
+.rules-group>summary{display:flex;justify-content:space-between;gap:1rem}
+.rules-count{color:var(--accent-2);font-variant-numeric:tabular-nums}
+.rules-row{padding:1.15rem 0;border-top:1px solid var(--line);scroll-margin-top:5rem}
+.rules-row:first-child{border-top:0}
+.rules-row h3{margin-bottom:.35rem}
+.rules-row-state{margin:0 0 .4rem;color:var(--accent-2);font-size:.95rem;font-weight:700}
+.rules-row.is-out .rules-row-state,.rules-list-row.is-out [data-rule-state]{color:var(--faint)}
+.rules-badges{display:flex;flex-wrap:wrap;gap:.4rem;margin:.45rem 0}
+.rules-badge,.rules-overlap{display:inline-block;padding:.15rem .55rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:.82rem}
+.rules-overlap{margin-left:.35rem;border-color:var(--accent-2);color:var(--accent-2)}
+.rules-meta{font-size:.92rem;color:var(--faint);text-transform:capitalize}
+.rules-list-row{margin:.4rem 0;color:var(--muted)}
+.rules-list-row [data-rule-state]{font-size:.9rem;color:var(--accent-2)}
+.rules-list-row.is-out{opacity:.72}
+@media (max-width:700px){
+  .rules-profile-grid{grid-template-columns:1fr}
+  .rules-builder{padding:1rem!important}
+  .rules-view-switcher{align-items:stretch}
+  .rules-view-switcher label{flex:1 1 100%}
+}
+@media (prefers-reduced-motion:reduce){
+  .rules-profile,.rules-actions button{transition:none}
+}

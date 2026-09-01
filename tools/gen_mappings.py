@@ -109,21 +109,6 @@ def _oxford_lower(items):
     return _oxford([item.lower() for item in items])
 
 
-def rule_title(path):
-    """The rule's display title: the first body '# ' heading. There is deliberately no frontmatter title
-    key (gen_rules._check_keys rejects unknown keys), so the H1 is the only source. Fail closed if none."""
-    text = path.read_text(encoding="utf-8")
-    end = text.find("\n---\n", 4)
-    body = text[end + 5:] if end != -1 else text
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            return stripped[2:].strip()
-        if stripped:
-            break
-    raise ValueError("{}: no body '# ' heading to use as the rule title".format(path.name))
-
-
 def _framework_sort_key(row):
     """Group frameworks alphabetically by source family (publisher), then by framework stem."""
     return (natkey(row["publisher"].casefold()), natkey(row["framework"].casefold()))
@@ -137,7 +122,7 @@ def build_rows(corpus, manifests):
         keys = sorted(k for k in fm if k.startswith("map-"))
         if not keys:
             continue
-        title = _no_dash(rule_title(src), src.name)
+        title = _no_dash(gen_rules.rule_title(src), src.name)
         for key in keys:
             base = key[:-6]            # strip the 6-char fit suffix ("-tight"/"-broad")
             fit = key[-5:]             # "tight" or "broad"
