@@ -526,6 +526,29 @@ def main():
         check("detach/fire-env-argv0", _verdict(det("env -a alias orch-verify x &")), "deny")
         check("detach/fire-env-file", _verdict(det("env -f cfg orch-verify x &")), "deny")
         check("detach/fire-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "deny")
+        # FIX B (round 2, PRINCIPLE CHANGE): an UNRECOGNIZED wrapper option, a terminal/query form, or a chain
+        # deeper than the hop bound FAILS TOWARD NOT-DENYING (an under-block is the safe direction for a
+        # blocking hook; a false-deny is the harmful one). Recognized options still DENY.
+        # False-denies now fixed to ALLOW:
+        check("detach/allow-bare-time-f", _verdict(det("time -f fmt orch-verify x &")), "allow")  # keyword rejects -f
+        check("detach/allow-timeout-help", _verdict(det("timeout --help orch-verify x &")), "allow")
+        check("detach/allow-env-help", _verdict(det("env --help orch-verify x &")), "allow")
+        check("detach/allow-usrbin-time-help", _verdict(det("/usr/bin/time --help orch-verify x &")), "allow")
+        check("detach/allow-command-v", _verdict(det("command -v orch-verify &")), "allow")
+        check("detach/allow-command-V", _verdict(det("command -V orch-verify &")), "allow")
+        check("detach/allow-unrecognized-wrapper-flag", _verdict(det("nohup --frobnicate orch-verify x &")), "allow")
+        check("detach/allow-sudo-unrecognized-flag", _verdict(det("sudo -b orch-verify x &")), "allow")
+        # explicit /usr/bin/time still DENIES on its recognized value option; bare time -p (keyword-valid) DENIES:
+        check("detach/fire-bare-time-p", _verdict(det("time -p orch-verify x &")), "deny")
+        # FIX B (round 2, MAJOR 2 cheap fix): timeout DURATION now also accepts exponent and inf/infinity forms.
+        check("detach/fire-timeout-exponent", _verdict(det("timeout 1e3 orch-verify x &")), "deny")
+        check("detach/fire-timeout-exponent-neg", _verdict(det("timeout 1e-3 orch-verify x &")), "deny")
+        check("detach/fire-timeout-infinity", _verdict(det("timeout infinity orch-verify x &")), "deny")
+        check("detach/fire-timeout-inf", _verdict(det("timeout inf orch-verify x &")), "deny")
+        # DISCLOSED under-blocks (allow, safe direction): env -S string re-split, and a chain past the hop bound.
+        check("detach/underblock-env-split-string", _verdict(det("env -S 'orch-verify x' &")), "allow")
+        check("detach/underblock-over-deep-chain", _verdict(det(
+            "nohup nice setsid stdbuf nohup nice setsid stdbuf nohup nice setsid orch-verify x &")), "allow")
         check("detach/fire-shell-c-literal", _verdict(det("bash -c 'orch-verify x &'")), "deny")
         # run_in_background is IGNORED for scoping (it tracks the wrapper shell, not a child the shell detaches).
         check("detach/fire-rib-true", _verdict(det("orch-verify x &", rib=True)), "deny")
@@ -552,6 +575,24 @@ def main():
         check("detach/fire-quoted-cmdsub-arg", _verdict(det('orch-verify "$(cat t)" &')), "deny")
         # a real subshell is NOT a command substitution and DENIES, pinning the $( ) vs ( ) discrimination.
         check("detach/deny-subshell-not-cmdsub", _verdict(det("( orch-verify x & )")), "deny")
+        # ROUND-2 ADDENDUM: a subshell CONTAINING a worker (no internal &) that is BACKGROUNDED by a TRAILING
+        # & detaches the worker and DENIES; OLD missed this (the ')' restore discarded the inner worker). The
+        # inner worker survives an internal ';'/'&&' and a wrapper, and nesting propagates outward.
+        check("detach/fire-bg-subshell", _verdict(det("( orch-verify x ) &")), "deny")
+        check("detach/fire-bg-subshell-then", _verdict(det("( orch-verify x ) & echo done")), "deny")
+        check("detach/fire-bg-subshell-nohup", _verdict(det("( nohup orch-verify x ) &")), "deny")
+        check("detach/fire-bg-subshell-semi", _verdict(det("( orch-verify x ; true ) &")), "deny")
+        check("detach/fire-bg-subshell-cd-and", _verdict(det("( cd /tmp && orch-verify x ) &")), "deny")
+        check("detach/fire-bg-subshell-nested", _verdict(det("( ( orch-verify x ) ) &")), "deny")
+        check("detach/fire-bg-subshell-pipeline", _verdict(det("( orch-verify x ) | tee log &")), "deny")
+        # FOREGROUND subshells are NOT detached and ALLOW (regression pins): no trailing & means it runs in
+        # the foreground, and a command substitution ')' NEVER denies on this basis (the parent waits).
+        check("detach/allow-fg-subshell", _verdict(det("( orch-verify x )")), "allow")
+        check("detach/allow-fg-subshell-nested", _verdict(det("( ( orch-verify x ) )")), "allow")
+        check("detach/allow-cmdsub-no-amp", _verdict(det("result=$(orch-verify x)")), "allow")
+        check("detach/allow-cmdsub-bg-parent", _verdict(det("echo $(orch-verify x) &")), "allow")
+        check("detach/allow-bg-subshell-worker-in-cmdsub", _verdict(det("( result=$(orch-verify x) ) &")), "allow")
+        check("detach/allow-bg-arith", _verdict(det("(( orch-verify & 1 )) &")), "allow")
         # backtick command substitution: the launcher glues into a non-command-word token, so it does not fire
         # (a disclosed non-catch, not a scope); pinned so a future lexer change is caught.
         check("detach/allow-backtick", _verdict(det("x=`orch-verify y &`")), "allow")

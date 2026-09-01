@@ -5357,9 +5357,12 @@ _DETACH_WRAPPERS = frozenset((
     "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "builtin", "exec",
     "sudo", "time"))
 # Per-wrapper options that CONSUME a following separate token as their value, so the value is never mistaken
-# for the wrapped command word. Reuses the _git_subcommand value-skip idiom (an '=' inline form carries its
-# value in the same token and is skipped as one). Only the common forms are listed; an unlisted value-taking
-# option is a disclosed residual that errs toward reading the value as the command word (a safe over/under).
+# for the wrapped command word. An '=' inline form (--opt=value) carries its value in the same token and is
+# skipped as one. Only common forms are listed; the round-2 principle governs the rest: an option that is NOT
+# a recognized value option, a recognized valueless flag, or a recognized terminal/query flag is
+# UNRECOGNIZED, and wrapper resolution then FAILS TOWARD NOT-DENYING (an under-block, the safe direction for a
+# BLOCKING hook), never guessing that the token after it is the wrapped command. Perfect option enumeration is
+# a losing tail; the fail-toward-allow default removes the whole false-deny class instead of chasing it.
 _WRAPPER_VALUE_OPTS = {
     "env": frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string",
                       "-a", "--argv0", "-f", "--file")),
@@ -5368,42 +5371,80 @@ _WRAPPER_VALUE_OPTS = {
     "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
                          "-u", "--uid")),
     "stdbuf": frozenset(("-i", "--input", "-o", "--output", "-e", "--error")),
-    "sudo": frozenset(("-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host",
+    "sudo": frozenset(("-u", "--user", "-g", "--group", "-C", "--close-from", "--host",
                        "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user",
                        "-R", "--chroot", "-D", "--chdir")),
     "exec": frozenset(("-a",)),
-    # /usr/bin/time (basename 'time'): -f/--format and -o/--output carry a value; -a/--append, -v/--verbose,
-    # -p/--portability are flags handled by the generic single-token skip. The bash 'time' keyword takes no
-    # such value option, so skipping these two for it is inert (its command word still resolves).
-    "time": frozenset(("-f", "--format", "-o", "--output")),
 }
-# `timeout [OPTS] DURATION COMMAND`: after its options a single DURATION positional precedes the command,
-# recognized conservatively (a decimal number, with or without a leading integer part so a leading-decimal
-# duration such as '.5s' is caught, and an optional s/m/h/d suffix) so a non-duration token is never
-# mis-skipped as the command word.
-_DURATION_RE = re.compile(r"^(\d+(\.\d+)?|\.\d+)[smhd]?$")
+# Recognized VALUELESS flags per wrapper (skipped as ONE token). Kept intentionally minimal: only what a
+# confirmed DENY case needs, so an unlisted flag falls to the unrecognized->allow path rather than risking a
+# false-deny from a value option mis-classified as a flag. `time` is handled specially below.
+_WRAPPER_FLAG_OPTS = {}
+# The bash `time` keyword accepts only -p/--portability; the GNU /usr/bin/time value and flag options apply
+# ONLY to an explicit path form (a '/'-bearing token such as /usr/bin/time). A bare `time -f fmt ... &` is a
+# false-deny to AVOID: bash rejects -f, the target never launches, so bare `time` with any non--p option
+# resolves unrecognized->allow. (A '\time' or 'command time' explicit form is indistinguishable after lexing
+# and is treated as the bare keyword: it under-blocks rather than false-denies, a disclosed residual.)
+_TIME_BARE_FLAG_OPTS = frozenset(("-p", "--portability"))
+_TIME_EXPLICIT_VALUE_OPTS = frozenset(("-f", "--format", "-o", "--output"))
+_TIME_EXPLICIT_FLAG_OPTS = frozenset(("-p", "--portability", "-a", "--append",
+                                      "-v", "--verbose", "-q", "--quiet"))
+# Terminal/query options: the wrapper prints help/version or resolves a name and does NOT launch the target,
+# so it must not deny. `command -v`/`command -V` are the query forms, handled with these.
+_WRAPPER_TERMINAL_OPTS = frozenset(("-h", "--help", "-V", "--version"))
+# `timeout [OPTS] DURATION COMMAND`: after its options a single DURATION positional precedes the command.
+# Recognized conservatively so a non-duration token is never mis-skipped as the command word: a decimal (with
+# or without a leading integer part, so '.5s' is caught) with an optional exponent and an optional s/m/h/d
+# suffix, or the literal 'inf'/'infinity'. Every form here was verified accepted by the host `timeout`.
+_DURATION_RE = re.compile(r"^(inf|infinity|(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?[smhd]?)$")
 _MAX_DETACH_RECURSION = 3  # bounded literal shell -c inspection depth (SECA-resource-bounds)
-_MAX_WRAPPER_HOPS = 10     # bounded transparent-wrapper unwrap (SECA-resource-bounds)
+_MAX_WRAPPER_HOPS = 10     # bounded transparent-wrapper unwrap; exceeding it fails toward allow (under-block)
 
 
-def _skip_wrapper_args(wrapper, argv, i):
-    """From index i (the first token AFTER a transparent wrapper word), skip that wrapper's options and any
-    separated option values, the env VAR=val assignments, and the timeout DURATION positional, returning the
-    index of the wrapped command word (or len(argv) when none remains)."""
+def _wrapper_option_sets(wrapper, explicit_time):
+    """The (value-taking, valueless) recognized option sets for a wrapper. `time` splits by form: the bash
+    keyword (bare) recognizes only -p; an explicit /usr/bin/time recognizes the GNU option set."""
+    if wrapper == "time":
+        if explicit_time:
+            return _TIME_EXPLICIT_VALUE_OPTS, _TIME_EXPLICIT_FLAG_OPTS
+        return frozenset(), _TIME_BARE_FLAG_OPTS
+    return _WRAPPER_VALUE_OPTS.get(wrapper, frozenset()), _WRAPPER_FLAG_OPTS.get(wrapper, frozenset())
+
+
+def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
+    """From index i (the first token AFTER a transparent wrapper word), skip that wrapper's CLEANLY
+    RECOGNIZED options (a known value option and its separated value, a known valueless flag, an env
+    NAME=value prefix, and a leading '--' end-of-options) and the timeout DURATION positional, returning the
+    index of the wrapped command word. Returns None when resolution cannot be trusted: an UNRECOGNIZED option
+    (the round-2 principle - do not guess the token after it is the command), or a terminal/query option
+    (--help/--version/-h/-V, or command -v/-V) whose wrapper does not launch the target. None makes the
+    caller fail toward NOT-denying (an under-block), never a false-deny."""
     n = len(argv)
-    valopts = _WRAPPER_VALUE_OPTS.get(wrapper, frozenset())
+    valopts, flagopts = _wrapper_option_sets(wrapper, explicit_time)
     while i < n:
         tok = argv[i]
         if tok == "--":
-            i += 1  # end of options: the next token is the command word
-            break
+            return i + 1  # end of options: the next token is the command word (a clean recognition)
         if tok.startswith("-") and len(tok) > 1:
-            i += 2 if (tok in valopts) else 1  # a separated value form skips its value too
-            continue
+            name = tok.split("=", 1)[0]
+            if name in _WRAPPER_TERMINAL_OPTS or (wrapper == "command" and name in ("-v", "-V")):
+                return None  # a non-launching terminal/query form: do not deny
+            if "=" in tok:
+                if name in valopts or name in flagopts:
+                    i += 1
+                    continue
+                return None  # an unrecognized inline --opt=value: fail toward allow
+            if name in valopts:
+                i += 2  # a separated value form: skip the option and its value
+                continue
+            if name in flagopts:
+                i += 1  # a recognized valueless flag
+                continue
+            return None  # UNRECOGNIZED option: cannot cleanly resolve, fail toward not-denying
         if wrapper == "env" and _ENV_ASSIGN_RE.match(tok):
             i += 1  # env NAME=value assignment prefix
             continue
-        break
+        break  # a non-option token: the DURATION positional or the wrapped command word
     if wrapper == "timeout" and i < n and _DURATION_RE.match(argv[i]):
         i += 1  # the mandatory DURATION positional before the command
     return i
@@ -5411,18 +5452,26 @@ def _skip_wrapper_args(wrapper, argv, i):
 
 def _detached_command_index(argv):
     """The index of a segment's REAL launch command word: the first non-assignment token, skipping the
-    transparent-wrapper chain (nohup/setsid/sudo/env/timeout/... and their options/values). None for an
-    empty segment or one that resolves to no command word."""
+    transparent-wrapper chain (nohup/setsid/sudo/env/timeout/... and their CLEANLY RECOGNIZED options and
+    values). None for an empty segment, one that resolves to no command word, or one whose wrapper chain
+    cannot be cleanly resolved (an unrecognized option, a terminal/query form, or a chain deeper than the hop
+    bound): resolution fails toward NOT-denying (an under-block), never a false-deny."""
     i = _command_word_index(argv)  # skip leading NAME=value assignments
     n = len(argv)
     hops = 0
-    while i < n and hops < _MAX_WRAPPER_HOPS:
-        base = argv[i].rsplit("/", 1)[-1]
+    while i < n:
+        tok = argv[i]
+        base = tok.rsplit("/", 1)[-1]
         if base not in _DETACH_WRAPPERS:
-            return i
+            return i  # the real command word
+        if hops >= _MAX_WRAPPER_HOPS:
+            return None  # chain deeper than the bound: fail toward allow (a disclosed under-block)
         hops += 1
-        i = _skip_wrapper_args(base, argv, i + 1)
-    return i if i < n else None
+        nxt = _skip_wrapper_args(base, argv, i + 1, explicit_time=(base == "time" and "/" in tok))
+        if nxt is None:
+            return None  # cannot cleanly resolve the wrapper: fail toward not-denying
+        i = nxt
+    return None  # ran off the end: all wrappers, no command word
 
 
 def _detached_command_basename(argv):
@@ -5501,14 +5550,22 @@ def _scan_detached_workers(command, worker_set, depth):
     open of any '(' the OUTER pipeline words are stacked and RESTORED on the matching ')', so a worker
     command word that precedes a '$( ... )'/'( ... )' IN ITS OWN ARGUMENTS still participates in the
     top-level '&' that closes the pipeline (an unquoted command substitution in a worker's arguments splits
-    the worker word into the segment ending with '(', which the reset would otherwise discard). Legacy
+    the worker word into the segment ending with '(', which the reset would otherwise discard). A SUBSHELL
+    that CONTAINS a declared worker anywhere within it, and is itself BACKGROUNDED by a trailing '&' (or
+    joins a pipeline that a trailing '&' backgrounds), is a real detach: on the closing ')' of a subshell
+    (kind 'subshell' only, NEVER a command substitution or arithmetic scope) that saw a worker, the worker
+    is propagated into the enclosing pipeline as the subshell's contribution, so the following '&' DENIES
+    ('( worker )' foreground with NO trailing '&' still ALLOWS, and nesting propagates outward). Legacy
     '$[ ... ]' arithmetic is NOT tracked (the lexer glues '$[' into a word and does not separate the ']'),
     so a bare '&' inside it is over-denied - a disclosed residual, taken over the false-allow risk of
     bracket tracking the shared lexer cannot support."""
     segments = _lex_command(command)  # top-level ValueError propagates to the handler's raw fallback
     pipeline_words = []
-    scope_stack = []    # (kind, saved_pipeline_words) per open '(': kind is 'cmdsub' | 'arith' | 'subshell'
+    # (kind, saved_pipeline_words, saved_worker_hit) per open '(': kind is 'cmdsub' | 'arith' | 'subshell'
+    scope_stack = []
     suppress_depth = 0  # open command-substitution or arithmetic scopes; a bare '&' inside any is not a detach
+    worker_hit = None   # a declared worker seen ANYWHERE in the CURRENT scope (survives a ';'/'&&' reset), so a
+                        # backgrounded subshell whose worker ran before a hard separator is still caught
     prev_sep = None     # the separator that ended the PREVIOUS segment (to spot an adjacent '((')
     verdict = (None, None)
     for seg in segments:
@@ -5516,6 +5573,8 @@ def _scan_detached_workers(command, worker_set, depth):
         word = _detached_command_basename(seg.argv)
         if word is not None:
             pipeline_words.append(word)
+            if word in worker_set:
+                worker_hit = word
             if depth < _MAX_DETACH_RECURSION and suppress_depth == 0 and word in _DETACH_SHELLS:
                 inner = _shell_c_literal(seg)
                 if inner is not None:
@@ -5544,20 +5603,29 @@ def _scan_detached_workers(command, worker_set, depth):
             elif seg.raw.endswith("$") and bool(seg.argv_opaque) and seg.argv_opaque[-1]:
                 kind = "cmdsub"         # '$(' command substitution: the '&' child is captured by the parent
             else:
-                kind = "subshell"       # a plain subshell: a bare '&' here IS a real detach
-            scope_stack.append((kind, pipeline_words))  # preserve the OUTER pipeline across the sub-scope
+                kind = "subshell"       # a plain subshell: a bare '&' here, or backgrounding the whole
+                                        # subshell, IS a real detach
+            scope_stack.append((kind, pipeline_words, worker_hit))  # preserve the OUTER pipeline and hit
             if kind in ("cmdsub", "arith"):
                 suppress_depth += 1
             pipeline_words = []
+            worker_hit = None           # a fresh scope: track its own worker presence
             prev_sep = sep
             continue
         if sep == ")":
             if scope_stack:
-                kind, saved = scope_stack.pop()
+                kind, saved, saved_hit = scope_stack.pop()
                 if kind in ("cmdsub", "arith"):
                     suppress_depth -= 1
+                inner_hit = worker_hit
                 pipeline_words = saved   # RESTORE the outer pipeline so a worker word before the sub-scope
-                                         # still reaches the top-level '&' that closes its pipeline
+                worker_hit = saved_hit   # still reaches the top-level '&' that closes its pipeline
+                if kind == "subshell" and inner_hit is not None:
+                    # a subshell that CONTAINED a worker acts as a worker-bearing element of the enclosing
+                    # pipeline, so a trailing '&' that backgrounds it detaches the worker (deny); a command
+                    # substitution or arithmetic ')' NEVER propagates (the parent waits / nothing launches)
+                    pipeline_words = saved + [inner_hit]
+                    worker_hit = inner_hit
             else:
                 pipeline_words = []      # an unbalanced ')': nothing to restore
             prev_sep = sep
