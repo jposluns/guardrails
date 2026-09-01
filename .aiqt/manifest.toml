@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "3dc49642fbffa8f808f4923122b329966761443b7101861437c1b8fe0e3e74c5"
+tree-sha256 = "7320c3fb5df44ee5a1e7548bd8b6719931f0e499b9e992747169f773e61d03c1"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2621,8 +2621,8 @@ sha256 = "11b17abd6c4549c7b9f0af0d98b749e72d3dbdaf10c1a7efd03dc811b4360874"
 
 [[sources]]
 path = "tools/check_rules_page.py"
-bytes = 30054
-sha256 = "f1fe94c170c4d19c579bdf08dd77b342c10da7173d97441074f3b2a6f51ffe30"
+bytes = 30985
+sha256 = "134791f7dbfed1cb64fdf9a43937999d6e8093b2143e8a1eaf0e34c4726258bc"
 
 [[sources]]
 path = "tools/check_secrets.py"

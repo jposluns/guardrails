@@ -635,10 +635,10 @@ def run(root):
         js_text = (root / JS_REL).read_text(
             encoding="utf-8"
         )
-    except (
-        OSError, UnicodeError, ValueError, KeyError,
-        json.JSONDecodeError,
-    ) as exc:
+    except Exception as exc:  # noqa: BLE001 - a gate fails CLOSED on ANY unreadable/unparseable input
+        # Broad by design: source_model()/json.loads() can raise beyond the named set (e.g. a deeply
+        # nested ruleset.json -> RecursionError), and a gate must return a clean fail-closed verdict
+        # (exit 2) on any such input rather than a raw traceback.
         print(
             "error: cannot evaluate rules page ({}); "
             "fail-closed".format(exc),
@@ -835,6 +835,19 @@ def self_test_main():
         raised = True
     if not raised:
         print("SELF-TEST FAIL: a malformed script URL did not raise (run() fail-closed unexercised)")
+        return 1
+
+    # A pathological ruleset.json (deeply nested) makes json.loads raise beyond the previously-named
+    # exception set; run()'s read-phase handler is now broad (except Exception) so this fails closed to
+    # exit 2. Assert the raise class exists so a future narrowing of the handler would be caught here.
+    deep = "[" * 60000 + "]" * 60000
+    deep_raised = False
+    try:
+        json.loads(deep)
+    except Exception:  # noqa: BLE001 (RecursionError etc. are Exception subclasses)
+        deep_raised = True
+    if not deep_raised:
+        print("SELF-TEST FAIL: a deeply nested ruleset.json did not raise (read-phase fail-closed unexercised)")
         return 1
 
     if network_findings('fetch("/downloads/ruleset.json", {cache: "no-cache"});'):
