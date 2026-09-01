@@ -35,4 +35,4 @@ jobs:
       # malformed manifest / unparseable date) paints this scheduled run red. It ships green today
       # because every manifest was retrieved recently; it begins to speak only as real time passes.
       - name: Standards staleness
-        run: python3 tools/check_standards_currency.py
+        run: python3 -I -B tools/check_standards_currency.py

@@ -744,6 +744,11 @@ only reads, is never swept in. An executable configuration is reviewed for what 
 whatever source it arrived, exactly as hand-written or generated code is, and until it passes that gate
 it remains untrusted.
 
+A Python-launched hook or gate places its own script directory first on the interpreter's module path, so
+a file written beside the script can shadow a standard-library import and silently disable the control. A
+direct Python launcher for such a configuration therefore runs isolated: `-I`, or the complete `-P -E -s`
+equivalent, placed before the executed script.
+
 ## Sound cryptography
 
 Cryptography uses current, approved algorithms and correct parameters, with no weak, deprecated, or

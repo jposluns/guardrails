@@ -226,6 +226,24 @@
       "target": "plugin/aiqt-guardrails-hooks/hooks/"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/about.md"
+      ],
+      "target": "site/about.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/development.md"
+      ],
+      "target": "site/development.html"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_disclosure.py",
       "sources": [
@@ -292,12 +310,39 @@
       "target": "site/downloads/mappings.json"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/evidence.md"
+      ],
+      "target": "site/evidence.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/examples.md"
+      ],
+      "target": "site/examples.html"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_install.py",
       "sources": [
         ".aiqt/core/skill/skill-source.md"
       ],
       "target": "site/install.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/learn.md"
+      ],
+      "target": "site/learn.html"
     },
     {
       "kind": "block",
@@ -360,6 +405,24 @@
         "docs/rule5.md"
       ],
       "target": "site/rule5.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/standard.md"
+      ],
+      "target": "site/standard.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/teams.md"
+      ],
+      "target": "site/teams.html"
     }
   ],
   "version": 1
