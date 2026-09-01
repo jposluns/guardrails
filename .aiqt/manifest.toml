@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "71ad75e22ee4852c4a5b2636a278dcd910d88212fe65c2b8b6d5599a7eb3fcc5"
+tree-sha256 = "a2586ad2e508d8d9f53a17dcdf05c49ce38ef557c97dc9999de3d0ea7683ceed"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,8 +46,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 62662
-sha256 = "ef1c3116a9ddec52a2ce3e4b881f7be3fe2d4235bc121084f11659acd9b457ac"
+bytes = 62627
+sha256 = "f29335384ed5b066d83ab592a0f9696a161511edfc44cb03b54d672829d1327c"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -726,8 +726,8 @@ sha256 = "4bc8f478517f571c4d8e044dee5bcaa65d116958de69386cc6ce8076acebd6a9"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 198242
-sha256 = "e2ece08de8bd65ac45777d0032feb5558fdadfd947471df96d7bc29215b6ba65"
+bytes = 198207
+sha256 = "90f1b0e4be5359ff00741d9f1e90e1fc8ea9e925b9e6a44d8f39c19f1eef737d"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2621,8 +2621,8 @@ sha256 = "11b17abd6c4549c7b9f0af0d98b749e72d3dbdaf10c1a7efd03dc811b4360874"
 
 [[sources]]
 path = "tools/check_rules_page.py"
-bytes = 28671
-sha256 = "181a3c3df91e0a33ed5099c6387f9d22a4724925ddb833f54af70471be2edd00"
+bytes = 28921
+sha256 = "f44aaf8afdffbdb6aebd55219af4a6994741914ec89545c686f6df607d54f249"
 
 [[sources]]
 path = "tools/check_secrets.py"

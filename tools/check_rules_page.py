@@ -201,7 +201,7 @@ class CatalogParser(HTMLParser):
         duplicates = sorted({
             name for name in names if names.count(name) > 1
         })
-        return dict(attrs), duplicates
+        return {name: ("" if value is None else value) for name, value in attrs}, duplicates
 
     def handle_starttag(self, tag, attrs):
         values, duplicates = self.attrs(attrs)
@@ -601,8 +601,8 @@ def network_findings(js_text):
     script-element src assignment; a regex literal adjacent to a quote that desynchronizes string
     tracking; template-literal ${...} nesting; or any egress whose tokens it does not name. The transport
     check catches ONLY XMLHttpRequest, EventSource, WebSocket, and sendBeacon. The REAL egress controls
-    are code review of this pack-immutable file, the site Content-Security-Policy (same-origin), and the
-    tri-family QA; this scan is defence-in-depth for the common case. The gate's manifest residue and its
+    are code review of this pack-immutable file and the tri-family QA; this scan is defence-in-depth for
+    the common case. The gate's manifest residue and its
     class-c letter state the same boundary."""
     findings = []
     code = _strip_comments(js_text)
@@ -825,6 +825,10 @@ def self_test_main():
          'fetch("/downloads/ruleset.json"); var u = "http://x"; new WebSocket(u);'),
         ("unicode line terminator ends a comment",
          'fetch("/downloads/ruleset.json"); // note\u2028new WebSocket("wss://x");'),
+        ("carriage-return ends a comment",
+         'fetch("/downloads/ruleset.json"); // note\rnew WebSocket("wss://x");'),
+        ("U+2029 ends a comment",
+         'fetch("/downloads/ruleset.json"); // note\u2029new WebSocket("wss://x");'),
     ):
         if not network_findings(sample):
             print("SELF-TEST FAIL: network scan missed the " + label)
