@@ -1,67 +1,12 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AIQT examples: the priority ordering making real calls</title>
-<meta name="description" content="Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded.">
-<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811za">
-<script src="/theme.js"></script>
-<link rel="canonical" href="https://aiqt.ai/examples">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<meta property="og:type" content="website">
-<meta property="og:title" content="AIQT examples: the priority ordering making real calls">
-<meta property="og:description" content="Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded.">
-<meta property="og:url" content="https://aiqt.ai/examples">
-<meta name="twitter:card" content="summary">
-</head>
-<body>
-<a class="skip" href="#main">Skip to content</a>
-
-<header class="topbar">
-  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
-  <a class="logo" href="/" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT™</span></a>
-  <div class="topformula" aria-label="AIQT priority ordering: Accuracy Integrity Quality Trust first, then Progress, Speed, Cost">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; <span class="t2">Progress</span> &gt; <span class="t3">Speed</span> &gt; <span class="t4">Cost</span></div>
-</header>
-<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
-<div class="layout">
-<nav class="sidebar" id="sidebar" aria-label="Main navigation">
-  <h4>Start</h4>
-  <a class="navlink" href="/">Home</a>
-  <h4>Chat assistants</h4>
-  <a class="navlink" href="/install">All assistants</a>
-  <a class="navlink" href="/install#claude">Claude</a>
-  <a class="navlink" href="/install#chatgpt">ChatGPT</a>
-  <a class="navlink" href="/install#gemini">Gemini</a>
-  <a class="navlink" href="/install#copilot">Copilot</a>
-  <a class="navlink" href="/install#other">Any other</a>
-  <h4>Developers &amp; teams</h4>
-  <a class="navlink" href="/development">Developers &amp; Coding</a>
-  <a class="navlink" href="/tech-details">Technical details</a>
-  <a class="navlink" href="/teams">Teams &amp; Enterprise</a>
-  <h4>Learn more</h4>
-  <a class="navlink" href="/learn">Overview</a>
-  <a class="navlink" href="/standard">The Standard</a>
-  <a class="navlink" href="/mappings">Mappings</a>
-  <a class="navlink active" href="/examples" aria-current="page">Examples</a>
-  <a class="navlink" href="/roadmap">Roadmap</a>
-  <a class="navlink" href="/evidence">Evidence</a>
-  <h4>The five rules</h4>
-  <a class="navlink" href="/rule1">Rule 1</a>
-  <a class="navlink" href="/rule2">Rule 2</a>
-  <a class="navlink" href="/rule3">Rule 3</a>
-  <a class="navlink" href="/rule4">Rule 4</a>
-  <a class="navlink" href="/rule5">Rule 5</a>
-  <h4>Project</h4>
-  <a class="navlink" href="/about">About</a>
-  <a class="navlink" href="/disclosure">Disclosure</a>
-  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
-  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
-</nav>
-<div class="content">
-
-<main id="main">
++++
+title = "AIQT examples: the priority ordering making real calls"
+description = "Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded."
+canonical = "https://aiqt.ai/examples"
+og-title = "AIQT examples: the priority ordering making real calls"
+og-description = "Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded."
+og-url = "https://aiqt.ai/examples"
+sidebar-active = "examples"
++++
 
 <div class="wrap pagehead">
   <p class="eyebrow">Examples</p>
@@ -341,10 +286,3 @@
     </div>
   </div>
 </section>
-
-</main>
-
-</div>
-</div>
-</body>
-</html>

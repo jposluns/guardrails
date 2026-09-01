@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "4fe683e617e2aeda14c04c814186a9158fd82a599323acc53ab8a4b57dded0bb"
+tree-sha256 = "0aec8dbdee3620d8aa7e706516cbe0589473a43468ef9dc69fb29952f24071cf"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -726,8 +726,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 8741
-sha256 = "355d012eb8761834791f98cf651334442cce3116d64b6c4b6aa8b3b25125f5fa"
+bytes = 10157
+sha256 = "e5cd3a3803928da5bc4e79986513ddfb3f6776139910221046024ebb4018ca2a"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2076,8 +2076,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 33380
-sha256 = "132d4cc3a6b3fcb12d8921208c5dd213c8126810f4b912d314f27651bb34dc40"
+bytes = 33577
+sha256 = "8cc4cebb29d3574315610403288278ec0e41c142e904cdce1578f42ca1d99f90"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2165,6 +2165,31 @@ bytes = 4147
 sha256 = "d6d0908a1f12997fe1572f5302e1661573738a6db6b85890612bf277d90d7b69"
 
 [[sources]]
+path = "docs/about.md"
+bytes = 6258
+sha256 = "523251149dc761c8d34ddd4a908a5045f27b3ac4f5cc0af32ef7e6297f2c0089"
+
+[[sources]]
+path = "docs/development.md"
+bytes = 10379
+sha256 = "b2ae5d6001a6deca4b88a149490fc869636f21b85f8d4adf6967604f99d00202"
+
+[[sources]]
+path = "docs/evidence.md"
+bytes = 5300
+sha256 = "26f65403aa03186dd409b917729c5efcc5a0d48bf10683d52bccde2d1e5cfc49"
+
+[[sources]]
+path = "docs/examples.md"
+bytes = 16739
+sha256 = "22aa04cf10939eeb86e95a1507deae2b74b77aaf78b916944ab1bf0cd179c093"
+
+[[sources]]
+path = "docs/learn.md"
+bytes = 2766
+sha256 = "2409231f4b961d643e37effd5ef154da03d0eeb236fa78491294fa0d29377678"
+
+[[sources]]
 path = "docs/rule1.md"
 bytes = 2692
 sha256 = "12a60266191e3bf74ca1b056f0b5a9620a8212ba94ae090b44b7c6fb8d8c2b3b"
@@ -2188,6 +2213,16 @@ sha256 = "96fb635652de2003138e0e73aa75102ba246c74f7a1a28336b5f4363e7c3f6d2"
 path = "docs/rule5.md"
 bytes = 6027
 sha256 = "0263a60095afaeb96b0a245d54376658b5e9b6a2d20d971324dd75bb4c39a0fc"
+
+[[sources]]
+path = "docs/standard.md"
+bytes = 5516
+sha256 = "2107eb0ae021c8abc849693590810af430326747ee0a8d4978b8bbe92714899a"
+
+[[sources]]
+path = "docs/teams.md"
+bytes = 9884
+sha256 = "32b54f2e5fb666a1318cab9a1bea9b96d8eb68f9e5ce89af85db8c5baae87ed5"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
@@ -2296,8 +2331,8 @@ sha256 = "f3c4f3d1724d3d8b13bee98ba584d5b2336af1bf476e5d6acb1507e4e0e3af27"
 
 [[sources]]
 path = "site/examples.html"
-bytes = 20712
-sha256 = "0a2ee23884da0167d29c3dd4921961abf72833b1159f298776297a28492d4820"
+bytes = 20698
+sha256 = "0900df0b4b492a756e092531c037d92fd079baad08e12fe15c6ab5fe60f944cc"
 
 [[sources]]
 path = "site/favicon.svg"
@@ -2321,8 +2356,8 @@ sha256 = "9e408ea39bfd48477a61d172c2bb4976ebaf27da23103e94288d55ca86eabc14"
 
 [[sources]]
 path = "site/learn.html"
-bytes = 6724
-sha256 = "f8e552c26a8cd8fdbc0b3aae12a8d4ffacd9ba61fdb2dfb6aab568eb0618921f"
+bytes = 6728
+sha256 = "22c57150f004a260010a21967e2758197f40631df89484a9730d7e1b29285b6d"
 
 [[sources]]
 path = "site/mappings.html"
@@ -2376,8 +2411,8 @@ sha256 = "909e8cb136cf3659670ca7a8b80f0ded484ae560423ff784797c2061506f8e01"
 
 [[sources]]
 path = "site/teams.html"
-bytes = 13856
-sha256 = "a4cffe6f0a0036eec987e9c4b5d48ab393b0d39ca155dda230e51262250741f4"
+bytes = 13854
+sha256 = "5112a4275654aa148eacdddf1957c9822077820f6762923ab438c426a80c6ef0"
 
 [[sources]]
 path = "site/tech-details.html"
@@ -2701,8 +2736,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 73017
-sha256 = "baed78f0ed94dd64b5c4920862cf704fd00f0c909dbd7950298cc4336f6661b4"
+bytes = 74125
+sha256 = "949b995c94ae85a45f94173412098cdbf5c20268ffe887330c384e233b7086e7"
 
 [[sources]]
 path = "tools/gen_skill.py"

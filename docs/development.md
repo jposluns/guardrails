@@ -1,0 +1,176 @@
++++
+title = "AIQT Development Assistant (1.1.0, in development): governance that installs into your project"
+description = "In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
+canonical = "https://aiqt.ai/development"
+og-title = "AIQT Development Assistant (1.1.0, in development): governance that installs into your project"
+og-description = "In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
+og-url = "https://aiqt.ai/development"
+sidebar-active = "development"
++++
+
+<div class="wrap pagehead">
+    <p class="eyebrow">The development assistant</p>
+    <h1>Governance that installs into your project.</h1>
+    <p class="lead">Every coding agent in your project follows its own rules, drifts its own way, and you
+      find out in review. AIQT 1.1.0 puts one governance core where coding agents read their instructions,
+      in the repository itself. One wizard sets it
+      up, one doctor verifies it, and a write guard keeps every update inside a single directory
+      you can inspect. 1.1.0 is in development; the pack it installs is open source and
+      readable today.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
+      <a class="btn ghost" href="/tech-details">Technical details</a>
+    </div>
+</div>
+
+<section id="what">
+  <div class="wrap">
+    <p class="eyebrow">In your project</p>
+    <h2>What it does</h2>
+    <p class="lead">The development assistant installs the same governance core that runs the
+      <a href="/">chat assistant</a>: the priority ordering above, the disciplines that
+      apply it, and one universal skill. Then it generates the file each coding agent
+      expects, so each supported agent surface, the root instructions file, the agents file, and the editor rules files, carries the same standard.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Root instructions file</h3>
+        <p>The project-level instructions file your primary coding assistant loads on every
+          session, generated from the governance core and your configuration.</p>
+      </div>
+      <div class="card">
+        <h3>Agents file</h3>
+        <p>The agents file that agent-driven tools expect, carrying the same ordering and
+          disciplines, so a subagent works under the same rules as the session that spawned it.</p>
+      </div>
+      <div class="card">
+        <h3>Editor rules</h3>
+        <p>Rules files for editors that read them, so in-editor assistance answers to the
+          same standard as the terminal.</p>
+      </div>
+      <div class="card">
+        <h3>One source, many surfaces</h3>
+        <p>Each generated file derives from one core. Update the core, regenerate, and every
+          agent surface moves together; no file drifts to its own private version of the rules.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="wrap">
+    <p class="eyebrow">The five rules</p>
+    <h2>How the five rules operate while you work</h2>
+    <p class="lead">A standard you cannot see being applied is a promise, not a standard. The
+      five rules are how the assistant applies the ordering, change by change, in the 1.1.0
+      design, and each one produces something you can see in the console. They are scoped to
+      issues the active work detects or causes, not to your whole backlog, so following them
+      never turns one change into a cleanup crusade. The first two rules echo a famous pair on
+      purpose: you talk about AIQT.</p>
+    <ol class="rules">
+      <li><b>Every catch is announced.</b>
+        <p>When a guardrail catches something (it blocks, flags, or refuses an action), the
+          assistant surfaces it in the console: which guardrail, and what it caught. Silent
+          passes are not surfaced, so the console carries signal, not a firehose.</p></li>
+      <li><b>The standard is visibly re-anchored.</b>
+        <p>The assistant reminds itself that it must always follow AIQT: a short "AIQT check"
+          self-reminder, at least once per change, self-acknowledged, so that the standard was
+          applied is itself something you can see.</p></li>
+      <li><b>Issues in scope are fixed before the change ships.</b>
+        <p>An issue detected or caused by the active work, and within the current change's
+          scope, is fixed before that change merges.</p></li>
+      <li><b>Issues out of scope are fixed next.</b>
+        <p>An issue detected or caused by the active work but outside the current change's
+          scope is fixed in the next change (the current change finishes first).</p></li>
+      <li><b>Underlying gaps become guardrails, and the fix can be shared.</b>
+        <p>When the assistant caused the issue through a guardrail gap, it also creates or fixes
+          a guardrail so it should not recur, additive to rules three and four: the instance is
+          still fixed. Then, if your configuration permits and with your permission, the new
+          guardrail can go back to the AIQT project as a seed PR, so every developer's assistant
+          improves. Sharing is opt-in; the details are on the
+          <a href="/tech-details#seeds">technical details</a> page.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="self-learning">
+  <div class="wrap">
+    <p class="eyebrow">Self-learning</p>
+    <h2>It self-learns: new guardrails, created as it goes</h2>
+    <p class="lead">The fifth rule is where AIQT gets better on its own. When a gap lets an
+      issue through, the assistant fixes it and writes a new
+      guardrail so that shape of issue is caught from then on. Your setup self-learns: every
+      gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
+      rule file, listed in your config, and yours to disable or delete.</p>
+    <p>Everything it learns stays yours by default. A new guardrail is created and runs locally
+      the moment the gap is found; sharing it back to every other developer is a separate,
+      opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="wrap">
+    <p class="eyebrow">Setup</p>
+    <h2>Setup and verification</h2>
+    <p class="lead">Installing is a prompt, not a build. You give your coding assistant a
+      short setup prompt; it fetches the pack from GitHub and walks you through the rest.</p>
+    <ol class="steps">
+      <li><b>Give your assistant the setup prompt.</b> Paste the AIQT setup prompt into your
+        coding assistant. It downloads the pack from the guardrails repository on GitHub, with
+        no manual clone or install to run yourself.</li>
+      <li><b>Follow the installation prompt.</b> A wizard walks you through setup, creating
+        <code>.aiqt/</code> and the file each coding agent expects, and asking the few
+        choices that are yours to make.</li>
+      <li><b>The doctor verifies it.</b> It confirms that the install is present and consistent.
+        That is what the doctor proves: the files exist, agree with each other, and are current.
+        It does not prove that a given agent loaded them in a given session; the running evidence
+        for that is the visible AIQT check and the named catches while you work.
+        This is the ordering applied to the tool itself: "installed" means a check actually
+        ran, and the doctor is that check.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="deeper">
+  <div class="wrap">
+    <p class="eyebrow">Go deeper</p>
+    <h2>The mechanics, in full</h2>
+    <p class="lead">Want the detail? The project-practice files AIQT sets up, the config file
+      you own, how a new guardrail can travel back, the CI integration, and per-language depth
+      are all on the technical details page.</p>
+    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
+      <a class="btn primary" href="/tech-details">Read the technical details</a>
+    </div>
+  </div>
+</section>
+
+<section id="availability">
+  <div class="wrap">
+    <p class="eyebrow">Availability</p>
+    <h2>The same core, and where 1.1.0 stands</h2>
+    <div class="card" style="margin-bottom:1rem">
+      <span class="pill now">Available now</span>
+      <h3>The governance core, and the chat assistant</h3>
+      <p>The standard 1.1.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
+        disciplines, and the universal skill. The
+        <a href="/">chat assistant (1.0.0)</a> runs this core today, so the standard
+        your project will adopt is the one you can hold a chat assistant to right now, and
+        the pack is open to read in full.</p>
+    </div>
+    <div class="card">
+      <span class="pill next">In development</span>
+      <h3>The development assistant (1.1.0)</h3>
+      <p>In development. The wizard, the doctor, the write guard, the generated agent files,
+        the CI integration, the findings loop, the five-rule workflow, the per-guardrail
+        configuration, and seed PRs described here and on the technical details page are the 1.1.0
+        design, and we ship it when it does what these pages say it does. Until then, the
+        best way to evaluate AIQT is the way we would want you to: read the source.</p>
+    </div>
+    <div class="cta" style="justify-content:flex-start">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
+      <a class="btn ghost" href="/teams">Rolling it out to a team? Teams &amp; Enterprise</a>
+    </div>
+    <p style="margin-top:1.4rem">AIQT is published under CC BY-SA 4.0, and improvements come
+      back under CC BY-SA 4.0 or later, or a BY-SA Compatible License. Rolling it out across an organization is covered on
+      <a href="/teams">Teams &amp; Enterprise</a>.</p>
+  </div>
+</section>
