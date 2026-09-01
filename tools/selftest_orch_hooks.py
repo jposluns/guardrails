@@ -519,6 +519,13 @@ def main():
         check("detach/fire-then-cmd", _verdict(det("orch-verify x & echo done")), "deny")
         check("detach/fire-pipeline", _verdict(det("orch-verify x | tee run.log &")), "deny")
         check("detach/fire-env-timeout", _verdict(det("env FOO=bar timeout 30 orch-verify x &")), "deny")
+        # FIX B (round 1): value-taking wrapper options must be skipped WITH their value so the worker after
+        # them is still seen. A leading-decimal timeout DURATION (.5s), env -a/-f value options, and
+        # /usr/bin/time -f <fmt> all previously hid the worker and ALLOWed; now they DENY.
+        check("detach/fire-timeout-decimal-dur", _verdict(det("timeout .5s orch-verify x &")), "deny")
+        check("detach/fire-env-argv0", _verdict(det("env -a alias orch-verify x &")), "deny")
+        check("detach/fire-env-file", _verdict(det("env -f cfg orch-verify x &")), "deny")
+        check("detach/fire-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "deny")
         check("detach/fire-shell-c-literal", _verdict(det("bash -c 'orch-verify x &'")), "deny")
         # run_in_background is IGNORED for scoping (it tracks the wrapper shell, not a child the shell detaches).
         check("detach/fire-rib-true", _verdict(det("orch-verify x &", rib=True)), "deny")
@@ -534,6 +541,15 @@ def main():
         check("detach/allow-foreground-worker", _verdict(det("orch-verify x")), "allow")
         check("detach/allow-cmdsub", _verdict(det("result=$(orch-verify x &)")), "allow")
         check("detach/allow-cmdsub-nested", _verdict(det("a=$(b=$(orch-verify x &))")), "allow")
+        # FIX A (round 1): a command substitution in the worker's OWN ARGUMENTS splits the worker word into
+        # the segment ending with the '(' separator; the outer pipeline is preserved across the sub-scope, so
+        # the top-level bare-& still DENIES. OLD returned ALLOW (the '(' reset discarded the worker word).
+        check("detach/fire-cmdsub-arg-eq", _verdict(det("orch-verify --rev=$(git rev-parse HEAD) &")), "deny")
+        check("detach/fire-cmdsub-arg-task", _verdict(det("orch-verify --task=$(cat t) &")), "deny")
+        check("detach/fire-cmdsub-arg-nohup", _verdict(det("nohup orch-verify $(id) &")), "deny")
+        check("detach/fire-cmdsub-arg-then", _verdict(det("orch-verify x $(true) & echo done")), "deny")
+        # the QUOTED substitution form does not split, and already denies; keep it pinned.
+        check("detach/fire-quoted-cmdsub-arg", _verdict(det('orch-verify "$(cat t)" &')), "deny")
         # a real subshell is NOT a command substitution and DENIES, pinning the $( ) vs ( ) discrimination.
         check("detach/deny-subshell-not-cmdsub", _verdict(det("( orch-verify x & )")), "deny")
         # backtick command substitution: the launcher glues into a non-command-word token, so it does not fire
@@ -542,6 +558,18 @@ def main():
         # arithmetic $(( a & b )): the & is bitwise-AND inside a substitution scope and the operands are not
         # command words, so it never fires.
         check("detach/allow-arith-amp", _verdict(det("echo $(( 1 & 2 ))")), "allow")
+        # FIX C (round 1): standalone arithmetic (( )) is a suppress scope too (the '&' is bitwise-AND, no
+        # launch), so it ALLOWs; OLD false-DENIED it. The discriminator is raw-adjacency: a SPACED ( ( ) )
+        # nested subshell really backgrounds the worker and still DENIES.
+        check("detach/allow-arith-standalone", _verdict(det("(( orch-verify & 1 ))")), "allow")
+        check("detach/deny-nested-subshell-spaced", _verdict(det("( ( orch-verify x & ) )")), "deny")
+        # legacy $[ ] arithmetic is a DISCLOSED over-deny: the lexer glues '$[' into a word and does not
+        # separate the ']', so the bare-& there cannot be cleanly bracketed without a false-allow risk; it
+        # fires (allow-direction-wrong, disclosed in the residue). Pinned so the posture is deliberate.
+        check("detach/overdeny-legacy-dollar-bracket", _verdict(det("x=$[ orch-verify & 1 ]")), "deny")
+        # FIX F (round 1): a brace-group { worker & } is a DISCLOSED non-catch (the lexer reads '{' as the
+        # command word), so it ALLOWs; pinned so a future change to brace handling is caught.
+        check("detach/allow-brace-group-noncatch", _verdict(det("{ orch-verify x & }")), "allow")
         # a declared worker basename that appears as an ARGUMENT, not the command word, is not a launch.
         check("detach/allow-worker-as-arg", _verdict(det("echo orch-verify &")), "allow")
         # Scope and cannot-evaluate posture. Undeclared / empty -> inert ALLOW; malformed control -> DENY.
@@ -553,6 +581,12 @@ def main():
         check("detach/malformed-nonlist-denies", _verdict(det("orch-verify x &")), "deny")
         _set_workers([""])  # a list with an empty entry: malformed control
         check("detach/malformed-empty-entry-denies", _verdict(det("orch-verify x &")), "deny")
+        # FIX D (round 1): an entry that normalizes to NO usable command basename (empty, whitespace, or a
+        # '.'/'..' path element) is a malformed control that fails CLOSED, never a silent coverage disable.
+        for _bad in ("/", " ", "bin/", "."):
+            _set_workers([_bad])
+            check("detach/malformed-unusable-basename-{!r}".format(_bad),
+                  _verdict(det("orch-verify x &")), "deny")
         _set_workers(["orch-verify"])
         # In scope, no readable command string -> fail closed (DENY).
         check("detach/no-command-denies", _verdict(aiqt_hooks.orch_detached_dispatch_guard(
@@ -560,6 +594,9 @@ def main():
         # UNPARSEABLE command: ASK on a worker word co-occurring with an apparent bare-&, else ALLOW.
         check("detach/unparseable-worker-amp-asks", _verdict(det('orch-verify x " &')), "ask")
         check("detach/unparseable-no-worker-allows", _verdict(det('foo x " &')), "allow")
+        # FIX E (round 1): an unparseable command with a worker word but NO '&' character does not over-ask
+        # (the unbalanced quote alone no longer trips the fallback); OLD ASKed on it.
+        check("detach/unparseable-worker-no-amp-allows", _verdict(det('orch-verify x "')), "allow")
         # A present-but-BAD registry (version != 1) is a cannot-evaluate: fail closed (DENY).
         _badver = json.loads(_dreg.read_text(encoding="utf-8"))
         _badver["version"] = 2

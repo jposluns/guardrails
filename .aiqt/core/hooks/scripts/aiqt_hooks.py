@@ -5361,7 +5361,8 @@ _DETACH_WRAPPERS = frozenset((
 # value in the same token and is skipped as one). Only the common forms are listed; an unlisted value-taking
 # option is a disclosed residual that errs toward reading the value as the command word (a safe over/under).
 _WRAPPER_VALUE_OPTS = {
-    "env": frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string")),
+    "env": frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string",
+                      "-a", "--argv0", "-f", "--file")),
     "timeout": frozenset(("-s", "--signal", "-k", "--kill-after")),
     "nice": frozenset(("-n", "--adjustment")),
     "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
@@ -5371,11 +5372,16 @@ _WRAPPER_VALUE_OPTS = {
                        "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user",
                        "-R", "--chroot", "-D", "--chdir")),
     "exec": frozenset(("-a",)),
+    # /usr/bin/time (basename 'time'): -f/--format and -o/--output carry a value; -a/--append, -v/--verbose,
+    # -p/--portability are flags handled by the generic single-token skip. The bash 'time' keyword takes no
+    # such value option, so skipping these two for it is inert (its command word still resolves).
+    "time": frozenset(("-f", "--format", "-o", "--output")),
 }
 # `timeout [OPTS] DURATION COMMAND`: after its options a single DURATION positional precedes the command,
-# recognized conservatively (a number with an optional s/m/h/d suffix) so a non-duration token is never
+# recognized conservatively (a decimal number, with or without a leading integer part so a leading-decimal
+# duration such as '.5s' is caught, and an optional s/m/h/d suffix) so a non-duration token is never
 # mis-skipped as the command word.
-_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+_DURATION_RE = re.compile(r"^(\d+(\.\d+)?|\.\d+)[smhd]?$")
 _MAX_DETACH_RECURSION = 3  # bounded literal shell -c inspection depth (SECA-resource-bounds)
 _MAX_WRAPPER_HOPS = 10     # bounded transparent-wrapper unwrap (SECA-resource-bounds)
 
@@ -5467,10 +5473,13 @@ def _raw_has_worker_word(text, worker_set):
 def _raw_cooccurrence_verdict(text, worker_set):
     """The conservative raw-string fallback for an UNPARSEABLE command (or an unparseable inner shell -c
     string): ('ask', None) when a declared worker basename appears as a word AND an apparent unquoted bare
-    '&' is present (reusing the sibling's quote/escape-aware _orch_foreground_detach, which also fails toward
-    a detach on an unbalanced quote), else (None, None). It never silently allows an in-scope apparent
-    detach, and it never denies (the parse could not confirm the operator)."""
-    if _raw_has_worker_word(text, worker_set) and _orch_foreground_detach(text):
+    '&' co-occurs, else (None, None). An '&' must actually be present in the raw text ('&' in text) before
+    the quote/escape-aware _orch_foreground_detach is consulted: that scan returns True on ANY unbalanced
+    quote (it fails toward a possible hidden '&'), but a command that carries no '&' character at all cannot
+    hide a bare-'&' detach however it is quoted, so requiring an '&' avoids over-asking a no-'&' command such
+    as 'orch-verify x "'. It never silently allows an in-scope apparent detach, and it never denies (the
+    parse could not confirm the operator)."""
+    if _raw_has_worker_word(text, worker_set) and "&" in text and _orch_foreground_detach(text):
         return ("ask", None)
     return (None, None)
 
@@ -5482,21 +5491,32 @@ def _scan_detached_workers(command, worker_set, depth):
     routes that to the raw fallback); an inner shell -c ValueError is handled here.
 
     A backgrounded pipeline is the run of '|'/'|&'-joined segments a bare '&' separator closes; every
-    segment's resolved command word in that run is checked, not only the one adjacent to '&'. A command
-    substitution '$( ... )' is tracked as a scope (a '(' whose preceding segment ends in an unquoted,
-    unescaped '$' opens it; a plain '(' is a subshell), and a bare '&' INSIDE an open command substitution
-    is CAPTURED (the parent waits on it), so the deny is suppressed there (depth counter; nesting handled)."""
+    segment's resolved command word in that run is checked, not only the one adjacent to '&'. Two scope
+    kinds SUPPRESS the deny because a bare '&' inside them is not a lost detach: a command substitution
+    '$( ... )' (a '(' whose preceding segment ends in an unquoted, unescaped '$'; the parent waits on the
+    child) and an arithmetic '(( ... ))' (the INNER '(' of an ADJACENT '((' - the current segment is empty
+    and its raw slice between the two parens is empty; a spaced '( (' subshell-of-subshell keeps a space in
+    that raw and is NOT arithmetic; the '&' there is bitwise-AND and launches nothing). A plain subshell
+    '( ... )' does NOT suppress. The nesting is tracked with a scope stack and a suppress counter. On the
+    open of any '(' the OUTER pipeline words are stacked and RESTORED on the matching ')', so a worker
+    command word that precedes a '$( ... )'/'( ... )' IN ITS OWN ARGUMENTS still participates in the
+    top-level '&' that closes the pipeline (an unquoted command substitution in a worker's arguments splits
+    the worker word into the segment ending with '(', which the reset would otherwise discard). Legacy
+    '$[ ... ]' arithmetic is NOT tracked (the lexer glues '$[' into a word and does not separate the ']'),
+    so a bare '&' inside it is over-denied - a disclosed residual, taken over the false-allow risk of
+    bracket tracking the shared lexer cannot support."""
     segments = _lex_command(command)  # top-level ValueError propagates to the handler's raw fallback
     pipeline_words = []
-    scope_stack = []   # one bool per open '(' : True = command substitution, False = subshell
-    cmdsub_depth = 0   # count of open command substitutions ('$( )'); a bare '&' inside any is captured
+    scope_stack = []    # (kind, saved_pipeline_words) per open '(': kind is 'cmdsub' | 'arith' | 'subshell'
+    suppress_depth = 0  # open command-substitution or arithmetic scopes; a bare '&' inside any is not a detach
+    prev_sep = None     # the separator that ended the PREVIOUS segment (to spot an adjacent '((')
     verdict = (None, None)
     for seg in segments:
         sep = seg.sep_after
         word = _detached_command_basename(seg.argv)
         if word is not None:
             pipeline_words.append(word)
-            if depth < _MAX_DETACH_RECURSION and cmdsub_depth == 0 and word in _DETACH_SHELLS:
+            if depth < _MAX_DETACH_RECURSION and suppress_depth == 0 and word in _DETACH_SHELLS:
                 inner = _shell_c_literal(seg)
                 if inner is not None:
                     try:
@@ -5508,29 +5528,42 @@ def _scan_detached_workers(command, worker_set, depth):
                     if r[0] == "ask" and verdict[0] is None:
                         verdict = r
         if sep in ("|", "|&"):
+            prev_sep = sep
             continue  # the pipeline continues; keep accumulating its command words
         if sep == "&":
-            if cmdsub_depth == 0:
+            if suppress_depth == 0:
                 for cw in pipeline_words:
                     if cw in worker_set:
                         return ("deny", cw)  # a bare-& detach of a declared worker: the proven positive
             pipeline_words = []
+            prev_sep = sep
             continue
         if sep == "(":
-            # A '$(' command-substitution open (the preceding segment's last token is an unquoted,
-            # unescaped '$' adjacent to the paren) versus a plain subshell '(' (an empty/other segment).
-            is_cmdsub = (seg.raw.endswith("$") and bool(seg.argv_opaque) and seg.argv_opaque[-1])
-            scope_stack.append(is_cmdsub)
-            if is_cmdsub:
-                cmdsub_depth += 1
+            if prev_sep == "(" and not seg.argv and seg.raw == "":
+                kind = "arith"          # the inner '(' of an adjacent '((': arithmetic, '&' is bitwise-AND
+            elif seg.raw.endswith("$") and bool(seg.argv_opaque) and seg.argv_opaque[-1]:
+                kind = "cmdsub"         # '$(' command substitution: the '&' child is captured by the parent
+            else:
+                kind = "subshell"       # a plain subshell: a bare '&' here IS a real detach
+            scope_stack.append((kind, pipeline_words))  # preserve the OUTER pipeline across the sub-scope
+            if kind in ("cmdsub", "arith"):
+                suppress_depth += 1
             pipeline_words = []
+            prev_sep = sep
             continue
         if sep == ")":
-            if scope_stack and scope_stack.pop():
-                cmdsub_depth -= 1
-            pipeline_words = []
+            if scope_stack:
+                kind, saved = scope_stack.pop()
+                if kind in ("cmdsub", "arith"):
+                    suppress_depth -= 1
+                pipeline_words = saved   # RESTORE the outer pipeline so a worker word before the sub-scope
+                                         # still reaches the top-level '&' that closes its pipeline
+            else:
+                pipeline_words = []      # an unbalanced ')': nothing to restore
+            prev_sep = sep
             continue
         pipeline_words = []  # a hard separator (';', '&&', '||', or line/command end): reset the pipeline
+        prev_sep = sep
     return verdict
 
 
@@ -5607,7 +5640,19 @@ def orch_detached_dispatch_guard(data):
             "guard cannot evaluate; failing closed. Correct or remove the key.",
             "AIQT guardrail: denied a Bash call because worker_launch_commands is malformed (rule trkasy, "
             "cannot-evaluate).")
-    worker_set = frozenset(w.rsplit("/", 1)[-1] for w in workers)
+    worker_bases = [w.rsplit("/", 1)[-1] for w in workers]
+    if not all(b.strip() and b not in (".", "..") for b in worker_bases):
+        # An entry that normalizes to no usable command basename (its basename is empty, whitespace, or a
+        # '.'/'..' path element, e.g. "/" or " " or "bin/") would silently match nothing and disable
+        # coverage: that is a malformed control input, a cannot-evaluate that fails CLOSED, not a silent
+        # disarm (10-ACCUR-guard-input-soundness), consistent with the other malformed-registry denials.
+        return _deny(
+            "AIQT rule trkasy (fail-closed): a worker_launch_commands entry does not normalize to a usable "
+            "command basename (its basename is empty, whitespace, or '.'/'..'), so its coverage would be "
+            "silently disabled; failing closed. Correct or remove the entry.",
+            "AIQT guardrail: denied a Bash call because a worker_launch_commands entry has no usable "
+            "basename (rule trkasy, cannot-evaluate).")
+    worker_set = frozenset(worker_bases)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
     if not isinstance(command, str) or not command:
