@@ -628,8 +628,8 @@ residue = "A byte-identity drift gate over every docs/*.md to site/*.html pair d
 [[gate]]
 id = "rules-page-consistency"
 script = "tools/check_rules_page.py"
-rules = []
+rules = ["gensrc"]
 platform = "ci"
 default = "block"
 class = "a"
-residue = "A structural static gate over applicability.toml, applies.toml, the live corpus, the enforceability ledger, ruleset.json, docs/rules.md, site/rules.html, and site/js/rules.js. It checks exact JSON fields and source membership, the three no-JavaScript catalogs, displayed generated counts, fingerprints, anchors, the immovable always controls, initial progressive-enhancement state, and the single literal data-fetch path. It does not execute a browser, compute CSS, prove keyboard focus order, observe screen-reader output, test the clipboard or download APIs, or establish rendered behavior; those remain browser-verification obligations before public promotion."
+residue = "A structural static gate over applicability.toml, applies.toml, the live corpus, the enforceability ledger, ruleset.json, docs/rules.md, site/rules.html, and site/js/rules.js. It checks exact JSON fields and source membership, the three no-JavaScript catalogs, displayed generated counts, fingerprints, anchors, the immovable always controls, initial progressive-enhancement state, and the single literal data-fetch path (rejecting a variable or computed fetch target). It does not catch an aliased fetch binding or a computed-member fetch call (window['fetch']), which carry no literal fetch( token and are left to the transport-name scan; nor does it execute a browser, compute CSS, prove keyboard focus order, observe screen-reader output, test the clipboard or download APIs, or establish rendered behavior; those remain browser-verification obligations before public promotion."

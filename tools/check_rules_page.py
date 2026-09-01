@@ -56,6 +56,10 @@ def load_enforcement(path):
         raise ValueError(
             "enforceability.json version must be integer 1"
         )
+    if not isinstance(data["boundary"], str) or not data["boundary"].strip():
+        raise ValueError(
+            "enforceability.json boundary must be a non-empty string"
+        )
     if not isinstance(data["rules"], list) or not data["rules"]:
         raise ValueError(
             "enforceability.json rules must be a non-empty list"
@@ -613,15 +617,25 @@ def run(root):
         r"/\*.*?\*/", "", js_text, flags=re.DOTALL
     )
     code = re.sub(r"//[^\n]*", "", code)
-    fetches = re.findall(
+    # Count EVERY fetch( call, not only quoted-literal ones: a variable or
+    # computed target (fetch(endpoint)) must not slip the single-path gate.
+    # Residual (disclosed): an aliased binding (var f = window.fetch; f(x))
+    # or a computed member access (window["fetch"](x)) carries no literal
+    # "fetch(" token; those are covered by the transport-name check below and
+    # named in this gate's manifest residue, not chased by this scan.
+    all_fetches = re.findall(r"\bfetch\s*\(", code)
+    literal_fetches = re.findall(
         r"\bfetch\s*\(\s*([\"'])(.*?)\1", code
     )
-    if [
-        url for _quote, url in fetches
-    ] != ["/downloads/ruleset.json"]:
+    if (
+        len(all_fetches) != 1
+        or [url for _quote, url in literal_fetches]
+        != ["/downloads/ruleset.json"]
+    ):
         findings.append(
-            "rules.js must have exactly one literal data fetch "
-            "to /downloads/ruleset.json"
+            "rules.js must make exactly one fetch call, a string literal "
+            "to /downloads/ruleset.json (a variable or computed fetch "
+            "target is rejected)"
         )
     if re.search(
         r"\b(?:XMLHttpRequest|EventSource|WebSocket|sendBeacon)\b",
