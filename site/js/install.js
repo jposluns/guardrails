@@ -1,10 +1,11 @@
 (function () {
-  var FAMILIES = ['claude', 'chatgpt', 'gemini', 'copilot', 'other'];
+  var FAMILIES = ['claude', 'chatgpt', 'gemini', 'copilot', 'copilotstudio', 'other'];
   var NAMES = {
     claude: 'Claude',
     chatgpt: 'ChatGPT',
     gemini: 'Gemini',
     copilot: 'Copilot',
+    copilotstudio: 'Copilot Studio',
     other: 'other assistants'
   };
   var root = document.documentElement;

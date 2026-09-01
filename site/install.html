@@ -35,6 +35,7 @@
   <a class="navlink" href="/install#chatgpt">ChatGPT</a>
   <a class="navlink" href="/install#gemini">Gemini</a>
   <a class="navlink" href="/install#copilot">Copilot</a>
+  <a class="navlink" href="/install#copilotstudio">Copilot Studio</a>
   <a class="navlink" href="/install#other">Any other</a>
   <h4>Developers &amp; teams</h4>
   <a class="navlink" href="/development">Developers &amp; Coding</a>
@@ -87,6 +88,8 @@
         <span><strong>Gemini</strong><small>Create a Gem</small></span></a>
       <a class="platform-button" href="#copilot" data-family-link="copilot"><span class="platform-icon copilot" aria-hidden="true">Co</span>
         <span><strong>Copilot</strong><small>Create an agent</small></span></a>
+      <a class="platform-button" href="#copilotstudio" data-family-link="copilotstudio"><span class="platform-icon copilotstudio" aria-hidden="true">CS</span>
+        <span><strong>Copilot Studio</strong><small>Upload a Skill</small></span></a>
       <a class="platform-button wide" href="#other" data-family-link="other"><span class="platform-icon guide" aria-hidden="true">+</span>
         <span><strong>Any other assistant</strong><small>Use the portable instruction file</small></span></a>
     </div>
@@ -141,6 +144,7 @@
         Skills, attach the full instruction file to a chat.</li>
       <li><b>Gemini:</b> the full instruction file, pasted into a Gem.</li>
       <li><b>Copilot:</b> the 8k instruction file, pasted into a Copilot agent.</li>
+      <li><b>Copilot Studio:</b> the Skill (.zip), uploaded as a Skill.</li>
       <li><b>Any other assistant:</b> the full instruction file.</li>
     </ul>
     <p style="margin-top:1.1rem">The instruction file is plain text; the Skill is a zip of prose
@@ -262,6 +266,30 @@
     <p style="margin-top:1.1rem">Copilot has not yet been tested against AIQT, so treat these steps as
       method-accurate rather than a verified result; the <a href="/evidence">evidence page</a>
       carries the current test status.</p>
+    <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
+  </div>
+</section>
+
+<section id="copilotstudio" data-family-section="copilotstudio">
+  <div class="wrap">
+    <p class="eyebrow">Agent builder &middot; Copilot Studio</p>
+    <h2>Add AIQT to Copilot Studio</h2>
+    <p class="verified">Last verified: pending</p>
+    <p class="lead"><b>Copilot Studio takes AIQT as a Skill.</b> Download the Skill (.zip) from
+      <a href="#download">Get AIQT</a>, upload it, and build your agent on top of it as you normally would.</p>
+    <ol class="steps">
+      <li><b>Download the Skill (.zip).</b> Get it from <a href="#download">Get AIQT</a>. The zip holds a
+        single SKILL.md at its root, the layout Copilot Studio reads.</li>
+      <li><b>Open Copilot Studio and click Skills.</b></li>
+      <li><b>Upload the Skill.</b> Choose the zip you downloaded; Copilot Studio reads the SKILL.md and
+        adds AIQT to the agent.</li>
+      <li><b>Create the agent.</b> Continue building the agent as you would any other.</li>
+      <li><b>Link it to your work.</b> Connect the agent to any of your business processes per standard
+        Copilot Studio practice.</li>
+    </ol>
+    <p style="margin-top:1.1rem">The upload and agent creation are validated; AIQT's behaviour on Copilot
+      Studio has not yet been through conformance testing, so treat these steps as method-accurate rather
+      than a verified result; the <a href="/evidence">evidence page</a> carries the current test status.</p>
     <p class="section-links" style="margin-top:.9rem"><a href="#verify">Check that it is on</a></p>
   </div>
 </section>
