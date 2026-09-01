@@ -549,6 +549,33 @@ def main():
         check("detach/underblock-env-split-string", _verdict(det("env -S 'orch-verify x' &")), "allow")
         check("detach/underblock-over-deep-chain", _verdict(det(
             "nohup nice setsid stdbuf nohup nice setsid stdbuf nohup nice setsid orch-verify x &")), "allow")
+        # ---- ROUND-3 fail-toward-allow audit: false-deny classes fixed to ALLOW; control char -> fail-closed ----
+        # (1) env -S re-splits its string into an argv the lexer never split; the real command lives inside
+        # that string, not the token after it, so resolving that token false-denied. Now allow (under-block).
+        check("detach/allow-env-split-realcmd", _verdict(det("env -S 'sleep 1' orch-verify &")), "allow")
+        check("detach/allow-env-split-inline", _verdict(det("env --split-string='sleep 1' orch-verify &")), "allow")
+        # (2) `builtin` runs only a shell builtin, never an external, so `builtin worker` launches nothing.
+        check("detach/allow-builtin-nonlauncher", _verdict(det("builtin orch-verify x &")), "allow")
+        # (3) the bash `time` keyword accepts only -p, NOT --portability (a GNU /usr/bin/time flag); bare
+        # `time --portability worker` errors and never launches. Now allow (`time -p` above still denies).
+        check("detach/allow-bare-time-portability", _verdict(det("time --portability orch-verify x &")), "allow")
+        # (4) a LEADING shell env-assignment prefix (masked OR clean) fails toward allow: a masked name is a
+        # failing command that launches nothing; a clean prefix is a disclosed under-block. The env-WRAPPER
+        # form (env FOO=bar timeout 30 worker &) is unaffected and still denies (pinned above).
+        check("detach/allow-leading-assign-masked", _verdict(det('"FOO"=bar orch-verify x &')), "allow")
+        check("detach/allow-leading-assign-clean", _verdict(det("FOO=bar orch-verify x &")), "allow")
+        # (5) a worker GATED behind a &&/|| conditional is not proven to run; a trailing '&' no longer denies.
+        check("detach/allow-cond-and", _verdict(det("false && orch-verify x &")), "allow")
+        check("detach/allow-cond-or", _verdict(det("true || orch-verify x &")), "allow")
+        # an UNCONDITIONAL worker before the '&' still denies (round-3 regression pin):
+        check("detach/fire-uncond-then-bg", _verdict(det("orch-verify x & echo done")), "deny")
+        # (6) a control character (NUL or C0/DEL) in a DECLARED basename never matches a real command, so it
+        # would silently disarm the guard for that entry: a malformed control input that fails CLOSED.
+        _set_workers(["orch\x00verify"])
+        check("detach/malformed-nul-basename-denies", _verdict(det("orch-verify x &")), "deny")
+        _set_workers(["orch\tverify"])
+        check("detach/malformed-ctrl-basename-denies", _verdict(det("orch-verify x &")), "deny")
+        _set_workers(["orch-verify"])  # restore a valid declared set for the tests that follow
         check("detach/fire-shell-c-literal", _verdict(det("bash -c 'orch-verify x &'")), "deny")
         # run_in_background is IGNORED for scoping (it tracks the wrapper shell, not a child the shell detaches).
         check("detach/fire-rib-true", _verdict(det("orch-verify x &", rib=True)), "deny")
@@ -582,7 +609,10 @@ def main():
         check("detach/fire-bg-subshell-then", _verdict(det("( orch-verify x ) & echo done")), "deny")
         check("detach/fire-bg-subshell-nohup", _verdict(det("( nohup orch-verify x ) &")), "deny")
         check("detach/fire-bg-subshell-semi", _verdict(det("( orch-verify x ; true ) &")), "deny")
-        check("detach/fire-bg-subshell-cd-and", _verdict(det("( cd /tmp && orch-verify x ) &")), "deny")
+        # ROUND-3 REVERT: a worker GATED behind an internal &&/|| in a backgrounded subshell is not proven
+        # to run (empirically `false && worker & wait` never runs worker), so it no longer denies. The
+        # unconditional forms above (';' sequence, plain `( worker ) &`) still deny.
+        check("detach/allow-bg-subshell-cd-and", _verdict(det("( cd /tmp && orch-verify x ) &")), "allow")
         check("detach/fire-bg-subshell-nested", _verdict(det("( ( orch-verify x ) ) &")), "deny")
         check("detach/fire-bg-subshell-pipeline", _verdict(det("( orch-verify x ) | tee log &")), "deny")
         # FOREGROUND subshells are NOT detached and ALLOW (regression pins): no trailing & means it runs in
@@ -604,10 +634,10 @@ def main():
         # nested subshell really backgrounds the worker and still DENIES.
         check("detach/allow-arith-standalone", _verdict(det("(( orch-verify & 1 ))")), "allow")
         check("detach/deny-nested-subshell-spaced", _verdict(det("( ( orch-verify x & ) )")), "deny")
-        # legacy $[ ] arithmetic is a DISCLOSED over-deny: the lexer glues '$[' into a word and does not
-        # separate the ']', so the bare-& there cannot be cleanly bracketed without a false-allow risk; it
-        # fires (allow-direction-wrong, disclosed in the residue). Pinned so the posture is deliberate.
-        check("detach/overdeny-legacy-dollar-bracket", _verdict(det("x=$[ orch-verify & 1 ]")), "deny")
+        # legacy $[ ] arithmetic: the lexer glues '$[' into a word and does not separate the ']'. This form
+        # carries a leading `x=` assignment, so the ROUND-3 fail-toward-allow on any leading-assignment
+        # segment now ALLOWs it (the correct direction: nothing launches in $[ ] arithmetic). OLD over-denied.
+        check("detach/allow-legacy-dollar-bracket", _verdict(det("x=$[ orch-verify & 1 ]")), "allow")
         # FIX F (round 1): a brace-group { worker & } is a DISCLOSED non-catch (the lexer reads '{' as the
         # command word), so it ALLOWs; pinned so a future change to brace handling is caught.
         check("detach/allow-brace-group-noncatch", _verdict(det("{ orch-verify x & }")), "allow")

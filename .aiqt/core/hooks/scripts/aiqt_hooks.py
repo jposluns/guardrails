@@ -5353,8 +5353,11 @@ _DETACH_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh"))
 # Transparent launch wrappers whose command word is not the real launch: the resolver skips past them to the
 # wrapped command word. `xargs` is deliberately NOT here (its option grammar is larger and mis-parse-prone,
 # and the accidental case rarely routes through it): it is a disclosed residual, flagged as a follow-on.
+# `builtin` is deliberately NOT here either (round-3 fix): `builtin` runs only a shell builtin, never an
+# external, so `builtin <worker>` errors and launches nothing (it is not a transparent launcher of a worker);
+# treating it as one false-denied `builtin orch-verify &`. It resolves as an ordinary command word instead.
 _DETACH_WRAPPERS = frozenset((
-    "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "builtin", "exec",
+    "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "exec",
     "sudo", "time"))
 # Per-wrapper options that CONSUME a following separate token as their value, so the value is never mistaken
 # for the wrapped command word. An '=' inline form (--opt=value) carries its value in the same token and is
@@ -5364,7 +5367,7 @@ _DETACH_WRAPPERS = frozenset((
 # BLOCKING hook), never guessing that the token after it is the wrapped command. Perfect option enumeration is
 # a losing tail; the fail-toward-allow default removes the whole false-deny class instead of chasing it.
 _WRAPPER_VALUE_OPTS = {
-    "env": frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string",
+    "env": frozenset(("-u", "--unset", "-C", "--chdir",
                       "-a", "--argv0", "-f", "--file")),
     "timeout": frozenset(("-s", "--signal", "-k", "--kill-after")),
     "nice": frozenset(("-n", "--adjustment")),
@@ -5380,12 +5383,16 @@ _WRAPPER_VALUE_OPTS = {
 # confirmed DENY case needs, so an unlisted flag falls to the unrecognized->allow path rather than risking a
 # false-deny from a value option mis-classified as a flag. `time` is handled specially below.
 _WRAPPER_FLAG_OPTS = {}
-# The bash `time` keyword accepts only -p/--portability; the GNU /usr/bin/time value and flag options apply
-# ONLY to an explicit path form (a '/'-bearing token such as /usr/bin/time). A bare `time -f fmt ... &` is a
+# The bash `time` keyword accepts ONLY -p (round-3 fix: NOT --portability; that long form is a GNU
+# /usr/bin/time flag, not a keyword flag). The GNU /usr/bin/time value and flag options apply ONLY to an
+# explicit path form (a '/'-bearing token such as /usr/bin/time). A bare `time -f fmt ... &` is a
 # false-deny to AVOID: bash rejects -f, the target never launches, so bare `time` with any non--p option
-# resolves unrecognized->allow. (A '\time' or 'command time' explicit form is indistinguishable after lexing
-# and is treated as the bare keyword: it under-blocks rather than false-denies, a disclosed residual.)
-_TIME_BARE_FLAG_OPTS = frozenset(("-p", "--portability"))
+# resolves unrecognized->allow. Empirically `bash -c 'time --portability echo x'` yields
+# "--portability: command not found" (rc 127): the keyword does NOT consume --portability and the target
+# never runs, so recognizing --portability here false-denied `time --portability worker &`; it is dropped.
+# (A '\time' or 'command time' explicit form is indistinguishable after lexing and is treated as the bare
+# keyword: it under-blocks rather than false-denies, a disclosed residual.)
+_TIME_BARE_FLAG_OPTS = frozenset(("-p",))
 _TIME_EXPLICIT_VALUE_OPTS = frozenset(("-f", "--format", "-o", "--output"))
 _TIME_EXPLICIT_FLAG_OPTS = frozenset(("-p", "--portability", "-a", "--append",
                                       "-v", "--verbose", "-q", "--quiet"))
@@ -5427,6 +5434,13 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
             return i + 1  # end of options: the next token is the command word (a clean recognition)
         if tok.startswith("-") and len(tok) > 1:
             name = tok.split("=", 1)[0]
+            if wrapper == "env" and name in ("-S", "--split-string"):
+                # env -S re-splits its string operand into the argv the shell lexer never split, so the
+                # REAL command word lives INSIDE that string, not in the token after it. Empirically
+                # `env -S 'echo x' MARKER` runs the split string, never MARKER, so resolving the token
+                # after -S as the command word false-denied it (round-3 fix): cannot cleanly resolve ->
+                # fail toward NOT-denying (an under-block, the safe direction), never a false-deny.
+                return None
             if name in _WRAPPER_TERMINAL_OPTS or (wrapper == "command" and name in ("-v", "-V")):
                 return None  # a non-launching terminal/query form: do not deny
             if "=" in tok:
@@ -5555,26 +5569,38 @@ def _scan_detached_workers(command, worker_set, depth):
     joins a pipeline that a trailing '&' backgrounds), is a real detach: on the closing ')' of a subshell
     (kind 'subshell' only, NEVER a command substitution or arithmetic scope) that saw a worker, the worker
     is propagated into the enclosing pipeline as the subshell's contribution, so the following '&' DENIES
-    ('( worker )' foreground with NO trailing '&' still ALLOWS, and nesting propagates outward). Legacy
+    ('( worker )' foreground with NO trailing '&' still ALLOWS, and nesting propagates outward). Only an
+    UNCONDITIONAL worker propagates: one gated behind an internal '&&'/'||' (e.g. '( cd && worker ) &') is
+    NOT proven to run, so it is not propagated and does not deny (round-3 never-false-deny posture). Legacy
     '$[ ... ]' arithmetic is NOT tracked (the lexer glues '$[' into a word and does not separate the ']'),
     so a bare '&' inside it is over-denied - a disclosed residual, taken over the false-allow risk of
     bracket tracking the shared lexer cannot support."""
     segments = _lex_command(command)  # top-level ValueError propagates to the handler's raw fallback
     pipeline_words = []
-    # (kind, saved_pipeline_words, saved_worker_hit) per open '(': kind is 'cmdsub' | 'arith' | 'subshell'
+    # (kind, saved_pipeline_words, saved_worker_hit, saved_gated) per open '(': kind 'cmdsub'|'arith'|'subshell'
     scope_stack = []
     suppress_depth = 0  # open command-substitution or arithmetic scopes; a bare '&' inside any is not a detach
-    worker_hit = None   # a declared worker seen ANYWHERE in the CURRENT scope (survives a ';'/'&&' reset), so a
+    worker_hit = None   # an UNCONDITIONAL declared worker seen in the CURRENT scope (survives a ';' reset), so a
                         # backgrounded subshell whose worker ran before a hard separator is still caught
+    gated = False       # True once past a &&/|| in the current AND-OR list: a worker after it runs conditionally,
+                        # so a trailing '&' backgrounding the list must NOT deny it (round-3 fix, no false-deny)
     prev_sep = None     # the separator that ended the PREVIOUS segment (to spot an adjacent '((')
     verdict = (None, None)
     for seg in segments:
         sep = seg.sep_after
         word = _detached_command_basename(seg.argv)
+        if word is not None and _command_word_index(seg.argv) != 0:
+            # A LEADING shell env-assignment prefix (round-3 fix): a quote/escape-masked NAME ("FOO"=bar,
+            # F\OO=bar) decodes to a clean NAME=value the shared lexer skips, but bash runs it as a
+            # (failing) command that launches nothing, so resolving the token after it would false-deny.
+            # Fail toward allow on ANY leading-assignment segment (no lexical tail); a CLEAN env-prefix
+            # (FOO=bar worker &) is a disclosed UNDER-block, still ASKed by the sibling truncation guard.
+            # The env-WRAPPER form (env FOO=bar worker &) is unaffected (command word `env`, index 0).
+            word = None
         if word is not None:
             pipeline_words.append(word)
-            if word in worker_set:
-                worker_hit = word
+            if word in worker_set and not gated:
+                worker_hit = word  # only an UNCONDITIONAL worker (before any &&/|| in this AND-OR list)
             if depth < _MAX_DETACH_RECURSION and suppress_depth == 0 and word in _DETACH_SHELLS:
                 inner = _shell_c_literal(seg)
                 if inner is not None:
@@ -5590,11 +5616,12 @@ def _scan_detached_workers(command, worker_set, depth):
             prev_sep = sep
             continue  # the pipeline continues; keep accumulating its command words
         if sep == "&":
-            if suppress_depth == 0:
+            if suppress_depth == 0 and not gated:
                 for cw in pipeline_words:
                     if cw in worker_set:
                         return ("deny", cw)  # a bare-& detach of a declared worker: the proven positive
             pipeline_words = []
+            gated = False  # the '&' ends this AND-OR list; a fresh unconditional list follows
             prev_sep = sep
             continue
         if sep == "(":
@@ -5605,18 +5632,20 @@ def _scan_detached_workers(command, worker_set, depth):
             else:
                 kind = "subshell"       # a plain subshell: a bare '&' here, or backgrounding the whole
                                         # subshell, IS a real detach
-            scope_stack.append((kind, pipeline_words, worker_hit))  # preserve the OUTER pipeline and hit
+            scope_stack.append((kind, pipeline_words, worker_hit, gated))  # preserve OUTER pipeline/hit/gate
             if kind in ("cmdsub", "arith"):
                 suppress_depth += 1
             pipeline_words = []
             worker_hit = None           # a fresh scope: track its own worker presence
+            gated = False               # a fresh AND-OR list inside the ( )
             prev_sep = sep
             continue
         if sep == ")":
             if scope_stack:
-                kind, saved, saved_hit = scope_stack.pop()
+                kind, saved, saved_hit, saved_gated = scope_stack.pop()
                 if kind in ("cmdsub", "arith"):
                     suppress_depth -= 1
+                gated = saved_gated      # restore the enclosing AND-OR list's conditional state
                 inner_hit = worker_hit
                 pipeline_words = saved   # RESTORE the outer pipeline so a worker word before the sub-scope
                 worker_hit = saved_hit   # still reaches the top-level '&' that closes its pipeline
@@ -5630,6 +5659,10 @@ def _scan_detached_workers(command, worker_set, depth):
                 pipeline_words = []      # an unbalanced ')': nothing to restore
             prev_sep = sep
             continue
+        if sep in ("&&", "||"):
+            gated = True   # subsequent pipelines in this AND-OR list run conditionally (round-3 fix)
+        else:
+            gated = False  # a ';' or line/command end starts a fresh, unconditional AND-OR list
         pipeline_words = []  # a hard separator (';', '&&', '||', or line/command end): reset the pipeline
         prev_sep = sep
     return verdict
@@ -5720,6 +5753,16 @@ def orch_detached_dispatch_guard(data):
             "silently disabled; failing closed. Correct or remove the entry.",
             "AIQT guardrail: denied a Bash call because a worker_launch_commands entry has no usable "
             "basename (rule trkasy, cannot-evaluate).")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for b in worker_bases for ch in b):
+        # A control character (NUL or other C0/DEL byte) in a declared basename never matches a real
+        # command basename, so it would silently DISARM this guard for that entry: a malformed control
+        # input that fails CLOSED (round-3 fix), never a silent disarm (10-ACCUR-guard-input-soundness).
+        return _deny(
+            "AIQT rule trkasy (fail-closed): a worker_launch_commands basename contains a control "
+            "character (a NUL or other C0/DEL byte), which no real command basename carries and which "
+            "would silently disarm this guard for that entry; failing closed. Correct or remove the entry.",
+            "AIQT guardrail: denied a Bash call because a worker_launch_commands basename has a control "
+            "character (rule trkasy, cannot-evaluate).")
     worker_set = frozenset(worker_bases)
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     command = tool_input.get("command")
