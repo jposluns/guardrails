@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "fcabb5cc4ffedc744d2c85a4f042313d90ae4966495d67306178fdfed4bd070b"
+tree-sha256 = "17366aaa3321685c655e1a4b9fe7cee00dba33581e182d12a19bf3abb1d6bdce"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2356,8 +2356,8 @@ sha256 = "96a3903d4ce7f61262dbcf431cb157d39d803c049feee22aaae25441e169daa5"
 
 [[sources]]
 path = "site/install.html"
-bytes = 24235
-sha256 = "0afeb7bb1e29dbe0ee4d30920639d14b6252d26ada3fd997fe9265019ffdb495"
+bytes = 24356
+sha256 = "bd8d8abf3bea14fffd7ccd12f6f16d8caa01a39f09a743271e87846a536ae91a"
 
 [[sources]]
 path = "site/js/install.js"
