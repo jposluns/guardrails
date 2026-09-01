@@ -333,6 +333,33 @@
         "docs/rule2.md"
       ],
       "target": "site/rule2.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/rule3.md"
+      ],
+      "target": "site/rule3.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/rule4.md"
+      ],
+      "target": "site/rule4.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/rule5.md"
+      ],
+      "target": "site/rule5.html"
     }
   ],
   "version": 1

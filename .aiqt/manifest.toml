@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "d093c7149273d976424c9cd053f590225e4e44901f01e86b5e3cd21ae2733e02"
+tree-sha256 = "c4921d372e780d0372e5e3c9d4dffa9d7f07f8d1785a27a1e1376e4f361c8643"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -726,8 +726,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 8147
-sha256 = "659fefdb82abef783d0a7cc62871c0b8cff4d04eaa644a64985e64eff6dd93ba"
+bytes = 8741
+sha256 = "355d012eb8761834791f98cf651334442cce3116d64b6c4b6aa8b3b25125f5fa"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2076,8 +2076,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 33249
-sha256 = "5188b21d6c7d11799582cb3d00486d299ea74b184cff45b3d6a8a154945ac40c"
+bytes = 33327
+sha256 = "90e47497e2ba294eee618c1d993cac9984e2ffb5d7599db6ce99bdfb8bddcca7"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2173,6 +2173,21 @@ sha256 = "12a60266191e3bf74ca1b056f0b5a9620a8212ba94ae090b44b7c6fb8d8c2b3b"
 path = "docs/rule2.md"
 bytes = 3041
 sha256 = "1c2dd17a23269d9be8acbd839c0ebdafaf0e77356d3d92179e6ad4fe391e5440"
+
+[[sources]]
+path = "docs/rule3.md"
+bytes = 2441
+sha256 = "ef802edffd46016efb84c81304a50abd1841b82c442bf9113720bb0c8b863b33"
+
+[[sources]]
+path = "docs/rule4.md"
+bytes = 2767
+sha256 = "96fb635652de2003138e0e73aa75102ba246c74f7a1a28336b5f4363e7c3f6d2"
+
+[[sources]]
+path = "docs/rule5.md"
+bytes = 6027
+sha256 = "0263a60095afaeb96b0a245d54376658b5e9b6a2d20d971324dd75bb4c39a0fc"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
@@ -2336,8 +2351,8 @@ sha256 = "2108adefcf9f1913158d2e242d78e5d44f9c15f154ea7b75d4c083af7a55386e"
 
 [[sources]]
 path = "site/rule3.html"
-bytes = 6403
-sha256 = "f58f3cb08372c8a1247cc6d78fd366693bc6a3692ec0513e73bbc60294bf53c2"
+bytes = 6413
+sha256 = "eed5fd5a627b8a70a760dee5da4103cb9c4f004044300689f549e756361bc67f"
 
 [[sources]]
 path = "site/rule4.html"
@@ -2346,8 +2361,8 @@ sha256 = "52233fcab47e006fee16e86634693eef9aad44ea74beb6696c5787d9f5bbbbeb"
 
 [[sources]]
 path = "site/rule5.html"
-bytes = 9989
-sha256 = "5fe95d2d6a987c306703eb3304b652fb824baef200fb186c69585238f20ccb40"
+bytes = 9999
+sha256 = "72ab62b7a73714c9c4e2eb2c36769357489d82264b017dc3e8f3cbd3a07529d9"
 
 [[sources]]
 path = "site/standard.html"
@@ -2681,8 +2696,8 @@ sha256 = "c1ae41caa7d6cefb021068969eba8cbc556725bc514170f8ab3e4a4d577fea82"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 72555
-sha256 = "00cd2916d92ea987c1552821ec6b5bc76d675487d439bcef8cae10b5e95daabf"
+bytes = 73017
+sha256 = "baed78f0ed94dd64b5c4920862cf704fd00f0c909dbd7950298cc4336f6661b4"
 
 [[sources]]
 path = "tools/gen_skill.py"
