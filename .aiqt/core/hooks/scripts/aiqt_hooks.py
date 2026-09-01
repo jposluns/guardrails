@@ -5426,9 +5426,11 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
     RECOGNIZED valueless flags, an env NAME=value prefix, a leading '--' end-of-options, and the timeout
     DURATION positional, returning the index of the wrapped command word. Returns None when resolution
     cannot be trusted: a value-taking option (round-5 - its value is unvalidatable and an invalid value
-    launches nothing, so the launch is unprovable), an UNRECOGNIZED option (the round-2 principle - do not
-    guess the token after it is the command), or a terminal/query option (--help/--version/-h/-V, or command
-    -v/-V) whose wrapper does not launch the target. None makes the caller fail toward NOT-denying (an
+    launches nothing, so the launch is unprovable), ANY inline --opt=value form (round-6 - a valueless flag
+    given an inline value makes the wrapper error and launch nothing, so it too is unprovable), an
+    UNRECOGNIZED option (the round-2 principle - do not guess the token after it is the command), or a
+    terminal/query option (--help/--version/-h/-V, or command -v/-V) whose wrapper does not launch the
+    target. None makes the caller fail toward NOT-denying (an
     under-block), never a false-deny."""
     n = len(argv)
     start = i  # the first token after the wrapper word (to detect a required-option wrapper given none)
@@ -5449,10 +5451,11 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
             if name in _WRAPPER_TERMINAL_OPTS or (wrapper == "command" and name in ("-v", "-V")):
                 return None  # a non-launching terminal/query form: do not deny
             if "=" in tok:
-                if name in flagopts:
-                    i += 1
-                    continue
-                return None  # a value-taking or unrecognized inline --opt=value: fail toward allow (round-5)
+                # ANY inline --opt=value fails toward allow (round-6): a VALUELESS flag given an inline
+                # value makes the wrapper error and launch nothing (time -p=x, /usr/bin/time --verbose=x,
+                # -v=x all error before any exec), and a value-taking or unrecognized inline option is
+                # unprovable too. Skipping a valueless flag here and denying the worker was a false-deny.
+                return None
             if name in valopts:
                 # a value-taking option (separated -o value): the value is unvalidatable, and an INVALID
                 # value makes the wrapper error and launch NOTHING (stdbuf -o bogus, timeout -s BOGUS, nice

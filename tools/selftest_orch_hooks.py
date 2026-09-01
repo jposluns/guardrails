@@ -530,7 +530,8 @@ def main():
         check("detach/allow-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "allow")
         # FIX B (round 2, PRINCIPLE CHANGE): an UNRECOGNIZED wrapper option, a terminal/query form, or a chain
         # deeper than the hop bound FAILS TOWARD NOT-DENYING (an under-block is the safe direction for a
-        # blocking hook; a false-deny is the harmful one). Recognized options still DENY.
+        # blocking hook; a false-deny is the harmful one). A recognized VALUELESS flag in SEPARATED form
+        # (time -p) still DENIES; a value-taking option or ANY inline =value form now ALLOWS (round-5/6).
         # False-denies now fixed to ALLOW:
         check("detach/allow-bare-time-f", _verdict(det("time -f fmt orch-verify x &")), "allow")  # keyword rejects -f
         check("detach/allow-timeout-help", _verdict(det("timeout --help orch-verify x &")), "allow")
@@ -540,8 +541,13 @@ def main():
         check("detach/allow-command-V", _verdict(det("command -V orch-verify &")), "allow")
         check("detach/allow-unrecognized-wrapper-flag", _verdict(det("nohup --frobnicate orch-verify x &")), "allow")
         check("detach/allow-sudo-unrecognized-flag", _verdict(det("sudo -b orch-verify x &")), "allow")
-        # explicit /usr/bin/time still DENIES on its recognized value option; bare time -p (keyword-valid) DENIES:
+        # bare time -p (keyword-valid VALUELESS flag, separated form) still DENIES (the worker does launch):
         check("detach/fire-bare-time-p", _verdict(det("time -p orch-verify x &")), "deny")
+        # (R6 tri-family BLOCKER/MAJOR/MINOR fix) a VALUELESS flag given an INLINE =value makes the wrapper
+        # error and launch nothing -> ALLOW (was a false-deny: the flag was skipped and the worker denied).
+        check("detach/allow-bare-time-p-eq", _verdict(det("time -p=foo orch-verify x &")), "allow")
+        check("detach/allow-usrbin-time-verbose-eq", _verdict(det("/usr/bin/time --verbose=foo orch-verify x &")), "allow")
+        check("detach/allow-usrbin-time-v-eq", _verdict(det("/usr/bin/time -v=foo orch-verify x &")), "allow")
         # FIX B (round 2, MAJOR 2 cheap fix): timeout DURATION now also accepts exponent and inf/infinity forms.
         check("detach/fire-timeout-exponent", _verdict(det("timeout 1e3 orch-verify x &")), "deny")
         check("detach/fire-timeout-exponent-neg", _verdict(det("timeout 1e-3 orch-verify x &")), "deny")
