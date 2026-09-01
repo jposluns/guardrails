@@ -5339,6 +5339,316 @@ def orch_truncation_guard(data):
         "AIQT guardrail: asked on a background dispatch whose full-output capture it does not parse.")
 
 
+# --- trkasy (EN-9): a bare-& detached DECLARED-worker launch is a hard block ------------------------
+# A SEPARATE sibling of orch_truncation_guard (its ask path, scanner, and residue are untouched). Where
+# the truncation guard ASKS on a foreground bare-& (any command) via its own quote/escape scan, THIS guard
+# hard-DENIES the untracked bare-& detach of a worker whose command basename the adopter has DECLARED in the
+# registry key worker_launch_commands, foreground or backgrounded, in a pipeline or subshell, including a
+# literal script passed to a recognized shell -c wrapper. It consumes the shared segmenter (_lex_command)
+# and adds ZERO new lexing: it never uses a raw `&` regex (which would re-fire on `&&`, `&>`, `>&`, `2>&1`,
+# and a quoted `&`). Command-substitution is EXCLUDED by construction: a bare `&` inside `$( ... )` is
+# CAPTURED by the substitution (the parent waits on it), so it is not a lost detach; the segment walk tracks
+# command-substitution scope from the _Segment records and suppresses the deny inside it (see the walk).
+_DETACH_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh"))
+# Transparent launch wrappers whose command word is not the real launch: the resolver skips past them to the
+# wrapped command word. `xargs` is deliberately NOT here (its option grammar is larger and mis-parse-prone,
+# and the accidental case rarely routes through it): it is a disclosed residual, flagged as a follow-on.
+_DETACH_WRAPPERS = frozenset((
+    "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "builtin", "exec",
+    "sudo", "time"))
+# Per-wrapper options that CONSUME a following separate token as their value, so the value is never mistaken
+# for the wrapped command word. Reuses the _git_subcommand value-skip idiom (an '=' inline form carries its
+# value in the same token and is skipped as one). Only the common forms are listed; an unlisted value-taking
+# option is a disclosed residual that errs toward reading the value as the command word (a safe over/under).
+_WRAPPER_VALUE_OPTS = {
+    "env": frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string")),
+    "timeout": frozenset(("-s", "--signal", "-k", "--kill-after")),
+    "nice": frozenset(("-n", "--adjustment")),
+    "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
+                         "-u", "--uid")),
+    "stdbuf": frozenset(("-i", "--input", "-o", "--output", "-e", "--error")),
+    "sudo": frozenset(("-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host",
+                       "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user",
+                       "-R", "--chroot", "-D", "--chdir")),
+    "exec": frozenset(("-a",)),
+}
+# `timeout [OPTS] DURATION COMMAND`: after its options a single DURATION positional precedes the command,
+# recognized conservatively (a number with an optional s/m/h/d suffix) so a non-duration token is never
+# mis-skipped as the command word.
+_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+_MAX_DETACH_RECURSION = 3  # bounded literal shell -c inspection depth (SECA-resource-bounds)
+_MAX_WRAPPER_HOPS = 10     # bounded transparent-wrapper unwrap (SECA-resource-bounds)
+
+
+def _skip_wrapper_args(wrapper, argv, i):
+    """From index i (the first token AFTER a transparent wrapper word), skip that wrapper's options and any
+    separated option values, the env VAR=val assignments, and the timeout DURATION positional, returning the
+    index of the wrapped command word (or len(argv) when none remains)."""
+    n = len(argv)
+    valopts = _WRAPPER_VALUE_OPTS.get(wrapper, frozenset())
+    while i < n:
+        tok = argv[i]
+        if tok == "--":
+            i += 1  # end of options: the next token is the command word
+            break
+        if tok.startswith("-") and len(tok) > 1:
+            i += 2 if (tok in valopts) else 1  # a separated value form skips its value too
+            continue
+        if wrapper == "env" and _ENV_ASSIGN_RE.match(tok):
+            i += 1  # env NAME=value assignment prefix
+            continue
+        break
+    if wrapper == "timeout" and i < n and _DURATION_RE.match(argv[i]):
+        i += 1  # the mandatory DURATION positional before the command
+    return i
+
+
+def _detached_command_index(argv):
+    """The index of a segment's REAL launch command word: the first non-assignment token, skipping the
+    transparent-wrapper chain (nohup/setsid/sudo/env/timeout/... and their options/values). None for an
+    empty segment or one that resolves to no command word."""
+    i = _command_word_index(argv)  # skip leading NAME=value assignments
+    n = len(argv)
+    hops = 0
+    while i < n and hops < _MAX_WRAPPER_HOPS:
+        base = argv[i].rsplit("/", 1)[-1]
+        if base not in _DETACH_WRAPPERS:
+            return i
+        hops += 1
+        i = _skip_wrapper_args(base, argv, i + 1)
+    return i if i < n else None
+
+
+def _detached_command_basename(argv):
+    """The basename of a segment's real launch command word (wrappers skipped), or None."""
+    idx = _detached_command_index(argv)
+    if idx is None:
+        return None
+    return argv[idx].rsplit("/", 1)[-1]
+
+
+def _shell_c_literal(seg):
+    """When a segment's resolved command word is a recognized shell invoked with a -c-family flag and a
+    LITERAL (non-opaque) string operand, return that inner script string for recursive inspection; else
+    None. A dynamic/opaque or absent operand is a disclosed residual (not recursed)."""
+    argv = seg.argv
+    idx = _detached_command_index(argv)
+    if idx is None:
+        return None
+    if argv[idx].rsplit("/", 1)[-1] not in _DETACH_SHELLS:
+        return None
+    j = idx + 1
+    n = len(argv)
+    while j < n:
+        tok = argv[j]
+        if tok == "--":
+            return None  # end of options: a following operand is the command name form, not a -c script
+        if tok.startswith("-") and len(tok) > 1:
+            if "c" in tok[1:]:  # a -c / -lc / -ec cluster: the command-string flag
+                k = j + 1
+                if k < n and k < len(seg.argv_opaque) and not seg.argv_opaque[k]:
+                    return argv[k]  # a literal script operand
+                return None  # no operand, or a dynamic/opaque one
+            j += 1
+            continue
+        return None  # a non-option operand before any -c: not a -c invocation this guard models
+    return None
+
+
+def _raw_has_worker_word(text, worker_set):
+    """True when any declared worker basename appears as a WHOLE word in the raw text (a launcher name is
+    treated as one token, so 'orch-verify' does not match inside 'xorch-verifyy' nor as a bare 'verify')."""
+    for w in worker_set:
+        if re.search(r"(?<![\w-])" + re.escape(w) + r"(?![\w-])", text):
+            return True
+    return False
+
+
+def _raw_cooccurrence_verdict(text, worker_set):
+    """The conservative raw-string fallback for an UNPARSEABLE command (or an unparseable inner shell -c
+    string): ('ask', None) when a declared worker basename appears as a word AND an apparent unquoted bare
+    '&' is present (reusing the sibling's quote/escape-aware _orch_foreground_detach, which also fails toward
+    a detach on an unbalanced quote), else (None, None). It never silently allows an in-scope apparent
+    detach, and it never denies (the parse could not confirm the operator)."""
+    if _raw_has_worker_word(text, worker_set) and _orch_foreground_detach(text):
+        return ("ask", None)
+    return (None, None)
+
+
+def _scan_detached_workers(command, worker_set, depth):
+    """Walk the command's segments and report ('deny', basename) on a bare-& backgrounding of a DECLARED
+    worker, ('ask', None) on an unparseable literal shell -c inner string that co-occurs a worker word and a
+    bare '&', or (None, None) otherwise. Raises ValueError only from the TOP-level _lex_command (the caller
+    routes that to the raw fallback); an inner shell -c ValueError is handled here.
+
+    A backgrounded pipeline is the run of '|'/'|&'-joined segments a bare '&' separator closes; every
+    segment's resolved command word in that run is checked, not only the one adjacent to '&'. A command
+    substitution '$( ... )' is tracked as a scope (a '(' whose preceding segment ends in an unquoted,
+    unescaped '$' opens it; a plain '(' is a subshell), and a bare '&' INSIDE an open command substitution
+    is CAPTURED (the parent waits on it), so the deny is suppressed there (depth counter; nesting handled)."""
+    segments = _lex_command(command)  # top-level ValueError propagates to the handler's raw fallback
+    pipeline_words = []
+    scope_stack = []   # one bool per open '(' : True = command substitution, False = subshell
+    cmdsub_depth = 0   # count of open command substitutions ('$( )'); a bare '&' inside any is captured
+    verdict = (None, None)
+    for seg in segments:
+        sep = seg.sep_after
+        word = _detached_command_basename(seg.argv)
+        if word is not None:
+            pipeline_words.append(word)
+            if depth < _MAX_DETACH_RECURSION and cmdsub_depth == 0 and word in _DETACH_SHELLS:
+                inner = _shell_c_literal(seg)
+                if inner is not None:
+                    try:
+                        r = _scan_detached_workers(inner, worker_set, depth + 1)
+                    except ValueError:
+                        r = _raw_cooccurrence_verdict(inner, worker_set)
+                    if r[0] == "deny":
+                        return r
+                    if r[0] == "ask" and verdict[0] is None:
+                        verdict = r
+        if sep in ("|", "|&"):
+            continue  # the pipeline continues; keep accumulating its command words
+        if sep == "&":
+            if cmdsub_depth == 0:
+                for cw in pipeline_words:
+                    if cw in worker_set:
+                        return ("deny", cw)  # a bare-& detach of a declared worker: the proven positive
+            pipeline_words = []
+            continue
+        if sep == "(":
+            # A '$(' command-substitution open (the preceding segment's last token is an unquoted,
+            # unescaped '$' adjacent to the paren) versus a plain subshell '(' (an empty/other segment).
+            is_cmdsub = (seg.raw.endswith("$") and bool(seg.argv_opaque) and seg.argv_opaque[-1])
+            scope_stack.append(is_cmdsub)
+            if is_cmdsub:
+                cmdsub_depth += 1
+            pipeline_words = []
+            continue
+        if sep == ")":
+            if scope_stack and scope_stack.pop():
+                cmdsub_depth -= 1
+            pipeline_words = []
+            continue
+        pipeline_words = []  # a hard separator (';', '&&', '||', or line/command end): reset the pipeline
+    return verdict
+
+
+def _detached_dispatch_fallback(command, worker_set, root):
+    """The unparseable-command fallback (section 5): ASK when a declared worker word co-occurs with an
+    apparent bare '&', otherwise ALLOW (named in the disclosed residual). Never a silent allow of an
+    in-scope apparent detach, never a deny (the parse could not confirm the operator)."""
+    if _raw_cooccurrence_verdict(command, worker_set)[0] == "ask":
+        _orch_guard_event(root, "detached-dispatch", "ask",
+                          "unparseable command; worker word co-occurs with an apparent bare-&")
+        return _ask(
+            "AIQT rule trkasy (track-launched-work): this command could not be parsed by the shell "
+            "lexer, and it appears to background a declared worker launch with a bare '&', which would "
+            "detach it from the harness and lose its completion signal. Confirm this is not a detached "
+            "worker launch, or re-issue it as a TRACKED background task (run_in_background) whose outcome "
+            "stays observable and read its result through that task's completion signal.",
+            "AIQT guardrail: an unparseable command appears to detach a worker with a bare '&' - confirm "
+            "it is tracked before proceeding (rule trkasy, fail-safe).")
+    return _allow()
+
+
+def orch_detached_dispatch_guard(data):
+    """trkasy (integ/track-launched-work), PreToolUse/Bash. HARD-DENY a Bash command that backgrounds a
+    DECLARED worker launch with a bare '&' (trailing, or followed by a newline or another command),
+    foreground or inside a run_in_background wrapper, in a pipeline or subshell, including a literal script
+    passed to a recognized shell -c. The worker set is adopter-declared (the registry key
+    worker_launch_commands); the shipped pack declares none, so the guard is inert until an adopter opts in.
+    A SEPARATE sibling of orch_truncation_guard: that guard ASKS on a foreground bare-& (any command); this
+    one DENIES the untracked bare-& detach of a declared worker (deny outranks ask at the platform, so the
+    overlap resolves to the deny). Registry-scoped and lexical/best-effort against the ACCIDENTAL case, not
+    an adversarial process-containment boundary (see the manifest residue)."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: orch_detached_dispatch_guard wired to unexpected event {!r}; "
+                           "failing closed".format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("trkasy")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    root = _orch_root(data)
+    if root is None:
+        return _allow()  # not an orchestrated session (no repo root): inert
+    status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()  # no orchestration registry: inert, the opt-in posture of the orch_* suite
+    if status != "ok":
+        # A present-but-BAD registry is a malformed control input (cannot-evaluate), never a silently
+        # disabled guard (10-ACCUR-guard-input-soundness): fail closed. Write/Edit are out of this Bash
+        # matcher, so the registry can still be repaired.
+        return _deny(
+            "AIQT rule trkasy (fail-closed): the orchestration registry is present but malformed, so the "
+            "declared worker-launch set cannot be read and this guard cannot evaluate; failing closed. "
+            "Repair .aiqt/orchestration.local.json or .aiqt/orchestration.json.",
+            "AIQT guardrail: denied a Bash call because the orchestration registry is malformed (rule "
+            "trkasy, cannot-evaluate).")
+    workers = reg.get("worker_launch_commands")
+    if workers is None:
+        return _allow()  # the key is undeclared: inert
+    if not isinstance(workers, list):
+        # A present-but-MALFORMED control value is a cannot-evaluate, not a disabled guard: fail closed
+        # (10-ACCUR-guard-input-soundness). An empty list is a valid "declare nothing" and stays inert.
+        return _deny(
+            "AIQT rule trkasy (fail-closed): the registry's worker_launch_commands is malformed (it must "
+            "be a list of non-empty command-basename strings), so this guard cannot evaluate; failing "
+            "closed. Correct or remove the key.",
+            "AIQT guardrail: denied a Bash call because worker_launch_commands is malformed (rule trkasy, "
+            "cannot-evaluate).")
+    if not workers:
+        return _allow()  # an empty declared list: inert
+    if not all(isinstance(w, str) and w for w in workers):
+        return _deny(
+            "AIQT rule trkasy (fail-closed): the registry's worker_launch_commands must be a list of "
+            "non-empty command-basename strings; a non-string or empty entry makes it malformed, so this "
+            "guard cannot evaluate; failing closed. Correct or remove the key.",
+            "AIQT guardrail: denied a Bash call because worker_launch_commands is malformed (rule trkasy, "
+            "cannot-evaluate).")
+    worker_set = frozenset(w.rsplit("/", 1)[-1] for w in workers)
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command:
+        # In scope (declared workers) but no readable command: fail closed, matching the sibling's
+        # deny-on-unreadable. run_in_background is IGNORED for scoping; the check runs on the command string
+        # either way, because run_in_background tracks the wrapper shell, not a child the shell detaches.
+        return _deny(
+            "AIQT rule trkasy (fail-closed): a Bash call in an orchestrated session with declared workers "
+            "carried no readable command string, so the detached-dispatch check could not run; failing "
+            "closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-closed).")
+    try:
+        kind, basename = _scan_detached_workers(command, worker_set, 0)
+    except ValueError:
+        return _detached_dispatch_fallback(command, worker_set, root)
+    if kind == "deny":
+        _orch_guard_event(root, "detached-dispatch", "deny",
+                          "bare-& detach of declared worker {!r}".format(basename))
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): this command backgrounds a worker launch ({!r}) with "
+            "a bare '&', which detaches it from the harness. Its completion signal is then lost, so a "
+            "failure it carries is hidden and any later claim that it finished is ungrounded. Dispatch the "
+            "worker as a TRACKED background task whose outcome stays observable (the harness "
+            "run_in_background mechanism, or the registry-declared dispatch tool), and read its result "
+            "through that task's completion signal. Check any follow-up work as a SEPARATE step keyed off "
+            "that signal, never by chaining behind '&'.".format(basename),
+            "AIQT guardrail: blocked a detached bare-& worker launch (its completion signal would be "
+            "lost); dispatch it as a tracked background task instead.")
+    if kind == "ask":
+        _orch_guard_event(root, "detached-dispatch", "ask",
+                          "unparseable inner shell -c; worker word co-occurs with an apparent bare-&")
+        return _ask(
+            "AIQT rule trkasy (track-launched-work): a shell -c script in this command could not be parsed "
+            "by the shell lexer, and it appears to background a declared worker launch with a bare '&', "
+            "which would detach it from the harness and lose its completion signal. Confirm this is not a "
+            "detached worker launch, or re-issue it as a TRACKED background task (run_in_background).",
+            "AIQT guardrail: a shell -c script that could not be parsed appears to detach a worker with a "
+            "bare '&' - confirm it is tracked before proceeding (rule trkasy, fail-safe).")
+    return _allow()
+
+
 def orch_dispatch_ledger(data):
     """trkasy/recfst, PostToolUse (recorder, never blocks): append launch rows for background Bash and
     registry-declared dispatch tools, completion rows for TaskOutput reads. A failed write SURFACES
@@ -6154,6 +6464,7 @@ HANDLERS = {
     "orch_yield_tool": orch_yield_tool,
     "orch_ask_guard": orch_ask_guard,
     "orch_truncation_guard": orch_truncation_guard,
+    "orch_detached_dispatch_guard": orch_detached_dispatch_guard,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
@@ -6185,6 +6496,7 @@ HANDLER_EVENT = {
     "orch_yield_tool": PRETOOL,
     "orch_ask_guard": PRETOOL,
     "orch_truncation_guard": PRETOOL,
+    "orch_detached_dispatch_guard": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
