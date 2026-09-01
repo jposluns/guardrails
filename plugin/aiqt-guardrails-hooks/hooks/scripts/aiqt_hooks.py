@@ -5423,9 +5423,10 @@ def _wrapper_option_sets(wrapper, explicit_time):
 
 def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
     """From index i (the first token AFTER a transparent wrapper word), skip that wrapper's CLEANLY
-    RECOGNIZED valueless flags, an env NAME=value prefix, a leading '--' end-of-options, and the timeout
-    DURATION positional, returning the index of the wrapped command word. Returns None when resolution
-    cannot be trusted: a value-taking option (round-5 - its value is unvalidatable and an invalid value
+    RECOGNIZED valueless flags, an env NAME=value prefix, and the timeout DURATION positional, returning the
+    index of the wrapped command word. Returns None when resolution cannot be trusted: a '--' end-of-options
+    marker (round-7 - what launches after it depends on wrapper-specific required-operand semantics that are
+    unbounded), a value-taking option (round-5 - its value is unvalidatable and an invalid value
     launches nothing, so the launch is unprovable), ANY inline --opt=value form (round-6 - a valueless flag
     given an inline value makes the wrapper error and launch nothing, so it too is unprovable), an
     UNRECOGNIZED option (the round-2 principle - do not guess the token after it is the command), or a
@@ -5438,7 +5439,14 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
     while i < n:
         tok = argv[i]
         if tok == "--":
-            return i + 1  # end of options: the next token is the command word (a clean recognition)
+            # end-of-options: what actually launches after -- depends on wrapper-specific REQUIRED-operand
+            # semantics (timeout still needs a DURATION, stdbuf a buffering-mode option, the bash `time`
+            # keyword does not honour -- at all), which are wrapper-specific and unbounded. Returning the
+            # next token as the command false-denied timeout -- worker & and stdbuf -- worker & (which
+            # launch nothing) and mis-read timeout -- 5 worker &. Rather than chase per-wrapper -- rules,
+            # fail toward allow (round-7): a disclosed under-block, never a false-deny, matching the
+            # round-5 posture of retiring an unbounded tail toward allow.
+            return None
         if tok.startswith("-") and len(tok) > 1:
             name = tok.split("=", 1)[0]
             if wrapper == "env" and name in ("-S", "--split-string"):

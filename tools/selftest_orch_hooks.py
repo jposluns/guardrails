@@ -548,6 +548,13 @@ def main():
         check("detach/allow-bare-time-p-eq", _verdict(det("time -p=foo orch-verify x &")), "allow")
         check("detach/allow-usrbin-time-verbose-eq", _verdict(det("/usr/bin/time --verbose=foo orch-verify x &")), "allow")
         check("detach/allow-usrbin-time-v-eq", _verdict(det("/usr/bin/time -v=foo orch-verify x &")), "allow")
+        # (R7 Codex BLOCKER/MAJOR fix) a -- end-of-options marker fails toward allow: after -- the launch
+        # depends on unbounded wrapper-specific required-operand semantics. timeout --/stdbuf -- launch
+        # nothing (was a false-deny); timeout -- 5 / nohup -- are disclosed under-blocks (was mis-read).
+        check("detach/allow-timeout-endopts-nodur", _verdict(det("timeout -- orch-verify x &")), "allow")
+        check("detach/allow-stdbuf-endopts", _verdict(det("stdbuf -- orch-verify x &")), "allow")
+        check("detach/allow-timeout-endopts-dur", _verdict(det("timeout -- 5 orch-verify x &")), "allow")
+        check("detach/allow-nohup-endopts", _verdict(det("nohup -- orch-verify x &")), "allow")
         # FIX B (round 2, MAJOR 2 cheap fix): timeout DURATION now also accepts exponent and inf/infinity forms.
         check("detach/fire-timeout-exponent", _verdict(det("timeout 1e3 orch-verify x &")), "deny")
         check("detach/fire-timeout-exponent-neg", _verdict(det("timeout 1e-3 orch-verify x &")), "deny")
