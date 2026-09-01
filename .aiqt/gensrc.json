@@ -319,6 +319,15 @@
       "target": "site/evidence.html"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/examples.md"
+      ],
+      "target": "site/examples.html"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_install.py",
       "sources": [
@@ -405,6 +414,15 @@
         "docs/standard.md"
       ],
       "target": "site/standard.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/teams.md"
+      ],
+      "target": "site/teams.html"
     }
   ],
   "version": 1
