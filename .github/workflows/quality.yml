@@ -32,10 +32,10 @@ jobs:
       # Each gate runs as its own step so a failure names itself in the UI.
       # No step carries continue-on-error: a gate that cannot fail is decorative.
       - name: Secrets (project scanner)
-        run: python3 tools/check_secrets.py
+        run: python3 -I -B tools/check_secrets.py
 
       - name: Secret scan self-test
-        run: python3 tools/check_secrets.py --self-test
+        run: python3 -I -B tools/check_secrets.py --self-test
 
       # gitleaks is invoked as the MIT-licensed BINARY, pinned by version and verified
       # by checksum, rather than through gitleaks/gitleaks-action. The action reports
@@ -55,83 +55,83 @@ jobs:
           ./gitleaks dir . --no-banner --redact --exit-code 1
 
       - name: Leak denylist
-        run: python3 tools/check_leaks.py
+        run: python3 -I -B tools/check_leaks.py
 
       # check_leaks owns the FILE channel; check_msg_leaks (F-144) owns the channels files never touch:
       # commit messages (base..head on a PR; before..after on a push to main), PR title/body, and head
       # ref. It reads the event via $GITHUB_EVENT_NAME/$GITHUB_EVENT_PATH and fails closed on missing input.
       - name: Message/metadata leak self-test
-        run: python3 tools/check_msg_leaks.py --self-test
+        run: python3 -I -B tools/check_msg_leaks.py --self-test
       - name: Message/metadata leak scan
-        run: python3 tools/check_msg_leaks.py
+        run: python3 -I -B tools/check_msg_leaks.py
 
       # Portability is DISTINCT from the leak gate: the leak gate answers a confidentiality question
       # repo-wide, this answers whether the shippable surface can land on a stranger's machine unchanged
       # (no operator identity outside its attribution, no repo-operational vocabulary, no exemption
       # markers, no unscannable file classes off the allow-list). See the gate header.
       - name: Portability self-test
-        run: python3 tools/check_portability.py --self-test
+        run: python3 -I -B tools/check_portability.py --self-test
       - name: Portability
-        run: python3 tools/check_portability.py
+        run: python3 -I -B tools/check_portability.py
 
       # Derive-don't-hardcode: an adopter-parameterized scan flagging a hardcoded target-specific literal
       # at an adopter-declared command sink (grdinp/exetgt). Adopter-declared: NOT APPLICABLE in this repo,
       # which ships no .aiqt/derived-command-parameters.toml.
       - name: Derived command parameters self-test
-        run: python3 tools/check_derived_command_parameters.py --self-test
+        run: python3 -I -B tools/check_derived_command_parameters.py --self-test
       - name: Derived command parameters
-        run: python3 tools/check_derived_command_parameters.py
+        run: python3 -I -B tools/check_derived_command_parameters.py
 
       - name: Dashes
-        run: python3 tools/check_no_dashes.py
+        run: python3 -I -B tools/check_no_dashes.py
 
       - name: Internal links
-        run: python3 tools/check_links.py
+        run: python3 -I -B tools/check_links.py
 
       - name: Site logo-consistency self-test
-        run: python3 tools/check_site.py --self-test
+        run: python3 -I -B tools/check_site.py --self-test
 
       - name: Site integrity
-        run: python3 tools/check_site.py
+        run: python3 -I -B tools/check_site.py
 
       - name: Overclaim lint self-test
-        run: python3 tools/check_overclaim.py --self-test
+        run: python3 -I -B tools/check_overclaim.py --self-test
 
       - name: Overclaim lint
-        run: python3 tools/check_overclaim.py
+        run: python3 -I -B tools/check_overclaim.py
 
       - name: Footer coverage self-test
-        run: python3 tools/check_footer.py --self-test
+        run: python3 -I -B tools/check_footer.py --self-test
 
       - name: Footer coverage
-        run: python3 tools/check_footer.py
+        run: python3 -I -B tools/check_footer.py
 
       - name: New-tab external links self-test
-        run: python3 tools/check_newtab.py --self-test
+        run: python3 -I -B tools/check_newtab.py --self-test
 
       - name: New-tab external links
-        run: python3 tools/check_newtab.py
+        run: python3 -I -B tools/check_newtab.py
 
       - name: Site version currency self-test
-        run: python3 tools/check_site_versions.py --self-test
+        run: python3 -I -B tools/check_site_versions.py --self-test
 
       - name: Site version currency
-        run: python3 tools/check_site_versions.py
+        run: python3 -I -B tools/check_site_versions.py
 
       - name: Render driver behaviour self-test
-        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_opf_render.py
+        run: python3 -I -B tools/selftest_opf_render.py
 
       - name: Roadmap drift
-        run: python3 tools/gen_roadmap.py --check
+        run: python3 -I -B tools/gen_roadmap.py --check
 
       - name: Changelog drift
-        run: python3 tools/gen_changelog.py --check
+        run: python3 -I -B tools/gen_changelog.py --check
 
       - name: Version format and single-source
-        run: python3 tools/check_versions.py
+        run: python3 -I -B tools/check_versions.py
 
       - name: Version monotonicity self-test
-        run: python3 tools/check_version_monotonicity.py --self-test
+        run: python3 -I -B tools/check_version_monotonicity.py --self-test
 
       # The baseline differs by trigger: a pull_request compares against its target branch
       # (origin/$GITHUB_BASE_REF, the auto-set trusted branch name); a push probes HEAD^ first and
@@ -145,207 +145,212 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            python3 tools/check_version_monotonicity.py --base "origin/${GITHUB_BASE_REF}"
+            python3 -I -B tools/check_version_monotonicity.py --base "origin/${GITHUB_BASE_REF}"
           elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
-            python3 tools/check_version_monotonicity.py --base "HEAD^"
+            python3 -I -B tools/check_version_monotonicity.py --base "HEAD^"
           else
-            python3 tools/check_version_monotonicity.py
+            python3 -I -B tools/check_version_monotonicity.py
           fi
 
       - name: Release delta self-test
-        run: python3 tools/check_release_delta.py --self-test
+        run: python3 -I -B tools/check_release_delta.py --self-test
       - name: Release delta
-        run: python3 tools/check_release_delta.py
+        run: python3 -I -B tools/check_release_delta.py
       - name: Release build self-test
-        run: python3 tools/check_release_build.py --self-test
+        run: python3 -I -B tools/check_release_build.py --self-test
       - name: Release build
-        run: python3 tools/check_release_build.py
+        run: python3 -I -B tools/check_release_build.py
 
       - name: Clause inventory self-test
-        run: python3 tools/check_clauses.py --self-test
+        run: python3 -I -B tools/check_clauses.py --self-test
       - name: Clause inventory
-        run: python3 tools/check_clauses.py --genesis
+        run: python3 -I -B tools/check_clauses.py --genesis
 
       # VER-CORE Section 12 step 6 (VC-6): migration engine, crosswalk tooling, archive. The crash-
       # injection self-test is the mandatory 9.3 gate; the live check_crosswalk leg reports NOT
       # APPLICABLE in this repo (the pack is not an adopter install), self-tested first over synthetic
       # trees. Mirrors the same legs in tools/run_all_checks.sh (roster symmetry).
       - name: Crosswalk generator self-test
-        run: python3 tools/gen_crosswalk.py --self-test
+        run: python3 -I -B tools/gen_crosswalk.py --self-test
       - name: Crosswalk schema drift
-        run: python3 tools/gen_crosswalk.py --check
+        run: python3 -I -B tools/gen_crosswalk.py --check
       - name: Crosswalk gate self-test
-        run: python3 tools/check_crosswalk.py --self-test
+        run: python3 -I -B tools/check_crosswalk.py --self-test
       - name: Crosswalk gate
-        run: python3 tools/check_crosswalk.py
+        run: python3 -I -B tools/check_crosswalk.py
       - name: Migration engine crash-injection self-test
-        run: python3 tools/migrate.py --self-test
+        run: python3 -I -B tools/migrate.py --self-test
       # VER-CORE Section 12 step 7 (VC-7): pin lifecycle (pin.py) and the core doctor (doctor.py). The
       # self-tests cover the plan-4.5 scenarios over synthetic installs; the live doctor leg reports NOT
       # APPLICABLE in this repo (the pack is not an adopter install). The doctor is READ-ONLY by default.
       - name: Pin lifecycle self-test
-        run: python3 tools/pin.py --self-test
+        run: python3 -I -B tools/pin.py --self-test
       - name: Doctor self-test
-        run: python3 tools/doctor.py --self-test
+        run: python3 -I -B tools/doctor.py --self-test
       - name: Doctor (read-only, NA in this repo)
-        run: python3 tools/doctor.py --root .
+        run: python3 -I -B tools/doctor.py --root .
 
       - name: Rules self-test
-        run: python3 tools/gen_rules.py --self-test
+        run: python3 -I -B tools/gen_rules.py --self-test
       # Ships DORMANT: no release records a [release.artifacts] table today, so the gate prints NOT
       # APPLICABLE and passes. It arms fail-closed once the content freeze records the first digests.
       - name: Artifact checksums self-test
-        run: python3 tools/check_artifact_checksums.py --self-test
+        run: python3 -I -B tools/check_artifact_checksums.py --self-test
       - name: Artifact checksums
-        run: python3 tools/check_artifact_checksums.py
+        run: python3 -I -B tools/check_artifact_checksums.py
 
       - name: Rules drift
-        run: python3 tools/gen_rules.py --check
+        run: python3 -I -B tools/gen_rules.py --check
 
       - name: Agents drift
-        run: python3 tools/gen_agents.py --check
+        run: python3 -I -B tools/gen_agents.py --check
 
       - name: Mappings page drift
-        run: python3 tools/gen_mappings.py --check
+        run: python3 -I -B tools/gen_mappings.py --check
 
       - name: Reference roster self-test
-        run: python3 tools/gen_reference_facts.py --self-test
+        run: python3 -I -B tools/gen_reference_facts.py --self-test
       - name: Reference roster drift
-        run: python3 tools/gen_reference_facts.py --check
+        run: python3 -I -B tools/gen_reference_facts.py --check
 
       - name: Reference facts self-test
-        run: python3 tools/check_reference_facts.py --self-test
+        run: python3 -I -B tools/check_reference_facts.py --self-test
       - name: Reference facts
-        run: python3 tools/check_reference_facts.py
+        run: python3 -I -B tools/check_reference_facts.py
 
       - name: Disclosure generator self-test
-        run: python3 tools/gen_disclosure.py --self-test
+        run: python3 -I -B tools/gen_disclosure.py --self-test
 
       - name: Disclosure drift
-        run: python3 tools/gen_disclosure.py --check
+        run: python3 -I -B tools/gen_disclosure.py --check
 
       - name: Install page block self-test
-        run: python3 tools/gen_install.py --self-test
+        run: python3 -I -B tools/gen_install.py --self-test
 
       - name: Install page block drift
-        run: python3 tools/gen_install.py --check
+        run: python3 -I -B tools/gen_install.py --check
 
       - name: Install page tripwire self-test
-        run: python3 tools/check_install_page.py --self-test
+        run: python3 -I -B tools/check_install_page.py --self-test
 
       - name: Install page tripwire
-        run: python3 tools/check_install_page.py
+        run: python3 -I -B tools/check_install_page.py
 
       - name: Sized instructions self-test
-        run: python3 tools/check_sized_instructions.py --self-test
+        run: python3 -I -B tools/check_sized_instructions.py --self-test
 
       - name: Sized instructions
-        run: python3 tools/check_sized_instructions.py
+        run: python3 -I -B tools/check_sized_instructions.py
 
       - name: NOTICE drift
-        run: python3 tools/gen_notice.py --check
+        run: python3 -I -B tools/gen_notice.py --check
 
       - name: CLAUDE.md drift
-        run: python3 tools/gen_claude.py --check
+        run: python3 -I -B tools/gen_claude.py --check
 
       - name: Adapters drift
-        run: python3 tools/gen_adapters.py --check
+        run: python3 -I -B tools/gen_adapters.py --check
       - name: Cursor self-test
-        run: python3 tools/gen_cursor.py --self-test
+        run: python3 -I -B tools/gen_cursor.py --self-test
       - name: Cursor drift
-        run: python3 tools/gen_cursor.py --check
+        run: python3 -I -B tools/gen_cursor.py --check
 
       - name: Hooks generator self-test
-        run: python3 tools/gen_hooks.py --self-test
+        run: python3 -I -B tools/gen_hooks.py --self-test
 
       # gen_secret_patterns.py --check runs BEFORE the byte-copy drift gate below: a drifted generated
       # secret-pattern region in the source aiqt_hooks.py is caught here, before gen_hooks.py copies that
       # file into the plugin surface.
       - name: Secret-patterns drift
-        run: python3 tools/gen_secret_patterns.py --check
+        run: python3 -I -B tools/gen_secret_patterns.py --check
 
       - name: Hooks drift
-        run: python3 tools/gen_hooks.py --check
+        run: python3 -I -B tools/gen_hooks.py --check
 
       - name: Hooks behaviour self-test
-        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_aiqt_hooks.py
+        run: python3 -I -B tools/selftest_aiqt_hooks.py
 
       - name: Orchestrator-integrity behaviour self-test
-        run: PYTHONDONTWRITEBYTECODE=1 python3 tools/selftest_orch_hooks.py
+        run: python3 -I -B tools/selftest_orch_hooks.py
 
       - name: Record-drift self-test
-        run: python3 tools/check_record_drift.py --self-test
+        run: python3 -I -B tools/check_record_drift.py --self-test
 
       - name: Record-drift gate
-        run: python3 tools/check_record_drift.py
+        run: python3 -I -B tools/check_record_drift.py
 
       - name: Record-section preservation self-test
-        run: python3 tools/check_record_sections.py --self-test
+        run: python3 -I -B tools/check_record_sections.py --self-test
 
       - name: Mistakes-register self-test
-        run: python3 tools/check_mistakes_register.py --self-test
+        run: python3 -I -B tools/check_mistakes_register.py --self-test
 
       - name: Mistakes-register gate
-        run: python3 tools/check_mistakes_register.py
+        run: python3 -I -B tools/check_mistakes_register.py
 
       - name: AEI enumerator self-test
-        run: python3 tools/aei_backlog_md.py --self-test
+        run: python3 -I -B tools/aei_backlog_md.py --self-test
 
       - name: Skill self-test
-        run: python3 tools/gen_skill.py --self-test
+        run: python3 -I -B tools/gen_skill.py --self-test
       - name: Skill drift
-        run: python3 tools/gen_skill.py --check
+        run: python3 -I -B tools/gen_skill.py --check
 
       - name: Gensrc registry self-test
-        run: python3 tools/gen_gensrc.py --self-test
+        run: python3 -I -B tools/gen_gensrc.py --self-test
       - name: Gensrc registry drift
-        run: python3 tools/gen_gensrc.py --check
+        run: python3 -I -B tools/gen_gensrc.py --check
 
       - name: Gensrc fail-close self-test
-        run: python3 tools/check_gensrc_failclose.py --self-test
+        run: python3 -I -B tools/check_gensrc_failclose.py --self-test
       - name: Gensrc fail-close sweep
-        run: python3 tools/check_gensrc_failclose.py
+        run: python3 -I -B tools/check_gensrc_failclose.py
 
       - name: Enforceability ledger self-test
-        run: python3 tools/gen_enforceability.py --self-test
+        run: python3 -I -B tools/gen_enforceability.py --self-test
       - name: Enforceability ledger drift
-        run: python3 tools/gen_enforceability.py --check
+        run: python3 -I -B tools/gen_enforceability.py --check
+
+      - name: Launcher isolation self-test
+        run: python3 -I -B tools/check_python_launcher_isolation.py --self-test
+      - name: Launcher isolation
+        run: python3 -I -B tools/check_python_launcher_isolation.py
 
       - name: Renderer declaration self-test
-        run: python3 tools/gen_renderers.py --self-test
+        run: python3 -I -B tools/gen_renderers.py --self-test
       - name: Renderer declaration drift
-        run: python3 tools/gen_renderers.py --check
+        run: python3 -I -B tools/gen_renderers.py --check
       - name: Manifest generator self-test
-        run: python3 tools/gen_manifest.py --self-test
+        run: python3 -I -B tools/gen_manifest.py --self-test
       - name: Manifest generation drift
-        run: python3 tools/gen_manifest.py --check
+        run: python3 -I -B tools/gen_manifest.py --check
       - name: Manifest integrity self-test
-        run: python3 tools/check_manifest.py --self-test
+        run: python3 -I -B tools/check_manifest.py --self-test
       - name: Manifest integrity
-        run: python3 tools/check_manifest.py
+        run: python3 -I -B tools/check_manifest.py
       - name: Byte canon self-test
-        run: python3 tools/check_byte_canon.py --self-test
+        run: python3 -I -B tools/check_byte_canon.py --self-test
       - name: Byte canon
-        run: python3 tools/check_byte_canon.py
+        run: python3 -I -B tools/check_byte_canon.py
       - name: Clause inventory (manifest-SOURCES leg, armed)
-        run: python3 tools/check_clauses.py --genesis --with-manifest
+        run: python3 -I -B tools/check_clauses.py --genesis --with-manifest
 
       - name: Rule placement
-        run: python3 tools/check_rule_placement.py
+        run: python3 -I -B tools/check_rule_placement.py
 
       - name: Standards mappings
-        run: python3 tools/check_mappings.py
+        run: python3 -I -B tools/check_mappings.py
 
       - name: Conformance suite self-test
-        run: python3 tools/conformance.py --self-test
+        run: python3 -I -B tools/conformance.py --self-test
 
       - name: Conformance suite (reference install)
-        run: python3 tools/conformance.py --root .
+        run: python3 -I -B tools/conformance.py --root .
 
       # Only the deterministic self-test runs here; the real time-dependent staleness audit lives in
       # the scheduled currency.yml, never on the PR path (see that workflow's header).
       - name: Standards currency self-test
-        run: python3 tools/check_standards_currency.py --self-test
+        run: python3 -I -B tools/check_standards_currency.py --self-test
 
   # The 3.6 checkout-byte-stability matrix: prove the .gitattributes eol=lf pinning defeats the worst
   # adopter setting on each supported platform. core.autocrlf true is set BEFORE the checkout, so the
@@ -367,6 +372,6 @@ jobs:
         with:
           python-version: '3.12'
       - name: Byte canon self-test (vectors)
-        run: python3 tools/check_byte_canon.py --self-test
+        run: python3 -I -B tools/check_byte_canon.py --self-test
       - name: Byte canon (full gate on this platform)
-        run: python3 tools/check_byte_canon.py
+        run: python3 -I -B tools/check_byte_canon.py

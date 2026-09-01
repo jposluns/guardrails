@@ -2228,7 +2228,7 @@ source-path = ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md
 start-line = 14
 end-line = 16
 canonical-text = "Agent, editor, workspace, and repository configuration and hook definitions that can trigger execution\nwhen they are loaded, opened, or applied are executable code, not inert settings, and pass the same\nreview and trust gate as code before they are trusted or run."
-source-digest = "abfe53cdc4f8bb6d25c282e0b4e8196418b12da55acfab9e7895d6ba6a1323bb"
+source-digest = "d1163da189c678895879cc6048c03a56997cbac9fbd41d54968f50ef7d23714d"
 
 [[clause]]
 clause-id = "seccet.2"
@@ -2237,7 +2237,7 @@ source-path = ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md
 start-line = 14
 end-line = 16
 canonical-text = "Agent, editor, workspace, and repository configuration and hook definitions that can trigger execution\nwhen they are loaded, opened, or applied are executable code, not inert settings, and pass the same\nreview and trust gate as code before they are trusted or run."
-source-digest = "abfe53cdc4f8bb6d25c282e0b4e8196418b12da55acfab9e7895d6ba6a1323bb"
+source-digest = "d1163da189c678895879cc6048c03a56997cbac9fbd41d54968f50ef7d23714d"
 
 [[clause]]
 clause-id = "seccet.3"
@@ -2246,7 +2246,7 @@ source-path = ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md
 start-line = 16
 end-line = 18
 canonical-text = "Whether a file has that property is decided\nby what it can do on load, not by its name or format, so genuinely inert configuration, values a tool\nonly reads, is never swept in."
-source-digest = "abfe53cdc4f8bb6d25c282e0b4e8196418b12da55acfab9e7895d6ba6a1323bb"
+source-digest = "d1163da189c678895879cc6048c03a56997cbac9fbd41d54968f50ef7d23714d"
 
 [[clause]]
 clause-id = "seccet.4"
@@ -2255,7 +2255,25 @@ source-path = ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md
 start-line = 18
 end-line = 20
 canonical-text = "An executable configuration is reviewed for what it will run, from\nwhatever source it arrived, exactly as hand-written or generated code is, and until it passes that gate\nit remains untrusted."
-source-digest = "abfe53cdc4f8bb6d25c282e0b4e8196418b12da55acfab9e7895d6ba6a1323bb"
+source-digest = "d1163da189c678895879cc6048c03a56997cbac9fbd41d54968f50ef7d23714d"
+
+[[clause]]
+clause-id = "seccet.5"
+corpus-id = "seccet"
+source-path = ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md"
+start-line = 22
+end-line = 23
+canonical-text = "A Python-launched hook or gate places its own script directory first on the interpreter's module path, so\na file written beside the script can shadow a standard-library import and silently disable the control."
+source-digest = "d1163da189c678895879cc6048c03a56997cbac9fbd41d54968f50ef7d23714d"
+
+[[clause]]
+clause-id = "seccet.6"
+corpus-id = "seccet"
+source-path = ".aiqt/core/rules/security-seci-config-is-executable-trust-gate.md"
+start-line = 23
+end-line = 25
+canonical-text = "A\ndirect Python launcher for such a configuration therefore runs isolated: `-I`, or the complete `-P -E -s`\nequivalent, placed before the executed script."
+source-digest = "d1163da189c678895879cc6048c03a56997cbac9fbd41d54968f50ef7d23714d"
 
 [[clause]]
 clause-id = "seccry.1"

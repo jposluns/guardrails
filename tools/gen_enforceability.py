@@ -49,11 +49,14 @@ manifest likewise exits 2, but through the reused loaders (gen_rules.load_corpus
 which raise on that input; those delegated loader paths are covered by their own suites, not this
 self-test (see the self-test note).
 
-PROTOCOL LIMITS. The inverse roster check sees only `python3 tools/*.py` steps; the gitleaks binary step
-and any non-`python3 tools/*.py` gate are invisible to it and carry no manifest entry by design. That
-check is a line-based lexical scan of trusted, controlled roster files; a `python3 tools/*.py` token
-embedded in a quoted argument, a heredoc, or an eval string may be miscounted. The authoritative
-single-source of the roster (generating both runners from this manifest) is deferred.
+PROTOCOL LIMITS. The inverse roster check sees only isolated `python3 -I -B tools/*.py` steps (the house
+launcher grammar the check_python_launcher_isolation gate enforces); the gitleaks binary step, any
+non-`python3 tools/*.py` gate, and any gate wired WITHOUT the `-I -B` isolation flags are invisible to it
+and carry no manifest entry by that route (a manifest-listed gate wired un-isolated therefore falls out
+of the roster parse and fails reconciliation, a second enforcement layer). That check is a line-based
+lexical scan of trusted, controlled roster files; a `python3 -I -B tools/*.py` token embedded in a quoted
+argument, a heredoc, or an eval string may be miscounted. The authoritative single-source of the roster
+(generating both runners from this manifest) is deferred.
 """
 import json
 import re
@@ -81,14 +84,16 @@ PLATFORMS = {"ci"}
 DEFAULTS = {"block"}
 CLASSES = {"a", "c"}   # b is the hook axis; d is never authored on a control (see the rubric)
 SCRIPT_RE = re.compile(r"^tools/[A-Za-z0-9_]+\.py$")
-# Matches the python3 tools/*.py roster steps with the same shape gen_gensrc discovery uses, so the
-# inverse roster check sees exactly those steps: the gitleaks binary step is a shell step, invisible to
-# this regex, and carries no manifest entry by design. roster_scripts strips an inline comment before
-# matching, so a trailing-comment token is not miscounted; this remains a line-based lexical scan of
-# trusted, controlled roster files, so a `python3 tools/*.py` token embedded in a quoted argument, a
-# heredoc, or an eval string may still be miscounted. The authoritative single-source of the roster
-# (generating both runners from this manifest) is deferred.
-ROSTER_RE = re.compile(r"python3 (tools/[A-Za-z0-9_]+\.py)")
+# Matches the isolated python3 -I -B tools/*.py roster steps (the house launcher grammar the
+# check_python_launcher_isolation gate enforces), so the inverse roster check sees exactly those steps:
+# the gitleaks binary step is a shell step, invisible to this regex, and carries no manifest entry by
+# design; a gate wired WITHOUT the -I -B flags likewise falls out of this parse, so an un-isolated
+# manifest-listed gate fails reconciliation (a second enforcement layer). roster_scripts strips an inline
+# comment before matching, so a trailing-comment token is not miscounted; this remains a line-based
+# lexical scan of trusted, controlled roster files, so a `python3 -I -B tools/*.py` token embedded in a
+# quoted argument, a heredoc, or an eval string may still be miscounted. The authoritative single-source
+# of the roster (generating both runners from this manifest) is deferred.
+ROSTER_RE = re.compile(r"python3 -I -B (tools/[A-Za-z0-9_]+\.py)")
 
 # The BOUNDARY string carried at the ledger top level: the honest half of the artefact, in the file.
 BOUNDARY = (
@@ -187,7 +192,7 @@ def load_gates_manifest(path, root):
 
 
 def roster_scripts(root):
-    """Return (union, per_file): the python3 tools/*.py scripts the roster files invoke, as a union set
+    """Return (union, per_file): the isolated python3 -I -B tools/*.py scripts the roster files invoke, as a union set
     and as a per-file dict. Each ROSTER_FILES entry is read (an absent or unreadable roster raises
     OSError, fail-closed per the check-fails-closed rule, never an empty set); comment lines are dropped;
     ROSTER_RE matches are collected per file. A roster that parses to zero scripts is malformed
@@ -199,7 +204,7 @@ def roster_scripts(root):
         for line in text.splitlines():
             # Strip an inline comment before matching (a conservative lexical cut, documented at
             # ROSTER_RE): the first space- or tab-preceded `#` ends a trailing comment, so
-            # `true # python3 tools/ghost.py` (space or tab before the #) no longer miscounts ghost.py;
+            # `true # python3 -I -B tools/ghost.py` (space or tab before the #) no longer miscounts ghost.py;
             # a leading "#" then drops a whole comment line. This does not parse the shell, so a token
             # inside a quoted argument or a heredoc may still be miscounted.
             code = re.split(r"[ \t]#", line, maxsplit=1)[0]
@@ -207,7 +212,7 @@ def roster_scripts(root):
                 continue
             scripts.update(ROSTER_RE.findall(code))
         if not scripts:
-            raise ValueError("roster {} names no python3 tools/*.py gate step (malformed)".format(rel))
+            raise ValueError("roster {} names no python3 -I -B tools/*.py gate step (malformed)".format(rel))
         per_file[rel] = scripts
     union = set().union(*per_file.values())
     return union, per_file
@@ -449,9 +454,9 @@ residue = "A self-test explicit-empty gate."
 
 _ROSTER_SH = """#!/usr/bin/env bash
 # a self-test roster mirror
-run_gate "alpha-selftest" python3 tools/g_alpha.py --self-test
-run_gate "alpha" python3 tools/g_alpha.py --check
-run_gate "empty" python3 tools/g_empty.py
+run_gate "alpha-selftest" python3 -I -B tools/g_alpha.py --self-test
+run_gate "alpha" python3 -I -B tools/g_alpha.py --check
+run_gate "empty" python3 -I -B tools/g_empty.py
 """
 
 _ROSTER_YML = """name: Quality
@@ -459,9 +464,9 @@ jobs:
   quality:
     steps:
       # a self-test CI roster
-      - run: python3 tools/g_alpha.py --self-test
-      - run: python3 tools/g_alpha.py --check
-      - run: python3 tools/g_empty.py
+      - run: python3 -I -B tools/g_alpha.py --self-test
+      - run: python3 -I -B tools/g_alpha.py --check
+      - run: python3 -I -B tools/g_empty.py
 """
 
 
@@ -593,7 +598,8 @@ def self_test_main():
         gex = _build(tmp / "roster-extra")
         for rel in ROSTER_FILES:
             p = gex / rel
-            p.write_text(p.read_text(encoding="utf-8") + "\n# extra step\nrun: python3 tools/g_extra.py\n",
+            p.write_text(p.read_text(encoding="utf-8") +
+                         "\n# extra step\nrun: python3 -I -B tools/g_extra.py\n",
                          encoding="utf-8")
         if run_quiet(gex, check=True) != 2:
             failures.append("a roster script with no manifest entry expected exit 2 (uncatalogued gate)")
@@ -697,7 +703,7 @@ def self_test_main():
         for rel in ROSTER_FILES:
             p = pinl / rel
             p.write_text(p.read_text(encoding="utf-8") +
-                         "\ntrue  # a commented step: python3 tools/g_inline.py --check\n",
+                         "\ntrue  # a commented step: python3 -I -B tools/g_inline.py --check\n",
                          encoding="utf-8")
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "

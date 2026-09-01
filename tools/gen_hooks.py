@@ -215,7 +215,10 @@ def render_hooks_json(hooks):
     json.dumps(indent=2) plus a trailing newline. Shape per the doc-confirmed plugin schema:
     {description, hooks: {<Event>: [{matcher?, hooks: [{type, command, args, timeout}]}]}}; the command
     is python3 with the script path and handler as args (no shell string, so nothing is shell-quoted);
-    matcher is omitted for non-tool events."""
+    matcher is omitted for non-tool events. Every launcher runs isolated: args[0] is "-I" (Python's
+    isolated mode), placed before the script path, so a file written beside the dispatcher cannot
+    shadow a standard-library import and silently neuter the hook. The generator asserts this invariant
+    in its --self-test, and the check_python_launcher_isolation gate re-checks the rendered surface."""
     events = {}
     for hook in sorted(hooks, key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
         entry = {}
@@ -223,7 +226,7 @@ def render_hooks_json(hooks):
             entry["matcher"] = hook["matcher"]
         entry["hooks"] = [{"type": "command",
                            "command": "python3",
-                           "args": [SCRIPT_PLUGIN_PATH, hook["handler"]],
+                           "args": ["-I", SCRIPT_PLUGIN_PATH, hook["handler"]],
                            "timeout": TIMEOUT}]
         events.setdefault(hook["event"], []).append(entry)
     obj = {"description": "AIQT Guardrails mechanical-enforcement hooks, generated from "
@@ -334,6 +337,7 @@ def main():
 # Proves the generator's own fail-closed invariants against synthetic trees (the conformance.py
 # pattern), so gen_hooks never becomes an ungated generator:
 #   1. a conformant manifest generates, and regeneration is drift-clean,
+#  1b. every rendered launcher runs isolated: args[0] == "-I", before the script path,
 #   2. drift in hooks.json (and an orphan under the plugin hooks/) is caught (exit 1),
 #   3. an unknown corpus-id in the manifest fails closed (exit 2),
 #   4. an empty residue fails closed (exit 2),
@@ -451,6 +455,21 @@ def self_test_main():
         for rel in (HOOKS_JSON_REL, SCRIPT_REL, PLUGIN_JSON_REL):
             if not (good / rel).is_file():
                 failures.append("conformant tree: expected generated file {}".format(rel))
+
+        # 1b. Every rendered launcher runs isolated: args[0] is "-I", before the script path, so a
+        #     sibling file cannot shadow a stdlib import and neuter the hook. A regression in the
+        #     generator (dropping the flag or misplacing it) fails the generator's own self-test.
+        try:
+            rendered = json.loads((good / HOOKS_JSON_REL).read_text(encoding="utf-8"))
+            entries = [h for event in rendered["hooks"].values() for e in event for h in e["hooks"]]
+            if not entries:
+                failures.append("isolation invariant: no rendered hook entries to check")
+            for h in entries:
+                if h.get("args", [None])[0] != "-I":
+                    failures.append("isolation invariant: launcher args[0] must be '-I', got {!r}"
+                                    .format(h.get("args")))
+        except (OSError, ValueError, KeyError, IndexError) as exc:
+            failures.append("isolation invariant: could not read rendered hooks.json: {}".format(exc))
 
         # 2. Drift in hooks.json, and an orphan under the plugin hooks/, are caught.
         target = good / HOOKS_JSON_REL
@@ -629,7 +648,8 @@ def self_test_main():
     note = ("" if not skipped else
             " NOTE: skipped {} case(s) the runner cannot exercise (chmod-0 still readable): {}"
             .format(len(skipped), ", ".join(skipped)))
-    print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; hooks.json "
+    print("SELF-TEST PASS: a conformant manifest generates and regenerates drift-clean; every rendered "
+          "launcher runs isolated (args[0] == '-I'); hooks.json "
           "drift and a plugin hooks/ orphan fail the check; an unknown corpus-id, an empty residue, "
           "an unreadable source tree, a bad/unknown event, an uncompilable matcher, a handler not in "
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
