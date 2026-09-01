@@ -115,7 +115,7 @@ PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 # The only shippable file that is not scannable text. It is byte-reconciled by gen_skill.py --check from
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
 # an unreadable copy fails closed rather than passing silently.
-BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.3.zip"}
+BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.4.zip"}
 
 # GD-56 attribution exemption (NARROW and REVIEWED; NOT a general operator-identity allowance). The
 # maintainer deliberately attributes both the project and himself, by name, on the two PUBLISHED chat
@@ -659,7 +659,7 @@ def _build_surface(base, name, email):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(_CLEAN_MD, encoding="utf-8")
     (base / "site/downloads/aiqt-skill.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
-    (base / "site/downloads/aiqt-skill-1.0.3.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
+    (base / "site/downloads/aiqt-skill-1.0.4.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
     return base
 
 

@@ -1,5 +1,5 @@
 AIQT: a standard for your AI assistant (minimal 1.5k pointer)
-Version 1.0.3. Licensed under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
+Version 1.0.4. Licensed under CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
 Full text and source: https://github.com/jposluns/guardrails
 
 This is a POINTER, not the standard. It is too short to carry the full rules; where your assistant

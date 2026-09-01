@@ -357,7 +357,7 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # --- checkout byte stability (3.3): every concern-1 path is `text eol=lf` except these ------------------
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.3.zip"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.4.zip"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 
