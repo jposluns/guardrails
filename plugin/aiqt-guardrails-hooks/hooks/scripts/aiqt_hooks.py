@@ -5342,195 +5342,41 @@ def orch_truncation_guard(data):
 # --- trkasy (EN-9): a bare-& detached DECLARED-worker launch is a hard block ------------------------
 # A SEPARATE sibling of orch_truncation_guard (its ask path, scanner, and residue are untouched). Where
 # the truncation guard ASKS on a foreground bare-& (any command) via its own quote/escape scan, THIS guard
-# hard-DENIES the untracked bare-& detach of a worker whose command basename the adopter has DECLARED in the
-# registry key worker_launch_commands, foreground or backgrounded, in a pipeline or subshell, including a
-# literal script passed to a recognized shell -c wrapper. It consumes the shared segmenter (_lex_command)
+# hard-DENIES the bare-& detach of a worker whose command basename the adopter has DECLARED in the registry
+# key worker_launch_commands, ONLY when that worker is the DIRECT command word (SIMPLIFY: it does NOT resolve
+# through any transparent wrapper - see _detached_command_index and the residue). It handles the worker
+# foreground or backgrounded, in a pipeline or subshell, and a DIRECT worker inside a literal shell -c
+# script. It consumes the shared segmenter (_lex_command)
 # and adds ZERO new lexing: it never uses a raw `&` regex (which would re-fire on `&&`, `&>`, `>&`, `2>&1`,
 # and a quoted `&`). Command-substitution is EXCLUDED by construction: a bare `&` inside `$( ... )` is
 # CAPTURED by the substitution (the parent waits on it), so it is not a lost detach; the segment walk tracks
 # command-substitution scope from the _Segment records and suppresses the deny inside it (see the walk).
 _DETACH_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh"))
-# Transparent launch wrappers whose command word is not the real launch: the resolver skips past them to the
-# wrapped command word. `xargs` is deliberately NOT here (its option grammar is larger and mis-parse-prone,
-# and the accidental case rarely routes through it): it is a disclosed residual, flagged as a follow-on.
-# `builtin` is deliberately NOT here either (round-3 fix): `builtin` runs only a shell builtin, never an
-# external, so `builtin <worker>` errors and launches nothing (it is not a transparent launcher of a worker);
-# treating it as one false-denied `builtin orch-verify &`. It resolves as an ordinary command word instead.
+# Transparent launch-wrapper basenames. SIMPLIFY: the guard does NOT resolve through these; a command word
+# that IS one of them makes the launch wrapper-mediated and fails toward allow (a disclosed under-block),
+# because resolving through wrappers to find the wrapped worker had an unbounded false-deny tail (QA rounds
+# 5-8: execution-context boundaries, per-wrapper flag arity, locale numeric parsing). `builtin` and `xargs`
+# are not here (a declared worker directly after them resolves as an ordinary command word and denies).
 _DETACH_WRAPPERS = frozenset((
     "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "exec",
     "sudo", "time"))
-# Per-wrapper value-taking options. Recognizing one no longer skips it: a value-taking option (round-5)
-# fails the wrapper resolution toward ALLOW, because its value is unvalidatable and an invalid value makes
-# the wrapper error and launch nothing, so the launch is unprovable. The set still matters because a value
-# option must be RECOGNIZED as one (both the separated -o value and the inline --opt=value form) to route to
-# that fail-toward-allow rather than be char-scanned or misread. Only common forms are listed; the round-2
-# principle governs the rest: an option that is NOT
-# a recognized value option, a recognized valueless flag, or a recognized terminal/query flag is
-# UNRECOGNIZED, and wrapper resolution then FAILS TOWARD NOT-DENYING (an under-block, the safe direction for a
-# BLOCKING hook), never guessing that the token after it is the wrapped command. Perfect option enumeration is
-# a losing tail; the fail-toward-allow default removes the whole false-deny class instead of chasing it.
-_WRAPPER_VALUE_OPTS = {
-    "env": frozenset(("-u", "--unset", "-C", "--chdir",
-                      "-a", "--argv0", "-f", "--file")),
-    "timeout": frozenset(("-s", "--signal", "-k", "--kill-after")),
-    "nice": frozenset(("-n", "--adjustment")),
-    "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid",
-                         "-u", "--uid")),
-    "stdbuf": frozenset(("-i", "--input", "-o", "--output", "-e", "--error")),
-    "sudo": frozenset(("-u", "--user", "-g", "--group", "-C", "--close-from", "--host",
-                       "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user",
-                       "-R", "--chroot", "-D", "--chdir")),
-    "exec": frozenset(("-a",)),
-}
-# Recognized VALUELESS flags per wrapper (skipped as ONE token). Kept intentionally minimal: only what a
-# confirmed DENY case needs, so an unlisted flag falls to the unrecognized->allow path rather than risking a
-# false-deny from a value option mis-classified as a flag. `time` is handled specially below.
-_WRAPPER_FLAG_OPTS = {}
-# The bash `time` keyword accepts ONLY -p (round-3 fix: NOT --portability; that long form is a GNU
-# /usr/bin/time flag, not a keyword flag). The GNU /usr/bin/time value and flag options apply ONLY to an
-# explicit path form (a '/'-bearing token such as /usr/bin/time). A bare `time -f fmt ... &` is a
-# false-deny to AVOID: bash rejects -f, the target never launches, so bare `time` with any non--p option
-# resolves unrecognized->allow. Empirically `bash -c 'time --portability echo x'` yields
-# "--portability: command not found" (rc 127): the keyword does NOT consume --portability and the target
-# never runs, so recognizing --portability here false-denied `time --portability worker &`; it is dropped.
-# (A '\time' or 'command time' explicit form is indistinguishable after lexing and is treated as the bare
-# keyword: it under-blocks rather than false-denies, a disclosed residual.)
-_TIME_BARE_FLAG_OPTS = frozenset(("-p",))
-_TIME_EXPLICIT_VALUE_OPTS = frozenset(("-f", "--format", "-o", "--output"))
-_TIME_EXPLICIT_FLAG_OPTS = frozenset(("-p", "--portability", "-a", "--append",
-                                      "-v", "--verbose", "-q", "--quiet"))
-# Terminal/query options: the wrapper prints help/version or resolves a name and does NOT launch the target,
-# so it must not deny. `command -v`/`command -V` are the query forms, handled with these.
-_WRAPPER_TERMINAL_OPTS = frozenset(("-h", "--help", "-V", "--version"))
-# `timeout [OPTS] DURATION COMMAND`: after its options a single DURATION positional precedes the command.
-# Recognized conservatively so a non-duration token is never mis-skipped as the command word: a decimal (with
-# or without a leading integer part, so '.5s' is caught) with an optional exponent and an optional s/m/h/d
-# suffix, or the literal 'inf'/'infinity'. Every form here was verified accepted by the host `timeout`.
-_DURATION_RE = re.compile(r"^(inf|infinity|(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?[smhd]?)$")
 _MAX_DETACH_RECURSION = 3  # bounded literal shell -c inspection depth (SECA-resource-bounds)
-_MAX_WRAPPER_HOPS = 10     # bounded transparent-wrapper unwrap; exceeding it fails toward allow (under-block)
-
-
-def _wrapper_option_sets(wrapper, explicit_time):
-    """The (value-taking, valueless) recognized option sets for a wrapper. `time` splits by form: the bash
-    keyword (bare) recognizes only -p; an explicit /usr/bin/time recognizes the GNU option set."""
-    if wrapper == "time":
-        if explicit_time:
-            return _TIME_EXPLICIT_VALUE_OPTS, _TIME_EXPLICIT_FLAG_OPTS
-        return frozenset(), _TIME_BARE_FLAG_OPTS
-    return _WRAPPER_VALUE_OPTS.get(wrapper, frozenset()), _WRAPPER_FLAG_OPTS.get(wrapper, frozenset())
-
-
-def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
-    """From index i (the first token AFTER a transparent wrapper word), skip that wrapper's CLEANLY
-    RECOGNIZED valueless flags, an env NAME=value prefix, and the timeout DURATION positional, returning the
-    index of the wrapped command word. Returns None when resolution cannot be trusted: a '--' end-of-options
-    marker (round-7 - what launches after it depends on wrapper-specific required-operand semantics that are
-    unbounded), a value-taking option (round-5 - its value is unvalidatable and an invalid value
-    launches nothing, so the launch is unprovable), ANY inline --opt=value form (round-6 - a valueless flag
-    given an inline value makes the wrapper error and launch nothing, so it too is unprovable), an
-    UNRECOGNIZED option (the round-2 principle - do not guess the token after it is the command), or a
-    terminal/query option (--help/--version/-h/-V, or command -v/-V) whose wrapper does not launch the
-    target. None makes the caller fail toward NOT-denying (an
-    under-block), never a false-deny."""
-    n = len(argv)
-    start = i  # the first token after the wrapper word (to detect a required-option wrapper given none)
-    valopts, flagopts = _wrapper_option_sets(wrapper, explicit_time)
-    bare_time_flag_used = False  # the bash `time` keyword takes at most ONE -p (round-8)
-    while i < n:
-        tok = argv[i]
-        if tok == "--":
-            # end-of-options: what actually launches after -- depends on wrapper-specific REQUIRED-operand
-            # semantics (timeout still needs a DURATION, stdbuf a buffering-mode option, the bash `time`
-            # keyword does not honour -- at all), which are wrapper-specific and unbounded. Returning the
-            # next token as the command false-denied timeout -- worker & and stdbuf -- worker & (which
-            # launch nothing) and mis-read timeout -- 5 worker &. Rather than chase per-wrapper -- rules,
-            # fail toward allow (round-7): a disclosed under-block, never a false-deny, matching the
-            # round-5 posture of retiring an unbounded tail toward allow.
-            return None
-        if tok.startswith("-") and len(tok) > 1:
-            name = tok.split("=", 1)[0]
-            if wrapper == "env" and name in ("-S", "--split-string"):
-                # env -S re-splits its string operand into the argv the shell lexer never split, so the
-                # REAL command word lives INSIDE that string, not in the token after it. Empirically
-                # `env -S 'echo x' MARKER` runs the split string, never MARKER, so resolving the token
-                # after -S as the command word false-denied it (round-3 fix): cannot cleanly resolve ->
-                # fail toward NOT-denying (an under-block, the safe direction), never a false-deny.
-                return None
-            if name in _WRAPPER_TERMINAL_OPTS or (wrapper == "command" and name in ("-v", "-V")):
-                return None  # a non-launching terminal/query form: do not deny
-            if "=" in tok:
-                # ANY inline --opt=value fails toward allow (round-6): a VALUELESS flag given an inline
-                # value makes the wrapper error and launch nothing (time -p=x, /usr/bin/time --verbose=x,
-                # -v=x all error before any exec), and a value-taking or unrecognized inline option is
-                # unprovable too. Skipping a valueless flag here and denying the worker was a false-deny.
-                return None
-            if name in valopts:
-                # a value-taking option (separated -o value): the value is unvalidatable, and an INVALID
-                # value makes the wrapper error and launch NOTHING (stdbuf -o bogus, timeout -s BOGUS, nice
-                # -n bogus, env -C /nonexistent), so the launch is UNPROVABLE -> fail toward allow, never a
-                # false-deny (round-5). The value-validity tail is unbounded, so the class is retired here.
-                return None
-            if name in flagopts:
-                if wrapper == "time" and not explicit_time:
-                    # the bash `time` keyword accepts at most ONE -p; a second option token becomes the
-                    # pipeline command word (which errors and launches nothing), so fail toward allow
-                    # rather than skip it and deny a worker bash never runs (round-8).
-                    if bare_time_flag_used:
-                        return None
-                    bare_time_flag_used = True
-                i += 1  # a recognized valueless flag
-                continue
-            return None  # UNRECOGNIZED option: cannot cleanly resolve, fail toward not-denying
-        if wrapper == "env" and _ENV_ASSIGN_RE.match(tok):
-            i += 1  # env NAME=value assignment prefix
-            continue
-        break  # a non-option token: the DURATION positional or the wrapped command word
-    if wrapper == "timeout":
-        # timeout REQUIRES a DURATION before the command; without a valid one it errors and launches
-        # NOTHING (empirically `timeout orch-verify` -> invalid time interval, no exec), so a missing or
-        # invalid duration is not a launch: fail toward allow rather than false-deny the worker (round-5).
-        if i < n and _DURATION_RE.match(argv[i]):
-            i += 1
-        else:
-            return None
-    elif wrapper == "stdbuf" and i == start:
-        # stdbuf REQUIRES a buffering-mode option; with none it errors and launches nothing, so
-        # `stdbuf worker &` is not a detach: fail toward allow rather than false-deny (round-5).
-        return None
-    return i
 
 
 def _detached_command_index(argv):
-    """The index of a segment's REAL launch command word: the first non-assignment token, skipping the
-    transparent-wrapper chain (nohup/setsid/sudo/env/timeout/... and their CLEANLY RECOGNIZED options and
-    values). None for an empty segment, one that resolves to no command word, or one whose wrapper chain
-    cannot be cleanly resolved (an unrecognized option, a terminal/query form, or a chain deeper than the hop
-    bound): resolution fails toward NOT-denying (an under-block), never a false-deny."""
+    """The index of a segment's REAL launch command word: the first non-assignment token. SIMPLIFY: the
+    guard no longer resolves THROUGH a transparent wrapper. If that first command word is a known
+    transparent wrapper (nohup/setsid/timeout/env/sudo/exec/command/time/...), the launch runs under
+    wrapper-specific semantics this guard does not model (execution context, per-wrapper flag arity, the
+    locale numeric parser - an unbounded false-deny tail proven across QA rounds 5-8), so it FAILS TOWARD
+    ALLOW - a disclosed under-block. Only a DIRECT, no-wrapper launch resolves to a command word that can
+    deny. None for an empty segment or a wrapper-prefixed one."""
     i = _command_word_index(argv)  # skip leading NAME=value assignments
-    n = len(argv)
-    hops = 0
-    crossed_external = False  # have we passed an EXTERNAL wrapper binary? (round-8)
-    while i < n:
-        tok = argv[i]
-        base = tok.rsplit("/", 1)[-1]
-        if base not in _DETACH_WRAPPERS:
-            return i  # the real command word
-        # exec/command are Bash builtins, bare `time` a Bash keyword; an EXTERNAL wrapper binary cannot
-        # invoke them, so crossing an external wrapper then reaching one launches nothing (round-8).
-        bash_only = base in ("exec", "command") or (base == "time" and "/" not in tok)
-        if bash_only and crossed_external:
-            return None
-        if not bash_only:
-            crossed_external = True
-        if hops >= _MAX_WRAPPER_HOPS:
-            return None  # chain deeper than the bound: fail toward allow (a disclosed under-block)
-        hops += 1
-        nxt = _skip_wrapper_args(base, argv, i + 1, explicit_time=(base == "time" and "/" in tok))
-        if nxt is None:
-            return None  # cannot cleanly resolve the wrapper: fail toward not-denying
-        i = nxt
-    return None  # ran off the end: all wrappers, no command word
+    if i >= len(argv):
+        return None
+    if argv[i].rsplit("/", 1)[-1] in _DETACH_WRAPPERS:
+        return None  # a wrapper-prefixed launch: fail toward allow (disclosed under-block)
+    return i
 
 
 def _detached_command_basename(argv):
@@ -5797,6 +5643,9 @@ def orch_detached_dispatch_guard(data):
     foreground or inside a run_in_background wrapper, in a pipeline or subshell, including a literal script
     passed to a recognized shell -c. The worker set is adopter-declared (the registry key
     worker_launch_commands); the shipped pack declares none, so the guard is inert until an adopter opts in.
+    It denies only a DIRECT (no transparent-wrapper) worker; ANY wrapper-prefixed form (nohup/timeout/env/
+    sudo/exec/...) fails toward allow (SIMPLIFY, after wrapper resolution proved an unbounded false-deny
+    tail; see the residue).
     A SEPARATE sibling of orch_truncation_guard: that guard ASKS on a foreground bare-& (any command); this
     one DENIES the untracked bare-& detach of a declared worker (deny outranks ask at the platform, so the
     overlap resolves to the deny). Registry-scoped and lexical/best-effort against the ACCIDENTAL case, not

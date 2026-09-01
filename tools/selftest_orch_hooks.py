@@ -508,23 +508,26 @@ def main():
         check("detach/lex-redirect-amp-not-amp", "&" in _seps("orch-verify x >& run.log"), False)
         check("detach/lex-dup-2gt1-not-amp", "&" in _seps("orch-verify x 2>&1 | tee run.log"), False)
         check("detach/lex-quoted-amp-not-amp", "&" in _seps("echo 'launch worker &'"), False)
-        # FIRE (deny): the proven bare-& detach of a declared worker. Vectors 1-10 flip to ALLOW if the
-        # sep_after == "&" detection is removed, so these tests fail-when-reverted.
+        # SIMPLIFY: a DIRECT (no transparent-wrapper) bare-& detach of a declared worker DENIES; any
+        # wrapper-prefixed form (nohup/setsid/sudo/timeout/env/exec/time/...) fails toward ALLOW, a disclosed
+        # under-block (wrapper resolution proved an unbounded false-deny tail over QA rounds 5-8). The
+        # direct-deny cases flip to allow if the sep_after=="&" detection is removed (fail-when-reverted);
+        # the wrapper cases flip to deny if wrapper resolution is restored.
         check("detach/fire-fg-trailing", _verdict(det("orch-verify --brief x &")), "deny")
         check("detach/fire-fg-newline", _verdict(det("orch-verify x &\necho next")), "deny")
-        check("detach/fire-nohup", _verdict(det("nohup orch-verify x &")), "deny")
-        check("detach/fire-setsid", _verdict(det("setsid orch-verify x &")), "deny")
-        check("detach/fire-sudo", _verdict(det("sudo orch-verify x &")), "deny")
+        check("detach/allow-nohup", _verdict(det("nohup orch-verify x &")), "allow")
+        check("detach/allow-setsid", _verdict(det("setsid orch-verify x &")), "allow")
+        check("detach/allow-sudo", _verdict(det("sudo orch-verify x &")), "allow")
         check("detach/fire-subshell", _verdict(det("( orch-verify x & )")), "deny")
         check("detach/fire-then-cmd", _verdict(det("orch-verify x & echo done")), "deny")
         check("detach/fire-pipeline", _verdict(det("orch-verify x | tee run.log &")), "deny")
-        check("detach/fire-env-timeout", _verdict(det("env FOO=bar timeout 30 orch-verify x &")), "deny")
+        check("detach/allow-env-timeout", _verdict(det("env FOO=bar timeout 30 orch-verify x &")), "allow")
         # (R5) A leading-decimal timeout DURATION (.5s) is a validated POSITIONAL and still DENIES; but a
         # value-taking wrapper OPTION now FAILS TOWARD ALLOW (its value is unvalidatable; an invalid value
         # launches nothing, so the launch is unprovable). env -a/-f and /usr/bin/time -f previously DENIED
         # (assuming a valid value) and now ALLOW - a disclosed under-block (Codex R4 BLOCKER fix). See the
         # dedicated R5 value-option block below for the full class incl. invalid-value vectors.
-        check("detach/fire-timeout-decimal-dur", _verdict(det("timeout .5s orch-verify x &")), "deny")
+        check("detach/allow-timeout-decimal-dur", _verdict(det("timeout .5s orch-verify x &")), "allow")
         check("detach/allow-env-argv0", _verdict(det("env -a alias orch-verify x &")), "allow")
         check("detach/allow-env-file", _verdict(det("env -f cfg orch-verify x &")), "allow")
         check("detach/allow-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "allow")
@@ -542,7 +545,7 @@ def main():
         check("detach/allow-unrecognized-wrapper-flag", _verdict(det("nohup --frobnicate orch-verify x &")), "allow")
         check("detach/allow-sudo-unrecognized-flag", _verdict(det("sudo -b orch-verify x &")), "allow")
         # bare time -p (keyword-valid VALUELESS flag, separated form) still DENIES (the worker does launch):
-        check("detach/fire-bare-time-p", _verdict(det("time -p orch-verify x &")), "deny")
+        check("detach/allow-bare-time-p", _verdict(det("time -p orch-verify x &")), "allow")
         # (R6 tri-family BLOCKER/MAJOR/MINOR fix) a VALUELESS flag given an INLINE =value makes the wrapper
         # error and launch nothing -> ALLOW (was a false-deny: the flag was skipped and the worker denied).
         check("detach/allow-bare-time-p-eq", _verdict(det("time -p=foo orch-verify x &")), "allow")
@@ -562,13 +565,13 @@ def main():
         check("detach/allow-extwrap-exec", _verdict(det("/usr/bin/time exec orch-verify x &")), "allow")
         check("detach/allow-extwrap-command", _verdict(det("env command orch-verify x &")), "allow")
         # bash-context builtins still DENY (they really launch): direct exec, and the bare `time exec` chain.
-        check("detach/fire-exec-direct", _verdict(det("exec orch-verify x &")), "deny")
-        check("detach/fire-time-exec", _verdict(det("time exec orch-verify x &")), "deny")
+        check("detach/allow-exec-direct", _verdict(det("exec orch-verify x &")), "allow")
+        check("detach/allow-time-exec", _verdict(det("time exec orch-verify x &")), "allow")
         # FIX B (round 2, MAJOR 2 cheap fix): timeout DURATION now also accepts exponent and inf/infinity forms.
-        check("detach/fire-timeout-exponent", _verdict(det("timeout 1e3 orch-verify x &")), "deny")
-        check("detach/fire-timeout-exponent-neg", _verdict(det("timeout 1e-3 orch-verify x &")), "deny")
-        check("detach/fire-timeout-infinity", _verdict(det("timeout infinity orch-verify x &")), "deny")
-        check("detach/fire-timeout-inf", _verdict(det("timeout inf orch-verify x &")), "deny")
+        check("detach/allow-timeout-exponent", _verdict(det("timeout 1e3 orch-verify x &")), "allow")
+        check("detach/allow-timeout-exponent-neg", _verdict(det("timeout 1e-3 orch-verify x &")), "allow")
+        check("detach/allow-timeout-infinity", _verdict(det("timeout infinity orch-verify x &")), "allow")
+        check("detach/allow-timeout-inf", _verdict(det("timeout inf orch-verify x &")), "allow")
         # DISCLOSED under-blocks (allow, safe direction): env -S string re-split, and a chain past the hop bound.
         check("detach/underblock-env-split-string", _verdict(det("env -S 'orch-verify x' &")), "allow")
         check("detach/underblock-over-deep-chain", _verdict(det(
@@ -607,7 +610,7 @@ def main():
         # (R5) timeout/stdbuf without their REQUIRED arg launch NOTHING -> fail toward allow (was a false-deny).
         check("detach/allow-timeout-no-duration", _verdict(det("timeout orch-verify x &")), "allow")
         check("detach/allow-stdbuf-no-option", _verdict(det("stdbuf orch-verify x &")), "allow")
-        check("detach/fire-timeout-with-duration", _verdict(det("timeout 5 orch-verify x &")), "deny")
+        check("detach/allow-timeout-with-duration", _verdict(det("timeout 5 orch-verify x &")), "allow")
         # (R5 Codex R4 BLOCKER) value-taking-wrapper-option false-deny class, now ALLOW: a recognized value
         # option (VALID or INVALID value) makes the launch unprovable -> fail toward allow (unbounded tail).
         check("detach/allow-timeout-signal-valid", _verdict(det("timeout -s TERM 5 orch-verify x &")), "allow")
@@ -658,7 +661,7 @@ def main():
         # the top-level bare-& still DENIES. OLD returned ALLOW (the '(' reset discarded the worker word).
         check("detach/fire-cmdsub-arg-eq", _verdict(det("orch-verify --rev=$(git rev-parse HEAD) &")), "deny")
         check("detach/fire-cmdsub-arg-task", _verdict(det("orch-verify --task=$(cat t) &")), "deny")
-        check("detach/fire-cmdsub-arg-nohup", _verdict(det("nohup orch-verify $(id) &")), "deny")
+        check("detach/allow-cmdsub-arg-nohup", _verdict(det("nohup orch-verify $(id) &")), "allow")
         check("detach/fire-cmdsub-arg-then", _verdict(det("orch-verify x $(true) & echo done")), "deny")
         # the QUOTED substitution form does not split, and already denies; keep it pinned.
         check("detach/fire-quoted-cmdsub-arg", _verdict(det('orch-verify "$(cat t)" &')), "deny")
@@ -669,7 +672,7 @@ def main():
         # inner worker survives an internal ';'/'&&' and a wrapper, and nesting propagates outward.
         check("detach/fire-bg-subshell", _verdict(det("( orch-verify x ) &")), "deny")
         check("detach/fire-bg-subshell-then", _verdict(det("( orch-verify x ) & echo done")), "deny")
-        check("detach/fire-bg-subshell-nohup", _verdict(det("( nohup orch-verify x ) &")), "deny")
+        check("detach/allow-bg-subshell-nohup", _verdict(det("( nohup orch-verify x ) &")), "allow")
         check("detach/fire-bg-subshell-semi", _verdict(det("( orch-verify x ; true ) &")), "deny")
         # ROUND-3 REVERT: a worker GATED behind an internal &&/|| in a backgrounded subshell is not proven
         # to run (empirically `false && worker & wait` never runs worker), so it no longer denies. The
