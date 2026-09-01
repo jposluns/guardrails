@@ -555,6 +555,15 @@ def main():
         check("detach/allow-stdbuf-endopts", _verdict(det("stdbuf -- orch-verify x &")), "allow")
         check("detach/allow-timeout-endopts-dur", _verdict(det("timeout -- 5 orch-verify x &")), "allow")
         check("detach/allow-nohup-endopts", _verdict(det("nohup -- orch-verify x &")), "allow")
+        # (R8 Codex R7 BLOCKERs) (3) a Unicode digit is not an ASCII timeout DURATION; (2) the bash time
+        # keyword takes at most ONE -p; (1) an EXTERNAL wrapper cannot invoke a bash builtin/keyword.
+        check("detach/allow-timeout-unicode-digit", _verdict(det("timeout ٥ orch-verify x &")), "allow")
+        check("detach/allow-time-double-p", _verdict(det("time -p -p orch-verify x &")), "allow")
+        check("detach/allow-extwrap-exec", _verdict(det("/usr/bin/time exec orch-verify x &")), "allow")
+        check("detach/allow-extwrap-command", _verdict(det("env command orch-verify x &")), "allow")
+        # bash-context builtins still DENY (they really launch): direct exec, and the bare `time exec` chain.
+        check("detach/fire-exec-direct", _verdict(det("exec orch-verify x &")), "deny")
+        check("detach/fire-time-exec", _verdict(det("time exec orch-verify x &")), "deny")
         # FIX B (round 2, MAJOR 2 cheap fix): timeout DURATION now also accepts exponent and inf/infinity forms.
         check("detach/fire-timeout-exponent", _verdict(det("timeout 1e3 orch-verify x &")), "deny")
         check("detach/fire-timeout-exponent-neg", _verdict(det("timeout 1e-3 orch-verify x &")), "deny")

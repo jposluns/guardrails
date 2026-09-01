@@ -5406,7 +5406,7 @@ _WRAPPER_TERMINAL_OPTS = frozenset(("-h", "--help", "-V", "--version"))
 # Recognized conservatively so a non-duration token is never mis-skipped as the command word: a decimal (with
 # or without a leading integer part, so '.5s' is caught) with an optional exponent and an optional s/m/h/d
 # suffix, or the literal 'inf'/'infinity'. Every form here was verified accepted by the host `timeout`.
-_DURATION_RE = re.compile(r"^(inf|infinity|(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?[smhd]?)$")
+_DURATION_RE = re.compile(r"^(inf|infinity|(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?[smhd]?)$")
 _MAX_DETACH_RECURSION = 3  # bounded literal shell -c inspection depth (SECA-resource-bounds)
 _MAX_WRAPPER_HOPS = 10     # bounded transparent-wrapper unwrap; exceeding it fails toward allow (under-block)
 
@@ -5436,6 +5436,7 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
     n = len(argv)
     start = i  # the first token after the wrapper word (to detect a required-option wrapper given none)
     valopts, flagopts = _wrapper_option_sets(wrapper, explicit_time)
+    bare_time_flag_used = False  # the bash `time` keyword takes at most ONE -p (round-8)
     while i < n:
         tok = argv[i]
         if tok == "--":
@@ -5471,6 +5472,13 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
                 # false-deny (round-5). The value-validity tail is unbounded, so the class is retired here.
                 return None
             if name in flagopts:
+                if wrapper == "time" and not explicit_time:
+                    # the bash `time` keyword accepts at most ONE -p; a second option token becomes the
+                    # pipeline command word (which errors and launches nothing), so fail toward allow
+                    # rather than skip it and deny a worker bash never runs (round-8).
+                    if bare_time_flag_used:
+                        return None
+                    bare_time_flag_used = True
                 i += 1  # a recognized valueless flag
                 continue
             return None  # UNRECOGNIZED option: cannot cleanly resolve, fail toward not-denying
@@ -5502,11 +5510,19 @@ def _detached_command_index(argv):
     i = _command_word_index(argv)  # skip leading NAME=value assignments
     n = len(argv)
     hops = 0
+    crossed_external = False  # have we passed an EXTERNAL wrapper binary? (round-8)
     while i < n:
         tok = argv[i]
         base = tok.rsplit("/", 1)[-1]
         if base not in _DETACH_WRAPPERS:
             return i  # the real command word
+        # exec/command are Bash builtins, bare `time` a Bash keyword; an EXTERNAL wrapper binary cannot
+        # invoke them, so crossing an external wrapper then reaching one launches nothing (round-8).
+        bash_only = base in ("exec", "command") or (base == "time" and "/" not in tok)
+        if bash_only and crossed_external:
+            return None
+        if not bash_only:
+            crossed_external = True
         if hops >= _MAX_WRAPPER_HOPS:
             return None  # chain deeper than the bound: fail toward allow (a disclosed under-block)
         hops += 1
