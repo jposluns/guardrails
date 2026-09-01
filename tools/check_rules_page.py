@@ -548,6 +548,47 @@ def parse_catalog(value):
     return parser
 
 
+def _strip_comments(code):
+    """Remove // line and /* */ block comments that sit OUTSIDE string literals, via a small state
+    machine tracking ', ", and ` strings (with backslash escapes). A // inside a URL string
+    ("https://x") therefore cannot mask the rest of the line. Recognizable-subset lexer (no JS parser):
+    residual (disclosed) is template-literal ${...} nesting - code inside a backtick ${...} is treated
+    as string content, not re-scanned."""
+    out = []
+    i, n = 0, len(code)
+    quote = None
+    while i < n:
+        c = code[i]
+        if quote is not None:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(code[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "'\"`":
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and code[i + 1] == "/":
+            while i < n and code[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and code[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (code[i] == "*" and code[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def network_findings(js_text):
     """Findings for rules.js network egress. Strips comments, then requires exactly one fetch call,
     a string literal to /downloads/ruleset.json, and rejects the named transport primitives.
@@ -560,8 +601,7 @@ def network_findings(js_text):
     sendBeacon. Those residuals are left to review and the tri-family QA; the gate's manifest residue
     states the same boundary."""
     findings = []
-    code = re.sub(r"/\*.*?\*/", "", js_text, flags=re.DOTALL)
-    code = re.sub(r"//[^\n]*", "", code)
+    code = _strip_comments(js_text)
     all_fetches = re.findall(r"\bfetch\s*\(", code)
     literal_fetches = re.findall(r"\bfetch\s*\(\s*([\"\'])(.*?)\1", code)
     if (len(all_fetches) != 1
@@ -642,9 +682,6 @@ def run(root):
         parse_catalog(site_text), HTML_REL, payload, rules
     ))
 
-    code = re.sub(
-        r"/\*.*?\*/", "", js_text, flags=re.DOTALL
-    )
     findings.extend(network_findings(js_text))
 
     if findings:
@@ -780,6 +817,8 @@ def self_test_main():
         ("second literal fetch", 'fetch("/downloads/ruleset.json"); fetch("/x");'),
         ("no sanctioned fetch", 'fetch("/other.json");'),
         ("transport primitive", 'fetch("/downloads/ruleset.json"); new WebSocket("wss://x");'),
+        ("slash-in-string masking a transport",
+         'fetch("/downloads/ruleset.json"); var u = "http://x"; new WebSocket(u);'),
     ):
         if not network_findings(sample):
             print("SELF-TEST FAIL: network scan missed the " + label)
