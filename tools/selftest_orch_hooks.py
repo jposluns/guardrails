@@ -540,7 +540,7 @@ def main():
         check("detach/allow-command-V", _verdict(det("command -V orch-verify &")), "allow")
         check("detach/allow-unrecognized-wrapper-flag", _verdict(det("nohup --frobnicate orch-verify x &")), "allow")
         check("detach/allow-sudo-unrecognized-flag", _verdict(det("sudo -b orch-verify x &")), "allow")
-        # bare time -p (keyword-valid VALUELESS flag, separated form) still DENIES (the worker does launch):
+        # SIMPLIFY: time is a wrapper, so time -p ALLOWS (wrapper-prefixed -> fail toward allow):
         check("detach/allow-bare-time-p", _verdict(det("time -p orch-verify x &")), "allow")
         # (R6 tri-family BLOCKER/MAJOR/MINOR fix) a VALUELESS flag given an INLINE =value makes the wrapper
         # error and launch nothing -> ALLOW (was a false-deny: the flag was skipped and the worker denied).
@@ -560,7 +560,7 @@ def main():
         check("detach/allow-time-double-p", _verdict(det("time -p -p orch-verify x &")), "allow")
         check("detach/allow-extwrap-exec", _verdict(det("/usr/bin/time exec orch-verify x &")), "allow")
         check("detach/allow-extwrap-command", _verdict(det("env command orch-verify x &")), "allow")
-        # bash-context builtins still DENY (they really launch): direct exec, and the bare `time exec` chain.
+        # SIMPLIFY: exec and time are wrappers, so direct exec and the time exec chain ALLOW (under-blocks).
         check("detach/allow-exec-direct", _verdict(det("exec orch-verify x &")), "allow")
         check("detach/allow-time-exec", _verdict(det("time exec orch-verify x &")), "allow")
         # FIX B (round 2, MAJOR 2 cheap fix): timeout DURATION now also accepts exponent and inf/infinity forms.
@@ -580,7 +580,7 @@ def main():
         # (2) `builtin` runs only a shell builtin, never an external, so `builtin worker` launches nothing.
         check("detach/allow-builtin-nonlauncher", _verdict(det("builtin orch-verify x &")), "allow")
         # (3) the bash `time` keyword accepts only -p, NOT --portability (a GNU /usr/bin/time flag); bare
-        # `time --portability worker` errors and never launches. Now allow (`time -p` above still denies).
+        # `time --portability worker` errors and never launches. Allow (time is a wrapper; time -p above allows too).
         check("detach/allow-bare-time-portability", _verdict(det("time --portability orch-verify x &")), "allow")
         # (4/R5) a CLEAN, LITERAL leading env-prefix is a provable detach -> DENY (restores the round-2 catch
         # that round-3's class-elimination lost; Codex R4 BLOCKER). A quote/escape-MASKED name, or an
@@ -603,6 +603,13 @@ def main():
         check("detach/fire-uncond-lead-or", _verdict(det("orch-verify x || true &")), "deny")
         check("detach/fire-uncond-lead-subshell", _verdict(det("( orch-verify && true ) &")), "deny")
         check("detach/allow-cond-subshell-true", _verdict(det("( true && orch-verify ) &")), "allow")
+        # EXTERNAL-gate-on-subshell symmetry: `<cond> && ( worker ) &` is short-circuited by bash, the
+        # subshell (and worker) never runs, so it ALLOWS - matching the direct `false && worker &`. Only an
+        # UNGATED backgrounded subshell propagates and denies; a subshell that is itself the unconditional
+        # LEAD of a backgrounded AND-OR list still runs and DENIES.
+        check("detach/allow-extgate-subshell-and", _verdict(det("false && ( orch-verify ) &")), "allow")
+        check("detach/allow-extgate-subshell-or", _verdict(det("true || ( orch-verify ) &")), "allow")
+        check("detach/fire-lead-subshell-and", _verdict(det("( orch-verify ) && true &")), "deny")
         # (R5) timeout/stdbuf without their REQUIRED arg launch NOTHING -> fail toward allow (was a false-deny).
         check("detach/allow-timeout-no-duration", _verdict(det("timeout orch-verify x &")), "allow")
         check("detach/allow-stdbuf-no-option", _verdict(det("stdbuf orch-verify x &")), "allow")

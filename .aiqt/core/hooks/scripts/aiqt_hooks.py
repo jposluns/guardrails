@@ -5356,7 +5356,8 @@ _DETACH_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh"))
 # that IS one of them makes the launch wrapper-mediated and fails toward allow (a disclosed under-block),
 # because resolving through wrappers to find the wrapped worker had an unbounded false-deny tail (QA rounds
 # 5-8: execution-context boundaries, per-wrapper flag arity, locale numeric parsing). `builtin` and `xargs`
-# are not here (a declared worker directly after them resolves as an ordinary command word and denies).
+# are not here, so THEY become the resolved command word (not the worker after them), which therefore
+# ALLOWS - a disclosed non-catch.
 _DETACH_WRAPPERS = frozenset((
     "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "exec",
     "sudo", "time"))
@@ -5598,13 +5599,16 @@ def _scan_detached_workers(command, worker_set, depth):
                 pipeline_words = saved   # RESTORE the outer pipeline so a worker word before the sub-scope
                 worker_hit = saved_hit   # still reaches the top-level '&' that closes its pipeline
                 list_worker = saved_list # restore the enclosing list's unconditional lead worker
-                if kind == "subshell" and inner_hit is not None:
+                if kind == "subshell" and inner_hit is not None and not gated:
                     # a subshell that CONTAINED a worker acts as a worker-bearing element of the enclosing
-                    # pipeline, so a trailing '&' that backgrounds it detaches the worker (deny); a command
-                    # substitution or arithmetic ')' NEVER propagates (the parent waits / nothing launches)
+                    # pipeline, so a trailing '&' that backgrounds it detaches the worker (deny) - but ONLY
+                    # when the subshell is not itself gated by a preceding &&/|| in the enclosing list:
+                    # `false && ( worker ) &` is short-circuited, the worker never runs, so it must NOT deny,
+                    # matching the direct `false && worker &` (fix: external-gate-on-subshell symmetry). A
+                    # command substitution or arithmetic ')' NEVER propagates (the parent waits / nothing runs).
                     pipeline_words = saved + [inner_hit]
                     worker_hit = inner_hit
-                    list_worker = inner_hit  # a backgrounded subshell with an unconditional worker (round-5)
+                    list_worker = inner_hit  # a backgrounded UNGATED subshell with an unconditional worker
             else:
                 pipeline_words = []      # an unbalanced ')': nothing to restore
             prev_sep = sep
