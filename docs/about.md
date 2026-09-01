@@ -1,0 +1,99 @@
++++
+title = "About AIQT: origin, direction, and the maintainer"
+description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns, CC BY-SA 4.0."
+canonical = "https://aiqt.ai/about"
+og-title = "About AIQT: origin, direction, and the maintainer"
+og-description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns, CC BY-SA 4.0."
+og-url = "https://aiqt.ai/about"
+sidebar-active = "about"
++++
+
+<div class="wrap pagehead">
+  <p class="eyebrow">About</p>
+  <h1>Where AIQT comes from.</h1>
+  <p class="lead">AIQT began inside the GRC Library, a public documentation project whose
+    corpus is written under an AI-managed workflow. The disciplines that kept that work
+    honest proved useful well beyond one project, so they became a standard in their
+    own right.</p>
+</div>
+
+<section id="origin">
+  <div class="wrap">
+    <p class="eyebrow">Origin</p>
+    <h2>Proven in practice before it had a name</h2>
+    <p class="lead">AIQT started inside the <a href="https://grclibrary.ai" target="_blank" rel="noopener noreferrer">Governance, Risk, and
+      Compliance Documentation Library</a> (the GRC Library), a public project homed at
+      <a href="https://github.com/jposluns/grc_library" target="_blank" rel="noopener noreferrer">github.com/jposluns/grc_library</a>,
+      whose document library is written under an AI-managed workflow. It arrived in four steps.</p>
+    <ol class="steps">
+      <li><b>Built where it was needed.</b> The AI-managed workflow needed rules to keep it
+        honest: every claim tied to its source, every check kept at full strength, nothing
+        called done without a check that ran.</li>
+      <li><b>Distilled into a pack.</b> Those rules were distilled into a portable guardrails
+        pack and applied first to the library's own work, in the same repository the pack
+        protected.</li>
+      <li><b>Proven adoptable.</b> Over time the pack grew into something other people could
+        adopt independently of the document library.</li>
+      <li><b>Given its own home.</b> The guardrails are now being separated into a standalone
+        project, <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">AIQT</a>, which the GRC Library
+        will then adopt, replacing its own built-in copies with the standalone pack. This is a
+        deliberate evolution, not a rebrand: the standard proved general, so it earned its own
+        home.</li>
+    </ol>
+  </div>
+</section>
+
+<section id="cleanlanguage">
+  <div class="wrap">
+    <p class="eyebrow">A sibling project</p>
+    <h2>Clean Language</h2>
+    <p class="lead">AIQT is not the first project to leave the GRC Library this way.
+      <a href="https://cleanlanguage.ai" target="_blank" rel="noopener noreferrer">Clean Language</a> separated first: a free editorial
+      standard that keeps AI writing precise, direct, and natural, spun out of the same library
+      and now a project in its own right (its source is on
+      <a href="https://github.com/jposluns/cleanlanguage" target="_blank" rel="noopener noreferrer">GitHub</a>). AIQT follows the same
+      route, from a discipline proven inside the library to a standard anyone can use.</p>
+  </div>
+</section>
+
+<section id="direction">
+  <div class="wrap">
+    <p class="eyebrow">Direction</p>
+    <h2>How decisions are made</h2>
+    <p class="lead">As the projects progress, decisions about AIQT's evolution are made by
+      lead maintainer Jeff Posluns, and they orient toward one question: what will best
+      help the world.</p>
+    <p>Open, portable, and shared is the working answer. AIQT is published under Creative
+      Commons Attribution-ShareAlike 4.0, contributions come back under CC BY-SA 4.0 or later, or a BY-SA Compatible License,
+      and the direction is chosen for public benefit rather than lock-in. A guardrail that
+      travels between tools and teams helps more people than one that binds you to
+      either.</p>
+  </div>
+</section>
+
+<section id="maintainer">
+  <div class="wrap">
+    <p class="eyebrow">The maintainer</p>
+    <h2><a href="https://linkedin.com/in/jposluns" target="_blank" rel="noopener noreferrer">Jeff Posluns</a></h2>
+    <p class="lead">Jeff Posluns, CGEIT, CISSP, is a Chief Information Officer and
+      enterprise technology executive with thirty years of leadership, driving
+      enterprise-scale transformations across operating models, ERP, data, and platform
+      modernization for global organizations, with particular depth in enterprise AI.</p>
+    <p>He builds AI capability end to end, from governance councils and lifecycle controls
+      through to production AI and ML adoption across business workflows. His leadership
+      rests on a deep foundation in cybersecurity, risk, and governance, built over CIO,
+      CISO, and consulting mandates in high-trust, multi-jurisdiction regulatory
+      environments, which keeps his decisions grounded in security-by-design, privacy,
+      and operational resilience. He holds the CGEIT and CISSP certifications, has served
+      as a director of an international non-profit, has co-authored several books, and has
+      presented at industry and academic conferences since the late 1990s.</p>
+    <p>AIQT is created and led by Jeff, distilling the governance lessons of the GRC
+      Library's AI-managed workflow into a standard other teams can use.</p>
+    <div class="cta" style="justify-content:center; margin-top:1.6rem">
+      <a class="btn primary" href="/install">Add AIQT to your assistant</a>
+      <a class="btn ghost" href="https://linkedin.com/in/jposluns" target="_blank" rel="noopener noreferrer">Jeff on LinkedIn</a>
+      <a class="btn ghost" href="https://github.com/jposluns/grc_library" target="_blank" rel="noopener noreferrer">GRC Library on GitHub</a>
+      <a class="btn ghost" href="https://grclibrary.ai" target="_blank" rel="noopener noreferrer">grclibrary.ai, the parent project</a>
+    </div>
+  </div>
+</section>
