@@ -139,6 +139,12 @@ GENSRC_OUTPUTS = (
     {"target": "site/standard.html", "kind": "file",
      "sources": ("docs/_shell.html", "docs/standard.md"),
      "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/examples.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/examples.md"),
+     "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/teams.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/teams.md"),
+     "regenerate": "python3 tools/gen_site.py"},
 )
 
 DOCS_DIR = "docs"
