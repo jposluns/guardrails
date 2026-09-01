@@ -575,7 +575,7 @@ def _strip_comments(code):
             i += 1
             continue
         if c == "/" and i + 1 < n and code[i + 1] == "/":
-            while i < n and code[i] != "\n":
+            while i < n and code[i] not in "\n\r\u2028\u2029":
                 i += 1
             continue
         if c == "/" and i + 1 < n and code[i + 1] == "*":
@@ -590,16 +590,20 @@ def _strip_comments(code):
 
 
 def network_findings(js_text):
-    """Findings for rules.js network egress. Strips comments, then requires exactly one fetch call,
-    a string literal to /downloads/ruleset.json, and rejects the named transport primitives.
+    """Findings for rules.js network egress: a BEST-EFFORT recognizable-subset LEXICAL tripwire for the
+    ACCIDENTAL case (a maintainer adding a fetch/transport), NOT an adversarial-grade denylist. It strips
+    comments (string-aware), then requires exactly one fetch call, a string literal to
+    /downloads/ruleset.json, and rejects the named transport primitives.
 
-    COVERAGE BOUNDARY (disclosed): a recognizable-subset LEXICAL scan, not a complete egress denylist.
-    It catches a variable or second fetch TARGET (fetch(x)) and window.fetch(...). It does NOT catch an
-    aliased fetch binding (var f = window.fetch; f(x)), a computed-member call (window["fetch"](x)), a
-    dynamic import("..."), an Image()/img or script-element src assignment, or any egress whose tokens
-    it does not name. The transport check catches ONLY XMLHttpRequest, EventSource, WebSocket, and
-    sendBeacon. Those residuals are left to review and the tri-family QA; the gate's manifest residue
-    states the same boundary."""
+    COVERAGE BOUNDARY (disclosed): a regex/state-machine scan cannot soundly tokenize JavaScript, so a
+    DETERMINED author can evade it. It does NOT catch: an aliased fetch binding (var f = window.fetch;
+    f(x)); a computed-member call (window["fetch"](x)); a dynamic import("..."); an Image()/img or
+    script-element src assignment; a regex literal adjacent to a quote that desynchronizes string
+    tracking; template-literal ${...} nesting; or any egress whose tokens it does not name. The transport
+    check catches ONLY XMLHttpRequest, EventSource, WebSocket, and sendBeacon. The REAL egress controls
+    are code review of this pack-immutable file, the site Content-Security-Policy (same-origin), and the
+    tri-family QA; this scan is defence-in-depth for the common case. The gate's manifest residue and its
+    class-c letter state the same boundary."""
     findings = []
     code = _strip_comments(js_text)
     all_fetches = re.findall(r"\bfetch\s*\(", code)
@@ -819,6 +823,8 @@ def self_test_main():
         ("transport primitive", 'fetch("/downloads/ruleset.json"); new WebSocket("wss://x");'),
         ("slash-in-string masking a transport",
          'fetch("/downloads/ruleset.json"); var u = "http://x"; new WebSocket(u);'),
+        ("unicode line terminator ends a comment",
+         'fetch("/downloads/ruleset.json"); // note\u2028new WebSocket("wss://x");'),
     ):
         if not network_findings(sample):
             print("SELF-TEST FAIL: network scan missed the " + label)
