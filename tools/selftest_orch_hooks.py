@@ -519,13 +519,15 @@ def main():
         check("detach/fire-then-cmd", _verdict(det("orch-verify x & echo done")), "deny")
         check("detach/fire-pipeline", _verdict(det("orch-verify x | tee run.log &")), "deny")
         check("detach/fire-env-timeout", _verdict(det("env FOO=bar timeout 30 orch-verify x &")), "deny")
-        # FIX B (round 1): value-taking wrapper options must be skipped WITH their value so the worker after
-        # them is still seen. A leading-decimal timeout DURATION (.5s), env -a/-f value options, and
-        # /usr/bin/time -f <fmt> all previously hid the worker and ALLOWed; now they DENY.
+        # (R5) A leading-decimal timeout DURATION (.5s) is a validated POSITIONAL and still DENIES; but a
+        # value-taking wrapper OPTION now FAILS TOWARD ALLOW (its value is unvalidatable; an invalid value
+        # launches nothing, so the launch is unprovable). env -a/-f and /usr/bin/time -f previously DENIED
+        # (assuming a valid value) and now ALLOW - a disclosed under-block (Codex R4 BLOCKER fix). See the
+        # dedicated R5 value-option block below for the full class incl. invalid-value vectors.
         check("detach/fire-timeout-decimal-dur", _verdict(det("timeout .5s orch-verify x &")), "deny")
-        check("detach/fire-env-argv0", _verdict(det("env -a alias orch-verify x &")), "deny")
-        check("detach/fire-env-file", _verdict(det("env -f cfg orch-verify x &")), "deny")
-        check("detach/fire-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "deny")
+        check("detach/allow-env-argv0", _verdict(det("env -a alias orch-verify x &")), "allow")
+        check("detach/allow-env-file", _verdict(det("env -f cfg orch-verify x &")), "allow")
+        check("detach/allow-usrbin-time-fmt", _verdict(det("/usr/bin/time -f fmt orch-verify x &")), "allow")
         # FIX B (round 2, PRINCIPLE CHANGE): an UNRECOGNIZED wrapper option, a terminal/query form, or a chain
         # deeper than the hop bound FAILS TOWARD NOT-DENYING (an under-block is the safe direction for a
         # blocking hook; a false-deny is the harmful one). Recognized options still DENY.
@@ -584,6 +586,20 @@ def main():
         check("detach/allow-timeout-no-duration", _verdict(det("timeout orch-verify x &")), "allow")
         check("detach/allow-stdbuf-no-option", _verdict(det("stdbuf orch-verify x &")), "allow")
         check("detach/fire-timeout-with-duration", _verdict(det("timeout 5 orch-verify x &")), "deny")
+        # (R5 Codex R4 BLOCKER) value-taking-wrapper-option false-deny class, now ALLOW: a recognized value
+        # option (VALID or INVALID value) makes the launch unprovable -> fail toward allow (unbounded tail).
+        check("detach/allow-timeout-signal-valid", _verdict(det("timeout -s TERM 5 orch-verify x &")), "allow")
+        check("detach/allow-timeout-signal-invalid", _verdict(det("timeout -s BOGUS 5 orch-verify x &")), "allow")
+        check("detach/allow-timeout-killafter-invalid", _verdict(det("timeout -k BOGUS 5 orch-verify x &")), "allow")
+        check("detach/allow-timeout-signal-inline", _verdict(det("timeout --signal=TERM 5 orch-verify x &")), "allow")
+        check("detach/allow-stdbuf-mode-valid", _verdict(det("stdbuf -o L orch-verify x &")), "allow")
+        check("detach/allow-stdbuf-mode-invalid", _verdict(det("stdbuf -o bogus orch-verify x &")), "allow")
+        check("detach/allow-nice-adj-invalid", _verdict(det("nice -n bogus orch-verify x &")), "allow")
+        check("detach/allow-ionice-class-invalid", _verdict(det("ionice -c bogus orch-verify x &")), "allow")
+        check("detach/allow-env-chdir", _verdict(det("env -C /nonexistent orch-verify x &")), "allow")
+        check("detach/allow-sudo-user", _verdict(det("sudo -u x orch-verify x &")), "allow")
+        # (R5) a `!` reserved-word compound hides the worker basename: a DISCLOSED fail-open under-block.
+        check("detach/allow-bang-negation-disclosed", _verdict(det("! orch-verify x &")), "allow")
         # (R5) DISCLOSED exotic fail-opens (per the deny-only-on-accidental-proof posture): a launcher-builtin
         # (builtin command), command/env time with a GNU option, a conditional behind an always-true, and a
         # whole-script shell -c all ALLOW - named in the manifest residue, mitigated by the sibling ASK.

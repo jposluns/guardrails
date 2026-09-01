@@ -5359,9 +5359,12 @@ _DETACH_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh"))
 _DETACH_WRAPPERS = frozenset((
     "nohup", "setsid", "stdbuf", "nice", "ionice", "timeout", "env", "command", "exec",
     "sudo", "time"))
-# Per-wrapper options that CONSUME a following separate token as their value, so the value is never mistaken
-# for the wrapped command word. An '=' inline form (--opt=value) carries its value in the same token and is
-# skipped as one. Only common forms are listed; the round-2 principle governs the rest: an option that is NOT
+# Per-wrapper value-taking options. Recognizing one no longer skips it: a value-taking option (round-5)
+# fails the wrapper resolution toward ALLOW, because its value is unvalidatable and an invalid value makes
+# the wrapper error and launch nothing, so the launch is unprovable. The set still matters because a value
+# option must be RECOGNIZED as one (both the separated -o value and the inline --opt=value form) to route to
+# that fail-toward-allow rather than be char-scanned or misread. Only common forms are listed; the round-2
+# principle governs the rest: an option that is NOT
 # a recognized value option, a recognized valueless flag, or a recognized terminal/query flag is
 # UNRECOGNIZED, and wrapper resolution then FAILS TOWARD NOT-DENYING (an under-block, the safe direction for a
 # BLOCKING hook), never guessing that the token after it is the wrapped command. Perfect option enumeration is
@@ -5420,12 +5423,13 @@ def _wrapper_option_sets(wrapper, explicit_time):
 
 def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
     """From index i (the first token AFTER a transparent wrapper word), skip that wrapper's CLEANLY
-    RECOGNIZED options (a known value option and its separated value, a known valueless flag, an env
-    NAME=value prefix, and a leading '--' end-of-options) and the timeout DURATION positional, returning the
-    index of the wrapped command word. Returns None when resolution cannot be trusted: an UNRECOGNIZED option
-    (the round-2 principle - do not guess the token after it is the command), or a terminal/query option
-    (--help/--version/-h/-V, or command -v/-V) whose wrapper does not launch the target. None makes the
-    caller fail toward NOT-denying (an under-block), never a false-deny."""
+    RECOGNIZED valueless flags, an env NAME=value prefix, a leading '--' end-of-options, and the timeout
+    DURATION positional, returning the index of the wrapped command word. Returns None when resolution
+    cannot be trusted: a value-taking option (round-5 - its value is unvalidatable and an invalid value
+    launches nothing, so the launch is unprovable), an UNRECOGNIZED option (the round-2 principle - do not
+    guess the token after it is the command), or a terminal/query option (--help/--version/-h/-V, or command
+    -v/-V) whose wrapper does not launch the target. None makes the caller fail toward NOT-denying (an
+    under-block), never a false-deny."""
     n = len(argv)
     start = i  # the first token after the wrapper word (to detect a required-option wrapper given none)
     valopts, flagopts = _wrapper_option_sets(wrapper, explicit_time)
@@ -5445,13 +5449,16 @@ def _skip_wrapper_args(wrapper, argv, i, explicit_time=False):
             if name in _WRAPPER_TERMINAL_OPTS or (wrapper == "command" and name in ("-v", "-V")):
                 return None  # a non-launching terminal/query form: do not deny
             if "=" in tok:
-                if name in valopts or name in flagopts:
+                if name in flagopts:
                     i += 1
                     continue
-                return None  # an unrecognized inline --opt=value: fail toward allow
+                return None  # a value-taking or unrecognized inline --opt=value: fail toward allow (round-5)
             if name in valopts:
-                i += 2  # a separated value form: skip the option and its value
-                continue
+                # a value-taking option (separated -o value): the value is unvalidatable, and an INVALID
+                # value makes the wrapper error and launch NOTHING (stdbuf -o bogus, timeout -s BOGUS, nice
+                # -n bogus, env -C /nonexistent), so the launch is UNPROVABLE -> fail toward allow, never a
+                # false-deny (round-5). The value-validity tail is unbounded, so the class is retired here.
+                return None
             if name in flagopts:
                 i += 1  # a recognized valueless flag
                 continue
