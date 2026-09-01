@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "e10c8d24d61d1e3bb5d17c4fbe6762667a215d4ff751a4059e1befbf24210044"
+tree-sha256 = "d711e66a650fd39f8609ca3d0aa96dd76f3eca55e78cb32e3f2905881187a579"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -97,7 +97,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2536
-sha256 = "3cbc6f9d5c0f4b5045f274c71cf90808e1acb109710a4c4c806685fda8315788"
+sha256 = "d5c0496596495ea59bcb49bb959cd3d111353e3ae650c2e4b137e11220b193d2"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2132,7 +2132,7 @@ sha256 = "0a4277b00d37350bec555b600b5b80dbeb1ff1f719e4bf661ebac513f02be25f"
 [[sources]]
 path = "RELEASING.md"
 bytes = 6245
-sha256 = "b4b88ad6d12c46741f32a3d60b73d3d2155f2bceb8c95f24e04b34b017ae9713"
+sha256 = "a9036ed5836e9a29c8ba599efe88df75646087dda5bf2a313c833c10d9a5c040"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -2162,7 +2162,7 @@ sha256 = "79f4539151ecb22ab0bca929f9d0ec7b6efc2541dd8da708b259ea8642d3ec5a"
 [[sources]]
 path = "changelog.toml"
 bytes = 1602
-sha256 = "4b8205720719251c21a1b2cde602373fbb4018a5da216b2a3b3dbec8c256dcf4"
+sha256 = "9ca9c425854515a2f799bfa3e41d0302d0d30970e5306f1f248aa35df17aca73"
 
 [[sources]]
 path = "disclosure.toml"
@@ -2477,7 +2477,7 @@ sha256 = "e95bbb0dffb1fa9ab801bc3f44e387346ab0e166823b902955e38337e1364474"
 [[sources]]
 path = "tools/check_artifact_checksums.py"
 bytes = 24169
-sha256 = "767fb8d9b30ce89bf8489f6cafcf89965b95c7d0992f0cd210822633aeece84b"
+sha256 = "46cf5575a53ddacbfd5167d39f33502367a9b2f6396ad42e52ef060da8d6dc4d"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -2757,7 +2757,7 @@ sha256 = "949b995c94ae85a45f94173412098cdbf5c20268ffe887330c384e233b7086e7"
 [[sources]]
 path = "tools/gen_skill.py"
 bytes = 46083
-sha256 = "6d039bb90c1c677a604db4f72375a6f15a323cb55fb98a951c4209611448fea6"
+sha256 = "bea27054fdf20ccb9d6446f7baa6de0342a19cb70aeebb727577e4f348fd5f43"
 
 [[sources]]
 path = "tools/import_cwe.py"

@@ -356,7 +356,7 @@ def render_skill(data):
 
 
 def versioned_zip_basename(version):
-    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.3.zip'. This is the
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.4.zip'. This is the
     shared SHAPE helper: it spells the filename PATTERN in one place, so the build-time match assertion, the
     install-page block (gen_install.py), and any other caller derive the name the same way. It is NOT the
     single source of the concrete versioned name: that name is spelled as a literal in several spots (the
