@@ -475,7 +475,7 @@ rules = ["gensrc"]
 platform = "ci"
 default = "block"
 class = "a"
-residue = "A byte-identity drift gate over the four release-integrity outputs (manifest, .gitattributes, ROOT, announce snippet) regenerated from the ownership map and the git-tracked surface. It proves the committed outputs equal a fresh regeneration and that the inversion assertion holds; it does not prove a class ASSIGNMENT is semantically right (a wrong but consistent class survives to review), and it cannot see a file hidden by an existing concrete exclusion pattern (the disclosed bounded residual of 4.2)."
+residue = "A byte-identity drift gate over the five generated outputs (manifest, .gitattributes, ROOT, announce snippet, and the EN-8 frozen floor .aiqt/frozen.json) regenerated from the ownership map and the git-tracked surface. It proves the committed outputs equal a fresh regeneration and that the inversion assertion holds; it does not prove a class ASSIGNMENT is semantically right (a wrong but consistent class survives to review), and it cannot see a file hidden by an existing concrete exclusion pattern (the disclosed bounded residual of 4.2)."
 
 [[gate]]
 id = "manifest-integrity"

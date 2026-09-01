@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Release-manifest generator (VER-CORE 4.1/4.2, Section 12 step 2). Offline, stdlib only, fail-closed.
 
-Owns four deterministic outputs, all generated in one run from the anchored ownership map
+Owns five deterministic outputs, all generated in one run from the anchored ownership map
 (.aiqt/core/ownership.toml) and the git-tracked surface:
 
   .gitattributes                         one literal line per in-scope tracked path (3.3)
   .aiqt/manifest.toml                    SOURCES, ARTIFACTS, TREE digest, genesis (4.1)
   .aiqt/release/root.txt                 sha256:<hex> over the exact manifest bytes (5.4)
   .aiqt/release/announce-snippet.txt     ready-to-publish version + ROOT lines (5.4)
+  .aiqt/frozen.json                      the EN-8 write-scope frozen floor selectors (a derived SOURCES member)
 
 Concern-1 scope is COMPUTED BY INVERSION: all git-tracked repository paths minus the map's
 concrete-literal exclusion set; every remaining path must carry exactly one release class, with no
@@ -20,13 +21,13 @@ check_manifest.py IMPORTS this module's loader and expansion (the check_gensrc_f
 house pattern: reuse the validated loader, never fork a second parser) and independently recomputes
 every verdict from the same inputs; it never trusts this generator's output bytes.
 
-BOOTSTRAP: the four output paths are treated as IN SCOPE while still untracked whenever they are present
+BOOTSTRAP: the five output paths are treated as IN SCOPE while still untracked whenever they are present
 on disk (this run creates them, and a release commit git-adds them with the map). Write mode forces all
-four into scope; check mode adds each output that exists on disk. A MISSING output is never assumed:
+five into scope; check mode adds each output that exists on disk. A MISSING output is never assumed:
 its selector then matches nothing and the NO-STRAYS leg fails LOUD (exit 2). Drift in a present output
 is caught by byte reconciliation. This keeps the generator fail-safe with no filesystem-walk fallback.
 
-  gen_manifest.py             regenerate all four outputs
+  gen_manifest.py             regenerate all five outputs
   gen_manifest.py --check     exit 1 if any output differs from a fresh regeneration; write nothing
   gen_manifest.py --self-test build synthetic git fixtures and assert the fail-closed invariants
   gen_manifest.py --root DIR  operate on DIR instead of the repo root (fixtures)
@@ -36,6 +37,7 @@ unclassified/stray/overlapping selector outcome, an exclusion swallowing a gensr
 surface, a tracked concern-2 path, an unusable git repository, or any other cannot-evaluate.
 """
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -72,6 +74,8 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/ownership.toml", "VERSION", ".aiqt/core/releases.toml",
                  ".aiqt/core/renderers.toml", "CLAUDE.md"),
      "regenerate": "python3 tools/gen_manifest.py"},
+    {"target": ".aiqt/frozen.json", "kind": "file",
+     "sources": (".aiqt/core/ownership.toml",), "regenerate": "python3 tools/gen_manifest.py"},
 )
 
 OWNERSHIP_REL = ".aiqt/core/ownership.toml"
@@ -82,7 +86,15 @@ ATTRIBUTES_REL = ".gitattributes"
 RELEASES_REL = ".aiqt/core/releases.toml"
 RENDERERS_REL = ".aiqt/core/renderers.toml"
 VERSION_REL = "VERSION"
+FROZEN_REL = ".aiqt/frozen.json"       # EN-8 write-scope frozen floor; a fifth generated, drift-gated output
+FROZEN_VERSION = 1
 OWN_OUTPUTS_REL = (ATTRIBUTES_REL, MANIFEST_REL, ROOT_REL, SNIPPET_REL)
+# The frozen floor is a FIFTH generated, drift-gated output, but it is NOT one of the four release-manifest
+# self-outputs (it is not the manifest, its ROOT, or the snippet): it is a normal derived SOURCES member,
+# so it is hashed into the manifest and covered by the published ROOT like any other derived file.
+# GENERATED_OUTPUTS_REL is the full generated set for the classify-universe bootstrap, the drift reconcile,
+# and the 100644 mode check; OWN_OUTPUTS_REL stays the four for the manifest-self carve-out and the delta gate.
+GENERATED_OUTPUTS_REL = OWN_OUTPUTS_REL + (FROZEN_REL,)
 
 # The ONE shared release-order row schema (2.4/2.6/6.5), single source of truth for the three gates that
 # read releases.toml (VC-4 QA #6): read_genesis (needs only the row count, validates the two mandatory
@@ -97,6 +109,16 @@ RELEASE_ROW_ALLOWED = frozenset({"version", "commit_sha", "tag", "tag_object_sha
 
 RELEASE_CLASSES = ("pack-immutable", "derived", "manifest-self", "managed-block")
 NAMESPACE_CLASSES = ("adopter-state", "archive")
+# EN-8 write-scope frozen floor: the Architect-bound operational frozen class set (2026-08-31). A guarded
+# Write/Edit/MultiEdit whose target resolves into one of these classes is hard-denied by write_scope_guard
+# (.aiqt/core/hooks/scripts/aiqt_hooks.py), un-lowerable by the per-slice scope declaration. This is the ONE
+# place the manifest-class -> frozen mapping is bound, recorded, and reviewed; the hook never reimplements
+# or guesses it. derived + manifest-self are generated outputs (generated-artefact-source-only: edit the
+# source, never the output); archive is frozen rotation data. EXCLUDED by the binding: pack-immutable
+# (rule/doc SOURCES are legitimately edited), managed-block (hand-authored regions are legitimately edited),
+# adopter-state (working state is legitimately edited). Changing this set is itself a guardrail-config change
+# needing explicit authorization (SECI-guardrail-config-integrity).
+FROZEN_CLASSES = ("derived", "manifest-self", "archive")
 BLOCK_BEGIN = "<!-- RULES-INDEX:BEGIN (generated) -->"
 BLOCK_END = "<!-- RULES-INDEX:END -->"
 # gitattributes hazard characters: a path carrying any of these would need git-side quoting or would
@@ -269,16 +291,16 @@ def git_tracked(root):
 
 
 def check_output_modes(root):
-    """F-236: the four OWN_OUTPUTS_REL are generated TEXT and MUST carry git index mode 100644, never
+    """F-236: the GENERATED_OUTPUTS_REL are generated TEXT and MUST carry git index mode 100644, never
     100755. gen_manifest reads the index mode at build and check_manifest re-reads it (defence in depth);
     otherwise a mode flip 100644->100755 on a generated output passes both gates unnoticed. Scoped STRICTLY
-    to the four outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER touched.
-    An output not yet tracked (genesis, before the release commit git-adds it) is not in the index and is
-    skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read."""
+    to the generated outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER
+    touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
+    and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         proc = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--stage", "--",
-                               *OWN_OUTPUTS_REL], capture_output=True, timeout=60, env=env)
+                               *GENERATED_OUTPUTS_REL], capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files for output modes ({}); fail-closed".format(exc))
     if proc.returncode != 0:
@@ -292,7 +314,7 @@ def check_output_modes(root):
             mode = meta.split(" ", 1)[0]
         except (UnicodeDecodeError, ValueError) as exc:
             raise GateError("malformed git index record for an output ({}); fail-closed".format(exc))
-        if path in OWN_OUTPUTS_REL and mode != "100644":
+        if path in GENERATED_OUTPUTS_REL and mode != "100644":
             raise GateError("{}: a generated output must have git index mode 100644, not {} "
                             "(generated text is never executable)".format(path, mode))
 
@@ -302,14 +324,14 @@ def classify(tracked, exclusions, release, namespace, root, assume_outputs=False
     on: a stale exclusion (zero matches); an unclassified in-scope path (COMPLETENESS); a selector with
     zero matches or an untracked exact path (NO-STRAYS); two selectors matching one path (overlap); a class
     selector reaching an excluded path; a concern-2 selector matching any tracked path.
-    The universe is the tracked set PLUS this generator's own four outputs when present (or all four in
+    The universe is the tracked set PLUS this generator's own five outputs when present (or all five in
     write mode, assume_outputs=True): the release commit git-adds them, so a present-but-untracked output
     is in scope while a MISSING output is never assumed and trips NO-STRAYS. Presence is read from the
     working tree by default; a caller classifying a git commit (not the checkout) passes outputs_present, a
     set of the OWN_OUTPUTS_REL that exist AT that commit, so root's filesystem is never consulted for a
     predecessor tree (check_release_delta, VC-4 QA #11)."""
     universe = set(tracked)
-    for rel in OWN_OUTPUTS_REL:
+    for rel in GENERATED_OUTPUTS_REL:
         present = (rel in outputs_present) if outputs_present is not None else (root / rel).exists()
         if assume_outputs or present:
             universe.add(rel)
@@ -500,10 +522,33 @@ def build_artifacts(root, classes, renderers):
     return rows
 
 
+def _frozen_text(release, namespace):
+    """The EN-8 frozen-floor artifact bytes (.aiqt/frozen.json): a version-pinned JSON object listing, in
+    the shared write-scope entry grammar (a repo-root-relative POSIX path; a trailing '/' marks a tree,
+    otherwise an exact file), every ownership selector whose class is in FROZEN_CLASSES ({derived,
+    manifest-self, archive}). ONE classifier, TWO consumers: the same ownership rows classify() reads for the
+    manifest are read here for the floor, so the runtime hook's floor cannot drift from the gate's
+    classification (the drift gate makes any divergence a CI failure). An exact-path selector yields a file
+    entry; a '<prefix>/**' pattern yields a '<prefix>/' tree entry. Entries are sorted and de-duplicated for
+    determinism. classify() has already proven every release selector live (NO-STRAYS) and every namespace
+    selector zero-tracked, so a frozen release selector (derived, manifest-self) maps to at least one tracked
+    generated output and the archive namespace maps to a reserved (untracked) rotation tree, both correctly
+    frozen against a guarded-tool write. The floor lists .aiqt/frozen.json itself (it is class derived), so
+    the floor's own committed copy is deny-protected from the guarded tools."""
+    entries = set()
+    for sel, cls in list(release) + list(namespace):
+        if cls in FROZEN_CLASSES:
+            entries.add(sel.exact if sel.exact is not None else sel.prefix)
+    return json.dumps({"version": FROZEN_VERSION, "frozen": sorted(entries)},
+                      indent=2, sort_keys=True) + "\n"
+
+
 def compute_all(root, write_mode):
-    """Compute the four output texts. Returns {rel_path: text}. GateError on any fail-closed condition.
-    In write mode the attributes text is computed first and the SOURCES hash of .gitattributes uses the
-    COMPUTED text (the file is about to carry it); in check mode disk bytes are hashed everywhere."""
+    """Compute the five generated output texts (the four release-manifest self-outputs plus the EN-8 frozen
+    floor). Returns {rel_path: text}. GateError on any fail-closed condition. In write mode the attributes
+    and frozen-floor texts are computed first and their own SOURCES hashes use the COMPUTED text (each file
+    is about to carry it, and the floor may not yet exist on first generation); in check mode disk bytes are
+    hashed everywhere."""
     exclusions, release, namespace, binary_set = load_ownership(root)
     tracked = git_tracked(root)
     classes, _ = classify(tracked, exclusions, release, namespace, root, assume_outputs=write_mode)
@@ -524,6 +569,9 @@ def compute_all(root, write_mode):
         attr_lines.append("{} {}".format(path, "binary" if path in binary_set else "text eol=lf"))
     attributes_text = "\n".join(attr_lines) + "\n"
 
+    # 1b. The EN-8 frozen floor, from the same ownership classification (one classifier, two consumers).
+    frozen_text = _frozen_text(release, namespace)
+
     # 2. The manifest.
     version = read_version(root)
     genesis = read_genesis(root)
@@ -533,6 +581,11 @@ def compute_all(root, write_mode):
     for p in source_paths:
         if write_mode and p == ATTRIBUTES_REL:
             data = attributes_text.encode("utf-8")
+        elif write_mode and p == FROZEN_REL:
+            # The frozen floor is a SOURCES member (class derived); in write mode use the COMPUTED text for
+            # its hash, because the file is about to be (re)written and may not exist yet on first generation
+            # (mirrors the .gitattributes self-reference above, so regeneration converges in one pass).
+            data = frozen_text.encode("utf-8")
         else:
             try:
                 data = (root / p).read_bytes()
@@ -569,7 +622,7 @@ def compute_all(root, write_mode):
     root_text = "sha256:{}\n".format(root_hex)
     snippet_text = "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex)
     return {ATTRIBUTES_REL: attributes_text, MANIFEST_REL: manifest_text,
-            ROOT_REL: root_text, SNIPPET_REL: snippet_text}
+            ROOT_REL: root_text, SNIPPET_REL: snippet_text, FROZEN_REL: frozen_text}
 
 
 def run(root, check):
@@ -586,14 +639,14 @@ def run(root, check):
         return 2
     if check:
         try:
-            check_output_modes(root)  # F-236: the four outputs are generated text, index mode 100644 only.
+            check_output_modes(root)  # F-236: the five outputs are generated text, index mode 100644 only.
         except GateError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
     if not check:
         (root / ".aiqt" / "release").mkdir(parents=True, exist_ok=True)
     drifted = []
-    for rel in OWN_OUTPUTS_REL:  # attributes first: the manifest's SOURCES row covers its new bytes
+    for rel in GENERATED_OUTPUTS_REL:  # attributes first: the manifest's SOURCES row covers its new bytes
         if reconcile(root / rel, texts[rel], check):
             drifted.append(rel)
     if drifted:
@@ -602,7 +655,7 @@ def run(root, check):
         return 1
     if not check:
         print("wrote {} ({} sources, root sha256:{}...)".format(
-            ", ".join(OWN_OUTPUTS_REL), texts[MANIFEST_REL].count("[[sources]]"),
+            ", ".join(GENERATED_OUTPUTS_REL), texts[MANIFEST_REL].count("[[sources]]"),
             _sha256(texts[MANIFEST_REL].encode("utf-8"))[:12]))
     return 0
 
@@ -627,7 +680,7 @@ def main():
 #   (a) a conformant fixture generates, then re-checks drift-clean, and two runs are byte-identical;
 #   (b) carve-outs: the manifest, ROOT, and snippet are absent from SOURCES; CLAUDE.md is absent from
 #       SOURCES while its managed-block row is present in ARTIFACTS; the map itself IS in SOURCES;
-#   (c) corrupting each of the four outputs fails --check (exit 1);
+#   (c) corrupting each of the five outputs fails --check (exit 1);
 #   (d) an unclassified new tracked path (COMPLETENESS), a stray/untracked exact selector (NO-STRAYS), an
 #       overlapping selector pair, a tracked concern-2 path, and a stale exclusion each exit 2;
 #   (e) a non-UTF-8 tracked file absent from [checkout].binary exits 2; declared binary passes;
@@ -647,6 +700,10 @@ class = "derived"
 
 [[release-class]]
 path = ".aiqt/release/announce-snippet.txt"
+class = "derived"
+
+[[release-class]]
+path = ".aiqt/frozen.json"
 class = "derived"
 
 [[release-class]]
@@ -807,14 +864,26 @@ def self_test_main():
         if "managed-block" not in manifest_text or "RULES-INDEX" not in manifest_text:
             failures.append("artifacts: the CLAUDE.md managed-block row is missing")
 
-        # (c) corrupt each of the four outputs -> exit 1.
-        for rel in OWN_OUTPUTS_REL:
+        # (c) corrupt each generated output (the four self-outputs plus the frozen floor) -> exit 1.
+        for rel in GENERATED_OUTPUTS_REL:
             corr = _build_fixture(tmp / ("corrupt-" + rel.replace("/", "_")))
             run_quiet(corr, check=False)
             tp = corr / rel
             tp.write_text(tp.read_text(encoding="utf-8") + "\n# tamper\n", encoding="utf-8")
             if run_quiet(corr, check=True) != 1:
                 failures.append("corruption of {} expected exit 1 (drift)".format(rel))
+
+        # (c2) EN-8: the generated frozen floor lists exactly the {derived, manifest-self, archive}
+        # selectors in the write-scope grammar (trailing '/' marks a tree), and lists itself (class
+        # derived). A conformant fixture's floor is drift-clean and self-protecting.
+        floorf = _build_fixture(tmp / "frozen-floor")
+        run_quiet(floorf, check=False)
+        floor_obj = json.loads((floorf / FROZEN_REL).read_text(encoding="utf-8"))
+        want_floor = {".aiqt/archive/", ".aiqt/frozen.json", ".aiqt/manifest.toml",
+                      ".aiqt/release/announce-snippet.txt", ".aiqt/release/root.txt"}
+        if floor_obj.get("version") != FROZEN_VERSION or set(floor_obj.get("frozen", [])) != want_floor:
+            failures.append("EN-8: the frozen floor is not the expected {{derived, manifest-self, archive}} "
+                            "selector set (got {!r})".format(floor_obj))
 
         # (d) COMPLETENESS / NO-STRAYS / overlap / concern-2 / stale exclusion.
         comp = _build_fixture(tmp / "completeness", extra_files={"stray-new.txt": "x\n"})
@@ -915,7 +984,7 @@ def self_test_main():
 
         # (j) F-236: an output with git index mode 100755 fails closed. Generate, git-add the outputs at
         #     their 100644 mode (drift-clean), then chmod one executable and re-stage so the index mode is
-        #     100755 -> exit 2. Scoped to the four outputs; *.sh stay legitimately executable.
+        #     100755 -> exit 2. Scoped to the five outputs; *.sh stay legitimately executable.
         modef = _build_fixture(tmp / "outmode")
         run_quiet(modef, check=False)
         _git(modef, "add", "-A")
@@ -956,7 +1025,7 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: a conformant git fixture generates and regenerates drift-clean and is "
           "deterministic; SOURCES carve out the manifest, ROOT, snippet, and CLAUDE.md while the map is a "
-          "member and the managed block is an artifact; corrupting each of the four outputs fails --check "
+          "member and the managed block is an artifact; corrupting each of the five outputs fails --check "
           "(exit 1); and an unclassified path, a stray selector, an overlapping selector pair, a tracked "
           "concern-2 path, a stale exclusion, a non-UTF-8 file not declared binary, a git-less root, and a "
           "broken CLAUDE.md marker pair all fail closed (exit 2), while raw-byte hashing records a CRLF "
