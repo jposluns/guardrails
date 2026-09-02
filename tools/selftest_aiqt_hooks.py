@@ -37,7 +37,7 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
-It covers branch_root (brnrot) through H1-H30: rooted creation allows, an orphaned explicit start
+It covers branch_root (brnrot) through H1-H32: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
 the switch long-form create extracts its start and denies an orphan while git-branch --track routes to ASK; git-branch
 upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
@@ -2228,6 +2228,19 @@ def main():
         # rather than probe-denying a git-error command (maximally-conservative, codex MINOR).
         brexpect("(H30) switch -c <name> --ours <orphan> asks (checkout-only option on switch)",
                  "git switch -c h30 --ours orphan-start", "ask")
+        # H31: -v/--verbose is a git-branch-only option; on checkout/switch/worktree git rejects it (creates
+        # nothing), so it is NOT in the clean allowlist there and the creation ASKS (maximally-conservative,
+        # codex MINOR: it was a shared clean boolean and false-denied a git-error command).
+        brexpect("(H31a) checkout -v -b <name> <orphan> asks (branch-only -v)",
+                 "git checkout -v -b h31 orphan-start", "ask")
+        brexpect("(H31b) branch -v <name> <orphan> still probes (branch DOES expose -v)",
+                 "git branch -v h31b orphan-start", "deny")
+        # H32: --show-current / --edit-description are recognized non-creation actions -> allow (they match
+        # the residue's non-creation ALLOW claim; codex MINOR: they had ASKed).
+        brexpect("(H32a) branch --show-current allows",
+                 "git branch --show-current", "allow")
+        brexpect("(H32b) branch --edit-description allows",
+                 "git branch --edit-description somebranch", "allow")
         # H24f: git checkout -b with --detach is a git error (creates nothing); the hook must not probe-deny
         # a command that creates no branch (redesign-fix-6, codex MINOR).
         brexpect("(H24f) checkout -b <name> --detach asks (order-dependent detach, no silent allow)",
@@ -4193,7 +4206,7 @@ def main():
           "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
           "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
-          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H30 on structured "
+          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H32 on structured "
           "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
           "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
           "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "

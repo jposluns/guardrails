@@ -299,9 +299,13 @@ def self_test():
     failures = []
     skipped = []
     old_home = os.environ.get("HOME")
+    old_xdg = os.environ.get("XDG_CONFIG_HOME")
     fixture_home = temp / "home"
     fixture_home.mkdir()
     os.environ["HOME"] = str(fixture_home)
+    # Isolate the XDG git-config channel too (a user XDG_CONFIG_HOME could carry core.hooksPath or a
+    # clean/process filter that perturbs fixture commits), so the self-test is hermetic, not only HOME-clean.
+    os.environ["XDG_CONFIG_HOME"] = str(fixture_home / "xdg")
 
     def case(label, expected, root, protected=None, head=None, max_lag=None):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -443,6 +447,10 @@ def self_test():
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = old_home
+        if old_xdg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = old_xdg
         shutil.rmtree(temp, ignore_errors=True)
 
     # V12: a default-root acquisition failure (a deleted or unsearchable working directory) is a

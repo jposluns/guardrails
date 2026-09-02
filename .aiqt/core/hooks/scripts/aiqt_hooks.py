@@ -3619,8 +3619,12 @@ _ASK_START = object()
 # Exact match only -- git resolves an unambiguous long-option PREFIX to the full
 # option, so an abbreviated form (e.g. "--qui") is deliberately NOT matched here and
 # falls through to the ASK path, never to a clean-allow.
-_CLEAN_LONG_BOOLEANS = frozenset(("--quiet", "--force", "--verbose"))
-_CLEAN_SHORT_LETTERS = frozenset("qfv")
+_CLEAN_LONG_BOOLEANS = frozenset(("--quiet", "--force"))
+_CLEAN_SHORT_LETTERS = frozenset("qf")
+# git branch additionally exposes --verbose/-v as a valueless boolean; checkout/switch/worktree do NOT
+# (git rejects -v there and creates nothing), so -v is clean for BRANCH only, not shared.
+_BRANCH_CLEAN_LONG = _CLEAN_LONG_BOOLEANS | frozenset(("--verbose",))
+_BRANCH_CLEAN_SHORT = _CLEAN_SHORT_LETTERS | frozenset("v")
 
 # git branch: copy (a creation whose start is the SOURCE).
 _BRANCH_COPY_SHORT = frozenset("cC")
@@ -3631,7 +3635,7 @@ _BRANCH_COPY_LONG = frozenset(("--copy",))
 _BRANCH_NONCREATION_SHORT = frozenset("dDmMaru")
 _BRANCH_NONCREATION_LONG = frozenset((
     "--delete", "--move", "--all", "--remotes", "--list",
-    "--set-upstream-to", "--unset-upstream",
+    "--set-upstream-to", "--unset-upstream", "--show-current", "--edit-description",
 ))
 
 # git worktree: only `add` can create; the rest are recognized non-creations.
@@ -3781,8 +3785,8 @@ def _branch_command_creation_start(args):
                     copy = True
             elif name in _BRANCH_NONCREATION_LONG:
                 noncreation = True
-            elif name in _CLEAN_LONG_BOOLEANS and not has_value:
-                pass                                    # tolerated valueless boolean
+            elif name in _BRANCH_CLEAN_LONG and not has_value:
+                pass                                    # tolerated valueless boolean (branch: +--verbose)
             else:
                 ask = True                              # unknown/value-taking/abbreviated -> ASK
             i += 1
@@ -3794,7 +3798,7 @@ def _branch_command_creation_start(args):
                     copy = True
                 elif ch in _BRANCH_NONCREATION_SHORT:
                     noncreation = True
-                elif ch in _CLEAN_SHORT_LETTERS:
+                elif ch in _BRANCH_CLEAN_SHORT:
                     pass
                 else:
                     ask = True                          # any letter outside the known sets -> ASK
