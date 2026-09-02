@@ -2213,6 +2213,15 @@ def main():
                  "git branch -c copiedhead", "allow")
         brexpect("(H24d) branch -m rename is out of scope, allows",
                  "git branch -m orphan-start renamed", "allow")
+        # H24e: an explicit COPY action dominates a display/list classifier - `git branch -c <orphan> <dst>
+        # --format=...` still copies, so the orphan source is probed and DENIES, never silently allowed
+        # (redesign-fix-6, codex BLOCKER: --format had set noncreate and short-circuited the copy).
+        brexpect("(H24e) branch -c <orphan> <dst> --format still denies",
+                 "git branch -c orphan-start copiedfmt --format=%(refname)", "deny")
+        # H24f: git checkout -b with --detach is a git error (creates nothing); the hook must not probe-deny
+        # a command that creates no branch (redesign-fix-6, codex MINOR).
+        brexpect("(H24f) checkout -b <name> --detach allows (git-error, no branch)",
+                 "git checkout -b h24f --detach orphan-start", "allow")
         # H25: a `git worktree add --detach` creates NO branch, so it is allowed even from an orphan
         # (round-6 codex MAJOR: --detach was over-denied).
         brexpect("(H25) worktree add --detach <path> <orphan> allows",

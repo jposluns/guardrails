@@ -3714,6 +3714,8 @@ def _checkout_creation_start(args, switch=False):
             i += 1
             continue
         # --- option region (before the boundary, starts with '-') ---
+        if arg == "--detach":
+            return None  # a detached checkout/switch creates no branch; -b/-B with --detach is a git error
         if arg in _CO_SW_AMBIGUOUS or arg.startswith("--track=") or arg.startswith("--orphan="):
             return _ASK_START  # a --track/-t/--orphan form is creation-ish but its start is unextractable
         if switch and arg in create_long:
@@ -3817,11 +3819,13 @@ def _branch_command_creation_start(args):
         i += 1
     if ambiguous:
         return _ASK_START  # fail SAFE to ASK on any unclassifiable shape, never a silent allow
-    if noncreate:
-        return None  # a confidently-recognized non-creation with no ambiguity
     if copying:
-        # `git branch -c <src> <dst>` copies <src>; `git branch -c <dst>` copies the current HEAD.
+        # An explicit copy ACTION dominates a display/list classifier (git branch -c <src> <dst> --format
+        # still copies), so probe the source BEFORE treating a display flag as a non-creation, never a
+        # silent allow. `-c <src> <dst>` copies <src>; `-c <dst>` copies the current HEAD.
         return operands[0] if len(operands) > 1 else "HEAD"
+    if noncreate:
+        return None  # a confidently-recognized non-creation (delete/rename/upstream, or a pure listing)
     if not operands:
         return None  # plain `git branch` listing
     return operands[1] if len(operands) > 1 else "HEAD"
