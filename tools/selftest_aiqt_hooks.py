@@ -39,7 +39,7 @@ and the parse-error/wrapper fallback fails safe for the force-push, deletion, AN
 
 It covers branch_root (brnrot) through H1-H26: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
-the switch long-form create and git-branch --track extract their start and deny an orphan; git-branch
+the switch long-form create extracts its start and denies an orphan while git-branch --track routes to ASK; git-branch
 upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
 unknown-arity option in a creation-ish command ASK rather than silently allow; and a rooted-but-stale
 start allows (only the CI gate's --max-lag catches staleness). Every outcome is asserted from the
@@ -2032,11 +2032,13 @@ def main():
         brexpect("(H6b) switch --force-create from orphan denies",
                  "git switch --force-create x orphan-start", "deny")
 
-        # H7: git branch models --track as BOOLEAN, so `git branch --track <name> <start>` extracts the
-        # start and denies an orphan (previously --track wrongly consumed the branch NAME as its value
-        # and the orphan-rooted create silently passed).
-        brexpect("(H7) branch --track from orphan denies",
-                 "git branch --track x orphan-start", "deny")
+        # H7: under fail-safe-ASK, a tracking form is not a confidently-clean creation - `git branch
+        # --track` may create-with-tracking OR (with no start) DWIM the current upstream - so branch
+        # --track/-t routes to ASK, consistent with checkout/switch --track (redesign-fix-2, codex MAJOR).
+        brexpect("(H7a) branch --track from orphan asks",
+                 "git branch --track x orphan-start", "ask")
+        brexpect("(H7b) branch -t (short --track) asks",
+                 "git branch -t x orphan-start", "ask")
 
         # H8: git branch upstream-setting forms are non-creation and are not judged.
         brexpect("(H8a) branch -u <upstream> <name> is non-creation allows",
@@ -2061,8 +2063,8 @@ def main():
                  "git worktree add -b wtden ../wt-den orphan-start", "deny")
         brexpect("(H10b) worktree add <path> <commit-ish> (no -b) asks",
                  "git worktree add ../wt-ci orphan-start", "ask")
-        brexpect("(H10c) worktree add <path> alone (DWIM from HEAD) allows",
-                 "git worktree add ../wt-dwim", "allow")
+        brexpect("(H10c) worktree add <path> alone (ambiguous DWIM-create vs checkout-existing) asks",
+                 "git worktree add ../wt-dwim", "ask")
 
         # H11: an unmodelled option of unknown arity in a creation-ish command ASKS rather than risk a
         # mis-extracted start (fail safe over a fragile full-grammar model).
@@ -4161,7 +4163,7 @@ def main():
           "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
           "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
           "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "
-          "the switch long-form create (--create/--force-create) and git-branch --track extract their "
+          "the switch long-form create (--create/--force-create) extracts its "
           "start and DENY an orphan; git-branch upstream forms (-u, --set-upstream-to=) are "
           "non-creation ALLOWs; --track/-t and --orphan on checkout/switch/worktree and any "
           "unknown-arity option in a creation-ish command ASK (fail safe, never a silent allow); and a "

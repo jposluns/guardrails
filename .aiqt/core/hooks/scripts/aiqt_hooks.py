@@ -3646,11 +3646,11 @@ _CO_SW_CREATIONISH_LONG = ("--orphan", "--track", "--guess")
 # git branch safe-boolean options: branch models --track and --recurse-submodules as BOOLEAN (unlike
 # checkout/switch), so no value is consumed and the `<name> [<start>]` operand grammar still holds.
 _BRANCH_SAFE_BOOL = frozenset((
-    "--quiet", "--force", "--verbose", "--track", "--no-track",
+    "--quiet", "--force", "--verbose",
     "--create-reflog", "--no-create-reflog", "--recurse-submodules", "--no-recurse-submodules",
 ))
 # git branch clusterable safe-boolean SHORT letters: -q quiet, -f force, -v verbose, -t track, -l reflog.
-_BRANCH_SAFE_SHORT = frozenset("qfvtlar")  # q f v t l + a(--all) r(--remotes): all listing/safe booleans
+_BRANCH_SAFE_SHORT = frozenset("qfvlar")  # q f v l + a(--all) r(--remotes); -t(--track) is NOT safe (ASKS)
 
 # git worktree add: --orphan/--track/-t route to ASK; the safe-boolean long options and clusterable short
 # letters below never consume an operand. -b/-B (new-branch name) are value-taking and handled inline.
@@ -3891,12 +3891,10 @@ def _worktree_creation_start(args):
         return None
     if creating_b:
         return operands[1] if len(operands) > 1 else "HEAD"  # -b <name> <path> [start]: start or HEAD
-    # No -b/-B and no --detach: `worktree add <path>` DWIMs a new branch from HEAD (rooted); but `worktree
-    # add <path> <commit-ish>` is a detached or existing-branch checkout, NOT a clean creation -> fail-safe
-    # ASK rather than a probe-based DENY of a non-creation.
-    if len(operands) > 1:
-        return _ASK_START
-    return "HEAD"
+    # No -b/-B and no --detach: a bare `worktree add <path> [<commit-ish>]` is ambiguous - it DWIM-creates a
+    # branch from HEAD ONLY when the path basename names no existing branch, and otherwise checks out an
+    # EXISTING branch or detaches - so it is not a confidently-clean creation and fail-safe ASKS.
+    return _ASK_START
 
 
 def _branch_creation_start(sub, args):
