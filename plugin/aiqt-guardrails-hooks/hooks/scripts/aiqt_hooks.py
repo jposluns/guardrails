@@ -3913,10 +3913,23 @@ _SECSEC_PREFIX_SOURCES = [
     ('\\bxox[baprs]-[A-Za-z0-9-]{10,}', 'Slack token'),
     ('\\bxapp-[A-Za-z0-9-]{10,}', 'Slack app-level token'),
     ('-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----', 'private key block'),
-    ('\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b', 'JWT (JSON Web Token)'),
+    ('\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])', 'JWT (JSON Web Token)'),
+    ('\\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])', 'Google API key'),
+    ('\\b[sr]k_(?:live|test)_[0-9a-zA-Z]{20,}\\b', 'Stripe API key'),
+    ('\\bglpat-[0-9A-Za-z_-]{20,}', 'GitLab personal access token'),
+    ('\\bSG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])', 'SendGrid API key'),
+    ('\\bnpm_[A-Za-z0-9]{36}\\b', 'npm access token'),
+    ('\\bpypi-AgEIcHlwaS[A-Za-z0-9_-]{50,}', 'PyPI upload token'),
+    ('https://hooks\\.slack\\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{24,}', 'Slack webhook URL'),
 ]
 _SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>(?:(?!(?P=q))[^\\n]){12,})(?P=q)  # quoted; qvalue excludes only the OPENING\n                                                     # delimiter (not both quotes), so a value that embeds\n                                                     # the other quote, e.g. "ab\'cd...", is not truncated\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
 _SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
+_SECSEC_ENTROPY_ASSIGN_SOURCE = '(?x)\n    (?:^|[^A-Za-z0-9])\n    (?P<name>[A-Za-z][A-Za-z0-9_.\\-]*)\n    \\s*[:=]\\s*\n    (?:\n        # QUOTED: the WHOLE inter-quote value must be alphabet (closing quote required), so a value that\n        # embeds a non-alphabet char (an email\'s @, a URL\'s :) does NOT partially match on its prefix; no\n        # upper cap here because the closing quote bounds it, so a >150-char quoted secret still fires.\n        (?P<q>[\'"])(?P<qvalue>[A-Za-z0-9_./+=\\-]{40,})(?P=q)\n        # UNQUOTED: a possessive run (no backtracking) of 40 OR MORE alphabet chars that is NOT followed by @ or\n        # : (which would make it a prefix of a larger structured value such as an email or a URL); a longer\n        # all-alphabet unquoted value still fires on its 150-char prefix (char 151 is alphabet, not @/:).\n      | (?P<value>[A-Za-z0-9_./+=\\-]{40,}+)(?![@:])\n    )\n    '
+_SECSEC_ENTROPY_MIN_LEN = 40
+_SECSEC_ENTROPY_MAX_LEN = 150
+_SECSEC_ENTROPY_THRESHOLD = 3.5
+_SECSEC_CREDENTIAL_COMPONENTS = ('access', 'api', 'apikey', 'auth', 'client', 'credential', 'credentials', 'creds', 'key', 'pass', 'passphrase', 'passwd', 'password', 'pwd', 'secret', 'token')
+_SECSEC_METADATA_COMPONENTS = ('alias', 'checksum', 'count', 'digest', 'dir', 'endpoint', 'file', 'fingerprint', 'id', 'length', 'name', 'path', 'public', 'size', 'type', 'uri', 'url', 'version')
 # END generated secret patterns
 # Compiled at module load from the generated source strings (stdlib re only; no runtime import of
 # check_secrets). Recompiling from a pattern's .pattern string preserves its inline flags ((?ix)/(?i)),
@@ -3933,6 +3946,40 @@ _SECSEC_PLACEHOLDER = re.compile(_SECSEC_PLACEHOLDER_SOURCE)
 # region above (which carries only the single-sourced pattern strings).
 _SECSEC_DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
 _SECSEC_ENV_REF = re.compile(r"(?i)\A(?:process\.env|import\.meta\.env|env)\.")
+
+
+# GD-121: the entropy-gated generic-assignment detector, hand-mirrored from check_secrets.py EXACTLY as
+# the ASSIGN/env-ref logic above is. The regex source, the credential/metadata component sets, and the
+# threshold are single-sourced through the generated region; the DECISION logic below is the hand mirror
+# (not part of the generated region, so the parity battery in tools/selftest_aiqt_hooks.py guards it).
+_SECSEC_ENTROPY_ASSIGN = re.compile(_SECSEC_ENTROPY_ASSIGN_SOURCE)
+_SECSEC_CREDENTIAL_COMPONENT_SET = frozenset(_SECSEC_CREDENTIAL_COMPONENTS)
+_SECSEC_METADATA_COMPONENT_SET = frozenset(_SECSEC_METADATA_COMPONENTS)
+_SECSEC_COMPONENT_SPLIT = re.compile(r"[_.\-]+")
+_SECSEC_CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+
+
+def _secsec_shannon_entropy(value):
+    """Shannon entropy (bits/char) of value; mirrors check_secrets._shannon_entropy EXACTLY."""
+    if not value:
+        return 0.0
+    counts = {}
+    for char in value:
+        counts[char] = counts.get(char, 0) + 1
+    length = len(value)
+    return -sum((count / length) * math.log2(count / length) for count in counts.values())
+
+
+def _secsec_split_components(name):
+    """Lower-cased exact identifier components (split on _ - . and camelCase); mirrors
+    check_secrets._split_components EXACTLY."""
+    components = []
+    for part in _SECSEC_COMPONENT_SPLIT.split(name):
+        if not part:
+            continue
+        for token in _SECSEC_CAMEL.findall(part):
+            components.append(token.lower())
+    return components
 
 
 # The target field per SINGLE-FIELD tool: the text a Write/Edit would write, or the command a Bash call
@@ -3968,6 +4015,33 @@ def _scan_secret(text):
                     value = ""
             if value and not _SECSEC_PLACEHOLDER.match(value):
                 return "credential-named variable assigned a literal"
+        # GD-121: only when neither a provider prefix nor a credential-named ASSIGN matched this line, try
+        # the entropy-gated generic detector, mirroring check_secrets._entropy_assign_is_secret EXACTLY:
+        # metadata component on the LHS wins, require a credential component, exclude PLACEHOLDER before
+        # entropy, exclude an UNQUOTED env-lookup, require a letter and a digit, then the entropy floor.
+        # Reaching here means neither loop above returned, so the "nothing else flagged the line" gate the
+        # CI scanner applies holds here too. The matched value is never returned, only the label.
+        for match in _SECSEC_ENTROPY_ASSIGN.finditer(line):
+            value = (match.group("qvalue") or match.group("value") or "").strip()
+            if not value:
+                continue
+            components = _secsec_split_components(match.group("name"))
+            if any(c in _SECSEC_METADATA_COMPONENT_SET for c in components):
+                continue
+            if not any(c in _SECSEC_CREDENTIAL_COMPONENT_SET for c in components):
+                continue
+            if _SECSEC_PLACEHOLDER.match(value):
+                continue
+            if match.group("qvalue") is None:
+                if _SECSEC_DOTTED_PATH.fullmatch(value) and _SECSEC_ENV_REF.match(value):
+                    continue
+            # entropy + letter/digit on the first _SECSEC_ENTROPY_MAX_LEN chars (capture cap), mirroring
+            # check_secrets: full value seen by the env-ref exclusion above, prefix judged for entropy.
+            candidate = value[:_SECSEC_ENTROPY_MAX_LEN]
+            if not (any(c.isalpha() for c in candidate) and any(c.isdigit() for c in candidate)):
+                continue
+            if _secsec_shannon_entropy(candidate) >= _SECSEC_ENTROPY_THRESHOLD:
+                return "high-entropy literal assigned to a credential-like name"
     return None
 
 

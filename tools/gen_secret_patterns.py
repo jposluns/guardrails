@@ -48,28 +48,48 @@ GENSRC_OUTPUTS = (
 
 
 def _load_check_secrets(root):
-    """Import tools/check_secrets.py and return (prefix_sources, assign_source, placeholder_source):
-    a list of (raw_pattern_string, label) for PREFIXES, and the raw .pattern string of ASSIGN and of
-    PLACEHOLDER. An import failure (an unreadable or broken source) raises, and run() maps it to exit 2,
-    so the generator never renders a region from a source it could not read."""
+    """Import tools/check_secrets.py and return a dict of the single-sourced pattern material: the
+    (raw_pattern_string, label) list for PREFIXES, the raw .pattern strings of ASSIGN, PLACEHOLDER, and
+    (GD-121) ENTROPY_ASSIGN, the entropy length bounds and threshold, and the credential/metadata
+    component sets rendered as SORTED TUPLES for determinism. An import failure (an unreadable or broken
+    source) raises, and run() maps it to exit 2, so the generator never renders a region from a source it
+    could not read."""
     tools_dir = str(root / "tools")
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
     import check_secrets  # ImportError/OSError -> caller's fail-closed try
     prefix_sources = [(pattern.pattern, label) for pattern, label in check_secrets.PREFIXES]
-    return prefix_sources, check_secrets.ASSIGN.pattern, check_secrets.PLACEHOLDER.pattern
+    return {
+        "prefix_sources": prefix_sources,
+        "assign_source": check_secrets.ASSIGN.pattern,
+        "placeholder_source": check_secrets.PLACEHOLDER.pattern,
+        "entropy_assign_source": check_secrets.ENTROPY_ASSIGN.pattern,
+        "entropy_min_len": check_secrets.ENTROPY_MIN_LEN,
+        "entropy_max_len": check_secrets.ENTROPY_MAX_LEN,
+        "entropy_threshold": check_secrets.ENTROPY_THRESHOLD,
+        "credential_components": tuple(sorted(check_secrets.CREDENTIAL_COMPONENTS)),
+        "metadata_components": tuple(sorted(check_secrets.METADATA_COMPONENTS)),
+    }
 
 
-def render_region(prefix_sources, assign_source, placeholder_source):
+def render_region(patterns):
     """The full generated region as text, sentinels included, deterministic. Each pattern string and
     label is emitted with repr() (a stable, valid, re-compilable Python literal); the PREFIXES order is
-    check_secrets.py's own list order. The hook compiles _SECSEC_*_SOURCE at module load."""
+    check_secrets.py's own list order; frozensets render as SORTED tuples (this generator's determinism
+    contract). The hook compiles _SECSEC_*_SOURCE at module load and reads the entropy constants/sets for
+    its hand-mirrored decision logic."""
     lines = [BEGIN, "_SECSEC_PREFIX_SOURCES = ["]
-    for pattern, label in prefix_sources:
+    for pattern, label in patterns["prefix_sources"]:
         lines.append("    ({}, {}),".format(repr(pattern), repr(label)))
     lines.append("]")
-    lines.append("_SECSEC_ASSIGN_SOURCE = {}".format(repr(assign_source)))
-    lines.append("_SECSEC_PLACEHOLDER_SOURCE = {}".format(repr(placeholder_source)))
+    lines.append("_SECSEC_ASSIGN_SOURCE = {}".format(repr(patterns["assign_source"])))
+    lines.append("_SECSEC_PLACEHOLDER_SOURCE = {}".format(repr(patterns["placeholder_source"])))
+    lines.append("_SECSEC_ENTROPY_ASSIGN_SOURCE = {}".format(repr(patterns["entropy_assign_source"])))
+    lines.append("_SECSEC_ENTROPY_MIN_LEN = {}".format(repr(patterns["entropy_min_len"])))
+    lines.append("_SECSEC_ENTROPY_MAX_LEN = {}".format(repr(patterns["entropy_max_len"])))
+    lines.append("_SECSEC_ENTROPY_THRESHOLD = {}".format(repr(patterns["entropy_threshold"])))
+    lines.append("_SECSEC_CREDENTIAL_COMPONENTS = {}".format(repr(patterns["credential_components"])))
+    lines.append("_SECSEC_METADATA_COMPONENTS = {}".format(repr(patterns["metadata_components"])))
     lines.append(END)
     return "\n".join(lines)
 
@@ -104,9 +124,9 @@ def run(root, check):
     unreadable source or unreadable/unwritable target, mirroring gen_hooks.py's posture."""
     target = root / TARGET_REL
     try:
-        prefix_sources, assign_source, placeholder_source = _load_check_secrets(root)
+        patterns = _load_check_secrets(root)
         current = target.read_text(encoding="utf-8")
-        region = render_region(prefix_sources, assign_source, placeholder_source)
+        region = render_region(patterns)
         desired = _splice(current, region)
     except (OSError, ValueError, ImportError) as exc:
         print("error: {}".format(exc), file=sys.stderr)

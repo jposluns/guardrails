@@ -2780,6 +2780,71 @@ def main():
         except ValueError:
             pass
 
+        # secsec round-5 (GD-121): the entropy-gated generic detector and the new provider families.
+        # Shapes assembled from PARTS at runtime (SECP; a contiguous literal would trip the repo
+        # secret-scan). `_hi` is a 48-char, 16-distinct high-entropy token (letters + digits); it clears
+        # the 3.5 floor. Handler-level decisions plus a gate/hook agreement loop (the parity battery ask).
+        def _n5(seed, length):
+            return (seed * (length // len(seed) + 1))[:length]
+        _hi = _n5("aB3dE7gH9kLmN2pQ", 48)
+        _upper5 = "ABCDEFGHIJKLMNOP"
+        # DENY: a bare `key` assigned a high-entropy literal (entropy detector, not the keyword ASSIGN).
+        sexpect("(ss-ag) GD-121 Write high-entropy under a bare key denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("key", '"' + _hi + '"')}, "deny",
+                secret=_hi)
+        # DENY: unquoted broadened keyword (passphrase) with a high-entropy value.
+        sexpect("(ss-ah) GD-121 Write unquoted passphrase high-entropy denies",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("passphrase", _n5("aB3dE7gH9kLmN2pQ", 40))},
+                "deny")
+        # DENY: new provider families (each stands alone; attributable to the NEW prefix, not the ASSIGN).
+        _aiza = "AI" + "za" + _n5("aB3dE7gH9k", 35)
+        _webhook = "https://hooks.slack.com" + "/services/" + "T" + _upper5 + "/B" + _upper5 + "/" + _n5("aB3dE7gH9k", 24)
+        sexpect("(ss-ai) GD-121 Write Google AIza token denies",
+                "Write", {"file_path": "/tmp/x", "content": _aiza + "\n"}, "deny", secret=_aiza)
+        sexpect("(ss-aj) GD-121 Write Slack webhook URL denies",
+                "Write", {"file_path": "/tmp/x", "content": _webhook + "\n"}, "deny", secret=_webhook)
+        # ALLOW: a placeholder high-entropy value (excluded BEFORE entropy).
+        sexpect("(ss-ak) GD-121 Write placeholder high-entropy allows",
+                "Write", {"file_path": "/tmp/x",
+                          "content": _asgn("key", '"' + "your_key_here_replace_before_use_1234567890" + '"')},
+                "allow")
+        # ALLOW: a metadata-named LHS (public_key) - the disclosed safe-direction divergence from gitleaks.
+        sexpect("(ss-al) GD-121 Write metadata-named public_key allows (safe-direction residual)",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("public_key", '"' + _hi + '"')}, "allow",
+                secret=_hi)
+        # ALLOW: anti-substring names (monkey/author/keyboard) - exact-component matching, not substrings.
+        for _nm in ("monkey", "author", "keyboard"):
+            sexpect("(ss-am-{}) GD-121 Write anti-substring name allows".format(_nm),
+                    "Write", {"file_path": "/tmp/x", "content": _asgn(_nm, '"' + _hi + '"')}, "allow",
+                    secret=_hi)
+        # ALLOW: 39-char value under a bare key (one below the length floor).
+        sexpect("(ss-an) GD-121 Write 39-char high-entropy allows (length boundary)",
+                "Write", {"file_path": "/tmp/x", "content": _asgn("key", '"' + _hi[:39] + '"')}, "allow")
+
+        # GD-121 PARITY: the shipped hook (_scan_secret) and the CI gate (check_secrets) must decide every
+        # entropy/provider line identically. The entropy decision and the new prefixes are hand-mirrored,
+        # so this guards against future drift, exactly as the F-127 parity loop does for the env-ref logic.
+        def _cs_any_hit(_line):
+            if any(_rx.search(_line) for _rx, _l in _cs.PREFIXES):
+                return True
+            if any(_cs._assign_is_secret(_m) for _m in _cs.ASSIGN.finditer(_line)):
+                return True
+            return any(_cs._entropy_assign_is_secret(_m) for _m in _cs.ENTROPY_ASSIGN.finditer(_line))
+        _gd121_parity = [
+            _asgn("key", '"' + _hi + '"'),                       # entropy under bare key: both fire
+            _asgn("passphrase", _n5("aB3dE7gH9kLmN2pQ", 40)),    # unquoted broadened keyword: both fire
+            _asgn("public_key", '"' + _hi + '"'),                # metadata excluded: both skip
+            _asgn("monkey", '"' + _hi + '"'),                    # anti-substring: both skip
+            _asgn("key", '"' + "a" * 40 + '"'),                  # low entropy: both skip
+            _asgn("key", '"' + _hi[:39] + '"'),                  # 39-char: below floor, both skip
+            _aiza,                                               # Google prefix: both fire
+            _webhook,                                            # Slack webhook: both fire
+            "npm_" + _n5("aB3dE7gH9k", 36),                      # npm token: both fire
+        ]
+        for _pl in _gd121_parity:
+            if _cs_any_hit(_pl) != (aiqt_hooks._scan_secret(_pl) is not None):
+                failures.append("(ss-gd121-parity) gate/hook disagree on a GD-121 line")
+
         # === gensrc_guard (gensrc): a Write/Edit/MultiEdit onto a REGISTERED generated artefact ASKS =
         # A registry-driven PATH guard: the handler reads the per-repo .aiqt/gensrc.json at decision
         # time and ASKS on a kind=file or kind=tree match. Judged by the STRUCTURED decision, never by
