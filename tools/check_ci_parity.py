@@ -9,11 +9,12 @@ Identity is the normalized command, including all script arguments. Python and s
 launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s,
 -P, and -u, including glued forms such as -IB, do not affect identity. The value of a
 runtime-derived flag (--base, --protected, --head) is masked as <ref:expression>,
-preserving which expression supplied it, only when it carries a shell expansion or a
-GitHub expression, so a change among runtime spellings (including one making two refs
-identical, a self-comparison) diverges; a literal value stays in identity, so two
-different literals diverge. Every other argument remains order-preserving and
-identity-relevant. Duplicates collapse because comparison is set-based.
+preserving which expression supplied it, only when it carries a shell expansion, so a
+change among runtime spellings (including one making two refs identical, a
+self-comparison) diverges; a literal value stays in identity, so two different literals
+diverge. A ${{ }} GitHub expression inside a gate command is cannot-evaluate, not
+masked. Every other argument remains order-preserving and identity-relevant. Duplicates
+collapse because comparison is set-based.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -44,7 +45,10 @@ counted as declared regardless of an enclosing conditional, whether a job-level 
 shell conditional inside a run: block, or an if/fi in the local runner, that could keep
 it from running; the comparison is of declared rosters, not reachable ones. Validating
 a single gate's own argument semantics beyond the runtime expression is that gate's
-responsibility, not this one's. The shadow scan has one soft edge: exotic quoting
+responsibility, not this one's. Two disclosed masking/parse edges remain: tokenization
+does not preserve quote type, so a $ inside single quotes is treated as runtime-derived
+like a double-quoted one; and a duplicate run: key within one step is counted as two
+members although YAML keeps one. The shadow scan has one soft edge: exotic quoting
 outside the supported grammar could hide a tools/ string from comment stripping.
 """
 import argparse
@@ -361,6 +365,16 @@ def normalize(tokens):
         canonical.append(token)
         index += 1
 
+    # A whitespace-bearing token would make the space-joined identity ambiguous
+    # (a quoted "a b" arg collides with two args a b), so it is outside the subset.
+    if any(any(ch.isspace() for ch in token) for token in canonical):
+        return Result(
+            False,
+            None,
+            "whitespace-arg",
+            "a gate argument contains whitespace, outside the parity grammar",
+        )
+
     return Result(True, " ".join(canonical), "", "")
 
 
@@ -447,6 +461,7 @@ def extract_local(text):
     in_function = False
     function_body = []
     if_depth = 0
+    if_unbalanced = False
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -477,9 +492,13 @@ def extract_local(text):
             continue
 
         # Track if/fi nesting so a bare exit is scaffold only inside a conditional
-        # block; a top-level unconditional exit makes later gates unreachable.
+        # block; a top-level unconditional exit makes later gates unreachable. A fi
+        # with no open if underflows: record it so the imbalance is not clamped away.
         if stripped == "fi":
-            if_depth = max(0, if_depth - 1)
+            if if_depth == 0:
+                if_unbalanced = True
+            else:
+                if_depth -= 1
         elif stripped.endswith("; then"):
             if_depth += 1
 
@@ -598,7 +617,7 @@ def extract_local(text):
             "run_gate function is not closed",
         ))
 
-    if if_depth != 0:
+    if if_depth != 0 or if_unbalanced:
         diagnostics.append(_diagnostic(
             source,
             0,
@@ -2011,6 +2030,27 @@ def self_test():
             selfcmp_waiver,
         ),
         1,
+    )
+
+    case(
+        "10l extra fi (underflow) is cannot-evaluate",
+        evaluate(
+            local_fixture(common + ("python3 tools/a.py",), ("fi",)),
+            ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
+    )
+
+    case(
+        "10m whitespace-bearing gate argument is cannot-evaluate",
+        evaluate(
+            local_fixture(common + (
+                'python3 tools/a.py --label "x y"',)),
+            ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
     )
 
     case(
