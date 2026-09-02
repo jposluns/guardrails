@@ -3607,290 +3607,313 @@ def protected_line(data):
 
 # --- brnrot: branch creation must stay rooted on origin/HEAD -----------------------------------------
 
-_BRANCH_NONCREATE = frozenset((
-    "-d", "-D", "-m", "-M", "-l", "--list", "--delete", "--move",
-    "--show-current", "--edit-description", "--set-upstream-to", "--unset-upstream",
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format",
-    "--all", "--remotes",
-))
-# brnrot creation-start parsers (F2 conservative redesign). The round-1 approach maintained per-option
-# value-taking lists that kept mis-modelling arity (a --color read as mandatory, a clustered -qb missed,
-# an attached --create=x unrecognized: F2 round-2). This redesign instead recognizes creation INTENT
-# broadly (a create flag in ANY form) and then EXTRACTS the start point ONLY when every remaining option
-# sits on a small, high-confidence SAFE-BOOLEAN allowlist; any option that is not confidently classifiable
-# (an unknown long option, an ambiguous optional-value such as --color/--column, a clustered short flag
-# that does not fully decompose, or a --track/-t/--orphan tracking-or-orphan form) routes to _ASK_START
-# (fail-safe), never a silent allow. The CI branch-root gate remains the authoritative backstop.
+# ============================================================================
+# CONSTANTS (module-level)
+# ============================================================================
 
-# checkout/switch safe-boolean LONG options: no value in bare form, so they never shift the operand the
-# probe reads. --recurse-submodules is optional-value: git binds a value ONLY in the attached =form, so
-# the BARE token consumes nothing and is safe here (a =form is an unclassifiable optional value -> ASK).
-_CO_SW_SAFE_BOOL = frozenset((
-    "--quiet", "--force", "--verbose", "--progress", "--no-progress", "--no-track",
-    "--no-guess", "--merge", "--discard-changes", "--ours", "--theirs",
-    "--overwrite-ignore", "--no-overwrite-ignore", "--ignore-other-worktrees",
-    "--ignore-skip-worktree-bits", "--recurse-submodules", "--no-recurse-submodules",
-    "--ipv4", "--ipv6",
-))
-# checkout/switch clusterable safe-boolean SHORT letters: -q quiet, -f force, -v verbose.
-_CO_SW_SAFE_SHORT = frozenset("qfv")
-# checkout/switch options whose presence makes the start point ambiguous -> ASK: --track/-t bind the start
-# to a remote operand (and DWIM-create), and --orphan creates a deliberately unrooted branch.
-_CO_SW_AMBIGUOUS = frozenset(("-t", "--track", "--orphan", "--guess"))
-# The creation-ish / tracking long options for checkout and switch. git resolves an unambiguous prefix of a
-# long option to the full option, so an abbreviation of any of these (`--orp` -> `--orphan`, `--tr` ->
-# `--track`, `--gu` -> `--guess`, plus `--cre` -> `--create` via create_long on switch) is a real creation
-# form the parser must route to ASK rather than silently allow (guard-input-soundness).
-_CO_SW_CREATIONISH_LONG = ("--orphan", "--track", "--guess")
-
-# git branch safe-boolean options: branch models --track and --recurse-submodules as BOOLEAN (unlike
-# checkout/switch), so no value is consumed and the `<name> [<start>]` operand grammar still holds.
-_BRANCH_SAFE_BOOL = frozenset((
-    "--quiet", "--force", "--verbose",
-    "--create-reflog", "--no-create-reflog", "--recurse-submodules", "--no-recurse-submodules",
-))
-# git branch clusterable safe-boolean SHORT letters: -q quiet, -f force, -v verbose, -t track, -l reflog.
-_BRANCH_SAFE_SHORT = frozenset("qfvlar")  # q f v l + a(--all) r(--remotes); -t(--track) is NOT safe (ASKS)
-
-# git worktree add: --orphan/--track/-t route to ASK; the safe-boolean long options and clusterable short
-# letters below never consume an operand. -b/-B (new-branch name) are value-taking and handled inline.
-_WORKTREE_AMBIGUOUS = frozenset(("--orphan", "--track", "-t"))
-_WORKTREE_SAFE_BOOL = frozenset((
-    "--quiet", "--force", "--checkout", "--no-checkout", "--lock",
-    "--no-guess-remote", "--relative-paths", "--no-relative-paths",
-))
-_WORKTREE_SAFE_SHORT = frozenset("qf")  # -d(--detach) is NOT safe: a --detach/--no-detach form ASKS
-
-# A creation-ish form whose start point cannot be extracted unambiguously: the handler routes it to a
-# fail-SAFE ask rather than a silent allow, since the hook is best-effort and the CI gate is the backstop.
+# Module sentinel and end-of-options boundary already exist in the target module;
+# reproduced here so the draft is self-contained and directly runnable.
 _ASK_START = object()
 
+# The ONLY options tolerated inside a clean canonical creation: valueless booleans.
+# Exact match only -- git resolves an unambiguous long-option PREFIX to the full
+# option, so an abbreviated form (e.g. "--qui") is deliberately NOT matched here and
+# falls through to the ASK path, never to a clean-allow.
+_CLEAN_LONG_BOOLEANS = frozenset(("--quiet", "--force", "--verbose"))
+_CLEAN_SHORT_LETTERS = frozenset("qfv")
 
-def _decompose_short_cluster(token, create_letters, safe_letters):
-    """Classify a single '-'-prefixed SHORT-option token (not '--', not a lone '-') for a create-capable
-    subcommand. Returns 'safe' (every letter is a clusterable safe boolean, no create letter), 'attached'
-    (a create letter carries an attached branch name in the same token, so no further token is consumed),
-    'separated' (a create letter is the final letter, so the NEXT token is the branch name), or 'ask' (a
-    letter is neither a safe boolean nor a create letter, so the cluster cannot be decomposed confidently).
-    A create letter takes an argument, so the remainder of the cluster after it is that argument (the
-    branch name), never further flags."""
-    letters = token[1:]
-    for j, ch in enumerate(letters):
-        if ch in create_letters:
-            return "attached" if j + 1 < len(letters) else "separated"
-        if ch not in safe_letters:
-            # An unclassifiable letter precedes any create letter. If a create letter still appears LATER
-            # in the cluster (e.g. -mb = -m -b), this IS a creation, just not cleanly extractable -> the
-            # caller must ASK, never silently allow (guard-input-soundness). Otherwise it is a non-create
-            # cluster we do not fully model.
-            return "ask-create" if any(c in create_letters for c in letters[j + 1:]) else "ask"
-    return "safe"
+# git branch: copy (a creation whose start is the SOURCE).
+_BRANCH_COPY_SHORT = frozenset("cC")
+_BRANCH_COPY_LONG = frozenset(("--copy",))
 
+# git branch: recognized NON-creation actions and listing forms (allow silently).
+# delete (d/D), move/rename (m/M), all (a), remotes (r), set-upstream (u).
+_BRANCH_NONCREATION_SHORT = frozenset("dDmMaru")
+_BRANCH_NONCREATION_LONG = frozenset((
+    "--delete", "--move", "--all", "--remotes", "--list",
+    "--set-upstream-to", "--unset-upstream",
+))
+
+# git worktree: only `add` can create; the rest are recognized non-creations.
+_WORKTREE_NONCREATION_SUBS = frozenset((
+    "list", "remove", "move", "prune", "lock", "unlock", "repair",
+))
+_WORKTREE_CREATE_SHORT = frozenset("bB")
+
+
+# ============================================================================
+# PARSER 1: checkout / switch
+# ============================================================================
 
 def _checkout_creation_start(args, switch=False):
-    """Return the explicit creation start point or HEAD for a confidently-simple create form, _ASK_START
-    when the form is creation-ish but not confidently classifiable, or None when no create flag appears."""
-    create_short = "cC" if switch else "bB"
-    create_long = ("--create", "--force-create") if switch else ()
-    creating = False
-    ask = False
-    operands = []
+    """Maximally-conservative start-point classifier for `git checkout` / `git switch`.
+
+    Returns a start-point string (probe: rooted allows, orphaned DENIES) ONLY for a
+    clean canonical creation; `_ASK_START` for any non-clean creation-capable form;
+    `None` for a confident non-creation (checkout/switch of an existing ref).
+    """
+    if switch:
+        short_triggers = frozenset("cC")            # -c / -C
+        long_triggers = frozenset(("--create", "--force-create"))
+    else:
+        short_triggers = frozenset("bB")            # -b / -B
+        long_triggers = frozenset()                 # checkout has no clean long creation form
+
+    created = False
+    branch_name = None      # the trigger's value (new branch name); None => none seen yet
+    operands = []           # positional start-point candidates
+    saw_eoo = False
+
     i = 0
-    after_boundary = False
-    while i < len(args):
-        arg = args[i]
-        if not after_boundary and arg in _EOO_TOKENS:
-            after_boundary = True
+    n = len(args)
+    while i < n:
+        tok = args[i]
+
+        if not saw_eoo and tok in _EOO_TOKENS:
+            saw_eoo = True
             i += 1
             continue
-        if not after_boundary and (not arg.startswith("-") or arg == "-"):
-            operands.append(arg)
-            i += 1
-            continue
-        if after_boundary:
+        if saw_eoo:
+            # checkout: post-boundary tokens are PATHSPECS (ignored, never the start).
+            # switch: no pathspecs, so post-boundary tokens are operands.
             if switch:
-                operands.append(arg)  # git switch has no pathspecs; post-`--` is the start operand
-            # git checkout: post-`--` is a pathspec, never the start point (not collected)
+                operands.append(tok)
             i += 1
             continue
-        # --- option region (before the boundary, starts with '-') ---
-        if arg in _CO_SW_AMBIGUOUS or arg.startswith("--track=") or arg.startswith("--orphan="):
-            return _ASK_START  # a --track/-t/--orphan form is creation-ish but its start is unextractable
-        if switch and arg in create_long:
-            if i + 1 >= len(args):
-                return None  # a dangling create flag names no branch: not a usable create form
-            creating = True
-            i += 2  # consume the new-branch name operand
-            continue
-        if switch and any(arg.startswith(opt + "=") for opt in create_long):
-            creating = True  # --create=NAME / --force-create=NAME: the name is embedded
-            i += 1
-            continue
-        if arg.startswith("--"):
-            if "=" not in arg and arg in _CO_SW_SAFE_BOOL:
+
+        if tok.startswith("--") and len(tok) > 2:
+            name = tok.split("=", 1)[0]
+            has_value = "=" in tok
+            if name in long_triggers and not created:
+                created = True
+                if has_value:
+                    branch_name = tok.split("=", 1)[1]
+                else:
+                    i += 1
+                    if i < n:
+                        branch_name = args[i]
                 i += 1
                 continue
-            bare = arg.split("=", 1)[0]
-            if len(bare) > 2 and any(
-                    flag.startswith(bare) for flag in tuple(create_long) + _CO_SW_CREATIONISH_LONG):
-                return _ASK_START  # an abbreviated creation/tracking flag (git resolves the prefix)
-            ask = True  # an unknown non-creation long option, or an unclassifiable optional-value =form
-            i += 1
-            continue
-        kind = _decompose_short_cluster(arg, create_short, _CO_SW_SAFE_SHORT)
-        if kind == "safe":
-            i += 1
-            continue
-        if kind == "attached":
-            creating = True
-            i += 1
-            continue
-        if kind == "separated":
-            if i + 1 >= len(args):
-                return None
-            creating = True
-            i += 2  # consume the new-branch name operand
-            continue
-        if kind == "ask-create":
-            creating = True  # a create letter is present in the cluster -> this IS a branch creation
-        ask = True  # kind 'ask'/'ask-create': a short cluster that does not fully decompose -> ASK
-        i += 1
-    if ask:
-        return _ASK_START  # an unrecognized/ambiguous option shape: fail SAFE to ASK, never a silent allow
-    if not creating:
-        return None
-    return operands[0] if operands else "HEAD"
+            if name in _CLEAN_LONG_BOOLEANS and not has_value:
+                i += 1
+                continue
+            # any other long option: unknown, value-taking, negation, abbreviation,
+            # a second trigger, --orphan, --detach, --track, --patch, ... -> ASK
+            return _ASK_START
 
+        if tok.startswith("-") and len(tok) > 1:
+            chars = tok[1:]
+            j = 0
+            while j < len(chars):
+                ch = chars[j]
+                if ch in _CLEAN_SHORT_LETTERS:
+                    j += 1
+                    continue
+                if ch in short_triggers and not created:
+                    created = True
+                    rest = chars[j + 1:]
+                    if rest:
+                        branch_name = rest              # attached value: -bNAME
+                    else:
+                        i += 1
+                        if i < n:
+                            branch_name = args[i]       # separated value: -b NAME
+                    break
+                # unknown short letter, or a duplicate trigger -> ASK
+                return _ASK_START
+            i += 1
+            continue
+
+        operands.append(tok)
+        i += 1
+
+    if created:
+        if len(operands) > 1:
+            return _ASK_START                           # more operands than a clean creation
+        if branch_name is None:
+            return None                                 # trigger with no name: git error, no ref
+        return operands[0] if operands else "HEAD"
+
+    # no creation trigger: a checkout/switch of an existing ref -> allow silently
+    return None
+
+
+# ============================================================================
+# PARSER 2: branch
+# ============================================================================
 
 def _branch_command_creation_start(args):
-    """Fail-safe classifier for `git branch`. Returns a concrete start ONLY for a confidently-clean creation
-    (a bare `<name> [start]`, or a `-c/-C/--copy` copy whose start is the source); None ONLY for a
-    confidently-recognized non-creation (listing/delete/RENAME) with no ambiguity; and _ASK_START for
-    everything else, never a silent allow. Any unrecognized option, or a negation that could flip a
-    non-creation classifier (git treats a later `--no-list` as cancelling `--list`, entering creation),
-    routes to ASK. A COPY makes a new ref at the source's commit, so its start is the source (explicit
-    <src>, else HEAD); a RENAME (-m/-M/--move) reuses an existing branch's commits and creates no new ref."""
-    if not args:
-        return None
-    copying = False
-    noncreate = False
-    ambiguous = False
-    operands = []
-    i = 0
-    after_boundary = False
-    while i < len(args):
-        arg = args[i]
-        if not after_boundary and arg in _EOO_TOKENS:
-            after_boundary = True
-            i += 1
-            continue
-        if not after_boundary and (not arg.startswith("-") or arg == "-"):
-            operands.append(arg)
-            i += 1
-            continue
-        if after_boundary:
-            operands.append(arg)  # git branch has no pathspecs; post-`--` is the <name>/<start> operand
-            i += 1
-            continue
-        head = arg.split("=", 1)[0]
-        if arg in ("-c", "-C") or head == "--copy":
-            copying = True  # branch copy: the new ref inherits the source commit's rootedness
-            i += 1
-            continue
-        if head in _BRANCH_NONCREATE or arg == "-u" or arg.startswith("-u"):
-            noncreate = True  # a recognized listing/delete/rename/upstream operation
-            i += 1
-            continue
-        if arg.startswith("--"):
-            if "=" not in arg and arg in _BRANCH_SAFE_BOOL:
-                i += 1
-                continue
-            ambiguous = True  # unknown long option, a negation that may flip a classifier, or a =form
-            i += 1
-            continue
-        if len(arg) > 1 and all(ch in _BRANCH_SAFE_SHORT for ch in arg[1:]):
-            if any(c in "lar" for c in arg[1:]):
-                noncreate = True  # -l/-a/-r (clustered or bare) are listing operations, not creations
-            i += 1
-            continue
-        ambiguous = True  # a short cluster carrying a letter that is not a known boolean
-        i += 1
-    if ambiguous:
-        return _ASK_START  # fail SAFE to ASK on any unclassifiable shape, never a silent allow
-    if copying:
-        # An explicit copy ACTION dominates a display/list classifier (git branch -c <src> <dst> --format
-        # still copies), so probe the source BEFORE treating a display flag as a non-creation, never a
-        # silent allow. `-c <src> <dst>` copies <src>; `-c <dst>` copies the current HEAD; `-c` with NO
-        # operand is a git error (no ref created), not a creation to probe-deny.
-        if not operands:
-            return None
-        return operands[0] if len(operands) > 1 else "HEAD"
-    if noncreate:
-        return None  # a confidently-recognized non-creation (delete/rename/upstream, or a pure listing)
-    if not operands:
-        return None  # plain `git branch` listing
-    return operands[1] if len(operands) > 1 else "HEAD"
+    """Maximally-conservative start-point classifier for `git branch`.
 
+    Clean creation is a bare `<name> [<start>]`, or a copy (`-c`/`-C`/`--copy`) whose
+    start is the SOURCE (explicit first operand, else HEAD). Recognized non-creation
+    actions and listing forms allow silently; everything else ASKs.
+    """
+    ask = False
+    noncreation = False
+    copy = False
+    operands = []
+    saw_eoo = False
+
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+
+        if not saw_eoo and tok in _EOO_TOKENS:
+            saw_eoo = True
+            i += 1
+            continue
+        if saw_eoo:
+            operands.append(tok)                        # no pathspecs: operands
+            i += 1
+            continue
+
+        if tok.startswith("--") and len(tok) > 2:
+            name = tok.split("=", 1)[0]
+            has_value = "=" in tok
+            if tok.startswith("--no-"):
+                ask = True                              # any negation flips the classifier -> ASK
+            elif name in _BRANCH_COPY_LONG:
+                if has_value:
+                    ask = True                          # unexpected value on a copy trigger
+                else:
+                    copy = True
+            elif name in _BRANCH_NONCREATION_LONG:
+                noncreation = True
+            elif name in _CLEAN_LONG_BOOLEANS and not has_value:
+                pass                                    # tolerated valueless boolean
+            else:
+                ask = True                              # unknown/value-taking/abbreviated -> ASK
+            i += 1
+            continue
+
+        if tok.startswith("-") and len(tok) > 1:
+            for ch in tok[1:]:
+                if ch in _BRANCH_COPY_SHORT:
+                    copy = True
+                elif ch in _BRANCH_NONCREATION_SHORT:
+                    noncreation = True
+                elif ch in _CLEAN_SHORT_LETTERS:
+                    pass
+                else:
+                    ask = True                          # any letter outside the known sets -> ASK
+            i += 1
+            continue
+
+        operands.append(tok)
+        i += 1
+
+    if ask:
+        return _ASK_START
+    if copy and noncreation:
+        return _ASK_START                               # contradictory triggers -> ASK
+    if noncreation:
+        return None
+    if copy:
+        if len(operands) == 0:
+            return None                                 # incomplete copy: git error, no ref
+        if len(operands) == 1:
+            return "HEAD"                               # copy current HEAD to the new name
+        if len(operands) == 2:
+            return operands[0]                          # copy the explicit SOURCE
+        return _ASK_START                               # unexpected extra operands
+    if operands:
+        if len(operands) > 2:
+            return _ASK_START
+        return operands[1] if len(operands) > 1 else "HEAD"
+    return None                                         # no operands, no trigger: a listing
+
+
+# ============================================================================
+# PARSER 3: worktree
+# ============================================================================
 
 def _worktree_creation_start(args):
-    """Recognize `git worktree add [<-b name>] <path> [start]`; return _ASK_START for an --orphan/--track
-    form or an option that is not confidently classifiable, or None when this is not a worktree-add
-    creation."""
-    if not args or args[0] != "add":
-        return None
-    ask = False
-    creating_b = False
-    operands = []
+    """Maximally-conservative start-point classifier for `git worktree`.
+
+    Only `worktree add -b/-B <name> <path> [<start>]` is a clean creation. A bare
+    `worktree add <path> [<commit-ish>]` (no -b) is ambiguous -> ASK. `--detach`/`-d`
+    and `--orphan` -> ASK. Recognized non-creation subcommands allow silently.
+    """
+    if not args:
+        return _ASK_START
+    subcommand = args[0]
+    if subcommand != "add":
+        if subcommand in _WORKTREE_NONCREATION_SUBS:
+            return None
+        return _ASK_START                               # unknown/absent subcommand -> fail-safe
+
+    created = False
+    branch_name = None
+    operands = []                                       # [<path>, <start>]
+    saw_eoo = False
+
     i = 1
-    after_boundary = False
-    while i < len(args):
-        arg = args[i]
-        if not after_boundary and arg in _EOO_TOKENS:
-            after_boundary = True
+    n = len(args)
+    while i < n:
+        tok = args[i]
+
+        if not saw_eoo and tok in _EOO_TOKENS:
+            saw_eoo = True
             i += 1
             continue
-        if not after_boundary and (not arg.startswith("-") or arg == "-"):
-            operands.append(arg)
+        if saw_eoo:
+            operands.append(tok)                        # no pathspecs: operands
             i += 1
             continue
-        if after_boundary:
-            operands.append(arg)  # git worktree add: post-`--` is the <path>/<commit-ish> operand
-            i += 1
-            continue
-        if arg in _WORKTREE_AMBIGUOUS or arg.startswith("--orphan=") or arg.startswith("--track="):
-            return _ASK_START  # orphan/tracking worktree: the start point cannot be extracted cleanly
-        if arg in ("-b", "-B"):
-            if i + 1 >= len(args):
-                return None
-            creating_b = True
-            i += 2  # consume the new-branch name value
-            continue
-        if any(arg.startswith(flag) and len(arg) > len(flag) for flag in ("-b", "-B")):
-            creating_b = True
-            i += 1  # attached -bNAME/-BNAME new-branch name
-            continue
-        if arg.startswith("--"):
-            if "=" not in arg and arg in _WORKTREE_SAFE_BOOL:
+
+        if tok.startswith("--") and len(tok) > 2:
+            name = tok.split("=", 1)[0]
+            has_value = "=" in tok
+            if name in _CLEAN_LONG_BOOLEANS and not has_value:
                 i += 1
                 continue
-            ask = True  # an unknown long option, or a =value form (for example --reason=...)
+            # --detach, --orphan, --no-*, unknown, value-taking, abbreviated -> ASK
+            return _ASK_START
+
+        if tok.startswith("-") and len(tok) > 1:
+            chars = tok[1:]
+            j = 0
+            while j < len(chars):
+                ch = chars[j]
+                if ch in _CLEAN_SHORT_LETTERS:
+                    j += 1
+                    continue
+                if ch in _WORKTREE_CREATE_SHORT and not created:
+                    created = True
+                    rest = chars[j + 1:]
+                    if rest:
+                        branch_name = rest              # attached value: -bNAME
+                    else:
+                        i += 1
+                        if i < n:
+                            branch_name = args[i]       # separated value: -b NAME
+                    break
+                # -d (detach) or any other short letter, or a duplicate trigger -> ASK
+                return _ASK_START
             i += 1
             continue
-        if len(arg) > 1 and all(ch in _WORKTREE_SAFE_SHORT for ch in arg[1:]):
-            i += 1
-            continue
-        ask = True  # a short cluster carrying a letter that is not a known boolean
+
+        operands.append(tok)
         i += 1
-    if ask:
-        return _ASK_START  # an unrecognized/ambiguous option shape: fail SAFE to ASK
-    if not operands:
-        return None
-    if creating_b:
-        return operands[1] if len(operands) > 1 else "HEAD"  # -b <name> <path> [start]: start or HEAD
-    # No -b/-B and no --detach: a bare `worktree add <path> [<commit-ish>]` is ambiguous - it DWIM-creates a
-    # branch from HEAD ONLY when the path basename names no existing branch, and otherwise checks out an
-    # EXISTING branch or detaches - so it is not a confidently-clean creation and fail-safe ASKS.
-    return _ASK_START
+
+    if not created:
+        return _ASK_START                               # bare `add <path> [<commit-ish>]`: ambiguous
+    if branch_name is None:
+        return None                                     # -b with no name: git error, no ref
+    if len(operands) == 0:
+        return None                                     # add -b name  (no path): git error, no ref
+    if len(operands) == 1:
+        return "HEAD"                                   # add -b name /path  (no start-point)
+    if len(operands) == 2:
+        return operands[1]                              # operands = [path, start]
+    return _ASK_START                                   # unexpected extra operands
+
+
+# ============================================================================
+# SELF-TEST: asserts EVERY required vector
+# ============================================================================
 
 
 def _branch_creation_start(sub, args):

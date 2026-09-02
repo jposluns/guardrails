@@ -37,7 +37,7 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
-It covers branch_root (brnrot) through H1-H27: rooted creation allows, an orphaned explicit start
+It covers branch_root (brnrot) through H1-H30: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
 the switch long-form create extracts its start and denies an orphan while git-branch --track routes to ASK; git-branch
 upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
@@ -2102,8 +2102,10 @@ def main():
         # H14: --recurse-submodules is BOOLEAN for git branch (so the start is extracted and an orphan
         # denies); --color is an ambiguous optional-value the redesign will not classify, so it ASKS
         # rather than silently allow (its orphan is caught by the ASK or the CI gate).
-        brexpect("(H14a) branch --recurse-submodules from orphan denies",
-                 "git branch --recurse-submodules x orphan-start", "deny")
+        # (maximally-conservative 2026-09-02) any option outside the tiny valueless allowlist -q/-f/-v ->
+        # ASK, even a boolean like --recurse-submodules; the creation is caught by ASK, not silently allowed.
+        brexpect("(H14a) branch --recurse-submodules creation asks",
+                 "git branch --recurse-submodules x orphan-start", "ask")
         brexpect("(H14b) branch with trailing --color asks (unclassifiable optional-value)",
                  "git branch x orphan-start --color", "ask")
 
@@ -2116,14 +2118,14 @@ def main():
 
         # H16: non-creation git branch forms in their =value and attached-upstream spellings are
         # correctly non-creation ALLOWs (F5), not over-blocked or over-asked.
-        brexpect("(H16a) branch --contains=main is non-creation allows",
-                 "git branch --contains=main", "allow")
-        brexpect("(H16b) branch --merged=main is non-creation allows",
-                 "git branch --merged=main", "allow")
-        brexpect("(H16c) branch --points-at=main <glob> is non-creation allows",
-                 "git branch --points-at=main 'ma*'", "allow")
-        brexpect("(H16d) branch -u<upstream> <name> (attached) is non-creation allows",
-                 "git branch -umain feature", "allow")
+        brexpect("(H16a) branch --contains=main (value-taking filter) asks",
+                 "git branch --contains=main", "ask")
+        brexpect("(H16b) branch --merged=main (value-taking filter) asks",
+                 "git branch --merged=main", "ask")
+        brexpect("(H16c) branch --points-at=main (value-taking filter) asks",
+                 "git branch --points-at=main 'ma*'", "ask")
+        brexpect("(H16d) branch -u<upstream> <name> (attached value) asks",
+                 "git branch -umain feature", "ask")
 
         # H17: a clustered short create where the create letter is NOT first (-mb = -m -b) still extracts
         # no clean start, so it ASKS rather than silently allowing (round-3 claude MAJOR; makes the
@@ -2216,8 +2218,16 @@ def main():
         # H24e: an explicit COPY action dominates a display/list classifier - `git branch -c <orphan> <dst>
         # --format=...` still copies, so the orphan source is probed and DENIES, never silently allowed
         # (redesign-fix-6, codex BLOCKER: --format had set noncreate and short-circuited the copy).
-        brexpect("(H24e) branch -c <orphan> <dst> --format still denies",
-                 "git branch -c orphan-start copiedfmt --format=%(refname)", "deny")
+        brexpect("(H24e) branch -c <orphan> <dst> --format (copy + display) asks",
+                 "git branch -c orphan-start copiedfmt --format=%(refname)", "ask")
+        # H29: a SEPARATED option value pollutes operand identification, so a copy combined with any
+        # non-clean option ASKS rather than probing the wrong source (maximally-conservative, codex BLOCKER).
+        brexpect("(H29) branch --format main -c <orphan> <dst> asks (separated value)",
+                 "git branch --format main -c orphan-start copsep", "ask")
+        # H30: --ours is checkout-only; on switch it is unrecognized, so a switch creation carrying it ASKS
+        # rather than probe-denying a git-error command (maximally-conservative, codex MINOR).
+        brexpect("(H30) switch -c <name> --ours <orphan> asks (checkout-only option on switch)",
+                 "git switch -c h30 --ours orphan-start", "ask")
         # H24f: git checkout -b with --detach is a git error (creates nothing); the hook must not probe-deny
         # a command that creates no branch (redesign-fix-6, codex MINOR).
         brexpect("(H24f) checkout -b <name> --detach asks (order-dependent detach, no silent allow)",
@@ -2246,8 +2256,8 @@ def main():
                  "git checkout --patch somefile", "ask")
         brexpect("(H26e) worktree add -d (short --detach) asks",
                  "git worktree add -d /tmp/wt-shortd orphan-start", "ask")
-        brexpect("(H26f) branch -lv <pattern> is a listing, allows",
-                 "git branch -lv somepattern", "allow")
+        brexpect("(H26f) branch -lv (version-ambiguous -l) asks",
+                 "git branch -lv somepattern", "ask")
 
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
@@ -4183,7 +4193,7 @@ def main():
           "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
           "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
-          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H27 on structured "
+          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H30 on structured "
           "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
           "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
           "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "
