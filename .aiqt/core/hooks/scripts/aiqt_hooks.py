@@ -3985,8 +3985,10 @@ def branch_root(data):
     saw_dir_change = False
     for tokens, _sep in segments:
         word = _command_word(tokens)
-        if word in _CD_BUILTINS:
-            saw_dir_change = True  # a cd/pushd BEFORE the git segment moves the target out of the cwd
+        if word in _CD_BUILTINS or word == "popd":
+            # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
+            # an unknowable stack-top directory, so it too routes the following creation to a fail-safe ASK.
+            saw_dir_change = True
             continue
         if word != "git" or _has_info_flag(tokens):
             continue

@@ -2158,6 +2158,10 @@ def main():
                  "git checkout -b coboundary -- orphan-start", "allow")
         # H22: git resolves an unambiguous long-option PREFIX to the full option, so an abbreviated
         # creation/tracking flag must ASK (round-5 codex MAJOR: --cre/--orp/--tr returned allow).
+        # H27: a popd (like cd/pushd) BEFORE a git creation moves the target out of the session cwd, so
+        # the creation routes to ASK, not a probe of the wrong directory (redesign-fix-4, codex MAJOR).
+        brexpect("(H27) popd then a creation asks (dir change)",
+                 "popd && git checkout -b h27 orphan-start", "ask")
         brexpect("(H22a) switch --cre (abbrev --create) asks",
                  "git switch --cre abbrbr orphan-start", "ask")
         brexpect("(H22b) checkout --orp (abbrev --orphan) asks",
