@@ -33,7 +33,8 @@ invocations cannot be detected if nobody runs the remaining file manually. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, a top-level unconditional exit that would strand
-later local gates, and a run_gate() dispatcher body outside its recognized shape.
+later local gates, unbalanced if/fi nesting in the runner, job content without a job
+mapping, and a run_gate() dispatcher body outside its recognized shape.
 Deeper nested non-gate YAML (under on:, env:, with:, or strategy:) is structurally
 recognized but not exhaustively schema-validated; the shadow scan still prevents a
 tools/ gate from hiding there. Reachability is outside token-parity scope: a gate is
@@ -586,6 +587,14 @@ def extract_local(text):
             "run_gate function is not closed",
         ))
 
+    if if_depth != 0:
+        diagnostics.append(_diagnostic(
+            source,
+            0,
+            "unbalanced-if",
+            "unbalanced if/fi nesting; the shell file is not well-formed",
+        ))
+
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
@@ -771,6 +780,7 @@ def extract_ci(text):
     in_jobs = False
     in_steps = False
     current_mapping = None
+    current_job = None
     saw_jobs = False
     index = 0
 
@@ -835,6 +845,18 @@ def extract_ci(text):
                     r"[A-Za-z0-9_-]+:", stripped)):
             in_steps = False
             current_mapping = None
+            current_job = stripped
+            index += 1
+            continue
+
+        if in_jobs and indent >= 4 and current_job is None:
+            diagnostics.append(_diagnostic(
+                source,
+                line_number,
+                "orphan-job-content",
+                "job content appears without a job mapping; the workflow "
+                "structure is not well-formed",
+            ))
             index += 1
             continue
 
@@ -1914,6 +1936,37 @@ def self_test():
                 common + ("python3 tools/a.py",),
                 ("echo prefix#not-comment; python3 tools/hidden.py",)),
             ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
+    )
+
+    case(
+        "10i unbalanced if/fi is cannot-evaluate",
+        evaluate(
+            local_fixture(
+                common + ("python3 tools/a.py",),
+                ("if [ 1 -eq 1 ]; then",)),
+            ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
+    )
+
+    orphan_steps_ci = "\n".join((
+        "name: Test",
+        "jobs:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Gate 1",
+        "        run: python3 tools/a.py",
+    )) + "\n"
+    case(
+        "10j steps without a job mapping is cannot-evaluate",
+        evaluate(
+            local_fixture(common + ("python3 tools/a.py",)),
+            orphan_steps_ci,
             (),
         ),
         2,
