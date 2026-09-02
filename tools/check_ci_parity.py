@@ -36,10 +36,15 @@ top-level or job-level workflow key, a top-level unconditional exit that would s
 later local gates, and a run_gate() dispatcher body outside its recognized shape.
 Deeper nested non-gate YAML (under on:, env:, with:, or strategy:) is structurally
 recognized but not exhaustively schema-validated; the shadow scan still prevents a
-tools/ gate from hiding there, and a job-level if: that disables a whole job is a
-reachability concern outside token-parity scope. The shadow scan has one soft edge:
-exotic quoting outside the supported grammar could hide a tools/ string from comment
-stripping.
+tools/ gate from hiding there. Reachability is outside token-parity scope: a gate is
+counted as declared regardless of an enclosing conditional, whether a job-level if:, a
+shell conditional inside a run: block, or an if/fi in the local runner, that could keep
+it from running; the comparison is of declared rosters, not reachable ones. Because a
+runtime-derived value is masked to <ref>, a change among runtime spellings, including
+one that makes two masked refs identical (a self-comparison), is not distinguished;
+validating a single gate's own argument semantics is that gate's responsibility, not
+this one's. The shadow scan has one soft edge: exotic quoting outside the supported
+grammar could hide a tools/ string from comment stripping.
 """
 import argparse
 import re
@@ -194,7 +199,9 @@ def _strip_comment(line):
             out.append(char)
             quote = char
             continue
-        if char == "#":
+        if char == "#" and (not out or out[-1] in " \t"):
+            # A comment starts only at a word boundary (line start or after
+            # whitespace); a mid-word # is a literal, as Bash and YAML treat it.
             break
         out.append(char)
     return "".join(out).rstrip()
@@ -1895,6 +1902,18 @@ def self_test():
         evaluate(
             local_fixture(common + ("python3 tools/a.py",)),
             unknown_job_ci,
+            (),
+        ),
+        2,
+    )
+
+    case(
+        "10h mid-word hash does not hide a gate",
+        evaluate(
+            local_fixture(
+                common + ("python3 tools/a.py",),
+                ("echo prefix#not-comment; python3 tools/hidden.py",)),
+            ci_fixture(common + ("python3 tools/a.py",)),
             (),
         ),
         2,
