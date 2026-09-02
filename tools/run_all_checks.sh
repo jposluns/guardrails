@@ -163,6 +163,9 @@ run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --self-test
 
+run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
+run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
+
 if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"
   exit 1
