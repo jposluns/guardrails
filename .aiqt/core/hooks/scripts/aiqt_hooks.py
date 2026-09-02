@@ -3754,29 +3754,26 @@ def _checkout_creation_start(args, switch=False):
             creating = True  # a create letter is present in the cluster -> this IS a branch creation
         ask = True  # kind 'ask'/'ask-create': a short cluster that does not fully decompose -> ASK
         i += 1
+    if ask:
+        return _ASK_START  # an unrecognized/ambiguous option shape: fail SAFE to ASK, never a silent allow
     if not creating:
         return None
-    if ask:
-        return _ASK_START
     return operands[0] if operands else "HEAD"
 
 
 def _branch_command_creation_start(args):
-    """Recognize `git branch <name> [start]` creation AND `git branch -c/-C <src> <dst>` copy; return
-    _ASK_START when a creation carries an unclassifiable option, or None for a listing/deletion/MOVE
-    (rename)/upstream form. A COPY makes a NEW ref at the source's commit, so it is a rootable creation
-    whose start point is the source (an explicit <src>, else the current HEAD); a RENAME (-m/-M/--move)
-    reuses an existing branch's commits under a new name and creates no new orphan-rootable ref."""
+    """Fail-safe classifier for `git branch`. Returns a concrete start ONLY for a confidently-clean creation
+    (a bare `<name> [start]`, or a `-c/-C/--copy` copy whose start is the source); None ONLY for a
+    confidently-recognized non-creation (listing/delete/RENAME) with no ambiguity; and _ASK_START for
+    everything else, never a silent allow. Any unrecognized option, or a negation that could flip a
+    non-creation classifier (git treats a later `--no-list` as cancelling `--list`, entering creation),
+    routes to ASK. A COPY makes a new ref at the source's commit, so its start is the source (explicit
+    <src>, else HEAD); a RENAME (-m/-M/--move) reuses an existing branch's commits and creates no new ref."""
     if not args:
         return None
     copying = False
-    for arg in args:
-        head = arg.split("=", 1)[0] if arg.startswith("--") else arg
-        if head in _BRANCH_NONCREATE or arg == "-u" or arg.startswith("-u"):
-            return None  # listing/delete/rename (incl. --contains=main), or a -u/--set-upstream form
-        if arg in ("-c", "-C") or head == "--copy":
-            copying = True  # branch copy: the new ref inherits the source commit's rootedness
-    ask = False
+    noncreate = False
+    ambiguous = False
     operands = []
     i = 0
     after_boundary = False
@@ -3794,28 +3791,38 @@ def _branch_command_creation_start(args):
             operands.append(arg)  # git branch has no pathspecs; post-`--` is the <name>/<start> operand
             i += 1
             continue
-        if arg in ("-c", "-C") or (arg.startswith("--") and arg.split("=", 1)[0] == "--copy"):
-            i += 1  # the copy flag itself, already recorded above
+        head = arg.split("=", 1)[0]
+        if arg in ("-c", "-C") or head == "--copy":
+            copying = True  # branch copy: the new ref inherits the source commit's rootedness
+            i += 1
+            continue
+        if head in _BRANCH_NONCREATE or arg == "-u" or arg.startswith("-u"):
+            noncreate = True  # a recognized listing/delete/rename/upstream operation
+            i += 1
             continue
         if arg.startswith("--"):
             if "=" not in arg and arg in _BRANCH_SAFE_BOOL:
                 i += 1
                 continue
-            ask = True  # an unknown long option, or an optional-value =form (--color/--column/...)
+            ambiguous = True  # unknown long option, a negation that may flip a classifier, or a =form
             i += 1
             continue
         if len(arg) > 1 and all(ch in _BRANCH_SAFE_SHORT for ch in arg[1:]):
+            if "l" in arg[1:]:
+                noncreate = True  # -l (clustered or bare) is --list: a listing operation, not a creation
             i += 1
             continue
-        ask = True  # a short cluster carrying a letter that is not a known boolean
+        ambiguous = True  # a short cluster carrying a letter that is not a known boolean
         i += 1
-    if not operands:
-        return None  # plain `git branch` (listing) or an all-option form with no branch name
-    if ask:
-        return _ASK_START
+    if ambiguous:
+        return _ASK_START  # fail SAFE to ASK on any unclassifiable shape, never a silent allow
+    if noncreate:
+        return None  # a confidently-recognized non-creation with no ambiguity
     if copying:
         # `git branch -c <src> <dst>` copies <src>; `git branch -c <dst>` copies the current HEAD.
         return operands[0] if len(operands) > 1 else "HEAD"
+    if not operands:
+        return None  # plain `git branch` listing
     return operands[1] if len(operands) > 1 else "HEAD"
 
 
@@ -3866,16 +3873,18 @@ def _worktree_creation_start(args):
             i += 1
             continue
         if len(arg) > 1 and all(ch in _WORKTREE_SAFE_SHORT for ch in arg[1:]):
+            if "d" in arg[1:]:
+                detached = True  # -d is --detach for worktree add (short spelling)
             i += 1
             continue
         ask = True  # a short cluster carrying a letter that is not a known boolean
         i += 1
     if detached:
-        return None  # --detach creates no branch, whatever the operands
+        return None  # --detach/-d creates no branch, whatever the operands
+    if ask:
+        return _ASK_START  # an unrecognized/ambiguous option shape: fail SAFE to ASK
     if not operands:
         return None
-    if ask:
-        return _ASK_START
     return operands[1] if len(operands) > 1 else "HEAD"
 
 

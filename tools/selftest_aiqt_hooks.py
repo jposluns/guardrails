@@ -37,7 +37,7 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
-It covers branch_root (brnrot) through H1-H23: rooted creation allows, an orphaned explicit start
+It covers branch_root (brnrot) through H1-H26: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
 the switch long-form create and git-branch --track extract their start and deny an orphan; git-branch
 upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
@@ -2158,9 +2158,10 @@ def main():
                  "git checkout --tr origin/abbr", "ask")
         brexpect("(H22d) switch --force-cre (abbrev --force-create) asks",
                  "git switch --force-cre abbrbr orphan-start", "ask")
-        # H22e: a benign non-creation long option is not a creation-flag prefix, so it still allows.
-        brexpect("(H22e) checkout --patch (benign, non-creation) allows",
-                 "git checkout --patch abbrbr", "allow")
+        # H22e: under the fail-safe-ASK redesign an unrecognized long option ASKS (it could be an
+        # abbreviated creation flag), never a silent allow. (Superseded the pre-redesign allow expectation.)
+        brexpect("(H22e) checkout --patch (unrecognized long option) asks",
+                 "git checkout --patch abbrbr", "ask")
 
         # H23: a FAILURE of the shallow-repository probe must fail SAFE to unknown/ASK, never fall through
         # to ORPHANED/deny (round-5 codex MINOR; aligns the hook with the gate's cannot-evaluate posture).
@@ -2200,6 +2201,21 @@ def main():
         # (round-6 codex MAJOR: --detach was over-denied).
         brexpect("(H25) worktree add --detach <path> <orphan> allows",
                  "git worktree add --detach /tmp/wt-detach orphan-start", "allow")
+
+        # H26: fail-safe-ASK redesign (Architect 2026-09-02, round-7 cap). Any unclassifiable option shape
+        # ASKs rather than silently allowing OR falsely denying; the confidently-clean forms still probe.
+        brexpect("(H26a) branch --list --no-list (negation flips classifier) asks",
+                 "git branch --list --no-list qa orphan-start", "ask")
+        brexpect("(H26b) branch --delete --no-delete (negation) asks",
+                 "git branch --delete --no-delete qa orphan-start", "ask")
+        brexpect("(H26c) branch --unknown-flag creation asks",
+                 "git branch --unknown-flag qa orphan-start", "ask")
+        brexpect("(H26d) checkout --patch (benign unrecognized) asks (fail-safe)",
+                 "git checkout --patch somefile", "ask")
+        brexpect("(H26e) worktree add -d (short --detach) allows",
+                 "git worktree add -d /tmp/wt-shortd orphan-start", "allow")
+        brexpect("(H26f) branch -lv <pattern> is a listing, allows",
+                 "git branch -lv somepattern", "allow")
 
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
@@ -4135,7 +4151,7 @@ def main():
           "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
           "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
-          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H23 on structured "
+          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H26 on structured "
           "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
           "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
           "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "

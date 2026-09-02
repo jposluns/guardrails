@@ -299,6 +299,7 @@ def self_test():
         print("SELF-TEST ERROR: cannot create fixture root: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
+    skipped = []
     old_home = os.environ.get("HOME")
     fixture_home = temp / "home"
     fixture_home.mkdir()
@@ -400,10 +401,10 @@ def self_test():
             os.mkdir(v10_bytes)
         except (OSError, UnicodeError):
             v10_bytes = None
-            print(
-                "SELF-TEST NOTE: V10 skipped; this filesystem rejects a non-UTF-8 directory name, so "
-                "the non-UTF-8 git-output path cannot be exercised here (it runs on a byte-transparent "
-                "filesystem such as the Linux CI runner)."
+            skipped.append(
+                "V10 non-UTF-8-git-output (this filesystem rejects a non-UTF-8 directory name, so the "
+                "fixture cannot be built here; it runs on a byte-transparent filesystem such as the "
+                "Linux CI runner)"
             )
         if v10_bytes is not None:
             v10 = Path(os.fsdecode(v10_bytes))
@@ -426,8 +427,10 @@ def self_test():
         except (OSError, subprocess.SubprocessError, CannotEvaluate):
             shallow_ready = False
         if not shallow_ready:
-            print("SELF-TEST NOTE: V11 skipped; a shallow file:// clone could not be built here (the "
-                  "shallow branch-root path runs on the CI runner, which clones over file://).")
+            skipped.append(
+                "V11 shallow-clone (a shallow file:// clone could not be built here; the shallow "
+                "branch-root path runs where file:// clones are constructible, such as the CI runner)"
+            )
         else:
             v11_tree = _fixture_git(v11, "rev-parse", "HEAD^{tree}")
             v11_orphan = _commit_tree(v11, v11_tree, (), "orphan in shallow")
@@ -449,12 +452,17 @@ def self_test():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print(
-        "SELF-TEST PASS: V1-V11 cover rooted, orphaned, configured/report-only stale, partial rewrite, "
-        "underivable protected ref, missing head, malformed/negative threshold, two-base criss-cross, "
-        "non-repository, non-UTF-8-git-output, and shallow-clone (both cannot-evaluate) outcomes; verdicts "
-        "are asserted by exit code"
-    )
+    covered = ("rooted, orphaned, configured/report-only stale, partial rewrite, underivable protected "
+               "ref, missing head, malformed/negative threshold, two-base criss-cross, and non-repository")
+    if skipped:
+        # A declared case whose fixture could not be built in THIS environment is disclosed explicitly and
+        # is NOT counted as covered, so the pass can never falsely claim coverage it did not exercise.
+        print("SELF-TEST PASS (PARTIAL): verified " + covered + "; verdicts are asserted by exit code. "
+              "NOT VERIFIED HERE (declared cases whose fixtures could not be built in this environment): "
+              + "; ".join(skipped))
+    else:
+        print("SELF-TEST PASS: V1-V11 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
+              "(both cannot-evaluate) outcomes; verdicts are asserted by exit code")
     return 0
 
 
