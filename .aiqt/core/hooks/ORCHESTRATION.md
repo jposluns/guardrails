@@ -1,8 +1,8 @@
 # The orchestrator-integrity suite
 
-Six controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
-tools), a record-drift gate, a background-dispatch truncation guard, an unattended-ask blocker, a
-resume audit with a mutation barrier, and a mistakes register. One registry declares the adopter's
+Seven controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
+tools), a record-drift gate, a background-dispatch truncation guard, a verification-delivery
+truncation warning, an unattended-ask blocker, a resume audit with a mutation barrier, and a mistakes register. One registry declares the adopter's
 bindings; one pure decision core (decide_yield in scripts/aiqt_hooks.py) makes every yield judgement,
 so a new yield path is covered by adding a binding, never by re-implementing judgement.
 
@@ -25,6 +25,8 @@ keys except `version` are optional; an undeclared surface simply removes the pro
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
   "dispatch_tools": [],
+  "verify_commands": ["verification-command"],
+  "verify_delivery_paths": ["state/verification/", "reports/verdict.out"],
   "mistakes_register": "path",
   "staleness": {"external_hours": 24, "task_hours": 24},
   "escape": {"path": "path"}
@@ -36,7 +38,11 @@ keys except `version` are optional; an undeclared surface simply removes the pro
 `guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, and `pending-asks.jsonl`. The mode
 record carries a plain `Operating-mode: <text>` line; a mode containing `unattended` arms the ask
 blocker. The escape artefact (default `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by
-convention: its presence allows every yield and is logged to guard-events.
+convention: its presence allows every yield and is logged to guard-events. `verify_commands` declares
+verification dispatch command words (matched after basename resolution and leading assignments);
+`verify_delivery_paths` declares exact files or trees, with a trailing `/` marking a tree. Delivery paths
+may be absolute or repo-root-relative; wildcards, backslashes, control characters, and `.`/`..` or empty
+components are invalid. Either key may be omitted, leaving its detection arm inert.
 
 ## The adopter enumeration interface (AEI), protocol v1
 

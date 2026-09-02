@@ -1504,6 +1504,15 @@
         {
           "class": "c",
           "default": "warn",
+          "event": "PreToolUse",
+          "id": "orch-delivery-truncation",
+          "matcher": "Bash",
+          "platform": "claude-code",
+          "residue": "Coverage is exactly the adopter declaration: an undeclared verification command, delivery path, or subcommand-form dispatch is invisible, and the hook cannot prove the declarations complete. An absent or bad orchestration registry, absent keys, and malformed keys or entries leave the hook or affected arm silently unarmed; the suite blocking members surface a bad registry independently. The sink set is exactly head/tail; sed/awk row limits, grep -m, pagers, byte slicers, and internal truncation are unseen. A head/tail form that emits the whole input (for example tail -n +1 or head -n -0) still warns, because the sink is matched by command word, not by its arguments. The reader set is exactly cat/less/more/head/tail, so a delivery passed through jq, sed, grep, or a script before truncation can be missed. Matching is lexical, exact, and case-sensitive: aliases, functions, PATH shadows, env/sudo/command wrappers, sh -c, eval, xargs, sourced scripts, quote-fragmented words, expansions, substitutions, tilde, globs, symlink/hard-link indirection, and a prior cd can hide or mis-root a producer or operand; redirections are removed before matching, so a delivery fed to a reader by input redirection, or a producer whose stdout is redirected away from the pipe, is mis-judged. Cross-command or cross-turn truncation of an undeclared intermediate copy is invisible; a later direct head/tail read of a declared path is caught. Truncation inside a verifier, wrapper, remote service, or outside Bash is invisible. Safe-direction over-warns are accepted: tee preserving a full copy still warns because the displayed stream is truncated; a declared command reused for other work warns; and the raw parse-error fallback can match quoted prose or comments. The fallback does not cover a direct head/tail read without a pipe, and it recognizes only a literal pipe before head/tail, not |&, unlike the primary pipeline walk. The hook never inspects output, locates a verdict, or proves a completion marker; the post-execution vrfdlv discipline remains the gate, this control prevents nothing, and gate-weakening may independently ASK. The handler never asks or denies, but a dispatcher-level unreadable payload or crash follows the shared PreToolUse exit-2 contract. Stage bake is a recorded non-blocking posture: every fire attempts a best-effort guard-events append, which can itself fail without changing the warning; a later posture change or a permanent-warning schema extension requires a maintainer manifest edit based on bake evidence."
+        },
+        {
+          "class": "c",
+          "default": "warn",
           "event": "PostToolUse",
           "id": "orch-dispatch-ledger",
           "matcher": "Bash|TaskOutput",
@@ -1626,6 +1635,15 @@
       "family": "aiqt",
       "gates": [],
       "hooks": [
+        {
+          "class": "c",
+          "default": "warn",
+          "event": "PreToolUse",
+          "id": "orch-delivery-truncation",
+          "matcher": "Bash",
+          "platform": "claude-code",
+          "residue": "Coverage is exactly the adopter declaration: an undeclared verification command, delivery path, or subcommand-form dispatch is invisible, and the hook cannot prove the declarations complete. An absent or bad orchestration registry, absent keys, and malformed keys or entries leave the hook or affected arm silently unarmed; the suite blocking members surface a bad registry independently. The sink set is exactly head/tail; sed/awk row limits, grep -m, pagers, byte slicers, and internal truncation are unseen. A head/tail form that emits the whole input (for example tail -n +1 or head -n -0) still warns, because the sink is matched by command word, not by its arguments. The reader set is exactly cat/less/more/head/tail, so a delivery passed through jq, sed, grep, or a script before truncation can be missed. Matching is lexical, exact, and case-sensitive: aliases, functions, PATH shadows, env/sudo/command wrappers, sh -c, eval, xargs, sourced scripts, quote-fragmented words, expansions, substitutions, tilde, globs, symlink/hard-link indirection, and a prior cd can hide or mis-root a producer or operand; redirections are removed before matching, so a delivery fed to a reader by input redirection, or a producer whose stdout is redirected away from the pipe, is mis-judged. Cross-command or cross-turn truncation of an undeclared intermediate copy is invisible; a later direct head/tail read of a declared path is caught. Truncation inside a verifier, wrapper, remote service, or outside Bash is invisible. Safe-direction over-warns are accepted: tee preserving a full copy still warns because the displayed stream is truncated; a declared command reused for other work warns; and the raw parse-error fallback can match quoted prose or comments. The fallback does not cover a direct head/tail read without a pipe, and it recognizes only a literal pipe before head/tail, not |&, unlike the primary pipeline walk. The hook never inspects output, locates a verdict, or proves a completion marker; the post-execution vrfdlv discipline remains the gate, this control prevents nothing, and gate-weakening may independently ASK. The handler never asks or denies, but a dispatcher-level unreadable payload or crash follows the shared PreToolUse exit-2 contract. Stage bake is a recorded non-blocking posture: every fire attempts a best-effort guard-events append, which can itself fail without changing the warning; a later posture change or a permanent-warning schema extension requires a maintainer manifest edit based on bake evidence."
+        },
         {
           "class": "b",
           "default": "block",

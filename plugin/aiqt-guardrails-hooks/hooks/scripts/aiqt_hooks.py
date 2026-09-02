@@ -5879,6 +5879,152 @@ def orch_truncation_guard(data):
         "AIQT guardrail: asked on a background dispatch whose full-output capture it does not parse.")
 
 
+_ORCH_DELIVERY_READERS = frozenset(("cat", "less", "more", "head", "tail"))
+_ORCH_DELIVERY_DYNAMIC_CHARS = frozenset(("$", "`", "*", "?", "["))
+
+
+def _orch_delivery_entry(raw, root):
+    """Parse one delivery path entry into (kind, normalized absolute path, declared body). A trailing
+    slash marks a tree; absolute paths are accepted, while backslashes, control characters, wildcards,
+    and empty/dot/dot-dot components are rejected. Purely lexical: no filesystem access."""
+    if not isinstance(raw, str) or not raw or "\\" in raw:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in raw):
+        return None
+    if any(ch in raw for ch in ("*", "?", "[")):
+        return None
+    kind = "tree" if raw.endswith("/") else "file"
+    body = raw[:-1] if kind == "tree" else raw
+    if not body:
+        return None
+    parts = body.split("/")
+    if os.path.isabs(body) and parts and parts[0] == "":
+        parts = parts[1:]
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    path = body if os.path.isabs(body) else os.path.join(root, *body.split("/"))
+    try:
+        return (kind, os.path.normpath(path), body)
+    except (OSError, ValueError):
+        return None
+
+
+def _orch_delivery_declarations(reg, root):
+    """Return the independently usable command-word and delivery-path declarations. A malformed key
+    or entry drops only that arm, matching the fail-open posture of the advisory orchestration hooks."""
+    raw_commands = reg.get("verify_commands")
+    commands = frozenset(
+        value for value in (raw_commands if isinstance(raw_commands, list) else [])
+        if isinstance(value, str) and value and "/" not in value and "\\" not in value
+        and not any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value))
+    raw_paths = reg.get("verify_delivery_paths")
+    entries = []
+    for raw in raw_paths if isinstance(raw_paths, list) else []:
+        entry = _orch_delivery_entry(raw, root)
+        if entry is not None:
+            entries.append(entry)
+    return commands, entries
+
+
+def _pipeline_truncating_sink(segments, index):
+    """The first head/tail stage downstream of index in the same | or |& pipeline, else None."""
+    cursor = index
+    while cursor < len(segments) and segments[cursor][1] in ("|", "|&"):
+        cursor += 1
+        while cursor < len(segments) and not segments[cursor][0]:
+            cursor += 1
+        if cursor >= len(segments):
+            return None
+        word = _command_word(segments[cursor][0])
+        if word in _TRUNCATING_SINKS:
+            return word
+    return None
+
+
+def _orch_delivery_operand_matches(tokens, entries, root):
+    """Whether a reader operand lexically names a declared delivery file or tree."""
+    start = _command_word_index(tokens) + 1
+    for operand in tokens[start:]:
+        if operand.startswith("-") or _ENV_ASSIGN_RE.match(operand):
+            continue
+        if operand.startswith("~") or any(ch in operand for ch in _ORCH_DELIVERY_DYNAMIC_CHARS):
+            continue
+        try:
+            candidate = os.path.normpath(
+                operand if os.path.isabs(operand) else os.path.join(root, operand))
+        except (OSError, ValueError):
+            continue
+        for kind, path, _body in entries:
+            if candidate == path or (kind == "tree" and candidate.startswith(path.rstrip(os.sep) + os.sep)):
+                return True
+    return False
+
+
+def _orch_delivery_raw_marker(command, commands, entries):
+    """The declared producer marker visible in raw unparseable text, or None."""
+    for word in sorted(commands):
+        if re.search(r"(?<![A-Za-z0-9_]){}(?![A-Za-z0-9_])".format(re.escape(word)), command):
+            return word
+    for _kind, _path, body in entries:
+        if body in command:
+            return "declared delivery path"
+    return None
+
+
+def _orch_delivery_warn(root, producer, sink):
+    _orch_guard_event(root, "delivery-truncation", "warn",
+                      "{} piped/read through {}".format(producer, sink))
+    return (0, {"systemMessage": (
+        "AIQT guardrail (delivery truncation, BAKE posture: surfacing, not blocking): rules "
+        "vrfdlv/trkasy: declared verification producer {!r} reaches truncating sink {!r}. Read the "
+        "complete persisted delivery or re-run it unfiltered; a verification verdict or completion "
+        "marker can sit at either end of the stream that head/tail discards."
+        .format(producer, sink))}, None)
+
+
+def orch_delivery_truncation(data):
+    """vrfdlv/trkasy, PreToolUse/Bash, stage BAKE: warn when a registry-declared verification
+    producer feeds head/tail in the same pipeline, or a fixed reader truncates a declared delivery path.
+    Registry/config/payload faults fail open because this handler is advisory and never asks or denies."""
+    if data.get("tool_name") != "Bash":
+        return _allow()
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()
+    commands, entries = _orch_delivery_declarations(reg, root)
+    if not commands and not entries:
+        return _allow()
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return _allow()
+    try:
+        segments = _segments(command)
+    except ValueError:
+        marker = _orch_delivery_raw_marker(command, commands, entries)
+        raw_sink = _RAW_TRUNCATE_RE.search(command)
+        if marker is not None and raw_sink is not None:
+            sink = raw_sink.group(0).lstrip("|").strip().split()[0]
+            return _orch_delivery_warn(root, marker, sink)
+        return _allow()
+    for index, (tokens, _sep_after) in enumerate(segments):
+        word = _command_word(tokens)
+        if word in commands:
+            sink = _pipeline_truncating_sink(segments, index)
+            if sink is not None:
+                return _orch_delivery_warn(root, word, sink)
+        if word in _TRUNCATING_SINKS and _orch_delivery_operand_matches(tokens, entries, root):
+            return _orch_delivery_warn(root, word, word)
+        if word in _ORCH_DELIVERY_READERS and _orch_delivery_operand_matches(tokens, entries, root):
+            sink = _pipeline_truncating_sink(segments, index)
+            if sink is not None:
+                return _orch_delivery_warn(root, word, sink)
+    return _allow()
+
+
 def orch_dispatch_ledger(data):
     """trkasy/recfst, PostToolUse (recorder, never blocks): append launch rows for background Bash and
     registry-declared dispatch tools, completion rows for TaskOutput reads. A failed write SURFACES
@@ -6695,6 +6841,7 @@ HANDLERS = {
     "orch_yield_tool": orch_yield_tool,
     "orch_ask_guard": orch_ask_guard,
     "orch_truncation_guard": orch_truncation_guard,
+    "orch_delivery_truncation": orch_delivery_truncation,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
@@ -6727,6 +6874,7 @@ HANDLER_EVENT = {
     "orch_yield_tool": PRETOOL,
     "orch_ask_guard": PRETOOL,
     "orch_truncation_guard": PRETOOL,
+    "orch_delivery_truncation": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",

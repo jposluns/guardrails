@@ -93,6 +93,8 @@ class Fixture:
             "state_dir": str(self.state),
             "yield_tools": ["ScheduleWakeup", "CronCreate"],
             "dispatch_tools": [],
+            "verify_commands": ["vrun"],
+            "verify_delivery_paths": [".local/state/vrun/", "reports/verdict.out"],
             "staleness": {"external_hours": 24, "task_hours": 24},
         }
         (self.root / ".aiqt").mkdir()
@@ -481,6 +483,92 @@ def main():
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
 
+
+        # ---------- GD-122: verification-delivery truncation warning ----------
+        dt = Fixture(tmp, "delivery-truncation")
+        dt_reg_path = dt.root / ".aiqt" / "orchestration.local.json"
+        dt_reg = json.loads(dt_reg_path.read_text(encoding="utf-8"))
+        delivery = lambda command: aiqt_hooks.orch_delivery_truncation(
+            dt.payload("PreToolUse", "Bash", {"command": command}))
+        delivery_cases = [
+            ("a", "vrun run | tail -5", "warn"),
+            ("b", "vrun run | head", "warn"),
+            ("c", "vrun run 2>&1 | tail -20", "warn"),
+            ("d", "vrun run |& head -20", "warn"),
+            ("e", "/usr/local/bin/vrun | tail", "warn"),
+            ("f", "MODE=qa vrun | head", "warn"),
+            ("g", "vrun |\ntail -5", "warn"),
+            ("h", "vrun | sed 's/x/y/' | tail -5", "warn"),
+            ("i", "vrun | tee full.out | tail -5", "warn"),
+            ("j", "cat .local/state/vrun/run-42.out | tail -5", "warn"),
+            ("k", "less reports/verdict.out | head", "warn"),
+            ("l", "tail -5 .local/state/vrun/run-42.out", "warn"),
+            ("m", "head .local/state/vrun/x.out", "warn"),
+            ("n", "cat {}/.local/state/vrun/run.out | tail".format(dt.root), "warn"),
+            ("o", "vrun > .local/state/vrun/run.out; tail -5 .local/state/vrun/run.out", "warn"),
+            ("p", "vrun run", "allow"),
+            ("q", "vrun | tee full.out", "allow"),
+            ("r", "vrun run > run.out", "allow"),
+            ("s", "vrun | less", "allow"),
+            ("t", "vrun | grep ERROR", "allow"),
+            ("u", "cat .local/state/vrun/run.out", "allow"),
+            ("v", "cat .local/state/other/x.out | tail -5", "allow"),
+            ("w", "cat build.log | tail -50", "allow"),
+            ("x", "pytest | tail", "allow"),
+            ("y", "vrun; build-log | tail", "allow"),
+            ("z", "echo 'vrun | tail'", "allow"),
+            ("aa", "vrun # | tail", "allow"),
+            ("ab", "tail -5 build.log", "allow"),
+            ("ag", 'vrun | tail "unbalanced', "warn"),
+            ("ah", 'foo "unbalanced | tail', "allow"),
+            ("ai", 'vrun "unbalanced', "allow"),
+        ]
+        for case_id, command, want in delivery_cases:
+            check("delivery/dt-{}".format(case_id), _verdict(delivery(command)), want)
+
+        dt_absent = Fixture(tmp, "delivery-no-registry")
+        (dt_absent.root / ".aiqt" / "orchestration.local.json").unlink()
+        check("delivery/dt-ac", _verdict(aiqt_hooks.orch_delivery_truncation(
+            dt_absent.payload("PreToolUse", "Bash", {"command": "vrun | tail -5"}))), "allow")
+
+        no_keys = dict(dt_reg)
+        no_keys.pop("verify_commands")
+        no_keys.pop("verify_delivery_paths")
+        dt_reg_path.write_text(json.dumps(no_keys), encoding="utf-8")
+        check("delivery/dt-ad", _verdict(delivery("vrun | tail -5")), "allow")
+
+        malformed = dict(dt_reg)
+        malformed["verify_commands"] = [None, 7]
+        malformed["verify_delivery_paths"] = "not-a-list"
+        dt_reg_path.write_text(json.dumps(malformed), encoding="utf-8")
+        check("delivery/dt-ae", _verdict(delivery("vrun | tail -5")), "allow")
+
+        dt_reg_path.write_text("{broken", encoding="utf-8")
+        check("delivery/dt-af", _verdict(delivery("vrun | tail -5")), "allow")
+        dt_reg_path.write_text(json.dumps(dt_reg), encoding="utf-8")
+
+        check("delivery/dt-aj", _verdict(aiqt_hooks.orch_delivery_truncation(
+            dt.payload("PreToolUse", "Bash", {}))), "allow")
+        check("delivery/dt-ak-missing", _verdict(aiqt_hooks.orch_delivery_truncation(
+            {"hook_event_name": "PreToolUse", "cwd": str(dt.root),
+             "tool_input": {"command": "vrun | tail"}})), "allow")
+        check("delivery/dt-ak-other", _verdict(aiqt_hooks.orch_delivery_truncation(
+            dt.payload("PreToolUse", "Write", {"command": "vrun | tail"}))), "allow")
+
+        for label, bad_path in (("dotdot", "bad/../run.out"),
+                                ("wildcard", "bad/*.out"),
+                                ("control", "bad/\x01.out")):
+            bad_entry = dict(dt_reg)
+            bad_entry["verify_commands"] = []
+            bad_entry["verify_delivery_paths"] = [bad_path]
+            dt_reg_path.write_text(json.dumps(bad_entry), encoding="utf-8")
+            check("delivery/dt-al-{}".format(label),
+                  _verdict(delivery("cat {} | tail".format(bad_path))), "allow")
+        dt_reg_path.write_text(json.dumps(dt_reg), encoding="utf-8")
+        check("delivery/guard-event-written",
+              "\"kind\": \"delivery-truncation\"" in
+              (dt.state / "guard-events.jsonl").read_text(encoding="utf-8"), True)
+
         # ---------- Surface B: the validation membrane ----------
         import time as _time
         check("vB/exact-int-valid", aiqt_hooks._v_exact_int(3, 0, 9999), 3)
@@ -657,7 +745,7 @@ def main():
           "row; the truncation guard allows a plain metacharacter-free background command and asks on "
           "any shell syntax or reserved word, asks on a foreground bare-& detach while dropping a "
           "word-start `#` comment and failing an unbalanced/ANSI-C quote toward ASK rather than a silent "
-          "allow; the ledger records launches and completions; the resume "
+          "allow; the delivery-truncation hook warns on declared verification producers and delivery paths feeding head/tail; the ledger records launches and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; and the prompt stamp "
           "resets guard counters from genuine human input")
     return 0
