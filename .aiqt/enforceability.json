@@ -87,6 +87,33 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "brnrot",
+      "family": "aiqt",
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "branch-root",
+          "platform": "ci",
+          "residue": "Judges only the revision under gate against the derived protected ref: it does not scan the repository's other branches, cannot prove where a branch was originally cut (a branch cut from a sibling that itself descends from the protected line still resolves), passes a fork point that survives a partial rewrite unless the configured lag threshold catches it, does not fail on multiple merge bases, and where no threshold is configured the staleness layer reports and never blocks. With multiple merge bases the reported first-parent lag is the MINIMUM (most-lenient) across bases, so a criss-cross history is judged by its nearest fork point. Replace refs are neutralized in the scrubbed env (GIT_NO_REPLACE_OBJECTS=1) so a `git replace --graft` cannot mask an orphan as rooted through merge-base; the on-disk .git/info/grafts residual is out of scope (an accidental-case guardrail; full adversarial-grade parent-rewrite resistance is not this gate's remit). A shallow repository maps a merge-base miss to cannot-evaluate (exit 2) with a `git fetch --unshallow` remediation, never a false ORPHANED, because truncated history cannot be told from a genuinely absent root (the CI gate checks out at fetch-depth:0). When the protected ref is derived from the default origin/HEAD, a stale local origin/HEAD (not refreshed since the last fetch) can skew the derived protected tip, so both the orphaned and the first-parent-lag verdicts are only as current as the clone's remote-tracking state; pass --protected an authoritative ref, or refresh origin/HEAD, when that currency matters. A degenerate invocation naming the SAME ref for --protected and --head is a self-comparison that always resolves (a ref is rooted on itself); the caller supplies distinct refs.",
+          "script": "tools/check_branch_root.py"
+        }
+      ],
+      "hooks": [
+        {
+          "class": "c",
+          "default": "block",
+          "event": "PreToolUse",
+          "id": "branch-root-guard",
+          "matcher": "Bash",
+          "platform": "claude-code",
+          "residue": "Lexical trigger over an open command grammar: a branch created through a wrapper, alias, script, or shell indirection is not seen, and only creation forms are checked, so switching to an existing orphaned branch, or continuing work on the current branch, passes to the CI gate. It recognizes creation INTENT broadly (a create flag in any form: checkout -b/-B and switch -c/-C or --create/--force-create, attached, =value, or clustered; a bare `git branch <name>` operand; and `git worktree add`) and then extracts the start point ONLY when every remaining option sits on a small, high-confidence SAFE-BOOLEAN allowlist; any option that is not confidently classifiable (an unknown long option, an ambiguous optional-value such as --color/--column, a clustered short flag that does not fully decompose, or a --track/-t/--orphan tracking-or-orphan form) routes to a fail-SAFE ask rather than a silent allow, since this hook is best-effort and the CI branch-root gate is the authoritative backstop. What it PROVES at creation time is only that the start point is ORPHANED (no merge base with origin/HEAD); a rooted-but-STALE or old start point (for example checkout -b x origin/HEAD~1) still has a merge base and PASSES this hook, and its staleness is caught only by the CI gate's configured --max-lag first-parent-lag threshold, not here. Replace refs are neutralized on the probe (GIT_NO_REPLACE_OBJECTS=1) so a grafted parent cannot make an orphan look rooted; the on-disk .git/info/grafts residual is out of scope (an accidental-case guardrail). A shallow clone cannot distinguish a missing merge base from unfetched history, so a merge-base miss in a shallow repository routes to ASK, never a deny. A cd/pushd in an earlier segment of the compound command, a non-cosmetic ambient GIT_* variable, or a command-local -C/--git-dir/--work-tree redirect all leave the target repository unreconcilable with the session cwd, so the creation routes to ASK. The ancestry answer comes from the clone's remote-tracking state, which can be stale until the next fetch. The env-assignment command form is best-effort, as for the sibling git hooks. The hook catches only EXPLICIT-start creation forms; an IMPLICIT-start (DWIM) form where git auto-creates a branch from a matching remote-tracking ref (a bare git checkout/switch <name> whose name matches a remote branch, or a --guess/--guess-remote guess) has a start git resolves at runtime and not lexically visible here, so it is routed to ASK where a guess flag is present and otherwise passes the hook and is caught by the authoritative CI branch-root gate, which judges the actual post-creation ancestry."
+        }
+      ],
+      "source": ".aiqt/core/rules/integ-branch-rooted-on-live-main.md",
+      "status": "gate-linked"
+    },
+    {
       "corpus-id": "chgchk",
       "family": "aiqt",
       "gates": [],

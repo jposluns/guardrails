@@ -4668,3 +4668,48 @@ start-line = 19
 end-line = 22
 canonical-text = "Before relying on the whole, it confirms\nit has observed the whole, by reading through to an observed end-of-source, by a search scoped to the\nentire artefact, or by a count reconciled against the artefact's true size, and where only a slice was\nseen it scopes its claim to that slice or widens the read."
 source-digest = "1c8eba842cf43ab8c8f2b8a6e691b967115f6f922cd264209644d3daa055ed1f"
+
+[[clause]]
+clause-id = "brnrot.1"
+corpus-id = "brnrot"
+source-path = ".aiqt/core/rules/integ-branch-rooted-on-live-main.md"
+start-line = 18
+end-line = 19
+canonical-text = "A working branch is cut from the current tip of the protected line of development, so its ancestry\nalways resolves to the live protected line."
+source-digest = "f3197be5d8d73e4ea53880a44c227d390a9b4c08d99f4cc0d00bed8a29026024"
+
+[[clause]]
+clause-id = "brnrot.2"
+corpus-id = "brnrot"
+source-path = ".aiqt/core/rules/integ-branch-rooted-on-live-main.md"
+start-line = 19
+end-line = 22
+canonical-text = "A branch whose common ancestor with the protected line no\nlonger resolves, because a history rewrite, a re-initialization, or a squash-merge retired the root it\nwas cut from, is orphaned: no work is dispatched onto it and nothing integrates from it until it is\nre-homed onto the live line by a recut or a replay of its unique commits."
+source-digest = "f3197be5d8d73e4ea53880a44c227d390a9b4c08d99f4cc0d00bed8a29026024"
+
+[[clause]]
+clause-id = "brnrot.3"
+corpus-id = "brnrot"
+source-path = ".aiqt/core/rules/integ-branch-rooted-on-live-main.md"
+start-line = 22
+end-line = 24
+canonical-text = "A branch whose ancestry still\nresolves but whose fork point has fallen behind the line's configured freshness horizon is stale and is\nre-homed on the same terms."
+source-digest = "f3197be5d8d73e4ea53880a44c227d390a9b4c08d99f4cc0d00bed8a29026024"
+
+[[clause]]
+clause-id = "brnrot.4"
+corpus-id = "brnrot"
+source-path = ".aiqt/core/rules/integ-branch-rooted-on-live-main.md"
+start-line = 26
+end-line = 27
+canonical-text = "The check that asserts this derives the protected ref from the repository it runs in and\nfails closed when that ref, or the revision under check, cannot be resolved."
+source-digest = "f3197be5d8d73e4ea53880a44c227d390a9b4c08d99f4cc0d00bed8a29026024"
+
+[[clause]]
+clause-id = "brnrot.5"
+corpus-id = "brnrot"
+source-path = ".aiqt/core/rules/integ-branch-rooted-on-live-main.md"
+start-line = 24
+end-line = 26
+canonical-text = "On git the signal is the merge base between the protected ref and the\nbranch: where it resolves to a commit the branch is rooted, and where it resolves to nothing the branch\nis orphaned."
+source-digest = "f3197be5d8d73e4ea53880a44c227d390a9b4c08d99f4cc0d00bed8a29026024"

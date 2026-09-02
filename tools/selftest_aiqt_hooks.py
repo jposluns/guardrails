@@ -37,6 +37,14 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
+It covers branch_root (brnrot) through H1-H12: rooted creation allows, an orphaned explicit start
+denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
+the switch long-form create and git-branch --track extract their start and deny an orphan; git-branch
+upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
+unknown-arity option in a creation-ish command ASK rather than silently allow; and a rooted-but-stale
+start allows (only the CI gate's --max-lag catches staleness). Every outcome is asserted from the
+handler's structured decision.
+
 It also covers the gate-weakening guard (gate_weakening, gatdis): a git verification-hook bypass
 (--no-verify on commit/merge/push/pull/rebase/am, exact or abbreviated; the short -n only on
 commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failure is swallowed
@@ -1979,6 +1987,168 @@ def main():
                 "git diff -S --stat", "ask")
         dexpect("(f117r7-j) genuine git log -p still denies (confirmed console patch)", "git log -p", "deny")
 
+        # === branch_root (brnrot): H1-H5 structured branch-creation decisions =================
+        brg = aiqt_hooks.branch_root
+        br_repo = _init_repo(tmp / "branch-root-repo")
+        brr = str(br_repo)
+        # Give the protected line depth >= 2 so origin/HEAD~1 names a rooted ancestor (the H12 stale
+        # case). _init_repo leaves HEAD on `main`, so this second commit advances the protected tip.
+        (br_repo / "second.txt").write_text("second\n", encoding="utf-8")
+        _git(br_repo, "add", "second.txt")
+        _git(br_repo, "commit", "-q", "-m", "second", env_identity=True)
+        br_tip = subprocess.run(
+            ["git", "-C", brr, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        _git(br_repo, "update-ref", "refs/remotes/origin/main", br_tip)
+        _git(br_repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+        def brexpect(label, command, want):
+            got = _decision(brg, command, cwd=brr)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # H1: implicit HEAD is rooted on origin/HEAD.
+        brexpect("(H1) checkout -b from rooted HEAD allows", "git checkout -b x", "allow")
+
+        # H2: a parentless commit in the same object database is an explicit orphan start.
+        br_tree = subprocess.run(
+            ["git", "-C", brr, "rev-parse", "HEAD^{tree}"],
+            check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        br_orphan = subprocess.run(
+            ["git", "-C", brr, "-c", "user.name=Test", "-c",
+             "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+             "commit-tree", br_tree],
+            input="orphan root\n", check=True, capture_output=True, text=True,
+            timeout=30).stdout.strip()
+        _git(br_repo, "update-ref", "refs/heads/orphan-start", br_orphan)
+        brexpect("(H2) checkout -b from orphan denies",
+                 "git checkout -b x orphan-start", "deny")
+
+        # H6: the switch long-form create (--create/--force-create) is now recognized, so an orphan
+        # start denies just like the short -c/-C form (previously the long forms were unhandled and the
+        # command silently passed).
+        brexpect("(H6a) switch --create from orphan denies",
+                 "git switch --create x orphan-start", "deny")
+        brexpect("(H6b) switch --force-create from orphan denies",
+                 "git switch --force-create x orphan-start", "deny")
+
+        # H7: git branch models --track as BOOLEAN, so `git branch --track <name> <start>` extracts the
+        # start and denies an orphan (previously --track wrongly consumed the branch NAME as its value
+        # and the orphan-rooted create silently passed).
+        brexpect("(H7) branch --track from orphan denies",
+                 "git branch --track x orphan-start", "deny")
+
+        # H8: git branch upstream-setting forms are non-creation and are not judged.
+        brexpect("(H8a) branch -u <upstream> <name> is non-creation allows",
+                 "git branch -u origin/main x", "allow")
+        brexpect("(H8b) branch --set-upstream-to=<upstream> <name> is non-creation allows",
+                 "git branch --set-upstream-to=origin/main x", "allow")
+
+        # H9: creation-ish forms whose start point cannot be extracted cleanly ASK (fail safe), never
+        # silently allow: --track/-t on checkout/switch, and --orphan/--track on worktree add.
+        brexpect("(H9a) checkout --track asks", "git checkout --track origin/main", "ask")
+        brexpect("(H9b) checkout -t asks", "git checkout -t origin/main", "ask")
+        brexpect("(H9c) switch --track asks", "git switch --track origin/main", "ask")
+        brexpect("(H9d) worktree add --orphan asks", "git worktree add --orphan ../wt-orphan", "ask")
+        brexpect("(H9e) worktree add --track asks",
+                 "git worktree add --track -b x ../wt-track origin/main", "ask")
+
+        # H10: git worktree add extracts an explicit start; an orphan start denies (--orphan is no
+        # longer mismodelled as consuming the worktree PATH, and the path/start operands are read right).
+        brexpect("(H10) worktree add <path> <orphan-start> denies",
+                 "git worktree add ../wt-den orphan-start", "deny")
+
+        # H11: an unmodelled option of unknown arity in a creation-ish command ASKS rather than risk a
+        # mis-extracted start (fail safe over a fragile full-grammar model).
+        brexpect("(H11) checkout -b with an unknown option asks",
+                 "git checkout -b x --unknown-opt", "ask")
+
+        # H12: a rooted-but-STALE start (an old ancestor of origin/HEAD) PASSES the hook; only the CI
+        # gate's configured --max-lag catches staleness (documented residue, disclose-guard-residuals).
+        brexpect("(H12) checkout -b from a stale-but-rooted start allows",
+                 "git checkout -b x origin/HEAD~1", "allow")
+
+        # H3: origin/HEAD cannot be derived, so the creation asks rather than silently allowing.
+        _git(br_repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        brexpect("(H3) missing origin/HEAD asks", "git checkout -b x", "ask")
+
+        # H4: non-creation git commands are untouched even while origin/HEAD is absent.
+        for br_cmd in ("git status", "git log --oneline", "git branch"):
+            brexpect("(H4) {} allows".format(br_cmd), br_cmd, "allow")
+
+        # H5: a non-git command is outside the matcher logic.
+        brexpect("(H5) non-git command allows", "printf hello", "allow")
+
+        # H3 above deleted origin/HEAD; restore it so the H13+ ancestry probes have a protected ref.
+        _git(br_repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+        # H13: F2 round-2 forms the round-1 parser silently ALLOWED now extract the start and DENY an
+        # orphan: an attached =value switch create, and a clustered short create.
+        brexpect("(H13a) switch --create=NAME from orphan denies",
+                 "git switch --create=x orphan-start", "deny")
+        brexpect("(H13b) switch --force-create=NAME from orphan denies",
+                 "git switch --force-create=x orphan-start", "deny")
+        brexpect("(H13c) checkout clustered -qbNAME from orphan denies",
+                 "git checkout -qbfoo orphan-start", "deny")
+
+        # H14: --recurse-submodules is BOOLEAN for git branch (so the start is extracted and an orphan
+        # denies); --color is an ambiguous optional-value the redesign will not classify, so it ASKS
+        # rather than silently allow (its orphan is caught by the ASK or the CI gate).
+        brexpect("(H14a) branch --recurse-submodules from orphan denies",
+                 "git branch --recurse-submodules x orphan-start", "deny")
+        brexpect("(H14b) branch with trailing --color asks (unclassifiable optional-value)",
+                 "git branch x orphan-start --color", "ask")
+
+        # H15: a cd/pushd BEFORE the git-creation segment leaves the target repository unreconcilable
+        # with the session cwd, so the creation ASKS (F3) rather than probe the wrong repo.
+        brexpect("(H15a) cd-prefixed checkout -b asks",
+                 "cd /tmp && git checkout -b x orphan-start", "ask")
+        brexpect("(H15b) pushd-prefixed switch -c asks",
+                 "pushd /tmp && git switch -c x orphan-start", "ask")
+
+        # H16: non-creation git branch forms in their =value and attached-upstream spellings are
+        # correctly non-creation ALLOWs (F5), not over-blocked or over-asked.
+        brexpect("(H16a) branch --contains=main is non-creation allows",
+                 "git branch --contains=main", "allow")
+        brexpect("(H16b) branch --merged=main is non-creation allows",
+                 "git branch --merged=main", "allow")
+        brexpect("(H16c) branch --points-at=main <glob> is non-creation allows",
+                 "git branch --points-at=main 'ma*'", "allow")
+        brexpect("(H16d) branch -u<upstream> <name> (attached) is non-creation allows",
+                 "git branch -umain feature", "allow")
+
+        # H17: a clustered short create where the create letter is NOT first (-mb = -m -b) still extracts
+        # no clean start, so it ASKS rather than silently allowing (round-3 claude MAJOR; makes the
+        # "clustered -> ASK" residue disclosure true).
+        brexpect("(H17a) checkout -mb (create letter not first) asks",
+                 "git checkout -mb feat orphan-start", "ask")
+        brexpect("(H17b) switch -mc (create letter not first) asks",
+                 "git switch -mc feat orphan-start", "ask")
+        # H18: --guess enables DWIM auto-creation from a matching remote (implicit start) -> ASK.
+        brexpect("(H18) checkout --guess asks (DWIM implicit start)",
+                 "git checkout --guess feat", "ask")
+        # H19: for checkout, everything after -- is a pathspec, so -b feat -- path is cut from HEAD (rooted)
+        # -> allow (round-3 claude MINOR: the post-'--' token is no longer mis-read as the start).
+        brexpect("(H19) checkout -b feat -- path is cut from HEAD allows",
+                 "git checkout -b feat -- path", "allow")
+        # H20: git worktree add --guess-remote may pick a matching remote-tracking branch as the start
+        # (implicit) -> ASK rather than default to HEAD (round-3 codex MAJOR-2).
+        brexpect("(H20) worktree add --guess-remote asks (implicit start)",
+                 "git worktree add --guess-remote /tmp/wt-x", "ask")
+
+        # H21: an explicit orphan start given AFTER `--` is a real creation form for switch/branch/worktree
+        # (they have no pathspecs), so it is collected and DENIES an orphan (round-4 codex BLOCKER: fix-3 had
+        # over-applied checkout's post-`--`-is-a-pathspec treatment to all three).
+        brexpect("(H21a) branch -- <name> <orphan> denies",
+                 "git branch -- boundary orphan-start", "deny")
+        brexpect("(H21b) switch -c <name> -- <orphan> denies",
+                 "git switch -c switchboundary -- orphan-start", "deny")
+        brexpect("(H21c) worktree add -b <name> -- <path> <orphan> denies",
+                 "git worktree add -b wtboundary -- /tmp/wt-b orphan-start", "deny")
+        # H21d: for checkout, post-`--` remains a pathspec, so the branch is cut from HEAD (rooted) -> allow.
+        brexpect("(H21d) checkout -b <name> -- <pathspec> is cut from HEAD allows",
+                 "git checkout -b coboundary -- orphan-start", "allow")
+
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
         # future tokenizer regression is caught at the tokenizer, not only through a handler outcome.
@@ -3913,6 +4083,17 @@ def main():
           "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
           "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
+          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H12 on structured "
+          "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
+          "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
+          "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "
+          "the switch long-form create (--create/--force-create) and git-branch --track extract their "
+          "start and DENY an orphan; git-branch upstream forms (-u, --set-upstream-to=) are "
+          "non-creation ALLOWs; --track/-t and --orphan on checkout/switch/worktree and any "
+          "unknown-arity option in a creation-ish command ASK (fail safe, never a silent allow); and a "
+          "rooted-but-stale start (origin/HEAD~1) ALLOWs, staleness being the CI gate's --max-lag job. "
+          "The handler's ancestry decision is read from git exit status, never output matching, while "
+          "the open command-grammar residual remains disclosed in the hook manifest. The "
           "inherent lexical boundary; and the safe-direction over-DENIES hold: --force "
           "--no-force, --delete --no-delete, --force-if-includes alone, and --dry-run with a "
           "force or delete spelling all DENY)"

@@ -38,6 +38,7 @@
 .aiqt/core/rules/cost-tier.md text eol=lf
 .aiqt/core/rules/integ-anything-wrong-fixed-first.md text eol=lf
 .aiqt/core/rules/integ-branch-and-merge-on-green.md text eol=lf
+.aiqt/core/rules/integ-branch-rooted-on-live-main.md text eol=lf
 .aiqt/core/rules/integ-check-fails-closed-on-unreadable.md text eol=lf
 .aiqt/core/rules/integ-commit-identity.md text eol=lf
 .aiqt/core/rules/integ-gate-discipline.md text eol=lf
@@ -189,6 +190,7 @@
 .claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md text eol=lf
 .claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md text eol=lf
 .claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md text eol=lf
+.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md text eol=lf
 .claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md text eol=lf
 .claude/rules/aiqt/10-INTEG-commit-identity.md text eol=lf
 .claude/rules/aiqt/10-INTEG-gate-discipline.md text eol=lf
@@ -313,6 +315,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-branch-and-merge-on-green.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-branch-rooted-on-live-main.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-check-fails-closed-on-unreadable.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-commit-identity.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-gate-discipline.mdc text eol=lf
@@ -498,6 +501,7 @@ tools/_walk.py text eol=lf
 tools/aei_backlog_md.py text eol=lf
 tools/check_applies.py text eol=lf
 tools/check_artifact_checksums.py text eol=lf
+tools/check_branch_root.py text eol=lf
 tools/check_byte_canon.py text eol=lf
 tools/check_clauses.py text eol=lf
 tools/check_crosswalk.py text eol=lf
