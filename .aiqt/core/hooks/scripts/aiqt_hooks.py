@@ -3608,7 +3608,7 @@ def protected_line(data):
 # --- brnrot: branch creation must stay rooted on origin/HEAD -----------------------------------------
 
 _BRANCH_NONCREATE = frozenset((
-    "-d", "-D", "-m", "-M", "-c", "-C", "-l", "--list", "--delete", "--move", "--copy",
+    "-d", "-D", "-m", "-M", "-l", "--list", "--delete", "--move",
     "--show-current", "--edit-description", "--set-upstream-to", "--unset-upstream",
     "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format",
 ))
@@ -3762,15 +3762,20 @@ def _checkout_creation_start(args, switch=False):
 
 
 def _branch_command_creation_start(args):
-    """Recognize the plain `git branch <name> [start]` creation form; return _ASK_START when a creation
-    carries an option that is not a confidently-classifiable safe boolean, or None for a
-    listing/deletion/copy/move/upstream-setting form (including the =value and attached-upstream forms)."""
+    """Recognize `git branch <name> [start]` creation AND `git branch -c/-C <src> <dst>` copy; return
+    _ASK_START when a creation carries an unclassifiable option, or None for a listing/deletion/MOVE
+    (rename)/upstream form. A COPY makes a NEW ref at the source's commit, so it is a rootable creation
+    whose start point is the source (an explicit <src>, else the current HEAD); a RENAME (-m/-M/--move)
+    reuses an existing branch's commits under a new name and creates no new orphan-rootable ref."""
     if not args:
         return None
+    copying = False
     for arg in args:
         head = arg.split("=", 1)[0] if arg.startswith("--") else arg
         if head in _BRANCH_NONCREATE or arg == "-u" or arg.startswith("-u"):
-            return None  # listing/delete/copy/move (incl. --contains=main), or a -u/--set-upstream form
+            return None  # listing/delete/rename (incl. --contains=main), or a -u/--set-upstream form
+        if arg in ("-c", "-C") or head == "--copy":
+            copying = True  # branch copy: the new ref inherits the source commit's rootedness
     ask = False
     operands = []
     i = 0
@@ -3789,6 +3794,9 @@ def _branch_command_creation_start(args):
             operands.append(arg)  # git branch has no pathspecs; post-`--` is the <name>/<start> operand
             i += 1
             continue
+        if arg in ("-c", "-C") or (arg.startswith("--") and arg.split("=", 1)[0] == "--copy"):
+            i += 1  # the copy flag itself, already recorded above
+            continue
         if arg.startswith("--"):
             if "=" not in arg and arg in _BRANCH_SAFE_BOOL:
                 i += 1
@@ -3805,6 +3813,9 @@ def _branch_command_creation_start(args):
         return None  # plain `git branch` (listing) or an all-option form with no branch name
     if ask:
         return _ASK_START
+    if copying:
+        # `git branch -c <src> <dst>` copies <src>; `git branch -c <dst>` copies the current HEAD.
+        return operands[0] if len(operands) > 1 else "HEAD"
     return operands[1] if len(operands) > 1 else "HEAD"
 
 
@@ -3815,6 +3826,7 @@ def _worktree_creation_start(args):
     if not args or args[0] != "add":
         return None
     ask = False
+    detached = False
     operands = []
     i = 1
     after_boundary = False
@@ -3834,6 +3846,10 @@ def _worktree_creation_start(args):
             continue
         if arg in _WORKTREE_AMBIGUOUS or arg.startswith("--orphan=") or arg.startswith("--track="):
             return _ASK_START  # orphan/tracking worktree: the start point cannot be extracted cleanly
+        if arg == "--detach":
+            detached = True  # a detached worktree creates NO branch, so there is no start to root-check
+            i += 1
+            continue
         if arg in ("-b", "-B"):
             if i + 1 >= len(args):
                 return None
@@ -3854,6 +3870,8 @@ def _worktree_creation_start(args):
             continue
         ask = True  # a short cluster carrying a letter that is not a known boolean
         i += 1
+    if detached:
+        return None  # --detach creates no branch, whatever the operands
     if not operands:
         return None
     if ask:

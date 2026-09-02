@@ -37,7 +37,7 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
-It covers branch_root (brnrot) through H1-H12: rooted creation allows, an orphaned explicit start
+It covers branch_root (brnrot) through H1-H23: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
 the switch long-form create and git-branch --track extract their start and deny an orphan; git-branch
 upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
@@ -2186,6 +2186,21 @@ def main():
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
 
+        # H24: `git branch -c/-C` COPY makes a new ref at the SOURCE commit, so an orphaned source DENIES
+        # (round-6 codex MAJOR: copy was classified non-creation and allowed); a RENAME is out of scope.
+        brexpect("(H24a) branch -c <orphan-src> <dst> denies",
+                 "git branch -c orphan-start copied", "deny")
+        brexpect("(H24b) branch -C <orphan-src> <dst> (force copy) denies",
+                 "git branch -C orphan-start copied2", "deny")
+        brexpect("(H24c) branch -c <dst> copies rooted HEAD, allows",
+                 "git branch -c copiedhead", "allow")
+        brexpect("(H24d) branch -m rename is out of scope, allows",
+                 "git branch -m orphan-start renamed", "allow")
+        # H25: a `git worktree add --detach` creates NO branch, so it is allowed even from an orphan
+        # (round-6 codex MAJOR: --detach was over-denied).
+        brexpect("(H25) worktree add --detach <path> <orphan> allows",
+                 "git worktree add --detach /tmp/wt-detach orphan-start", "allow")
+
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
         # future tokenizer regression is caught at the tokenizer, not only through a handler outcome.
@@ -4120,7 +4135,7 @@ def main():
           "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
           "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
-          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H12 on structured "
+          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H23 on structured "
           "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
           "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
           "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "

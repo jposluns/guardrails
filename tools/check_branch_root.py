@@ -23,9 +23,8 @@ import tempfile
 from collections import namedtuple
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
-
+# Liftable and stdlib-only: the default root is resolved from the working directory via git
+# rev-parse (_repo_root), with no dependency on any repository-local helper module.
 TIMEOUT = 30
 Result = namedtuple(
     "Result",
@@ -488,7 +487,7 @@ def main(argv=None):
             parser.print_usage(sys.stderr)
             return 2
         return self_test()
-    root = args.root if args.root is not None else repo_root()
+    root = args.root if args.root is not None else str(Path.cwd())
     return run(root, protected=args.protected, head=args.head, max_lag=args.max_lag)
 
 
