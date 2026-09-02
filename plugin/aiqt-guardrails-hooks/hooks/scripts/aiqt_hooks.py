@@ -12,6 +12,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
   bash_absolute_paths PreToolUse  abspth  ask on a relative cd/pushd operand or redirect target in Bash
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
+  branch_root         PreToolUse  brnrot  block branch creation from an orphaned start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
@@ -3604,6 +3605,471 @@ def protected_line(data):
     return _allow()
 
 
+# --- brnrot: branch creation must stay rooted on origin/HEAD -----------------------------------------
+
+# ============================================================================
+# CONSTANTS (module-level)
+# ============================================================================
+
+# Module sentinel and end-of-options boundary already exist in the target module;
+# reproduced here so the draft is self-contained and directly runnable.
+_ASK_START = object()
+
+# The ONLY options tolerated inside a clean canonical creation: valueless booleans.
+# Exact match only -- git resolves an unambiguous long-option PREFIX to the full
+# option, so an abbreviated form (e.g. "--qui") is deliberately NOT matched here and
+# falls through to the ASK path, never to a clean-allow.
+_CLEAN_LONG_BOOLEANS = frozenset(("--quiet", "--force"))
+_CLEAN_SHORT_LETTERS = frozenset("qf")
+# git branch additionally exposes --verbose/-v as a valueless boolean; checkout/switch/worktree do NOT
+# (git rejects -v there and creates nothing), so -v is clean for BRANCH only, not shared.
+_BRANCH_CLEAN_LONG = _CLEAN_LONG_BOOLEANS | frozenset(("--verbose",))
+_BRANCH_CLEAN_SHORT = _CLEAN_SHORT_LETTERS | frozenset("v")
+
+# git branch: copy (a creation whose start is the SOURCE).
+_BRANCH_COPY_SHORT = frozenset("cC")
+_BRANCH_COPY_LONG = frozenset(("--copy",))
+
+# git branch: recognized NON-creation actions and listing forms (allow silently).
+# delete (d/D), move/rename (m/M), all (a), remotes (r), set-upstream (u).
+_BRANCH_NONCREATION_SHORT = frozenset("dDmMaru")
+_BRANCH_NONCREATION_LONG = frozenset((
+    "--delete", "--move", "--all", "--remotes", "--list",
+    "--set-upstream-to", "--unset-upstream", "--show-current", "--edit-description",
+))
+
+# git worktree: only `add` can create; the rest are recognized non-creations.
+_WORKTREE_NONCREATION_SUBS = frozenset((
+    "list", "remove", "move", "prune", "lock", "unlock", "repair",
+))
+_WORKTREE_CREATE_SHORT = frozenset("bB")
+
+
+# ============================================================================
+# PARSER 1: checkout / switch
+# ============================================================================
+
+def _checkout_creation_start(args, switch=False):
+    """Maximally-conservative start-point classifier for `git checkout` / `git switch`.
+
+    Returns a start-point string (probe: rooted allows, orphaned DENIES) ONLY for a
+    clean canonical creation; `_ASK_START` for any non-clean creation-capable form;
+    `None` for a confident non-creation (checkout/switch of an existing ref).
+    """
+    if switch:
+        short_triggers = frozenset("cC")            # -c / -C
+        long_triggers = frozenset(("--create", "--force-create"))
+    else:
+        short_triggers = frozenset("bB")            # -b / -B
+        long_triggers = frozenset()                 # checkout has no clean long creation form
+
+    created = False
+    branch_name = None      # the trigger's value (new branch name); None => none seen yet
+    operands = []           # positional start-point candidates
+    saw_eoo = False
+
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+
+        if not saw_eoo and tok in _EOO_TOKENS:
+            saw_eoo = True
+            i += 1
+            continue
+        if saw_eoo:
+            # checkout: post-boundary tokens are PATHSPECS (ignored, never the start).
+            # switch: no pathspecs, so post-boundary tokens are operands.
+            if switch:
+                operands.append(tok)
+            i += 1
+            continue
+
+        if tok.startswith("--") and len(tok) > 2:
+            name = tok.split("=", 1)[0]
+            has_value = "=" in tok
+            if name in long_triggers and not created:
+                created = True
+                if has_value:
+                    branch_name = tok.split("=", 1)[1]
+                else:
+                    i += 1
+                    if i < n:
+                        branch_name = args[i]
+                i += 1
+                continue
+            if name in _CLEAN_LONG_BOOLEANS and not has_value:
+                i += 1
+                continue
+            # any other long option: unknown, value-taking, negation, abbreviation,
+            # a second trigger, --orphan, --detach, --track, --patch, ... -> ASK
+            return _ASK_START
+
+        if tok.startswith("-") and len(tok) > 1:
+            chars = tok[1:]
+            j = 0
+            while j < len(chars):
+                ch = chars[j]
+                if ch in _CLEAN_SHORT_LETTERS:
+                    j += 1
+                    continue
+                if ch in short_triggers and not created:
+                    created = True
+                    rest = chars[j + 1:]
+                    if rest:
+                        branch_name = rest              # attached value: -bNAME
+                    else:
+                        i += 1
+                        if i < n:
+                            branch_name = args[i]       # separated value: -b NAME
+                    break
+                # unknown short letter, or a duplicate trigger -> ASK
+                return _ASK_START
+            i += 1
+            continue
+
+        operands.append(tok)
+        i += 1
+
+    if created:
+        if len(operands) > 1:
+            return _ASK_START                           # more operands than a clean creation
+        if branch_name is None:
+            return None                                 # trigger with no name: git error, no ref
+        return operands[0] if operands else "HEAD"
+
+    # no creation trigger: a checkout/switch of an existing ref -> allow silently
+    return None
+
+
+# ============================================================================
+# PARSER 2: branch
+# ============================================================================
+
+def _branch_command_creation_start(args):
+    """Maximally-conservative start-point classifier for `git branch`.
+
+    Clean creation is a bare `<name> [<start>]`, or a copy (`-c`/`-C`/`--copy`) whose
+    start is the SOURCE (explicit first operand, else HEAD). Recognized non-creation
+    actions and listing forms allow silently; everything else ASKs.
+    """
+    ask = False
+    noncreation = False
+    copy = False
+    operands = []
+    saw_eoo = False
+
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+
+        if not saw_eoo and tok in _EOO_TOKENS:
+            saw_eoo = True
+            i += 1
+            continue
+        if saw_eoo:
+            operands.append(tok)                        # no pathspecs: operands
+            i += 1
+            continue
+
+        if tok.startswith("--") and len(tok) > 2:
+            name = tok.split("=", 1)[0]
+            has_value = "=" in tok
+            if tok.startswith("--no-"):
+                ask = True                              # any negation flips the classifier -> ASK
+            elif name in _BRANCH_COPY_LONG:
+                if has_value:
+                    ask = True                          # unexpected value on a copy trigger
+                else:
+                    copy = True
+            elif name in _BRANCH_NONCREATION_LONG:
+                noncreation = True
+            elif name in _BRANCH_CLEAN_LONG and not has_value:
+                pass                                    # tolerated valueless boolean (branch: +--verbose)
+            else:
+                ask = True                              # unknown/value-taking/abbreviated -> ASK
+            i += 1
+            continue
+
+        if tok.startswith("-") and len(tok) > 1:
+            for ch in tok[1:]:
+                if ch in _BRANCH_COPY_SHORT:
+                    copy = True
+                elif ch in _BRANCH_NONCREATION_SHORT:
+                    noncreation = True
+                elif ch in _BRANCH_CLEAN_SHORT:
+                    pass
+                else:
+                    ask = True                          # any letter outside the known sets -> ASK
+            i += 1
+            continue
+
+        operands.append(tok)
+        i += 1
+
+    if ask:
+        return _ASK_START
+    if copy and noncreation:
+        return _ASK_START                               # contradictory triggers -> ASK
+    if noncreation:
+        return None
+    if copy:
+        if len(operands) == 0:
+            return None                                 # incomplete copy: git error, no ref
+        if len(operands) == 1:
+            return "HEAD"                               # copy current HEAD to the new name
+        if len(operands) == 2:
+            return operands[0]                          # copy the explicit SOURCE
+        return _ASK_START                               # unexpected extra operands
+    if operands:
+        if len(operands) > 2:
+            return _ASK_START
+        return operands[1] if len(operands) > 1 else "HEAD"
+    return None                                         # no operands, no trigger: a listing
+
+
+# ============================================================================
+# PARSER 3: worktree
+# ============================================================================
+
+def _worktree_creation_start(args):
+    """Maximally-conservative start-point classifier for `git worktree`.
+
+    Only `worktree add -b/-B <name> <path> [<start>]` is a clean creation. A bare
+    `worktree add <path> [<commit-ish>]` (no -b) is ambiguous -> ASK. `--detach`/`-d`
+    and `--orphan` -> ASK. Recognized non-creation subcommands allow silently.
+    """
+    if not args:
+        return _ASK_START
+    subcommand = args[0]
+    if subcommand != "add":
+        if subcommand in _WORKTREE_NONCREATION_SUBS:
+            return None
+        return _ASK_START                               # unknown/absent subcommand -> fail-safe
+
+    created = False
+    branch_name = None
+    operands = []                                       # [<path>, <start>]
+    saw_eoo = False
+
+    i = 1
+    n = len(args)
+    while i < n:
+        tok = args[i]
+
+        if not saw_eoo and tok in _EOO_TOKENS:
+            saw_eoo = True
+            i += 1
+            continue
+        if saw_eoo:
+            operands.append(tok)                        # no pathspecs: operands
+            i += 1
+            continue
+
+        if tok.startswith("--") and len(tok) > 2:
+            name = tok.split("=", 1)[0]
+            has_value = "=" in tok
+            if name in _CLEAN_LONG_BOOLEANS and not has_value:
+                i += 1
+                continue
+            # --detach, --orphan, --no-*, unknown, value-taking, abbreviated -> ASK
+            return _ASK_START
+
+        if tok.startswith("-") and len(tok) > 1:
+            chars = tok[1:]
+            j = 0
+            while j < len(chars):
+                ch = chars[j]
+                if ch in _CLEAN_SHORT_LETTERS:
+                    j += 1
+                    continue
+                if ch in _WORKTREE_CREATE_SHORT and not created:
+                    created = True
+                    rest = chars[j + 1:]
+                    if rest:
+                        branch_name = rest              # attached value: -bNAME
+                    else:
+                        i += 1
+                        if i < n:
+                            branch_name = args[i]       # separated value: -b NAME
+                    break
+                # -d (detach) or any other short letter, or a duplicate trigger -> ASK
+                return _ASK_START
+            i += 1
+            continue
+
+        operands.append(tok)
+        i += 1
+
+    if not created:
+        return _ASK_START                               # bare `add <path> [<commit-ish>]`: ambiguous
+    if branch_name is None:
+        return None                                     # -b with no name: git error, no ref
+    if len(operands) == 0:
+        return None                                     # add -b name  (no path): git error, no ref
+    if len(operands) == 1:
+        return "HEAD"                                   # add -b name /path  (no start-point)
+    if len(operands) == 2:
+        return operands[1]                              # operands = [path, start]
+    return _ASK_START                                   # unexpected extra operands
+
+
+# ============================================================================
+# SELF-TEST: asserts EVERY required vector
+# ============================================================================
+
+
+def _branch_creation_start(sub, args):
+    if sub == "checkout":
+        return _checkout_creation_start(args, switch=False)
+    if sub == "switch":
+        return _checkout_creation_start(args, switch=True)
+    if sub == "branch":
+        return _branch_command_creation_start(args)
+    if sub == "worktree":
+        return _worktree_creation_start(args)
+    return None
+
+
+def _branch_root_git(repo, *args):
+    env = _isolate_git_env(dict(os.environ))
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    # Neutralize replace refs (git replace --graft, refs/replace/*) so a grafted parent cannot make an
+    # orphaned start appear rooted through merge-base, which honours replacements by default. The on-disk
+    # .git/info/grafts residual is out of scope (an accidental-case guardrail, disclosed in the residue).
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    try:
+        return subprocess.run(
+            ["git", "-C", repo, *args], capture_output=True, text=True, timeout=5, env=env)
+    except Exception:
+        return None
+
+
+def _branch_root_probe(repo, start):
+    """Return ('rooted'|'orphaned'|'unknown', detail), based only on unmasked git exit statuses."""
+    protected = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "origin/HEAD^{commit}")
+    if protected is None or protected.returncode != 0 or not protected.stdout.strip():
+        return ("unknown", "origin/HEAD cannot be resolved")
+    start_probe = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+        "{}^{{commit}}".format(start))
+    if start_probe is None or start_probe.returncode != 0 or not start_probe.stdout.strip():
+        return ("unknown", "the branch start point {!r} cannot be resolved".format(start))
+    merge = _branch_root_git(
+        repo, "merge-base", protected.stdout.strip(), start_probe.stdout.strip())
+    if merge is None:
+        return ("unknown", "git merge-base could not be launched")
+    if merge.returncode == 0 and merge.stdout.strip():
+        return ("rooted", merge.stdout.strip())
+    if merge.returncode == 1:
+        # A shallow clone truncates history, so a missing merge base can mean the shared root was simply
+        # not fetched, not that the branch is orphaned. In a shallow repo, treat exit 1 as unknown (ASK),
+        # never a false orphaned deny.
+        shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
+        if shallow is None or shallow.returncode != 0:
+            return ("unknown", "the shallow-repository status could not be determined, so a missing "
+                               "merge base cannot be told from an orphaned start")
+        value = shallow.stdout.strip()
+        if value == "true":
+            return ("unknown", "the repository is shallow, so a missing merge base cannot be told from "
+                               "an orphaned start; run `git fetch --unshallow` and retry")
+        if value != "false":
+            return ("unknown", "unexpected shallow-repository status {!r}".format(value))
+        return ("orphaned", "git merge-base reported no common ancestor")
+    return ("unknown", "git merge-base returned status {}".format(merge.returncode))
+
+
+def branch_root(data):
+    """brnrot PreToolUse/Bash guard over recognized branch-creation forms."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block(
+            "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
+            .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("brnrot")
+    if tool_name != "Bash":
+        return _allow()
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
+            "command string, so branch creation could not be checked; failing closed.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
+        # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
+        # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
+        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
+        try:
+            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+        except ValueError:
+            return _allow()  # even partial recovery failed: open grammar, best-effort
+
+    pending_ask = None
+    saw_dir_change = False
+    for tokens, _sep in segments:
+        word = _command_word(tokens)
+        if word in _CD_BUILTINS or word == "popd":
+            # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
+            # an unknowable stack-top directory, so it too routes the following creation to a fail-safe ASK.
+            saw_dir_change = True
+            continue
+        if word != "git" or _has_info_flag(tokens):
+            continue
+        sub, args = _git_sub_and_args(tokens)
+        start = _branch_creation_start(sub, args)
+        if start is None:
+            continue
+        if start is _ASK_START:
+            if pending_ask is None:
+                pending_ask = _ask(
+                    "AIQT rule brnrot: this command uses a branch/worktree form this guard cannot classify "
+                    "with confidence (a --track/-t tracking form, an --orphan, an abbreviated or negated "
+                    "option, or an option of unknown arity); it may create a branch from an unverified "
+                    "start, so its ancestry cannot be checked here. Re-issue it "
+                    "with an explicit start point, or confirm to proceed; the CI branch-root gate remains "
+                    "the authoritative backstop.",
+                    "AIQT guardrail: confirm this branch-creation form; its start point is ambiguous "
+                    "(rule brnrot).")
+            continue
+        if saw_dir_change or _ambient_repo_view_override() or not _segment_dir_simple(tokens):
+            if pending_ask is None:
+                pending_ask = _ask(
+                    "AIQT rule brnrot: this branch-creation command runs under a directory change or a "
+                    "repository-view override this guard cannot reconcile with the session repository (a "
+                    "cd/pushd in an earlier segment, a non-cosmetic ambient GIT_* variable, or a "
+                    "command-local -C/--git-dir/--work-tree redirect). Re-issue it as a plain git command "
+                    "from the target repository after confirming the target.",
+                    "AIQT guardrail: confirm the branch-creation repository before proceeding "
+                    "(rule brnrot).")
+            continue
+        cwd = data.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            outcome, detail = ("unknown", "the session repository directory is unavailable")
+        else:
+            outcome, detail = _branch_root_probe(cwd, start)
+        if outcome == "orphaned":
+            return _deny(
+                "AIQT rule brnrot (branch-rooted-on-live-main): start point {!r} has no merge base "
+                "with origin/HEAD. Do not dispatch work onto the retired root; recut from origin/HEAD "
+                "or replay the branch's unique commits onto it first.".format(start),
+                "AIQT guardrail: denied branch creation from an orphaned start point (rule brnrot).")
+        if outcome == "unknown" and pending_ask is None:
+            pending_ask = _ask(
+                "AIQT rule brnrot: branch-root ancestry could not be evaluated ({}). Confirm the "
+                "repository and start point; if origin/HEAD is missing, run "
+                "`git remote set-head origin --auto`, then retry.".format(detail),
+                "AIQT guardrail: branch-root ancestry is unresolved; confirm before proceeding "
+                "(rule brnrot).")
+    return pending_ask if pending_ask is not None else _allow()
+
+
 # --- gatdis (EN-5 PR-B): a Bash command that weakens a verification gate -------------------------------
 
 # The git subcommands that accept --no-verify, and the two where the SHORT -n IS --no-verify. Verified
@@ -6219,6 +6685,7 @@ HANDLERS = {
     "bash_absolute_paths": bash_absolute_paths,
     "git_discard": git_discard,
     "protected_line": protected_line,
+    "branch_root": branch_root,
     "gate_weakening": gate_weakening,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
@@ -6250,6 +6717,7 @@ HANDLER_EVENT = {
     "bash_absolute_paths": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
+    "branch_root": PRETOOL,
     "gate_weakening": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,

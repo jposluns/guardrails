@@ -152,6 +152,25 @@ jobs:
             python3 -I -B tools/check_version_monotonicity.py
           fi
 
+      - name: Branch root self-test
+        run: python3 -I -B tools/check_branch_root.py --self-test
+
+      - name: Branch root
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_BASE_REF}" --head "$PR_HEAD_SHA" --max-lag 200
+          else
+            # On push to main, HEAD is the protected line itself, so this branch is a SELF-CHECK (main vs
+            # origin/main resolves to main with zero lag). The pull_request job above, which compares the
+            # PR head against its target branch, is the effective branch-root gate; this push job only
+            # keeps the gate wired and green on the protected line.
+            python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_REF_NAME}" --max-lag 200
+          fi
+
       - name: Release delta self-test
         run: python3 -I -B tools/check_release_delta.py --self-test
       - name: Release delta

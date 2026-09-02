@@ -72,7 +72,7 @@
     endorses, sponsors, or is affiliated with this pack, and a mapping asserts a relationship of ideas,
     not certification against a standard.</p>
   <!-- COVERAGE:BEGIN (generated) -->
-      <p class="lead">The crosswalk carries <strong>951</strong> mappings from <strong>104</strong> of the pack's rules to <strong>514</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
+      <p class="lead">The crosswalk carries <strong>957</strong> mappings from <strong>105</strong> of the pack's rules to <strong>514</strong> identifiers across <strong>17</strong> frameworks. Every mapped identifier is validated against a pinned-edition manifest before it can ship; the counts here are generated from that live state, never hand-entered.</p>
       <!-- COVERAGE:END -->
 </div>
 
@@ -410,6 +410,36 @@
             <li>NIST Secure Software Development Framework (1.1 (SP 800-218)): supports control
               <ul>
                 <li>PS.1.1: Protect stored code with least privilege (broad)</li>
+                <li>PW.7.1: Decide on code review and analysis (broad)</li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Cut branches from the live protected line and re-home after a rewrite</summary>
+        <div class="inner">
+          <p><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">View this rule on GitHub</a></p>
+          <ul>
+            <li>ISO/IEC 42001:2023 AI management system (2023): supports control
+              <ul>
+                <li>A.6.1.3: Processes for responsible design and development of AI systems (broad)</li>
+              </ul>
+            </li>
+            <li>NIST SP 800-53 Security and Privacy Controls (Rev 5 (catalog 5.2.0)): supports control
+              <ul>
+                <li>SA-10: Developer Configuration Management (broad)</li>
+                <li>CM-3: Configuration Change Control (tight)</li>
+                <li>CM-3(2): Testing, Validation, and Documentation of Changes (tight)</li>
+              </ul>
+            </li>
+            <li>NIST AI Risk Management Framework (1.0 (NIST AI 100-1)): aligns with guidance
+              <ul>
+                <li>MANAGE 4.1: Post-deployment AI system monitoring plans are implemented, including mechanisms for capturing and evaluating input from users and other relevant AI actors, appeal and override, decommissioning, incident response, recovery, and change management. (broad)</li>
+              </ul>
+            </li>
+            <li>NIST Secure Software Development Framework (1.1 (SP 800-218)): supports control
+              <ul>
                 <li>PW.7.1: Decide on code review and analysis (broad)</li>
               </ul>
             </li>
@@ -4992,6 +5022,7 @@
             <li>A.6.1.3: Processes for responsible design and development of AI systems
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">Cut branches from the live protected line and re-home after a rewrite</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md" target="_blank" rel="noopener noreferrer">Workers produce inert data</a> (broad)</li>
               </ul>
@@ -5909,6 +5940,7 @@
             <li>CM-3: Configuration Change Control
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">Cut branches from the live protected line and re-home after a rewrite</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-separate-task-changes.md" target="_blank" rel="noopener noreferrer">Separate task changes from pre-existing work</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (tight)</li>
@@ -5919,6 +5951,7 @@
             <li>CM-3(2): Testing, Validation, and Documentation of Changes
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (tight)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">Cut branches from the live protected line and re-home after a rewrite</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-gate-discipline.md" target="_blank" rel="noopener noreferrer">Gate discipline</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md" target="_blank" rel="noopener noreferrer">Validation is a gate on apply</a> (tight)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-change-carries-check.md" target="_blank" rel="noopener noreferrer">A behavioural change carries a check that fails without it</a> (broad)</li>
@@ -6049,6 +6082,7 @@
             <li>SA-10: Developer Configuration Management
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">Cut branches from the live protected line and re-home after a rewrite</a> (broad)</li>
               </ul>
             </li>
             <li>SA-11: Developer Testing and Evaluation
@@ -6327,6 +6361,7 @@
             <li>MANAGE 4.1: Post-deployment AI system monitoring plans are implemented, including mechanisms for capturing and evaluating input from users and other relevant AI actors, appeal and override, decommissioning, incident response, recovery, and change management.
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">Cut branches from the live protected line and re-home after a rewrite</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md" target="_blank" rel="noopener noreferrer">Change record</a> (broad)</li>
               </ul>
@@ -6512,6 +6547,7 @@
             <li>PW.7.1: Decide on code review and analysis
               <ul>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md" target="_blank" rel="noopener noreferrer">Branch and merge only on green</a> (broad)</li>
+                <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md" target="_blank" rel="noopener noreferrer">Cut branches from the live protected line and re-home after a rewrite</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md" target="_blank" rel="noopener noreferrer">Protected-branch integrity</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md" target="_blank" rel="noopener noreferrer">Validation is a gate on apply</a> (broad)</li>
                 <li><a href="https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-verifier-diversity.md" target="_blank" rel="noopener noreferrer">Verifier diversity</a> (broad)</li>

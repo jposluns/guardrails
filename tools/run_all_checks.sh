@@ -80,6 +80,8 @@ run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
 run_gate "versions"        python3 -I -B tools/check_versions.py
 run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
+run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
+run_gate "branch-root"          python3 -I -B tools/check_branch_root.py --max-lag 200
 run_gate "release-delta-selftest" python3 -I -B tools/check_release_delta.py --self-test
 run_gate "release-delta"          python3 -I -B tools/check_release_delta.py
 run_gate "release-build-selftest" python3 -I -B tools/check_release_build.py --self-test
