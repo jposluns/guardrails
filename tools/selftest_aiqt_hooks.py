@@ -2220,12 +2220,19 @@ def main():
                  "git branch -c orphan-start copiedfmt --format=%(refname)", "deny")
         # H24f: git checkout -b with --detach is a git error (creates nothing); the hook must not probe-deny
         # a command that creates no branch (redesign-fix-6, codex MINOR).
-        brexpect("(H24f) checkout -b <name> --detach allows (git-error, no branch)",
-                 "git checkout -b h24f --detach orphan-start", "allow")
+        brexpect("(H24f) checkout -b <name> --detach asks (order-dependent detach, no silent allow)",
+                 "git checkout -b h24f --detach orphan-start", "ask")
+        brexpect("(H24g) checkout --detach --no-detach -b creation asks (no silent allow)",
+                 "git checkout --detach --no-detach -b h24g orphan-start", "ask")
         # H25: a `git worktree add --detach` creates NO branch, so it is allowed even from an orphan
         # (round-6 codex MAJOR: --detach was over-denied).
-        brexpect("(H25) worktree add --detach <path> <orphan> allows",
-                 "git worktree add --detach /tmp/wt-detach orphan-start", "allow")
+        # H25: --detach is option-order-dependent (a later --no-detach flips it, git applies last), so a
+        # detach form is not confidently classifiable and fail-safe ASKS (redesign-fix-7, codex --no-detach
+        # BLOCKER); never a silent allow of a --detach --no-detach -b creation.
+        brexpect("(H25a) worktree add --detach <path> <orphan> asks",
+                 "git worktree add --detach /tmp/wt-detach orphan-start", "ask")
+        brexpect("(H25b) worktree add --detach --no-detach -b <name> creation asks (no silent allow)",
+                 "git worktree add --detach --no-detach -b h25b /tmp/wt-nd orphan-start", "ask")
 
         # H26: fail-safe-ASK redesign (Architect 2026-09-02, round-7 cap). Any unclassifiable option shape
         # ASKs rather than silently allowing OR falsely denying; the confidently-clean forms still probe.
@@ -2237,8 +2244,8 @@ def main():
                  "git branch --unknown-flag qa orphan-start", "ask")
         brexpect("(H26d) checkout --patch (benign unrecognized) asks (fail-safe)",
                  "git checkout --patch somefile", "ask")
-        brexpect("(H26e) worktree add -d (short --detach) allows",
-                 "git worktree add -d /tmp/wt-shortd orphan-start", "allow")
+        brexpect("(H26e) worktree add -d (short --detach) asks",
+                 "git worktree add -d /tmp/wt-shortd orphan-start", "ask")
         brexpect("(H26f) branch -lv <pattern> is a listing, allows",
                  "git branch -lv somepattern", "allow")
 

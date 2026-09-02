@@ -3627,7 +3627,7 @@ _BRANCH_NONCREATE = frozenset((
 # the BARE token consumes nothing and is safe here (a =form is an unclassifiable optional value -> ASK).
 _CO_SW_SAFE_BOOL = frozenset((
     "--quiet", "--force", "--verbose", "--progress", "--no-progress", "--no-track",
-    "--detach", "--no-guess", "--merge", "--discard-changes", "--ours", "--theirs",
+    "--no-guess", "--merge", "--discard-changes", "--ours", "--theirs",
     "--overwrite-ignore", "--no-overwrite-ignore", "--ignore-other-worktrees",
     "--ignore-skip-worktree-bits", "--recurse-submodules", "--no-recurse-submodules",
     "--ipv4", "--ipv6",
@@ -3656,10 +3656,10 @@ _BRANCH_SAFE_SHORT = frozenset("qfvlar")  # q f v l + a(--all) r(--remotes); -t(
 # letters below never consume an operand. -b/-B (new-branch name) are value-taking and handled inline.
 _WORKTREE_AMBIGUOUS = frozenset(("--orphan", "--track", "-t"))
 _WORKTREE_SAFE_BOOL = frozenset((
-    "--quiet", "--force", "--detach", "--checkout", "--no-checkout", "--lock",
+    "--quiet", "--force", "--checkout", "--no-checkout", "--lock",
     "--no-guess-remote", "--relative-paths", "--no-relative-paths",
 ))
-_WORKTREE_SAFE_SHORT = frozenset("qfd")
+_WORKTREE_SAFE_SHORT = frozenset("qf")  # -d(--detach) is NOT safe: a --detach/--no-detach form ASKS
 
 # A creation-ish form whose start point cannot be extracted unambiguously: the handler routes it to a
 # fail-SAFE ask rather than a silent allow, since the hook is best-effort and the CI gate is the backstop.
@@ -3714,8 +3714,6 @@ def _checkout_creation_start(args, switch=False):
             i += 1
             continue
         # --- option region (before the boundary, starts with '-') ---
-        if arg == "--detach":
-            return None  # a detached checkout/switch creates no branch; -b/-B with --detach is a git error
         if arg in _CO_SW_AMBIGUOUS or arg.startswith("--track=") or arg.startswith("--orphan="):
             return _ASK_START  # a --track/-t/--orphan form is creation-ish but its start is unextractable
         if switch and arg in create_long:
@@ -3822,7 +3820,10 @@ def _branch_command_creation_start(args):
     if copying:
         # An explicit copy ACTION dominates a display/list classifier (git branch -c <src> <dst> --format
         # still copies), so probe the source BEFORE treating a display flag as a non-creation, never a
-        # silent allow. `-c <src> <dst>` copies <src>; `-c <dst>` copies the current HEAD.
+        # silent allow. `-c <src> <dst>` copies <src>; `-c <dst>` copies the current HEAD; `-c` with NO
+        # operand is a git error (no ref created), not a creation to probe-deny.
+        if not operands:
+            return None
         return operands[0] if len(operands) > 1 else "HEAD"
     if noncreate:
         return None  # a confidently-recognized non-creation (delete/rename/upstream, or a pure listing)
@@ -3838,7 +3839,6 @@ def _worktree_creation_start(args):
     if not args or args[0] != "add":
         return None
     ask = False
-    detached = False
     creating_b = False
     operands = []
     i = 1
@@ -3859,10 +3859,6 @@ def _worktree_creation_start(args):
             continue
         if arg in _WORKTREE_AMBIGUOUS or arg.startswith("--orphan=") or arg.startswith("--track="):
             return _ASK_START  # orphan/tracking worktree: the start point cannot be extracted cleanly
-        if arg == "--detach":
-            detached = True  # a detached worktree creates NO branch, so there is no start to root-check
-            i += 1
-            continue
         if arg in ("-b", "-B"):
             if i + 1 >= len(args):
                 return None
@@ -3881,14 +3877,10 @@ def _worktree_creation_start(args):
             i += 1
             continue
         if len(arg) > 1 and all(ch in _WORKTREE_SAFE_SHORT for ch in arg[1:]):
-            if "d" in arg[1:]:
-                detached = True  # -d is --detach for worktree add (short spelling)
             i += 1
             continue
         ask = True  # a short cluster carrying a letter that is not a known boolean
         i += 1
-    if detached:
-        return None  # --detach/-d creates no branch, whatever the operands
     if ask:
         return _ASK_START  # an unrecognized/ambiguous option shape: fail SAFE to ASK
     if not operands:
