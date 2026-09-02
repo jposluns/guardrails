@@ -466,6 +466,21 @@ def self_test():
     finally:
         Path.cwd = original_cwd
 
+    # V13: the --max-lag CLI type rejects separators/whitespace/signs that int(value, 10) would accept.
+    import argparse as _ap
+    for _bad in ("1_000", " 5 ", "-5", "+5", "", "5.0"):
+        try:
+            _max_lag(_bad)
+            failures.append("V13 malformed --max-lag {!r}: accepted, expected reject".format(_bad))
+        except _ap.ArgumentTypeError:
+            pass
+    for _good, _want in (("0", 0), ("200", 200)):
+        try:
+            if _max_lag(_good) != _want:
+                failures.append("V13 --max-lag {!r}: wrong parse".format(_good))
+        except _ap.ArgumentTypeError:
+            failures.append("V13 --max-lag {!r}: rejected a valid value".format(_good))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -481,19 +496,19 @@ def self_test():
               "NOT VERIFIED HERE (declared cases whose fixtures could not be built in this environment): "
               + "; ".join(skipped))
     else:
-        print("SELF-TEST PASS: V1-V12 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
+        print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
               "(both cannot-evaluate) outcomes; verdicts are asserted by exit code")
     return 0
 
 
 def _max_lag(value):
-    try:
-        parsed = int(value, 10)
-    except (TypeError, ValueError):
+    # str.isdigit() accepts ONLY a pure run of digits: it rejects a sign, surrounding whitespace, and the
+    # underscore or other digit separators that int(value, 10) would silently accept, so a malformed
+    # threshold is a usage error rather than a mis-parsed value. isascii() additionally rejects non-ASCII
+    # digit characters (for example superscripts or other-script digits) that isdigit() would allow.
+    if not (isinstance(value, str) and value.isascii() and value.isdigit()):
         raise argparse.ArgumentTypeError("must be a non-negative integer")
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be a non-negative integer")
-    return parsed
+    return int(value, 10)
 
 
 def main(argv=None):
