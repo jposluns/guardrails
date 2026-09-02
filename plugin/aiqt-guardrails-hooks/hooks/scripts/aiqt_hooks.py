@@ -3636,6 +3636,11 @@ _CO_SW_SAFE_SHORT = frozenset("qfv")
 # checkout/switch options whose presence makes the start point ambiguous -> ASK: --track/-t bind the start
 # to a remote operand (and DWIM-create), and --orphan creates a deliberately unrooted branch.
 _CO_SW_AMBIGUOUS = frozenset(("-t", "--track", "--orphan", "--guess"))
+# The creation-ish / tracking long options for checkout and switch. git resolves an unambiguous prefix of a
+# long option to the full option, so an abbreviation of any of these (`--orp` -> `--orphan`, `--tr` ->
+# `--track`, `--gu` -> `--guess`, plus `--cre` -> `--create` via create_long on switch) is a real creation
+# form the parser must route to ASK rather than silently allow (guard-input-soundness).
+_CO_SW_CREATIONISH_LONG = ("--orphan", "--track", "--guess")
 
 # git branch safe-boolean options: branch models --track and --recurse-submodules as BOOLEAN (unlike
 # checkout/switch), so no value is consumed and the `<name> [<start>]` operand grammar still holds.
@@ -3724,7 +3729,11 @@ def _checkout_creation_start(args, switch=False):
             if "=" not in arg and arg in _CO_SW_SAFE_BOOL:
                 i += 1
                 continue
-            ask = True  # an unknown long option, or an unclassifiable optional-value =form
+            bare = arg.split("=", 1)[0]
+            if len(bare) > 2 and any(
+                    flag.startswith(bare) for flag in tuple(create_long) + _CO_SW_CREATIONISH_LONG):
+                return _ASK_START  # an abbreviated creation/tracking flag (git resolves the prefix)
+            ask = True  # an unknown non-creation long option, or an unclassifiable optional-value =form
             i += 1
             continue
         kind = _decompose_short_cluster(arg, create_short, _CO_SW_SAFE_SHORT)
@@ -3900,9 +3909,15 @@ def _branch_root_probe(repo, start):
         # not fetched, not that the branch is orphaned. In a shallow repo, treat exit 1 as unknown (ASK),
         # never a false orphaned deny.
         shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
-        if shallow is not None and shallow.returncode == 0 and shallow.stdout.strip() == "true":
+        if shallow is None or shallow.returncode != 0:
+            return ("unknown", "the shallow-repository status could not be determined, so a missing "
+                               "merge base cannot be told from an orphaned start")
+        value = shallow.stdout.strip()
+        if value == "true":
             return ("unknown", "the repository is shallow, so a missing merge base cannot be told from "
                                "an orphaned start; run `git fetch --unshallow` and retry")
+        if value != "false":
+            return ("unknown", "unexpected shallow-repository status {!r}".format(value))
         return ("orphaned", "git merge-base reported no common ancestor")
     return ("unknown", "git merge-base returned status {}".format(merge.returncode))
 

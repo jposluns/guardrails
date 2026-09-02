@@ -2148,6 +2148,43 @@ def main():
         # H21d: for checkout, post-`--` remains a pathspec, so the branch is cut from HEAD (rooted) -> allow.
         brexpect("(H21d) checkout -b <name> -- <pathspec> is cut from HEAD allows",
                  "git checkout -b coboundary -- orphan-start", "allow")
+        # H22: git resolves an unambiguous long-option PREFIX to the full option, so an abbreviated
+        # creation/tracking flag must ASK (round-5 codex MAJOR: --cre/--orp/--tr returned allow).
+        brexpect("(H22a) switch --cre (abbrev --create) asks",
+                 "git switch --cre abbrbr orphan-start", "ask")
+        brexpect("(H22b) checkout --orp (abbrev --orphan) asks",
+                 "git checkout --orp abbrbr", "ask")
+        brexpect("(H22c) checkout --tr (abbrev --track) asks",
+                 "git checkout --tr origin/abbr", "ask")
+        brexpect("(H22d) switch --force-cre (abbrev --force-create) asks",
+                 "git switch --force-cre abbrbr orphan-start", "ask")
+        # H22e: a benign non-creation long option is not a creation-flag prefix, so it still allows.
+        brexpect("(H22e) checkout --patch (benign, non-creation) allows",
+                 "git checkout --patch abbrbr", "allow")
+
+        # H23: a FAILURE of the shallow-repository probe must fail SAFE to unknown/ASK, never fall through
+        # to ORPHANED/deny (round-5 codex MINOR; aligns the hook with the gate's cannot-evaluate posture).
+        class _R:
+            def __init__(self, rc, out=""):
+                self.returncode = rc
+                self.stdout = out
+        def _probe_with_shallow(shallow_result):
+            seq = [_R(0, "AAA"), _R(0, "BBB"), _R(1, ""), shallow_result]
+            saved = aiqt_hooks._branch_root_git
+            aiqt_hooks._branch_root_git = lambda repo, *a: seq.pop(0)
+            try:
+                return aiqt_hooks._branch_root_probe("/nonexistent", "start")[0]
+            finally:
+                aiqt_hooks._branch_root_git = saved
+        for label, res, want in (
+                ("(H23a) shallow-probe exit 128 -> unknown", _R(128, ""), "unknown"),
+                ("(H23b) shallow-probe None -> unknown", None, "unknown"),
+                ("(H23c) shallow-probe 'true' -> unknown", _R(0, "true"), "unknown"),
+                ("(H23d) shallow-probe garbage -> unknown", _R(0, "maybe"), "unknown"),
+                ("(H23e) shallow-probe 'false' -> orphaned", _R(0, "false"), "orphaned")):
+            got = _probe_with_shallow(res)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
 
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a
