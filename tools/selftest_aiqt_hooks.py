@@ -2058,7 +2058,7 @@ def main():
         # H10: only an EXPLICIT -b/-B worktree creation is deny-capable (its start is extractable). A bare
         # `worktree add <path> <commit-ish>` (no -b) is a detached/existing checkout, not a clean creation,
         # so under fail-safe-ASK it ASKS rather than probe-denying a non-creation (redesign-fix-1, codex +
-        # claude corroborated); `worktree add <path>` alone DWIMs a branch from HEAD (rooted) and allows.
+        # claude corroborated); `worktree add <path>` alone is ambiguous (DWIM-create vs checkout-existing) and ASKS.
         brexpect("(H10a) worktree add -b <name> <path> <orphan-start> denies",
                  "git worktree add -b wtden ../wt-den orphan-start", "deny")
         brexpect("(H10b) worktree add <path> <commit-ish> (no -b) asks",

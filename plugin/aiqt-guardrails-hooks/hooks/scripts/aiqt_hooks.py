@@ -3997,9 +3997,10 @@ def branch_root(data):
         if start is _ASK_START:
             if pending_ask is None:
                 pending_ask = _ask(
-                    "AIQT rule brnrot: this command creates a branch or worktree in a form whose start "
-                    "point cannot be extracted unambiguously (a --track/-t tracking form, an --orphan, "
-                    "or an option of unknown arity), so its ancestry cannot be checked here. Re-issue it "
+                    "AIQT rule brnrot: this command uses a branch/worktree form this guard cannot classify "
+                    "with confidence (a --track/-t tracking form, an --orphan, an abbreviated or negated "
+                    "option, or an option of unknown arity); it may create a branch from an unverified "
+                    "start, so its ancestry cannot be checked here. Re-issue it "
                     "with an explicit start point, or confirm to proceed; the CI branch-root gate remains "
                     "the authoritative backstop.",
                     "AIQT guardrail: confirm this branch-creation form; its start point is ambiguous "

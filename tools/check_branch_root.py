@@ -202,15 +202,13 @@ def _print_result(result):
             "retired history (a rewrite or re-initialization removed its root from the live line). "
             "Re-home before any\ndispatch or merge:\n"
             "  git fetch origin\n"
-            "  git rebase --onto {} <old-base> {}   (replay unique commits), or recut:\n"
-            "  git checkout -B {} {}\n"
+            "  git rebase --onto {} <old-base> <your-branch>   (replay unique commits), or recut:\n"
+            "  git checkout -B <your-branch> {}\n"
             "This gate detects and blocks; it never re-homes a branch itself. Re-homing is a "
             "state-changing action\nreserved to the operator.".format(
                 result.head_sha,
                 result.protected_ref,
                 result.protected_ref,
-                result.head_ref,
-                result.head_ref,
                 result.protected_ref,
             )
         )
@@ -447,13 +445,27 @@ def self_test():
             os.environ["HOME"] = old_home
         shutil.rmtree(temp, ignore_errors=True)
 
+    # V12: a default-root acquisition failure (a deleted or unsearchable working directory) is a
+    # cannot-evaluate (exit 2), never an uncaught exception that would exit 1 (reserved for ORPHANED/STALE).
+    original_cwd = Path.cwd
+    try:
+        Path.cwd = staticmethod(
+            lambda: (_ for _ in ()).throw(FileNotFoundError("working directory removed")))
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = main(["--max-lag", "200"])
+        if got != 2:
+            failures.append("V12 unavailable cwd: expected exit 2, got {}".format(got))
+    finally:
+        Path.cwd = original_cwd
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
         return 1
     covered = ("rooted, orphaned, configured/report-only stale, partial rewrite, underivable protected "
-               "ref, missing head, malformed/negative threshold, two-base criss-cross, and non-repository")
+               "ref, missing head, malformed/negative threshold, two-base criss-cross, non-repository, and "
+               "default-root/cwd-unavailable")
     if skipped:
         # A declared case whose fixture could not be built in THIS environment is disclosed explicitly and
         # is NOT counted as covered, so the pass can never falsely claim coverage it did not exercise.
@@ -461,7 +473,7 @@ def self_test():
               "NOT VERIFIED HERE (declared cases whose fixtures could not be built in this environment): "
               + "; ".join(skipped))
     else:
-        print("SELF-TEST PASS: V1-V11 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
+        print("SELF-TEST PASS: V1-V12 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
               "(both cannot-evaluate) outcomes; verdicts are asserted by exit code")
     return 0
 
@@ -495,7 +507,17 @@ def main(argv=None):
             parser.print_usage(sys.stderr)
             return 2
         return self_test()
-    root = args.root if args.root is not None else str(Path.cwd())
+    if args.root is not None:
+        root = args.root
+    else:
+        try:
+            root = str(Path.cwd())
+        except OSError as exc:
+            # A deleted or unsearchable working directory is a cannot-evaluate (exit 2), never an uncaught
+            # exception to exit 1 (which the contract reserves for ORPHANED/STALE).
+            print("branch-root: the working directory is unavailable ({}); cannot evaluate".format(exc),
+                  file=sys.stderr)
+            return 2
     return run(root, protected=args.protected, head=args.head, max_lag=args.max_lag)
 
 
