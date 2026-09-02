@@ -37,7 +37,7 @@ a direct commit (the literal commit subcommand only) are judged by a read-only H
 when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
 and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
 
-It covers branch_root (brnrot) through H1-H26: rooted creation allows, an orphaned explicit start
+It covers branch_root (brnrot) through H1-H27: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
 the switch long-form create extracts its start and denies an orphan while git-branch --track routes to ASK; git-branch
 upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
@@ -2162,6 +2162,10 @@ def main():
         # the creation routes to ASK, not a probe of the wrong directory (redesign-fix-4, codex MAJOR).
         brexpect("(H27) popd then a creation asks (dir change)",
                  "popd && git checkout -b h27 orphan-start", "ask")
+        # H28: an unsupported LATER construct (a heredoc) must NOT discard a proven-complete orphan creation
+        # already in the prefix; DENY outranks the whole-command parse error (redesign-fix-5, codex MAJOR).
+        brexpect("(H28) creation then heredoc still denies (parse-poison)",
+                 "git checkout -b h28 orphan-start; cat <<'EOF'\npayload\nEOF\n", "deny")
         brexpect("(H22a) switch --cre (abbrev --create) asks",
                  "git switch --cre abbrbr orphan-start", "ask")
         brexpect("(H22b) checkout --orp (abbrev --orphan) asks",
@@ -4163,7 +4167,7 @@ def main():
           "AS disclosed (ANY benign parsed git segment, earlier OR later, suppresses the "
           "wrapped-catch and the wrapped force-push ALLOWS, best-effort and not chased; a "
           "shell-EXPANDED destination ($BRANCH) is judged as the literal token and ALLOWS, the "
-          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H26 on structured "
+          "inherent lexical boundary). The branch-root guard (brnrot) is proven by H1-H27 on structured "
           "decisions: checkout -b from a HEAD rooted on origin/HEAD ALLOWS; the same creation with an "
           "explicit parentless orphan start DENIES; an absent origin/HEAD ASKS with remediation; git "
           "status, git log, and branch listing remain untouched ALLOWs; and a non-git command ALLOWs; "

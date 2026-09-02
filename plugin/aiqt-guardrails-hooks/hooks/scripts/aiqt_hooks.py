@@ -3979,7 +3979,14 @@ def branch_root(data):
     try:
         segments = _segments(command)
     except ValueError:
-        return _allow()  # open command grammar: no supported creation form was proven
+        # An unsupported LATER construct (a heredoc, a process substitution) must not discard a
+        # proven-complete creation already recovered in the prefix: partial-lex and judge the recovered
+        # segments, so a canonical orphan creation still DENIES (DENY outranks the parse error). A command
+        # with no recovered creation falls back to the open-grammar allow (best-effort, disclosed).
+        try:
+            segments = [(seg.argv, seg.sep_after) for seg in _lex_command(command, partial=True)[0]]
+        except ValueError:
+            return _allow()  # even partial recovery failed: open grammar, best-effort
 
     pending_ask = None
     saw_dir_change = False
