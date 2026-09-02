@@ -2053,10 +2053,16 @@ def main():
         brexpect("(H9e) worktree add --track asks",
                  "git worktree add --track -b x ../wt-track origin/main", "ask")
 
-        # H10: git worktree add extracts an explicit start; an orphan start denies (--orphan is no
-        # longer mismodelled as consuming the worktree PATH, and the path/start operands are read right).
-        brexpect("(H10) worktree add <path> <orphan-start> denies",
-                 "git worktree add ../wt-den orphan-start", "deny")
+        # H10: only an EXPLICIT -b/-B worktree creation is deny-capable (its start is extractable). A bare
+        # `worktree add <path> <commit-ish>` (no -b) is a detached/existing checkout, not a clean creation,
+        # so under fail-safe-ASK it ASKS rather than probe-denying a non-creation (redesign-fix-1, codex +
+        # claude corroborated); `worktree add <path>` alone DWIMs a branch from HEAD (rooted) and allows.
+        brexpect("(H10a) worktree add -b <name> <path> <orphan-start> denies",
+                 "git worktree add -b wtden ../wt-den orphan-start", "deny")
+        brexpect("(H10b) worktree add <path> <commit-ish> (no -b) asks",
+                 "git worktree add ../wt-ci orphan-start", "ask")
+        brexpect("(H10c) worktree add <path> alone (DWIM from HEAD) allows",
+                 "git worktree add ../wt-dwim", "allow")
 
         # H11: an unmodelled option of unknown arity in a creation-ish command ASKS rather than risk a
         # mis-extracted start (fail safe over a fragile full-grammar model).

@@ -3611,6 +3611,7 @@ _BRANCH_NONCREATE = frozenset((
     "-d", "-D", "-m", "-M", "-l", "--list", "--delete", "--move",
     "--show-current", "--edit-description", "--set-upstream-to", "--unset-upstream",
     "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format",
+    "--all", "--remotes",
 ))
 # brnrot creation-start parsers (F2 conservative redesign). The round-1 approach maintained per-option
 # value-taking lists that kept mis-modelling arity (a --color read as mandatory, a clustered -qb missed,
@@ -3649,7 +3650,7 @@ _BRANCH_SAFE_BOOL = frozenset((
     "--create-reflog", "--no-create-reflog", "--recurse-submodules", "--no-recurse-submodules",
 ))
 # git branch clusterable safe-boolean SHORT letters: -q quiet, -f force, -v verbose, -t track, -l reflog.
-_BRANCH_SAFE_SHORT = frozenset("qfvtl")
+_BRANCH_SAFE_SHORT = frozenset("qfvtlar")  # q f v t l + a(--all) r(--remotes): all listing/safe booleans
 
 # git worktree add: --orphan/--track/-t route to ASK; the safe-boolean long options and clusterable short
 # letters below never consume an operand. -b/-B (new-branch name) are value-taking and handled inline.
@@ -3808,8 +3809,8 @@ def _branch_command_creation_start(args):
             i += 1
             continue
         if len(arg) > 1 and all(ch in _BRANCH_SAFE_SHORT for ch in arg[1:]):
-            if "l" in arg[1:]:
-                noncreate = True  # -l (clustered or bare) is --list: a listing operation, not a creation
+            if any(c in "lar" for c in arg[1:]):
+                noncreate = True  # -l/-a/-r (clustered or bare) are listing operations, not creations
             i += 1
             continue
         ambiguous = True  # a short cluster carrying a letter that is not a known boolean
@@ -3834,6 +3835,7 @@ def _worktree_creation_start(args):
         return None
     ask = False
     detached = False
+    creating_b = False
     operands = []
     i = 1
     after_boundary = False
@@ -3860,9 +3862,11 @@ def _worktree_creation_start(args):
         if arg in ("-b", "-B"):
             if i + 1 >= len(args):
                 return None
+            creating_b = True
             i += 2  # consume the new-branch name value
             continue
         if any(arg.startswith(flag) and len(arg) > len(flag) for flag in ("-b", "-B")):
+            creating_b = True
             i += 1  # attached -bNAME/-BNAME new-branch name
             continue
         if arg.startswith("--"):
@@ -3885,7 +3889,14 @@ def _worktree_creation_start(args):
         return _ASK_START  # an unrecognized/ambiguous option shape: fail SAFE to ASK
     if not operands:
         return None
-    return operands[1] if len(operands) > 1 else "HEAD"
+    if creating_b:
+        return operands[1] if len(operands) > 1 else "HEAD"  # -b <name> <path> [start]: start or HEAD
+    # No -b/-B and no --detach: `worktree add <path>` DWIMs a new branch from HEAD (rooted); but `worktree
+    # add <path> <commit-ish>` is a detached or existing-branch checkout, NOT a clean creation -> fail-safe
+    # ASK rather than a probe-based DENY of a non-creation.
+    if len(operands) > 1:
+        return _ASK_START
+    return "HEAD"
 
 
 def _branch_creation_start(sub, args):
