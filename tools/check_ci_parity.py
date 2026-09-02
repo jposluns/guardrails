@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Check token-level parity between the local and CI quality-gate rosters.
 
@@ -8,10 +7,11 @@ resolved repository root.
 
 Identity is the normalized command, including all script arguments. Python and shell
 launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s,
--P, and -u, including glued forms such as -IB, do not affect identity. The runtime
-value of a runtime-derived flag (--base, --protected, --head) is masked as <ref>,
-retaining the flag itself in identity. Every other argument remains order-preserving
-and identity-relevant. Duplicates collapse because comparison is set-based.
+-P, and -u, including glued forms such as -IB, do not affect identity. The value of a
+runtime-derived flag (--base, --protected, --head) is masked as <ref> only when it
+carries a shell expansion or a GitHub expression; a literal value stays in identity, so
+two different literals diverge. Every other argument remains order-preserving and
+identity-relevant. Duplicates collapse because comparison is set-based.
 
 Exit convention:
   0  extraction succeeded, every difference has an active exception, no exception is
@@ -31,8 +31,14 @@ gates in other workflows are not enumerated. Argument order is identity-relevant
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
 invocations cannot be detected if nobody runs the remaining file manually. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
-cannot-evaluate rather than a clean pass. The shadow scan has one soft edge: exotic
-quoting outside the supported grammar could hide a tools/ string from comment
+cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
+top-level or job-level workflow key, a top-level unconditional exit that would strand
+later local gates, and a run_gate() dispatcher body outside its recognized shape.
+Deeper nested non-gate YAML (under on:, env:, with:, or strategy:) is structurally
+recognized but not exhaustively schema-validated; the shadow scan still prevents a
+tools/ gate from hiding there, and a job-level if: that disables a whole job is a
+reachability concern outside token-parity scope. The shadow scan has one soft edge:
+exotic quoting outside the supported grammar could hide a tools/ string from comment
 stripping.
 """
 import argparse
@@ -70,6 +76,16 @@ ALLOWLIST = (
         "reason": (
             "CI derives the comparison base from trusted event and repository "
             "history context; the bare leg runs on both sides."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_version_monotonicity.py --base HEAD^",
+        "reason": (
+            "The CI else-branch uses the history-relative literal base HEAD^ "
+            "when no pull-request target ref is available; there is no local "
+            "--base leg, so this literal form is CI-only by design."
         ),
         "backlog": "GD-123",
     },
@@ -115,6 +131,28 @@ MANDATORY_MEMBERS = frozenset({
 
 INTERPRETERS = frozenset({"python", "python3"})
 SHELLS = frozenset({"bash", "sh"})
+
+# The run_gate() dispatcher body carries no gate invocations, so its lines are not
+# extracted; but it is validated against this exact expected shape rather than skipped
+# blindly, so malformed or unexpected function-body shell is cannot-evaluate, not a pass.
+EXPECTED_RUN_GATE_BODY = (
+    'local name="$1"; shift',
+    'echo "--- ${name} ---"',
+    'if "$@"; then :; else failed=1; fi',
+    "echo",
+)
+
+# Recognized structural keys, so a genuinely unknown key at these levels is
+# cannot-evaluate rather than silently ignored (honouring the fail-closed guarantee).
+# Deeper nested non-gate YAML (under on:, env:, with:, strategy:) is not exhaustively
+# schema-validated; the shadow scan still prevents any tools/* gate from hiding there.
+TOP_LEVEL_KEYS = frozenset({"name", "on", "permissions", "jobs"})
+JOB_PROPERTY_KEYS = frozenset({
+    "name", "runs-on", "steps", "strategy", "needs", "env", "permissions",
+    "if", "timeout-minutes", "continue-on-error", "defaults", "outputs",
+    "concurrency", "container", "services", "uses", "with", "secrets",
+    "environment",
+})
 
 TOOL_RE = re.compile(r"\btools/[A-Za-z0-9_.-]+\.(?:py|sh)\b")
 PY_TARGET_RE = re.compile(r"^tools/[A-Za-z0-9_.-]+\.py$")
@@ -186,6 +224,12 @@ def _operator(token):
 def _interpreter_flag(token):
     """Recognize only the disclosed, valueless interpreter flag set."""
     return bool(re.fullmatch(r"-[IBEsPu]+", token))
+
+
+def _is_runtime_value(value):
+    """A runtime-derived flag value carries a shell expansion or a GitHub expression.
+    A literal value has neither and stays in identity, so two different literals diverge."""
+    return "$" in value or "`" in value
 
 
 def normalize(tokens):
@@ -261,7 +305,9 @@ def normalize(tokens):
                     "runtime-value",
                     "{} has no value".format(token),
                 )
-            canonical.extend((token, "<ref>"))
+            value = args[index + 1]
+            canonical.extend(
+                (token, "<ref>" if _is_runtime_value(value) else value))
             index += 2
             continue
 
@@ -278,7 +324,9 @@ def normalize(tokens):
                     "runtime-value",
                     "{} has an empty value".format(matched_flag),
                 )
-            canonical.extend((matched_flag, "<ref>"))
+            value = token[len(matched_flag) + 1:]
+            canonical.extend(
+                (matched_flag, "<ref>" if _is_runtime_value(value) else value))
             index += 1
             continue
 
@@ -378,6 +426,8 @@ def extract_local(text):
         ))
 
     in_function = False
+    function_body = []
+    if_depth = 0
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -390,10 +440,29 @@ def extract_local(text):
         if in_function:
             if stripped == "}":
                 in_function = False
+                if tuple(function_body) != EXPECTED_RUN_GATE_BODY:
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "run-gate-body",
+                        "run_gate() body is outside the recognized dispatcher "
+                        "shape; refusing to skip unvalidated function content",
+                    ))
+                function_body = []
+            else:
+                function_body.append(stripped)
             continue
         if stripped == "run_gate() {":
             in_function = True
+            function_body = []
             continue
+
+        # Track if/fi nesting so a bare exit is scaffold only inside a conditional
+        # block; a top-level unconditional exit makes later gates unreachable.
+        if stripped == "fi":
+            if_depth = max(0, if_depth - 1)
+        elif stripped.endswith("; then"):
+            if_depth += 1
 
         if stripped.endswith("\\"):
             diagnostics.append(_diagnostic(
@@ -472,7 +541,7 @@ def extract_local(text):
             )
         elif stripped in ("else", "fi", "then"):
             scaffold = True
-        elif re.fullmatch(r"exit [0-9]+", stripped):
+        elif re.fullmatch(r"exit [0-9]+", stripped) and if_depth > 0:
             scaffold = True
         elif (tokens and tokens[0] == "if"
                 and len(tokens) >= 4
@@ -736,6 +805,19 @@ def extract_ci(text):
             index += 1
             continue
 
+        if indent == 0:
+            top_key = stripped.split(":", 1)[0] if ":" in stripped else stripped
+            if top_key not in TOP_LEVEL_KEYS:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "unknown-top-key",
+                    "top-level line {!r} is outside the recognized workflow "
+                    "keys".format(stripped),
+                ))
+            index += 1
+            continue
+
         if in_steps and indent <= 4:
             in_steps = False
             current_mapping = None
@@ -752,6 +834,19 @@ def extract_ci(text):
         if in_jobs and indent == 4 and stripped == "steps:":
             in_steps = True
             current_mapping = None
+            index += 1
+            continue
+
+        if in_jobs and not in_steps and indent == 4:
+            job_key = stripped.split(":", 1)[0] if ":" in stripped else stripped
+            if job_key not in JOB_PROPERTY_KEYS:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "unknown-job-key",
+                    "job-level line {!r} is outside the recognized job "
+                    "properties".format(stripped),
+                ))
             index += 1
             continue
 
@@ -1394,7 +1489,9 @@ def self_test():
             "failed=0",
             "run_gate() {",
             '  local name="$1"; shift',
+            '  echo "--- ${name} ---"',
             '  if "$@"; then :; else failed=1; fi',
+            "  echo",
             "}",
         ]
         for number, command in enumerate(commands, 1):
@@ -1637,14 +1734,24 @@ def self_test():
         "tools/check_version_monotonicity.py",
         "          fi",
     ))
-    base_waiver = ({
-        "side": "ci-only",
-        "identity": (
-            "tools/check_version_monotonicity.py --base <ref>"
-        ),
-        "reason": "fixture baseline",
-        "backlog": "T-2",
-    },)
+    base_waiver = (
+        {
+            "side": "ci-only",
+            "identity": (
+                "tools/check_version_monotonicity.py --base <ref>"
+            ),
+            "reason": "fixture baseline",
+            "backlog": "T-2",
+        },
+        {
+            "side": "ci-only",
+            "identity": (
+                "tools/check_version_monotonicity.py --base HEAD^"
+            ),
+            "reason": "fixture baseline: HEAD^ is a kept literal",
+            "backlog": "T-2",
+        },
+    )
     case(
         "10 runtime base masking",
         evaluate(
@@ -1704,6 +1811,93 @@ def self_test():
             protected_waivers,
         ),
         0,
+    )
+
+    case(
+        "10c literal masked-flag values diverge",
+        evaluate(
+            local_fixture(common + (
+                "python3 tools/check_versions.py --base localref",)),
+            ci_fixture(common + (
+                "python3 -I -B tools/check_versions.py --base OTHERref",)),
+            (),
+        ),
+        1,
+    )
+
+    tampered_body_local = "\n".join((
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        "failed=0",
+        "run_gate() {",
+        '  local name="$1"; shift',
+        '  echo "--- ${name} ---"',
+        '  eval "$INJECT"',
+        '  if "$@"; then :; else failed=1; fi',
+        "  echo",
+        "}",
+        "run_gate \"gate1\" python3 tools/a.py",
+    )) + "\n"
+    case(
+        "10d tampered run_gate body is cannot-evaluate",
+        evaluate(
+            tampered_body_local,
+            ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
+    )
+
+    case(
+        "10e top-level exit is cannot-evaluate",
+        evaluate(
+            local_fixture(common + ("python3 tools/a.py",), ("exit 0",)),
+            ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
+    )
+
+    unknown_top_ci = "\n".join((
+        "name: Test",
+        "bogus_top_key: value",
+        "jobs:",
+        "  quality:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Gate 1",
+        "        run: python3 tools/a.py",
+    )) + "\n"
+    case(
+        "10f unknown top-level key is cannot-evaluate",
+        evaluate(
+            local_fixture(common + ("python3 tools/a.py",)),
+            unknown_top_ci,
+            (),
+        ),
+        2,
+    )
+
+    unknown_job_ci = "\n".join((
+        "name: Test",
+        "jobs:",
+        "  quality:",
+        "    runs-on: ubuntu-latest",
+        "    bogus_job_key: nope",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Gate 1",
+        "        run: python3 tools/a.py",
+    )) + "\n"
+    case(
+        "10g unknown job-level key is cannot-evaluate",
+        evaluate(
+            local_fixture(common + ("python3 tools/a.py",)),
+            unknown_job_ci,
+            (),
+        ),
+        2,
     )
 
     case(
