@@ -375,6 +375,12 @@ jobs:
       - name: Standards currency self-test
         run: python3 -I -B tools/check_standards_currency.py --self-test
 
+      - name: CI parity self-test
+        run: python3 -I -B tools/check_ci_parity.py --self-test
+
+      - name: CI parity
+        run: python3 -I -B tools/check_ci_parity.py
+
   # The 3.6 checkout-byte-stability matrix: prove the .gitattributes eol=lf pinning defeats the worst
   # adopter setting on each supported platform. core.autocrlf true is set BEFORE the checkout, so the
   # fresh working tree below is materialized under the hostile setting; the byte-canon gate then runs

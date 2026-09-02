@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c350998c7d09d4ac25686900bf08635db97e52c568b73c16e83ae3cf8460b2d6"
+tree-sha256 = "ce4aa3ca643155b1bbf26eacd9b0b2c446b25df31ab6a51acc434a199bfdab18"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,8 +46,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 62979
-sha256 = "6452e2cf37f0f0b72e45dde855f8d127d39971eaa09d7f1f835e60a6a29c70c7"
+bytes = 64521
+sha256 = "223008a5aeec6752f0d83fa87dd20526b00e00cbde26d19daea653694a7ade95"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -731,8 +731,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 205720
-sha256 = "8ab4e10b193d333b159e238dd2b2fb039959659e5667c9fa52fb1bd09d8fbc1f"
+bytes = 207331
+sha256 = "68598cabbdb1548b2f5ead6683a5ced61c781de2c3455e6472e65a3b7ca0f6f2"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2101,8 +2101,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 33951
-sha256 = "022447d34d29b050caeae40baa07a5ef180ea03513eda613f619da4b2d189d25"
+bytes = 33988
+sha256 = "a959273783700f2e0a2a52a1d417c925a7431b6e798d4532f374e0d54d60caae"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2505,6 +2505,11 @@ bytes = 43281
 sha256 = "316ad0a049bacc10b372a49da00b5a4961352d0689d33872987ccc807f18d563"
 
 [[sources]]
+path = "tools/check_ci_parity.py"
+bytes = 58589
+sha256 = "13dad39dfad22fb843d6d0cb503825cf1c55cc8a933f28e97b7e6a7b20f40520"
+
+[[sources]]
 path = "tools/check_clauses.py"
 bytes = 99910
 sha256 = "e6c66303c6770d8afeacc0f807a3bd807e841344b43a17cfd72d37432d151db1"
@@ -2821,8 +2826,8 @@ sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 11527
-sha256 = "fc0acaf835f3c9ce42fa04b11c1ce229391fd19e5f5ab922769e04d5712e9392"
+bytes = 11678
+sha256 = "b621ce7fec2f633fa88639da7afdbf23690fb68e2080fffb48b0a890d85681da"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
