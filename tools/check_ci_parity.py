@@ -8,9 +8,11 @@ resolved repository root.
 Identity is the normalized command, including all script arguments. Python and shell
 launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s,
 -P, and -u, including glued forms such as -IB, do not affect identity. The value of a
-runtime-derived flag (--base, --protected, --head) is masked as <ref> only when it
-carries a shell expansion or a GitHub expression; a literal value stays in identity, so
-two different literals diverge. Every other argument remains order-preserving and
+runtime-derived flag (--base, --protected, --head) is masked as <ref:expression>,
+preserving which expression supplied it, only when it carries a shell expansion or a
+GitHub expression, so a change among runtime spellings (including one making two refs
+identical, a self-comparison) diverges; a literal value stays in identity, so two
+different literals diverge. Every other argument remains order-preserving and
 identity-relevant. Duplicates collapse because comparison is set-based.
 
 Exit convention:
@@ -40,12 +42,10 @@ recognized but not exhaustively schema-validated; the shadow scan still prevents
 tools/ gate from hiding there. Reachability is outside token-parity scope: a gate is
 counted as declared regardless of an enclosing conditional, whether a job-level if:, a
 shell conditional inside a run: block, or an if/fi in the local runner, that could keep
-it from running; the comparison is of declared rosters, not reachable ones. Because a
-runtime-derived value is masked to <ref>, a change among runtime spellings, including
-one that makes two masked refs identical (a self-comparison), is not distinguished;
-validating a single gate's own argument semantics is that gate's responsibility, not
-this one's. The shadow scan has one soft edge: exotic quoting outside the supported
-grammar could hide a tools/ string from comment stripping.
+it from running; the comparison is of declared rosters, not reachable ones. Validating
+a single gate's own argument semantics beyond the runtime expression is that gate's
+responsibility, not this one's. The shadow scan has one soft edge: exotic quoting
+outside the supported grammar could hide a tools/ string from comment stripping.
 """
 import argparse
 import re
@@ -78,7 +78,7 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
-        "identity": "tools/check_version_monotonicity.py --base <ref>",
+        "identity": "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
         "reason": (
             "CI derives the comparison base from trusted event and repository "
             "history context; the bare leg runs on both sides."
@@ -98,7 +98,7 @@ ALLOWLIST = (
     {
         "side": "ci-only",
         "identity": (
-            "tools/check_branch_root.py --protected <ref> --head <ref> --max-lag 200"
+            "tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> --head <ref:$PR_HEAD_SHA> --max-lag 200"
         ),
         "reason": (
             "The pull_request CI job compares the PR head against its target "
@@ -110,7 +110,7 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
-        "identity": "tools/check_branch_root.py --protected <ref> --max-lag 200",
+        "identity": "tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> --max-lag 200",
         "reason": (
             "The push-to-main CI job self-checks the protected line against its "
             "runtime-derived origin ref; there is no local equivalent of the "
@@ -240,6 +240,19 @@ def _is_runtime_value(value):
     return "$" in value or "`" in value
 
 
+def _mask_value(value):
+    """Canonicalize a runtime-value-flag value. A runtime-derived value is masked to
+    <ref:expression>, preserving which expression supplied it so a change among runtime
+    spellings (including a self-comparison) diverges; a literal stays in identity. An
+    already-masked placeholder passes through unchanged so the form is idempotent, which
+    the allowlist canonical-identity check relies on."""
+    if value.startswith("<ref") and value.endswith(">"):
+        return value
+    if _is_runtime_value(value):
+        return "<ref:" + value + ">"
+    return value
+
+
 def normalize(tokens):
     """Return a canonical gate identity or a cannot-evaluate Result."""
     tokens = list(tokens)
@@ -314,8 +327,7 @@ def normalize(tokens):
                     "{} has no value".format(token),
                 )
             value = args[index + 1]
-            canonical.extend(
-                (token, "<ref>" if _is_runtime_value(value) else value))
+            canonical.extend((token, _mask_value(value)))
             index += 2
             continue
 
@@ -333,8 +345,7 @@ def normalize(tokens):
                     "{} has an empty value".format(matched_flag),
                 )
             value = token[len(matched_flag) + 1:]
-            canonical.extend(
-                (matched_flag, "<ref>" if _is_runtime_value(value) else value))
+            canonical.extend((matched_flag, _mask_value(value)))
             index += 1
             continue
 
@@ -1767,7 +1778,7 @@ def self_test():
         {
             "side": "ci-only",
             "identity": (
-                "tools/check_version_monotonicity.py --base <ref>"
+                "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>"
             ),
             "reason": "fixture baseline",
             "backlog": "T-2",
@@ -1811,8 +1822,9 @@ def self_test():
         {
             "side": "ci-only",
             "identity": (
-                "tools/check_branch_root.py --protected <ref> "
-                "--head <ref> --max-lag 200"
+                "tools/check_branch_root.py "
+                "--protected <ref:origin/${GITHUB_BASE_REF}> "
+                "--head <ref:$PR_HEAD_SHA> --max-lag 200"
             ),
             "reason": "fixture baseline",
             "backlog": "T-2",
@@ -1820,7 +1832,7 @@ def self_test():
         {
             "side": "ci-only",
             "identity": (
-                "tools/check_branch_root.py --protected <ref> --max-lag 200"
+                "tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> --max-lag 200"
             ),
             "reason": "fixture baseline",
             "backlog": "T-2",
@@ -1970,6 +1982,35 @@ def self_test():
             (),
         ),
         2,
+    )
+
+    selfcmp_ci = "\n".join((
+        "name: Test",
+        "jobs:",
+        "  quality:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+        "      - name: Branch root",
+        '        run: python3 tools/check_branch_root.py '
+        '--protected "$X" --head "$X"',
+    )) + "\n"
+    selfcmp_waiver = ({
+        "side": "ci-only",
+        "identity": (
+            "tools/check_branch_root.py --protected <ref:$X> --head <ref:$Y>"
+        ),
+        "reason": "distinct-ref form is the reviewed CI shape",
+        "backlog": "T-2",
+    },)
+    case(
+        "10k masked self-comparison diverges from the distinct-ref waiver",
+        evaluate(
+            local_fixture(common + ("python3 tools/check_branch_root.py",)),
+            selfcmp_ci,
+            selfcmp_waiver,
+        ),
+        1,
     )
 
     case(
