@@ -28,6 +28,11 @@ human, not covered by standing authorization and determining the next action, mu
 first; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,
 quotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single
 situation may satisfy more than one, and any one of them suffices.
+A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the
+moment it is confirmed, the work is parked behind the human decision it now awaits or exits through
+the project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles
+it. A lapse the assistant itself asserts never converts into a self-granted clean close of open
+work; a clean close past open work belongs to the operator alone.
 This rule never narrows the oversight threshold; it defers to it. The distinction is what a finding
 reveals, not the instrument that surfaced it: a failing check, gate, or audit whose finding is an
 ordinary defect is fixed in place while the run continues and is not a wind-down signal, while the
