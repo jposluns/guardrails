@@ -179,7 +179,7 @@ residue = 'A PATH guard, not a content judge: it decides where a write lands, ne
 
 [[hook]]
 id = "orch-stop-guard"
-rules = ["setcmp", "cntdef", "trkasy", "cnclse"]  # completeness-claim + continue-by-default + tracked work + lease scope
+rules = ["setcmp", "cntdef", "trkasy", "cnclse"]  # completeness-claim + continue-by-default + track-launched-work + lease scope
 platform = "claude-code"
 event = "Stop"
 handler = "orch_stop_guard"
