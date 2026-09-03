@@ -76,9 +76,9 @@ Output on stdout:
 A nonzero exit, malformed JSON, a duplicate id, or an unknown version is ENUMERATOR_ERROR, never an
 empty backlog; an empty `items` array is a valid enumeration, a parse failure never is. On the stop
 path (FIX 1) an enumerator error or any cannot-evaluate FAILS CLOSED-CONTINUE: the stop is DENIED
-(ignorance refuses the wind-down), releasable only by the operator-owned escape sentinel and never a
-clean close, bounded by the guard-owned loop bound past which it becomes a deliberate, recorded forced
-exit; a new idle or wake scheduling call is likewise DENIED on cannot-evaluate, bounded by a
+(ignorance refuses the wind-down), releasable by the operator-owned escape sentinel OR by the
+guard-owned loop bound (past which it becomes a deliberate, recorded forced exit), and never a clean
+close; a new idle or wake scheduling call is likewise DENIED on cannot-evaluate, bounded by a
 three-denial cap. `tools/aei_backlog_md.py` is the generic reference
 provider for a markdown-checkbox backlog.
 

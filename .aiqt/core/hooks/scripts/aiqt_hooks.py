@@ -176,7 +176,8 @@ def _ask(reason, banner):
 
 def _stop_warn(banner):
     """A Stop surfacing WARN: exit 0 with a systemMessage banner and NOTHING blocking. Every Stop
-    outcome that is not a clean pass uses this, so the Stop layer can never wedge a turn chain (see the
+    outcome that WARNS (a guard's own I/O error, or a loop-bound-relieved forced exit) uses this, so the
+    warn path can never wedge a turn chain; a DELIBERATE Stop deny returns exit 2 directly (see the
     module docstring's design note)."""
     return (0, {"systemMessage": banner}, None)
 
@@ -5033,7 +5034,8 @@ def gensrc_guard(data):
 # .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session repo root it is inert (the
 # gensrc.json precedent), and the backlog guards additionally require a live orchestrator lease or a
 # declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
-# stop path fails OPEN (a guard error can never wedge a session); the schedule path fails CLOSED on
+# stop path fails OPEN on a guard's own error (which can never wedge a session) but DENIES on a backlog
+# cannot-evaluate (ignorance refuses the wind-down); the schedule path fails CLOSED on
 # cannot-evaluate (a denied tool call cannot wedge anything), bounded by a denial cap. See
 # .aiqt/core/hooks/ORCHESTRATION.md for the registry schema and the AEI v1 protocol.
 
@@ -6070,8 +6072,9 @@ def _orch_stop_family(data, event_name, kind):
         return _allow()
     if status == "bad":
         return _stop_warn("AIQT guardrail: the orchestration registry could not be read "
-                          "({}); the {} proceeds and this is a recorded finding.".format(reg,
-                                                                                         event_name))
+                          "({}); the {} fails open on its own read error and, because the registry is "
+                          "unreadable, writes NO guard-event (no record).".format(reg,
+                                                                                  event_name))
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
@@ -7620,7 +7623,8 @@ def main(argv):
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
-            # A Stop handler NEVER exits 2, not even on a malformed invocation: WARN and exit 0.
+            # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
+            # stop guard), not even on a malformed invocation: WARN and exit 0.
             print(json.dumps(_dispatcher_fail_open_warn(handler_name,"bad invocation: {}".format(detail))))
             return 0
         print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
@@ -7632,7 +7636,7 @@ def main(argv):
     except (ValueError, UnicodeDecodeError, OSError) as exc:
         # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload.
         if is_fail_open:
-            # A Stop handler NEVER exits 2: surface a non-blocking warning and exit 0, so no Stop
+            # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
             # payload (including a bare '{' or any garbage) can ever wedge the session.
             print(json.dumps(_dispatcher_fail_open_warn(handler_name,"unreadable payload: {}".format(exc))))
             return 0
