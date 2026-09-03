@@ -29,7 +29,10 @@ def main():
     if status != "ok":
         print("no usable orchestration registry ({}); nothing to preflight".format(status))
         return 2
-    ctx, _ts, _basis = aiqt_hooks._orch_build_ctx(reg, root, kinds[op], {})
+    # A preview makes NO state change (secpv): the checkpoint union is computed for display but not
+    # persisted, and no guard-events are emitted. The real hook path keeps record_checkpoint=True.
+    ctx, _ts, _basis = aiqt_hooks._orch_build_ctx(
+        reg, root, kinds[op], {}, record_checkpoint=False)
     verdict, reason, disposition = aiqt_hooks.decide_yield(ctx)
     print("operation: {} (decision kind: {})".format(op, kinds[op]))
     print("verdict if you {} now: {}".format(op, verdict))

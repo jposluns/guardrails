@@ -6,8 +6,12 @@ Row schema (one JSON object per line):
   {"seq": N, "id": "MR-N", "ts": "<iso-utc>", "mistake": "...", "evidence": "...", "rule": "...",
    "guardrail": "...", "status": "proposed|accepted|landed|declined|superseded",
    "prev": "<sha256 of the previous raw line, 64*'0' for the first>",
-   ...landed rows also: "commit": "<sha>", "check_ref": "<repo-relative path>"}
+   ...landed rows also: "commit": "<sha>", "check_ref": "<repo-relative path>",
+   ...optional: "class": "<row classifier, e.g. systemic-lapse>", "ref": "<the blocker ref an
+   attestation row covers>"}
 A status change is a NEW row re-naming an earlier id at a higher seq; nothing is ever edited in place.
+A registry-declared `attestations` register (GD-127 C.2) is verified by this same gate under the
+AT- id prefix; the id prefix is per-register, MR- for the mistakes register.
 
 Append-only enforcement, two modes: a git-TRACKED register is checked as an exact line-prefix of its
 merge-base state with origin/HEAD (so the protected-branch reference must be resolvable: on a fresh
@@ -48,8 +52,9 @@ class CannotEvaluate(RuntimeError):
     an authority it could not compute (chkfcl/grdinp)."""
 
 
-def verify_lines(lines, root=None):
-    """Return a list of violation strings for the raw register lines (empty = clean)."""
+def verify_lines(lines, root=None, prefix="MR-"):
+    """Return a list of violation strings for the raw register lines (empty = clean). prefix is the
+    register's id family (MR- for the mistakes register, AT- for an attestations register)."""
     problems, prev_line, ids_born, last_status = [], None, {}, {}
     for n, line in enumerate(lines, 1):
         if not line.strip():
@@ -70,8 +75,8 @@ def verify_lines(lines, root=None):
         status = row.get("status")
         if status not in STATUSES:
             problems.append("line {}: unknown status {!r}".format(n, status))
-        elif not isinstance(rid, str) or not rid.startswith("MR-"):
-            problems.append("line {}: id {!r} is not an MR- id".format(n, rid))
+        elif not isinstance(rid, str) or not rid.startswith(prefix):
+            problems.append("line {}: id {!r} is not an {} id".format(n, rid, prefix))
         elif rid in ids_born and status == "proposed":
             problems.append("line {}: id {} reused as a new proposal".format(n, rid))
         elif rid in ids_born:
@@ -176,36 +181,47 @@ def run(root, update=False):
                 print("error: cannot read the orchestration registry: {}".format(exc))
                 return 2
             break
-    if not isinstance(reg, dict) or not reg.get("mistakes_register"):
-        print("NOT APPLICABLE: no orchestration registry (or no declared mistakes register); the "
-              "self-test carries the assurance")
+    surfaces = []
+    if isinstance(reg, dict):
+        for key, prefix in (("mistakes_register", "MR-"), ("attestations", "AT-")):
+            if reg.get(key):
+                surfaces.append((key, prefix, reg[key]))
+    if not surfaces:
+        print("NOT APPLICABLE: no orchestration registry (or no declared mistakes or attestations "
+              "register); the self-test carries the assurance")
         return 0
-    declared = reg["mistakes_register"]
-    path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        print("error: the DECLARED mistakes register is unreadable ({}); fail-closed".format(exc))
-        return 2
-    line_problems = verify_lines(lines, root=root)
-    try:
-        append_problems = verify_append_only(root, path, lines, allow_missing_anchor=update)
-    except CannotEvaluate as exc:
-        print("error: cannot evaluate the register's append-only history ({}); fail-closed"
-              .format(exc))
-        return 2
-    problems = line_problems + append_problems
-    if problems:
-        print("FAIL: {} register violation(s):".format(len(problems)))
-        for p in problems:
-            print("  " + p)
+    worst, green = 0, []
+    for key, prefix, declared in surfaces:
+        path = Path(declared) if os.path.isabs(declared) else Path(root) / declared
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            print("error: the DECLARED {} is unreadable ({}); fail-closed".format(key, exc))
+            return 2
+        line_problems = verify_lines(lines, root=root, prefix=prefix)
+        try:
+            append_problems = verify_append_only(root, path, lines, allow_missing_anchor=update)
+        except CannotEvaluate as exc:
+            print("error: cannot evaluate the {}'s append-only history ({}); fail-closed"
+                  .format(key, exc))
+            return 2
+        problems = line_problems + append_problems
+        if problems:
+            print("FAIL: {} {} violation(s):".format(len(problems), key))
+            for p in problems:
+                print("  " + p)
+            worst = 1
+            continue
+        green.append((key, path, lines))
+    if worst:
         return 1
-    if update:
-        update_anchor(path, lines)
-        print("PASS: register verified; anchor advanced to seq {}".format(len(lines)))
-        return 0
-    print("PASS: the mistakes register is a verified append-only chain ({} row(s))".format(
-        len(lines)))
+    for key, path, lines in green:
+        if update:
+            update_anchor(path, lines)
+            print("PASS: {} verified; anchor advanced to seq {}".format(key, len(lines)))
+        else:
+            print("PASS: the {} is a verified append-only chain ({} row(s))".format(
+                key, len(lines)))
     return 0
 
 
@@ -229,8 +245,8 @@ def self_test():
             prev = hashlib.sha256(line.encode("utf-8")).hexdigest()
         return out
 
-    def _case(name, lines, want_clean, root=None):
-        got = not verify_lines(lines, root=root)
+    def _case(name, lines, want_clean, root=None, prefix="MR-"):
+        got = not verify_lines(lines, root=root, prefix=prefix)
         if got != want_clean:
             failures.append("{}: clean={}, want {}".format(name, got, want_clean))
 
@@ -322,6 +338,27 @@ def self_test():
             failures.append("--update-anchor bootstrap should establish the anchor and pass")
         if run(repo) != 0:
             failures.append("gate should pass once the anchor is established")
+        # GD-127 C.2: an attestations register (AT- prefix, optional class/ref fields) is covered by
+        # the same machinery; before the change a declared-attestations-only registry was NOT
+        # APPLICABLE (exit 0), so these legs discriminate.
+        at_good = chain(lambda p: row(1, "AT-1", "proposed", p,
+                                      {"ref": "ci", "class": "attestation"}))
+        _case("at-prefix-passes-under-at", at_good, True, prefix="AT-")
+        _case("at-rows-fail-default-prefix", at_good, False)
+        at_reg_path = repo / "attest.jsonl"
+        at_reg_path.write_text("\n".join(at_good) + "\n", encoding="utf-8")
+        registry.write_text(json.dumps(
+            {"version": 1, "attestations": "attest.jsonl"}), encoding="utf-8")
+        if run(repo) != 2:
+            failures.append("declared untracked attestations register with no anchor should exit 2")
+        if run(repo, update=True) != 0:
+            failures.append("--update-anchor should bootstrap the attestations anchor and pass")
+        if run(repo) != 0:
+            failures.append("gate should pass the attestations register once anchored")
+        at_wrong = chain(lambda p: row(1, "MR-1", "proposed", p))
+        at_reg_path.write_text("\n".join(at_wrong) + "\n", encoding="utf-8")
+        if run(repo) != 1:
+            failures.append("an MR- row in the attestations register should fail the AT- prefix")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if failures:
@@ -332,7 +369,9 @@ def self_test():
     print("SELF-TEST PASS: pure appends pass; a broken chain or sequence, a reused id, an illegal "
           "transition, an anchored rewrite or reorder, an unverifiable or absolute-path landed "
           "check_ref, a tracked rewrite with no computable merge-base, and a declared untracked "
-          "register with no anchor all fail; the --update-anchor bootstrap establishes the baseline")
+          "register with no anchor all fail; the --update-anchor bootstrap establishes the baseline; "
+          "and a declared attestations register is verified under the AT- prefix with the optional "
+          "class and ref fields accepted")
     return 0
 
 

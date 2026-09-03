@@ -3,11 +3,16 @@
 
   orch_register.py append --register PATH --id MR-N --mistake T --evidence R --rule CID \
                           --guardrail T [--status proposed] [--commit SHA --check-ref PATH]
-      Append one chained row (seq and prev computed from the file; a wrong --id fails).
+                          [--prefix MR] [--klass T] [--ref R]
+      Append one chained row (seq and prev computed from the file; a wrong --id fails). --prefix
+      parameterizes the id family (MR for the mistakes register, AT for an attestation register,
+      GD-127 C.2); --klass writes the optional class field (for example systemic-lapse); --ref
+      writes the blocker ref an attestation row covers.
   orch_register.py project --register PATH
       Emit an AEI v1 enumeration of the rows whose LATEST status is proposed or accepted and not yet
       landed, as granted open items, so the stop guard itself enforces mistake-to-guardrail
-      follow-through. A registry can name this as (part of) its enumerator.
+      follow-through. A registry can name this as (part of) its enumerator. An attestation register
+      is evidence, never backlog: project the mistakes register, not the attestations file.
 """
 import argparse
 import datetime
@@ -31,7 +36,7 @@ def cmd_append(a):
     lines = _lines(path)
     prev = ZERO if not lines else hashlib.sha256(lines[-1].encode("utf-8")).hexdigest()
     seq = len(lines) + 1
-    want_id = "MR-{}".format(sum(1 for l in lines if '"status": "proposed"' in l) + 1) \
+    want_id = "{}-{}".format(a.prefix, sum(1 for l in lines if '"status": "proposed"' in l) + 1) \
         if a.status == "proposed" else a.id
     if a.status == "proposed" and a.id != want_id:
         sys.exit("append: a new proposal must take the next id {} (ids are permanent, "
@@ -43,6 +48,10 @@ def cmd_append(a):
         row["commit"] = a.commit
     if a.check_ref:
         row["check_ref"] = a.check_ref
+    if a.klass:
+        row["class"] = a.klass
+    if a.ref:
+        row["ref"] = a.ref
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -78,9 +87,10 @@ def main():
     p1 = sub.add_parser("append")
     for name, req in (("--register", True), ("--id", True), ("--mistake", True),
                       ("--evidence", True), ("--rule", True), ("--guardrail", True),
-                      ("--status", False), ("--commit", False), ("--check-ref", False)):
+                      ("--status", False), ("--commit", False), ("--check-ref", False),
+                      ("--prefix", False), ("--klass", False), ("--ref", False)):
         p1.add_argument(name, required=req, dest=name.lstrip("-").replace("-", "_"),
-                        default="proposed" if name == "--status" else None)
+                        default={"--status": "proposed", "--prefix": "MR"}.get(name))
     p2 = sub.add_parser("project")
     p2.add_argument("--register", required=True)
     a = ap.parse_args()
