@@ -1032,22 +1032,32 @@ def main():
               "checkpoint-marker-unwritable" in (cmsd / "guard-events.jsonl").read_text(
                   encoding="utf-8"), True)
         # FIX 1 preview immutability (record_checkpoint=False, the tools/orch_preflight.py posture):
-        # the preview COMPUTES injections but writes NOTHING. A shrink-eligible backlog that WOULD
-        # write a checkpoint + marker on the real path leaves the state dir untouched under preview.
+        # the preview COMPUTES injections but writes NOTHING. The backlog is driven OVER
+        # _ORCH_CHECKPOINT_MAX so a bound-forced drop WOULD emit a "checkpoint-bound" guard-event AND
+        # rewrite the checkpoint + marker on the real path; under preview the state dir stays untouched,
+        # so the no-guard-events leg is DISCRIMINATING (making the bound-drop event unconditional under
+        # preview fails it), not vacuous on a below-bound backlog that emits no event either way.
         pv = Fixture(tmp, "preview")
         pvreg = aiqt_hooks._orch_registry(str(pv.root))[1]
         pvsd = Path(aiqt_hooks._orch_state_dir_for_root(str(pv.root)))
-        pv.set_items([cblocked("PV-A")])
+        pv.set_items([item("PV-{:05d}".format(n))
+                      for n in range(aiqt_hooks._ORCH_CHECKPOINT_MAX + 50)])
         pv.set_turn_state({})  # creates the state dir; the three probed files must stay absent
         aiqt_hooks._orch_build_ctx(pvreg, str(pv.root), "stop", {}, record_checkpoint=False)
         check("preview/no-checkpoint", (pvsd / "backlog-checkpoint.json").exists(), False)
         check("preview/no-marker", (pvsd / "checkpoint-init.marker").exists(), False)
         check("preview/no-guard-events", (pvsd / "guard-events.jsonl").exists(), False)
         # contrast: the real hook path (record_checkpoint default True) DOES write checkpoint + marker
+        # AND, the backlog being over the bound, emits the "checkpoint-bound" guard-event the preview
+        # suppressed (proving the guard-event path was genuinely exercised, so the leg above discriminates)
         aiqt_hooks._orch_build_ctx(pvreg, str(pv.root), "stop", {})
         check("preview/real-path-writes-checkpoint",
               (pvsd / "backlog-checkpoint.json").exists(), True)
         check("preview/real-path-writes-marker", (pvsd / "checkpoint-init.marker").exists(), True)
+        check("preview/real-path-emits-bound-drop",
+              (pvsd / "guard-events.jsonl").exists()
+              and "checkpoint-bound" in (pvsd / "guard-events.jsonl").read_text(encoding="utf-8"),
+              True)
 
         # ---------- C.4: forced-exit recording ----------
         d = Fixture(tmp, "forced")
@@ -1153,6 +1163,17 @@ def main():
             _c, gya, _e = gsched({"prompt": "recheck SP-2"})
             check("spoof6/yield-allow-surfaces",
                   "SPOOF-UNRECORDED" in (gya or {}).get("systemMessage", ""), True)
+            # (5) yield ALLOW_WITH_FINDINGS (schedule cap-relieved past an actionable backlog): the
+            # spoof warning rides the systemMessage on the cap-relief branch too, not only clean ALLOW.
+            # Three denials on an unchanged basis reach the cap; the fourth call is cap-relieved.
+            g.set_items([item("SP-3")])
+            g.set_turn_state({})
+            for _ in range(aiqt_hooks._ORCH_SCHEDULE_CAP):
+                gsched({"prompt": "recheck SP-3"})
+            _c, gyawf, _e = gsched({"prompt": "recheck SP-3"})
+            check("spoof6/yield-awf-verdict", _verdict((_c, gyawf, _e)), "warn")
+            check("spoof6/yield-awf-surfaces",
+                  "SPOOF-UNRECORDED" in (gyawf or {}).get("systemMessage", ""), True)
         finally:
             aiqt_hooks._orch_escape_active = _o_active
             aiqt_hooks._orch_record_escape_spoof = _o_spoof

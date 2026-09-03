@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "86736e0b330d091b800c25c6087bf2e25f0eadf78619ea253f74ae56f70af3bf"
+tree-sha256 = "f0b0e341c275d0fc7a1d567b5659397a534bb89b7bc575806f3d40a879a72c3b"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -21,8 +21,8 @@ sha256 = "3245979bdeef4559f4bb9064d77d35c31674cdef21fcaacab4f11513fe735d56"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 235554
-sha256 = "803c8efa30021552a83c30080c825dcb60aba033eee3863eb20c654253cadeab"
+bytes = 237028
+sha256 = "8c3d91c9dc754803e12225b46f3c161f226428d4731dc392d90c67742842dfdd"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -51,13 +51,13 @@ sha256 = "2de2ca06f158f116767bfa759aeaae17b419d88b11cab6406a8ecfa50eb2329d"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
-bytes = 9314
-sha256 = "9ec00e925f9fa7aa4f273e2b6146feab632b939807dd9db8e9ef5c4c2b2d4340"
+bytes = 9316
+sha256 = "c9d987d00cf297ce3bdeea7cdef10ca109e500ed7a24eb7c7ec2b3fe997b9380"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 102983
-sha256 = "0410a4d5f12cf8d41ae4ca3a8d75dfa69714a172615331a9a8583947e5dd72e9"
+bytes = 102992
+sha256 = "b9e4fabf9698bb6e787eaa02c82b155a90ce9276f69c3e6b513c2258eff4da84"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -66,8 +66,8 @@ sha256 = "27a61e78080825a0211307cea479366a2bea8c8adca49ed1037ad0704e9196d4"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 31613
-sha256 = "a76db24882980f25eedbbe8bc2cfd2f17e14b59718ecbd1d1b74a962a8ef2bfa"
+bytes = 31662
+sha256 = "f62a81fa2c1be5a463d02f6bd64e7641145611c70bf609750eb364a3ec8e7820"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -671,8 +671,8 @@ sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
 
 [[sources]]
 path = ".aiqt/core/rules/trust-continue-by-default.md"
-bytes = 4950
-sha256 = "701b1fb5bf746ccf1bb4e277e3de49d285bc2276dd74ed565d156f4410ba470a"
+bytes = 6157
+sha256 = "7e7b2eb2d43ef8b3841194c715c34d9ad4b5f64d867942a76367fd4797fa092c"
 
 [[sources]]
 path = ".aiqt/core/rules/trust-human-oversight.md"
@@ -731,8 +731,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 224458
-sha256 = "66cd4e3603b7f4a9d5507e1c418219e6ec4ae029caec8898d2ab43613fee001c"
+bytes = 224494
+sha256 = "5df7f83b2b8d690cb161c3cc80b8f461b8ad3d5aa81d8a5e911f1d6a02e1d56d"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -1151,8 +1151,8 @@ sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-TRUST-continue-by-default.md"
-bytes = 4950
-sha256 = "701b1fb5bf746ccf1bb4e277e3de49d285bc2276dd74ed565d156f4410ba470a"
+bytes = 6157
+sha256 = "7e7b2eb2d43ef8b3841194c715c34d9ad4b5f64d867942a76367fd4797fa092c"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
@@ -1776,8 +1776,8 @@ sha256 = "dd16a709bbbc41e71a6d0364f685c647f7d0a8153bf07d65f636a75dd6945c29"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-TRUST-continue-by-default.mdc"
-bytes = 4830
-sha256 = "acc60af7e57a2c9a2626e53b498ce7b91911664a21a8ba25de4d5dc9063e5c75"
+bytes = 6037
+sha256 = "2b3a38b917b4f61bba7b9432e03923e804396a83206e6e25c5bd82f663acfb16"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-TRUST-express-authorization-before-execution.mdc"
@@ -2106,13 +2106,13 @@ sha256 = "a959273783700f2e0a2a52a1d417c925a7431b6e798d4532f374e0d54d60caae"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 73369
-sha256 = "2d75151ed2c2184f5cececf0ad913b467dbb8e7c53327fc0237cf43610d96fa8"
+bytes = 74576
+sha256 = "e298ddd222af64fd3735df733ab25df22c35661a3ea8367d5cbd45938c21e649"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 73358
-sha256 = "853714017eec9e423017b49501558df0d05da7e13a8057c3759103b5c2d6d9a4"
+bytes = 74565
+sha256 = "d7591bba9ec6296a25b1af4bf4c932fca83e772dfd57c27d6a58f2dc59198026"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2126,8 +2126,8 @@ sha256 = "440b3f6c3a2ef516bdf433bff591c15c7d56c639f627363de6f9cff7c2591781"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 73365
-sha256 = "e23a1436bd75c416ca06cca890e1cd9cf429d603f3f7d89fbc894575d625527b"
+bytes = 74572
+sha256 = "dfb38d5425c95bef1e5328c9bd05b0eb6fc162ceb7319a8b3a5e215782abcc1f"
 
 [[sources]]
 path = "LICENSE"
@@ -2161,8 +2161,8 @@ sha256 = "063bcfc743567f1b2438f33a0481453b065996f06172b17eea9f4047d41105a5"
 
 [[sources]]
 path = "SYSTEM-HARDENING.md"
-bytes = 8148
-sha256 = "a7709f913f402bad92b654cf4ecbfb9405f26dc290acc424f4bd2e4109924ad1"
+bytes = 8275
+sha256 = "e51ab2755cb8b253555068e343011bcd564bae36225f6d4978541783dfa26b78"
 
 [[sources]]
 path = "VERSION"
@@ -2841,8 +2841,8 @@ sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 75669
-sha256 = "db429fff1d6493ecdb1012e9659c516857d02a259dba9f15de95127256bd7bc8"
+bytes = 77249
+sha256 = "973f62937abeb2e66b6273e71605990b5de05e0d2543a43a1c0ea22e36c41912"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
@@ -3219,7 +3219,7 @@ sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
 artifact-id = "rules:.claude/rules/aiqt/10-TRUST-continue-by-default.md"
 path = ".claude/rules/aiqt/10-TRUST-continue-by-default.md"
 kind = "file"
-sha256 = "701b1fb5bf746ccf1bb4e277e3de49d285bc2276dd74ed565d156f4410ba470a"
+sha256 = "7e7b2eb2d43ef8b3841194c715c34d9ad4b5f64d867942a76367fd4797fa092c"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
@@ -3969,7 +3969,7 @@ sha256 = "dd16a709bbbc41e71a6d0364f685c647f7d0a8153bf07d65f636a75dd6945c29"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-TRUST-continue-by-default.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-TRUST-continue-by-default.mdc"
 kind = "file"
-sha256 = "acc60af7e57a2c9a2626e53b498ce7b91911664a21a8ba25de4d5dc9063e5c75"
+sha256 = "2b3a38b917b4f61bba7b9432e03923e804396a83206e6e25c5bd82f663acfb16"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-TRUST-express-authorization-before-execution.mdc"
@@ -4359,13 +4359,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "2d75151ed2c2184f5cececf0ad913b467dbb8e7c53327fc0237cf43610d96fa8"
+sha256 = "e298ddd222af64fd3735df733ab25df22c35661a3ea8367d5cbd45938c21e649"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "853714017eec9e423017b49501558df0d05da7e13a8057c3759103b5c2d6d9a4"
+sha256 = "d7591bba9ec6296a25b1af4bf4c932fca83e772dfd57c27d6a58f2dc59198026"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -4378,7 +4378,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "e23a1436bd75c416ca06cca890e1cd9cf429d603f3f7d89fbc894575d625527b"
+sha256 = "dfb38d5425c95bef1e5328c9bd05b0eb6fc162ceb7319a8b3a5e215782abcc1f"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

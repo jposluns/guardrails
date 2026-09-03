@@ -605,6 +605,20 @@ systemic lapse. A self-reported claim that the actionable items are exhausted is
 claim that licenses less work, so it is enumerated from the authoritative backlog rather than
 asserted, and the default under partial evidence is to continue on the highest-priority open item.
 
+A blocking condition that licenses a wind-down is granted and externally observable, never
+self-authored. A hard external block, or a reserved decision that must be answered first, counts
+only when the condition that blocks the item is granted by an authority other than the assistant
+and is observable in the authoritative record: a granted status, a failing check, an unavailable
+source, or an operator decision genuinely still pending in the decision record. A "blocked",
+"held", or "needs a go" that the assistant authored about its own work is a proposal, not a grant,
+and does not gate a stop; nor does reclassifying work the operating mode already authorizes, such
+as already-decided queued backlog, as newly needing a fresh authorization. The requirement for
+express authorization gates a plan-initiating new unit of work; it is never repurposed as a blocker
+to manufacture a stop over work already decided. The check that reads exhaustion reads that
+authoritative grant source, not the assistant's narration of it or a bare status marker, and it
+validates its own input, so a blocker it cannot confirm to be real and granted resolves to
+continue, never to a stop. Ignorance refuses the wind-down.
+
 Elapsed run length, session depth, the number of compaction events, accumulated progress or a
 reached milestone, and the anticipated size of the work still ahead, whether observed, measured, or
 estimated, are not members of that set, so none of them, alone or combined, is a wind-down trigger;
