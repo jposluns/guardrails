@@ -359,6 +359,16 @@ def main():
         del _freg["escape"]
         _fregp.write_text(json.dumps(_freg), encoding="utf-8")
         f.set_items([item("A-11")])
+        # FIX B: a FIFO sentinel with no writer is IGNORED (not a hang). The real _orch_escape_stat
+        # opens O_RDONLY|O_NONBLOCK, so a writerless FIFO opens non-blocking and the S_ISREG check
+        # rejects it; WITHOUT O_NONBLOCK the open blocks forever and this leg would hang (a regression
+        # surfaces as a hung self-test). A real mkfifo in the state-dir anchor, not the injected seam.
+        os.mkfifo(str(sd / "ESCAPE-ALLOW-YIELD"))
+        f.set_turn_state({})
+        check("stop/fifo-escape-ignored", _verdict(stop()), "block2")
+        check("stop/fifo-escape-spoof", "not a regular file" in _spoof_detail(), True)
+        (sd / "ESCAPE-ALLOW-YIELD").unlink()
+        (sd / "escape-spoof.json").unlink()
         # The remaining acceptance legs run through the injected _orch_escape_stat seam, because a
         # real file owned by a DIFFERENT uid cannot be created hermetically on a single-uid host
         # (test-hermeticity: the seam supplies the lstat result the filesystem cannot).
@@ -870,6 +880,36 @@ def main():
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
         check("attest/anchor-tamper-holds", _verdict(astop()), "warn")
+        # FIX A1 (discriminating): a snapshot bound to the REAL register tip but carrying a FABRICATED
+        # ref is NOT trusted. The yield reader re-derives refs from the register content, so the fake
+        # ref substantiates nothing (the round-1 impl trusted snap['refs'] and would have ALLOWED).
+        write_at(good_ci)  # a clean chain whose only approved, resolving ref is 'ci'
+        aiqt_hooks._orch_validate_attestations(areg, str(a.root))  # ok snapshot bound to this tip
+        _bound = json.loads((asd / "attestations-validated.json").read_text(encoding="utf-8"))
+        (asd / "attestations-validated.json").write_text(
+            json.dumps(dict(_bound, refs=["phantom"])), encoding="utf-8")  # real binding, fake ref
+        a.set_items([ext("AT-I1", "phantom")])
+        a.set_turn_state({})
+        check("attest/real-bound-fabricated-ref-not-substantiated", _verdict(astop()), "block2")
+        # control: the genuinely substantiated 'ci' ref from that same re-derivation still blocks
+        a.set_items([ext("AT-I1", "ci")])
+        a.set_turn_state({})
+        check("attest/rederived-real-ref-still-allows", _verdict(astop()), "allow")
+        # A2 residual (DISCLOSED, not a HOLD): an fs-write actor who APPENDS a valid approved row (and,
+        # for an anchor-authority register, advances the companion anchor, both filesystem writes, no
+        # git) DOES substantiate the appended ref. This records the TRUE behaviour so the suite is not
+        # a false HOLD; the categorical closure is an OS-owned, non-writable register.
+        write_at(chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
+             "mistake": "attests ci", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"},
+            {"seq": 2, "id": "AT-2", "ts": now_iso(0), "status": "accepted",
+             "mistake": "appended approved row", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "dep", "check_ref": "seed.txt"}))
+        aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+        a.set_items([ext("AT-I1", "dep")])
+        a.set_turn_state({})
+        check("attest/appended-approved-row-substantiates", _verdict(astop()), "allow")
         # FIX 3: a failed snapshot write invalidates any prior 'ok' snapshot (delete-then-hold)
         write_at(good_ci)
         aiqt_hooks._orch_validate_attestations(areg, str(a.root))  # fresh ok snapshot present
@@ -972,6 +1012,42 @@ def main():
         c2.set_items([cblocked("CK-A")])
         c2.set_turn_state({})
         check("ckpt/never-init-first-window-allows", _verdict(c2stop()), "allow")
+        # FIX C: a failed init-marker write is fail-loud, not a silent gap. Patch the atomic writer to
+        # fail ONLY the marker (the checkpoint write still succeeds) on a never-initialised dir so the
+        # marker path is reached; assert a cannot-evaluate injection (warn, not a clean allow) plus a
+        # guard event. Reverting FIX C makes this leg allow with no event.
+        cm = Fixture(tmp, "ckpt-marker")
+        cmstop = lambda: aiqt_hooks.orch_stop_guard(cm.payload("Stop"))
+        cmsd = Path(aiqt_hooks._orch_state_dir_for_root(str(cm.root)))
+        cm.set_items([cblocked("CM-A")])  # a blocked-only backlog -> otherwise a clean allow
+        cm.set_turn_state({})
+        _o_wja3 = aiqt_hooks._orch_write_json_atomic
+        try:
+            aiqt_hooks._orch_write_json_atomic = (
+                lambda p, o: False if str(p).endswith("checkpoint-init.marker") else _o_wja3(p, o))
+            check("ckpt/marker-unwritable-holds", _verdict(cmstop()), "warn")
+        finally:
+            aiqt_hooks._orch_write_json_atomic = _o_wja3
+        check("ckpt/marker-unwritable-guard-event",
+              "checkpoint-marker-unwritable" in (cmsd / "guard-events.jsonl").read_text(
+                  encoding="utf-8"), True)
+        # FIX 1 preview immutability (record_checkpoint=False, the tools/orch_preflight.py posture):
+        # the preview COMPUTES injections but writes NOTHING. A shrink-eligible backlog that WOULD
+        # write a checkpoint + marker on the real path leaves the state dir untouched under preview.
+        pv = Fixture(tmp, "preview")
+        pvreg = aiqt_hooks._orch_registry(str(pv.root))[1]
+        pvsd = Path(aiqt_hooks._orch_state_dir_for_root(str(pv.root)))
+        pv.set_items([cblocked("PV-A")])
+        pv.set_turn_state({})  # creates the state dir; the three probed files must stay absent
+        aiqt_hooks._orch_build_ctx(pvreg, str(pv.root), "stop", {}, record_checkpoint=False)
+        check("preview/no-checkpoint", (pvsd / "backlog-checkpoint.json").exists(), False)
+        check("preview/no-marker", (pvsd / "checkpoint-init.marker").exists(), False)
+        check("preview/no-guard-events", (pvsd / "guard-events.jsonl").exists(), False)
+        # contrast: the real hook path (record_checkpoint default True) DOES write checkpoint + marker
+        aiqt_hooks._orch_build_ctx(pvreg, str(pv.root), "stop", {})
+        check("preview/real-path-writes-checkpoint",
+              (pvsd / "backlog-checkpoint.json").exists(), True)
+        check("preview/real-path-writes-marker", (pvsd / "checkpoint-init.marker").exists(), True)
 
         # ---------- C.4: forced-exit recording ----------
         d = Fixture(tmp, "forced")
@@ -1037,6 +1113,68 @@ def main():
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "warn")
         check("forced5/second-resume-clean",
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "allow")
+
+        # FIX 6: the escape-spoof record is FAIL-LOUD on EVERY verdict path, not only the clean
+        # stop-ALLOW. Force a spoof whose record fails, then assert the warning surfaces on a stop
+        # DENY, a stop ALLOW_WITH_FINDINGS, a yield DENY, and a yield ALLOW.
+        g = Fixture(tmp, "spoof6")
+        gstop = lambda: aiqt_hooks.orch_stop_guard(g.payload("Stop"))
+        gsched = lambda ti: aiqt_hooks.orch_yield_tool(
+            g.payload("PreToolUse", "ScheduleWakeup", ti))
+        gblk = lambda iid: item(iid, blocker={"kind": "external", "ref": "up-" + iid,
+                                              "evidence": "vendor outage",
+                                              "observed_at_utc": now_iso(1)})
+        _o_active = aiqt_hooks._orch_escape_active
+        _o_spoof = aiqt_hooks._orch_record_escape_spoof
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root: (False, "forced-spoof-detail")
+            aiqt_hooks._orch_record_escape_spoof = lambda root, detail: "SPOOF-UNRECORDED"
+            # (1) stop DENY over an actionable item: warning rides the block reason (err)
+            g.set_items([item("SP-1")])
+            g.set_turn_state({})
+            _c, _o, gerr = gstop()
+            check("spoof6/stop-deny-surfaces", "SPOOF-UNRECORDED" in (gerr or ""), True)
+            # (2) stop ALLOW_WITH_FINDINGS (loop bound reached): warning rides the warn banner
+            g.set_items([item("SP-1")])
+            g.set_turn_state({"stop_denials": aiqt_hooks._ORCH_LOOP_BOUND})
+            _c, gobj, _e = gstop()
+            check("spoof6/stop-awf-surfaces",
+                  "SPOOF-UNRECORDED" in (gobj or {}).get("systemMessage", ""), True)
+            # (3) yield DENY (schedule past an actionable backlog): warning rides the deny reason
+            g.set_items([item("SP-1")])
+            g.set_turn_state({})
+            _c, gyd, _e = gsched({"prompt": "recheck SP-1"})
+            check("spoof6/yield-deny-surfaces",
+                  "SPOOF-UNRECORDED" in (gyd or {}).get(
+                      "hookSpecificOutput", {}).get("permissionDecisionReason", ""), True)
+            # (4) yield ALLOW (blocked-only backlog, clean allow): warning rides systemMessage
+            g.set_items([gblk("SP-2")])
+            g.set_turn_state({})
+            _c, gya, _e = gsched({"prompt": "recheck SP-2"})
+            check("spoof6/yield-allow-surfaces",
+                  "SPOOF-UNRECORDED" in (gya or {}).get("systemMessage", ""), True)
+        finally:
+            aiqt_hooks._orch_escape_active = _o_active
+            aiqt_hooks._orch_record_escape_spoof = _o_spoof
+        # FIX 5 (discriminating): the resume surfacing names EVERY forced-exit row's ids, not just the
+        # first. Two appended rows with DISTINCT open ids must BOTH appear in the findings text (an
+        # impl that emits only the first row but advances the surfaced set over both would fail here).
+        h = Fixture(tmp, "forced5b")
+        hsd = Path(aiqt_hooks._orch_state_dir_for_root(str(h.root)))
+        hsd.mkdir(parents=True, exist_ok=True)
+        aiqt_hooks._orch_append_jsonl(str(hsd / "forced-exit.jsonl"),
+                                      {"ts": now_iso(0), "event": "Stop", "key": "k1",
+                                       "open_ids": ["OX-1"], "reason": "r", "enum_status": "ok"})
+        aiqt_hooks._orch_append_jsonl(str(hsd / "forced-exit.jsonl"),
+                                      {"ts": now_iso(0), "event": "Stop", "key": "k2",
+                                       "open_ids": ["OX-2"], "reason": "r", "enum_status": "ok"})
+        _htext = " ".join(aiqt_hooks._orch_forced_exit_findings(str(hsd)))
+        check("forced5/surfaces-first-id", "OX-1" in _htext, True)
+        check("forced5/surfaces-second-id", "OX-2" in _htext, True)
+        check("forced5/both-keys-surfaced",
+              set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
+                  encoding="utf-8")).get("keys", [])), {"k1", "k2"})
+        check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

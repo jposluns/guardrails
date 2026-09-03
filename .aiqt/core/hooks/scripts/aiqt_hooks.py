@@ -5307,14 +5307,17 @@ def _orch_scope_live(reg, root, session_id=None):
 
 def _orch_escape_stat(path):
     """The C.1 stat seam: bind the final-component stat to an O_NOFOLLOW-opened descriptor
-    (os.open O_RDONLY|O_NOFOLLOW then os.fstat), or None on any OSError. Binding the stat to the opened
+    (os.open O_RDONLY|O_NOFOLLOW|O_NONBLOCK then os.fstat), or None on any OSError. FIX B: O_NONBLOCK
+    keeps a FIFO sentinel with no writer from blocking the open (which would hang the guard); the
+    S_ISREG check below then rejects the FIFO. Binding the stat to the opened
     inode rather than a pathname lstat means a name swap AFTER a pathname check cannot redirect the
     validation onto a different inode (a best-effort race narrowing; see _orch_escape_active for the
     disclosed residual). A one-line helper so the self-test can exercise the different-uid honour,
     hardlink, and writable legs hermetically on a single-uid host, where a real file owned by another
     uid (or with a fabricated link count) cannot be created."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW
+                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
     try:
@@ -5533,13 +5536,21 @@ def _orch_pending_haystack(reg, root):
 def _orch_attestation_refs(reg, root, staleness):
     """The C.2 attestation proof surface. Three-valued, matching the proof-source idiom: None when the
     registry declares no attestations register; "unreadable" when one is declared but the validated
-    snapshot is absent, malformed, not a status-ok run, stale, or (FIX 3) its binding to the register
-    on disk no longer verifies (held, never blocked or actionable); else the frozenset of blocker refs
-    the last validation pass substantiated. FIX 3: the yield reader RE-ANCHORS, it re-reads the
-    register and recomputes its append-only authority (git merge-base or <path>.anchor) and confirms
-    the snapshot is bound to that same register path + anchored seq + tip digest, so a snapshot forged
-    with fabricated refs, or a register swapped between audit and yield, fails to "unreadable" -> HOLD.
-    A pre-FIX-3 (v1) snapshot lacks the binding fields and so fails closed to HOLD (safe migration)."""
+    snapshot is absent, malformed, not a status-ok run, stale, its binding to the register on disk no
+    longer verifies, or (FIX A1) the bound register no longer reads as a clean chain (held, never
+    blocked or actionable); else the frozenset of blocker refs RE-DERIVED from the register content.
+    The re-anchor (FIX 3) defends the register-SWAP and snapshot-STALENESS classes only: the reader
+    re-reads the register, recomputes its append-only authority (git merge-base or <path>.anchor), and
+    confirms the snapshot is bound to that same register path + anchored seq + tip digest, so a
+    register swapped or a snapshot gone stale between audit and yield HOLDS. FIX A1: the snapshot's
+    stored 'refs' field is non-authoritative; the reader re-derives the substantiated refs from the
+    re-anchored register content itself (the shared _orch_attestation_derive), so a snapshot forged
+    with fabricated refs substantiates none of them. This RAISES THE BAR over free-text evidence but
+    is NOT categorically forgery-proof: an actor with filesystem write to the state-dir can still
+    forge an attestation by APPENDING a valid approved row (uncommitted; A2 residual), which this
+    derivation substantiates. The categorical closure is an operator-owned, assistant-non-writable
+    register at the OS layer (SYSTEM-HARDENING.md entry 2). A pre-binding (v1) snapshot lacks the
+    binding fields and so fails closed to HOLD (safe migration)."""
     at_path = _orch_path(root, reg.get("attestations"))
     if not at_path:
         return None
@@ -5562,7 +5573,15 @@ def _orch_attestation_refs(reg, root, staleness):
     if astatus != "ok" or snap.get("register") != os.path.realpath(at_path) \
             or snap.get("seq") != aseq or snap.get("digest") != adigest:
         return "unreadable"
-    return frozenset(r for r in snap["refs"] if isinstance(r, str))
+    # FIX A1: the snapshot's own 'refs' field is NOT authoritative. Re-derive the substantiated refs
+    # from the re-anchored register content itself (the same audit derivation), so a snapshot forged
+    # with fabricated refs but bound to the real tip substantiates none of them.
+    rows, _detail = _orch_chained_rows(at_path, "AT-")
+    if rows is None:
+        return "unreadable"
+    refs, _unsub, _findings = _orch_attestation_derive(reg, root,
+                                                       _orch_state_dir_for_root(root), rows)
+    return frozenset(refs)
 
 
 def classify_backlog(items, live_ids, ledger_readable, pending_haystack, staleness,
@@ -5864,7 +5883,16 @@ def _orch_checkpoint_union(root, payload, record=True):
                               "against the prior state")
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
-            _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()})
+            # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
+            # go undetected; record it as a fact (fail-loud) and HOLD this window (cannot-evaluate),
+            # never a silent gap, consistent with the other recorders.
+            if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
+                _orch_guard_event(root, "checkpoint-marker-unwritable", "recorded",
+                                  "the checkpoint-init marker could not be written; a later "
+                                  "checkpoint deletion would be undetectable this window")
+                injected.append(("backlog-checkpoint", "cannot-evaluate",
+                                 "checkpoint-init marker unwritable; a later deletion would go "
+                                 "undetected"))
     return injected
 
 
@@ -6609,9 +6637,12 @@ def _orch_register_authority(root, path):
     of an authority the actor cannot trivially forge, its git merge-base state with origin/HEAD when
     the register is tracked, else its <path>.anchor file, with seq/digest identifying the current tip;
     otherwise ('hold', detail, None), a cannot-evaluate the caller routes to a fail-closed HOLD, never
-    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable; the git authority raises
-    the bar, but an actor with BOTH filesystem and git write access (or who can advance the anchor) is
-    the categorical residual."""
+    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable, and this authority only
+    checks that the on-disk register is an append-only EXTENSION of its committed (merge-base) or
+    anchored prefix. An actor with filesystem write ALONE can therefore APPEND rows past that prefix
+    (uncommitted; git status M) and have them counted as the tip, so the git/anchor authority defends
+    the register-SWAP and prefix-REWRITE classes but not an appended approved row (A2); the categorical
+    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
@@ -6687,6 +6718,50 @@ def _orch_pointer_resolves(root, sd, pointer):
     return False
 
 
+def _orch_attestation_derive(reg, root, sd, rows):
+    """Shared C.2 derivation over a chained attestation register's rows: return (refs, unsub,
+    findings), where refs is the sorted set of blocker refs each covered by a fresh, APPROVED row
+    whose integrity pointer resolves. The AUDIT (_orch_validate_attestations) and the yield-time
+    reader (_orch_attestation_refs, FIX A1) run this SAME logic, so a validated snapshot's stored
+    'refs' field is never authoritative: the yield reader recomputes refs from the re-anchored
+    register content itself, and a snapshot forged with fabricated refs substantiates none of them.
+    RESIDUAL (disclosed, A2): an actor with filesystem write to the register can still APPEND a valid
+    approved row (uncommitted; git status M, past the committed or anchored prefix the authority
+    checks) whose ref this derivation then substantiates; only an operator-owned, assistant-non-
+    writable register closes that categorically."""
+    latest = {}
+    for row in rows:
+        latest[row["id"]] = row
+    ext_hours = _orch_validate("staleness", reg.get("staleness"))[1]["external_hours"]
+    now = _orch_now()
+    refs, unsub, findings = [], [], []
+    for rid in sorted(latest):
+        row = latest[rid]
+        status = row.get("status")
+        if status in ("declined", "superseded"):
+            continue
+        ref = row.get("ref")
+        pointer = row.get("check_ref") or row.get("evidence")
+        observed = _orch_parse_utc(row.get("ts"))
+        age = (now - observed).total_seconds() if observed is not None else None
+        fresh = age is not None and -_ORCH_CLOCK_SKEW <= age <= ext_hours * 3600
+        if not isinstance(ref, str) or not ref.strip():
+            unsub.append(rid)
+            findings.append("attestation {} names no blocker ref; it attests nothing".format(rid))
+        elif status not in _ORCH_ATTEST_APPROVED:
+            unsub.append(rid)
+            findings.append("attestation {} status {!r} is not approved ({}); it attests "
+                            "nothing".format(rid, status,
+                                             "/".join(sorted(_ORCH_ATTEST_APPROVED))))
+        elif not _orch_pointer_resolves(root, sd, pointer):
+            unsub.append(rid)
+            findings.append("attestation {} pointer {!r} resolves to nothing; it attests "
+                            "nothing and blocks nothing".format(rid, pointer))
+        elif fresh:
+            refs.append(ref)
+    return (sorted(set(refs)), unsub, findings)
+
+
 def _orch_validate_attestations(reg, root):
     """The C.2 validation pass, run at AUDIT CADENCE (the resume audit and tools/orch_doctor.py
     --resume-audit both reach it through _orch_resume_probes), never synchronously at yield time:
@@ -6719,39 +6794,10 @@ def _orch_validate_attestations(reg, root):
                             "yield-time reader holds affected items (cannot-evaluate)".format(aseq))
             snap = hold_snap
         else:
-            latest = {}
-            for row in rows:
-                latest[row["id"]] = row
-            ext_hours = _orch_validate("staleness", reg.get("staleness"))[1]["external_hours"]
-            now = _orch_now()
-            refs, unsub = [], []
-            for rid in sorted(latest):
-                row = latest[rid]
-                status = row.get("status")
-                if status in ("declined", "superseded"):
-                    continue
-                ref = row.get("ref")
-                pointer = row.get("check_ref") or row.get("evidence")
-                observed = _orch_parse_utc(row.get("ts"))
-                age = (now - observed).total_seconds() if observed is not None else None
-                fresh = age is not None and -_ORCH_CLOCK_SKEW <= age <= ext_hours * 3600
-                if not isinstance(ref, str) or not ref.strip():
-                    unsub.append(rid)
-                    findings.append("attestation {} names no blocker ref; it attests nothing"
-                                    .format(rid))
-                elif status not in _ORCH_ATTEST_APPROVED:
-                    unsub.append(rid)
-                    findings.append("attestation {} status {!r} is not approved ({}); it attests "
-                                    "nothing".format(rid, status,
-                                                     "/".join(sorted(_ORCH_ATTEST_APPROVED))))
-                elif not _orch_pointer_resolves(root, sd, pointer):
-                    unsub.append(rid)
-                    findings.append("attestation {} pointer {!r} resolves to nothing; it attests "
-                                    "nothing and blocks nothing".format(rid, pointer))
-                elif fresh:
-                    refs.append(ref)
+            refs, unsub, dfindings = _orch_attestation_derive(reg, root, sd, rows)
+            findings.extend(dfindings)
             snap = {"version": 2, "ts": _orch_now().isoformat(), "status": "ok",
-                    "refs": sorted(set(refs)), "unsubstantiated": unsub, "register": canonical,
+                    "refs": refs, "unsubstantiated": unsub, "register": canonical,
                     "seq": aseq, "digest": adigest}
         ok_snap = snap.get("status") == "ok"
         if not ok_snap:
