@@ -116,9 +116,11 @@ This is enforced at the DISPATCHER, not left to the handler alone: main() reads 
 class from HANDLER_EVENT (the argv mode, never the payload, which may be unreadable) and, for a
 Stop/SubagentStop handler, converts EVERY error path (a bad argv count, unreadable/malformed stdin, a
 JSON parse failure, a non-dict payload, or a handler crash) into a non-blocking systemMessage warning
-on exit 0. No Stop invocation can reach exit 2 for any input; only a PreToolUse handler fails closed via
-exit 2, and only a genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on
-a bad invocation.
+on exit 0. No Stop invocation reaches exit 2 on an ERROR path; a Stop handler may still return exit 2 as a
+DELIBERATE decision where the platform documents exit 2 as the block (the orchestration stop guard denies a
+manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
+the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
+genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
 """
 import collections
 import datetime
@@ -182,7 +184,8 @@ def _stop_warn(banner):
 def _hard_block(message):
     """A fail-closed hard block where no structured decision can be formed (a mis-wired PreToolUse
     event): exit 2 with the diagnostic on stderr, so a broken guard blocks rather than silently
-    passing. Not used by the Stop handler, which is warn-only."""
+    passing. The Stop handlers do not use this constructor: their ERROR paths warn (exit 0), while a
+    DELIBERATE Stop deny returns exit 2 directly (the orchestration stop guard, not warn-only)."""
     return (2, None, message)
 
 
@@ -772,8 +775,9 @@ def diff_wall_stop(data):
     already rendered, and a hard Stop block could wedge the session with no documented loop bound). It
     surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
     if data.get("hook_event_name") not in STOP_EVENTS:
-        # Even a mis-wired event only WARNS here: the Stop layer is warn-only end to end, so nothing on
-        # this path can wedge a turn chain. The generator's event whitelist is the real guard.
+        # Even a mis-wired event only WARNS here: the diff-wall Stop layer is warn-only end to end (the
+        # orchestration stop guard, a separate Stop handler, is the one that deliberately denies via exit
+        # 2), so nothing here can wedge a turn chain. The generator's event whitelist is the real guard.
         return _stop_warn(
             "AIQT guardrail (rule cnsdif): the Stop diff-wall check was wired to an unexpected event "
             "{!r}; surfacing a warning rather than blocking.".format(data.get("hook_event_name")))
@@ -5510,7 +5514,8 @@ def _orch_live_ledger_ids(root, task_hours):
         if ts is not None and -_ORCH_CLOCK_SKEW <= (now - ts).total_seconds() <= task_hours * 3600:
             live.add(tid)
     # an unparseable OR schema-invalid line means some rows could not be trusted: report readable=False so
-    # the caller HOLDS a tracked item (cannot-evaluate) rather than hard-denying a stop.
+    # the caller HOLDS the item as cannot-evaluate (never read as 'no live task'); FIX 1 then DENIES the
+    # stop on it below the loop bound (ignorance refuses the wind-down), the operator escape releasing it.
     readable = bad == 0 and schema_bad == 0
     detail = "{} malformed ledger line(s) skipped".format(bad) if bad else ""
     return (live, readable, detail)
@@ -5520,8 +5525,9 @@ def _orch_pending_haystack(reg, root):
     """The human-decision proof surface: the DECLARED pending-decisions record ONLY. The machine-written
     pending-asks keys are NOT decision rows and are excluded (an ask key session::tool_use could otherwise
     forge a row via the id-colon match, CX-R4-2). Returns None when no surface is declared or it is
-    unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate), never
-    demoting it to actionable and hard-denying a stop."""
+    unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
+    than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
+    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     declared = _orch_path(root, rec.get("pending_decisions"))
     if not declared:
@@ -5688,9 +5694,9 @@ def decide_yield(ctx):
                         .format(ctx["schedule_denials"]), disposition)
             return ("DENY",
                     "the backlog is not enumerable ({}: {}); missing evidence never licenses a new "
-                    "idle or wake. Fix the enumerator or the registry, or stop instead (the stop "
-                    "path records this as a finding)".format(ctx["enum_status"],
-                                                             ctx["enum_detail"]), disposition)
+                    "idle or wake. Fix the enumerator or the registry, or release through the "
+                    "operator-owned escape sentinel".format(ctx["enum_status"],
+                                                            ctx["enum_detail"]), disposition)
         return ("DENY",
                 "cntdef: the backlog is not enumerable ({}: {}); an unconfirmable enumeration cannot "
                 "confirm whole-set exhaustion, so it cannot license a stop (ignorance refuses the "
@@ -5708,8 +5714,8 @@ def decide_yield(ctx):
                     .format(ctx["schedule_denials"]), disposition)
         return ("DENY",
                 "a proof source for {} open item(s) is unreadable (cannot-evaluate); missing evidence "
-                "never licenses a new idle or wake. Fix the source or stop instead."
-                .format(len(ctx.get("cannot_evaluate", []))), disposition)
+                "never licenses a new idle or wake. Fix the source, or release through the "
+                "operator-owned escape sentinel.".format(len(ctx.get("cannot_evaluate", []))), disposition)
     if not ctx["actionable"]:
         rechecked = ctx["waiting"] + ctx["blocked"]
         if kind == "schedule_idle" and rechecked and ctx["wake_named"] is False:

@@ -820,7 +820,7 @@ def main():
             at_reg.write_text(text, encoding="utf-8")
             at_anchor(text)
 
-        # declared register with NO validated snapshot yet: held (stop fails open, schedule denies)
+        # declared register with NO validated snapshot yet: held cannot-evaluate (stop DENIES -> block2, schedule denies)
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
         check("attest/no-snapshot-stop-holds", _verdict(astop()), "block2")
@@ -996,7 +996,7 @@ def main():
         c.set_items([cblocked("CK-A"), cblocked("CK-B")])
         c.set_turn_state({})
         check("ckpt/first-window-allows", _verdict(cstop()), "allow")
-        # CK-B vanishes with no close receipt: held as cannot-evaluate (warn, never a clean allow);
+        # CK-B vanishes with no close receipt: held as cannot-evaluate (FIX 1 DENIES -> block2, never a clean allow);
         # reverting C.3 makes this leg fail on "allow"
         c.set_items([cblocked("CK-A")], keep_checkpoint=True)
         c.set_turn_state({})
@@ -1055,8 +1055,8 @@ def main():
         check("ckpt/no-demote-still-allows", _verdict(cdstop()), "allow")
         # FIX C: a failed init-marker write is fail-loud, not a silent gap. Patch the atomic writer to
         # fail ONLY the marker (the checkpoint write still succeeds) on a never-initialised dir so the
-        # marker path is reached; assert a cannot-evaluate injection (warn, not a clean allow) plus a
-        # guard event. Reverting FIX C makes this leg allow with no event.
+        # marker path is reached; assert a cannot-evaluate injection (FIX 1 DENIES -> block2, not a clean
+        # allow) plus a guard event. Reverting FIX C makes this leg allow with no event.
         cm = Fixture(tmp, "ckpt-marker")
         cmstop = lambda: aiqt_hooks.orch_stop_guard(cm.payload("Stop"))
         cmsd = Path(aiqt_hooks._orch_state_dir_for_root(str(cm.root)))
@@ -1165,13 +1165,18 @@ def main():
         check("forced5/second-resume-clean",
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "allow")
 
-        # FIX 1 (discriminating): an operator-owned escape sentinel STILL releases the stop even under a
-        # whole-enumerator failure (cannot-evaluate), proving the escape (not a fail-open) is the release
-        # and the new DENY is what changed. The same enum-error WITHOUT the escape now DENIES (above).
+        # FIX 1 (self-discriminating): under a whole-enumerator failure (cannot-evaluate) a BELOW-BOUND
+        # stop DENIES with NO escape, and an operator-owned escape sentinel STILL releases it. Asserting
+        # BOTH here makes the leg fail on a FIX-1 revert AT THIS LEG (the no-escape verdict flips block2 ->
+        # warn), not only at the pure-core legs (core/stop-enum-error-denies, core/stop-cannot-evaluate-
+        # denies) or the f/ce integration legs above. Proves the escape (not a fail-open) is the release.
         _orig_es2 = aiqt_hooks._orch_escape_stat
         try:
-            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
             f.enum_exit.write_text("3", encoding="utf-8")
+            aiqt_hooks._orch_escape_stat = lambda path: None                 # escape ABSENT
+            f.set_turn_state({})
+            check("stop/enum-error-denies-without-escape", _verdict(stop()), "block2")
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
             f.set_turn_state({})
             check("stop/escape-releases-under-enum-error", _verdict(stop()), "allow")
         finally:
@@ -1179,9 +1184,11 @@ def main():
             f.enum_exit.write_text("0", encoding="utf-8")
         if (sd / "escape-spoof.json").exists():
             (sd / "escape-spoof.json").unlink()
-        # FIX 1 + C.4: the now-DENY cannot-evaluate records NO forced exit (C.4 fires only on the
-        # bounded ALLOW_WITH_FINDINGS, never on a deny); the SAME enum-error, once the loop bound is
-        # reached, DOES record one. Discriminates the deny (no record) from the unchanged bound-exit.
+        # FIX 1 + C.4: the below-bound cannot-evaluate DENIES (ce/enum-error-denies -> block2 below is the
+        # FIX-1 discriminator for this leg: a revert flips it to warn) and records NO forced exit (C.4
+        # fires only on the bounded ALLOW_WITH_FINDINGS, never on a deny); the SAME enum-error, once the
+        # loop bound is reached, DOES record one. So ce/no-forced-exit-on-deny is read against
+        # ce/enum-error-denies, discriminating the deny (no record) from the unchanged bound-exit.
         ce = Fixture(tmp, "ce_forced")
         cestop = lambda: aiqt_hooks.orch_stop_guard(ce.payload("Stop"))
         cesd = Path(aiqt_hooks._orch_state_dir_for_root(str(ce.root)))
@@ -1276,8 +1283,9 @@ def main():
         return 1
     print("SELF-TEST PASS: the stop guard denies enumerated actionable work and unproven or stale "
           "blockers, allows proven blockers, live tracked tasks, proposed-only backlogs, absent "
-          "registry/lease scope, a genuinely operator-owned escape sentinel, and DENIES on every "
-          "cannot-evaluate (ignorance refuses the wind-down; only the operator escape releases); the "
+          "registry/lease scope, a genuinely operator-owned escape sentinel, and DENIES a BELOW-BOUND "
+          "cannot-evaluate (ignorance refuses the wind-down; the operator escape OR the bounded loop-exit "
+          "releases); the "
           "schedule path denies on cannot-evaluate with a three-denial cap and "
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
