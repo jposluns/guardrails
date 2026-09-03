@@ -64,8 +64,17 @@ Each entry follows the same shape:
 
 ---
 
+## 2. Put the orchestration guard's state under an operator-owned directory
+
+- **Guardrail:** The orchestration stop-guard's forgery-resistance, the operator escape sentinel, the anti-shrinkage checkpoint, and the attestation register that together decide whether the assistant may stop or treat work as blocked (`aiqt/10-TRUST-continue-by-default`, with audit records held under a separate authority, `security/SECI-protect-audit-records`).
+- **What the pack does:** it treats these as operator-controlled in code. The escape sentinel is honoured only as a regular file with a single hard link, reached without a symlinked path component, resolved under the state-directory anchor, owned by a different uid, and not group- or other-writable; the attestation register is re-anchored against its git merge-base (or a companion anchor file) authority and the validated snapshot re-bound at yield; and the checkpoint distinguishes a genuine first window from a deleted one through an init marker. These raise the bar against naming, symlink, hard-link, forge-between-audits, and naive-deletion vectors.
+- **The gap:** all of that state, the sentinel and its anchor, the checkpoint and its init marker, the attestation register and its anchor, lives in a state directory the assistant itself can write. An actor running as that same account can delete the checkpoint and its marker together, replace the register and recompute its chain (and, with git-write or anchor-advance, its authority), or place a passing sentinel. Code running as that actor cannot categorically prevent any of it; the in-code checks are best-effort bar-raisers.
+- **What you set up:** place the orchestration state directory, and any declared attestation register, under a path the assistant's account cannot write: owned by a different uid (the operator or a dedicated role), not group- or other-writable, with the assistant lacking write on the directory and its parent chain. The sentinel, checkpoint, marker, and register then become artefacts the assistant reads but cannot forge, and the in-code checks become enforced rather than best-effort. Combine with entry 1's filesystem containment so the assistant's writable working area excludes this directory.
+- **What remains even then:** an operator or root who writes the directory is trusted by construction; host clock control still defeats the freshness checks (out of threat model); and the shared-kernel and allowed-path residuals of entry 1 still apply.
+
+---
+
 *More entries are added here as guardrails with a host-level component are identified. Likely next
-candidates: an enforced network egress allow-list (`security/SECC-egress-destinations`), kernel-enforced
-resource bounds (`security/SECA-resource-bounds`), and audit records held under an authority separate from
-the actor they record (`security/SECI-protect-audit-records`). If an entry does not apply to your
+candidates: an enforced network egress allow-list (`security/SECC-egress-destinations`) and kernel-enforced
+resource bounds (`security/SECA-resource-bounds`). If an entry does not apply to your
 environment, skip it.*

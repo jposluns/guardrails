@@ -89,19 +89,10 @@ equivalent to a blocking hook.
 
 ## Honest limits (suite-level)
 
-Machine-local state is local-only: CI gates cover committed surfaces and the gates' own self-tests;
-gates over machine-local records run at session checkpoints and in the local mirror. Fabricated
-free-text blocker evidence remains mechanically unclosable only where no attestation register is
-declared; with one declared, external and foreign-lease evidence is verified against validated
-attestations at audit cadence, and the residuals become authorship (the chain proves order and
-integrity, never who appended), cadence (tamper misleads until the next audit or gate run), and
-relevance (a pointer that resolves can still be a misappropriated pretext; triage refutes it). Uid
-inequality on the escape sentinel proves not-self, never operator identity: any other-uid process
-could plant a passing sentinel. The registry file is the confinement's trust root (a
-guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's
-first window has no union to compare, and a machine-local, unversioned enumeration source keeps the
-local-state disclosure above; the checkpoint bound logs what it drops, never silently. The loop
-bound remains a deliberate, exhaustible, marked exit: deleting the turn state restarts it, with each
-denial and each forced exit individually recorded in guard-events and the forced-exit artefact. Host
-clock control defeats every freshness check here (out of threat model). The roster of yield
-primitives is fixed at generation and re-reconciled when the toolchain changes.
+Machine-local state is local-only: CI gates cover committed surfaces and the gates' own self-tests; gates over machine-local records run at session checkpoints and in the local mirror. The controls below RAISE THE BAR against a forged stop or escape; they are not categorical, because the state directory they read (the escape sentinel's anchor, the anti-shrinkage checkpoint and its init marker, and a declared attestation register with its anchor) is one the assistant itself can write. Categorical forgery-resistance needs an operator-owned, assistant-non-writable state directory at the OS layer, described in SYSTEM-HARDENING.md; what the pack enforces in code is the following.
+
+Fabricated free-text blocker evidence remains mechanically unclosable only where no attestation register is declared. With one declared, external and foreign-lease evidence is verified against validated attestations that are re-anchored against the register's authority (its git merge-base state where the register is tracked, else a companion anchor file), and the validated snapshot is re-bound to that authority at yield, so a snapshot forged with fabricated refs, or a register swapped between audit and yield, holds the affected items (cannot-evaluate) rather than substantiating them; only an approved row substantiates a ref. The residuals narrow to authorship by an actor holding both filesystem and git-write (or anchor-advance) authority, cadence (tamper misleads until the next audit or gate run), and relevance (a pointer that resolves can still be a misappropriated pretext; triage refutes it).
+
+The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded, and surfaced once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
+
+The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops, never silently. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit, with each denial and each forced exit individually recorded in guard-events and an append-only forced-exit log that the next resume surfaces exactly once. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.

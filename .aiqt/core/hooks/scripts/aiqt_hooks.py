@@ -5048,6 +5048,7 @@ _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minut
 # surface cannot forge a human-decision block. Mirrors the record-drift typed-ref discipline.
 _ORCH_DECISION_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-[A-Z0-9][A-Za-z0-9-]*$")
 _ORCH_CLOCK_SKEW = 300  # seconds of tolerance for a proof timestamp slightly ahead of the guard clock
+_ORCH_ATTEST_APPROVED = frozenset(("accepted", "landed"))  # FIX 3: a ref counts only from an approved row
 
 
 def _orch_now():
@@ -5067,6 +5068,11 @@ def _orch_parse_utc(text):
     if value.tzinfo is None:
         value = value.replace(tzinfo=datetime.timezone.utc)
     return value
+
+
+def _orch_sha256_hex(text):
+    """The sha256 hex of a single register line's bytes (the tip identity a chained register anchors)."""
+    return __import__("hashlib").sha256(text.encode("utf-8")).hexdigest()
 
 
 def _orch_root(data):
@@ -5191,6 +5197,22 @@ def _orch_write_json(path, obj):
         return False
 
 
+def _orch_write_json_atomic(path, obj):
+    """Crash-safe JSON overwrite: write a sibling temp then os.replace (an atomic rename on the same
+    filesystem), so a crash mid-write never leaves a truncated file a reader would treat as malformed.
+    Same best-effort contract as _orch_write_json (returns True on success; the caller decides what a
+    failure means)."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _orch_guard_event(root, kind, decision, detail):
     """Best-effort append of one guard-events row (the over-fire metric and the mistakes-register feed).
     Returns whether the append succeeded (False on an I/O failure); the caller decides what a failure means
@@ -5284,34 +5306,79 @@ def _orch_scope_live(reg, root, session_id=None):
 
 
 def _orch_escape_stat(path):
-    """The C.1 stat seam: os.lstat(path), or None on any OSError. A one-line helper so the self-test
-    can exercise the different-uid honour leg hermetically on a single-uid host (a real file owned by
-    another uid cannot be created there)."""
+    """The C.1 stat seam: bind the final-component stat to an O_NOFOLLOW-opened descriptor
+    (os.open O_RDONLY|O_NOFOLLOW then os.fstat), or None on any OSError. Binding the stat to the opened
+    inode rather than a pathname lstat means a name swap AFTER a pathname check cannot redirect the
+    validation onto a different inode (a best-effort race narrowing; see _orch_escape_active for the
+    disclosed residual). A one-line helper so the self-test can exercise the different-uid honour,
+    hardlink, and writable legs hermetically on a single-uid host, where a real file owned by another
+    uid (or with a fabricated link count) cannot be created."""
     try:
-        return os.lstat(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
+    try:
+        return os.fstat(fd)
+    finally:
+        os.close(fd)
 
 
 def _orch_escape_active(reg, root):
-    """C.1: the escape sentinel opens the clean-ALLOW channel only when it is demonstrably NOT the
-    assistant's own artefact: a REGULAR file (lstat, never following a symlink), owned by a uid other
-    than this guard's effective uid, and not group- or other-writable. Returns (active, spoof_detail):
-    a present sentinel failing any condition reads INACTIVE with the failed condition as the detail,
-    so the decision proceeds exactly as with no sentinel (no new deny anywhere) and the bindings can
-    record the spoof. An absent or unstattable path is (False, None). Residuals (disclosed in
-    ORCHESTRATION.md): uid inequality proves not-self, never operator identity; on a shared-uid host
-    no file either party can create passes, so the channel is unavailable there and recovery is a
-    differently-owned sentinel, operator registry/mode maintenance, or the bounded marked exit."""
-    path = _orch_path(root, (reg.get("escape") or {}).get("path") if isinstance(
-        reg.get("escape"), dict) else None)
-    if not path:
-        path = os.path.join(_orch_state_dir_for_root(root), _ORCH_ESCAPE_NAME)
-    st = _orch_escape_stat(path)
+    """C.1: the escape sentinel opens the clean-ALLOW channel only when it is demonstrably an
+    operator-created artefact in a trusted place, NOT the assistant's own: a REGULAR file with a single
+    hard link (st_nlink == 1), reached without following any symlinked path component, resolved under
+    the operator-trusted anchor (the machine-written state dir), owned by a uid other than this guard's
+    effective uid, and not group- or other-writable. Returns (active, spoof_detail): a present sentinel
+    failing any condition reads INACTIVE with the failed condition as the detail, so the decision
+    proceeds exactly as with no sentinel (no new deny anywhere) and the bindings can record the spoof.
+    An absent or unstattable path is (False, None).
+
+    FIX 2 raises the bar against the naming/link vectors: an absolute FOREIGN path (e.g. /etc/passwd or
+    /proc/self/root/...), a '..' traversal, a symlinked path component, or a hard link no longer opens
+    the channel. Residuals (disclosed in ORCHESTRATION.md): the trusted anchor is the machine-written
+    state dir, which is itself actor-writable, so an actor with raw filesystem write access remains the
+    CATEGORICAL residual (closed only by an operator-owned, assistant-non-writable state dir at the OS
+    layer); component resolution is a best-effort lstat walk under the anchor rather than a fully
+    race-free openat-under-anchor (a narrow TOCTOU window between the walk and the O_NOFOLLOW open); and
+    uid inequality proves not-self, never operator identity."""
+    anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    declared = (reg.get("escape") or {}).get("path") if isinstance(reg.get("escape"), dict) else None
+    if declared is not None and (not isinstance(declared, str) or not declared):
+        return (False, None)
+    if declared:
+        raw = declared if os.path.isabs(declared) else os.path.join(anchor, declared)
+    else:
+        raw = os.path.join(anchor, _ORCH_ESCAPE_NAME)
+    if os.pardir in raw.split(os.sep):
+        return (False, "escape sentinel path contains '..' (rejected)")
+    norm = os.path.normpath(raw)
+    if not (norm == anchor or norm.startswith(anchor.rstrip(os.sep) + os.sep)):
+        return (False, "escape sentinel path is outside the operator-trusted anchor (rejected)")
+    # refuse to follow a symlinked component from the anchor down to (not including) the final name
+    rel = os.path.relpath(norm, anchor)
+    parts = [] if rel in ("", os.curdir) else rel.split(os.sep)
+    cur = anchor
+    for comp in parts[:-1]:
+        cur = os.path.join(cur, comp)
+        try:
+            if stat.S_ISLNK(os.lstat(cur).st_mode):
+                return (False, "escape sentinel has a symlinked path component (rejected)")
+        except OSError:
+            return (False, None)  # a missing intermediate directory is simply no sentinel
+    # a symlink AT the final name is a spoof: classify via lstat so it surfaces a detail (the seam's
+    # O_NOFOLLOW open would otherwise report it only as an unopenable None)
+    try:
+        if stat.S_ISLNK(os.lstat(norm).st_mode):
+            return (False, "escape sentinel is a symlink (not followed; ignored)")
+    except OSError:
+        pass  # absent on disk here: the seam is authoritative (and may be injected under test)
+    st = _orch_escape_stat(norm)
     if st is None:
         return (False, None)
     if not stat.S_ISREG(st.st_mode):
         return (False, "escape sentinel is not a regular file (symlink or special file; ignored)")
+    if st.st_nlink != 1:
+        return (False, "escape sentinel has more than one hard link (ignored)")
     if st.st_uid == os.geteuid():
         return (False, "escape sentinel is owned by the assistant's own effective uid (ignored)")
     if st.st_mode & 0o022:
@@ -5464,14 +5531,17 @@ def _orch_pending_haystack(reg, root):
 
 
 def _orch_attestation_refs(reg, root, staleness):
-    """The C.2 attestation proof surface, READ-ONLY at yield time (validation runs at audit cadence
-    via _orch_validate_attestations, never synchronously in a Stop hook). Three-valued, matching the
-    proof-source idiom: None when the registry declares no attestations register (prior behaviour,
-    byte-identical); "unreadable" when one is declared but the validated snapshot
-    (<state_dir>/attestations-validated.json) is absent, malformed, not a status-ok run, or stale
-    beyond the external staleness horizon (held, never blocked or actionable); else the frozenset of
-    blocker refs the last validation pass substantiated."""
-    if not _orch_path(root, reg.get("attestations")):
+    """The C.2 attestation proof surface. Three-valued, matching the proof-source idiom: None when the
+    registry declares no attestations register; "unreadable" when one is declared but the validated
+    snapshot is absent, malformed, not a status-ok run, stale, or (FIX 3) its binding to the register
+    on disk no longer verifies (held, never blocked or actionable); else the frozenset of blocker refs
+    the last validation pass substantiated. FIX 3: the yield reader RE-ANCHORS, it re-reads the
+    register and recomputes its append-only authority (git merge-base or <path>.anchor) and confirms
+    the snapshot is bound to that same register path + anchored seq + tip digest, so a snapshot forged
+    with fabricated refs, or a register swapped between audit and yield, fails to "unreadable" -> HOLD.
+    A pre-FIX-3 (v1) snapshot lacks the binding fields and so fails closed to HOLD (safe migration)."""
+    at_path = _orch_path(root, reg.get("attestations"))
+    if not at_path:
         return None
     path = os.path.join(_orch_state_dir_for_root(root), "attestations-validated.json")
     try:
@@ -5486,6 +5556,11 @@ def _orch_attestation_refs(reg, root, staleness):
     age = (_orch_now() - generated).total_seconds() if generated is not None else None
     ext_hours = _orch_validate("staleness", staleness)[1]["external_hours"]
     if age is None or not (-_ORCH_CLOCK_SKEW <= age <= ext_hours * 3600):
+        return "unreadable"
+    # FIX 3: re-bind the snapshot to the register on disk (re-read + re-anchor).
+    astatus, aseq, adigest = _orch_register_authority(root, at_path)
+    if astatus != "ok" or snap.get("register") != os.path.realpath(at_path) \
+            or snap.get("seq") != aseq or snap.get("digest") != adigest:
         return "unreadable"
     return frozenset(r for r in snap["refs"] if isinstance(r, str))
 
@@ -5719,22 +5794,35 @@ def _orch_token_present(needle, hay):
 _ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
 
 
-def _orch_checkpoint_union(root, payload):
+def _orch_checkpoint_union(root, payload, record=True):
     """C.3 anti-shrinkage checkpoint union, run only after a status-ok enumeration. Compares the
     persisted checkpoint (<state_dir>/backlog-checkpoint.json) against the FULL validated payload
     (closed rows included: a closed row is the receipt that lets an id leave the checkpoint) and
     returns the cannot-evaluate rows to inject: an id recorded open or proposed that is absent from
     the payload entirely, with no closed receipt, vanished without explanation and is HELD rather
     than silently shrunk away. An unreadable or malformed checkpoint injects ONE marker row and is
-    rewritten fresh; no checkpoint yet means no comparison (the disclosed first-window residual).
-    The rewritten checkpoint is the union of prior unreceipted open/proposed ids and this payload's,
-    bounded at _ORCH_CHECKPOINT_MAX with a bound-forced drop logged to guard-events. Verdict effects
-    are entirely existing branches (the stop path fails open with findings, the schedule path denies
-    bounded by the cap); this helper adds no new deny logic, and a failed rewrite changes no verdict."""
-    path = os.path.join(_orch_state_dir_for_root(root), "backlog-checkpoint.json")
+    rewritten fresh. The rewritten checkpoint is the union of prior unreceipted open/proposed ids and
+    this payload's, bounded at _ORCH_CHECKPOINT_MAX with a bound-forced drop logged to guard-events.
+    Verdict effects are entirely existing branches (the stop path fails open with findings, the
+    schedule path denies bounded by the cap); this helper adds no new deny logic, and a failed rewrite
+    changes no verdict.
+
+    record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
+    COMPUTED for display, but NO checkpoint rewrite, init-marker write, or guard-event is emitted, so a
+    preview makes no state change.
+
+    FIX 4: an absent checkpoint is a legitimate FIRST window only when no prior window was ever
+    initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
+    is a possible reset (naive deletion or a crash) and is HELD (cannot-evaluate), never silently
+    restarted. RESIDUAL (disclosed): the marker lives in the same actor-writable state dir, so this
+    raises the bar (catches naive deletion) without being categorical."""
+    sd = _orch_state_dir_for_root(root)
+    path = os.path.join(sd, "backlog-checkpoint.json")
+    marker = os.path.join(sd, "checkpoint-init.marker")
     injected, prior = [], {}
+    present = os.path.lexists(path)
     try:
-        if os.path.lexists(path):
+        if present:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             ids = data.get("ids") if isinstance(data, dict) else None
@@ -5746,6 +5834,11 @@ def _orch_checkpoint_union(root, payload):
     except (OSError, ValueError):
         injected.append(("backlog-checkpoint", "cannot-evaluate",
                          "checkpoint unreadable; rewritten fresh, one window uncompared"))
+    if not present and os.path.lexists(marker):
+        # FIX 4: a prior init marker with the checkpoint now gone is a possible reset, held rather than
+        # silently starting anti-shrinkage over.
+        injected.append(("backlog-checkpoint", "cannot-evaluate",
+                         "checkpoint missing though a prior window was initialised; possible reset"))
     current = {it["id"]: it["state"] for it in payload}
     for iid in sorted(prior):
         if prior[iid] in ("open", "proposed") and iid not in current:
@@ -5759,17 +5852,23 @@ def _orch_checkpoint_union(root, payload):
     if len(union) > _ORCH_CHECKPOINT_MAX:
         dropped = sorted(union)[_ORCH_CHECKPOINT_MAX:]
         union = {iid: union[iid] for iid in sorted(union)[:_ORCH_CHECKPOINT_MAX]}
-        _orch_guard_event(root, "checkpoint-bound", "dropped",
-                          "{} id(s) past the {} bound: {}".format(
-                              len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])))
-    if not _orch_write_json(path, {"version": 1, "ts": _orch_now().isoformat(), "ids": union}):
-        _orch_guard_event(root, "checkpoint-unwritable", "recorded",
-                          "the checkpoint could not be rewritten; the next window compares against "
-                          "the prior state")
+        if record:
+            _orch_guard_event(root, "checkpoint-bound", "dropped",
+                              "{} id(s) past the {} bound: {}".format(
+                                  len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])))
+    if record:
+        if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
+                                              "ids": union}):
+            _orch_guard_event(root, "checkpoint-unwritable", "recorded",
+                              "the checkpoint could not be rewritten; the next window compares "
+                              "against the prior state")
+        elif not os.path.lexists(marker):
+            # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
+            _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()})
     return injected
 
 
-def _orch_build_ctx(reg, root, kind, data, wake_text=None):
+def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=True):
     """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
     (ctx, turn_state_or_None, basis). The C.1 escape unpack, the C.2 attestation threading, and the
     C.3 checkpoint injection all land HERE, never in decide_yield: the decision core's verdict
@@ -5791,7 +5890,8 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None):
         # C.3: an id recorded open/proposed at the checkpoint that vanished from this enumeration
         # with no closed receipt is held (cannot-evaluate); the injected ids enter the class-tagged
         # basis below, so under D12 a shrink is a CHANGED basis, never premature cap relief.
-        classes["cannot_evaluate"].extend(_orch_checkpoint_union(root, payload))
+        classes["cannot_evaluate"].extend(
+            _orch_checkpoint_union(root, payload, record=record_checkpoint))
         enum_detail = ""
         # D12: tag each id with its class so an item flipping between classes reads as a CHANGED basis (an
         # untagged merge let such a flip collide to the same basis and skip fresh handling). CONV4-CX2 +
@@ -5846,35 +5946,60 @@ def _orch_record_denial(root, ts, kind, basis):
 
 
 def _orch_record_escape_spoof(root, detail):
-    """C.1 recorder: an ignored (actor-owned, symlinked, or writable) escape sentinel is a recorded
-    fact, never a verdict input: the decision already proceeded exactly as with no sentinel. Appends
-    a guard-events row and writes <state_dir>/escape-spoof.json so the next resume audit surfaces it
-    once; both writes are best-effort (recorder posture: a failed write changes no verdict)."""
-    _orch_guard_event(root, "escape-spoof", "recorded", detail)
-    _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
-                     {"ts": _orch_now().isoformat(), "detail": detail})
+    """C.1 recorder: an ignored (foreign, symlinked, hardlinked, actor-owned, or writable) escape
+    sentinel is a recorded fact, never a verdict input: the decision already proceeded exactly as with
+    no sentinel. Appends a guard-events row and writes <state_dir>/escape-spoof.json so the next resume
+    audit surfaces it once. FIX 6: the recording is FAIL-LOUD: returns '' on success, else the warning
+    text the caller MUST append to its banner, so an ignored sentinel that could not be recorded is
+    never silently dropped (which would contradict the always-recorded-and-surfaced claim, and leave
+    the resume audit nothing to surface when both writes failed)."""
+    ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail)
+    ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
+                               {"ts": _orch_now().isoformat(), "detail": detail})
+    if ok_event and ok_file:
+        return ""
+    return ("Additionally, an ignored escape sentinel could not be fully recorded (guard-events {}, "
+            "escape-spoof.json {}); record the spoof manually before resuming (nocncl)."
+            .format("ok" if ok_event else "FAILED", "ok" if ok_file else "FAILED"))
+
+
+def _orch_open_dispositions(ctx):
+    """Every NON-CLOSED disposition id a forced exit would leave behind: actionable, cannot-evaluate,
+    waiting, blocked, and proposed. FIX 5: a forced (cap/bound) exit past ANY of these is recorded; the
+    old gate recorded only over actionable or cannot-evaluate, so a cap/bound exit over a granted-open
+    waiting or blocked row went unrecorded. When the enumeration itself failed the open set cannot even
+    be established (enum_status != 'ok'); the caller records regardless in that case."""
+    return ([i for i, _t, _w in ctx["actionable"]]
+            + [i for i, _c, _p in ctx["cannot_evaluate"]]
+            + [i for i, _k, _r in ctx["waiting"]]
+            + [i for i, _k, _r in ctx["blocked"]]
+            + list(ctx["proposed"]))
 
 
 def _orch_record_forced_exit(root, event_name, ctx, reason):
-    """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past actionable or cannot-evaluate
-    rows is marked forced_unresolved (a guard-events row plus <state_dir>/forced-exit.json) so the
-    next resume audit surfaces it for triage. No register row, attestation, or escape-adjacent
-    artefact ever suppresses this record; a lapse-motivated bound exit relies on it as its
-    vindication artefact. Returns '' on success, else the failure text the caller MUST append to its
-    own banner (the unpersistable-counter idiom): the one record this design leans on can never fail
-    silently. The verdict itself is never changed here."""
-    open_ids = ([i for i, _t, _w in ctx["actionable"]]
-                + [i for i, _c, _p in ctx["cannot_evaluate"]])
+    """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past any non-closed disposition is
+    marked forced_unresolved so the next resume audit surfaces it for triage. FIX 5: the record is
+    APPEND-ONLY and uniquely keyed (<state_dir>/forced-exit.jsonl, one row per forced exit with a
+    unique key), so two forced exits before a resume are BOTH kept and each surfaced exactly once,
+    never clobbered into a single fixed file. No register row, attestation, or escape-adjacent artefact
+    ever suppresses this record. Returns '' on success, else the failure text the caller MUST append to
+    its banner (the one record this design leans on can never fail silently). The verdict is never
+    changed here."""
+    open_ids = _orch_open_dispositions(ctx)
+    enum_ok = ctx.get("enum_status") == "ok"
+    key = _orch_now().isoformat() + "-" + os.urandom(6).hex()
+    named = (", ".join(open_ids[:_ORCH_MAX_NAMED])
+             or ("open set unestablished" if not enum_ok else "none"))
     ok_event = _orch_guard_event(root, "forced_unresolved", "allow_with_findings",
-                                 "{}: open ids {}".format(
-                                     event_name, ", ".join(open_ids[:_ORCH_MAX_NAMED])))
-    ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "forced-exit.json"),
-                               {"ts": _orch_now().isoformat(), "event": event_name,
-                                "open_ids": open_ids, "reason": reason})
+                                 "{}: open ids {}".format(event_name, named))
+    ok_file = _orch_append_jsonl(os.path.join(_orch_state_dir_for_root(root), "forced-exit.jsonl"),
+                                 {"ts": _orch_now().isoformat(), "event": event_name, "key": key,
+                                  "open_ids": open_ids, "reason": reason,
+                                  "enum_status": ctx.get("enum_status")})
     if ok_event and ok_file:
         return ""
     return ("Additionally, the forced-exit record could not be fully persisted (guard-events {}, "
-            "forced-exit.json {}); record the forced exit manually before resuming (nocncl)."
+            "forced-exit.jsonl {}); record the forced exit manually before resuming (nocncl)."
             .format("ok" if ok_event else "FAILED", "ok" if ok_file else "FAILED"))
 
 
@@ -5894,27 +6019,33 @@ def _orch_stop_family(data, event_name, kind):
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
-    if ctx.get("escape_spoof"):
-        _orch_record_escape_spoof(root, ctx["escape_spoof"])
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+                  if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
     if verdict == "DENY":
         if not _orch_record_denial(root, ts, kind, basis):
             warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
                     "failing OPEN with findings rather than re-denying. Underlying: " + reason)
             _orch_guard_event(root, event_name, "allow_unpersistable", warn)
-            return _stop_warn("AIQT guardrail ({}): {}".format(event_name, warn))
+            return _stop_warn("AIQT guardrail ({}): {}{}".format(
+                event_name, warn, " " + spoof_warn if spoof_warn else ""))
         _orch_guard_event(root, event_name, "deny", reason)
-        return (2, None, reason)
+        # a DENY blocks (exit 2); if the spoof record itself failed, surface it on the block reason too
+        return (2, None, reason + (" " + spoof_warn if spoof_warn else ""))
     _orch_guard_event(root, event_name, verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         extra = ""
         if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
-                and (ctx["actionable"] or ctx["cannot_evaluate"]):
+                and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
             # C.4: the bound released this exit past open work; mark it forced_unresolved for the
             # next resume audit's triage. The fail-open verdict itself is unchanged.
             extra = _orch_record_forced_exit(root, event_name, ctx, reason)
+        tail = " ".join(x for x in (extra, spoof_warn) if x)
         return _stop_warn("AIQT guardrail ({}): {}{}".format(
-            event_name, reason, " " + extra if extra else ""))
+            event_name, reason, " " + tail if tail else ""))
+    if spoof_warn:
+        # a clean ALLOW whose spoof record FAILED still surfaces the failure (never a silent None)
+        return _stop_warn("AIQT guardrail ({}): {}".format(event_name, spoof_warn))
     return _allow()
 
 
@@ -5970,8 +6101,8 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
-    if ctx.get("escape_spoof"):
-        _orch_record_escape_spoof(root, ctx["escape_spoof"])
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+                  if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
     claim = _ORCH_QUIET_CLAIM_RE.search(wake_text or "")
     measured_min = None
@@ -5988,13 +6119,15 @@ def orch_yield_tool(data):
         # consume the schedule cap (CX-M2: repeated quiet-claim denials could otherwise farm the cap
         # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work).
         _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason, "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
-                             "contradicts the measured figure.")
+        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+                     "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
+                     "contradicts the measured figure.")
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
         _orch_record_denial(root, ts, kind, basis)
         _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason, "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
+        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+                     "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
     if kind == "schedule_idle":
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
@@ -6005,13 +6138,18 @@ def orch_yield_tool(data):
         forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
                   or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
                       and ctx["basis_unchanged"]))
-        if forced and (ctx["actionable"] or ctx["cannot_evaluate"]):
-            # C.4: cap or bound relief past open work is marked forced_unresolved; a failed record
-            # surfaces in the returned systemMessage rather than silently vanishing.
+        if forced and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
+            # C.4/FIX 5: cap or bound relief past ANY non-closed disposition (or during a whole-
+            # enumerator failure) is marked forced_unresolved; a failed record surfaces in the
+            # returned systemMessage rather than silently vanishing.
             extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason)
             if extra:
                 msg += " " + extra
+        if spoof_warn:
+            msg += " " + spoof_warn
         return (0, {"systemMessage": msg}, None)
+    if spoof_warn:
+        return (0, {"systemMessage": "AIQT guardrail: {}".format(spoof_warn)}, None)
     return _allow()
 
 
@@ -6455,6 +6593,74 @@ def _orch_chained_rows(path, prefix):
     return (rows, "")
 
 
+def _orch_register_tip(lines):
+    """('ok', seq, digest) for a register's current tip: seq is the line count and digest is the
+    sha256 of the last line (the same tip identity tools/check_mistakes_register.py anchors), so a
+    yield-time re-anchor can rebind a validated snapshot to the register on disk."""
+    if not lines:
+        return ("ok", 0, "0" * 64)
+    return ("ok", len(lines), _orch_sha256_hex(lines[-1]))
+
+
+def _orch_register_authority(root, path):
+    """FIX 3: the append-only AUTHORITY for a chained register (a compact inline mirror of
+    tools/check_mistakes_register.py's verify_append_only; the standalone hooks script cannot import
+    tools/). Returns ('ok', seq, digest) when the register on disk is a verified append-only extension
+    of an authority the actor cannot trivially forge, its git merge-base state with origin/HEAD when
+    the register is tracked, else its <path>.anchor file, with seq/digest identifying the current tip;
+    otherwise ('hold', detail, None), a cannot-evaluate the caller routes to a fail-closed HOLD, never
+    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable; the git authority raises
+    the bar, but an actor with BOTH filesystem and git write access (or who can advance the anchor) is
+    the categorical residual."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return ("hold", "register unreadable ({})".format(exc), None)
+    env = _isolate_git_env(dict(os.environ))
+    rel = None
+    try:
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+    except (OSError, ValueError):
+        rel = None
+    if rel and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+        try:
+            tracked = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", rel],
+                                     capture_output=True, timeout=10, env=env).returncode == 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            return ("hold", "cannot determine register tracking ({})".format(exc), None)
+        if tracked:
+            try:
+                base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
+                                      capture_output=True, text=True, timeout=10, env=env)
+                if base.returncode != 0 or not base.stdout.strip():
+                    return ("hold", "no computable merge-base with origin/HEAD", None)
+                ref = base.stdout.strip()
+                old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
+                                     capture_output=True, text=True, timeout=10, env=env)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return ("hold", "cannot read the register authority ({})".format(exc), None)
+            if old.returncode != 0:
+                return ("hold", "cannot read the register at its merge-base authority", None)
+            old_lines = old.stdout.splitlines()
+            if lines[:len(old_lines)] != old_lines:
+                return ("hold",
+                        "register is not an append-only extension of its merge-base state", None)
+            return _orch_register_tip(lines)
+    anchor = path + ".anchor"
+    try:
+        with open(anchor, "r", encoding="utf-8") as fh:
+            a = json.load(fh)
+        n, digest = int(a["seq"]), str(a["digest"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ("hold", "declared register has no readable anchor authority", None)
+    if len(lines) < n:
+        return ("hold", "register is shorter than its verified anchor (rows removed)", None)
+    if n > 0 and _orch_sha256_hex(lines[n - 1]) != digest:
+        return ("hold", "the anchored row was rewritten (tamper or reorder)", None)
+    return _orch_register_tip(lines)
+
+
 def _orch_pointer_resolves(root, sd, pointer):
     """True when a register row's check_ref/evidence pointer resolves to something real: an existing
     relative path contained under the repo root or the state dir, or a guard-events row (the
@@ -6495,14 +6701,23 @@ def _orch_validate_attestations(reg, root):
     findings = []
     sd = _orch_state_dir_for_root(root)
     at_path = _orch_path(root, reg.get("attestations"))
+    snap_path = os.path.join(sd, "attestations-validated.json")
     if at_path:
-        snap = {"version": 1, "ts": _orch_now().isoformat(), "status": "unreadable",
-                "refs": [], "unsubstantiated": []}
+        canonical = os.path.realpath(at_path)
         rows, detail = _orch_chained_rows(at_path, "AT-")
+        astatus, aseq, adigest = _orch_register_authority(root, at_path)
+        hold_snap = {"version": 2, "ts": _orch_now().isoformat(), "status": "unreadable",
+                     "refs": [], "unsubstantiated": [], "register": canonical,
+                     "seq": None, "digest": None}
         if rows is None:
-            findings.append("declared attestation register fails its inline chain/shape check "
-                            "({}); the yield-time reader holds affected items (cannot-evaluate)"
+            findings.append("declared attestation register fails its inline chain/shape check ({}); "
+                            "the yield-time reader holds affected items (cannot-evaluate)"
                             .format(detail))
+            snap = hold_snap
+        elif astatus != "ok":
+            findings.append("declared attestation register fails its append-only authority ({}); the "
+                            "yield-time reader holds affected items (cannot-evaluate)".format(aseq))
+            snap = hold_snap
         else:
             latest = {}
             for row in rows:
@@ -6512,7 +6727,8 @@ def _orch_validate_attestations(reg, root):
             refs, unsub = [], []
             for rid in sorted(latest):
                 row = latest[rid]
-                if row.get("status") in ("declined", "superseded"):
+                status = row.get("status")
+                if status in ("declined", "superseded"):
                     continue
                 ref = row.get("ref")
                 pointer = row.get("check_ref") or row.get("evidence")
@@ -6523,17 +6739,35 @@ def _orch_validate_attestations(reg, root):
                     unsub.append(rid)
                     findings.append("attestation {} names no blocker ref; it attests nothing"
                                     .format(rid))
+                elif status not in _ORCH_ATTEST_APPROVED:
+                    unsub.append(rid)
+                    findings.append("attestation {} status {!r} is not approved ({}); it attests "
+                                    "nothing".format(rid, status,
+                                                     "/".join(sorted(_ORCH_ATTEST_APPROVED))))
                 elif not _orch_pointer_resolves(root, sd, pointer):
                     unsub.append(rid)
                     findings.append("attestation {} pointer {!r} resolves to nothing; it attests "
                                     "nothing and blocks nothing".format(rid, pointer))
                 elif fresh:
                     refs.append(ref)
-            snap = {"version": 1, "ts": _orch_now().isoformat(), "status": "ok",
-                    "refs": sorted(set(refs)), "unsubstantiated": unsub}
-        if not _orch_write_json(os.path.join(sd, "attestations-validated.json"), snap):
-            findings.append("the attestation snapshot could not be written; the yield-time reader "
-                            "holds (cannot-evaluate), never a clean pass")
+            snap = {"version": 2, "ts": _orch_now().isoformat(), "status": "ok",
+                    "refs": sorted(set(refs)), "unsubstantiated": unsub, "register": canonical,
+                    "seq": aseq, "digest": adigest}
+        ok_snap = snap.get("status") == "ok"
+        if not ok_snap:
+            # delete-then-hold: invalidate any prior fresh 'ok' snapshot BEFORE writing the hold, so a
+            # failed write cannot leave a stale clean pass usable.
+            try:
+                os.remove(snap_path)
+            except OSError:
+                pass
+        if not _orch_write_json_atomic(snap_path, snap):
+            findings.append("the attestation snapshot could not be written; invalidating any prior "
+                            "snapshot so the yield-time reader holds (never a stale clean pass)")
+            try:
+                os.remove(snap_path)  # a failed OK write must not leave a prior snapshot usable either
+            except OSError:
+                pass
     mr_path = _orch_path(root, reg.get("mistakes_register"))
     if mr_path:
         rows, detail = _orch_chained_rows(mr_path, "MR-")
@@ -6554,39 +6788,71 @@ def _orch_validate_attestations(reg, root):
     return findings
 
 
+def _orch_forced_exit_findings(sd):
+    """C.4/FIX 5: surface EACH append-only forced-exit.jsonl row exactly once. A companion
+    forced-exit-surfaced.json records the keys already raised; a row whose key is not yet recorded
+    becomes a finding, and the surfaced set advances only on a successful write. An unreadable log, a
+    malformed line, or an unreadable/unwritable surfaced set re-fires next resume rather than losing
+    the record (chkfcl: unreadable is a finding, never a silent skip; the advance is at-least-once)."""
+    findings = []
+    log = os.path.join(sd, "forced-exit.jsonl")
+    rows, bad = _orch_read_jsonl(log)
+    if rows is None:
+        findings.append("pending forced-exit.jsonl present but unreadable: cannot-evaluate, held for "
+                        "manual triage")
+        return findings
+    if bad:
+        findings.append("{} malformed forced-exit.jsonl line(s): cannot-evaluate, held for manual "
+                        "triage".format(bad))
+    if not rows:
+        return findings
+    surfaced_path = os.path.join(sd, "forced-exit-surfaced.json")
+    try:
+        with open(surfaced_path, "r", encoding="utf-8") as fh:
+            surfaced = set(json.load(fh).get("keys", []))
+    except FileNotFoundError:
+        surfaced = set()
+    except (OSError, ValueError):
+        findings.append("the forced-exit surfaced-set is unreadable: cannot-evaluate, held for manual "
+                        "triage")
+        return findings  # never re-surface blindly against an unreadable set
+    fresh = [r for r in rows if r.get("key") not in surfaced]
+    for r in fresh:
+        ids = r.get("open_ids") if isinstance(r.get("open_ids"), list) else []
+        findings.append("a prior exit was forced past open work (forced_unresolved at {}: {} open "
+                        "id(s) {}); triage before continuing".format(
+                            r.get("ts", "unknown"), len(ids),
+                            ", ".join(str(i) for i in ids[:10]) or "unrecorded"))
+    if fresh:
+        all_keys = sorted({r.get("key") for r in rows if isinstance(r.get("key"), str)})
+        _orch_write_json_atomic(surfaced_path, {"keys": all_keys})  # at-least-once: a failed advance re-fires
+    return findings
+
+
 def _orch_pending_artefact_findings(root):
-    """C.1/C.4 resume probes: a pending escape-spoof.json or forced-exit.json becomes a finding and
-    is renamed with a .surfaced suffix, so it is raised exactly once but stays in the record. An
-    artefact that exists but cannot be read stays in place and re-fires (chkfcl: unreadable is a
-    finding, never a silent skip); a failed rename likewise re-fires rather than losing the record."""
+    """C.1/C.4 resume probes. escape-spoof.json is a single-shot artefact: raised once and renamed with
+    a .surfaced suffix, staying in the record; an unreadable one re-fires (chkfcl). Forced exits are an
+    append-only log surfaced via _orch_forced_exit_findings so multiple exits are each raised exactly
+    once and never clobbered."""
     findings = []
     sd = _orch_state_dir_for_root(root)
-    for name in ("escape-spoof.json", "forced-exit.json"):
-        path = os.path.join(sd, name)
-        try:
-            if not os.path.lexists(path):
-                continue
+    path = os.path.join(sd, "escape-spoof.json")
+    try:
+        if os.path.lexists(path):
             with open(path, "r", encoding="utf-8") as fh:
                 rec = json.load(fh)
-        except (OSError, ValueError):
-            findings.append("pending {} record present but unreadable: cannot-evaluate, held for "
-                            "manual triage".format(name))
-            continue
-        rec = rec if isinstance(rec, dict) else {}
-        if name == "escape-spoof.json":
+            rec = rec if isinstance(rec, dict) else {}
             findings.append("an actor-owned or malformed escape sentinel was ignored at {} ({})"
                             .format(rec.get("ts", "unknown"),
                                     rec.get("detail") or "no detail recorded"))
-        else:
-            ids = rec.get("open_ids") if isinstance(rec.get("open_ids"), list) else []
-            findings.append("a prior exit was forced past open work (forced_unresolved at {}: open "
-                            "ids {}); triage before continuing".format(
-                                rec.get("ts", "unknown"),
-                                ", ".join(str(i) for i in ids[:10]) or "unrecorded"))
-        try:
-            os.replace(path, path + ".surfaced")
-        except OSError:
-            pass  # it will surface again next resume; never wedge SessionStart
+            try:
+                os.replace(path, path + ".surfaced")
+            except OSError:
+                pass  # it will surface again next resume; never wedge SessionStart
+    except (OSError, ValueError):
+        findings.append("pending escape-spoof.json record present but unreadable: cannot-evaluate, "
+                        "held for manual triage")
+    findings.extend(_orch_forced_exit_findings(sd))
     return findings
 
 
