@@ -51,6 +51,14 @@ commit/am, where -n IS --no-verify) denies; a checker-shaped segment whose failu
 (|| true, || :) or piped into a truncating sink (| head, | tail) asks; option-value, post-'--',
 and push/merge -n edges stay allowed; and the parse-error fallback fails safe.
 
+It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
+(commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
+command modifiers to literal git, every token after the literal commit subcommand is scanned, including
+tokens after `--`; single-quoted literals ALLOW, while escaped literals ALLOW except for the disclosed
+bare-`$`-before-escaped-paren over-ASK. The raw fallback ASKS on a coarse apparent hit. The tests pin
+detected cases, deliberate over-ASKs, and selected named residual ALLOWs; they make no soundness or
+universal-coverage claim.
+
 It also covers the secrets-shift-left guard (secrets_shift_left, secsec): a Write content, an Edit
 new_string, or a Bash command that carries an obvious hardcoded secret (a provider-token prefix or a
 credential-named assignment of a real-length literal, single-sourced from tools/check_secrets.py) denies;
@@ -2805,6 +2813,129 @@ def main():
         gexpect("(qa-b1-gw) backslash-newline no-verify does not slip via an empty argv element, denies",
                 "git \\\n commit --no-verify -m x", "deny")
 
+        # GD-124: this BEST-EFFORT, ASK-only guard scans every token after a recognized git commit
+        # subcommand. The handler reads _lex_command's per-token opacity without Git option binding; it
+        # does not regex-scan the primary path. No repository fixture or probe is involved.
+        cmg = aiqt_hooks.commit_msg_subst
+
+        def cmexpect(label, command, want, tool="Bash"):
+            got = _decision(cmg, command, tool=tool)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        def cmdataexpect(label, data, want):
+            code, stdout_obj, _stderr = cmg(data)
+            if code == 0 and stdout_obj is None:
+                got = "allow"
+            elif code == 0 and isinstance(stdout_obj, dict):
+                got = stdout_obj.get("hookSpecificOutput", {}).get("permissionDecision", "unexpected")
+            else:
+                got = "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        # ASK: separated, attached, clustered, repeated, compound, abbreviated, and split-unquoted forms.
+        cmexpect("(cm-a) double-quoted backtick asks", 'git commit -m "fix `whoami` now"', "ask")
+        cmexpect("(cm-b) double-quoted dollar-paren asks",
+                 'git commit -m "fix $(rm -rf x) now"', "ask")
+        cmexpect("(cm-c) attached -m value asks", 'git commit -m"fix `x` y"', "ask")
+        cmexpect("(cm-d) attached --message value asks",
+                 'git commit --message="fix `x` y"', "ask")
+        cmexpect("(cm-e) separated --message value asks",
+                 'git commit --message "fix $(x)"', "ask")
+        cmexpect("(cm-f) clustered -am value asks", 'git commit -am "fix `x`"', "ask")
+        cmexpect("(cm-g) repeated -m inspects every bound value",
+                 'git commit -m ok -m "x $(y)"', "ask")
+        cmexpect("(cm-h) compound isolates the commit segment",
+                 'make build && git commit -m "ship `date`"', "ask")
+        cmexpect("(cm-i) narrow unquoted split dollar-paren asks",
+                 "git commit -m Built-$(date +%F)", "ask")
+        cmexpect("(cm-j) unquoted backtick asks", "git commit -m `git clean -fdx`", "ask")
+        cmexpect("(cm-k) arithmetic is a disclosed safe-direction over-ask",
+                 'git commit -m "n=$((1+2))"', "ask")
+        cmexpect("(cm-l) ANSI-C quoting is a disclosed safe-direction over-ask",
+                 "git commit -m $'a $(x) b'", "ask")
+        cmexpect("(cm-m) marker in an abbreviated long-option argument asks",
+                 'git commit --mess "x `y`"', "ask")
+        cmexpect("(cm-n) git global value option is skipped before commit",
+                 'git -C /tmp commit -m "a `b`"', "ask")
+        cmexpect("(cm-o) sibling and message substitutions are both in scope",
+                 'git commit -F "$(x)" -m "y `z`"', "ask")
+        cmexpect("(cm-p) unparseable apparent in-scope hit asks",
+                 'git commit -m "unbalanced $(x)', "ask")
+        cmexpect("(cm-help-tail) substitution before --help still asks",
+                 'git commit -m "$(x)" --help', "ask")
+        cmexpect("(cm-help-head) substitution after --help still asks",
+                 'git commit --help -m "$(x)"', "ask")
+        cmexpect("(cm-abbrev-shift) abbreviated sibling option cannot misbind a later marker",
+                 'git commit --pathspec-from-f -F -m "$(printf x)"', "ask")
+        cmexpect("(cm-fallback-attached) unparseable attached -m marker asks via raw fallback",
+                 'git commit -mfoo$(printf x) <<<x', "ask")
+        cmexpect("(cm-v) message-file argument substitution is in scope and asks",
+                 'git commit -F "$(x)"', "ask")
+        cmexpect("(cm-w) reuse/template argument substitutions are in scope and ask",
+                 'git commit -C "$(x)" -c "`y`" -t "$(z)" -m ok', "ask")
+        cmexpect("(cm-x) author argument substitution is in scope and asks",
+                 'git commit --author="a `x` b" -m ok', "ask")
+        # Round 3: scan every post-subcommand token. A `--` consumed as -m's value is not a boundary,
+        # and even a genuine pathspec boundary does not stop Bash from executing a substitution.
+        cmexpect("(cm-boundary-value) bare -- consumed as the first -m value cannot hide a later -m",
+                 'git commit -m -- -m "$(x)"', "ask")
+        cmexpect("(cm-boundary-quoted-value) quoted -- value cannot hide a later -m",
+                 'git commit -m "--" -m "$(x)"', "ask")
+        cmexpect("(cm-boundary-eoo-value) --end-of-options consumed as -m value cannot hide a later -m",
+                 'git commit -m --end-of-options -m "$(x)"', "ask")
+        # Resolve the effective command word through the hook-local command-modifier roster. These
+        # modifiers still cause Bash to expand their arguments before the effective command runs.
+        cmexpect("(cm-wrap-command) command-wrapped git commit asks",
+                 'command git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-env) env-wrapped git commit asks", 'env git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-env-options) env options and assignments are skipped",
+                 'env -i FOO=bar git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-exec) exec-wrapped git commit asks", 'exec git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-builtin) builtin-wrapped git commit asks",
+                 'builtin git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-nohup) nohup-wrapped git commit asks", 'nohup git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-time) time-wrapped git commit asks", 'time git commit -m "$(x)"', "ask")
+        cmexpect("(cm-wrap-negation) negated git commit asks", '! git commit -m "$(x)"', "ask")
+        cmexpect("(cm-pathspec-subst) post-boundary pathspec substitution over-asks",
+                 'git commit -- $(ls)', "ask")
+
+        # ALLOW: safe literal forms and documented best-effort residuals.
+        cmexpect("(cm-q) single-quoted substitution text allows",
+                 "git commit -m 'fix $(rm -rf x) now'", "allow")
+        cmexpect("(cm-r) escaped dollar-paren allows",
+                 'git commit -m "fix \\$(rm -rf x)"', "allow")
+        cmexpect("(cm-s) escaped backticks allow",
+                 'git commit -m "use \\`code\\` please"', "allow")
+        cmexpect("(cm-t) bare variable without a marker allows",
+                 'git commit -m "release $VERSION"', "allow")
+        cmexpect("(cm-u) marker-free ANSI-C value allows", "git commit -m $'plain'", "allow")
+        cmexpect("(cm-marker-free) marker-free git commit allows", "git commit -m plain", "allow")
+        cmexpect("(cm-help-clean) help without a substitution allows", "git commit --help", "allow")
+        cmexpect("(cm-y) single-quoted post-boundary message-shaped operand remains opaque=False",
+                 "git commit -m ok -- '-m `x`'", "allow")
+        cmexpect("(cm-z) quoted prose naming git commit is parseably out of scope",
+                 "echo 'git commit -m \"`x`\"'", "allow")
+        cmexpect("(cm-aa) non-commit git allows", 'git status -m "x `y`"', "allow")
+        cmexpect("(cm-ab) non-git command allows", "ls -la", "allow")
+        cmexpect("(cm-ac) unparseable command without a marker allows",
+                 'git commit -m "unbalanced', "allow")
+        cmexpect("(cm-ad) present non-Bash tool allows",
+                 'git commit -m "x `y`"', "allow", tool="Read")
+        # DISCLOSED residuals: the lexer does not parse through a reserved-word compound to its inner
+        # command, and an unquoted pre-subcommand $( fragments the git invocation into separate segments.
+        cmexpect("(cm-residual-compound) reserved-word compound allows (documented residual)",
+                 'if git commit -m "$(x)"; then :; fi', "allow")
+        cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
+                 'git -C $(x) commit -m "$(y)"', "allow")
+
+        # Payload postures: unreadable command ASKS; only the shared missing-tool contract DENIES.
+        cmdataexpect("(cm-ae) missing command asks",
+                     {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "ask")
+        cmdataexpect("(cm-af) missing tool_name denies",
+                     {"hook_event_name": "PreToolUse", "tool_input": {"command": "ls"}}, "deny")
+
         # === L11: git_discard redirect regression locks (prsunc) - a redirect is still non-pristine ->
         # ASK; no redirect may become a new ALLOW, and the clean-parse lossy scan sees redirect-free argv ==
         gd_repo = _init_repo(tmp / "gd-redir")
@@ -4228,6 +4359,13 @@ def main():
           "flags, a checker-shaped segment swallowed by '|| true'/'|| :' or piped into head/tail ASKS "
           "while non-checkers and non-truncating pipes stay allowed, a deny wins over a pending ask, "
           "and the parse-error fallback denies/asks the raw spellings, never a silent allow"
+          ". The BEST-EFFORT, ASK-only git-commit argument substitution guard (sectvl) battery checks "
+          "recognized simple git commit segments without claiming soundness or universal coverage: every "
+          "token after commit, including after `--`, is scanned without Git option binding; the named command "
+          "modifiers resolve to git; substituting markers ASK; single-quoted literals ALLOW, while escaped "
+          "literals ALLOW except for the named bare-$-before-escaped-paren over-ASK; selected named residual "
+          "ALLOWs are pinned without implying that every disclosed residual is tested; unreadable commands and "
+          "coarse apparent unparseable hits ASK; and only the shared missing-tool contract DENIES"
           ". The secrets-shift-left guard (EN-5 PR-C, secsec) is proven: a Write content, an Edit "
           "new_string, or a Bash command carrying a synthetic-but-shaped provider token (GitHub, "
           "Anthropic, AWS access key id), a private key block header, or a credential-named assignment of "
