@@ -20,3 +20,15 @@ items = [
 # Reserved optional key: a release MAY carry a `refs` array of TYPED references ("pr:17",
 # "decision:GD-110") consumed by tools/check_record_drift.py as a record-drift truth source. Inert to
 # gen_changelog and the version gates; narrative numbers in prose are never matched (GD-112 D9).
+
+[[release]]
+title = "Stop-guard escape hardening and the systemic-lapse wind-down record"
+version = "1.1.0"
+date = "2026-09-03"
+items = [
+  "The orchestrator stop-guard's operator escape sentinel is now honoured only when it is demonstrably not the assistant's own artefact: a regular file, owned by a uid other than the assistant's effective uid, and not group- or other-writable. A failing sentinel is ignored, logged, and surfaced by the next resume audit. MIGRATION: on a host where operator and assistant share one uid, no creatable file passes, so create the sentinel under a different uid (for example root-owned via sudo) or use registry/mode maintenance; split-uid deployment is the recommended posture.",
+  "Optional attestation register for blocker evidence: a registry that declares attestations has external and foreign-lease blocker evidence verified against validated attestation rows at audit cadence; undeclared registries keep the prior free-text behaviour unchanged.",
+  "Anti-shrinkage backlog checkpoint: an open item that vanishes from the enumeration without a closed receipt is held as cannot-evaluate rather than silently disappearing.",
+  "Forced exits are recorded: a loop-bound or denial-cap exit past open work is marked forced_unresolved and triaged by the next resume audit.",
+  "The continue-by-default rule (cntdef) now states that a systemic-lapse trigger licenses only a recorded wind-down: park behind the human decision or take the bounded, recorded exit; a self-asserted lapse never converts into a self-granted clean close of open work.",
+]

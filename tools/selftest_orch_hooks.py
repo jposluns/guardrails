@@ -104,12 +104,17 @@ class Fixture:
         subprocess.run(["git", "-C", str(self.root)] + list(args),
                        check=True, capture_output=True, timeout=30)
 
-    def set_items(self, items, version=1):
+    def set_items(self, items, version=1, keep_checkpoint=False):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.enum_payload.write_text(json.dumps(
             {"version": version, "generated_at_utc": now,
              "source": {"locator": "fixture", "revision": "r1", "observed_at_utc": now},
              "items": items}), encoding="utf-8")
+        if not keep_checkpoint:
+            # Each set_items call REPLACES the fixture backlog wholesale (a new scenario, never a
+            # shrink of the previous one), so the C.3 anti-shrinkage window starts fresh; a C.3 leg
+            # opts into the union with keep_checkpoint=True.
+            (self.state / "backlog-checkpoint.json").unlink(missing_ok=True)
 
     def payload(self, event, tool=None, tool_input=None, extra=None):
         data = {"hook_event_name": event, "cwd": str(self.root),
@@ -293,12 +298,53 @@ def main():
         f.set_turn_state({})
         check("stop/unknown-version-fails-open", _verdict(stop()), "warn")
 
-        # escape artefact -> allow even with actionable work
+        # C.1 witnessed fail-to-pass (reproduce-before-fix): a sentinel written by the RUNNING euid
+        # is actor-owned, so it must NOT open the clean-ALLOW channel. Run against the PRE-change
+        # code this same leg fails (the old lexists honour returns "allow"); post-change the verdict
+        # is the normal enumeration verdict (block2 on A-11) plus an escape-spoof record.
         f.set_items([item("A-11")])
         f.set_turn_state({})
         (sd / "ESCAPE-ALLOW-YIELD").write_text("operator\n", encoding="utf-8")
-        check("stop/escape-allows", _verdict(stop()), "allow")
+        check("stop/actor-owned-escape-ignored", _verdict(stop()), "block2")
+        check("stop/escape-spoof-artefact", (sd / "escape-spoof.json").exists(), True)
+        check("stop/escape-spoof-logged",
+              '"escape-spoof"' in (sd / "guard-events.jsonl").read_text(encoding="utf-8"), True)
         (sd / "ESCAPE-ALLOW-YIELD").unlink()
+        (sd / "escape-spoof.json").unlink()
+        # a symlink sentinel is ignored the same way (lstat, never followed)
+        (sd / "ESCAPE-ALLOW-YIELD").symlink_to(f.root / "seed.txt")
+        f.set_turn_state({})
+        check("stop/symlink-escape-ignored", _verdict(stop()), "block2")
+        (sd / "ESCAPE-ALLOW-YIELD").unlink()
+        (sd / "escape-spoof.json").unlink()
+        # The remaining acceptance legs run through the injected _orch_escape_stat seam, because a
+        # real file owned by a DIFFERENT uid cannot be created hermetically on a single-uid host
+        # (test-hermeticity: the seam supplies the lstat result the filesystem cannot).
+        import stat as _stat
+
+        class _St:
+            def __init__(self, mode, uid):
+                self.st_mode = mode
+                self.st_uid = uid
+        _orig_escape_stat = aiqt_hooks._orch_escape_stat
+        try:
+            # honour leg: different uid, regular file, owner-only mode -> the clean ALLOW stands
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
+            f.set_turn_state({})
+            check("stop/operator-owned-escape-allows", _verdict(stop()), "allow")
+            # a group-writable different-uid sentinel is ignored (any writer could have widened it)
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o664, os.geteuid() + 1)
+            f.set_turn_state({})
+            check("stop/group-writable-escape-ignored", _verdict(stop()), "block2")
+            # an OSError from the stat (the seam returns None) reads inactive and adds NO new deny
+            aiqt_hooks._orch_escape_stat = lambda path: None
+            f.set_items([])
+            f.set_turn_state({})
+            check("stop/escape-oserror-no-new-deny", _verdict(stop()), "allow")
+        finally:
+            aiqt_hooks._orch_escape_stat = _orig_escape_stat
+        if (sd / "escape-spoof.json").exists():
+            (sd / "escape-spoof.json").unlink()
 
         # guard-events rows were appended by the denies above
         check("stop/guard-events-written", (sd / "guard-events.jsonl").exists(), True)
@@ -640,6 +686,189 @@ def main():
         check("core/wake-hygiene-below-cap-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=3))
         check("core/wake-hygiene-at-cap-findings", v, "ALLOW_WITH_FINDINGS")
+
+        # ---------- C.2: the attestation register for blocker evidence ----------
+        # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
+        # external-evidence legs (stop/proven-blockers-allow, stop/blank-evidence-denies).
+        import hashlib as _hashlib
+
+        def chained(*rows):
+            out, prev = [], "0" * 64
+            for r in rows:
+                line = json.dumps(dict(r, prev=prev), sort_keys=True)
+                out.append(line)
+                prev = _hashlib.sha256(line.encode("utf-8")).hexdigest()
+            return "\n".join(out) + "\n"
+
+        a = Fixture(tmp, "attest")
+        at_reg = a.root / "attestations.jsonl"
+        mr_reg = a.root / "mistakes.jsonl"
+        mr_reg.write_text("", encoding="utf-8")
+        _aregp = a.root / ".aiqt" / "orchestration.local.json"
+        _areg_raw = json.loads(_aregp.read_text(encoding="utf-8"))
+        _areg_raw["attestations"] = str(at_reg)
+        _areg_raw["mistakes_register"] = str(mr_reg)
+        _aregp.write_text(json.dumps(_areg_raw), encoding="utf-8")
+        astop = lambda: aiqt_hooks.orch_stop_guard(a.payload("Stop"))
+        asched = lambda ti: aiqt_hooks.orch_yield_tool(a.payload("PreToolUse", "ScheduleWakeup", ti))
+        ext = lambda iid, ref: item(iid, blocker={"kind": "external", "ref": ref,
+                                                  "evidence": "run pending",
+                                                  "observed_at_utc": now_iso(1)})
+        # declared register with NO validated snapshot yet: held (stop fails open, schedule denies)
+        a.set_items([ext("AT-I1", "ci")])
+        a.set_turn_state({})
+        check("attest/no-snapshot-stop-holds", _verdict(astop()), "warn")
+        a.set_turn_state({})
+        check("attest/no-snapshot-schedule-denies",
+              _verdict(asched({"prompt": "recheck AT-I1"})), "deny")
+        # a fresh validated snapshot that does NOT cover the blocker's ref: the free-text path no
+        # longer blocks; reverting C.2 re-enables it and this leg fails on "allow"
+        at_reg.write_text(chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "proposed",
+             "mistake": "attests other", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "other", "check_ref": "seed.txt"}), encoding="utf-8")
+        areg = aiqt_hooks._orch_registry(str(a.root))[1]
+        check("attest/validate-clean",
+              aiqt_hooks._orch_validate_attestations(areg, str(a.root)), [])
+        a.set_turn_state({})
+        check("attest/unattested-ref-denies", _verdict(astop()), "block2")
+        # the same blocker WITH a fresh validated attestation covering its ref: blocked -> allow
+        at_reg.write_text(chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "proposed",
+             "mistake": "attests ci", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"}), encoding="utf-8")
+        aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+        a.set_turn_state({})
+        check("attest/attested-ref-allows", _verdict(astop()), "allow")
+        # a row whose pointer resolves to nothing is unsubstantiated: a finding, attesting nothing
+        at_reg.write_text(chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "proposed",
+             "mistake": "attests ci", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"},
+            {"seq": 2, "id": "AT-2", "ts": now_iso(0), "status": "proposed",
+             "mistake": "attests dep", "evidence": "", "rule": "corexc",
+             "guardrail": "n/a", "ref": "dep", "check_ref": "nosuch-integrity-signal.txt"}),
+            encoding="utf-8")
+        u_findings = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+        check("attest/unsubstantiated-finding", any("AT-2" in x for x in u_findings), True)
+        asd = Path(aiqt_hooks._orch_state_dir_for_root(str(a.root)))
+        snap = json.loads((asd / "attestations-validated.json").read_text(encoding="utf-8"))
+        check("attest/unsubstantiated-in-snapshot", snap.get("unsubstantiated"), ["AT-2"])
+        check("attest/substantiated-ref-kept", "ci" in snap.get("refs", []), True)
+        # a broken chain is held, never read as a smaller clean register
+        at_reg.write_text('{"seq": 1, "id": "AT-1", "prev": "beef"}\n', encoding="utf-8")
+        check("attest/broken-chain-finding",
+              bool(aiqt_hooks._orch_validate_attestations(areg, str(a.root))), True)
+        a.set_turn_state({})
+        check("attest/broken-chain-stop-holds", _verdict(astop()), "warn")
+
+        # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
+        regtool = str(repo_root() / "tools" / "orch_register.py")
+
+        def mr_append(rid, check_ref):
+            subprocess.run([sys.executable, regtool, "append", "--register", str(mr_reg),
+                            "--id", rid, "--mistake", "premature wind-down claim",
+                            "--evidence", "resume-audit finding", "--rule", "cntdef",
+                            "--guardrail", "stop-guard hardening", "--klass", "systemic-lapse",
+                            "--check-ref", check_ref],
+                           check=True, capture_output=True, timeout=30)
+
+        mr_append("MR-1", "seed.txt")
+        check("lapse/klass-recorded",
+              '"class": "systemic-lapse"' in mr_reg.read_text(encoding="utf-8"), True)
+        proj = subprocess.run([sys.executable, regtool, "project", "--register", str(mr_reg)],
+                              check=True, capture_output=True, text=True, timeout=30)
+        lapse_items = json.loads(proj.stdout)["items"]
+        # (a) a lapse row plus one actionable item: still DENY, no bypass of any kind
+        a.set_items(lapse_items + [item("A-20")])
+        a.set_turn_state({})
+        check("lapse/no-bypass-still-denies", _verdict(astop()), "block2")
+        # (b) the park: the lapse row stays proposed while the other item is blocked on a recorded
+        # pending decision, reaching the existing no-actionable ALLOW (quiescence, not an escape)
+        a.pending.write_text("| DEC-1 | 2026-09-03 | lapse triage | RAISED |\n", encoding="utf-8")
+        a.set_items(lapse_items + [item("A-21",
+                                        blocker={"kind": "human-decision", "ref": "DEC-1"})])
+        a.set_turn_state({})
+        check("lapse/park-allows-with-disposition", _verdict(astop()), "allow")
+        # (c) a lapse row whose pointer resolves to nothing is unsubstantiated (a resume-audit
+        # finding) and blocks nothing
+        mr_append("MR-2", "nosuch-integrity-signal.txt")
+        l_findings = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
+        check("lapse/unsubstantiated-lapse-finding", any("MR-2" in x for x in l_findings), True)
+        a.set_turn_state({})
+        check("lapse/unsubstantiated-blocks-nothing", _verdict(astop()), "allow")
+
+        # ---------- C.3: the anti-shrinkage checkpoint union ----------
+        c = Fixture(tmp, "ckpt")
+        cstop = lambda: aiqt_hooks.orch_stop_guard(c.payload("Stop"))
+        csched = lambda ti: aiqt_hooks.orch_yield_tool(c.payload("PreToolUse", "ScheduleWakeup", ti))
+        cblocked = lambda iid: item(iid, blocker={"kind": "external", "ref": "up-" + iid,
+                                                  "evidence": "vendor outage",
+                                                  "observed_at_utc": now_iso(1)})
+        # first window: no checkpoint yet, no comparison (the disclosed residual)
+        c.set_items([cblocked("CK-A"), cblocked("CK-B")])
+        c.set_turn_state({})
+        check("ckpt/first-window-allows", _verdict(cstop()), "allow")
+        # CK-B vanishes with no close receipt: held as cannot-evaluate (warn, never a clean allow);
+        # reverting C.3 makes this leg fail on "allow"
+        c.set_items([cblocked("CK-A")], keep_checkpoint=True)
+        c.set_turn_state({})
+        check("ckpt/shrink-stop-holds", _verdict(cstop()), "warn")
+        c.set_turn_state({})
+        check("ckpt/shrink-schedule-denies", _verdict(csched({"prompt": "recheck CK-A"})), "deny")
+        # a closed row is the receipt: CK-B leaves the checkpoint and clean behaviour returns
+        c.set_items([cblocked("CK-A"), item("CK-B", state="closed")], keep_checkpoint=True)
+        c.set_turn_state({})
+        check("ckpt/receipt-allows", _verdict(cstop()), "allow")
+        c.set_items([cblocked("CK-A")], keep_checkpoint=True)
+        c.set_turn_state({})
+        check("ckpt/receipted-absence-allows", _verdict(cstop()), "allow")
+        # an unreadable checkpoint injects one marker row and is rewritten fresh
+        (c.state / "backlog-checkpoint.json").write_text("{broken", encoding="utf-8")
+        c.set_turn_state({})
+        check("ckpt/malformed-holds-once", _verdict(cstop()), "warn")
+        c.set_turn_state({})
+        check("ckpt/rewritten-fresh-allows", _verdict(cstop()), "allow")
+
+        # ---------- C.4: forced-exit recording ----------
+        d = Fixture(tmp, "forced")
+        dstop = lambda: aiqt_hooks.orch_stop_guard(d.payload("Stop"))
+        dsd = Path(aiqt_hooks._orch_state_dir_for_root(str(d.root)))
+        d.set_items([item("FX-1")])
+        d.set_turn_state({})
+        check("forced/deny-1", _verdict(dstop()), "block2")
+        check("forced/deny-2", _verdict(dstop()), "block2")
+        check("forced/bound-exit-warns", _verdict(dstop()), "warn")
+        check("forced/artefact-written", (dsd / "forced-exit.json").exists(), True)
+        frec = json.loads((dsd / "forced-exit.json").read_text(encoding="utf-8"))
+        check("forced/artefact-names-open-ids", frec.get("open_ids"), ["FX-1"])
+        check("forced/guard-event-kind",
+              '"forced_unresolved"' in (dsd / "guard-events.jsonl").read_text(encoding="utf-8"),
+              True)
+        # the next resume audit surfaces the pending record ONCE and arms the warn-first barrier
+        check("forced/resume-audit-surfaces",
+              _verdict(aiqt_hooks.orch_resume_audit(d.payload("SessionStart"))), "warn")
+        dbarrier = json.loads((dsd / "resume-barrier.json").read_text(encoding="utf-8"))
+        check("forced/barrier-armed-warn-first", dbarrier.get("active"), True)
+        check("forced/artefact-renamed-surfaced",
+              (dsd / "forced-exit.json.surfaced").exists(), True)
+        check("forced/artefact-raised-once", (dsd / "forced-exit.json").exists(), False)
+        check("forced/clean-after-triage",
+              _verdict(aiqt_hooks.orch_resume_audit(d.payload("SessionStart"))), "allow")
+        # a failed forced-exit record surfaces in the warn banner itself (the write seam injects the
+        # failure; the fixture state dir stays untouched, per test-hermeticity)
+        _orig_write_json = aiqt_hooks._orch_write_json
+        try:
+            aiqt_hooks._orch_write_json = lambda path, obj: False
+            d.set_items([item("FX-2")])
+            d.set_turn_state({"stop_denials": 2})
+            fcode, fobj, _ferr = dstop()
+            check("forced/failed-record-in-banner",
+                  fcode == 0 and isinstance(fobj, dict)
+                  and "forced-exit record could not be fully persisted"
+                  in fobj.get("systemMessage", ""), True)
+        finally:
+            aiqt_hooks._orch_write_json = _orig_write_json
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -650,7 +879,8 @@ def main():
         return 1
     print("SELF-TEST PASS: the stop guard denies enumerated actionable work and unproven or stale "
           "blockers, allows proven blockers, live tracked tasks, proposed-only backlogs, absent "
-          "registry/lease scope, the operator escape, and fails OPEN with findings on every "
+          "registry/lease scope, a genuinely operator-owned escape sentinel, and fails OPEN with "
+          "findings on every "
           "cannot-evaluate; the schedule path denies on cannot-evaluate with a three-denial cap and "
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
@@ -658,8 +888,15 @@ def main():
           "any shell syntax or reserved word, asks on a foreground bare-& detach while dropping a "
           "word-start `#` comment and failing an unbalanced/ANSI-C quote toward ASK rather than a silent "
           "allow; the ledger records launches and completions; the resume "
-          "audit arms and clears the mutation barrier on real record state; and the prompt stamp "
-          "resets guard counters from genuine human input")
+          "audit arms and clears the mutation barrier on real record state; the prompt stamp "
+          "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
+          "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
+          "register gates external/foreign-lease evidence at audit cadence, holding on an unreadable "
+          "surface and surfacing unsubstantiated rows; an id that vanishes from the enumeration "
+          "without a close receipt is held by the anti-shrinkage checkpoint; a bound- or cap-released "
+          "exit past open work is marked forced_unresolved with a fail-loud record and triaged at "
+          "resume; and a systemic-lapse register row never bypasses a verdict, parks behind a "
+          "recorded decision, and blocks nothing when unsubstantiated")
     return 0
 
 
