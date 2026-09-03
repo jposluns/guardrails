@@ -5588,8 +5588,8 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                      attestations=None):
     """Pure classification of a VALID enumeration (step 5). Returns actionable/waiting/blocked/
     cannot_evaluate/proposed. A proof SOURCE that cannot be read (ledger unreadable-or-malformed, or
-    pending_haystack is None) puts the item in cannot_evaluate: the stop path surfaces it and fails OPEN
-    (never hard-denies), while the schedule path DENIES on it (missing evidence never licenses an idle).
+    pending_haystack is None) puts the item in cannot_evaluate: FIX 1 DENIES the stop on it (ignorance
+    refuses the wind-down) and the schedule path DENIES on it too (missing evidence never licenses an idle).
     attestations is the C.2 tri-state from _orch_attestation_refs: None (no register declared) keeps
     the free-text external/foreign-lease evidence path byte-identical; "unreadable" (declared but the
     validated snapshot is absent, stale, or malformed) HOLDS such an item (cannot-evaluate), never
@@ -5641,7 +5641,7 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
             if attestations == "unreadable":
                 # C.2: a DECLARED attestation surface that cannot be read HOLDS the item, a distinct
                 # cannot-evaluate: never blocked (a forgeable block) and never actionable (a false
-                # deny). The stop path warns and the schedule path denies bounded by the cap.
+                # deny). FIX 1 DENIES the stop and the schedule path denies bounded by the cap.
                 out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
                                                "attestation surface unreadable; held"))
             elif attestations is not None and ref not in attestations:
@@ -5691,12 +5691,16 @@ def decide_yield(ctx):
                     "idle or wake. Fix the enumerator or the registry, or stop instead (the stop "
                     "path records this as a finding)".format(ctx["enum_status"],
                                                              ctx["enum_detail"]), disposition)
-        return ("ALLOW_WITH_FINDINGS",
-                "the backlog is not enumerable ({}: {}); the yield proceeds and this is recorded as "
-                "a finding, never described as a drained backlog".format(
+        return ("DENY",
+                "cntdef: the backlog is not enumerable ({}: {}); an unconfirmable enumeration cannot "
+                "confirm whole-set exhaustion, so it cannot license a stop (ignorance refuses the "
+                "wind-down). Fix the enumerator or the registry; the operator-owned escape sentinel is "
+                "the release for a genuine block".format(
                     ctx["enum_status"], ctx["enum_detail"]), disposition)
     # ITEM-LEVEL cannot-evaluate (an unreadable proof source for a specific item) is missing evidence: the
-    # schedule path DENIES (never licenses an idle), the stop path surfaces it and fails OPEN.
+    # schedule path DENIES (never licenses an idle), and (FIX 1) the stop path DENIES too, because an
+    # unconfirmable blocker cannot confirm exhaustion (ignorance refuses the wind-down); the operator
+    # escape is the release.
     if ctx.get("cannot_evaluate", []) and kind == "schedule_idle":
         if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
             return ("ALLOW_WITH_FINDINGS",
@@ -5720,10 +5724,11 @@ def decide_yield(ctx):
                     "pending: {}".format(
                         ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
-            return ("ALLOW_WITH_FINDINGS",
-                    "{} item(s) could not be evaluated (unreadable proof source); yielding with them as "
-                    "findings rather than hard-denying (stop-path fail-open)."
-                    .format(len(ctx.get("cannot_evaluate", []))), disposition)
+            return ("DENY",
+                    "cntdef: {} open item(s) have an unreadable proof source (cannot-evaluate); an "
+                    "unconfirmable blocker cannot license a stop (ignorance refuses the wind-down). "
+                    "Fix the source; the operator-owned escape sentinel is the release for a genuine "
+                    "block.".format(len(ctx.get("cannot_evaluate", []))), disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
@@ -5817,13 +5822,14 @@ def _orch_checkpoint_union(root, payload, record=True):
     """C.3 anti-shrinkage checkpoint union, run only after a status-ok enumeration. Compares the
     persisted checkpoint (<state_dir>/backlog-checkpoint.json) against the FULL validated payload
     (closed rows included: a closed row is the receipt that lets an id leave the checkpoint) and
-    returns the cannot-evaluate rows to inject: an id recorded open or proposed that is absent from
-    the payload entirely, with no closed receipt, vanished without explanation and is HELD rather
-    than silently shrunk away. An unreadable or malformed checkpoint injects ONE marker row and is
-    rewritten fresh. The rewritten checkpoint is the union of prior unreceipted open/proposed ids and
+    returns the cannot-evaluate rows to inject: an id recorded eligible or proposed that is absent from
+    the payload entirely with no closed receipt (vanished), OR (FIX 2) an id recorded eligible now
+    DEMOTED to proposed/ungranted with no closed receipt, is HELD rather than silently shrunk or
+    demoted away. An unreadable or malformed checkpoint injects ONE marker row and is
+    rewritten fresh. The rewritten checkpoint is the union of prior unreceipted eligible/proposed ids and
     this payload's, bounded at _ORCH_CHECKPOINT_MAX with a bound-forced drop logged to guard-events.
-    Verdict effects are entirely existing branches (the stop path fails open with findings, the
-    schedule path denies bounded by the cap); this helper adds no new deny logic, and a failed rewrite
+    Verdict effects are entirely existing branches (FIX 1: the stop path DENIES on an injected
+    cannot-evaluate, the schedule path denies bounded by the cap); this helper adds no new deny logic, and a failed rewrite
     changes no verdict.
 
     record=False is the PREVIEW posture (tools/orch_preflight.py): the vanished-id injections are still
@@ -5834,7 +5840,7 @@ def _orch_checkpoint_union(root, payload, record=True):
     initialised. When the durable init marker shows a prior window but the checkpoint is now gone, that
     is a possible reset (naive deletion or a crash) and is HELD (cannot-evaluate), never silently
     restarted. RESIDUAL (disclosed): the marker lives in the same actor-writable state dir, so this
-    raises the bar (catches naive deletion) without being categorical."""
+    raises the bar (catches naive deletion) without being categorical. The checkpoint's eligibility memory (the FIX 2 demotion catch) lives in the same actor-writable state dir, so it raises the bar without being categorical."""
     sd = _orch_state_dir_for_root(root)
     path = os.path.join(sd, "backlog-checkpoint.json")
     marker = os.path.join(sd, "checkpoint-init.marker")
@@ -5858,16 +5864,31 @@ def _orch_checkpoint_union(root, payload, record=True):
         # silently starting anti-shrinkage over.
         injected.append(("backlog-checkpoint", "cannot-evaluate",
                          "checkpoint missing though a prior window was initialised; possible reset"))
-    current = {it["id"]: it["state"] for it in payload}
+    # FIX 2: the per-id memory is an ELIGIBILITY label, not the raw state, so a demotion that keeps the
+    # id present (state open->proposed, or granted true->false) is caught, not just an outright vanish.
+    # "eligible" == granted and open (the id will classify actionable/waiting/blocked/cannot-evaluate);
+    # "proposed" == state proposed or ungranted; "closed" is the receipt that lets an id leave. A legacy
+    # checkpoint's "open" value reads as "eligible" (a back-compatible migration, no memory lost).
+    def _label(it):
+        if it["state"] == "closed":
+            return "closed"
+        return "eligible" if (it["granted"] and it["state"] == "open") else "proposed"
+    current = {it["id"]: _label(it) for it in payload}
     for iid in sorted(prior):
-        if prior[iid] in ("open", "proposed") and iid not in current:
+        was = "eligible" if prior[iid] == "open" else prior[iid]
+        if was in ("eligible", "proposed") and iid not in current:
             injected.append((iid, "cannot-evaluate",
                              "vanished from the enumeration without a close receipt"))
-    union = {iid: st for iid, st in prior.items()
-             if st in ("open", "proposed") and current.get(iid) != "closed"}
+        elif was == "eligible" and current.get(iid) == "proposed":
+            # the demotion variant: a previously-actionable id relabelled to proposed/ungranted routes
+            # to the harmless proposed bucket and evades both the deny and the vanish check; held.
+            injected.append((iid, "cannot-evaluate",
+                             "demoted from actionable to proposed/ungranted without a close receipt; held"))
+    union = {iid: ("eligible" if st == "open" else st) for iid, st in prior.items()
+             if (st in ("open", "eligible", "proposed")) and current.get(iid) != "closed"}
     for it in payload:
-        if it["state"] in ("open", "proposed"):
-            union[it["id"]] = it["state"]
+        if it["state"] != "closed":
+            union[it["id"]] = current[it["id"]]
     if len(union) > _ORCH_CHECKPOINT_MAX:
         dropped = sorted(union)[_ORCH_CHECKPOINT_MAX:]
         union = {iid: union[iid] for iid in sorted(union)[:_ORCH_CHECKPOINT_MAX]}
@@ -6033,7 +6054,8 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
 
 def _orch_stop_family(data, event_name, kind):
     """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
-    mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN throughout."""
+    mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on its own I/O errors;
+    a cannot-evaluate DENIES (FIX 1)."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -6078,14 +6100,15 @@ def _orch_stop_family(data, event_name, kind):
 
 
 def orch_stop_guard(data):
-    """setcmp/cntdef/trkasy/cnclse, Stop: deny a stop past enumerated actionable work; fail open with
-    findings on every cannot-evaluate; bounded by the guard-owned counter."""
+    """setcmp/cntdef/trkasy/cnclse, Stop: deny a stop past enumerated actionable work
+    OR any cannot-evaluate (FIX 1: ignorance refuses the wind-down; the operator escape releases);
+    bounded by the guard-owned counter."""
     return _orch_stop_family(data, "Stop", "stop")
 
 
 def orch_teammate_idle(data):
-    """The same decision core at the TeammateIdle boundary. Cannot-evaluate takes the fail-open stop
-    branch (G8): forcing continued work on missing evidence could ping-pong a session."""
+    """The same decision core at the TeammateIdle boundary. Cannot-evaluate DENIES the idle
+    (FIX 1: ignorance refuses the wind-down), the same as the Stop boundary."""
     return _orch_stop_family(data, "TeammateIdle", "stop_idle" if False else "stop")
 
 

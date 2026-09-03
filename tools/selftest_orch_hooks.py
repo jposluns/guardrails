@@ -244,7 +244,8 @@ def main():
         f.set_turn_state({})
         check("stop/prose-token-does-not-forge-block", _verdict(stop()), "block2")
 
-        # R2/R3: malformed AEI provenance is a cannot-evaluate (stop fails open), never a clean backlog
+        # R2/R3: malformed AEI provenance is a cannot-evaluate (FIX 1 DENIES the stop; ignorance
+        # refuses the wind-down), never a clean backlog
         nowv = now_iso(0)
         for label, env in [
                 ("bool-version", '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
@@ -254,19 +255,19 @@ def main():
                 ("no-locator", '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
             f.enum_payload.write_text(env, encoding="utf-8")
             f.set_turn_state({})
-            check("stop/malformed-provenance-%s-fails-open" % label, _verdict(stop()), "warn")
+            check("stop/malformed-provenance-%s-denies" % label, _verdict(stop()), "block2")
         # a blank-evidence external blocker does not prove a block (R3-CX-M7)
         f.set_items([item("A-be", blocker={"kind": "external", "ref": "ci", "evidence": "   ",
                                            "observed_at_utc": now_iso(1)})])
         f.set_turn_state({})
         check("stop/blank-evidence-denies", _verdict(stop()), "block2")
-        # a malformed dispatch ledger HOLDS a tracked item: stop fails open, schedule denies (R3-CX-B1)
+        # a malformed dispatch ledger HOLDS a tracked item: FIX 1 DENIES the stop, schedule denies (R3-CX-B1)
         sd = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root)))
         sd.mkdir(parents=True, exist_ok=True)
         (sd / "dispatch-ledger.jsonl").write_text("null\n{broken\n", encoding="utf-8")
         f.set_items([item("A-le", blocker={"kind": "tracked-task", "ref": "T-x"})])
         f.set_turn_state({})
-        check("stop/malformed-ledger-fails-open", _verdict(stop()), "warn")
+        check("stop/malformed-ledger-denies", _verdict(stop()), "block2")
         check("sched/malformed-ledger-denies", _verdict(aiqt_hooks.orch_yield_tool(
             f.payload("PreToolUse", "ScheduleWakeup", {"prompt": "recheck T-x"}))), "deny")
         (sd / "dispatch-ledger.jsonl").unlink()
@@ -284,22 +285,22 @@ def main():
         f.set_turn_state({"stop_denials": 2})
         check("stop/loop-bound", _verdict(stop()), "warn")
 
-        # enumerator nonzero exit: stop -> warn (fail-open with findings)
+        # enumerator nonzero exit: FIX 1 DENIES the stop (ignorance refuses the wind-down)
         f.enum_exit.write_text("3", encoding="utf-8")
         f.set_turn_state({})
-        check("stop/enum-error-fails-open", _verdict(stop()), "warn")
+        check("stop/enum-error-denies", _verdict(stop()), "block2")
 
         # malformed enumeration is ENUMERATOR_ERROR, never an empty backlog
         f.enum_exit.write_text("0", encoding="utf-8")
         f.enum_payload.write_text("{not json", encoding="utf-8")
         f.set_turn_state({})
-        check("stop/bad-json-fails-open", _verdict(stop()), "warn")
+        check("stop/bad-json-denies", _verdict(stop()), "block2")
         f.set_items([item("D-1"), item("D-1")])  # duplicate id
         f.set_turn_state({})
-        check("stop/dup-id-fails-open", _verdict(stop()), "warn")
+        check("stop/dup-id-denies", _verdict(stop()), "block2")
         f.set_items([item("V-1")], version=9)
         f.set_turn_state({})
-        check("stop/unknown-version-fails-open", _verdict(stop()), "warn")
+        check("stop/unknown-version-denies", _verdict(stop()), "block2")
 
         # C.1 witnessed fail-to-pass (reproduce-before-fix): a sentinel written by the RUNNING euid
         # is actor-owned, so it must NOT open the clean-ALLOW channel. Run against the PRE-change
@@ -428,11 +429,11 @@ def main():
         # guard-events rows were appended by the denies above
         check("stop/guard-events-written", (sd / "guard-events.jsonl").exists(), True)
 
-        # TeammateIdle: same core; enum error fails OPEN (allows idle, with findings)
+        # TeammateIdle: same core; FIX 1 DENIES the idle on enum error (ignorance refuses the wind-down)
         f.enum_exit.write_text("3", encoding="utf-8")
         f.set_turn_state({})
-        check("idle/enum-error-fails-open",
-              _verdict(aiqt_hooks.orch_teammate_idle(f.payload("TeammateIdle"))), "warn")
+        check("idle/enum-error-denies",
+              _verdict(aiqt_hooks.orch_teammate_idle(f.payload("TeammateIdle"))), "block2")
         f.enum_exit.write_text("0", encoding="utf-8")
         f.set_items([item("A-12")])
         f.set_turn_state({})
@@ -472,11 +473,12 @@ def main():
         check("yield/actionable-denies-schedule",
               _verdict(sched({"prompt": "recheck A-1 later"})), "deny")
 
-        # a ScheduleWakeup with stop=true is the STOP kind: enum error fails OPEN, not deny
+        # a ScheduleWakeup with stop=true is the STOP kind: FIX 1 DENIES on enum error (ignorance
+        # refuses the wind-down; the yield tool maps DENY to a PreToolUse deny)
         g.enum_exit.write_text("3", encoding="utf-8")
         g.set_turn_state({})
-        check("yield/stop-kind-fails-open",
-              _verdict(sched({"stop": True})), "warn")
+        check("yield/stop-kind-denies",
+              _verdict(sched({"stop": True})), "deny")
         g.enum_exit.write_text("0", encoding="utf-8")
 
         # measured quiet wins over a claimed quiet duration
@@ -758,6 +760,21 @@ def main():
         v, _r, _d = aiqt_hooks.decide_yield(dict(base, actionable=[("A", "t", "no blocker")],
                                                  counter=2))
         check("core/loop-bound-findings", v, "ALLOW_WITH_FINDINGS")
+        # FIX 1: the STOP path now fails CLOSED-continue on a cannot-evaluate. A whole-enumerator
+        # failure and an item-level cannot-evaluate both DENY the stop below the loop bound (they used
+        # to ALLOW_WITH_FINDINGS); the operator escape still releases, and the loop bound is still a
+        # bounded ALLOW_WITH_FINDINGS exit.
+        v, _r, _d = aiqt_hooks.decide_yield(dict(base, enum_status="ENUMERATOR_ERROR"))
+        check("core/stop-enum-error-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, cannot_evaluate=[("CE", "cannot-evaluate", "held")]))
+        check("core/stop-cannot-evaluate-denies", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, escape=True, enum_status="ENUMERATOR_ERROR"))
+        check("core/stop-escape-releases-under-enum-error", v, "ALLOW")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, enum_status="ENUMERATOR_ERROR", counter=2))
+        check("core/stop-enum-error-loop-bound-findings", v, "ALLOW_WITH_FINDINGS")
         # CONV2-CX2: wake-hygiene denials are cap-relieved like every other schedule DENY
         wake_ctx = dict(base, kind="schedule_idle", waiting=[("W-1", "tracked-task", "t9")],
                         wake_named=False, basis_unchanged=True)
@@ -806,7 +823,7 @@ def main():
         # declared register with NO validated snapshot yet: held (stop fails open, schedule denies)
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
-        check("attest/no-snapshot-stop-holds", _verdict(astop()), "warn")
+        check("attest/no-snapshot-stop-holds", _verdict(astop()), "block2")
         a.set_turn_state({})
         check("attest/no-snapshot-schedule-denies",
               _verdict(asched({"prompt": "recheck AT-I1"})), "deny")
@@ -863,7 +880,7 @@ def main():
              "register": "/forged/path", "seq": 99, "digest": "deadbeef"}), encoding="utf-8")
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
-        check("attest/forged-snapshot-holds", _verdict(astop()), "warn")
+        check("attest/forged-snapshot-holds", _verdict(astop()), "block2")
         # FIX 3: a register whose anchor no longer verifies (a row rewritten without advancing the
         # anchor) fails the append-only authority -> HOLD, never read as a smaller clean register
         good_ci = chained(
@@ -879,7 +896,7 @@ def main():
         at_reg.write_text(tampered_ci, encoding="utf-8")  # rewrite WITHOUT advancing the anchor
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
-        check("attest/anchor-tamper-holds", _verdict(astop()), "warn")
+        check("attest/anchor-tamper-holds", _verdict(astop()), "block2")
         # FIX A1 (discriminating): a snapshot bound to the REAL register tip but carrying a FABRICATED
         # ref is NOT trusted. The yield reader re-derives refs from the register content, so the fake
         # ref substantiates nothing (the round-1 impl trusted snap['refs'] and would have ALLOWED).
@@ -924,13 +941,13 @@ def main():
               (asd / "attestations-validated.json").exists(), False)
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
-        check("attest/failed-write-holds", _verdict(astop()), "warn")
+        check("attest/failed-write-holds", _verdict(astop()), "block2")
         # a broken chain is held, never read as a smaller clean register
         at_reg.write_text('{"seq": 1, "id": "AT-1", "prev": "beef"}\n', encoding="utf-8")
         check("attest/broken-chain-finding",
               bool(aiqt_hooks._orch_validate_attestations(areg, str(a.root))), True)
         a.set_turn_state({})
-        check("attest/broken-chain-stop-holds", _verdict(astop()), "warn")
+        check("attest/broken-chain-stop-holds", _verdict(astop()), "block2")
 
         # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
         regtool = str(repo_root() / "tools" / "orch_register.py")
@@ -983,7 +1000,7 @@ def main():
         # reverting C.3 makes this leg fail on "allow"
         c.set_items([cblocked("CK-A")], keep_checkpoint=True)
         c.set_turn_state({})
-        check("ckpt/shrink-stop-holds", _verdict(cstop()), "warn")
+        check("ckpt/shrink-stop-holds", _verdict(cstop()), "block2")
         c.set_turn_state({})
         check("ckpt/shrink-schedule-denies", _verdict(csched({"prompt": "recheck CK-A"})), "deny")
         # a closed row is the receipt: CK-B leaves the checkpoint and clean behaviour returns
@@ -996,7 +1013,7 @@ def main():
         # an unreadable checkpoint injects one marker row and is rewritten fresh
         (c.state / "backlog-checkpoint.json").write_text("{broken", encoding="utf-8")
         c.set_turn_state({})
-        check("ckpt/malformed-holds-once", _verdict(cstop()), "warn")
+        check("ckpt/malformed-holds-once", _verdict(cstop()), "block2")
         c.set_turn_state({})
         check("ckpt/rewritten-fresh-allows", _verdict(cstop()), "allow")
         # FIX 4: a checkpoint deleted after a prior window (init marker present) is a possible reset ->
@@ -1005,13 +1022,37 @@ def main():
         (c.state / "backlog-checkpoint.json").unlink()
         c.set_items([cblocked("CK-A")], keep_checkpoint=True)
         c.set_turn_state({})
-        check("ckpt/deleted-after-init-holds", _verdict(cstop()), "warn")
+        check("ckpt/deleted-after-init-holds", _verdict(cstop()), "block2")
         # a genuinely never-initialised dir (no marker, no checkpoint) is still a clean first window
         c2 = Fixture(tmp, "ckpt2")
         c2stop = lambda: aiqt_hooks.orch_stop_guard(c2.payload("Stop"))
         c2.set_items([cblocked("CK-A")])
         c2.set_turn_state({})
         check("ckpt/never-init-first-window-allows", _verdict(c2stop()), "allow")
+        # FIX 2: the OTHER incident variant - a previously-actionable id DEMOTED to proposed/ungranted
+        # (not vanished) routes to the harmless proposed bucket and evades both the deny and the vanish
+        # check. The checkpoint now stores an eligibility label, detects the demotion, and injects a
+        # cannot-evaluate that (under FIX 1) DENIES the stop.
+        cd = Fixture(tmp, "ckpt-demote")
+        cdstop = lambda: aiqt_hooks.orch_stop_guard(cd.payload("Stop"))
+        cd.set_items([cblocked("CK-D")])                                     # window 1: eligible, clean
+        cd.set_turn_state({})
+        check("ckpt/demote-window1-allows", _verdict(cdstop()), "allow")
+        cd.set_items([item("CK-D", state="proposed")], keep_checkpoint=True) # demote: state proposed
+        cd.set_turn_state({})
+        check("ckpt/demote-to-proposed-denies", _verdict(cdstop()), "block2")
+        cd.set_items([cblocked("CK-D")], keep_checkpoint=False)              # fresh eligible window
+        cd.set_turn_state({})
+        check("ckpt/demote-reset-window1-allows", _verdict(cdstop()), "allow")
+        cd.set_items([item("CK-D", granted=False)], keep_checkpoint=True)    # demote: ungranted (state
+        cd.set_turn_state({})                                                # still open; state alone
+        check("ckpt/demote-ungranted-denies", _verdict(cdstop()), "block2")  # would miss it)
+        cd.set_items([cblocked("CK-D")], keep_checkpoint=False)              # discriminating: NO demote
+        cd.set_turn_state({})
+        check("ckpt/demote-window1b-allows", _verdict(cdstop()), "allow")
+        cd.set_items([cblocked("CK-D")], keep_checkpoint=True)               # stays eligible -> allow
+        cd.set_turn_state({})                                                # (mere presence never denies)
+        check("ckpt/no-demote-still-allows", _verdict(cdstop()), "allow")
         # FIX C: a failed init-marker write is fail-loud, not a silent gap. Patch the atomic writer to
         # fail ONLY the marker (the checkpoint write still succeeds) on a never-initialised dir so the
         # marker path is reached; assert a cannot-evaluate injection (warn, not a clean allow) plus a
@@ -1025,7 +1066,7 @@ def main():
         try:
             aiqt_hooks._orch_write_json_atomic = (
                 lambda p, o: False if str(p).endswith("checkpoint-init.marker") else _o_wja3(p, o))
-            check("ckpt/marker-unwritable-holds", _verdict(cmstop()), "warn")
+            check("ckpt/marker-unwritable-holds", _verdict(cmstop()), "block2")
         finally:
             aiqt_hooks._orch_write_json_atomic = _o_wja3
         check("ckpt/marker-unwritable-guard-event",
@@ -1124,6 +1165,35 @@ def main():
         check("forced5/second-resume-clean",
               _verdict(aiqt_hooks.orch_resume_audit(e.payload("SessionStart"))), "allow")
 
+        # FIX 1 (discriminating): an operator-owned escape sentinel STILL releases the stop even under a
+        # whole-enumerator failure (cannot-evaluate), proving the escape (not a fail-open) is the release
+        # and the new DENY is what changed. The same enum-error WITHOUT the escape now DENIES (above).
+        _orig_es2 = aiqt_hooks._orch_escape_stat
+        try:
+            aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
+            f.enum_exit.write_text("3", encoding="utf-8")
+            f.set_turn_state({})
+            check("stop/escape-releases-under-enum-error", _verdict(stop()), "allow")
+        finally:
+            aiqt_hooks._orch_escape_stat = _orig_es2
+            f.enum_exit.write_text("0", encoding="utf-8")
+        if (sd / "escape-spoof.json").exists():
+            (sd / "escape-spoof.json").unlink()
+        # FIX 1 + C.4: the now-DENY cannot-evaluate records NO forced exit (C.4 fires only on the
+        # bounded ALLOW_WITH_FINDINGS, never on a deny); the SAME enum-error, once the loop bound is
+        # reached, DOES record one. Discriminates the deny (no record) from the unchanged bound-exit.
+        ce = Fixture(tmp, "ce_forced")
+        cestop = lambda: aiqt_hooks.orch_stop_guard(ce.payload("Stop"))
+        cesd = Path(aiqt_hooks._orch_state_dir_for_root(str(ce.root)))
+        ce.set_items([item("CE-1")])
+        ce.enum_exit.write_text("3", encoding="utf-8")
+        ce.set_turn_state({})
+        check("ce/enum-error-denies", _verdict(cestop()), "block2")
+        check("ce/no-forced-exit-on-deny", (cesd / "forced-exit.jsonl").exists(), False)
+        ce.set_turn_state({"stop_denials": aiqt_hooks._ORCH_LOOP_BOUND})
+        check("ce/bound-exit-warns", _verdict(cestop()), "warn")
+        check("ce/forced-exit-on-bound", (cesd / "forced-exit.jsonl").exists(), True)
+
         # FIX 6: the escape-spoof record is FAIL-LOUD on EVERY verdict path, not only the clean
         # stop-ALLOW. Force a spoof whose record fails, then assert the warning surfaces on a stop
         # DENY, a stop ALLOW_WITH_FINDINGS, a yield DENY, and a yield ALLOW.
@@ -1206,9 +1276,9 @@ def main():
         return 1
     print("SELF-TEST PASS: the stop guard denies enumerated actionable work and unproven or stale "
           "blockers, allows proven blockers, live tracked tasks, proposed-only backlogs, absent "
-          "registry/lease scope, a genuinely operator-owned escape sentinel, and fails OPEN with "
-          "findings on every "
-          "cannot-evaluate; the schedule path denies on cannot-evaluate with a three-denial cap and "
+          "registry/lease scope, a genuinely operator-owned escape sentinel, and DENIES on every "
+          "cannot-evaluate (ignorance refuses the wind-down; only the operator escape releases); the "
+          "schedule path denies on cannot-evaluate with a three-denial cap and "
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
           "row; the truncation guard allows a plain metacharacter-free background command and asks on "

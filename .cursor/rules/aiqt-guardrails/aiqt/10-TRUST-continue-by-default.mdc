@@ -48,12 +48,13 @@ and is observable in the authoritative record: a granted status, a failing check
 source, or an operator decision genuinely still pending in the decision record. A "blocked",
 "held", or "needs a go" that the assistant authored about its own work is a proposal, not a grant,
 and does not gate a stop; nor does reclassifying work the operating mode already authorizes, such
-as already-decided queued backlog, as newly needing a fresh authorization. The requirement for
-express authorization gates a plan-initiating new unit of work; it is never repurposed as a blocker
-to manufacture a stop over work already decided. The check that reads exhaustion reads that
-authoritative grant source, not the assistant's narration of it or a bare status marker, and it
-validates its own input, so a blocker it cannot confirm to be real and granted resolves to
-continue, never to a stop. Ignorance refuses the wind-down.
+as already-decided queued backlog, as newly needing a fresh authorization. A self-authored demotion
+of decided work to "proposed" or "not granted" is likewise a proposal, not a grant, and licenses no
+wind-down. The requirement for express authorization gates a plan-initiating new unit of work; it is
+never repurposed as a blocker to manufacture a stop over work already decided. The check that reads
+exhaustion reads that authoritative grant source, not the assistant's narration of it or a bare
+status marker, and it validates its own input, so a blocker it cannot confirm to be real and granted
+resolves to continue, never to a stop. Ignorance refuses the wind-down.
 
 Elapsed run length, session depth, the number of compaction events, accumulated progress or a
 reached milestone, and the anticipated size of the work still ahead, whether observed, measured, or
