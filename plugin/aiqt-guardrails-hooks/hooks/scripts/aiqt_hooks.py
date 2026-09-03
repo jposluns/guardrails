@@ -14,6 +14,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   branch_root         PreToolUse  brnrot  block branch creation from an orphaned start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
+  commit_msg_subst    PreToolUse  sectvl  ask on shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
@@ -26,7 +27,8 @@ blocking error whose stderr is fed back to Claude. The Stop payload carries the 
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
 Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
-deliberate boundary posture is stated next) and gensrc_guard (a second stated exception, below). A
+deliberate boundary posture is stated next), gensrc_guard (a second stated exception, below), and
+commit_msg_subst (a third stated exception, below). A
 fail-closed control that cannot read the input it is meant
 to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
@@ -41,6 +43,11 @@ unresolvable repo root, a target that canonicalizes outside the repo, and an unr
 all ASK; an absent registry is the inert ALLOW; and only a missing tool_name denies (the shared
 fail-closed contract). The ASK still satisfies integ-check-fails-closed-on-unreadable in substance:
 the failure surfaces as a gate the human must clear and can never read as clean.
+
+commit_msg_subst (sectvl) is the THIRD stated exception: its strongest normal finding is an ASK, so a
+missing or unreadable command string also fails safe to ASK rather than being punished more harshly than
+a confirmed substitution. Only a missing tool_name denies under the shared fail-closed contract; a
+mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
 to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK
@@ -4158,6 +4165,8 @@ _RAW_CHECKER_RE = re.compile(
     r"tests?|selftests?|checks?|checker|lint\w*|verify|validate|audit|conformance)\b")
 _RAW_SWALLOW_RE = re.compile(r"\|\|\s*(?:true|:)(?=\s|$)")
 _RAW_TRUNCATE_RE = re.compile(r"\|\s*(?:head|tail)\b")
+_RAW_COMMIT_MSG_GIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
+_RAW_COMMIT_MSG_MARKER_RE = re.compile(r"`|\$\(")
 
 
 def _no_verify_spelling(sub, args):
@@ -4344,6 +4353,150 @@ def gate_weakening(data):
                     "(| head/tail) - confirm before proceeding (rule gatdis).")
     if pending_ask is not None:
         return pending_ask
+    return _allow()
+
+
+# --- sectvl: shell substitution in a git commit argument --------------------------------------------
+def _commit_msg_subst_marker(value, opaque, value_index, seg):
+    """The executable marker in a candidate git commit argument, or None. The per-token opacity signal
+    distinguishes a substituting double-quoted/unquoted marker from a single-quoted or escaped literal;
+    the final-token supplement covers the narrow unquoted '$(' split produced by _lex_command."""
+    if not opaque:
+        return None
+    if "`" in value:
+        return "a backtick"
+    if "$(" in value:
+        return "a $( command substitution"
+    if value.endswith("$") and value_index == len(seg.argv) - 1 and seg.sep_after == "(":
+        return "a $( command substitution"
+    return None
+
+
+_COMMIT_MSG_COMMAND_MODIFIERS = frozenset((
+    "command", "exec", "builtin", "nohup", "time", "!"))
+_COMMIT_MSG_ENV_VALUE_OPTS = frozenset((
+    "-u", "--unset", "-C", "--chdir", "-S", "--split-string", "--argv0"))
+
+
+def _commit_msg_command_index(tokens):
+    """Index of this hook's effective command word after recognized leading command modifiers.
+
+    This is deliberately local to commit_msg_subst: other guards rely on the shared _command_word's
+    narrower contract. Leading shell assignments are skipped first. The command/exec/builtin/nohup/time/!
+    modifiers advance one word; env additionally skips its leading option tokens, the separated values of
+    its common value-taking options, and NAME=VALUE assignments. Returns len(tokens) when no command remains.
+    """
+    i = _command_word_index(tokens)
+    n = len(tokens)
+    while i < n:
+        word = tokens[i].rsplit("/", 1)[-1]
+        if word in _COMMIT_MSG_COMMAND_MODIFIERS:
+            i += 1
+            continue
+        if word != "env":
+            return i
+        i += 1
+        options = True
+        while i < n:
+            token = tokens[i]
+            if _ENV_ASSIGN_RE.match(token):
+                i += 1
+                continue
+            if options and token == "--":
+                options = False
+                i += 1
+                continue
+            if options and token.startswith("-") and token != "-":
+                if "=" not in token and token in _COMMIT_MSG_ENV_VALUE_OPTS:
+                    i += 2
+                else:
+                    i += 1
+                continue
+            break
+    return i
+
+
+def _commit_msg_subst_hit(seg):
+    """Return (argument, marker) for the first post-subcommand hit in a recognized git commit segment.
+
+    Every token after commit is inspected without Git option binding: Bash performs substitution before Git
+    parses options or an end-of-options token, so neither an option value nor `--` makes a marker safe.
+    """
+    tokens = seg.argv
+    command_index = _commit_msg_command_index(tokens)
+    if (command_index >= len(tokens)
+            or tokens[command_index].rsplit("/", 1)[-1] != "git"):
+        return None
+    sub, args = _git_sub_and_args(tokens[command_index:])
+    if sub != "commit":
+        return None
+    offset = len(tokens) - len(args)
+    for index, token in enumerate(args, offset):
+        marker = _commit_msg_subst_marker(token, seg.argv_opaque[index], index, seg)
+        if marker is not None:
+            return token, marker
+    return None
+
+
+def _commit_msg_subst_fallback(command):
+    """Conservative raw fallback for an unparseable command: apparent git commit + substitution marker
+    ASKS; anything else ALLOWS at the true boundary. The probes intentionally over-match and can never
+    earn an allow proof for an apparent in-scope hit."""
+    if (_RAW_COMMIT_MSG_GIT_RE.search(command)
+            and _RAW_COMMIT_MSG_MARKER_RE.search(command)):
+        return _ask(
+            "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
+            "lexer and appears to carry a backtick or $( command substitution in a git commit argument. "
+            "The shell may execute it BEFORE git processes the argument. Confirm it is deliberate, or "
+            "re-issue with single quotes, escape the marker as \\` or \\$(, or write the message to a "
+            "file and use git commit -F <file>. The shared lexer conservatively prompts on marker-bearing "
+            "$'...' values even though Bash does not substitute inside them.",
+            "AIQT guardrail: an unparseable git commit argument appears to carry an executable command "
+            "substitution; confirm it is deliberate or re-issue in a safe form (rule sectvl).")
+    return _allow()
+
+
+def commit_msg_subst(data):
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. ASK when a token after a recognized
+    git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or $( command
+    substitution. It never denies a detected substitution: legitimate uses exist, so the human confirms
+    intent or re-issues the command in a safe form."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("sectvl")
+    if tool_name != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _ask(
+            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
+            "string, so the git-commit argument substitution check could not run; confirm the call "
+            "before proceeding.",
+            "AIQT guardrail: a Bash call has no readable command; confirm before proceeding "
+            "(rule sectvl, fail-safe).")
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return _commit_msg_subst_fallback(command)
+    for seg in segments:
+        hit = _commit_msg_subst_hit(seg)
+        if hit is None:
+            continue
+        argument, marker = hit
+        return _ask(
+            "AIQT rule sectvl (tool-argument-validation): this git commit argument {!r} carries {} in a "
+            "lexical context that may substitute. Bash executes the marker BEFORE git processes the "
+            "argument when it is double-quoted or unquoted. If that is not deliberate, re-issue with "
+            "single quotes, escape the marker as \\` or \\$(, or write the message to a file and use "
+            "git commit -F <file>. The shared lexer conservatively prompts on marker-bearing $'...' values "
+            "even though Bash does not substitute inside them."
+            .format(argument[:80], marker),
+            "AIQT guardrail: a git commit argument appears to carry an executable command substitution; "
+            "confirm it is deliberate or re-issue in a safe form (rule sectvl).")
     return _allow()
 
 
@@ -6687,6 +6840,7 @@ HANDLERS = {
     "protected_line": protected_line,
     "branch_root": branch_root,
     "gate_weakening": gate_weakening,
+    "commit_msg_subst": commit_msg_subst,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -6719,6 +6873,7 @@ HANDLER_EVENT = {
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,
     "gate_weakening": PRETOOL,
+    "commit_msg_subst": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,

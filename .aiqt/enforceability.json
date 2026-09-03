@@ -1342,9 +1342,19 @@
       "corpus-id": "sectvl",
       "family": "security",
       "gates": [],
-      "hooks": [],
+      "hooks": [
+        {
+          "class": "b",
+          "default": "ask",
+          "event": "PreToolUse",
+          "id": "commit-msg-subst",
+          "matcher": "Bash",
+          "platform": "claude-code",
+          "residue": "A BEST-EFFORT QUOTE-AWARE LEXICAL check via the shared tokenizer (_lex_command); it is ASK-only, so a detected substitution is surfaced for confirmation rather than blocked, and it makes NO soundness or universal-coverage claim. In a parsed simple segment it resolves the effective command word past leading shell assignments and the recognized command modifiers command, exec, builtin, nohup, time, !, and env; for env it skips leading option tokens, the separated operands of common value-taking options, and NAME=VALUE assignments. When that word is literal git and the subcommand after recognized Git-global options is literal commit, it scans EVERY argv token after commit, including tokens after `--` or `--end-of-options`, for a backtick or $( marker in a substituting double-quoted or unquoted context, using the shared lexer's parallel per-token opacity plus the narrow unquoted-$( split form where a final opaque token ending in $ is immediately followed by the ( operator. It deliberately does no Git option binding because the shell expands argv before Git parses it. On an unparseable command, the raw fallback ASKS when coarse git-commit and substitution-marker probes both match; that fallback can over-match quoted prose or literal markers. HONEST RESIDUALS: the option tokens belonging to a recognized command modifier are not skipped (for example command -p git commit, time -p git commit, exec -c git commit, exec -a x git commit, and nohup -- git commit), so resolution advances one word past the modifier, stops on the option, and silently ALLOWs a substitution-bearing commit; command modifiers outside the recognized set (notably sudo, nice, timeout, doas, stdbuf, and ionice) are not resolved, so for example sudo git commit -m \"$(x)\" silently ALLOWs; reserved-word compounds (if/while/until and `{ ...; }`) are not parsed through to their inner git command; shell functions and aliases that rename git; git-config subcommand aliases (for example alias.ci=commit making git ci -m \"$(x)\") cannot be known lexically and silently ALLOW; sh -c or bash -c script bodies; eval or xargs indirection; redirect targets on a recognized commit segment are removed from argv by the lexer and are not scanned, so git commit -m ok > \"$(x)\" and git commit -m ok 2> \"`x`\" silently ALLOW; leading environment-assignment values and Git-global option/value tokens before commit; a pre-subcommand unquoted $( that fragments the lexer segment, letting the whole commit invocation including its message escape inspection; quote-mangled command words such as g''it are outside the claimed command-resolution surface even where the shared lexer happens to normalize a form to git; $VAR indirection, concatenation, PATH-shadowed commands, and any other non-literal command word that does not resolve lexically to git; commands outside the Bash tool; and unparseable commands beyond the raw fallback probes. Deliberate over-ASKs: $((...)) includes $(; a bare $ immediately before an escaped parenthesis (for example git commit -m $\\(x\\)) is marked opaque and the decoded-marker check sees $(, so it ASKS even though Bash passes literal $(x) and runs no substitution; ANSI-C $'...' is treated as an opaque marker-bearing token even though Bash does not substitute inside it; whole-token opacity means an escaped literal backtick or $( sharing a word with an unrelated unquoted expansion or glob prompts; and a post-boundary pathspec produced by substitution (for example git commit -- $(ls)) prompts because the shell still executes it. It targets the accidental case, not an adversary."
+        }
+      ],
       "source": ".aiqt/core/rules/security-seci-tool-argument-validation.md",
-      "status": "prose-only"
+      "status": "hook-linked"
     },
     {
       "corpus-id": "secunt",
