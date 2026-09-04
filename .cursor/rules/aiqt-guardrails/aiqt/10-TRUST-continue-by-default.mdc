@@ -41,8 +41,9 @@ systemic lapse. A self-reported claim that the actionable items are exhausted is
 claim that licenses less work, so it is enumerated from the authoritative backlog rather than
 asserted, and the default under partial evidence is to continue on the highest-priority open item.
 
-A blocking condition that licenses a wind-down is granted, externally observable, and terminal,
-never self-authored. A hard external block, or a reserved decision that must be answered first,
+A blocking condition that licenses a wind-down is granted, externally observable, and terminal
+(no sanctioned path remains while the condition holds), never self-authored. A hard external
+block, or a reserved decision that must be answered first,
 counts only when the condition that blocks the item is granted by an authority other than the
 assistant and is observable in the authoritative record: a granted status, a failing check, an
 unavailable source, or an operator decision genuinely still pending in the decision record.

@@ -39,7 +39,7 @@ so the claim cannot rest on an unshown assertion that work is blocked. The recor
 item only when it leaves the item no step that can proceed while the condition holds, every sanctioned
 path completed or observed closed; a condition that gates only a later step of the item, or that degrades
 a resource only that later step consumes, shows that step held, not the item blocked, while a step can
-still proceed or a sanctioned path remains open.
+still proceed or a sanctioned path is not yet completed or observed closed.
 
 This governs completion-class quantifiers over an open or indexed set. A partial statement scoped to what was
 actually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a
@@ -627,8 +627,9 @@ systemic lapse. A self-reported claim that the actionable items are exhausted is
 claim that licenses less work, so it is enumerated from the authoritative backlog rather than
 asserted, and the default under partial evidence is to continue on the highest-priority open item.
 
-A blocking condition that licenses a wind-down is granted, externally observable, and terminal,
-never self-authored. A hard external block, or a reserved decision that must be answered first,
+A blocking condition that licenses a wind-down is granted, externally observable, and terminal
+(no sanctioned path remains while the condition holds), never self-authored. A hard external
+block, or a reserved decision that must be answered first,
 counts only when the condition that blocks the item is granted by an authority other than the
 assistant and is observable in the authoritative record: a granted status, a failing check, an
 unavailable source, or an operator decision genuinely still pending in the decision record.

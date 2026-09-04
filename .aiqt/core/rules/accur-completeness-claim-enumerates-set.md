@@ -28,7 +28,7 @@ so the claim cannot rest on an unshown assertion that work is blocked. The recor
 item only when it leaves the item no step that can proceed while the condition holds, every sanctioned
 path completed or observed closed; a condition that gates only a later step of the item, or that degrades
 a resource only that later step consumes, shows that step held, not the item blocked, while a step can
-still proceed or a sanctioned path remains open.
+still proceed or a sanctioned path is not yet completed or observed closed.
 
 This governs completion-class quantifiers over an open or indexed set. A partial statement scoped to what was
 actually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a
