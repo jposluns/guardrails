@@ -400,6 +400,16 @@ def _adapter_glob_roster(spec, root):
     return True, "{} gate(s) in roster ({})".format(len(matches), sample), [str(d / m) for m in matches[:3]], str(d)
 
 
+_COMMIT_ID_HEXDIGITS = frozenset("0123456789abcdef")
+
+
+def _is_commit_id(value):
+    """A git commit id is a lowercase-hex object name: 40 hex characters for sha1, 64 for sha256. A value
+    of any other length, uppercased, or carrying a non-hex character is not a resolved object id (a decoy
+    git's garbage line, an abbreviated id, an error string) and must never back a PASS."""
+    return isinstance(value, str) and len(value) in (40, 64) and all(c in _COMMIT_ID_HEXDIGITS for c in value)
+
+
 def _adapter_git(spec, root):
     # SANITIZE the environment for every git subprocess: an ambient GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR
     # (or any other GIT_-prefixed redirect) is honoured by git OVER cwd, so an inherited GIT_DIR pointing at
@@ -422,18 +432,43 @@ def _adapter_git(spec, root):
     branch = spec.get("protected-branch", "main")
     # A PASS must be backed by the protected branch existing as an actual BRANCH ref (refs/heads/<branch>),
     # real located evidence, not merely by any commit-ish: a raw 40-hex SHA, a tag, HEAD, or an ancestry
-    # expression is NOT a branch, so a `rev-parse <value>^{commit}` accepting any commit-ish let a non-branch
-    # value read PASS. Verify refs/heads/<branch> resolves and carry that branch ref (not an arbitrary sha
-    # alias) as evidence.
-    ref = "refs/heads/{}".format(branch)
+    # expression is NOT a branch. Resolve it at CLASS WIDTH in two steps so a revision/refname expression
+    # cannot slip through:
+    #  (a) VALIDATE the branch-name grammar FIRST. `git rev-parse --verify refs/heads/<value>` APPLIES
+    #      revision operators, so a configured value carrying a revision suffix (a `~0`, `^{commit}`, or
+    #      `@{0}`) or other refname metacharacter would resolve THROUGH the operator and read PASS with the
+    #      expression itself carried as branch evidence. Reject a leading-dash or empty value up front (so a
+    #      value shaped like a git option is never handed to git as one), then reject anything git's own
+    #      grammar (check-ref-format --branch) does not accept: a malformed value is UNVERIFIABLE, never PASS.
+    if not branch or branch.startswith("-"):
+        return False, "protected-branch value '{}' is not a valid branch name".format(branch), [top], top
     try:
-        bp = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref],
-                            cwd=str(root), capture_output=True, text=True, timeout=10, env=env)
+        crf = subprocess.run(["git", "check-ref-format", "--branch", branch], cwd=str(root),
+                             capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "git not runnable ({})".format(exc), [], None
-    sha = bp.stdout.strip()
-    if bp.returncode != 0 or not sha:
+    if crf.returncode != 0:
+        return False, "protected-branch value '{}' is not a valid branch name".format(branch), [top], top
+    #  (b) Resolve the EXACT ref WITHOUT revision interpretation. `git show-ref --verify -- refs/heads/
+    #      <branch>` matches the LITERAL ref and does NOT apply revision suffixes (unlike rev-parse), so the
+    #      grammar-valid value resolves as the branch it names or not at all, never as an operator applied to
+    #      it. Carry refs/heads/<branch>@<sha> (the exact ref, not an arbitrary sha alias) as evidence.
+    ref = "refs/heads/{}".format(branch)
+    try:
+        bp = subprocess.run(["git", "show-ref", "--verify", "--", ref], cwd=str(root),
+                            capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "git not runnable ({})".format(exc), [], None
+    if bp.returncode != 0:
         return False, "protected branch '{}' does not exist as a branch ref in the repository".format(branch), [top], top
+    fields = bp.stdout.split()
+    sha = fields[0] if fields else ""
+    #  (c) VALIDATE the resolved commit id. show-ref resolves an exact ref, but the git binary is trusted
+    #      from the ambient PATH, so a decoy `git` earlier on PATH could emit a non-sha line and, unchecked,
+    #      read PASS with garbage carried as the branch sha. A commit id that is not a strict 40-hex (sha1)
+    #      or 64-hex (sha256) lowercase object name is not a resolved ref: UNVERIFIABLE, never PASS.
+    if not _is_commit_id(sha):
+        return False, "protected branch '{}' resolved to a non-sha commit id".format(branch), [top], top
     provider = spec.get("remote-landing-provider", "")
     detail = "git root at repo toplevel, protected branch '{}' at {}".format(branch, sha[:12])
     if provider:
@@ -1022,24 +1057,85 @@ def _self_test():
                                  capture_output=True, text=True, env=genv).stdout.strip()
             head_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(gitrepo),
                                       capture_output=True, text=True, env=genv).stdout.strip()
+            git_top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(gitrepo),
+                                     capture_output=True, text=True, env=genv).stdout.strip()
             _git("tag", "v-selftest")
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": cur}}}, gitrepo)
-            if r["status"] != PASS:
-                failures.append("git surface on an existing protected branch expected PASS, got {} ({})".format(
-                    r["status"], r["detail"]))
-            # 31a. DISCRIMINATING (finding-6a: git PASS carries the protected-BRANCH ref as located
-            #      evidence): the successful evidence includes refs/heads/<branch>@<sha>. Removing the
-            #      branch ref from the returned evidence (carrying only the repo top) fails this case.
-            if not any(e.startswith("refs/heads/{}@".format(cur)) for e in r["evidence"]):
-                failures.append("git PASS evidence expected to carry the protected-branch ref, got "
-                                "{!r}".format(r["evidence"]))
+            # 31a. DISCRIMINATING (finding-6a + finding-2-ii): a git PASS carries the EXACT protected-BRANCH
+            #      ref-and-sha as located evidence, refs/heads/<branch>@<40-hex-sha>, asserted exactly (not a
+            #      prefix). Removing the branch ref from the evidence fails the membership; changing the sha
+            #      to a bogus token (refs/heads/<branch>@bogus) fails it too, since the exact head sha is
+            #      required, not merely a refs/heads/<branch>@ prefix.
+            pass_ref = "refs/heads/{}@{}".format(cur, head_sha)
+            if r["status"] != PASS or r["kind"] != KIND_AVAILABLE or pass_ref not in r["evidence"]:
+                failures.append("git surface on an existing protected branch expected PASS/available carrying "
+                                "{!r}, got {}/{} evidence={!r} ({})".format(
+                                    pass_ref, r["status"], r["kind"], r["evidence"], r["detail"]))
+            # 31a-2. DISCRIMINATING (finding-2-iii): a nonexistent protected branch is UNVERIFIABLE/
+            #      required-unavailable carrying EXACTLY the repo-root evidence [<repo-top>]. Removing that
+            #      [repo-root] evidence (returning []) fails the exact evidence assertion; a PASS fails the
+            #      status. The evidence is compared by realpath so a symlinked tmp root still matches.
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": "no-such-branch-xyz"}}}, gitrepo)
-            if r["status"] != UNVERIFIABLE:
-                failures.append("git surface on a nonexistent protected branch expected UNVERIFIABLE, got "
-                                "{} (a PASS must be backed by the branch existing, not the repo root)".format(
-                                    r["status"]))
+            if (r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_UNAVAILABLE
+                    or len(r["evidence"]) != 1
+                    or os.path.realpath(r["evidence"][0]) != os.path.realpath(git_top)):
+                failures.append("git surface on a nonexistent protected branch expected UNVERIFIABLE/"
+                                "required-unavailable carrying exactly the repo-root evidence, got {}/{} "
+                                "evidence={!r}".format(r["status"], r["kind"], r["evidence"]))
+            # 31a-3. DISCRIMINATING (finding-1: a protected-branch value carrying a REVISION SUFFIX is not a
+            #      branch name): `<branch>~0`, `<branch>^{commit}`, and `<branch>@{0}` each resolve THROUGH a
+            #      revision operator under `rev-parse --verify refs/heads/<value>` and would read PASS with the
+            #      expression carried as evidence. Each must be UNVERIFIABLE/required-unavailable, rejected at
+            #      the grammar step (detail names an invalid branch name) with exactly [<repo-top>] evidence.
+            #      Removing the check-ref-format grammar guard drops the "not a valid branch name" detail
+            #      (the value then falls to a does-not-exist UNVERIFIABLE); reverting resolution to the
+            #      `rev-parse --verify refs/heads/<value>` form makes every suffix read PASS. Both flips fail.
+            for suffix in ("~0", "^{commit}", "@{0}"):
+                value = cur + suffix
+                r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                             "enabled": True, "protected-branch": value}}}, gitrepo)
+                if (r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_UNAVAILABLE
+                        or "not a valid branch name" not in r["detail"]
+                        or len(r["evidence"]) != 1
+                        or os.path.realpath(r["evidence"][0]) != os.path.realpath(git_top)):
+                    failures.append("git protected-branch given a revision expression {!r} expected "
+                                    "UNVERIFIABLE/required-unavailable rejected as an invalid branch name "
+                                    "with repo-root evidence, got {}/{} detail={!r} evidence={!r}".format(
+                                        value, r["status"], r["kind"], r["detail"], r["evidence"]))
+            # 31a-4. DISCRIMINATING (finding-3: the resolved commit id must be a strict sha): a decoy `git`
+            #      earlier on PATH that emits a non-sha line for show-ref (while echoing the surface root as
+            #      the toplevel so the root-binding checks pass) must yield UNVERIFIABLE/required-unavailable,
+            #      the detail naming a non-sha commit id, never a PASS carrying garbage as the branch sha.
+            #      Removing the _is_commit_id sha-format check lets the decoy's line read PASS, failing this.
+            #      Needs a POSIX shell for the decoy; asserted only where /bin/sh is present.
+            if os.path.exists("/bin/sh"):
+                decoy_bin = tmp / "decoybin"
+                decoy_bin.mkdir()
+                decoy_root = tmp / "decoyroot"
+                decoy_root.mkdir()
+                decoy_git = decoy_bin / "git"
+                decoy_git.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in\n"
+                    "  *--show-toplevel*) printf '%s\\n' \"{root}\" ;;\n"
+                    "  *show-ref*) printf 'not-a-real-sha refs/heads/main\\n' ;;\n"
+                    "esac\n"
+                    "exit 0\n".format(root=decoy_root), encoding="utf-8")
+                decoy_git.chmod(0o755)
+                saved_path = os.environ.get("PATH", "")
+                os.environ["PATH"] = str(decoy_bin) + os.pathsep + saved_path
+                try:
+                    r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                                 "enabled": True, "protected-branch": "main"}}}, decoy_root)
+                    if (r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_UNAVAILABLE
+                            or "non-sha commit id" not in r["detail"]):
+                        failures.append("git surface with a decoy git emitting a non-sha commit id expected "
+                                        "UNVERIFIABLE/required-unavailable naming a non-sha commit id, got "
+                                        "{}/{} detail={!r}".format(r["status"], r["kind"], r["detail"]))
+                finally:
+                    os.environ["PATH"] = saved_path
             # 31b. DISCRIMINATING (finding-3: protected-branch must be a BRANCH ref, not any commit-ish): a
             #      raw SHA, a tag name, and HEAD each resolve to a commit but are NOT branch refs, so each is
             #      UNVERIFIABLE. Reverting the check to `rev-parse <value>^{commit}` accepts every one of
@@ -1177,20 +1273,23 @@ def _self_test():
         except ConfigError:
             pass
 
-        # 40. DISCRIMINATING (finding-1: canonical adapter-type substitution rejected): a config that binds a
-        #     canonically-recognized surface to a DIFFERENT adapter than its canonical one resolves
-        #     UNVERIFIABLE/adapter-mismatch, never PASS, so a required surface cannot be rebound to the
-        #     record-file adapter aimed at any present file and read PASS. Removing the adapter-type guard in
-        #     discover() lets the substituted adapter probe and PASS, failing these cases. Applies to every
-        #     canonical surface (backlog/gate_roster/git), not just backlog.
+        # 40. DISCRIMINATING (finding-1 + finding-2-i: canonical adapter-type substitution rejected): a config
+        #     that binds a canonically-recognized surface to a DIFFERENT adapter than its canonical one
+        #     resolves UNVERIFIABLE/adapter-mismatch carrying EXACTLY empty evidence ([]), never PASS and
+        #     never a decoy evidence element, so a required surface cannot be rebound to the record-file
+        #     adapter aimed at any present file and read PASS. Removing the adapter-type guard in discover()
+        #     lets the substituted adapter probe and PASS; changing the mismatch return's evidence to a decoy
+        #     (["decoy"]) fails the exact []-evidence assertion. Applies to every canonical surface
+        #     (backlog/gate_roster/git), not just backlog.
         (tmp / "TODO.md").write_text("- [ ] x1 task\n", encoding="utf-8")  # a present file the decoy points at
         subst = (("backlog", "record-file"), ("gate_roster", "record-file"), ("git", "record-file"))
         for name, decoy in subst:
             r = discover(name, {"surfaces": {name: {"adapter": decoy, "required": True, "enabled": True,
                          "path": "TODO.md", "dir": "tools", "pattern": "check_*.py"}}}, tmp)
-            if r["status"] != UNVERIFIABLE or r["kind"] != KIND_ADAPTER_MISMATCH:
+            if r["status"] != UNVERIFIABLE or r["kind"] != KIND_ADAPTER_MISMATCH or r["evidence"] != []:
                 failures.append("canonical surface '{}' rebound to adapter {!r} expected UNVERIFIABLE/"
-                                "adapter-mismatch, got {}/{}".format(name, decoy, r["status"], r["kind"]))
+                                "adapter-mismatch with empty evidence, got {}/{} evidence={!r}".format(
+                                    name, decoy, r["status"], r["kind"], r["evidence"]))
         # The canonical adapter for a canonical surface is accepted (no false mismatch): backlog on
         # gfm-task-list with the present TODO.md is a real PASS.
         r = discover("backlog", {"surfaces": {"backlog": {"adapter": "gfm-task-list", "required": True,
@@ -1219,6 +1318,27 @@ def _self_test():
                      "d", [7], "t")
         if any(not (isinstance(e, str) and e) for e in r["evidence"]):
             failures.append("_surface returned an UNVERIFIABLE with malformed evidence: {!r}".format(r["evidence"]))
+
+        # 41b. DISCRIMINATING (finding-2-iv: the non-empty-string provenance clause of _validate_probe_return):
+        #      an available probe returning an EMPTY-STRING provenance element (True, "detail", [""], "t") is
+        #      a MALFORMED probe, caught at the return-type gate, so it resolves UNVERIFIABLE/adapter-error
+        #      with the malformed-probe detail (naming the provenance fault) rather than reaching the PASS
+        #      branch. Removing the `and p` non-empty-string clause from _validate_probe_return lets [""] pass
+        #      validation, reach the PASS branch, and be downgraded by _surface with a DIFFERENT detail
+        #      ("inconsistent PASS downgraded"), so asserting the malformed-probe detail discriminates the
+        #      clause. (Distinct from test 34's non-LIST provenance: this is a list carrying an empty string.)
+        def _emptyprov(spec, root):
+            return (True, "detail", [""], "t")
+        ADAPTERS["_selftest-emptyprov"] = _emptyprov
+        try:
+            r = discover("ep", {"surfaces": {"ep": {"adapter": "_selftest-emptyprov",
+                         "required": True, "enabled": True}}}, tmp)
+            if r["status"] != UNVERIFIABLE or r["kind"] != KIND_ADAPTER_ERROR or "malformed probe" not in r["detail"]:
+                failures.append("empty-string provenance element expected UNVERIFIABLE/adapter-error via the "
+                                "malformed-probe gate, got {}/{} detail={!r}".format(
+                                    r["status"], r["kind"], r["detail"]))
+        finally:
+            del ADAPTERS["_selftest-emptyprov"]
 
         # 42. DISCRIMINATING (finding-6d: record-file 'path' is type-checked): a record-file surface with a
         #     LIST-valued 'path' is a loud ConfigError, so the record-file adapter's path field cannot load
