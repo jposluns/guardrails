@@ -20,7 +20,10 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
 
 The child is launched [sys.executable, -I, -B, <runner>, --execution-report, <private abs path>] with
-cwd at the repo root; its full stdout and stderr are forwarded UNFILTERED to this gate's own streams (no
+cwd at the repo root and a git-neutral environment (every ambient GIT_* variable dropped;
+GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pinned to os.devnull, GIT_CONFIG_NOSYSTEM=1), so ambient git
+configuration cannot steer the child's git subprocesses; its full stdout and stderr are forwarded
+UNFILTERED to this gate's own streams (no
 grep, no truncation), and its verdict is judged by its real return code plus the strict report
 reconcile, never by its prose. A report that is missing, truncated, malformed, wrong-suite, non-regular,
 or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a pass, whatever the child's exit
@@ -30,7 +33,8 @@ Exit convention: 0 the execution set matches exactly AND the child passed; 1 a r
 or extra check id, or a set-complete child that itself reported assertion failures); 2 usage or
 cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest; a runner that is
 absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
-unresolvable or duplicate check id; a static source-to-manifest set mismatch; an unconfirmable repo
+unresolvable, aliased (a non-call check reference), comprehension-bound, or duplicate check id; a
+static source-to-manifest set mismatch; an unconfirmable repo
 root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; or an invalid
 report).
 
@@ -41,10 +45,14 @@ manifest), and cannot distinguish a legitimate from an illegitimate coordinated 
 its manifest row in one reviewed change; the expectation manifest is trusted hand-authored input whose
 schema is machine-validated here but whose completeness rests on source review. The static layer proves
 source-to-manifest SET EQUALITY, not reachability (a dead literal call still counts as a source site;
-proving execution is the runtime layer's job), counts only call sites of the bare name check, and binds
-a loop-carried Name to the innermost enclosing for lexically, without full scope analysis (a nested
-rebinding of the same name could mis-attribute source ids; the runtime reconcile still proves the
-executed set independently). The child runs un-timed
+proving execution is the runtime layer's job), and resolves only DIRECT call sites of the bare name
+check with string-literal or for-loop-literal ids: a non-call reference to that bare name (an alias
+would carry a call site beyond the scan) and an id Name bound inside a comprehension (whose scope the
+lexical for-stack does not model) are refused fail-closed, never silently resolved, while an
+invocation route that never names check as a bare Name (getattr, exec) is invisible to this layer and
+lands as a pre-launch set mismatch or a runtime extra rather than a silent resolve. The remaining
+lexical binding (the innermost enclosing for) does not model function boundaries; the runtime
+reconcile still proves the executed set independently. The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
 import ast
@@ -173,15 +181,21 @@ def _runner_path(root, runner):
 
 
 class _CheckIdVisitor(ast.NodeVisitor):
-    """Resolve the first argument of every call to the bare name check() to string-literal ids. Two
-    patterns only: a string constant, or a Name bound by an enclosing for over a tuple/list of
-    tuple/list rows carrying a string literal at that Name's target position. Anything else is a
-    fail-closed error, never a guess. ast carries no parent links, so the visitor keeps its own stack
-    of the enclosing For nodes."""
+    """Resolve the first argument of every DIRECT call to the bare name check() to string-literal
+    ids. Two patterns only: a string constant, or a Name bound by an enclosing for over a tuple/list
+    of tuple/list rows carrying a string literal at that Name's target position. Anything else is a
+    fail-closed error, never a guess: a Load of the bare name check that is not the callee of a call
+    this visitor resolves (an alias such as renamed = check would carry a call site beyond this
+    scan's reach) and a Name id inside a comprehension (whose generator binding the lexical
+    for-stack does not model, so an enclosing for could mis-attribute it) are both refused. ast
+    carries no parent links, so the visitor keeps its own stack of the enclosing For nodes, a
+    comprehension depth, and the id() of every callee Name it resolved."""
 
     def __init__(self, runner_path):
         self.runner_path = runner_path
         self.for_stack = []
+        self.comp_depth = 0
+        self.callee_names = set()   # id() of each Name node resolved as a direct check() callee
         self.found = []      # (check id, line) per literal site or per resolved loop row
         self.errors = []
 
@@ -190,13 +204,40 @@ class _CheckIdVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         self.for_stack.pop()
 
-    def visit_Call(self, node):
+    def _visit_comprehension(self, node):
+        self.comp_depth += 1
         self.generic_visit(node)
-        if not (isinstance(node.func, ast.Name) and node.func.id == "check"):
+        self.comp_depth -= 1
+
+    visit_ListComp = _visit_comprehension
+    visit_SetComp = _visit_comprehension
+    visit_DictComp = _visit_comprehension
+    visit_GeneratorExp = _visit_comprehension
+
+    def visit_Name(self, node):
+        if (node.id == "check" and isinstance(node.ctx, ast.Load)
+                and id(node) not in self.callee_names):
+            self.errors.append(
+                "check referenced outside a direct call at {}:{}; the static layer resolves only "
+                "direct check(...) call sites".format(self.runner_path, node.lineno))
+
+    def visit_Call(self, node):
+        is_check = isinstance(node.func, ast.Name) and node.func.id == "check"
+        if is_check:
+            # Marked BEFORE the generic descent reaches it, so visit_Name does not flag the very
+            # reference this call resolves.
+            self.callee_names.add(id(node.func))
+        self.generic_visit(node)
+        if not is_check:
             return
         arg = node.args[0] if node.args else None
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             self.found.append((arg.value, node.lineno))
+            return
+        if isinstance(arg, ast.Name) and self.comp_depth:
+            self.errors.append(
+                "check() id resolved inside a comprehension at {}:{}; unresolvable".format(
+                    self.runner_path, node.lineno))
             return
         rows = self._loop_rows(arg.id) if isinstance(arg, ast.Name) else None
         if rows is None:
@@ -370,8 +411,21 @@ def run_suite(root, suite_id):
             _cannot("report path {} already exists before launch".format(report_path))
             return 2
         command = [sys.executable, "-I", "-B", str(runner), "--execution-report", report_path]
+        # Git-neutral child environment: drop every ambient GIT_* variable, then pin the global and
+        # system config surfaces to os.devnull, so a hostile GIT_CONFIG_GLOBAL or core.hooksPath
+        # cannot make the child's git subprocesses run an external hook or read a decoy repository
+        # (the runner's fixtures set their git identity inline, so commits still work). This hardens
+        # the GATE-launched child only; the runner's own direct-invocation hermeticity is tracked
+        # separately (F-249).
+        child_env = dict(os.environ)
+        for key in list(child_env):
+            if key.startswith("GIT_"):
+                del child_env[key]
+        child_env["GIT_CONFIG_GLOBAL"] = os.devnull
+        child_env["GIT_CONFIG_SYSTEM"] = os.devnull
+        child_env["GIT_CONFIG_NOSYSTEM"] = "1"
         try:
-            child = subprocess.run(command, cwd=str(root), capture_output=True)
+            child = subprocess.run(command, cwd=str(root), capture_output=True, env=child_env)
         except OSError as exc:
             _cannot("cannot launch {}: {}".format(command, exc))
             return 2
@@ -659,6 +713,68 @@ def self_test():
             tempfile.tempdir = real_tempdir
         expect("st/mkdtemp-oserror-2", code, 2)
         expect("st/mkdtemp-oserror-no-launch", launched(root), False)
+
+        # 20 (round 3, FIX A): a reference to the bare name check outside a direct call (an alias
+        # that could carry a call site beyond the static scan) is refused fail-closed, no launch
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(GOOD_IDS)
+                     + 'renamed = check\nif False:\n    renamed("a/ghost", 0, 0)\n')
+        code, _out, err = run(root)
+        expect("st/static-alias-ref-2", code, 2)
+        expect("st/static-alias-ref-named", "referenced outside a direct call" in err, True)
+        expect("st/static-alias-ref-no-launch", launched(root), False)
+
+        # 21 (round 3, FIX B): a check() id Name bound inside a comprehension is refused fail-closed
+        # (the lexical for-stack does not model comprehension scope, so an enclosing for could
+        # mis-attribute it); a literal-id check() inside a comprehension still resolves
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(GOOD_IDS) + (
+                         'if False:\n'
+                         '    for check_id, other in (("a/one", 1), ("a/two", 2)):\n'
+                         '        [check(check_id, 0, 0) for check_id in ("a/one", "a/rogue")]\n'))
+        code, _out, err = run(root)
+        expect("st/static-comp-id-2", code, 2)
+        expect("st/static-comp-id-named", "inside a comprehension" in err, True)
+        expect("st/static-comp-id-no-launch", launched(root), False)
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(["a/one", "a/two"])
+                     + 'if False:\n    [check("a/three", 0, 0) for _ in (1,)]\n')
+        code, _out, _err = run(root)
+        expect("st/static-comp-literal-passes", code, 0)
+
+        # 22 (round 3, FIX C): the child is launched under a git-neutral environment: every ambient
+        # GIT_* variable is dropped and the config surfaces pin to os.devnull, so a poisoned
+        # GIT_CONFIG_GLOBAL (for example a core.hooksPath naming an attacker hook) never reaches
+        # the child; the fake runner dumps the GIT_* environment it actually saw
+        root = build(_manifest_text(),
+                     "git_env = dict((k, v) for k, v in os.environ.items() "
+                     "if k.startswith('GIT_'))\n"
+                     "open(os.path.join(here, 'git-env.json'), 'w').write(json.dumps(git_env))\n"
+                     + _report_body(GOOD_IDS, 0))
+        saved_env = dict((k, os.environ.get(k)) for k in ("GIT_CONFIG_GLOBAL", "GIT_DIR"))
+        os.environ["GIT_CONFIG_GLOBAL"] = str(base / "poisoned-gitconfig")
+        os.environ["GIT_DIR"] = str(base / "decoy-git")
+        try:
+            code, _out, _err = run(root)
+        finally:
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        expect("st/git-env-passes", code, 0)
+        env_dump = root / "tools" / "git-env.json"
+        expect("st/git-env-dump-written", env_dump.exists(), True)
+        if env_dump.exists():
+            expect("st/git-env-neutralized", json.loads(env_dump.read_text(encoding="utf-8")),
+                   dict(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                        GIT_CONFIG_NOSYSTEM="1"))
+
+        # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
+        # tempdir guard above cannot be witnessed from inside this self-test without circularity,
+        # and the runner's FAILURES-before-report-write-OSError ordering has no cheap hermetic
+        # witness from here, so both remain manual-flip verifications, disclosed rather than forced
+        # into a fragile test.
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -674,8 +790,11 @@ def self_test():
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
-          "source site, a dead duplicate-id alias, and an unresolvable dynamic id, while the "
-          "loop-literal pattern resolves and a clean twin passes), treats unavailable temp storage as "
+          "source site, a dead duplicate-id alias, an unresolvable dynamic id, a non-call reference to "
+          "the bare name check, and a comprehension-bound id, while the loop-literal pattern and a "
+          "literal id inside a comprehension resolve and a clean twin passes), launches the child under "
+          "a git-neutral environment (ambient GIT_* dropped, config surfaces pinned to os.devnull), "
+          "treats unavailable temp storage as "
           "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
           "near-miss (a green child that never executed a registered check) while its complete-report "
           "twin passes")
