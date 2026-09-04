@@ -824,7 +824,7 @@ def _parse_args(argv):
         if arg == "--self-test":
             self_test = True
         else:
-            print("usage: check_derived_command_parameters.py [--self-test]", file=sys.stderr)
+            print("usage: check_derived_command_parameters.py [--self-test]; fail-closed", file=sys.stderr)
             return None
     return (self_test,)
 

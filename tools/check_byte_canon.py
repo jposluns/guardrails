@@ -762,7 +762,7 @@ def main():
     if "--self-test" in args or "--selftest" in args:  # --selftest: the spec spelling (3.4)
         return self_test_main()
     if args:
-        print("usage: check_byte_canon.py [--self-test]", file=sys.stderr)
+        print("usage: check_byte_canon.py [--self-test]; fail-closed", file=sys.stderr)
         return 2
     return run(repo_root())
 

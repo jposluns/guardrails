@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c088a9317736640faaa6b9422597d6f3ec4ff04086f25722134f3b9980240723"
+tree-sha256 = "9a7cf48558fc242dfa7d88333c2a0ca5bc3464cb0d7baa49af371c9f9c840f4d"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2491,8 +2491,8 @@ sha256 = "e95bbb0dffb1fa9ab801bc3f44e387346ab0e166823b902955e38337e1364474"
 
 [[sources]]
 path = "tools/check_artifact_checksums.py"
-bytes = 24169
-sha256 = "46cf5575a53ddacbfd5167d39f33502367a9b2f6396ad42e52ef060da8d6dc4d"
+bytes = 24182
+sha256 = "51963ae80682c33d5cc437da448191a7ce1ab3072837946dfe0679f250ff7a45"
 
 [[sources]]
 path = "tools/check_branch_root.py"
@@ -2501,8 +2501,8 @@ sha256 = "6d720b8993132eddb65e07e895cf85fb8501a7eb774b915075bfe28b25bdd286"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 43281
-sha256 = "316ad0a049bacc10b372a49da00b5a4961352d0689d33872987ccc807f18d563"
+bytes = 43294
+sha256 = "e098814bcc06b5f4789dc87a83675c97fe1c166658ce6564bfc51f057f58d41e"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -2521,8 +2521,8 @@ sha256 = "f613f44f7ae12aec10e73de55ed11e50aa420d98441997417610b740bd58325b"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
-bytes = 48259
-sha256 = "e54404491fa1f0b26003215744a7c5e71cb0fb56a43fea54a8add2b8f6cb5787"
+bytes = 48272
+sha256 = "1089c8073bffac5bbfc8eebf2166f882e471bff26a48100f1a2d1ad4db2eef9f"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -2531,8 +2531,8 @@ sha256 = "ac276520c3e20ffa7271c3d3b52461ad9cbe9da386f0ba612451fc4b04b30bce"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 81799
-sha256 = "f4229c460cb6980bd26f2b262f18593888de88fce71f4bb89d2de0ff7eff2e5e"
+bytes = 81812
+sha256 = "707f7a7368ab4204ed0be3c78226af1346c4a7be447a63d2244a4fcfe582c56e"
 
 [[sources]]
 path = "tools/check_install_page.py"
