@@ -60,6 +60,13 @@ def main():
     except ValueError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
+    # UNKNOWN-OPTION REJECTION also precedes the --self-test dispatch: an unrecognized option (a misspelled
+    # --self-testx or --digestx, a stray flag) is a loud exit 2, never a silent fall-through to a default path
+    # that would exit 0 without running the self-test or digest the caller asked for.
+    unknown = qa.reject_unknown_options(argv, {"--self-test", "--digest"})
+    if unknown is not None:
+        print("error: unrecognized option {!r}".format(unknown), file=sys.stderr)
+        return 2
     # The loud PINNED-source resolution runs BEFORE the --self-test dispatch, so a pinned-but-absent or
     # pinned-but-empty config (an explicit --config PATH that does not exist, or AIQT_ASSURANCE_CONFIG set
     # to "") is a loud exit 2 even under --self-test, rather than a silent self-test that exits 0 on a
@@ -158,6 +165,18 @@ def _self_test():
             if proc.returncode != 2:
                 failures.append("present-but-empty AIQT_ASSURANCE_CONFIG did not exit 2 under --self-test, "
                                 "got {}".format(proc.returncode))
+            # 6. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path):
+            #    a subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
+            #    running the default audit path (which would let --self-testx masquerade as --self-test in CI
+            #    parity). The child runs with cwd=tmp, whose tools/check_example.py makes the default audit
+            #    resolve the gate roster to a PASS (exit 0) under portable defaults, so removing the
+            #    reject_unknown_options guard deterministically lets --self-testx fall through and exit 0.
+            for badarg in ("--self-testx", "--bogus"):
+                proc = subprocess.run([sys.executable, "-I", "-B", selfpath, badarg],
+                                      capture_output=True, text=True, env=childenv, cwd=str(tmp))
+                if proc.returncode != 2:
+                    failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
+                        badarg, proc.returncode))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -168,9 +187,10 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: the reference audit returns PASS end to end on a present gate roster (with "
           "located evidence), UNVERIFIABLE on an absent one (missing evidence never reads as PASS), "
-          "emits valid result-contract JSON, and runs both --config operand validation and the loud "
-          "pinned-source resolution before the --self-test dispatch (a malformed operand or a "
-          "pinned-but-absent/empty config exits 2 even under --self-test).")
+          "emits valid result-contract JSON, and runs --config operand validation, unknown-option rejection, "
+          "and the loud pinned-source resolution before the --self-test dispatch (a malformed operand, an "
+          "unrecognized option such as --self-testx, or a pinned-but-absent/empty config exits 2 even under "
+          "--self-test).")
     return 0
 
 

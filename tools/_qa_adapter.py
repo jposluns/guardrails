@@ -122,6 +122,25 @@ def validate_result(result):
     status = result.get("status")
     if status not in STATUSES:
         raise ValueError("status {!r} is not one of {}".format(status, ", ".join(STATUSES)))
+    # STRUCTURAL COMPLETENESS: the mandatory identity fields are present and correctly typed for EVERY status,
+    # so no construction path (make_result, emit, or a hand-built dict) yields a structurally-incomplete or
+    # wrong-typed result. `audit` and `summary` name the audit and its verdict (non-empty strings); `surface`
+    # is the surface name (a string) or None when the result is not tied to one; `required` is a bool.
+    for field in ("audit", "summary"):
+        value = result.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError("a result's {!r} must be a non-empty string, got {!r}".format(field, value))
+    surface = result.get("surface")
+    if surface is not None and not isinstance(surface, str):
+        raise ValueError("a result's 'surface' must be a string or None, got {!r}".format(surface))
+    required = result.get("required")
+    if not isinstance(required, bool):
+        raise ValueError("a result's 'required' must be a bool, got {!r}".format(required))
+    # CROSS-FIELD CONSISTENCY: a REQUIRED surface can never be SKIP. SKIP is the OPTIONAL-disabled declared
+    # no-op, so a required=true SKIP is a structurally inconsistent combination, refused here (kept distinct
+    # from a required surface disabled in config, which resolves UNVERIFIABLE/required-disabled upstream).
+    if status == SKIP and required:
+        raise ValueError("a SKIP result cannot be marked required (a required surface is never a SKIP)")
     kind = result.get("kind")
     evidence = result.get("evidence")
     if not isinstance(evidence, list):
@@ -242,6 +261,30 @@ def config_arg(argv):
     return value
 
 
+def reject_unknown_options(argv, known_flags):
+    """Return the first UNRECOGNIZED option token in argv, or None when every token is recognized. A token is
+    recognized when it is a known flag (in `known_flags`), or part of a --config option (either `--config
+    PATH` with its separate operand, or `--config=PATH`); anything else (a bare unknown flag such as
+    `--self-testx`, or a stray positional) is unrecognized. The caller turns a non-None return into a LOUD
+    exit 2, so an unknown option can never silently run a default path and a misspelled `--self-testx` can
+    never masquerade as `--self-test` (or silently skip it). config_arg has already validated the --config
+    operand when this runs, so this only SKIPS it, never re-validates it."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--config":
+            i += 2  # skip the option and its (already-validated) separate operand
+            continue
+        if tok.startswith("--config="):
+            i += 1
+            continue
+        if tok in known_flags:
+            i += 1
+            continue
+        return tok
+    return None
+
+
 def load_config(path):
     """Parse an assurance.toml. Raises ConfigError on an absent, unreadable, or malformed file, so a
     pinned config that cannot be honoured is loud, never a silent empty pass."""
@@ -295,18 +338,21 @@ def load_config(path):
 
 
 def find_nearest_config(start):
-    """Walk up from `start` returning the nearest existing .aiqt/assurance.toml, or None. os.stat (not
-    exists()) so a present-but-unreadable config surfaces as ConfigError via load_config rather than
-    reading as absent."""
+    """Walk up from `start` returning the nearest existing .aiqt/assurance.toml, or None. Uses the shared
+    _classify_presence so a candidate that is a PRESENT dentry but unreadable (a BROKEN SYMLINK whose target
+    is missing, or an unreadable/non-regular file) FAILS CLOSED as a ConfigError rather than reading as
+    absent and falling through to a lower-precedence source (portable defaults). os.stat FOLLOWS a symlink,
+    so a dangling nearest config would otherwise raise FileNotFoundError and be skipped exactly like a
+    genuinely absent path: this is the class-wide broken-symlink fail-closed, mirroring
+    tools/check_internal_names.py. Only a genuinely ABSENT candidate walks up to the next ancestor."""
     start = Path(start).resolve()
     for anc in [start, *start.parents]:
         cand = anc.joinpath(*CONFIG_RELPARTS)
-        try:
-            os.stat(cand)
-        except FileNotFoundError:
+        state, why = _classify_presence(cand)
+        if state == _ABSENT:
             continue
-        except OSError as exc:
-            raise ConfigError("cannot stat candidate config {}: {}".format(cand, exc))
+        if state == _UNREADABLE:
+            raise ConfigError("candidate config {} is present but unreadable ({}); fail closed".format(cand, why))
         return cand
     return None
 
@@ -358,25 +404,52 @@ def resolve_config(explicit=None, environ=None, start=None):
 # An adapter returns (available: bool, detail: str, provenance: list[str], target: str|None). It probes
 # ONLY whether the surface resolves to real, readable evidence; it never decides an audit's verdict.
 
-def _probe_readable_file(target):
-    """A file-backed surface is available only when `target` is a REGULAR file that actually opens and
-    reads: a bare os.stat would let a DIRECTORY or an UNREADABLE file at the path read as available, which
-    the caller would then turn into a false PASS. Returns (ok, why): ok is False for an absent path (stat
-    raises), a directory or other non-regular file, and a file that cannot be opened and read, so every
-    such case resolves to available=False (which discover() turns into UNVERIFIABLE). `why` names the
-    reason for the detail string."""
+# Shared "present-but-unreadable" classification, used CLASS-WIDE by every path whose presence GATES a
+# result (the nearest-config walk, the file-backed adapters, and the glob gate roster), so the broken-symlink
+# fail-closed posture is applied at every such site rather than one at a time. A presence-gating path is in
+# exactly one of three states, and a gate must treat them differently:
+#   _ABSENT      no dentry at all (genuinely missing): a `continue` up the walk, or a lower-precedence
+#                source, is legitimate.
+#   _UNREADABLE  a PRESENT dentry the gate cannot read as the regular file it needs: a BROKEN SYMLINK (the
+#                target is missing, so os.stat FOLLOWS the link and raises FileNotFoundError exactly as for
+#                an absent path, yet os.path.islink stays true, which is the discriminator), a directory or
+#                other non-regular file, or a regular file that does not open and read (a permission or I/O
+#                error). This is FAIL-CLOSED territory: it never reads as absent, mirroring the broken-symlink
+#                fail-closed guard in tools/check_internal_names.py.
+#   _READABLE    a regular file that opens and reads.
+_ABSENT, _UNREADABLE, _READABLE = "absent", "unreadable", "readable"
+
+
+def _classify_presence(path):
+    """Classify a presence-gating path into (_ABSENT|_UNREADABLE|_READABLE, why). A genuinely absent path is
+    _ABSENT; a broken symlink, a non-regular file, and an unreadable regular file are each _UNREADABLE
+    (present but not the readable file the surface needs); a regular file that opens and reads a byte is
+    _READABLE. The broken-symlink case is the subtle one os.stat alone gets wrong: os.stat FOLLOWS the link,
+    so a dangling link raises FileNotFoundError just like an absent path, and os.path.islink (using lstat,
+    which succeeds on the link itself) is what tells a present-but-dangling dentry from a truly missing one."""
     try:
-        st = os.stat(target)
+        st = os.stat(path)
+    except FileNotFoundError:
+        return (_UNREADABLE, "broken symlink (target missing)") if os.path.islink(path) else (_ABSENT, "absent")
     except OSError as exc:
-        return False, "not readable ({})".format(exc)
+        return _UNREADABLE, "not statable ({})".format(exc)
     if not stat.S_ISREG(st.st_mode):
-        return False, "not a regular file"
+        return _UNREADABLE, "not a regular file"
     try:
-        with open(target, "rb") as fh:
+        with open(path, "rb") as fh:
             fh.read(1)
     except OSError as exc:
-        return False, "not readable ({})".format(exc)
-    return True, ""
+        return _UNREADABLE, "not readable ({})".format(exc)
+    return _READABLE, ""
+
+
+def _probe_readable_file(target):
+    """A file-backed surface is available only when `target` is a REGULAR file that actually opens and reads.
+    Thin wrapper over the shared _classify_presence: available is True only for _READABLE, so an absent path,
+    a broken symlink, a directory or other non-regular file, and an unreadable regular file all resolve
+    available=False (which discover() turns into UNVERIFIABLE). `why` names the reason for the detail string."""
+    state, why = _classify_presence(target)
+    return state == _READABLE, why
 
 
 def _adapter_gfm_task_list(spec, root):
@@ -398,10 +471,19 @@ def _adapter_glob_roster(spec, root):
     except OSError as exc:
         return False, "gate roster dir not readable ({})".format(exc), [], str(d)
     # A counted roster member must be a READABLE regular file, the same standard the file-backed surfaces
-    # hold to: an unreadable or non-regular match is not a present gate and is not counted, consistent with
-    # the readable-file probe. If that empties the roster the surface is UNVERIFIABLE (the caller's not-
-    # available branch), never a PASS on a directory of unreadable files.
-    matches = [p.name for p in candidates if _probe_readable_file(p)[0]]
+    # hold to. A candidate that is PRESENT-but-unreadable (a broken symlink, or an unreadable/non-regular
+    # file) is an input the roster cannot read: it FAILS THE ROSTER CLOSED (the caller's not-available branch
+    # -> UNVERIFIABLE), never silently filtered out while the remaining readable gates still read PASS. A
+    # glob match is always a present dentry, so a not-_READABLE candidate is always present-but-unreadable,
+    # never genuinely absent; the same class-wide broken-symlink/unreadable fail-closed applied everywhere.
+    matches = []
+    for p in candidates:
+        state, why = _classify_presence(p)
+        if state == _READABLE:
+            matches.append(p.name)
+        elif state == _UNREADABLE:
+            return False, "gate roster candidate {} present but unreadable ({}); fail closed".format(
+                p.name, why), [], str(d)
     if not matches:
         return False, "no readable gates match {}/{}".format(spec.get("dir", "tools"), pattern), [], str(d)
     sample = ", ".join(matches[:3]) + (" ..." if len(matches) > 3 else "")
@@ -419,13 +501,24 @@ def _is_commit_id(value):
 
 
 # Resolve the git executable ONCE, via a trusted ABSOLUTE path where one is discoverable, to shrink the
-# window in which a PATH edit DURING the run could swap in a decoy `git`. Fall back to the bare name
-# "git" (PATH-resolved per call) when git is not on PATH at import, since a portable tool must not
-# hard-fail merely because git is only reachable through PATH. This is a mitigation, not a categorical
-# defence: a decoy already FIRST on PATH at process launch is exactly what shutil.which itself resolves,
-# so a PATH-controlled precise decoy `git` remains an OS/adopter-hardening residual, not something a
-# portable tool can fully close. The self-test overrides this module global to bind a decoy `git`.
-_GIT = shutil.which("git") or "git"
+# window in which a PATH edit DURING the run could swap in a decoy `git`. shutil.which can return a RELATIVE
+# path when PATH carries a relative component, and a later cwd change would then reselect a different
+# executable, so the which result is absolutized (os.path.abspath, pinned against the cwd at import) to keep
+# the frozen-executable property. Fall back to the bare name "git" (PATH-resolved per call) only when git is
+# not on PATH at import, since a portable tool must not hard-fail merely because git is only reachable
+# through PATH. This is a mitigation, not a categorical defence: a decoy already FIRST on PATH at process
+# launch is exactly what shutil.which itself resolves, so a PATH-controlled precise decoy `git` remains an
+# OS/adopter-hardening residual, not something a portable tool can fully close. The self-test overrides this
+# module global to bind a decoy `git`.
+def _resolve_git(which_result):
+    """Absolutize the git path so a cwd change cannot reselect a different executable. `which_result` is the
+    shutil.which("git") value (an absolute path normally, but possibly RELATIVE when PATH carries a relative
+    component, or None when git is not found). Return os.path.abspath of a found path (absolute, whether the
+    input was relative or already absolute), or the bare name "git" (PATH-resolved per call) when none."""
+    return os.path.abspath(which_result) if which_result else "git"
+
+
+_GIT = _resolve_git(shutil.which("git"))
 
 
 def _adapter_git(spec, root):
@@ -867,12 +960,14 @@ def _self_test():
         #     guard that rejects EVERY non-PASS available result (the round-1 regression) fails the accept half.
         try:
             validate_result({"schema": RESULT_SCHEMA, "status": FAIL, "kind": KIND_AVAILABLE,
-                             "evidence": ["tools/x.py:1"]})
+                             "evidence": ["tools/x.py:1"], "audit": "x", "summary": "s",
+                             "surface": None, "required": True})
         except ValueError as exc:
             failures.append("validate_result wrongly rejected a legitimate FAIL/available result: {}".format(exc))
         try:
             validate_result({"schema": RESULT_SCHEMA, "status": UNVERIFIABLE, "kind": KIND_AVAILABLE,
-                             "evidence": []})
+                             "evidence": [], "audit": "x", "summary": "s", "surface": None,
+                             "required": True})
             failures.append("validate_result accepted an UNVERIFIABLE carrying the available kind")
         except ValueError:
             pass
@@ -881,13 +976,15 @@ def _self_test():
         #     string) or a bare string (not a list) is rejected. Dropping the non-empty-strings or list-type
         #     checks lets a hollow PASS through, failing these.
         try:
-            validate_result({"schema": RESULT_SCHEMA, "status": PASS, "kind": KIND_AVAILABLE, "evidence": [""]})
+            validate_result({"schema": RESULT_SCHEMA, "status": PASS, "kind": KIND_AVAILABLE, "evidence": [""],
+                             "audit": "x", "summary": "s", "surface": None, "required": True})
             failures.append("validate_result accepted a PASS with an empty-string evidence entry")
         except ValueError:
             pass
         try:
             validate_result({"schema": RESULT_SCHEMA, "status": PASS, "kind": KIND_AVAILABLE,
-                             "evidence": "tools/x.py:1"})
+                             "evidence": "tools/x.py:1", "audit": "x", "summary": "s", "surface": None,
+                             "required": True})
             failures.append("validate_result accepted a PASS with a non-list (string) evidence")
         except ValueError:
             pass
@@ -1092,10 +1189,19 @@ def _self_test():
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": cur}}}, gitrepo)
             # 31a. DISCRIMINATING (finding-6a + finding-2-ii + finding-2c): a git PASS carries EXACTLY the
-            #      two-element evidence vector [<repo-top>, refs/heads/<branch>@<40-hex-sha>], asserted by
-            #      EXACT VECTOR EQUALITY (==), not membership. Removing the branch ref, changing the sha to a
-            #      bogus token, OR appending an arbitrary decoy element each breaks the exact equality; a
-            #      membership test would let an appended decoy through, which exact equality catches.
+            #      two-element evidence vector [<repo-top>, refs/heads/<branch>@<sha>], asserted by EXACT
+            #      VECTOR EQUALITY (==), not membership, against the REAL head_sha git reported. Removing the
+            #      branch ref, self-constructing the sha (which then diverges from the real head_sha), OR
+            #      appending an arbitrary decoy element each breaks the exact equality; a membership test would
+            #      let an appended decoy through, which exact equality catches. SCOPE of this case, stated so
+            #      as not to over-claim: it pins the SHA half of the evidence to git's own output (the sha is
+            #      compared to the real head_sha, so a self-constructed sha is caught here), while the ref half
+            #      is proven equal to the requested refs/heads/<branch> by the returned-ref equality gate
+            #      upstream (test 31a-5), so whether the code interpolates the requested `ref` or git's
+            #      `returned_ref` into the evidence is IMMATERIAL once that gate holds (they are equal) and is
+            #      not independently discriminable. The two-field count of show-ref's line and the strict
+            #      40/64-hex LOWERCASE sha format (both directions) are discriminated separately by tests 48
+            #      and 47, not by this exact-vector case.
             pass_ref = "refs/heads/{}@{}".format(cur, head_sha)
             if r["status"] != PASS or r["kind"] != KIND_AVAILABLE or r["evidence"] != [git_top, pass_ref]:
                 failures.append("git surface on an existing protected branch expected PASS/available with "
@@ -1328,7 +1434,8 @@ def _self_test():
         #     UNVERIFIABLE). Removing SKIP from the disallowed-status set lets a SKIP wear the available
         #     kind, failing this case.
         try:
-            validate_result({"schema": RESULT_SCHEMA, "status": SKIP, "kind": KIND_AVAILABLE, "evidence": []})
+            validate_result({"schema": RESULT_SCHEMA, "status": SKIP, "kind": KIND_AVAILABLE, "evidence": [],
+                             "audit": "x", "summary": "s", "surface": None, "required": False})
             failures.append("validate_result accepted a SKIP carrying the available kind")
         except ValueError:
             pass
@@ -1352,7 +1459,8 @@ def _self_test():
             pass
         try:
             validate_result({"status": FAIL, "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"],
-                             "schema": "aiqt-qa-result/999"})
+                             "schema": "aiqt-qa-result/999", "audit": "x", "summary": "s",
+                             "surface": None, "required": True})
             failures.append("validate_result accepted a substituted schema on a FAIL")
         except ValueError:
             pass
@@ -1462,7 +1570,7 @@ def _self_test():
         #     yields clean (no malformed-element) evidence. Reverting the uniform element check (keeping the
         #     non-empty-string test only under `if status == PASS`) lets a FAIL/UNVERIFIABLE carry [7] or [""].
         try:
-            make_result("x", FAIL, "s", kind=KIND_AVAILABLE, evidence=[7])
+            make_result("x", FAIL, "s", surface=None, required=True, kind=KIND_AVAILABLE, evidence=[7])
             failures.append("make_result accepted a FAIL with a non-string evidence element [7]")
         except ValueError:
             pass
@@ -1531,6 +1639,166 @@ def _self_test():
             if proc.returncode != 2:
                 failures.append("present-but-empty AIQT_ASSURANCE_CONFIG did not exit 2 under --self-test, "
                                 "got {}".format(proc.returncode))
+
+        # 44. DISCRIMINATING (finding-1: broken-symlink fail-closed applied CLASS-WIDE): a BROKEN SYMLINK (a
+        #     present dentry whose target is missing) that gates a result must FAIL CLOSED, never read as
+        #     absent, at EVERY presence-gating site. os.symlink is needed; asserted only where it is
+        #     available and creating a dangling symlink succeeds.
+        sroot = tmp / "symlinkclass"
+        (sroot / ".aiqt").mkdir(parents=True)
+        made_sym = False
+        try:
+            os.symlink(str(sroot / "no-such-target.toml"), str(sroot / ".aiqt" / "assurance.toml"))
+            made_sym = True
+        except (OSError, NotImplementedError, AttributeError):
+            made_sym = False
+        if made_sym:
+            # 44a. the NEAREST-config walk (the round-12 BLOCKER): a dangling nearest .aiqt/assurance.toml is
+            #      a ConfigError, never a silent fall-through to portable defaults. Reverting find_nearest_
+            #      config's broken-symlink fail-closed (letting the FileNotFoundError `continue`) makes
+            #      resolution fall through to portable defaults, failing this.
+            try:
+                resolve_config(start=sroot, environ={})
+                failures.append("a dangling nearest .aiqt/assurance.toml fell through to portable defaults "
+                                "(the round-12 BLOCKER) instead of raising ConfigError")
+            except ConfigError:
+                pass
+            # 44b. the PINNED --config/env load: a --config pointing at a dangling symlink is a ConfigError
+            #      (present-but-unreadable), never a silent fall-through. Reverting load_config's OSError ->
+            #      ConfigError guard lets the FileNotFoundError escape or read as absent, failing this.
+            try:
+                resolve_config(explicit=str(sroot / ".aiqt" / "assurance.toml"), environ={})
+                failures.append("a pinned --config at a dangling symlink was not a loud ConfigError")
+            except ConfigError:
+                pass
+            # 44c. the GLOB gate ROSTER: a roster with one READABLE and one DANGLING candidate is
+            #      UNVERIFIABLE (fail closed on the present-but-unreadable member), NOT a PASS that silently
+            #      drops the dangling one. Reverting the roster's present-but-unreadable fail-closed (back to
+            #      silently filtering unreadable candidates) reads PASS on the readable member, failing this.
+            rtools = sroot / "tools"
+            rtools.mkdir()
+            (rtools / "check_ok.py").write_text("# gate\n", encoding="utf-8")
+            os.symlink(str(rtools / "no-such-gate.py"), str(rtools / "check_broken.py"))
+            r = discover("gate_roster", {"surfaces": {"gate_roster": {"adapter": "glob-roster",
+                         "required": True, "enabled": True, "dir": "tools", "pattern": "check_*.py"}}}, sroot)
+            if r["status"] != UNVERIFIABLE:
+                failures.append("a gate roster with a readable AND a dangling candidate expected "
+                                "UNVERIFIABLE (fail closed), got {} (a present-but-unreadable candidate must "
+                                "not be silently dropped with the roster still PASS)".format(r["status"]))
+
+        # 45. DISCRIMINATING (finding-2: result-contract structural completeness): validate_result enforces
+        #     the mandatory identity fields present and typed, and the SKIP/required cross-field consistency,
+        #     for every status, and make_result/emit route through it. A structurally-complete result is
+        #     accepted; a SKIP marked required, a result missing a mandatory field, a wrong-typed identity
+        #     field, and a make_result with required=None are each rejected. Removing the completeness or
+        #     consistency checks lets one of these through.
+        base_ok = {"schema": RESULT_SCHEMA, "status": FAIL, "summary": "s", "surface": None,
+                   "required": True, "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"], "audit": "ref"}
+        try:
+            validate_result(dict(base_ok))
+        except ValueError as exc:
+            failures.append("validate_result wrongly rejected a structurally-complete result: {}".format(exc))
+        try:  # (a) a SKIP marked required is inconsistent (a required surface is never a SKIP)
+            validate_result(dict(base_ok, status=SKIP, kind=KIND_OPTIONAL_DISABLED, evidence=[], required=True))
+            failures.append("validate_result accepted a SKIP marked required")
+        except ValueError:
+            pass
+        try:  # an optional (required=false) SKIP is accepted, so the reject isolates the required-true clause
+            validate_result(dict(base_ok, status=SKIP, kind=KIND_OPTIONAL_DISABLED, evidence=[], required=False))
+        except ValueError as exc:
+            failures.append("validate_result wrongly rejected an optional SKIP: {}".format(exc))
+        missing = dict(base_ok)  # (b) missing a mandatory identity field
+        del missing["audit"]
+        try:
+            validate_result(missing)
+            failures.append("validate_result accepted a result missing the mandatory 'audit' field")
+        except ValueError:
+            pass
+        for label, bad in (("non-string audit", dict(base_ok, audit=123)),
+                           ("non-bool required", dict(base_ok, required="yes")),
+                           ("non-string surface", dict(base_ok, surface=7))):
+            try:  # (c) wrong-typed identity fields
+                validate_result(bad)
+                failures.append("validate_result accepted a {}".format(label))
+            except ValueError:
+                pass
+        try:  # make_result routes through the contract, so a required=None construction is refused
+            make_result("ref", FAIL, "s", surface=None, kind=KIND_AVAILABLE, evidence=["tools/x.py:1"])
+            failures.append("make_result accepted a construction with required=None")
+        except ValueError:
+            pass
+
+        # 46. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
+        #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
+        #     running the default digest path (which would let --self-testx masquerade as --self-test in CI
+        #     parity). Removing reject_unknown_options lets the unknown option fall through, failing this.
+        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+            selfpath = str(Path(__file__).resolve())
+            childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
+            for badarg in ("--self-testx", "--bogus"):
+                proc = subprocess.run([sys.executable, "-I", "-B", selfpath, badarg],
+                                      capture_output=True, text=True, env=childenv)
+                if proc.returncode != 2:
+                    failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
+                        badarg, proc.returncode))
+
+        # 47. DISCRIMINATING (finding-4 + finding-5: strict commit-id and absolute git resolution):
+        #     _is_commit_id accepts a strict 40-hex and 64-hex sha and rejects a hex-but-wrong-length value,
+        #     a right-length-but-non-hex value, an uppercased hex, an empty string, and a non-string;
+        #     _resolve_git absolutizes a relative which result and falls back to the bare name; and _GIT is an
+        #     absolute path when git is discoverable. Removing the length check accepts "a"*3, removing the
+        #     hex check accepts "z"*40, narrowing to len==40 rejects a valid 64-hex, and reverting _resolve_
+        #     git (or _GIT) to a relative/bare value fails the isabs assertions.
+        if not _is_commit_id("a" * 40):
+            failures.append("_is_commit_id rejected a valid 40-hex sha1")
+        if not _is_commit_id("a" * 64):
+            failures.append("_is_commit_id rejected a valid 64-hex sha256")
+        for bad in ("a" * 3, "a" * 39, "a" * 41, "a" * 63, "z" * 40, "A" * 40, "", 40 * "a" + "g"):
+            if _is_commit_id(bad):
+                failures.append("_is_commit_id accepted a non-sha value len={} {!r}".format(len(bad), bad[:8]))
+        if _is_commit_id(1234567890):  # a non-string (int) is rejected by the isinstance guard
+            failures.append("_is_commit_id accepted a non-string value")
+        if not os.path.isabs(_resolve_git("bin/git")):
+            failures.append("_resolve_git did not absolutize a RELATIVE which result")
+        if not os.path.isabs(_resolve_git("/usr/bin/git")):
+            failures.append("_resolve_git did not preserve an absolute which result")
+        if _resolve_git(None) != "git":
+            failures.append("_resolve_git did not fall back to the bare 'git' when git is not found")
+        if shutil.which("git") and not os.path.isabs(_GIT):
+            failures.append("_GIT expected an absolute path when git is discoverable, got {!r}".format(_GIT))
+
+        # 48. DISCRIMINATING (finding-4: the show-ref line must have EXACTLY two fields): a decoy git emitting
+        #     a THREE-field show-ref line (a valid sha, the requested ref, and an extra token) with an
+        #     accepting grammar is UNVERIFIABLE (a malformed line), never a PASS that reads only the first two
+        #     fields. Removing the `len(fields) != 2` check lets fields[0]/fields[1] read the valid sha and
+        #     matching ref and PASS. Needs a POSIX /bin/sh; asserted where it is present.
+        if os.path.exists("/bin/sh"):
+            this_mod = sys.modules[__name__]
+            mf_bin = tmp / "malformed-decoybin"
+            mf_bin.mkdir()
+            mf_root = tmp / "malformedfieldroot"
+            mf_root.mkdir()
+            mf_git = mf_bin / "git"
+            mf_git.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *--show-toplevel*) printf '%s\\n' \"{root}\" ;;\n"
+                "  *check-ref-format*) exit 0 ;;\n"
+                "  *show-ref*) printf '%s refs/heads/main extra\\n' {sha} ; exit 0 ;;\n"
+                "esac\n"
+                "exit 0\n".format(root=mf_root, sha="a" * 40), encoding="utf-8")
+            mf_git.chmod(0o755)
+            saved_git = this_mod._GIT
+            this_mod._GIT = str(mf_git)
+            try:
+                r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                             "enabled": True, "protected-branch": "main"}}}, mf_root)
+                if r["status"] != UNVERIFIABLE or "malformed line" not in r["detail"]:
+                    failures.append("git surface with a decoy emitting a 3-field show-ref line expected "
+                                    "UNVERIFIABLE naming a malformed line, got {}/{} detail={!r}".format(
+                                        r["status"], r["kind"], r["detail"]))
+            finally:
+                this_mod._GIT = saved_git
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1542,16 +1810,25 @@ def _self_test():
     print("SELF-TEST PASS: a present required surface is PASS; a MISSING required surface is UNVERIFIABLE "
           "(never PASS); a DIRECTORY, a non-regular file, or a present-but-UNREADABLE (chmod 000, off-root) "
           "file at a file-backed surface is UNVERIFIABLE (regularity and existence are not readability), and "
-          "the gate roster counts only readable regular files (an unreadable-only roster is UNVERIFIABLE); "
+          "the gate roster counts only readable regular files (an unreadable-only roster is UNVERIFIABLE, and "
+          "a roster with a readable AND a present-but-unreadable candidate fails CLOSED to UNVERIFIABLE, "
+          "never silently dropping the unreadable one); a BROKEN SYMLINK (a present dentry whose target is "
+          "missing) is present-but-unreadable, not absent, at EVERY presence-gating site (the nearest-config "
+          "walk, the pinned --config/env load, and the gate roster each fail closed, so a dangling nearest "
+          "config raises ConfigError rather than falling through to portable defaults); "
           "optional-disabled is SKIP (never malformed-required); a disabled required surface is a distinct "
           "malformed-UNVERIFIABLE, and a config can NEVER downgrade a canonically-required surface (an "
           "enabled=false or present-but-empty backlog) to an optional SKIP, nor REBIND a canonically-"
           "recognized surface (backlog/gate_roster/git) to a different adapter type (UNVERIFIABLE/adapter-"
           "mismatch, never a PASS on the substituted adapter); the git surface returns PASS only when the "
           "configured protected branch exists as an actual BRANCH ref (refs/heads/<branch>), with the "
-          "returned show-ref ref field required to equal the requested ref and the located evidence derived "
-          "from git's own output, UNVERIFIABLE for a raw sha, tag, HEAD, other non-branch value, a "
-          "leading-dash value, or a decoy git returning a mismatched ref or a non-sha commit id, "
+          "returned show-ref ref field required to equal the requested ref (the show-ref line required to "
+          "carry EXACTLY two fields, a three-field line rejected as malformed) and the located evidence "
+          "derived from git's own output, UNVERIFIABLE for a raw sha, tag, HEAD, other non-branch value, a "
+          "leading-dash value, or a decoy git returning a mismatched ref or a non-sha commit id, where a "
+          "commit id is a strict 40-hex or 64-hex LOWERCASE sha (a valid 64-hex sha256 accepted; a "
+          "hex-but-wrong-length, a right-length-but-non-hex, an uppercased-hex, an empty, or a non-string "
+          "value rejected), and the git executable resolved ONCE to an ABSOLUTE path when discoverable; "
           "and the git probe is bound to root (ambient GIT_* scrubbed, toplevel realpath-equal to root) so "
           "an ambient GIT_DIR cannot bind a non-repo root to another repository; an unknown adapter, an "
           "adapter that RAISES, and an adapter whose "
@@ -1561,7 +1838,10 @@ def _self_test():
           "PASS; make_result rejects a non-list (bare-string) evidence at construction rather than "
           "char-splitting it, and _surface downgrades a char-split non-list provenance and a wrong-kind "
           "PASS instead of returning a false green; the result contract rejects a substituted or missing "
-          "schema tag (for every status), an out-of-set status, a "
+          "schema tag (for every status), an out-of-set status, a structurally-incomplete or wrong-typed "
+          "result (a missing or wrong-typed mandatory identity field: audit/summary non-empty strings, "
+          "surface a string or None, required a bool) and the SKIP/required cross-field inconsistency (a SKIP "
+          "can never be marked required), with make_result and emit routed through the same choke point, a "
           "non-list evidence, evidence elements that are not non-empty strings for EVERY status uniformly "
           "(a FAIL or UNVERIFIABLE carrying [7] or [\"\"] is refused, not only a PASS), and an inconsistent "
           "result (a PASS with an unavailable kind or without a non-empty list of non-empty evidence "
@@ -1575,7 +1855,9 @@ def _self_test():
           "a next-flag, or a duplicate), with a present-but-empty AIQT_ASSURANCE_CONFIG treated as a loud "
           "ConfigError on the SAME pinned-source path as --config, and both argument validation and the "
           "loud pinned-source resolution preceding the --self-test dispatch (a pinned-but-absent/empty "
-          "config exits 2 even under --self-test); the config root is derived consistently so an explicit "
+          "config exits 2 even under --self-test), and an UNRECOGNIZED option (a misspelled --self-testx or a "
+          "stray flag) is a loud exit 2, never a silent default path that would let it masquerade as "
+          "--self-test; the config root is derived consistently so an explicit "
           ".aiqt config "
           "resolves surfaces at the tree root; and discover_all enumerates the full expected set so a "
           "required surface omitted from config resolves UNVERIFIABLE.")
@@ -1591,6 +1873,13 @@ def main():
         explicit = config_arg(argv)
     except ValueError as exc:
         print("error: {}".format(exc), file=sys.stderr)
+        return 2
+    # UNKNOWN-OPTION REJECTION also precedes the --self-test dispatch: an unrecognized option (a misspelled
+    # --self-testx, a stray --bogus) is a LOUD exit 2, never a silent fall-through to the default digest path
+    # that would exit 0 without running the self-test the caller asked for.
+    unknown = reject_unknown_options(argv, {"--self-test"})
+    if unknown is not None:
+        print("error: unrecognized option {!r}".format(unknown), file=sys.stderr)
         return 2
     # The loud PINNED-source resolution runs BEFORE the --self-test dispatch, so a pinned-but-absent or
     # pinned-but-empty config (an explicit --config PATH that does not exist, or AIQT_ASSURANCE_CONFIG set

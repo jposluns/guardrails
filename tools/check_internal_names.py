@@ -181,7 +181,16 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    if "--self-test" in sys.argv[1:]:
+    argv = sys.argv[1:]
+    # UNKNOWN-OPTION REJECTION precedes the --self-test dispatch: this gate accepts only --self-test (or no
+    # args for a real scan), so any other token (a misspelled --self-testx, a stray flag) is a LOUD exit 2,
+    # never a silent fall-through to the default scan path that would exit without running the self-test the
+    # caller asked for (which would let --self-testx masquerade as --self-test in CI parity).
+    unknown = [a for a in argv if a != "--self-test"]
+    if unknown:
+        print("error: unrecognized option {!r}; fail closed".format(unknown[0]), file=sys.stderr)
+        return 2
+    if "--self-test" in argv:
         return _self_test()
     try:
         hashes, maxn, findings = load_hashes(root)
@@ -359,6 +368,19 @@ def _self_test():
                 failures.append("a broken symlink at the hash-file path expected fail-closed (raise), got an "
                                 "absent (empty-denylist) read")
             hf.unlink()
+
+        # 13. DISCRIMINATING (finding-3: an unknown option is a LOUD exit 2, never a silent default path): a
+        #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
+        #     running the default scan path (which would let --self-testx masquerade as --self-test in CI
+        #     parity). Removing the unknown-option rejection lets the unknown option fall through to the scan.
+        import subprocess
+        selfpath = str(Path(__file__).resolve())
+        for badarg in ("--self-testx", "--bogus"):
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath, badarg],
+                                  capture_output=True, text=True)
+            if proc.returncode != 2:
+                failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
+                    badarg, proc.returncode))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -376,7 +398,9 @@ def _self_test():
           "whose BASENAME is in SKIP_NAMES is skipped by basename (not by full relpath); and the shipped "
           "gate-runner and CI-workflow paths (tools/run_all_checks.sh, .github/workflows/quality.yml) are "
           "live SCOPE_RELPATHS members, so a synthetic provenance id planted in each is caught (removing "
-          "either from scope fails the case).")
+          "either from scope fails the case); and an UNRECOGNIZED option (a misspelled --self-testx or a "
+          "stray flag) is a loud exit 2, never a silent default scan that would let it masquerade as "
+          "--self-test.")
     return 0
 
 
