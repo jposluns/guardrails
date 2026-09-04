@@ -116,10 +116,19 @@
     {
       "corpus-id": "chgchk",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "a",
+          "default": "block",
+          "id": "selftest-execution",
+          "platform": "ci",
+          "residue": "Total over its declared surface: exact reconciliation of the executed check-id set recorded at the instrumented check() choke point of a registered suite against the hand-authored expectation manifest tools/selftest_checks.toml, judged on the child's real exit code plus a strict structured report; missing, extra, or duplicate ids, a missing, malformed, wrong-suite, or non-regular report, a malformed manifest, and every cannot-evaluate fail closed, and a child exit 0 never overrides a missing or mismatched report. The child suite's own behavioural assurance (the orchestrator-integrity acceptance vectors over hermetic fixtures, judged on structured verdicts) rides the child's verdict, which this gate requires. It proves INVOCATION IDENTITY only: it does not prove an invoked assertion is discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing outside the instrumented check() helper (a direct FAILURES.append, or a suite not yet registered), and cannot distinguish a legitimate from an illegitimate coordinated deletion of a check and its manifest row in one reviewed change; the expectation manifest is trusted hand-authored input whose schema is machine-validated but whose completeness rests on source review. Registered surface at this release: the orch-behaviour-selftest suite only.",
+          "script": "tools/check_selftest_execution.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/quali-change-carries-check.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "chgtrk",
@@ -375,10 +384,19 @@
     {
       "corpus-id": "evgcmp",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "a",
+          "default": "block",
+          "id": "selftest-execution",
+          "platform": "ci",
+          "residue": "Total over its declared surface: exact reconciliation of the executed check-id set recorded at the instrumented check() choke point of a registered suite against the hand-authored expectation manifest tools/selftest_checks.toml, judged on the child's real exit code plus a strict structured report; missing, extra, or duplicate ids, a missing, malformed, wrong-suite, or non-regular report, a malformed manifest, and every cannot-evaluate fail closed, and a child exit 0 never overrides a missing or mismatched report. The child suite's own behavioural assurance (the orchestrator-integrity acceptance vectors over hermetic fixtures, judged on structured verdicts) rides the child's verdict, which this gate requires. It proves INVOCATION IDENTITY only: it does not prove an invoked assertion is discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing outside the instrumented check() helper (a direct FAILURES.append, or a suite not yet registered), and cannot distinguish a legitimate from an illegitimate coordinated deletion of a check and its manifest row in one reviewed change; the expectation manifest is trusted hand-authored input whose schema is machine-validated but whose completeness rests on source review. Registered surface at this release: the orch-behaviour-selftest suite only.",
+          "script": "tools/check_selftest_execution.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/accur-evidence-grounded-completion.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "exauth",

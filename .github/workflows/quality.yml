@@ -289,8 +289,11 @@ jobs:
       - name: Hooks behaviour self-test
         run: python3 -I -B tools/selftest_aiqt_hooks.py
 
-      - name: Orchestrator-integrity behaviour self-test
-        run: python3 -I -B tools/selftest_orch_hooks.py
+      - name: Selftest-execution gate self-test
+        run: python3 -I -B tools/check_selftest_execution.py --self-test
+
+      - name: Orchestrator-integrity behaviour self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test
