@@ -20,17 +20,28 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
 
 The child is launched [sys.executable, -I, -B, <runner>, --execution-report, <private abs path>] with
-cwd at the repo root and a git-neutral environment (every ambient GIT_* variable dropped;
-GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pinned to os.devnull, GIT_CONFIG_NOSYSTEM=1;
-core.excludesFile and core.attributesFile overridden to os.devnull through injected
-GIT_CONFIG_COUNT/KEY/VALUE entries, neutralizing the global ignore and attributes surfaces the
-pinned config files do not cover), so ambient git
-configuration cannot steer the child's git subprocesses; its full stdout and stderr are forwarded
-UNFILTERED to this gate's own streams (no
-grep, no truncation), and its verdict is judged by its real return code plus the strict report
-reconcile, never by its prose. A report that is missing, truncated, malformed, wrong-suite, non-regular,
-or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a pass, whatever the child's exit
-code; completeness is never inferred from output volume or from the absence of a reported problem.
+cwd at the repo root and a git-neutral environment built in two layers: HOME and XDG_CONFIG_HOME are
+pinned to a fresh empty directory, so the per-user global config, ignore, and attributes surfaces are
+empty for EVERY descendant git call, including one made after a descendant scrubs the GIT_*
+environment (the registered runner imports aiqt_hooks, whose recovery-snapshot code takes exactly
+that allowlist posture, dropping any GIT_* pin this gate injected); and, for the immediate child,
+every ambient GIT_* variable is dropped, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are pinned to
+os.devnull with GIT_CONFIG_NOSYSTEM=1, and core.excludesFile and core.attributesFile are overridden
+to os.devnull through injected GIT_CONFIG_COUNT/KEY/VALUE entries. Two launch-environment bounds are
+disclosed rather than implied closed. First, the system-wide surfaces: the system-wide git config
+($(prefix)/etc/gitconfig) is neutralized only for the immediate child (GIT_CONFIG_NOSYSTEM and the
+GIT_CONFIG_SYSTEM pin are themselves GIT_-prefixed, so a scrubbing descendant drops them), and the
+system-wide attributes file ($(prefix)/etc/gitattributes) is not neutralized at all (no
+GIT_ATTR_NOSYSTEM is injected, and a scrubbing descendant would drop it the same way); a hostile
+system-wide file is root-owned, the same trust tier as the git binary itself, so it sits at the
+threat-model boundary, outside what this gate defends. Second, git itself is resolved through the
+ambient PATH, a trusted-toolchain concern outside this gate's threat model, the same disclosure the
+sibling branch-root gate carries. The child's full stdout and stderr are forwarded UNFILTERED to this
+gate's own streams (no grep, no truncation), and its verdict is judged by its real return code plus
+the strict report reconcile, never by its prose. A report that is missing, truncated, malformed,
+wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
+pass, whatever the child's exit code; completeness is never inferred from output volume or from the
+absence of a reported problem.
 
 Exit convention: 0 the execution set matches exactly AND the child passed; 1 a real finding (a missing
 or extra check id, or a set-complete child that itself reported assertion failures); 2 usage or
@@ -43,21 +54,31 @@ report).
 
 DISCLOSED RESIDUAL: this gate proves INVOCATION IDENTITY only. It does not prove an invoked assertion is
 discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing
-outside the instrumented check() helper (a direct FAILURES.append, or a suite not registered in the
-manifest), and cannot distinguish a legitimate from an illegitimate coordinated deletion of a check and
-its manifest row in one reviewed change; the expectation manifest is trusted hand-authored input whose
-schema is machine-validated here but whose completeness rests on source review. The static layer proves
+outside the instrumented check() helper (a direct FAILURES.append that hides a failure, its fabricating
+dual, a direct EXECUTED.append or _EXECUTED_SET.add that manufactures execution evidence for a check
+that never really ran, or a suite not registered in the manifest), and cannot distinguish a legitimate
+from an illegitimate coordinated deletion of a check and its manifest row in one reviewed change; the
+expectation manifest is trusted hand-authored input whose schema is machine-validated here but whose
+completeness rests on source review. The static layer proves
 source-to-manifest SET EQUALITY, not reachability (a dead literal call still counts as a source site;
 proving execution is the runtime layer's job), and resolves only DIRECT call sites of the bare name
 check with string-literal or for-loop-literal ids: a non-call reference to that bare name (an alias
 would carry a call site beyond the scan), an id Name bound inside a comprehension (whose scope the
 lexical for-stack does not model), and a statically empty literal loop (whose check() site would
-otherwise resolve to no id at all) are refused fail-closed, never silently resolved. An invocation
-route that never names check as a bare Name in Load context (getattr, exec, an import alias, or a
-Store, with, or except rebinding of the name) is invisible to this layer and is caught, if at all,
-by the runtime set reconcile; a route that re-executes an already-registered id whose direct call
-site is dead passes both set layers and is bounded only by the non-discrimination residual (a
-constant-true check counts as executed). The remaining
+otherwise resolve to no id at all) are refused fail-closed, never silently resolved. Two static
+blind spots remain, bounded the same way. First, an invocation route the static layer never sees a
+call site for, because it never names check as a bare Name in Load context: getattr, exec, an
+import that binds a different name and is then called through it, or a globals()['check'] lookup.
+Second, a rebinding of the name check the static layer cannot detect (any Store-class or non-Load
+binding: an assignment, a with-as or except-as target, a nested def check or class check, an
+import check, a del check, or a global or nonlocal declaration), which leaves the direct call
+sites visible and counted while they may no longer invoke the instrumented helper. Both are
+caught, if at all, by the runtime set reconcile; a registered id whose ONLY route is invisible (no
+direct call site at all) is refused by the static layer pre-launch (registered id has no source
+check()), and the runtime reconcile is the catcher specifically for the dead-direct-site decoy, a
+route that re-executes an already-registered id whose direct call site is dead, which passes both
+set layers and is bounded only by the non-discrimination residual (a constant-true check counts as
+executed). The remaining
 lexical binding (the innermost enclosing for) does not model function boundaries; the runtime
 reconcile still proves the executed set independently. Repo-root confirmation is a .git-existence
 proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
@@ -423,18 +444,35 @@ def run_suite(root, suite_id):
         if os.path.lexists(report_path):
             _cannot("report path {} already exists before launch".format(report_path))
             return 2
+        # The fresh EMPTY per-launch home the child's HOME and XDG_CONFIG_HOME pin to (see the
+        # child-env comment below): under `private`, so the finally's rmtree removes it too.
+        git_home = os.path.join(private, "home")
+        try:
+            os.mkdir(git_home)
+        except OSError as exc:
+            _cannot("cannot create the neutral child home directory: {}".format(exc))
+            return 2
         command = [sys.executable, "-I", "-B", str(runner), "--execution-report", report_path]
-        # Git-neutral child environment: drop every ambient GIT_* variable, then pin the global and
-        # system config surfaces to os.devnull, so a hostile GIT_CONFIG_GLOBAL or core.hooksPath
-        # cannot make the child's git subprocesses run an external hook or read a decoy repository
-        # (the runner's fixtures set their git identity inline with -c, which outranks the injected
-        # entries below, so commits still work). GIT_CONFIG_GLOBAL covers only the global CONFIG
-        # file: git reads the global ignore and attributes surfaces from
-        # XDG_CONFIG_HOME/git/{ignore,attributes} defaults even with no config file, so
-        # core.excludesFile and core.attributesFile are overridden to os.devnull through git's
-        # environment-config mechanism (GIT_CONFIG_COUNT/KEY/VALUE, set AFTER the drop loop so they
-        # survive it). This hardens the GATE-launched child only; the runner's own direct-invocation
-        # hermeticity is tracked separately (F-249).
+        # Git-neutral child environment, in two layers. Layer one, GIT_*: drop every ambient GIT_*
+        # variable, then pin the global and system config surfaces to os.devnull, so a hostile
+        # GIT_CONFIG_GLOBAL or core.hooksPath cannot make the child's git subprocesses run an
+        # external hook or read a decoy repository (the runner's fixtures set their git identity
+        # inline with -c, which outranks the injected entries below, so commits still work).
+        # GIT_CONFIG_GLOBAL covers only the global CONFIG file: git reads the global ignore and
+        # attributes surfaces from XDG_CONFIG_HOME/git/{ignore,attributes} defaults even with no
+        # config file, so core.excludesFile and core.attributesFile are overridden to os.devnull
+        # through git's environment-config mechanism (GIT_CONFIG_COUNT/KEY/VALUE, set AFTER the
+        # drop loop so they survive it). Layer two, HOME/XDG_CONFIG_HOME: the GIT_* pins alone are
+        # NOT transitive, because the child imports aiqt_hooks, whose recovery-snapshot code scrubs
+        # every GIT_*-prefixed variable before its own git subprocesses (the allowlist posture the
+        # inert-data rule requires), dropping the layer-one pins and re-exposing ~/.gitconfig and
+        # XDG_CONFIG_HOME/git/{config,ignore,attributes} to every descendant git call; HOME and
+        # XDG_CONFIG_HOME are not GIT_-prefixed, so that scrub cannot strip them, and pinning both
+        # at the fresh empty git_home keeps the per-user config, ignore, and attributes surfaces
+        # empty for EVERY descendant call, scrubbed or not (layer one stays as defence in depth for
+        # the immediate child; the system-wide config and attributes residual for a scrubbing
+        # descendant is disclosed in the module docstring). This hardens the GATE-launched child
+        # only; the runner's own direct-invocation hermeticity is tracked separately (F-249).
         child_env = dict(os.environ)
         for key in list(child_env):
             if key.startswith("GIT_"):
@@ -447,6 +485,8 @@ def run_suite(root, suite_id):
         child_env["GIT_CONFIG_VALUE_0"] = os.devnull
         child_env["GIT_CONFIG_KEY_1"] = "core.attributesFile"
         child_env["GIT_CONFIG_VALUE_1"] = os.devnull
+        child_env["HOME"] = git_home
+        child_env["XDG_CONFIG_HOME"] = git_home
         try:
             child = subprocess.run(command, cwd=str(root), capture_output=True, env=child_env)
         except OSError as exc:
@@ -765,21 +805,36 @@ def self_test():
         code, _out, _err = run(root)
         expect("st/static-comp-literal-passes", code, 0)
 
-        # 22 (round 3, FIX C; round 4, FIX 3): the child is launched under a git-neutral
-        # environment: every ambient GIT_* variable is dropped, the config surfaces pin to
-        # os.devnull, and core.excludesFile and core.attributesFile are overridden to os.devnull by
-        # injected GIT_CONFIG_* entries (the global ignore and attributes surfaces the pinned config
-        # files do not cover), so a poisoned GIT_CONFIG_GLOBAL (for example a core.hooksPath naming
-        # an attacker hook) or a hostile global ignore never reaches the child; the fake runner
-        # dumps the GIT_* environment it actually saw, asserted as the exact injected set
+        # 22 (round 3, FIX C; round 4, FIX 3; round 5, FIX 1): the child is launched under a
+        # git-neutral environment: every ambient GIT_* variable is dropped, the config surfaces pin
+        # to os.devnull, core.excludesFile and core.attributesFile are overridden to os.devnull by
+        # injected GIT_CONFIG_* entries (the global ignore and attributes surfaces the pinned
+        # config files do not cover), and HOME and XDG_CONFIG_HOME are pinned to a fresh empty
+        # directory, the transitive layer a descendant GIT_* re-scrub cannot strip, so a poisoned
+        # GIT_CONFIG_GLOBAL (for example a core.hooksPath naming an attacker hook), a hostile
+        # global ignore, or a hostile XDG_CONFIG_HOME/git/config never reaches the child; the fake
+        # runner dumps the GIT_* environment and the HOME and XDG_CONFIG_HOME it actually saw,
+        # asserted as the exact injected set and as one fresh empty directory distinct from the
+        # ambient values this leg pins (a behavioural no-fire witness for a scrubbing descendant,
+        # for example a hostile XDG core.fsmonitor, needs aiqt_hooks importable in the child, so it
+        # remains a real-suite manual verification, disclosed)
         root = build(_manifest_text(),
                      "git_env = dict((k, v) for k, v in os.environ.items() "
                      "if k.startswith('GIT_'))\n"
                      "open(os.path.join(here, 'git-env.json'), 'w').write(json.dumps(git_env))\n"
+                     "home = os.environ.get('HOME')\n"
+                     "open(os.path.join(here, 'home-env.json'), 'w').write(json.dumps(\n"
+                     "    {'HOME': home, 'XDG_CONFIG_HOME': os.environ.get('XDG_CONFIG_HOME'),\n"
+                     "     'home_is_dir': os.path.isdir(home) if home else False,\n"
+                     "     'home_entries': os.listdir(home) if home and os.path.isdir(home) "
+                     "else None}))\n"
                      + _report_body(GOOD_IDS, 0))
-        saved_env = dict((k, os.environ.get(k)) for k in ("GIT_CONFIG_GLOBAL", "GIT_DIR"))
+        saved_env = dict((k, os.environ.get(k)) for k in
+                         ("GIT_CONFIG_GLOBAL", "GIT_DIR", "HOME", "XDG_CONFIG_HOME"))
         os.environ["GIT_CONFIG_GLOBAL"] = str(base / "poisoned-gitconfig")
         os.environ["GIT_DIR"] = str(base / "decoy-git")
+        os.environ["HOME"] = str(base / "ambient-home")
+        os.environ["XDG_CONFIG_HOME"] = str(base / "ambient-xdg")
         try:
             code, _out, _err = run(root)
         finally:
@@ -797,6 +852,17 @@ def self_test():
                         GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2",
                         GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=os.devnull,
                         GIT_CONFIG_KEY_1="core.attributesFile", GIT_CONFIG_VALUE_1=os.devnull))
+        home_dump = root / "tools" / "home-env.json"
+        expect("st/home-env-dump-written", home_dump.exists(), True)
+        if home_dump.exists():
+            home_env = json.loads(home_dump.read_text(encoding="utf-8"))
+            expect("st/home-xdg-pinned-together",
+                   home_env["HOME"] is not None
+                   and home_env["HOME"] == home_env["XDG_CONFIG_HOME"], True)
+            expect("st/home-not-ambient", home_env["HOME"] in
+                   (str(base / "ambient-home"), str(base / "ambient-xdg")), False)
+            expect("st/home-fresh-empty-dir",
+                   (home_env["home_is_dir"], home_env["home_entries"]), (True, []))
 
         # 23 (round 4, FIX 1): a statically EMPTY literal loop is refused fail-closed, no launch: an
         # empty iterable resolves its check() site to zero ids, so without the refusal the site
@@ -834,7 +900,8 @@ def self_test():
           "the bare name check, and a comprehension-bound id, while the loop-literal pattern and a "
           "literal id inside a comprehension resolve and a clean twin passes), launches the child under "
           "a git-neutral environment (ambient GIT_* dropped, config surfaces pinned to os.devnull, "
-          "global ignore and attributes overridden to os.devnull by injected config), "
+          "global ignore and attributes overridden to os.devnull by injected config, and HOME and "
+          "XDG_CONFIG_HOME pinned to a fresh empty directory a descendant GIT_* re-scrub cannot strip), "
           "treats unavailable temp storage as "
           "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
           "near-miss (a green child that never executed a registered check) while its complete-report "
