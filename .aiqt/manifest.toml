@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "963adc506e8cb48c82fcfc578dae4d8838a29d3b5a200e9569778390ed67df8b"
+tree-sha256 = "1a8ed973e77ec09d625c659980adddfa8dc7be7b5af528ff79dcb600bb4fa1ff"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -56,13 +56,13 @@ sha256 = "bf6ba1a09a9488b7b951fdb6c65506d01fd8d24a83a2bb2f3b1a8dc791557637"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 104198
-sha256 = "340c4b83dc84bf50d4c9bc8d04d9514660eafa9f461cc6a969f8edbf7c230158"
+bytes = 108085
+sha256 = "5c5fbb641d62da35c8feced6cc48b59a1b52c8a7dd5d10553c97de2f3e3a3ad7"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 491316
-sha256 = "cc57b53ea71f19a9ee4f23024290f380096bf4d5737d1dfccd40256773e68132"
+bytes = 504797
+sha256 = "2fc9b75c8269128197c1fc89ca630974ff0f1baea0ba11a422e057ec226b70c0"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -731,8 +731,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 229323
-sha256 = "2d6d1625fe1090238de37940e9590fd194973542f94a698ee9b5228e9cdb9d1d"
+bytes = 233248
+sha256 = "8bb9f61dca3283b87f3f4dc1fc0a1cf2162676a7c84b41f191267d39fda81816"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2256,13 +2256,13 @@ sha256 = "d0a878cceb8a33d2baa4c0f658e1cac39b92fbdccdf859e6bc73eedfb49f2915"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
-bytes = 7961
-sha256 = "765a088dedaee16af2af61e61c0079244802e9eb7d8caa46fb77f837293a6fa9"
+bytes = 8314
+sha256 = "74132848210a1a8d57ae67ff8cc5c8db81dd5504a771d0c01d79666b98216baa"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 491316
-sha256 = "cc57b53ea71f19a9ee4f23024290f380096bf4d5737d1dfccd40256773e68132"
+bytes = 504797
+sha256 = "2fc9b75c8269128197c1fc89ca630974ff0f1baea0ba11a422e057ec226b70c0"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2841,8 +2841,8 @@ sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 83034
-sha256 = "cfc404a585190bd92b212c9a0de72f8d516cefa5dbb83021e3e2fe29987a630b"
+bytes = 92073
+sha256 = "87c30663e2f5d1e23b6334fd51ced5a7470a752dee25a8f1857c6909fde4e00c"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

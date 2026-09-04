@@ -608,6 +608,125 @@ def main():
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
 
+        # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
+        w = Fixture(tmp, "waitloop")
+        # predicate direct checks (three-valued): the four-conjunct truth table.
+        clf = aiqt_hooks._orch_bg_poll_loop
+        BASE = "while true; do gh pr checks 42; sleep 30; done &"
+        check("wl/base-match", clf(BASE), "match")
+        # removing each of the four conjuncts individually -> 'none' (no deny).
+        check("wl/no-detach-none", clf("while true; do gh pr checks 42; sleep 30; done"), "none")
+        check("wl/no-loop-none",   clf("gh pr checks 42; sleep 30 &"), "none")
+        check("wl/no-sleep-none",  clf("while true; do gh pr checks 42; done &"), "none")
+        check("wl/no-probe-none",  clf("while true; do echo working; sleep 30; done &"), "none")
+        # the three DENY fixtures from the brief classify 'match'.
+        check("wl/deny-while-gh", clf("while true; do gh pr checks 42; sleep 30; done &"), "match")
+        check("wl/deny-until-curl-condition",
+              clf("until curl -fsS https://example.invalid/status; do sleep 10; done &"), "match")
+        check("wl/deny-for-actions-runs",
+              clf("for attempt in 1 2 3; do curl -fsS https://example.invalid/actions/runs; "
+                  "sleep 20; done &"), "match")
+        # probe via a --watch token (command word neither gh nor curl in the body position).
+        check("wl/deny-watch-token",
+              clf("while true; do run_check --watch; sleep 5; done &"), "match")
+        # GD-137 PR1 round 2: a nested loop is no longer force-attributed to one canonical shape (that was
+        # the B2-class false positive). Two raw-unquoted headers -> 'indeterminate', deferring to the ASK.
+        check("wl/nested-indeterminate",
+              clf("while outer; do while inner; do gh api x; sleep 1; done; done &"), "indeterminate")
+        # GD-137 PR1 round 2: the codex false-positive BLOCKERs the redesign eliminates. A 'match' on any of
+        # these would strand a session; reverting the matching fix flips each back to a wrong 'match'.
+        # B1a: the bare-& closes a command named 'done' written QUOTED (argv is quote-decoded, so the old
+        # code misread it as the terminator); the final unquoted `done` closes the FOREGROUND loop.
+        check("wl/b1a-quoted-done-none",
+              clf('while false; do gh x; sleep 1; "done" & done'), "none")
+        # B1b: `_command_word` basenamed /tmp/done -> done; the raw-unquoted terminator check rejects it.
+        check("wl/b1b-path-done-none",
+              clf("while false; do gh x; sleep 1; /tmp/done & done"), "none")
+        # B2: the detached inner `for` carries only sleep; the gh probe belongs to the FOREGROUND outer loop.
+        check("wl/b2-inner-detach-indeterminate",
+              clf("while gh pr checks 42; do for n in 1 2; do sleep 1; done & wait; break; done"),
+              "indeterminate")
+        # conditional reserved words / negation in the loop span (were undisclosed false negatives).
+        check("wl/cond-if-then-indeterminate",
+              clf("while true; do if gh api x; then :; fi; sleep 1; done &"), "indeterminate")
+        check("wl/cond-negation-indeterminate",
+              clf("while ! gh pr checks 42; do sleep 5; done &"), "indeterminate")
+        # brace grouping masks the body command word.
+        check("wl/brace-group-indeterminate",
+              clf("while true; do { gh x; sleep 1; }; done &"), "indeterminate")
+        # C-style for (( )) is not subshell grouping, but its '(' separator is caught and now disclosed.
+        check("wl/c-style-for-indeterminate",
+              clf("for ((i=0;i<3;i++)); do gh x; sleep 1; done &"), "indeterminate")
+        # more than one bare-& is not the single canonical shape.
+        check("wl/multi-detach-indeterminate",
+              clf("sleep 1 & while true; do gh x; sleep 1; done &"), "indeterminate")
+        # a redirect on the `done` terminator makes its raw not a bare `done`: 'none', not a wrong match.
+        check("wl/done-redirect-none",
+              clf("while true; do gh x; sleep 1; done >log &"), "none")
+        # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
+        check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
+        # NEGATIVE fixtures (this control): every one is 'none'.
+        for cmd in [
+            "while true; do gh pr checks 42; sleep 30; done",   # foreground, no detach
+            "timeout 180 gh pr checks 42 --watch",              # bounded foreground watch
+            "sleep 30 &",                                       # bare sleep detach, no loop
+            "make -j8 &",                                       # parallel build detach, no loop/probe
+            "printf '%s\\n' 'while true; do curl x; sleep 1; done &'",  # loop text is quoted data
+            "while read -r line; do echo \"$line\"; done < input.txt &",  # loop, but no sleep/probe
+            "git add . && git commit -m x",                     # && is not a detach
+            "cmd > log 2>&1",                                   # redirects, no bare &
+            "a |& b",                                           # |& is not a detach
+        ]:
+            check("wl/allow-none/{}".format(cmd[:24]), clf(cmd), "none")
+        # indeterminate cases -> 'indeterminate' here (never this deny), and still reach the truncation
+        # guard's ASK on the same event (the degrade path).
+        HEREDOC = "cat <<EOF > poll.sh\nwhile true; do gh pr checks 42; sleep 30; done &\nEOF\n"
+        UNBAL = "while true; do gh pr checks 42; sleep 30; done ' &"     # unbalanced quote before the &
+        GROUPED = "( while true; do gh pr checks 42; sleep 30; done ) &"  # subshell-grouped detach
+        for name, cmd in [("heredoc", HEREDOC), ("unbalanced", UNBAL), ("grouped", GROUPED)]:
+            check("wl/indeterminate-{}".format(name), clf(cmd), "indeterminate")
+        # degrade path: this guard emits nothing (allow) while the truncation guard ASKs on the bare-& detach.
+        wl = lambda cmd, rib=False: aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
+        tg = lambda cmd, rib=False: aiqt_hooks.orch_truncation_guard(
+            w.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
+        for name, cmd in [("unbalanced", UNBAL), ("grouped", GROUPED)]:
+            check("wl/degrade-{}-guard-allows".format(name), _verdict(wl(cmd)), "allow")
+            check("wl/degrade-{}-trunc-asks".format(name), _verdict(tg(cmd)), "ask")
+        # handler DENY: the three brief DENY fixtures, plus the first with run_in_background:true.
+        check("wl/handler-deny-while", _verdict(wl("while true; do gh pr checks 42; sleep 30; done &")),
+              "deny")
+        check("wl/handler-deny-until",
+              _verdict(wl("until curl -fsS https://example.invalid/status; do sleep 10; done &")), "deny")
+        check("wl/handler-deny-for",
+              _verdict(wl("for attempt in 1 2 3; do curl -fsS https://example.invalid/actions/runs; "
+                         "sleep 20; done &")), "deny")
+        check("wl/handler-deny-rib-true",
+              _verdict(wl("while true; do gh pr checks 42; sleep 30; done &", rib=True)), "deny")
+        # handler ALLOW: a foreground poll loop (no detach) and a bounded watch acquire no deny here.
+        check("wl/handler-allow-foreground",
+              _verdict(wl("while true; do gh pr checks 42; sleep 30; done")), "allow")
+        check("wl/handler-allow-watch", _verdict(wl("timeout 180 gh pr checks 42 --watch")), "allow")
+        # handler ALLOW on the eliminated false positives: predicate 'none'/'indeterminate' -> emit nothing.
+        check("wl/handler-allow-b1a",
+              _verdict(wl('while false; do gh x; sleep 1; "done" & done')), "allow")
+        check("wl/handler-allow-b1b",
+              _verdict(wl("while false; do gh x; sleep 1; /tmp/done & done")), "allow")
+        check("wl/handler-allow-b2",
+              _verdict(wl("while gh pr checks 42; do for n in 1 2; do sleep 1; done & wait; break; done")),
+              "allow")
+        check("wl/handler-allow-nested",
+              _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
+        # fail-open: non-Bash tool, non-str command, absent registry -> silent allow even on a match command.
+        check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")
+        check("wl/failopen-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": 42}))), "allow")
+        wi = Fixture(tmp, "waitloop-inert")
+        (wi.root / ".aiqt" / "orchestration.local.json").unlink()
+        check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            wi.payload("PreToolUse", "Bash", {"command": BASE}))), "allow")
+
         # ---------- Surface B: the validation membrane ----------
         import time as _time
         check("vB/exact-int-valid", aiqt_hooks._v_exact_int(3, 0, 9999), 3)
