@@ -18,3 +18,9 @@ unverified item. A success, health, or backup marker is evidence only when it re
 being actually present and well-formed; the marker's existence, freshness, or age is not itself that
 evidence, so check the content it stands for rather than the marker. A stated intention is a claim; do not
 end a turn asserting work is proceeding unless it is.
+
+A machine-checkable status or completion assertion over a named set, such as all N gates being green at a
+revision or a coverage figure, is emitted from an observation that ran that exact set, never narrated
+alongside the checks. For a claim about the current or working state, that observation follows the last
+write to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to
+an immutable revision remains evidence about that revision.

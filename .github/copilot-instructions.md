@@ -69,6 +69,12 @@ being actually present and well-formed; the marker's existence, freshness, or ag
 evidence, so check the content it stands for rather than the marker. A stated intention is a claim; do not
 end a turn asserting work is proceeding unless it is.
 
+A machine-checkable status or completion assertion over a named set, such as all N gates being green at a
+revision or a coverage figure, is emitted from an observation that ran that exact set, never narrated
+alongside the checks. For a claim about the current or working state, that observation follows the last
+write to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to
+an immutable revision remains evidence about that revision.
+
 ## A guard is only as good as its input
 
 A check whose logic is correct is still worthless when its input cannot answer the question asked of it. Ask
@@ -213,6 +219,10 @@ and pass. A resource the work declares, or that its specification or contract re
 same standard: when it is absent or unusable, that is a failure, not a silent skip. The presence-test-then-run-or-succeed shape, which
 lets a missing declared input read as nothing to do, is exactly this failure; absence reads as a clean
 result only for an input outside what the work declares or its specification or contract requires.
+
+Unreadable includes present but unparseable. When a candidate record consumed by a gate or parser is
+malformed or fails validation against its schema or grammar, the result is a refusing failure that names the
+record, never silent absence.
 
 ## Commit identity
 
