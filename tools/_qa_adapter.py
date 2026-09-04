@@ -90,23 +90,28 @@ def make_result(audit, status, summary, surface=None, required=None, kind=None, 
 
 def validate_result(result):
     """Enforce the mutual consistency of a result-contract object so a caller cannot hand-build a false
-    green (for example status PASS with a required-unavailable kind and no evidence). A PASS must carry the
-    available kind AND non-empty evidence; conversely the available kind cannot pair with any non-PASS
-    status, so an UNVERIFIABLE, SKIP, or FAIL never wears an 'available' label. Raises ValueError on an
-    inconsistent result; returns it unchanged when consistent. is_pass alone checks only the status field,
-    so this is the guard that keeps status, kind, and evidence from disagreeing."""
+    green (for example status PASS with a required-unavailable kind and no evidence). `evidence` must be a
+    LIST; a PASS additionally requires it to be a NON-EMPTY list of NON-EMPTY strings, so an empty string or
+    a non-list can never stand in for located evidence. A PASS must carry the available kind. The available
+    kind is legitimate on a PASS and on a FAIL: a FAIL on an AVAILABLE surface is a real verdict (the
+    surface was present and probed, and the audit's own check observed the property violated), so only
+    UNVERIFIABLE and SKIP, the missing-evidence and declared-no-op states, may not wear an 'available'
+    label. Raises ValueError on an inconsistent result; returns it unchanged when consistent. is_pass alone
+    checks only the status field, so this is the guard that keeps status, kind, and evidence from disagreeing."""
     status = result.get("status")
     if status not in STATUSES:
         raise ValueError("status {!r} is not one of {}".format(status, ", ".join(STATUSES)))
     kind = result.get("kind")
-    evidence = result.get("evidence") or []
+    evidence = result.get("evidence")
+    if not isinstance(evidence, list):
+        raise ValueError("a result's evidence must be a list, got {}".format(type(evidence).__name__))
     if status == PASS:
         if kind != KIND_AVAILABLE:
             raise ValueError("a PASS result must carry the {!r} kind, got {!r}".format(KIND_AVAILABLE, kind))
-        if not evidence:
-            raise ValueError("a PASS result must carry non-empty evidence")
-    elif kind == KIND_AVAILABLE:
-        raise ValueError("kind {!r} cannot pair with a non-PASS status {!r}".format(kind, status))
+        if not evidence or not all(isinstance(e, str) and e for e in evidence):
+            raise ValueError("a PASS result must carry a non-empty list of non-empty evidence strings")
+    elif status in (UNVERIFIABLE, SKIP) and kind == KIND_AVAILABLE:
+        raise ValueError("kind {!r} cannot pair with status {!r}".format(KIND_AVAILABLE, status))
     return result
 
 
@@ -150,15 +155,47 @@ EXPECTED_SURFACES = tuple(PORTABLE_DEFAULTS["surfaces"])
 
 
 def config_arg(argv):
-    """Extract the value of a `--config` option from an argv list. `--config` with NO operand (it is the
-    last token) is a LOUD error (ValueError), never a silent fall-through to a lower-precedence resolution
-    step: a caller that typed --config meant to pin a config. Returns None when --config is absent."""
-    if "--config" not in argv:
-        return None
-    i = argv.index("--config")
-    if i + 1 >= len(argv):
-        raise ValueError("--config requires a path operand")
-    return argv[i + 1]
+    """Extract the value of a `--config` option, in either the separate `--config PATH` or the `=`-joined
+    `--config=PATH` form. Every malformed spelling is a LOUD error (ValueError), never a silent fall-through
+    to a lower-precedence resolution step, because a caller that typed --config meant to pin a config:
+      - `--config` with no following token (it is the last one) has no operand;
+      - `--config ""` (an empty operand) pins nothing;
+      - `--config` immediately followed by another option (a leading '-', e.g. `--config --self-test`) has
+        no operand, and the next option is NOT swallowed as the path;
+      - `--config=` with an empty value pins nothing;
+      - a DUPLICATE `--config` (either form) is ambiguous, refused rather than silently first-wins.
+    Returns None when --config is absent."""
+    found = False
+    value = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--config":
+            if found:
+                raise ValueError("--config given more than once")
+            found = True
+            if i + 1 >= len(argv):
+                raise ValueError("--config requires a path operand")
+            nxt = argv[i + 1]
+            if nxt.startswith("-"):
+                raise ValueError("--config requires a path operand, got option {!r}".format(nxt))
+            if nxt == "":
+                raise ValueError("--config requires a non-empty path operand")
+            value = nxt
+            i += 2
+            continue
+        if tok.startswith("--config="):
+            if found:
+                raise ValueError("--config given more than once")
+            found = True
+            v = tok[len("--config="):]
+            if v == "":
+                raise ValueError("--config requires a non-empty path operand")
+            value = v
+            i += 1
+            continue
+        i += 1
+    return value
 
 
 def load_config(path):
@@ -179,6 +216,13 @@ def load_config(path):
     # is the right test: an int flag would already have parsed as int, which this refuses.)
     if not isinstance(cfg, dict):
         raise ConfigError("assurance config {} is not a table".format(path))
+    # REQUIRED top-level keys must be PRESENT and correctly typed, so a config that OMITS a mandatory key
+    # (or gives it a wrong-typed value, e.g. a string-valued schema-version) is a loud fault, never a
+    # silent downgrade that a type-check-only-present loop would wave through. schema-version is an integer
+    # (tomllib parses a TOML bool as bool, which is refused); surfaces is a table.
+    version = cfg.get("schema-version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ConfigError("assurance config {}: required key 'schema-version' must be a present integer".format(path))
     surfaces = cfg.get("surfaces")
     if not isinstance(surfaces, dict):
         raise ConfigError("assurance config {} has no [surfaces] table".format(path))
@@ -284,11 +328,16 @@ def _adapter_glob_roster(spec, root):
     d = root / spec.get("dir", "tools")
     pattern = spec.get("pattern", "check_*.py")
     try:
-        matches = sorted(p.name for p in d.glob(pattern) if p.is_file())
+        candidates = sorted(d.glob(pattern))
     except OSError as exc:
         return False, "gate roster dir not readable ({})".format(exc), [], str(d)
+    # A counted roster member must be a READABLE regular file, the same standard the file-backed surfaces
+    # hold to: an unreadable or non-regular match is not a present gate and is not counted, consistent with
+    # the readable-file probe. If that empties the roster the surface is UNVERIFIABLE (the caller's not-
+    # available branch), never a PASS on a directory of unreadable files.
+    matches = [p.name for p in candidates if _probe_readable_file(p)[0]]
     if not matches:
-        return False, "no gates match {}/{}".format(spec.get("dir", "tools"), pattern), [], str(d)
+        return False, "no readable gates match {}/{}".format(spec.get("dir", "tools"), pattern), [], str(d)
     sample = ", ".join(matches[:3]) + (" ..." if len(matches) > 3 else "")
     return True, "{} gate(s) in roster ({})".format(len(matches), sample), [str(d / m) for m in matches[:3]], str(d)
 
@@ -353,10 +402,41 @@ ADAPTERS = {
 }
 
 
+def _validate_probe_return(ret):
+    """An adapter must return a 4-tuple (available: bool, detail: str, provenance: list[str], target:
+    str|None). A malformed return (wrong arity, a non-bool `available` such as the truthy string "false",
+    a non-str detail, a non-list or non-string-element `provenance`, a non-str/non-None target) is an
+    ADAPTER FAULT, not evidence: the caller turns it into UNVERIFIABLE/adapter-error so an untyped truthy
+    value can never reach a PASS. Returns (ok, why)."""
+    if not isinstance(ret, tuple) or len(ret) != 4:
+        return False, "expected a 4-tuple (available, detail, provenance, target)"
+    available, detail, provenance, target = ret
+    if not isinstance(available, bool):
+        return False, "available must be a bool, got {}".format(type(available).__name__)
+    if not isinstance(detail, str):
+        return False, "detail must be a str, got {}".format(type(detail).__name__)
+    if not isinstance(provenance, list) or not all(isinstance(p, str) for p in provenance):
+        return False, "provenance must be a list of strings"
+    if target is not None and not isinstance(target, str):
+        return False, "target must be a str or None, got {}".format(type(target).__name__)
+    return True, ""
+
+
 def _surface(name, adapter, required, enabled, available, status, kind, detail, provenance, target):
+    """Construct a normalized surface record. This is the SINGLE construction point every discovery path
+    routes through, so it also fail-safes the false-green case at the boundary: a record marked PASS is
+    handed to a caller only when it is genuinely available, carries the available kind, and carries located
+    evidence (a non-empty list of non-empty strings). An inconsistent PASS is DOWNGRADED to UNVERIFIABLE/
+    adapter-error (never raised), so a direct discover()/discover_all() result can never carry a false PASS
+    yet discovery never crashes mid-walk."""
+    evidence = list(provenance or [])
+    if status == PASS and not (available is True and kind == KIND_AVAILABLE
+                               and evidence and all(isinstance(e, str) and e for e in evidence)):
+        status, kind, available = UNVERIFIABLE, KIND_ADAPTER_ERROR, False
+        detail = "inconsistent PASS downgraded (missing evidence or wrong kind): {}".format(detail)
     return {"name": name, "adapter": adapter, "required": required, "enabled": enabled,
             "available": available, "status": status, "kind": kind, "detail": detail,
-            "evidence": list(provenance or []), "target": target}
+            "evidence": evidence, "target": target}
 
 
 def discover(name, cfg, root):
@@ -395,13 +475,21 @@ def discover(name, cfg, root):
                         "unknown adapter type {!r}".format(adapter), [], None)
 
     try:
-        available, detail, provenance, target = probe(spec, root)
+        ret = probe(spec, root)
     except Exception as exc:  # noqa: BLE001  an adapter that RAISES is a cannot-evaluate, never a crash
         # An adapter fault is UNVERIFIABLE with an adapter-error kind, so a broken probe surfaces loudly
         # instead of crashing discovery or (worse) reading as a pass. Deleting this wrap lets the exception
         # escape and crash the caller, which is exactly what the self-test's raising-adapter case catches.
         return _surface(name, adapter, required, enabled, False, UNVERIFIABLE, KIND_ADAPTER_ERROR,
                         "adapter {!r} raised: {}".format(adapter, exc), [], None)
+    ok, why = _validate_probe_return(ret)
+    if not ok:
+        # A MALFORMED adapter return is an adapter fault, not evidence: a truthy string like "false" as
+        # `available`, or a None provenance, must never reach the PASS branch below. It resolves
+        # UNVERIFIABLE/adapter-error, the same fail-safe posture as a raising probe.
+        return _surface(name, adapter, required, enabled, False, UNVERIFIABLE, KIND_ADAPTER_ERROR,
+                        "adapter {!r} returned a malformed probe ({})".format(adapter, why), [], None)
+    available, detail, provenance, target = ret
     if not available:
         # DISCRIMINATING GUARD: missing/unreadable evidence is UNVERIFIABLE, never PASS. The kind
         # distinguishes required-unavailable (loud) from optional-unavailable (visible).
@@ -601,6 +689,143 @@ def _self_test():
             failures.append("discover_all omitted the required 'backlog' surface entirely (silent skip)")
         elif backlog["status"] != UNVERIFIABLE:
             failures.append("omitted required surface expected UNVERIFIABLE, got {}".format(backlog["status"]))
+
+        # 17. DISCRIMINATING (FAIL/available is legitimate): a FAIL on an AVAILABLE surface is a real verdict
+        #     (the surface was present and probed, the audit's check observed the property violated), so
+        #     validate_result ACCEPTS it; an UNVERIFIABLE carrying the available kind is still REJECTED. A
+        #     guard that rejects EVERY non-PASS available result (the round-1 regression) fails the accept half.
+        try:
+            validate_result({"status": FAIL, "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"]})
+        except ValueError as exc:
+            failures.append("validate_result wrongly rejected a legitimate FAIL/available result: {}".format(exc))
+        try:
+            validate_result({"status": UNVERIFIABLE, "kind": KIND_AVAILABLE, "evidence": []})
+            failures.append("validate_result accepted an UNVERIFIABLE carrying the available kind")
+        except ValueError:
+            pass
+
+        # 18. DISCRIMINATING (evidence typing): a PASS whose evidence is [""] (a non-empty list of an EMPTY
+        #     string) or a bare string (not a list) is rejected. Dropping the non-empty-strings or list-type
+        #     checks lets a hollow PASS through, failing these.
+        try:
+            validate_result({"status": PASS, "kind": KIND_AVAILABLE, "evidence": [""]})
+            failures.append("validate_result accepted a PASS with an empty-string evidence entry")
+        except ValueError:
+            pass
+        try:
+            validate_result({"status": PASS, "kind": KIND_AVAILABLE, "evidence": "tools/x.py:1"})
+            failures.append("validate_result accepted a PASS with a non-list (string) evidence")
+        except ValueError:
+            pass
+
+        # 19. DISCRIMINATING (malformed adapter return): an adapter returning a truthy STRING for
+        #     `available` ("false") must not reach PASS; discover type-validates the return and resolves it
+        #     UNVERIFIABLE/adapter-error. Removing the return validation lets the truthy string read PASS.
+        def _liar(spec, root):
+            return ("false", "detail", ["ev"], "t")  # a truthy string, not a real bool
+        ADAPTERS["_selftest-liar"] = _liar
+        try:
+            r = discover("liar", {"surfaces": {"liar": {"adapter": "_selftest-liar",
+                         "required": True, "enabled": True}}}, tmp)
+            if r["status"] != UNVERIFIABLE or r["kind"] != KIND_ADAPTER_ERROR:
+                failures.append("truthy-string available expected UNVERIFIABLE/adapter-error, got {}/{}".format(
+                    r["status"], r["kind"]))
+        finally:
+            del ADAPTERS["_selftest-liar"]
+
+        # 20. DISCRIMINATING (discover-boundary fail-safe): an adapter that returns a well-typed
+        #     available=True but EMPTY provenance would build a PASS with no evidence; _surface downgrades
+        #     it to UNVERIFIABLE rather than hand back a false PASS (and never raises mid-discovery). Removing
+        #     the _surface fail-safe lets discover() return a PASS with empty evidence, failing this.
+        def _evidenceless(spec, root):
+            return (True, "available but no located evidence", [], "t")
+        ADAPTERS["_selftest-evidenceless"] = _evidenceless
+        try:
+            r = discover("ev0", {"surfaces": {"ev0": {"adapter": "_selftest-evidenceless",
+                         "required": True, "enabled": True}}}, tmp)
+            if r["status"] == PASS:
+                failures.append("an available=True adapter with empty evidence produced a false PASS")
+        finally:
+            del ADAPTERS["_selftest-evidenceless"]
+
+        # 21. DISCRIMINATING (required-key schema): a config that OMITS schema-version, or gives it a string
+        #     value, is a loud ConfigError, never a silent accept. Removing the required-key check lets the
+        #     omission or the wrong type load, failing these.
+        miss_cfg = tmp / "missing-version.toml"
+        miss_cfg.write_text("[surfaces.git]\nadapter='git'\nrequired=true\nenabled=true\n", encoding="utf-8")
+        try:
+            load_config(miss_cfg)
+            failures.append("load_config accepted a config missing schema-version")
+        except ConfigError:
+            pass
+        str_cfg = tmp / "string-version.toml"
+        str_cfg.write_text("schema-version = '1'\n[surfaces.git]\nadapter='git'\n", encoding="utf-8")
+        try:
+            load_config(str_cfg)
+            failures.append("load_config accepted a string-valued schema-version")
+        except ConfigError:
+            pass
+
+        # 22. DISCRIMINATING (--config operand parsing): an empty operand, the =-joined empty form, a
+        #     next-flag operand, and a duplicate --config are each loud errors, never a silent accept or a
+        #     first-wins. (The trailing-operand case is covered separately below.)
+        for bad in (["--config", ""], ["--config="], ["--config", "--self-test"],
+                    ["--config", "a.toml", "--config", "b.toml"], ["--config=a.toml", "--config=b.toml"]):
+            try:
+                config_arg(bad)
+                failures.append("config_arg accepted a malformed --config argv {!r}".format(bad))
+            except ValueError:
+                pass
+        if config_arg(["--config=x.toml"]) != "x.toml":
+            failures.append("config_arg did not parse the =-joined --config=x.toml form")
+        if config_arg(["--config", "x.toml"]) != "x.toml":
+            failures.append("config_arg did not parse the separate --config x.toml form")
+
+        # 23. DISCRIMINATING (arg validation precedes --self-test dispatch in main): a subprocess given
+        #     `--config --self-test` exits 2 (a loud argument error), never 0. A recursion sentinel keeps a
+        #     regressed build (which would re-enter the self-test) from spawning nested children.
+        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+            proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                                   "--config", "--self-test"], capture_output=True, text=True,
+                                  env=dict(os.environ, AIQT_QA_SELFTEST_CHILD="1"))
+            if proc.returncode != 2:
+                failures.append("main did not validate --config before dispatching --self-test "
+                                "(expected loud exit 2, got {})".format(proc.returncode))
+
+        # 24. DISCRIMINATING (roster readability): an UNREADABLE gate file in the roster dir is not counted;
+        #     when it is the only match the roster is UNVERIFIABLE, never a PASS on an unreadable gate. chmod
+        #     000 does not restrict root, so the case is asserted only off-root (CI and local run non-root).
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            rr = tmp / "roster-unreadable"
+            (rr / "tools").mkdir(parents=True)
+            gate = rr / "tools" / "check_only.py"
+            gate.write_text("# gate\n", encoding="utf-8")
+            os.chmod(gate, 0o000)
+            try:
+                r = discover("gate_roster", {"surfaces": {"gate_roster": {"adapter": "glob-roster",
+                             "required": True, "enabled": True, "dir": "tools", "pattern": "check_*.py"}}}, rr)
+                if r["status"] != UNVERIFIABLE:
+                    failures.append("an unreadable-only gate roster expected UNVERIFIABLE, got {} "
+                                    "(an unreadable gate must not count as present)".format(r["status"]))
+            finally:
+                os.chmod(gate, 0o600)
+
+        # 25. DISCRIMINATING (readable, not merely regular): a present, REGULAR, but UNREADABLE file
+        #     (chmod 000) at a file-backed surface resolves available=False -> UNVERIFIABLE. Removing the
+        #     open-and-read half of _probe_readable_file (keeping only the S_ISREG check) makes this read
+        #     PASS, so it fails. Asserted only off-root, since chmod 000 does not restrict root.
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            unreadable = tmp / "unreadable.txt"
+            unreadable.write_text("secret\n", encoding="utf-8")
+            os.chmod(unreadable, 0o000)
+            try:
+                r = discover("unread", {"surfaces": {"unread": {"adapter": "record-file", "required": True,
+                             "enabled": True, "path": "unreadable.txt"}}}, tmp)
+                if r["status"] != UNVERIFIABLE:
+                    failures.append("an unreadable regular file at a file-backed surface expected "
+                                    "UNVERIFIABLE, got {} (regularity is not readability)".format(r["status"]))
+            finally:
+                os.chmod(unreadable, 0o600)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -610,13 +835,21 @@ def _self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: a present required surface is PASS; a MISSING required surface is UNVERIFIABLE "
-          "(never PASS); a DIRECTORY or unreadable file at a file-backed surface is UNVERIFIABLE (existence "
-          "is not readability); optional-disabled is SKIP (never malformed-required); a disabled required "
-          "surface is a distinct malformed-UNVERIFIABLE; an unknown adapter and an adapter that RAISES are "
-          "each UNVERIFIABLE (never a crash or a pass); the result contract rejects an out-of-set status "
-          "and an inconsistent result (a PASS with an unavailable kind or no evidence); load_config rejects "
-          "a wrong-typed surface schema; config resolution is fail-loud on a pinned config and on a "
-          "--config with no operand; the config root is derived consistently so an explicit .aiqt config "
+          "(never PASS); a DIRECTORY, a non-regular file, or a present-but-UNREADABLE (chmod 000, off-root) "
+          "file at a file-backed surface is UNVERIFIABLE (regularity and existence are not readability), and "
+          "the gate roster counts only readable regular files (an unreadable-only roster is UNVERIFIABLE); "
+          "optional-disabled is SKIP (never malformed-required); a disabled required surface is a distinct "
+          "malformed-UNVERIFIABLE; an unknown adapter, an adapter that RAISES, and an adapter whose RETURN "
+          "is malformed (a truthy-string available, a non-list provenance) are each UNVERIFIABLE (never a "
+          "crash or a pass), and an available return with empty located evidence is fail-safe-downgraded at "
+          "the discover boundary rather than handed back as a false PASS; the result contract rejects an "
+          "out-of-set status, a non-list evidence, and an inconsistent result (a PASS with an unavailable "
+          "kind or without a non-empty list of non-empty evidence strings, or an UNVERIFIABLE/SKIP wearing "
+          "the available kind) while ACCEPTING a legitimate FAIL on an available surface; load_config "
+          "rejects a wrong-typed surface schema and a missing or wrong-typed required key (schema-version); "
+          "config resolution is fail-loud on a pinned config and on a malformed --config operand (absent, "
+          "empty, =-joined-empty, a next-flag, or a duplicate), with argument validation preceding the "
+          "--self-test dispatch; the config root is derived consistently so an explicit .aiqt config "
           "resolves surfaces at the tree root; and discover_all enumerates the full expected set so a "
           "required surface omitted from config resolves UNVERIFIABLE.")
     return 0
@@ -624,14 +857,17 @@ def _self_test():
 
 def main():
     argv = sys.argv[1:]
-    if "--self-test" in argv:
-        return _self_test()
-    # Default: resolve the config for the current tree and print the surface digest (a read-only view).
+    # ARGUMENT VALIDATION precedes the --self-test dispatch, so a malformed operand (e.g. `--config
+    # --self-test`, which must NOT swallow the flag as a path) is a loud error rather than a silent
+    # self-test run that exits 0.
     try:
         explicit = config_arg(argv)
     except ValueError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
+    if "--self-test" in argv:
+        return _self_test()
+    # Default: resolve the config for the current tree and print the surface digest (a read-only view).
     try:
         cfg, root, prov = resolve_config(explicit=explicit)
     except ConfigError as exc:

@@ -52,13 +52,16 @@ def _resolve(explicit):
 
 def main():
     argv = sys.argv[1:]
-    if "--self-test" in argv:
-        return _self_test()
+    # ARGUMENT VALIDATION precedes the --self-test dispatch: a malformed --config operand (empty, an
+    # =-joined empty value, a next-flag that must not be swallowed as the path, or a duplicate) is a loud
+    # error, never a silent self-test run that exits 0.
     try:
         explicit = qa.config_arg(argv)  # --config with no operand is a loud error, never a silent skip
     except ValueError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
+    if "--self-test" in argv:
+        return _self_test()
     try:
         cfg, root, prov = _resolve(explicit)
     except qa.ConfigError as exc:
@@ -118,6 +121,20 @@ def _self_test():
             failures.append("emitted result carried an out-of-set status {!r}".format(obj["status"]))
         if obj["schema"] != qa.RESULT_SCHEMA:
             failures.append("emitted result carried the wrong schema tag {!r}".format(obj["schema"]))
+
+        # 4. DISCRIMINATING (arg validation precedes --self-test dispatch in main): a subprocess given
+        #    `--config --self-test` exits 2 (a loud argument error via the shared config_arg), never a
+        #    silent self-test run that exits 0. A recursion sentinel keeps a regressed build (which would
+        #    re-enter the self-test) from spawning nested children.
+        import os
+        import subprocess
+        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+            proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                                   "--config", "--self-test"], capture_output=True, text=True,
+                                  env=dict(os.environ, AIQT_QA_SELFTEST_CHILD="1"))
+            if proc.returncode != 2:
+                failures.append("main did not validate --config before dispatching --self-test "
+                                "(expected loud exit 2, got {})".format(proc.returncode))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
