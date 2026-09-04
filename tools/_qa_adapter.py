@@ -72,11 +72,20 @@ class ConfigError(Exception):
 
 def make_result(audit, status, summary, surface=None, required=None, kind=None, evidence=None):
     """Build a normalized result object. `evidence` is a list of provenance strings (path:line, a git
-    ref, a run id): the located basis for the verdict, never the verdict itself. Rejects a status outside
-    the fixed set so a typo can never smuggle a fifth, unhandled state past the contract."""
+    ref, a run id): the located basis for the verdict, never the verdict itself. `evidence` must be a
+    LIST; a non-list (a bare string above all) is a LOUD error, never coerced with list(), because
+    list('x:1') SPLITS the string into single characters ['x', ':', '1'], each of which would then satisfy
+    the non-empty-string-list check and let a hollow PASS through. Every result is routed through the
+    shared validate_result, the SINGLE choke point, so no construction path can hand back a malformed
+    result: a status outside the fixed set, or (for a PASS) a missing available kind or evidence that is
+    not a non-empty list of non-empty strings, is refused here, at construction, not only at emit."""
     if status not in STATUSES:
         raise ValueError("status {!r} is not one of {}".format(status, ", ".join(STATUSES)))
-    return {
+    if evidence is None:
+        evidence = []
+    if not isinstance(evidence, list):
+        raise ValueError("a result's evidence must be a list, got {}".format(type(evidence).__name__))
+    return validate_result({
         "schema": RESULT_SCHEMA,
         "audit": audit,
         "status": status,
@@ -84,8 +93,8 @@ def make_result(audit, status, summary, surface=None, required=None, kind=None, 
         "surface": surface,
         "required": required,
         "kind": kind,
-        "evidence": list(evidence or []),
-    }
+        "evidence": list(evidence),
+    })
 
 
 def validate_result(result):
@@ -152,6 +161,24 @@ PORTABLE_DEFAULTS = {
 # this whole set (plus any extra a config declares), so a REQUIRED surface omitted entirely from a config
 # resolves UNVERIFIABLE rather than being silently skipped.
 EXPECTED_SURFACES = tuple(PORTABLE_DEFAULTS["surfaces"])
+
+# The KNOWN schema versions this loader understands. A schema-version that parses as an integer but is
+# not a known version (e.g. 999) is a loud ConfigError, never loaded on the strength of being an int: an
+# unknown schema is a config written for a different, unhonoured contract, not a silent accept.
+SUPPORTED_SCHEMA_VERSIONS = (1,)
+
+# The adapter-specific config fields each shipped adapter reads, all string-typed. load_config type-checks
+# every field an adapter declares (a list-valued 'protected-branch' or a table-valued
+# 'remote-landing-provider' is a loud ConfigError), so a wrong-typed adapter field can never load and then
+# read as a PASS. This mirrors the ADAPTERS registry below; a new adapter's string fields are added here.
+ADAPTER_STR_FIELDS = {
+    "gfm-task-list": ("path",),
+    "glob-roster": ("dir", "pattern"),
+    "git": ("protected-branch", "remote-landing-provider"),
+    "record-file": ("path",),
+    "transcript-inbox": ("path",),
+    "held-source": ("path",),
+}
 
 
 def config_arg(argv):
@@ -223,6 +250,9 @@ def load_config(path):
     version = cfg.get("schema-version")
     if not isinstance(version, int) or isinstance(version, bool):
         raise ConfigError("assurance config {}: required key 'schema-version' must be a present integer".format(path))
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ConfigError("assurance config {}: schema-version {} is not a known version (supported: {})".format(
+            path, version, ", ".join(str(v) for v in SUPPORTED_SCHEMA_VERSIONS)))
     surfaces = cfg.get("surfaces")
     if not isinstance(surfaces, dict):
         raise ConfigError("assurance config {} has no [surfaces] table".format(path))
@@ -237,6 +267,13 @@ def load_config(path):
             if flag in spec and not isinstance(spec[flag], bool):
                 raise ConfigError("assurance config {}: surface '{}' {} must be a boolean".format(
                     path, name, flag))
+        # ADAPTER-SPECIFIC field typing: every field the declared adapter reads is string-typed, so a
+        # list-valued 'protected-branch' or a table-valued 'remote-landing-provider' is a loud fault, not
+        # a value that loads and then lets the surface read as a PASS on a wrong-typed control.
+        for field in ADAPTER_STR_FIELDS.get(adapter, ()):
+            if field in spec and not isinstance(spec[field], str):
+                raise ConfigError("assurance config {}: surface '{}' field '{}' must be a string".format(
+                    path, name, field))
     return cfg
 
 
@@ -274,13 +311,25 @@ def resolve_config(explicit=None, environ=None, start=None):
     relative surface paths resolve under, derived by _config_root (or `start` for portable defaults)."""
     environ = os.environ if environ is None else environ
     start = Path(start or Path.cwd()).resolve()
-    if explicit:
-        cfg = load_config(explicit)                      # step 1: loud on failure, no fall-through
-        return cfg, _config_root(explicit), "explicit --config {}".format(explicit)
-    env_val = environ.get(ENV_VAR)
-    if env_val:
-        cfg = load_config(env_val)                       # step 2: loud on failure, no fall-through
-        return cfg, _config_root(env_val), "{}={}".format(ENV_VAR, env_val)
+    # PINNED SOURCES (explicit --config, then AIQT_ASSURANCE_CONFIG) share ONE handling so they cannot
+    # diverge: a source is PINNED when it is PRESENT, and a present-but-EMPTY pinned source (whether
+    # --config "" or an env var set to "") is a LOUD ConfigError, never a silent fall-through to a
+    # lower-precedence step. Presence is tested by membership, not truthiness, so an explicitly empty env
+    # var is honoured as pinned-but-empty rather than read as absent. A non-empty pinned source is loaded
+    # loud (load_config raises on an absent, unreadable, or malformed file), also never a fall-through.
+    if explicit is not None:
+        pinned = ("explicit --config", explicit, "explicit --config {}".format(explicit))
+    elif ENV_VAR in environ:
+        pinned = ("{} environment variable".format(ENV_VAR), environ[ENV_VAR],
+                  "{}={}".format(ENV_VAR, environ[ENV_VAR]))
+    else:
+        pinned = None
+    if pinned is not None:
+        label, value, provenance = pinned
+        if not value:
+            raise ConfigError("{} is set but empty; a pinned config source must name a path".format(label))
+        cfg = load_config(value)                          # steps 1 and 2: loud on failure, no fall-through
+        return cfg, _config_root(value), provenance
     nearest = find_nearest_config(start)                 # step 3
     if nearest is not None:
         cfg = load_config(nearest)
@@ -352,11 +401,23 @@ def _adapter_git(spec, root):
         return False, "not a git repository", [], None
     top = proc.stdout.strip()
     branch = spec.get("protected-branch", "main")
+    # A PASS must be backed by the PROTECTED BRANCH actually existing (real located evidence), not merely
+    # by the repository root: a git surface whose protected branch does not resolve to a commit is
+    # UNVERIFIABLE (missing evidence), never a PASS supported only by repository-root evidence. Verify the
+    # branch resolves and carry its located sha as evidence.
+    try:
+        bp = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "{}^{{commit}}".format(branch)],
+                            cwd=str(root), capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "git not runnable ({})".format(exc), [], None
+    sha = bp.stdout.strip()
+    if bp.returncode != 0 or not sha:
+        return False, "protected branch '{}' does not resolve to a commit in the repository".format(branch), [top], top
     provider = spec.get("remote-landing-provider", "")
-    detail = "git root at repo toplevel, protected branch '{}'".format(branch)
+    detail = "git root at repo toplevel, protected branch '{}' at {}".format(branch, sha[:12])
     if provider:
         detail += ", remote-landing provider '{}'".format(provider)
-    return True, detail, [top], top
+    return True, detail, [top, "{}@{}".format(branch, sha)], top
 
 
 def _adapter_record_file(spec, root):
@@ -429,7 +490,11 @@ def _surface(name, adapter, required, enabled, available, status, kind, detail, 
     evidence (a non-empty list of non-empty strings). An inconsistent PASS is DOWNGRADED to UNVERIFIABLE/
     adapter-error (never raised), so a direct discover()/discover_all() result can never carry a false PASS
     yet discovery never crashes mid-walk."""
-    evidence = list(provenance or [])
+    # A non-list provenance never char-splits: list('x:1') would yield ['x', ':', '1'] and, at PASS,
+    # satisfy the non-empty-string-list check below with hollow single-character "evidence". Only a real
+    # list is copied; anything else (a bare string above all, or None) becomes empty evidence, which then
+    # DOWNGRADES a would-be PASS to UNVERIFIABLE rather than handing back a false green.
+    evidence = list(provenance) if isinstance(provenance, list) else []
     if status == PASS and not (available is True and kind == KIND_AVAILABLE
                                and evidence and all(isinstance(e, str) and e for e in evidence)):
         status, kind, available = UNVERIFIABLE, KIND_ADAPTER_ERROR, False
@@ -457,7 +522,15 @@ def discover(name, cfg, root):
                   else "surface '{}' not declared in config".format(name))
         return _surface(name, None, req, None, False, UNVERIFIABLE, KIND_UNDECLARED, detail, [], None)
     adapter = spec.get("adapter")
-    required = bool(spec.get("required", False))
+    # A surface's REQUIRED flag is validated against the canonical PORTABLE_DEFAULTS and can never be
+    # DOWNGRADED below it: a config that omits `required`, sets it false, or leaves a canonically-required
+    # surface present-but-empty (an empty [surfaces.backlog]) or enabled=false must not silently demote a
+    # canonically-REQUIRED surface to an optional SKIP. The canonical requirement is ORed in, so such a
+    # surface, when disabled/empty in config, resolves to the required-disabled malformed UNVERIFIABLE
+    # below, never an optional-disabled SKIP. Applies to every canonically-required surface, not just backlog.
+    canonical = PORTABLE_DEFAULTS["surfaces"].get(name)
+    canonical_required = bool(canonical.get("required", False)) if isinstance(canonical, dict) else False
+    required = bool(spec.get("required", False)) or canonical_required
     enabled = bool(spec.get("enabled", False))
 
     if not enabled:
@@ -826,6 +899,190 @@ def _self_test():
                                     "UNVERIFIABLE, got {} (regularity is not readability)".format(r["status"]))
             finally:
                 os.chmod(unreadable, 0o600)
+
+        # 26. DISCRIMINATING (make_result rejects non-list evidence): make_result with a bare STRING
+        #     evidence is refused, never coerced with list() (which would split 'x:1' into ['x', ':', '1']
+        #     and let a hollow PASS through). Reverting the non-list guard to list(evidence or []) lets the
+        #     string char-split and the result construct, failing this case (the round-4 BLOCKER).
+        try:
+            make_result("x", PASS, "s", kind=KIND_AVAILABLE, evidence="x:1")
+            failures.append("make_result accepted a bare-string evidence (char-split into a hollow PASS)")
+        except ValueError:
+            pass
+
+        # 27. DISCRIMINATING (_surface non-list provenance): a PASS handed to _surface with a NON-LIST
+        #     provenance never char-splits into hollow single-character evidence; it becomes empty evidence
+        #     and downgrades to UNVERIFIABLE. Reverting `evidence` to list(provenance or []) splits a string
+        #     into characters that satisfy the non-empty-string-list check, returning a false PASS.
+        r = _surface("np", "record-file", True, True, True, PASS, KIND_AVAILABLE, "d", "x:1", "t")
+        if r["status"] == PASS:
+            failures.append("_surface returned a false PASS from a char-split non-list provenance")
+
+        # 28. DISCRIMINATING (canonically-required surface not downgradable): a config presenting the
+        #     canonically-REQUIRED backlog as enabled=false, or present-but-empty, must resolve
+        #     UNVERIFIABLE/required-disabled, NEVER an optional-disabled SKIP. Removing the canonical-required
+        #     OR in discover() lets the config downgrade it to a SKIP, failing these cases.
+        r = discover("backlog", {"surfaces": {"backlog": {"adapter": "gfm-task-list", "enabled": False,
+                     "path": "TODO.md"}}}, tmp)
+        if r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_DISABLED:
+            failures.append("a canonically-required surface disabled in config expected UNVERIFIABLE/"
+                            "required-disabled, got {}/{}".format(r["status"], r["kind"]))
+        r = discover("backlog", {"surfaces": {"backlog": {}}}, tmp)
+        if r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_DISABLED:
+            failures.append("a present-but-empty canonically-required surface expected UNVERIFIABLE/"
+                            "required-disabled, got {}/{}".format(r["status"], r["kind"]))
+
+        # 29. DISCRIMINATING (unknown schema-version): a schema-version that parses as an int but is not a
+        #     KNOWN version (999) is a loud ConfigError, never loaded on the strength of being an integer.
+        #     Removing the supported-versions check lets 999 load, failing this case.
+        v999 = tmp / "version-999.toml"
+        v999.write_text("schema-version = 999\n[surfaces.git]\nadapter='git'\n", encoding="utf-8")
+        try:
+            load_config(v999)
+            failures.append("load_config accepted an unknown schema-version 999")
+        except ConfigError:
+            pass
+
+        # 30. DISCRIMINATING (adapter-specific field typing): a list-valued 'protected-branch' and a
+        #     table-valued 'remote-landing-provider' on the git surface are each a loud ConfigError, never a
+        #     wrong-typed value that loads and lets the git surface read PASS. Removing the adapter-field
+        #     type check lets them load, failing these cases.
+        for i, body in enumerate((
+                "schema-version = 1\n[surfaces.git]\nadapter='git'\nprotected-branch=['a','b']\n",
+                "schema-version = 1\n[surfaces.git]\nadapter='git'\nremote-landing-provider={name='gh'}\n")):
+            fp = tmp / "adapter-field-{}.toml".format(i)
+            fp.write_text(body, encoding="utf-8")
+            try:
+                load_config(fp)
+                failures.append("load_config accepted a wrong-typed adapter field: {!r}".format(body))
+            except ConfigError:
+                pass
+
+        # 31. DISCRIMINATING (git protected branch must exist): the git surface is UNVERIFIABLE when the
+        #     configured protected branch does not resolve to a commit, and PASS only when it does (real
+        #     located evidence, not merely the repo root). Removing the branch verification lets a
+        #     nonexistent branch read PASS on repository-root evidence alone, failing the UNVERIFIABLE case.
+        #     Needs a git binary; skipped (not asserted) where git is unavailable.
+        if shutil.which("git"):
+            gitrepo = tmp / "gitrepo"
+            gitrepo.mkdir()
+            genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+
+            def _git(*a):
+                return subprocess.run(["git", *a], cwd=str(gitrepo), capture_output=True, text=True, env=genv)
+
+            _git("init", "-q")
+            (gitrepo / "f.txt").write_text("x\n", encoding="utf-8")
+            _git("add", "-A")
+            _git("commit", "-q", "-m", "init")
+            cur = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(gitrepo),
+                                 capture_output=True, text=True, env=genv).stdout.strip()
+            r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
+                         "protected-branch": cur}}}, gitrepo)
+            if r["status"] != PASS:
+                failures.append("git surface on an existing protected branch expected PASS, got {} ({})".format(
+                    r["status"], r["detail"]))
+            r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
+                         "protected-branch": "no-such-branch-xyz"}}}, gitrepo)
+            if r["status"] != UNVERIFIABLE:
+                failures.append("git surface on a nonexistent protected branch expected UNVERIFIABLE, got "
+                                "{} (a PASS must be backed by the branch existing, not the repo root)".format(
+                                    r["status"]))
+
+        # 32. DISCRIMINATING (present-but-empty pinned env var): AIQT_ASSURANCE_CONFIG set to "" is a loud
+        #     ConfigError (a pinned source that names nothing), never a silent fall-through to the nearest
+        #     config, exactly like --config "". Reverting the env handling to a truthiness test lets the
+        #     empty value read as absent and fall through, failing this case.
+        try:
+            resolve_config(environ={ENV_VAR: ""}, start=tmp)
+            failures.append("resolve_config silently accepted a present-but-empty {}".format(ENV_VAR))
+        except ConfigError:
+            pass
+
+        # 33. DISCRIMINATING (SKIP/available rejection): a SKIP result carrying the available kind is
+        #     rejected by validate_result, the same as an UNVERIFIABLE/available (test 17 covers
+        #     UNVERIFIABLE). Removing SKIP from the disallowed-status set lets a SKIP wear the available
+        #     kind, failing this case.
+        try:
+            validate_result({"status": SKIP, "kind": KIND_AVAILABLE, "evidence": []})
+            failures.append("validate_result accepted a SKIP carrying the available kind")
+        except ValueError:
+            pass
+
+        # 34. DISCRIMINATING (non-list adapter provenance): an adapter returning available=True with a
+        #     NON-LIST provenance is a malformed probe, resolved UNVERIFIABLE/adapter-error at the
+        #     return-type gate (detail names the malformed probe). Removing the provenance-type check in
+        #     _validate_probe_return lets it reach _surface, which still downgrades but with a different
+        #     (evidence-downgrade) detail, so asserting the malformed-probe detail discriminates this gate.
+        def _badprov(spec, root):
+            return (True, "detail", "not-a-list", "t")
+        ADAPTERS["_selftest-badprov"] = _badprov
+        try:
+            r = discover("bp", {"surfaces": {"bp": {"adapter": "_selftest-badprov",
+                         "required": True, "enabled": True}}}, tmp)
+            if r["status"] != UNVERIFIABLE or "malformed probe" not in r["detail"]:
+                failures.append("non-list provenance expected UNVERIFIABLE via the malformed-probe gate, "
+                                "got {}/{}".format(r["status"], r["detail"]))
+        finally:
+            del ADAPTERS["_selftest-badprov"]
+
+        # 35. DISCRIMINATING (adapter wrong arity): an adapter returning a 3-tuple (not the required
+        #     4-tuple) is a malformed probe, resolved UNVERIFIABLE/adapter-error, never an unpack crash.
+        #     Removing the arity check lets the 4-way unpack in _validate_probe_return raise and crash this
+        #     self-test.
+        def _arity(spec, root):
+            return (True, "detail", ["ev"])
+        ADAPTERS["_selftest-arity"] = _arity
+        try:
+            r = discover("ar", {"surfaces": {"ar": {"adapter": "_selftest-arity",
+                         "required": True, "enabled": True}}}, tmp)
+            if r["status"] != UNVERIFIABLE or "4-tuple" not in r["detail"]:
+                failures.append("wrong-arity probe expected UNVERIFIABLE via the arity gate, got {}/{}".format(
+                    r["status"], r["detail"]))
+        finally:
+            del ADAPTERS["_selftest-arity"]
+
+        # 36. DISCRIMINATING (_surface wrong-kind PASS downgrade): a PASS handed to _surface with a kind
+        #     OTHER than available (but otherwise valid evidence) is downgraded to UNVERIFIABLE, never
+        #     returned as a PASS wearing the wrong kind. Removing the `kind == KIND_AVAILABLE` clause of the
+        #     downgrade condition lets the mislabeled PASS through, failing this case.
+        r = _surface("wk", "record-file", True, True, True, PASS, KIND_REQUIRED_UNAVAILABLE, "d", ["ev"], "t")
+        if r["status"] == PASS:
+            failures.append("_surface returned a PASS carrying a non-available kind (wrong-kind not downgraded)")
+
+        # 37. DISCRIMINATING (boolean schema-version): a TOML boolean schema-version (true) is a loud
+        #     ConfigError, never accepted as the integer 1 it equals (bool is an int subclass, and
+        #     True in (1,) is True). Removing the isinstance(version, bool) exclusion lets true load,
+        #     failing this case.
+        bool_cfg = tmp / "bool-version.toml"
+        bool_cfg.write_text("schema-version = true\n[surfaces.git]\nadapter='git'\n", encoding="utf-8")
+        try:
+            load_config(bool_cfg)
+            failures.append("load_config accepted a boolean schema-version")
+        except ConfigError:
+            pass
+
+        # 38. DISCRIMINATING (non-string adapter): a surface whose `adapter` is a non-string (an integer)
+        #     is a loud ConfigError. Removing the adapter string-type check lets it load, failing this case.
+        na = tmp / "nonstr-adapter.toml"
+        na.write_text("schema-version = 1\n[surfaces.x]\nadapter = 123\n", encoding="utf-8")
+        try:
+            load_config(na)
+            failures.append("load_config accepted a non-string adapter")
+        except ConfigError:
+            pass
+
+        # 39. DISCRIMINATING (non-boolean required/enabled): a surface whose `required` is a non-boolean
+        #     (a string) is a loud ConfigError. Removing the flag boolean-type check lets it load, failing
+        #     this case.
+        nb = tmp / "nonbool-flag.toml"
+        nb.write_text("schema-version = 1\n[surfaces.x]\nadapter = 'git'\nrequired = 'yes'\n", encoding="utf-8")
+        try:
+            load_config(nb)
+            failures.append("load_config accepted a non-boolean 'required' flag")
+        except ConfigError:
+            pass
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -839,16 +1096,26 @@ def _self_test():
           "file at a file-backed surface is UNVERIFIABLE (regularity and existence are not readability), and "
           "the gate roster counts only readable regular files (an unreadable-only roster is UNVERIFIABLE); "
           "optional-disabled is SKIP (never malformed-required); a disabled required surface is a distinct "
-          "malformed-UNVERIFIABLE; an unknown adapter, an adapter that RAISES, and an adapter whose RETURN "
-          "is malformed (a truthy-string available, a non-list provenance) are each UNVERIFIABLE (never a "
-          "crash or a pass), and an available return with empty located evidence is fail-safe-downgraded at "
-          "the discover boundary rather than handed back as a false PASS; the result contract rejects an "
-          "out-of-set status, a non-list evidence, and an inconsistent result (a PASS with an unavailable "
-          "kind or without a non-empty list of non-empty evidence strings, or an UNVERIFIABLE/SKIP wearing "
-          "the available kind) while ACCEPTING a legitimate FAIL on an available surface; load_config "
-          "rejects a wrong-typed surface schema and a missing or wrong-typed required key (schema-version); "
-          "config resolution is fail-loud on a pinned config and on a malformed --config operand (absent, "
-          "empty, =-joined-empty, a next-flag, or a duplicate), with argument validation preceding the "
+          "malformed-UNVERIFIABLE, and a config can NEVER downgrade a canonically-required surface (an "
+          "enabled=false or present-but-empty backlog) to an optional SKIP; the git surface returns PASS "
+          "only when the configured protected branch actually resolves to a commit (real located evidence), "
+          "UNVERIFIABLE when it does not; an unknown adapter, an adapter that RAISES, and an adapter whose "
+          "RETURN is malformed (a truthy-string available, a non-list provenance, or a wrong-arity tuple) "
+          "are each UNVERIFIABLE (never a crash or a pass), and an available return with empty located "
+          "evidence is fail-safe-downgraded at the discover boundary rather than handed back as a false "
+          "PASS; make_result rejects a non-list (bare-string) evidence at construction rather than "
+          "char-splitting it, and _surface downgrades a char-split non-list provenance and a wrong-kind "
+          "PASS instead of returning a false green; the result contract rejects an out-of-set status, a "
+          "non-list evidence, and an inconsistent result (a PASS with an unavailable kind or without a "
+          "non-empty list of non-empty evidence strings, or an UNVERIFIABLE/SKIP wearing the available "
+          "kind) while ACCEPTING a legitimate FAIL on an available surface; load_config rejects a "
+          "wrong-typed surface schema (a non-table surface entry, a non-string adapter, a non-boolean "
+          "required/enabled flag, or a wrong-typed adapter-specific field such as a list-valued "
+          "protected-branch or a table-valued remote-landing-provider) and a missing, wrong-typed, boolean, "
+          "or unknown schema-version (a present integer drawn from the supported set); config resolution is "
+          "fail-loud on a pinned config and on a malformed --config operand (absent, empty, =-joined-empty, "
+          "a next-flag, or a duplicate), with a present-but-empty AIQT_ASSURANCE_CONFIG treated as a loud "
+          "ConfigError on the SAME pinned-source path as --config, and argument validation preceding the "
           "--self-test dispatch; the config root is derived consistently so an explicit .aiqt config "
           "resolves surfaces at the tree root; and discover_all enumerates the full expected set so a "
           "required surface omitted from config resolves UNVERIFIABLE.")

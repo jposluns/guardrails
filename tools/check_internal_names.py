@@ -14,10 +14,12 @@ are reused, so the two gates agree and no plaintext internal name is re-typed he
   2. A HASHED codename denylist (tools/internal-name-hashes.txt): SHA-256 only, for names a generic shape
      cannot catch, above all a sibling-repo name. Shipped EMPTY by default; the private generator fills it.
 
-SCOPE, deliberately narrow and explicit. This gate scans ONLY the QA-suite shipped surfaces, NOT the whole
-tree: the existing pack legitimately carries guardrail-decision ids in its hooks and a dogfood-adopter name
-in its site and docs, so a whole-tree provenance-id scan would be a wall of false positives. The scope is
-the QA-suite deliverables listed in SCOPE_RELPATHS (files scanned directly, directories walked fail-closed);
+SCOPE, deliberately narrow and explicit. This gate scans ONLY the QA-suite shipped surfaces plus the shipped
+gate-runner and CI-workflow files this PR modifies (tools/run_all_checks.sh and .github/workflows/quality.yml,
+both verified clean of provenance shapes), NOT the whole tree: the existing pack legitimately carries
+guardrail-decision ids in its hooks and a dogfood-adopter name in its site and docs, so a whole-tree
+provenance-id scan would be a wall of false positives. The scope is the surfaces listed in SCOPE_RELPATHS
+(files scanned directly, directories walked fail-closed);
 absent future surfaces are skipped, a present one that cannot be read fails closed (an OSError is exit 2, a
 non-UTF-8/undecodable file is a fail-closed unscannable-surface finding). A line carrying an `internal-allow`
 marker is exempt from the STRUCTURAL layer (the same escape hatch the leak gate offers).
@@ -53,6 +55,8 @@ HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 SCOPE_RELPATHS = (
     "tools/_qa_adapter.py",
     "tools/audit_reference.py",
+    "tools/run_all_checks.sh",   # shipped local gate runner (this PR modifies it)
+    ".github/workflows/quality.yml",  # shipped CI workflow (this PR modifies it)
     ".aiqt/assurance.toml",
     ".aiqt/assurance-schema.md",
     ".aiqt/core/qa-skills",      # future QA skill sources (multi-skill generator input)
@@ -122,8 +126,8 @@ def _iter_scope(root, scope_relpaths):
     """Yield in-scope files. A file entry is yielded if present; a directory entry is walked fail-closed.
     An absent entry is skipped; an unreadable present one raises (caller fails closed)."""
     for rel in scope_relpaths:
-        if rel in SKIP_NAMES:
-            continue
+        if Path(rel).name in SKIP_NAMES:  # compare the BASENAME (mirrors the f.name test below); a full
+            continue                       # relpath never matches a bare-basename SKIP_NAMES entry
         p = root / rel
         try:
             st = p.stat()
@@ -262,6 +266,19 @@ def _self_test():
         f = scan_scope(tmp, scope, hashes, maxn)
         if not any("unscannable" in x for x in f):
             failures.append("non-UTF-8 in-scope surface expected a fail-closed finding, got {}".format(f))
+
+        # 9. DISCRIMINATING (SKIP_NAMES honoured for a SCOPED file by BASENAME): a scope entry whose
+        #    BASENAME is in SKIP_NAMES (a gate's own source, which legitimately carries provenance shapes)
+        #    is skipped, so it produces no finding even when it holds a structural host path. Reverting the
+        #    basename test to `if rel in SKIP_NAMES` (a full relpath vs a bare basename) never matches, so
+        #    the file is scanned and the host path is flagged, failing this case.
+        write_hashes([])
+        (toolsdir / "check_leaks.py").write_text(
+            "A path {} sits in this gate source.\n".format("/" + "opt/x/private"), encoding="utf-8")
+        hashes, maxn, bad = load_hashes(tmp)
+        f = scan_scope(tmp, ("tools/check_leaks.py",), hashes, maxn)
+        if f:
+            failures.append("a scoped file whose basename is in SKIP_NAMES expected to be skipped, got {}".format(f))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -272,8 +289,9 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: clean generic content passes; a seeded provenance id, a fixed host path, and a "
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
-          "the structural layer; a malformed hashes file is reported, never a silent empty denylist; and a "
-          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip.")
+          "the structural layer; a malformed hashes file is reported, never a silent empty denylist; a "
+          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; and a scoped file "
+          "whose BASENAME is in SKIP_NAMES is skipped by basename (not by full relpath).")
     return 0
 
 
