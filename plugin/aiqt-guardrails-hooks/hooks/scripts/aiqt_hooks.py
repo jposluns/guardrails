@@ -3326,6 +3326,21 @@ def _push_parse(args):
     operands += post  # after '--' every token is a refspec (push has no pathspec position)
     return force or mirror, delete, mirror, sweep_all, prune, operands
 
+def _wildcard_hits_branches(dst):
+    """True when a wildcard push destination could expand into refs/heads/ (a protected branch),
+    so a sweep the guard cannot enumerate ASKS. The wildcard's literal prefix (before the first
+    '*') is compatible with refs/heads/ when it is a prefix of 'refs/heads/' (a wildcard at or
+    above the heads namespace: '*', 'refs/*', 'refs/he*'), is itself under refs/heads/ or heads/,
+    or carries no refs/ prefix at all (a bare 'name*'). A wildcard provably confined to a non-heads
+    namespace (refs/tags/*, refs/remotes/*, refs/notes/*) cannot reach a branch and is excluded.
+    GD-145: 'refs/*' (namespace-wide) evaded the old refs/heads/-only test."""
+    if "*" not in dst:
+        return False
+    prefix = dst[:dst.index("*")]
+    return ("refs/heads/".startswith(prefix) or prefix.startswith(("refs/heads/", "heads/"))
+            or not prefix.startswith("refs/"))
+
+
 def _push_protected(tokens, args, cwd):
     """Classify one git push segment against the protected set: ('deny', detail, act_noun), where
     act_noun names the denied act for the banner ('force-push' or 'branch deletion'); ('ask', detail,
@@ -3345,7 +3360,8 @@ def _push_protected(tokens, args, cwd):
     delete destination over the branch namespace, --mirror, a forced --all/--branches, the MATCHING
     refspec ':' (every branch existing on both ends; '+:' is its forced form), which is empty on BOTH
     sides so the per-operand loop has no destination to judge (round-3 skipped it - a silent allow),
-    and --prune with a wildcard or matching refspec, which DELETES every remote branch absent locally
+    and --prune with a wildcard or matching refspec or --all/--branches, which DELETES every remote
+    branch absent locally
     with NO force flag (witnessed deleting a remote master). Only the refspec-less force-push and a
     forced or deleted HEAD/@ consult the HEAD probe, and only when the repository view is provable
     (no non-cosmetic ambient GIT_* var, no command-local redirect, a usable session cwd); otherwise
@@ -3381,7 +3397,7 @@ def _push_protected(tokens, args, cwd):
             src, dst = None, spec  # a bare refspec pushes to a like-named destination
         if not dst:
             continue  # 'main:' names no destination to judge
-        if "*" in dst and (dst.startswith(("refs/heads/", "heads/")) or not dst.startswith("refs/")):
+        if _wildcard_hits_branches(dst):
             wild_branch = True
         if plus or force:
             forced_dsts.append(dst)
@@ -3397,24 +3413,32 @@ def _push_protected(tokens, args, cwd):
                             "':<dst>' refspec targeting it); a deletion rewrites the protected line as "
                             "surely as a force-push".format(dst), "branch deletion")
     # A sweep the guard cannot prove misses the protected names ASKS rather than denies: a wildcard
-    # force or delete destination over the branch namespace (or an unqualified one), the matching
-    # refspec, --prune over a wildcard refspec (a deletion needing no force flag), a --mirror push
-    # (which force-updates EVERY ref), or a forced --all/--branches.
+    # force or delete destination that can reach the branch namespace, a --prune sweep (a wildcard
+    # or matching refspec, or --all/--branches: it DELETES remote branches absent locally with no
+    # force flag), the plain matching refspec, a --mirror push (which force-updates AND deletes every
+    # ref), or a forced --all/--branches. The --prune combinations are judged BEFORE the plain
+    # matching case so a pruning matching-refspec ('git push --prune origin :') names its deletion
+    # effect rather than the non-deleting matching explanation (GD-145).
     for dst in forced_dsts + deleted_dsts:
-        if "*" in dst and (dst.startswith(("refs/heads/", "heads/")) or not dst.startswith("refs/")):
+        if _wildcard_hits_branches(dst):
             return ("ask", "force-pushes or deletes the wildcard refspec {!r}, a sweep this guard "
                            "cannot prove misses the protected branches".format(dst), None)
+    if prune and (wild_branch or matching or sweep_all):
+        return ("ask", "combines --prune with a sweeping selector (a wildcard or matching refspec, "
+                       "or --all/--branches), which DELETES every selected remote ref whose local "
+                       "counterpart is absent, without requiring a force flag; the sweep can remove a "
+                       "protected "
+                       "branch and cause potentially irreversible loss, and this guard cannot prove "
+                       "it misses the protected branches", None)
     if matching:
         return ("ask", "pushes the matching refspec ':' ('+:' is its forced form), a matching-refspec "
                        "push of every branch existing on both ends, which this guard cannot prove "
                        "misses the protected branches", None)
-    if prune and wild_branch:
-        return ("ask", "carries --prune with a wildcard refspec, which DELETES every remote branch "
-                       "absent locally with no force flag, a sweep this guard cannot prove misses "
-                       "the protected branches", None)
     if mirror:
-        return ("ask", "is a --mirror push, which force-updates every remote ref including any "
-                       "protected branch", None)
+        return ("ask", "is a --mirror push, which force-updates every matching remote ref and DELETES "
+                       "every remote ref (branch, tag, note) absent locally; on a shared remote this "
+                       "removes branches, protected or not, and can cause potentially irreversible "
+                       "loss, and this guard cannot prove it misses the protected branches", None)
     if force and sweep_all:
         return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch",
                 None)
@@ -3440,7 +3464,15 @@ def _push_protected(tokens, args, cwd):
     # The forced (or deleted) target is the CURRENT branch (a refspec-less force, or a forced/deleted
     # HEAD/@). Resolve it via the read-only HEAD probe, only when the repository view is provable; the
     # push.default=matching configured-state residual (which could force every matching branch) is
-    # disclosed, not modelled.
+    # disclosed, not modelled; likewise a bare 'git push --prune <remote>' whose deletion is driven
+    # by a configured remote.<name>.push refspec, and a configured mirror mode (remote.<name>.mirror
+    # =true in git config, or a command-local 'git -c remote.<name>.mirror=true push'), which
+    # reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard reads
+    # no git config offline, so these are disclosed residuals, not modelled (GD-145). A '--repo=<remote>'
+    # option does not displace the positional repository operand: git gives the command-line positional
+    # precedence (git-push(1)), so operands[0] stays the repository and the guard's slice is correct; a
+    # '--repo' form carrying a refspec-shaped positional is rejected by git as an unknown repository
+    # rather than executed as a push (verified, git 2.53).
     act, act_noun = (("deletes", "branch deletion") if delete and not force
                      else ("force-pushes", "force-push"))
     if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
@@ -3532,7 +3564,7 @@ def protected_line(data):
     unprovable; the deleted-HEAD deny is a harmless over-deny, git itself rejecting a HEAD delete as
     a nonexistent ref). A sweep this guard cannot prove misses the protected names ASKS: a wildcard
     force or delete refspec over the branch namespace, --mirror, a forced --all/--branches, the
-    matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec (round-4: prune
+    matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec or --all/--branches (round-4: prune
     deletes absent remote branches with no force flag). A force-push or delete to a non-protected
     ref and a plain non-force push ALLOW. ASK a git commit segment while HEAD is a protected branch
     (probed read-only under the ambient-GIT_* scrub; fail-to-ASK when HEAD cannot be resolved): the
