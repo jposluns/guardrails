@@ -734,7 +734,7 @@ def main() -> int:
     if "--self-test" in args:
         return self_test_main()
     if args:
-        print("usage: check_gensrc_failclose.py [--self-test]", file=sys.stderr)
+        print("usage: check_gensrc_failclose.py [--self-test]; fail-closed", file=sys.stderr)
         return 2
     return sweep(repo_root())
 
