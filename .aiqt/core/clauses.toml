@@ -167,7 +167,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 15
 canonical-text = "Never claim completion without evidence."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "evgcmp.2"
@@ -176,7 +176,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "evgcmp.3"
@@ -185,7 +185,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "evgcmp.4"
@@ -194,7 +194,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "evgcmp.5"
@@ -203,7 +203,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "evgcmp.6"
@@ -212,7 +212,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 17
 end-line = 19
 canonical-text = "A success, health, or backup marker is evidence only when it rests on the expected payload\nbeing actually present and well-formed; the marker's existence, freshness, or age is not itself that\nevidence, so check the content it stands for rather than the marker."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "evgcmp.7"
@@ -221,7 +221,16 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 19
 end-line = 20
 canonical-text = "do not\nend a turn asserting work is proceeding unless it is."
-source-digest = "6b8b12824bd61b5a0996962f39090492b4ec3b76092aad205e032f5514be716c"
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+
+[[clause]]
+clause-id = "evgcmp.8"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 22
+end-line = 26
+canonical-text = "A machine-checkable status or completion assertion over a named set, such as all N gates being green at a\nrevision or a coverage figure, is emitted from an observation that ran that exact set, never narrated\nalongside the checks. For a claim about the current or working state, that observation follows the last\nwrite to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to\nan immutable revision remains evidence about that revision."
+source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
 
 [[clause]]
 clause-id = "grdinp.1"
@@ -635,7 +644,7 @@ source-path = ".aiqt/core/rules/integ-check-fails-closed-on-unreadable.md"
 start-line = 15
 end-line = 16
 canonical-text = "A gate, validator, scan, or traversal that cannot access, read, or list an input it is meant to cover\nreports that as a failure, never as an absent, empty, or clean input."
-source-digest = "348522fdde1bfab8de48394c6abbe42dbcea31171e9c26bff23a547e8b5f1cab"
+source-digest = "77b2e76a348f1468c55988ab1427e04511560c1479e0206aed88416deedacafd"
 
 [[clause]]
 clause-id = "chkfcl.2"
@@ -644,7 +653,7 @@ source-path = ".aiqt/core/rules/integ-check-fails-closed-on-unreadable.md"
 start-line = 16
 end-line = 19
 canonical-text = "An operation that silently yields\nnothing on a permission or I/O error, a glob or a listing that returns empty, or an existence check that\nreturns false, is made to surface the error, so an unreadable input can never read as nothing to check\nand pass."
-source-digest = "348522fdde1bfab8de48394c6abbe42dbcea31171e9c26bff23a547e8b5f1cab"
+source-digest = "77b2e76a348f1468c55988ab1427e04511560c1479e0206aed88416deedacafd"
 
 [[clause]]
 clause-id = "chkfcl.3"
@@ -653,7 +662,16 @@ source-path = ".aiqt/core/rules/integ-check-fails-closed-on-unreadable.md"
 start-line = 19
 end-line = 20
 canonical-text = "A resource the work declares, or that its specification or contract requires it to cover, is held to the\nsame standard: when it is absent or unusable, that is a failure, not a silent skip."
-source-digest = "348522fdde1bfab8de48394c6abbe42dbcea31171e9c26bff23a547e8b5f1cab"
+source-digest = "77b2e76a348f1468c55988ab1427e04511560c1479e0206aed88416deedacafd"
+
+[[clause]]
+clause-id = "chkfcl.4"
+corpus-id = "chkfcl"
+source-path = ".aiqt/core/rules/integ-check-fails-closed-on-unreadable.md"
+start-line = 24
+end-line = 26
+canonical-text = "Unreadable includes present but unparseable. When a candidate record consumed by a gate or parser is\nmalformed or fails validation against its schema or grammar, the result is a refusing failure that names the\nrecord, never silent absence."
+source-digest = "77b2e76a348f1468c55988ab1427e04511560c1479e0206aed88416deedacafd"
 
 [[clause]]
 clause-id = "cmtidn.1"

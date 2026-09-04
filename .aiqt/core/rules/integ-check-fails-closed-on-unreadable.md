@@ -20,3 +20,7 @@ and pass. A resource the work declares, or that its specification or contract re
 same standard: when it is absent or unusable, that is a failure, not a silent skip. The presence-test-then-run-or-succeed shape, which
 lets a missing declared input read as nothing to do, is exactly this failure; absence reads as a clean
 result only for an input outside what the work declares or its specification or contract requires.
+
+Unreadable includes present but unparseable. When a candidate record consumed by a gate or parser is
+malformed or fails validation against its schema or grammar, the result is a refusing failure that names the
+record, never silent absence.
