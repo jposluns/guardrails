@@ -1836,6 +1836,9 @@ def main():
                 "git push --force origin refs/heads/*:refs/heads/*", "ask", cwd=plr)
         pexpect("(pl-h2) --mirror push asks", "git push --mirror backup", "ask", cwd=plr)
         pexpect("(pl-h3) forced --all asks", "git push --force --all origin", "ask", cwd=plr)
+        pexpect("(pl-h3a) forced namespace-wide wildcard '+refs/*:refs/*' asks (GD-145: a sweep over "
+                "every ref, including refs/heads/main, that the old refs/heads/-only test missed)",
+                "git push origin '+refs/*:refs/*'", "ask", cwd=plr)
 
         # Refspec-less force-push: resolved through the HEAD probe (real repos, no mock).
         pexpect("(pl-i1) bare 'git push --force' with HEAD=main denies", "git push --force", "deny",
@@ -2614,6 +2617,14 @@ def main():
         pexpect("(pl-y3) --prune with a wildcard refspec asks (deletes absent remote branches, "
                 "no force flag)",
                 "git push --prune origin 'refs/heads/*:refs/heads/*'", "ask", cwd=plr)
+        pexpect("(pl-y3a) --prune --all asks (GD-145: deletes remote branches absent locally with "
+                "no force flag and no command-line refspec, previously a silent allow)",
+                "git push --prune --all origin", "ask", cwd=plr)
+        pexpect("(pl-y3b) --branches --prune asks (GD-145: the --branches spelling of the same sweep)",
+                "git push --branches --prune origin", "ask", cwd=plr)
+        pexpect("(pl-y3c) --prune with the matching ':' refspec asks as a prune sweep (GD-145: judged "
+                "before the plain matching case so its deletion effect is named)",
+                "git push --prune origin :", "ask", cwd=plr)
         pexpect("(pl-y4) a wrapped clustered '-dv' delete asks via the widened fallback",
                 "env git push -dv origin main", "ask", cwd=plr)
         pexpect("(pl-y5) a wrapped git commit asks via the fallback",
@@ -4324,9 +4335,10 @@ def main():
           "(deny on a protected HEAD, fail-to-ASK when unresolvable; the deleted-HEAD deny is a "
           "harmless safe-direction over-deny, git itself rejecting a HEAD delete as a "
           "nonexistent ref); a --mirror or forced --all/--branches sweep, a wildcard force or "
-          "delete destination, the matching refspec ':' and its forced '+:' form, and --prune "
-          "with a wildcard or matching refspec (which deletes absent remote branches with NO "
-          "force flag) ASK; a direct git commit while HEAD is protected (or unprovable) ASKS - "
+          "delete destination (including a namespace-wide 'refs/*' that reaches refs/heads/), the "
+          "matching refspec ':' and its forced '+:' form, and --prune with a wildcard, matching, "
+          "or --all/--branches sweep (which deletes absent remote branches with NO force flag) "
+          "ASK; a direct git commit while HEAD is protected (or unprovable) ASKS - "
           "only the literal commit subcommand, merge/cherry-pick/revert being out of the "
           "accidental-case scope by design; the fallback (a shell parse error OR a command-word "
           "wrapper hiding git) ASKS an apparent git FORCE-PUSH (incl a +refspec even "
