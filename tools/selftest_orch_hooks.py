@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Behavioural self-test for the GD-112 orchestrator-integrity handlers in
 .aiqt/core/hooks/scripts/aiqt_hooks.py (the section-e acceptance vectors; authored BEFORE the core,
-test-first). Hermetic: every case runs against throwaway fixtures under a temp dir (its own git repo,
-its own registry, its own enumerator stub, its own state dir), removed in a finally; nothing on the
-host is read or written. Verdicts are judged on the STRUCTURED result each handler returns (the
-(code, stdout_obj, stderr) tuple), never by grepping diagnostic prose.
+test-first). Filesystem-write hermetic in its fixtures: every case runs against throwaway fixtures
+under a per-case temp dir (its own git repo, its own registry, its own enumerator stub, its own
+state dir), removed in a finally, and the fixtures write nowhere else. A DIRECT invocation is NOT
+read-hermetic: the fixtures' git calls still read the ambient per-user git configuration (the
+HOME/XDG surfaces), and the run's own interpreter honours the ambient PYTHON* environment; running
+the suite through tools/check_selftest_execution.py neutralizes both (HOME and XDG_CONFIG_HOME
+pinned, GIT_* and PYTHON* dropped, the child launched -I -B), and the runner's own direct-invocation
+git-config hermeticity is tracked separately (F-249). Verdicts are judged on the STRUCTURED result
+each handler returns (the (code, stdout_obj, stderr) tuple), never by grepping diagnostic prose.
 
   selftest_orch_hooks.py                              exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL
   selftest_orch_hooks.py --execution-report ABS_PATH  additionally write the executed check ids as a
@@ -128,8 +133,11 @@ class Fixture:
         self.lease.write_text("holder: selftest\n", encoding="utf-8")
         registry = {
             "version": 1,
-            "enumerator": {"argv": [sys.executable, str(stub), str(self.enum_payload),
-                                    str(self.enum_exit)], "timeout": 30},
+            # -I -B on every interpreter grandchild: a direct developer run must not honour an
+            # ambient PYTHONPATH/sitecustomize (the gate launch additionally drops PYTHON* from
+            # the child environment; this is the defence-in-depth layer for a bare invocation).
+            "enumerator": {"argv": [sys.executable, "-I", "-B", str(stub),
+                                    str(self.enum_payload), str(self.enum_exit)], "timeout": 30},
             "record": {"findings": str(self.findings),
                        "pending_decisions": str(self.pending),
                        "handoff": str(self.handoff)},
@@ -1011,7 +1019,8 @@ def main(report_path=None):
         regtool = str(repo_root() / "tools" / "orch_register.py")
 
         def mr_append(rid, check_ref):
-            subprocess.run([sys.executable, regtool, "append", "--register", str(mr_reg),
+            subprocess.run([sys.executable, "-I", "-B", regtool, "append",
+                            "--register", str(mr_reg),
                             "--id", rid, "--mistake", "premature wind-down claim",
                             "--evidence", "resume-audit finding", "--rule", "cntdef",
                             "--guardrail", "stop-guard hardening", "--klass", "systemic-lapse",
@@ -1021,7 +1030,8 @@ def main(report_path=None):
         mr_append("MR-1", "seed.txt")
         check("lapse/klass-recorded",
               '"class": "systemic-lapse"' in mr_reg.read_text(encoding="utf-8"), True)
-        proj = subprocess.run([sys.executable, regtool, "project", "--register", str(mr_reg)],
+        proj = subprocess.run([sys.executable, "-I", "-B", regtool, "project",
+                               "--register", str(mr_reg)],
                               check=True, capture_output=True, text=True, timeout=30)
         lapse_items = json.loads(proj.stdout)["items"]
         # (a) a lapse row plus one actionable item: still DENY, no bypass of any kind

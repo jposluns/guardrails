@@ -27,7 +27,13 @@ environment (the registered runner imports aiqt_hooks, whose recovery-snapshot c
 that allowlist posture, dropping any GIT_* pin this gate injected); and, for the immediate child,
 every ambient GIT_* variable is dropped, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are pinned to
 os.devnull with GIT_CONFIG_NOSYSTEM=1, and core.excludesFile and core.attributesFile are overridden
-to os.devnull through injected GIT_CONFIG_COUNT/KEY/VALUE entries. Two launch-environment bounds are
+to os.devnull through injected GIT_CONFIG_COUNT/KEY/VALUE entries. The child environment also drops
+every ambient PYTHON*-prefixed variable: -I isolates only the immediate child, which passes its
+environment on to the interpreter grandchildren the runner launches, so a hostile PYTHONPATH would
+otherwise inject an attacker sitecustomize module into them; unlike the GIT_* pins this drop IS
+transitive (nothing downstream re-derives or re-sets a PYTHON* variable), and the runner's own
+grandchild launch sites carry -I -B as well, defence in depth for a direct developer run. Three
+launch-environment bounds are
 disclosed rather than implied closed. First, the system-wide surfaces: the system-wide git config
 ($(prefix)/etc/gitconfig) is neutralized only for the immediate child (GIT_CONFIG_NOSYSTEM and the
 GIT_CONFIG_SYSTEM pin are themselves GIT_-prefixed, so a scrubbing descendant drops them), and the
@@ -36,7 +42,10 @@ GIT_ATTR_NOSYSTEM is injected, and a scrubbing descendant would drop it the same
 system-wide file is root-owned, the same trust tier as the git binary itself, so it sits at the
 threat-model boundary, outside what this gate defends. Second, git itself is resolved through the
 ambient PATH, a trusted-toolchain concern outside this gate's threat model, the same disclosure the
-sibling branch-root gate carries. The child's full stdout and stderr are forwarded UNFILTERED to this
+sibling branch-root gate carries. Third, the environment drop neutralizes the PYTHON*-prefixed
+family only: a loader-level injection control such as LD_PRELOAD, and the interpreter binary
+sys.executable itself, sit at the same trusted-toolchain tier, outside this gate's threat model.
+The child's full stdout and stderr are forwarded UNFILTERED to this
 gate's own streams (no grep, no truncation), and its verdict is judged by its real return code plus
 the strict report reconcile, never by its prose. A report that is missing, truncated, malformed,
 wrong-suite, non-regular, or carrying a duplicate or wrong-typed entry is CANNOT-EVALUATE, never a
@@ -54,8 +63,9 @@ report).
 
 DISCLOSED RESIDUAL: this gate proves INVOCATION IDENTITY only. It does not prove an invoked assertion is
 discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing
-outside the instrumented check() helper (a direct FAILURES.append that hides a failure, its fabricating
-dual, a direct EXECUTED.append or _EXECUTED_SET.add that manufactures execution evidence for a check
+outside the instrumented check() helper (an assertion made by a direct FAILURES.append outside the
+choke point, whose non-execution is invisible to the execution set, a direct EXECUTED.append or
+_EXECUTED_SET.add that manufactures execution evidence for a check
 that never really ran, or a suite not registered in the manifest), and cannot distinguish a legitimate
 from an illegitimate coordinated deletion of a check and its manifest row in one reviewed change; the
 expectation manifest is trusted hand-authored input whose schema is machine-validated here but whose
@@ -79,7 +89,9 @@ check()), and the runtime reconcile is the catcher specifically for the dead-dir
 route that re-executes an already-registered id whose direct call site is dead, which passes both
 set layers and is bounded only by the non-discrimination residual (a constant-true check counts as
 executed). The remaining
-lexical binding (the innermost enclosing for) does not model function boundaries; the runtime
+lexical binding (the innermost enclosing for) does not model any intervening dataflow between the
+loop header and the call site (a rebinding of the loop variable, a nested function boundary), so
+such a site can mis-attribute its ids; the runtime
 reconcile still proves the executed set independently. Repo-root confirmation is a .git-existence
 proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
 launch read the runner's source at two moments, so a concurrent same-user writer between them is
@@ -453,7 +465,8 @@ def run_suite(root, suite_id):
             _cannot("cannot create the neutral child home directory: {}".format(exc))
             return 2
         command = [sys.executable, "-I", "-B", str(runner), "--execution-report", report_path]
-        # Git-neutral child environment, in two layers. Layer one, GIT_*: drop every ambient GIT_*
+        # Git-neutral, interpreter-neutral child environment. The git side has two layers. Layer
+        # one, GIT_*: drop every ambient GIT_*
         # variable, then pin the global and system config surfaces to os.devnull, so a hostile
         # GIT_CONFIG_GLOBAL or core.hooksPath cannot make the child's git subprocesses run an
         # external hook or read a decoy repository (the runner's fixtures set their git identity
@@ -471,11 +484,18 @@ def run_suite(root, suite_id):
         # at the fresh empty git_home keeps the per-user config, ignore, and attributes surfaces
         # empty for EVERY descendant call, scrubbed or not (layer one stays as defence in depth for
         # the immediate child; the system-wide config and attributes residual for a scrubbing
-        # descendant is disclosed in the module docstring). This hardens the GATE-launched child
-        # only; the runner's own direct-invocation hermeticity is tracked separately (F-249).
+        # descendant is disclosed in the module docstring). The drop loop also strips every ambient
+        # PYTHON*-prefixed variable: -I isolates only the immediate child, which passes its
+        # environment on, and the runner launches interpreter grandchildren, so a hostile
+        # PYTHONPATH would otherwise run an attacker sitecustomize module in them. Unlike the GIT_*
+        # pins this drop IS transitive, because nothing downstream re-derives or re-sets a PYTHON*
+        # variable, so no descendant interpreter ever sees one; the runner's grandchild launch
+        # sites carry -I -B as well, defence in depth for a direct developer run. This hardens the
+        # GATE-launched child only; the runner's own direct-invocation hermeticity is tracked
+        # separately (F-249).
         child_env = dict(os.environ)
         for key in list(child_env):
-            if key.startswith("GIT_"):
+            if key.startswith("GIT_") or key.startswith("PYTHON"):
                 del child_env[key]
         child_env["GIT_CONFIG_GLOBAL"] = os.devnull
         child_env["GIT_CONFIG_SYSTEM"] = os.devnull
@@ -805,16 +825,19 @@ def self_test():
         code, _out, _err = run(root)
         expect("st/static-comp-literal-passes", code, 0)
 
-        # 22 (round 3, FIX C; round 4, FIX 3; round 5, FIX 1): the child is launched under a
-        # git-neutral environment: every ambient GIT_* variable is dropped, the config surfaces pin
+        # 22 (round 3, FIX C; round 4, FIX 3; round 5, FIX 1; round 6, FIX 1): the child is
+        # launched under a git-neutral, interpreter-neutral environment: every ambient GIT_* and
+        # PYTHON* variable is dropped, the config surfaces pin
         # to os.devnull, core.excludesFile and core.attributesFile are overridden to os.devnull by
         # injected GIT_CONFIG_* entries (the global ignore and attributes surfaces the pinned
         # config files do not cover), and HOME and XDG_CONFIG_HOME are pinned to a fresh empty
         # directory, the transitive layer a descendant GIT_* re-scrub cannot strip, so a poisoned
         # GIT_CONFIG_GLOBAL (for example a core.hooksPath naming an attacker hook), a hostile
-        # global ignore, or a hostile XDG_CONFIG_HOME/git/config never reaches the child; the fake
-        # runner dumps the GIT_* environment and the HOME and XDG_CONFIG_HOME it actually saw,
-        # asserted as the exact injected set and as one fresh empty directory distinct from the
+        # global ignore, or a hostile XDG_CONFIG_HOME/git/config never reaches the child, and a
+        # hostile ambient PYTHONPATH never reaches a descendant interpreter; the fake
+        # runner dumps the GIT_* and PYTHON* environment and the HOME and XDG_CONFIG_HOME it
+        # actually saw, asserted as the exact injected GIT_* set, an empty PYTHON* set, and one
+        # fresh empty directory distinct from the
         # ambient values this leg pins (a behavioural no-fire witness for a scrubbing descendant,
         # for example a hostile XDG core.fsmonitor, needs aiqt_hooks importable in the child, so it
         # remains a real-suite manual verification, disclosed)
@@ -822,6 +845,9 @@ def self_test():
                      "git_env = dict((k, v) for k, v in os.environ.items() "
                      "if k.startswith('GIT_'))\n"
                      "open(os.path.join(here, 'git-env.json'), 'w').write(json.dumps(git_env))\n"
+                     "py_env = dict((k, v) for k, v in os.environ.items() "
+                     "if k.startswith('PYTHON'))\n"
+                     "open(os.path.join(here, 'py-env.json'), 'w').write(json.dumps(py_env))\n"
                      "home = os.environ.get('HOME')\n"
                      "open(os.path.join(here, 'home-env.json'), 'w').write(json.dumps(\n"
                      "    {'HOME': home, 'XDG_CONFIG_HOME': os.environ.get('XDG_CONFIG_HOME'),\n"
@@ -830,11 +856,12 @@ def self_test():
                      "else None}))\n"
                      + _report_body(GOOD_IDS, 0))
         saved_env = dict((k, os.environ.get(k)) for k in
-                         ("GIT_CONFIG_GLOBAL", "GIT_DIR", "HOME", "XDG_CONFIG_HOME"))
+                         ("GIT_CONFIG_GLOBAL", "GIT_DIR", "HOME", "XDG_CONFIG_HOME", "PYTHONPATH"))
         os.environ["GIT_CONFIG_GLOBAL"] = str(base / "poisoned-gitconfig")
         os.environ["GIT_DIR"] = str(base / "decoy-git")
         os.environ["HOME"] = str(base / "ambient-home")
         os.environ["XDG_CONFIG_HOME"] = str(base / "ambient-xdg")
+        os.environ["PYTHONPATH"] = str(base / "hostile-pythonpath")
         try:
             code, _out, _err = run(root)
         finally:
@@ -852,6 +879,11 @@ def self_test():
                         GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2",
                         GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=os.devnull,
                         GIT_CONFIG_KEY_1="core.attributesFile", GIT_CONFIG_VALUE_1=os.devnull))
+        py_dump = root / "tools" / "py-env.json"
+        expect("st/py-env-dump-written", py_dump.exists(), True)
+        if py_dump.exists():
+            expect("st/py-env-neutralized",
+                   json.loads(py_dump.read_text(encoding="utf-8")), {})
         home_dump = root / "tools" / "home-env.json"
         expect("st/home-env-dump-written", home_dump.exists(), True)
         if home_dump.exists():
@@ -879,7 +911,9 @@ def self_test():
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
         # and the runner's FAILURES-before-report-write-OSError ordering has no cheap hermetic
         # witness from here, so both remain manual-flip verifications, disclosed rather than forced
-        # into a fragile test.
+        # into a fragile test. Round 6: run_suite's git_home os.mkdir guard is the same kind, a
+        # manual-flip verification, unwitnessed here and essentially unreachable (a fresh mkdir
+        # inside the just-created private tempdir).
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -899,7 +933,8 @@ def self_test():
           "literal loop, a non-call reference to "
           "the bare name check, and a comprehension-bound id, while the loop-literal pattern and a "
           "literal id inside a comprehension resolve and a clean twin passes), launches the child under "
-          "a git-neutral environment (ambient GIT_* dropped, config surfaces pinned to os.devnull, "
+          "a git-neutral, interpreter-neutral environment (ambient GIT_* and PYTHON* dropped, config "
+          "surfaces pinned to os.devnull, "
           "global ignore and attributes overridden to os.devnull by injected config, and HOME and "
           "XDG_CONFIG_HOME pinned to a fresh empty directory a descendant GIT_* re-scrub cannot strip), "
           "treats unavailable temp storage as "
