@@ -6425,6 +6425,222 @@ def orch_truncation_guard(data):
         "AIQT guardrail: asked on a background dispatch whose full-output capture it does not parse.")
 
 
+_ORCH_LOOP_HEADERS = frozenset(("for", "while", "until"))
+# A single leading loop reserved word is stripped to reach a construct segment's simple command: `do sleep`
+# -> `sleep`, `until curl` -> `curl`. `done` is NOT stripped (it closes the loop, never prefixes a command).
+_ORCH_LOOP_BODY_KEYWORDS = frozenset(("for", "while", "until", "do"))
+_ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
+
+# Reserved words that make a loop span un-attributable to the single canonical poll shape: a conditional
+# reserved word or a '!' negation, and brace grouping. Any of these appearing raw-unquoted in the loop span
+# routes to 'indeterminate' (defer to the ASK) rather than a match the walk cannot soundly justify.
+_ORCH_POLL_FORBIDDEN = frozenset((
+    "if", "then", "elif", "else", "fi", "case", "esac", "!", "{", "}"))
+
+
+def _orch_poll_body_argv(argv):
+    """The effective simple-command argv of a loop-construct segment, a single leading loop reserved word
+    (for/while/until/do) removed, so the do-segment `["do", "sleep", "10"]` resolves to command word
+    `sleep` and the until-header `["until", "curl", ...]` resolves to `curl`. `done` is left in place."""
+    if argv and argv[0] in _ORCH_LOOP_BODY_KEYWORDS:
+        return argv[1:]
+    return argv
+
+
+def _orch_token_actions_runs(token):
+    """True when the token carries an `actions/runs` path component pair (a GitHub Actions run probe), as
+    a bare `repos/o/r/actions/runs/1` or inside a URL. Bounded by `/` so `xactions/runsy` does not match."""
+    parts = token.split("/")
+    return any(parts[k] == "actions" and parts[k + 1] == "runs" for k in range(len(parts) - 1))
+
+
+def _orch_raw_unquoted_words(raw):
+    """The list, in order, of the FULLY-UNQUOTED, unescaped words in a single segment's raw source. A
+    segment carries no unquoted separator (a separator ends the segment), so this scans words only, reusing
+    the shared _read_word reader (which decides quoting from raw positions and raises on an unbalanced
+    quote). A word is reported ONLY when its raw slice equals its decoded text, i.e. it carried NO quote or
+    escape anywhere: argv_opaque does not flag plain quoting, so this raw-slice comparison is the sole sound
+    signal that a token was written bare. A '#' at a word boundary begins a comment (the rest is not command
+    text); a redirect operator and its one following target word are skipped so a target is not counted as a
+    word. Returns [] on any scan error, which the caller treats as 'no reserved word here', the safe
+    direction (the whole command already lexed cleanly before this is reached, so a valid segment does not
+    error)."""
+    words = []
+    n = len(raw)
+    i = 0
+    try:
+        while i < n:
+            c = raw[i]
+            if c in " \t":
+                i += 1
+                continue
+            if c == "#":
+                break                       # word-boundary comment: the rest is not command text
+            if c in _METACHARS:
+                # within a segment the only metacharacter is a redirect operator ('<'/'>', or '&>' the
+                # lexer left in raw); skip the operator and one following target word so neither pollutes
+                # the word list. A separator metacharacter never appears here (it would end the segment).
+                _op, _kind, oplen = _match_operator(raw, i, n)
+                i += oplen
+                while i < n and raw[i] in " \t":
+                    i += 1
+                if i < n and raw[i] not in _METACHARS and raw[i] != "#":
+                    _t, _o, started, _d, _lt, i = _read_word(raw, i, n)
+                    if not started:
+                        break
+                continue
+            text, _o, started, _d, _lt, j = _read_word(raw, i, n)
+            if not started:
+                break
+            if raw[i:j] == text:            # no quote or escape anywhere in the word: written bare
+                words.append(text)
+            i = j
+    except ValueError:
+        return []
+    return words
+
+
+def _orch_body_cmd(seg):
+    """(word, unquoted) for a loop segment's effective command word: basenamed, with a single leading loop
+    reserved word (do/for/while/until) stripped as _orch_poll_body_argv does and a leading env-assignment
+    prefix skipped, paired with whether that command-word TOKEN was written UNQUOTED in the raw source.
+    Soundness of the sleep/probe conjuncts rests on this being the command WORD (an argument that merely
+    spells 'sleep'/'gh' is not the command word, so it never fabricates a match); the raw-unquoted gate only
+    tightens it further. ('', False) when the segment resolves to no command word."""
+    argv = _orch_poll_body_argv(seg.argv)
+    if not argv:
+        return "", False
+    idx = _command_word_index(argv)
+    if idx >= len(argv):
+        return "", False
+    token = argv[idx]
+    return token.rsplit("/", 1)[-1], token in _orch_raw_unquoted_words(seg.raw)
+
+
+def _orch_poll_loop_at(segments, done_idx):
+    """Judge the single loop that the clean bare-`&` `done` terminator at done_idx closes, the caller having
+    already established that done_idx is that terminator (its raw is an unquoted `done`), is the sole bare-`&`
+    detach, and is the command's final operator. Returns 'match' ONLY for an UNAMBIGUOUS single for/while/
+    until loop whose body carries a raw-unquoted `sleep` command word and whose construct carries a status
+    probe; 'indeterminate' for any structure this segment walk cannot soundly attribute to that ONE loop (a
+    nested or extra loop keyword, a conditional reserved word, or brace grouping); and 'none' for a clean
+    single loop that simply lacks the sleep or the probe. Loop keywords are counted from the RAW-UNQUOTED
+    tokens, never a basenamed or quoted spelling, so an inner header that shares a segment with the outer
+    `do` (e.g. `["do","for",...]`) is still counted and forces 'indeterminate' rather than borrowing the
+    outer loop's probe."""
+    words_by_seg = [_orch_raw_unquoted_words(segments[k].raw) for k in range(done_idx + 1)]
+    n_header = sum(w in _ORCH_LOOP_HEADERS for words in words_by_seg for w in words)
+    n_do = sum(w == "do" for words in words_by_seg for w in words)
+    n_done = sum(w == "done" for words in words_by_seg for w in words)
+    if not (n_header == 1 and n_do == 1 and n_done == 1):
+        return "indeterminate"              # nested/extra loop keyword, or a keyword the walk cannot place
+    header_idx = do_idx = None
+    for k, words in enumerate(words_by_seg):
+        if words and words[0] in _ORCH_LOOP_HEADERS:
+            header_idx = k
+        elif words and words[0] == "do":
+            do_idx = k
+    if header_idx is None or do_idx is None or not (header_idx < do_idx < done_idx):
+        return "indeterminate"              # the one header/do is not in command position, or out of order
+    for k in range(header_idx, done_idx + 1):
+        if any(w in _ORCH_POLL_FORBIDDEN for w in words_by_seg[k]):
+            return "indeterminate"          # a conditional reserved word or brace group in the loop span
+    has_sleep = False
+    for k in range(do_idx, done_idx + 1):
+        word, unq = _orch_body_cmd(segments[k])
+        if word == "sleep" and unq:
+            has_sleep = True
+            break
+    has_probe = False
+    for k in range(header_idx, done_idx + 1):
+        word, unq = _orch_body_cmd(segments[k])
+        if word in _ORCH_POLL_PROBE_CMDS and unq:
+            has_probe = True
+            break
+        if any(tok == "--watch" or _orch_token_actions_runs(tok) for tok in segments[k].argv):
+            has_probe = True
+            break
+    return "match" if (has_sleep and has_probe) else "none"
+
+
+def _orch_bg_poll_loop(command):
+    """THREE-VALUED classifier over the raw Bash command. 'match' ONLY for the UNAMBIGUOUS canonical shape:
+    a SINGLE for/while/until loop closed by a bare-`&` `done` that is the command's FINAL operator, whose
+    body carries a raw-unquoted `sleep` command word and whose construct carries a status probe (a raw-
+    unquoted `gh`/`curl` command word, a `--watch` token, or an `actions/runs` path token; the probe set is a
+    disclosed heuristic, not exhaustive). 'none' on a full parse that is simply not that shape and carries no
+    ambiguity to defer: no bare `&`; a bare `&` that does not close a raw-unquoted `done` terminator; or a
+    clean single loop that lacks the sleep or the probe. 'indeterminate' whenever the structure cannot be
+    soundly attributed to one canonical loop, so the guard defers to the ASK rather than risk a false deny:
+    an unparseable construct, subshell or C-style `(( ))` grouping, more than one bare `&`, a command
+    trailing the bare-`&` `done`, a nested or extra loop keyword, a conditional reserved word, or brace
+    grouping.
+
+    Reserved words (for/while/until/do/done) are recognized ONLY as the EXACT raw-unquoted token, never a
+    basename or a quoted spelling: because `_command_word` basenames and argv is quote-decoded, a bare `&`
+    closing a command whose name was written quoted, or a path such as `/tmp/done`, is NOT read as the loop
+    terminator (it classifies 'none'), and an inner loop header sharing a segment with the outer `do` is
+    still counted (forcing 'indeterminate').
+
+    The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
+    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&` ASK on the
+    same event. Residuals are disclosed in the manifest."""
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
+    if any(seg.sep_after in ("(", ")") for seg in segments):
+        return "indeterminate"              # subshell or C-style for (( )) grouping: cannot attribute
+    bare_amps = [i for i, seg in enumerate(segments) if seg.sep_after == "&"]
+    if not bare_amps:
+        return "none"                       # no bare-`&` detach at all
+    if len(bare_amps) > 1:
+        return "indeterminate"              # more than one detach: not the single canonical shape
+    amp_idx = bare_amps[0]
+    if segments[amp_idx].raw.strip() != "done":
+        return "none"                       # the bare-`&` does not close a raw-unquoted `done` terminator
+    if any(segments[k].argv for k in range(amp_idx + 1, len(segments))):
+        return "indeterminate"              # a command trails the bare-`&` `done`: not the canonical shape
+    return _orch_poll_loop_at(segments, amp_idx)
+
+
+def orch_untracked_wait_loop(data):
+    """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
+    detached child is not a harness-tracked task, so its completion cannot notify this session and the result
+    is stranded while the session goes dark waiting on it. Registry-gated exactly like orch_truncation_guard
+    (inert with no orchestration registry present) but NOT lease-gated: a bounded worker building a
+    fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash or absent tool, an absent
+    registry, or a non-string/empty command; a NUL, heredoc, unbalanced quote, or subshell-grouped detach
+    classifies 'indeterminate' and emits nothing, deferring to the generic bare-`&` ASK of the truncation
+    guard. Only a positive 'match' DENIES. This is a deny-side companion to that ASK-side guard, defence in
+    depth on the same event: the ASK catches a generic detach, this DENIES the specific untracked poll loop."""
+    if data.get("tool_name") != "Bash":
+        return _allow()
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, _reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command:
+        return _allow()                     # unreadable/empty command: out of scope, fail-open
+    if _orch_bg_poll_loop(command) == "match":
+        return _deny(
+            "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
+            "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
+            "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
+            "the session goes dark waiting on it. Remove the trailing '&' and take ONE of these exits: (1) "
+            "submit the same loop as a tracked background dispatch (run_in_background: true) and collect its "
+            "completion; (2) run a bounded foreground watch and act on the observed result (for example: "
+            "timeout <seconds> gh pr checks <ref> --watch); (3) schedule a tracked wake that re-invokes this "
+            "session to re-check.",
+            "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
+            "session. Use run_in_background, a bounded foreground watch, or a tracked wake.")
+    return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
+
+
 def orch_dispatch_ledger(data):
     """trkasy/recfst, PostToolUse (recorder, never blocks): append launch rows for background Bash and
     registry-declared dispatch tools, completion rows for TaskOutput reads. A failed write SURFACES
@@ -7556,6 +7772,7 @@ HANDLERS = {
     "orch_yield_tool": orch_yield_tool,
     "orch_ask_guard": orch_ask_guard,
     "orch_truncation_guard": orch_truncation_guard,
+    "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
@@ -7589,6 +7806,7 @@ HANDLER_EVENT = {
     "orch_yield_tool": PRETOOL,
     "orch_ask_guard": PRETOOL,
     "orch_truncation_guard": PRETOOL,
+    "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
