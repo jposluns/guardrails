@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "8af314a24335b77a0d5c31191a38060e7bd2066adb52e2cc6ec6fcc3cc572b11"
+tree-sha256 = "e052c229ffcca6c2b3527fe5835a3e428f8da577aaeeecc2109fae59bdd72614"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2631,8 +2631,8 @@ sha256 = "683e94db8330824c5b73ee79164ec0d30ee555b2ba9b852af0a82e0a7b4b3f08"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
-bytes = 23955
-sha256 = "077f3067feb4d46c3f98c7995235bb40a1d3d637207ed631a4327d5bd8aabf0c"
+bytes = 35986
+sha256 = "784cbec4f4688eb08220b332f147ea245e75fe11812fadb6bf162dd69ac78447"
 
 [[sources]]
 path = "tools/check_site.py"
@@ -2851,8 +2851,8 @@ sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 87645
-sha256 = "41448719e3fd76683433569a19642dd7873fa4c2ee1dd001e9845787c240caf5"
+bytes = 88174
+sha256 = "c0848a0ff10faf750d2e098c32d14e82e077614b56c6e07c321afb1fff48a286"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

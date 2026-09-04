@@ -4,12 +4,17 @@ RAN, not merely that the suite went green.
 
 A present-but-unreached check() call (dead code after an early return, a misindented block, a loop that
 no longer iterates) is indistinguishable from a passing one when judged by the suite's exit code alone.
-This gate closes that: the suite's check() choke point records every check id actually reached, the
-child emits them as a structured JSON report, and this gate reconciles that report, as an exact set,
-against the hand-authored expectation manifest tools/selftest_checks.toml. The manifest is authored from
-SOURCE REVIEW and is NEVER regenerated from a runtime capture (a captured manifest would drop an
-accidentally-unreachable check from both sides of the comparison and stay green, the exact failure this
-gate exists to catch); there is deliberately no accept, update, or baseline command.
+This gate closes that with three layers. First, a STATIC pre-launch reconciliation resolves every
+check() call site in the runner's SOURCE to literal ids (a string constant, or a for loop over literal
+rows; anything else is a fail-closed error, and a duplicate source id is refused) and requires that set
+to equal the manifest exactly, so a check that is both unreachable and unregistered, or a dead
+duplicate-id source alias, is refused before any child runs. Second, the suite's check() choke point
+records every check id actually reached, the child emits them as a structured JSON report, and this
+gate reconciles that report, as an exact set, against the hand-authored expectation manifest
+tools/selftest_checks.toml. Third, the child carries its own in-run self-guard. The manifest is
+authored from SOURCE REVIEW and is NEVER regenerated from a runtime capture (a captured manifest would
+drop an accidentally-unreachable check from both sides of the comparison and stay green, the exact
+failure this gate exists to catch); there is deliberately no accept, update, or baseline command.
 
   check_selftest_execution.py --suite <id>   run the registered suite and reconcile its execution set
   check_selftest_execution.py --self-test    synthetic manifests and fake runners assert every leg fires
@@ -24,17 +29,25 @@ code; completeness is never inferred from output volume or from the absence of a
 Exit convention: 0 the execution set matches exactly AND the child passed; 1 a real finding (a missing
 or extra check id, or a set-complete child that itself reported assertion failures); 2 usage or
 cannot-evaluate (an unreadable, malformed, or suite-missing expectation manifest; a runner that is
-absent, non-regular, a symlink, or escapes the repo; a launch failure; a child return code outside
-{0, 1}; or an invalid report).
+absent, non-regular, a symlink, or escapes the repo; runner source that does not parse or carries an
+unresolvable or duplicate check id; a static source-to-manifest set mismatch; an unconfirmable repo
+root; unavailable temp storage; a launch failure; a child return code outside {0, 1}; or an invalid
+report).
 
 DISCLOSED RESIDUAL: this gate proves INVOCATION IDENTITY only. It does not prove an invoked assertion is
 discriminating (a constant-true check counts as executed), carries no mutation sensitivity, sees nothing
 outside the instrumented check() helper (a direct FAILURES.append, or a suite not registered in the
 manifest), and cannot distinguish a legitimate from an illegitimate coordinated deletion of a check and
 its manifest row in one reviewed change; the expectation manifest is trusted hand-authored input whose
-schema is machine-validated here but whose completeness rests on source review. The child runs un-timed
+schema is machine-validated here but whose completeness rests on source review. The static layer proves
+source-to-manifest SET EQUALITY, not reachability (a dead literal call still counts as a source site;
+proving execution is the runtime layer's job), counts only call sites of the bare name check, and binds
+a loop-carried Name to the innermost enclosing for lexically, without full scope analysis (a nested
+rebinding of the same name could mis-attribute source ids; the runtime reconcile still proves the
+executed set independently). The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
+import ast
 import contextlib
 import hashlib
 import io
@@ -51,9 +64,6 @@ try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_selftest_execution.py requires Python 3.11+ (tomllib).")
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
 
 MANIFEST_TOP_KEYS = {"format-version", "suite"}
 SUITE_ROW_KEYS = {"id", "runner", "expected-check-ids"}
@@ -162,6 +172,94 @@ def _runner_path(root, runner):
     return path
 
 
+class _CheckIdVisitor(ast.NodeVisitor):
+    """Resolve the first argument of every call to the bare name check() to string-literal ids. Two
+    patterns only: a string constant, or a Name bound by an enclosing for over a tuple/list of
+    tuple/list rows carrying a string literal at that Name's target position. Anything else is a
+    fail-closed error, never a guess. ast carries no parent links, so the visitor keeps its own stack
+    of the enclosing For nodes."""
+
+    def __init__(self, runner_path):
+        self.runner_path = runner_path
+        self.for_stack = []
+        self.found = []      # (check id, line) per literal site or per resolved loop row
+        self.errors = []
+
+    def visit_For(self, node):
+        self.for_stack.append(node)
+        self.generic_visit(node)
+        self.for_stack.pop()
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if not (isinstance(node.func, ast.Name) and node.func.id == "check"):
+            return
+        arg = node.args[0] if node.args else None
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            self.found.append((arg.value, node.lineno))
+            return
+        rows = self._loop_rows(arg.id) if isinstance(arg, ast.Name) else None
+        if rows is None:
+            self.errors.append(
+                "unresolvable check id at {}:{}; every check id must be a string literal or a "
+                "for-loop literal".format(self.runner_path, node.lineno))
+        else:
+            self.found.extend(rows)
+
+    def _loop_rows(self, name):
+        """The (id, line) rows the innermost enclosing for binds to Name <name>, or None when no
+        enclosing for binds it as a tuple target over all-literal rows at its position."""
+        for loop in reversed(self.for_stack):
+            target = loop.target
+            if isinstance(target, ast.Name):
+                if target.id == name:
+                    return None
+                continue
+            if not isinstance(target, ast.Tuple):
+                continue
+            names = [elt.id if isinstance(elt, ast.Name) else None for elt in target.elts]
+            if name not in names:
+                continue
+            pos = names.index(name)
+            if not isinstance(loop.iter, (ast.Tuple, ast.List)):
+                return None
+            rows = []
+            for row in loop.iter.elts:
+                if (not isinstance(row, (ast.Tuple, ast.List)) or len(row.elts) != len(names)
+                        or not isinstance(row.elts[pos], ast.Constant)
+                        or not isinstance(row.elts[pos].value, str)):
+                    return None
+                rows.append((row.elts[pos].value, row.lineno))
+            return rows
+        return None
+
+
+def _source_check_ids(runner_path):
+    """The statically resolved check ids of every check() call site in the runner's source, as
+    (sorted id list, None); or (None, error) on a source that does not parse, an unresolvable id, or
+    a duplicate call-site id. Fail closed: no id is guessed, and source-site uniqueness is required
+    (a dead duplicate-id alias would otherwise hide behind its reachable twin in the runtime set)."""
+    try:
+        source = Path(runner_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, "runner {} unreadable as UTF-8 source: {}".format(runner_path, exc)
+    try:
+        tree = ast.parse(source, filename=str(runner_path))
+    except (SyntaxError, ValueError) as exc:
+        return None, "runner {} does not parse: {}".format(runner_path, exc)
+    visitor = _CheckIdVisitor(runner_path)
+    visitor.visit(tree)
+    if visitor.errors:
+        return None, "; ".join(visitor.errors)
+    first_seen = {}
+    for cid, line in visitor.found:
+        if cid in first_seen:
+            return None, "duplicate source check id {!r} at lines {} and {} in {}".format(
+                cid, first_seen[cid], line, runner_path)
+        first_seen[cid] = line
+    return sorted(first_seen), None
+
+
 def _forward(blob, stream):
     """Forward the child's captured bytes IN FULL to our own stream: no filter, no truncation. Bytes go
     to the raw buffer where one exists; under an in-process capture (the self-test's StringIO) there is
@@ -176,6 +274,17 @@ def _forward(blob, stream):
         buffer.flush()
     else:
         stream.write(blob.decode("utf-8", errors="replace"))
+
+
+def _reject_dup_keys(pairs):
+    """json object_pairs_hook: a duplicate member is a malformed report, refused, so a doctored
+    report cannot carry two check_ids members and have the last one silently win."""
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON object member {!r}".format(key))
+        obj[key] = value
+    return obj
 
 
 def _read_report(report_path, suite_id):
@@ -194,8 +303,9 @@ def _read_report(report_path, suite_id):
         return None
     try:
         with open(report_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            data = json.load(handle, object_pairs_hook=_reject_dup_keys)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        # ValueError covers json.JSONDecodeError and the duplicate-member rejection above.
         _cannot("execution report {} unreadable or malformed: {}".format(report_path, exc))
         return None
     if not isinstance(data, dict) or set(data) != REPORT_KEYS:
@@ -220,7 +330,8 @@ def _read_report(report_path, suite_id):
 
 
 def run_suite(root, suite_id):
-    """Validate the manifest, launch the registered runner with a private report path, forward its full
+    """Validate the manifest, statically reconcile the runner's source check() set against it BEFORE
+    any launch, then launch the registered runner with a private report path, forward its full
     output, and reconcile the executed set. Returns the gate exit code."""
     root = Path(root)
     manifest_path = root / "tools" / "selftest_checks.toml"
@@ -235,7 +346,24 @@ def run_suite(root, suite_id):
     runner = _runner_path(root, row["runner"])
     if runner is None:
         return 2
-    private = tempfile.mkdtemp(prefix="aiqt-selftest-exec-")
+    source_ids, error = _source_check_ids(runner)
+    if error is not None:
+        _cannot(error)
+        return 2
+    source_set = set(source_ids)
+    if source_set != expected:
+        _cannot("suite {}: the runner's static check() set does not match {}; the manifest must "
+                "mirror the source exactly before any launch".format(suite_id, manifest_path))
+        for cid in sorted(source_set - expected):
+            print("  source check not registered: {}".format(cid), file=sys.stderr)
+        for cid in sorted(expected - source_set):
+            print("  registered id has no source check(): {}".format(cid), file=sys.stderr)
+        return 2
+    try:
+        private = tempfile.mkdtemp(prefix="aiqt-selftest-exec-")
+    except OSError as exc:
+        _cannot("cannot create the private report directory: {}".format(exc))
+        return 2
     try:
         report_path = os.path.join(private, "execution-report.json")
         if os.path.lexists(report_path):
@@ -306,10 +434,20 @@ def self_test():
         if got != want:
             failures.append("{}: got {!r}, want {!r}".format(label, got, want))
 
-    base = Path(tempfile.mkdtemp(prefix="aiqt-selftest-exec-st-"))
+    try:
+        base = Path(tempfile.mkdtemp(prefix="aiqt-selftest-exec-st-"))
+    except OSError as exc:
+        _cannot("self-test temp storage unavailable: {}".format(exc))
+        return 2
     counter = [0]
 
-    def build(manifest_text, runner_body=None):
+    def dead_checks(ids):
+        """A statically present but never-executed check() block: the fake runner writes its report
+        directly, so its source satisfies the pre-launch static reconcile without a live choke
+        point."""
+        return "if False:\n" + "".join("    check({!r}, 0, 0)\n".format(cid) for cid in ids)
+
+    def build(manifest_text, runner_body=None, source_block=None):
         counter[0] += 1
         root = base / "case-{:02d}".format(counter[0])
         (root / "tools").mkdir(parents=True)
@@ -320,7 +458,9 @@ def self_test():
                 "import json, os, sys\n"
                 "here = os.path.dirname(os.path.abspath(__file__))\n"
                 "open(os.path.join(here, 'launched.marker'), 'w').close()\n"
-                "report = sys.argv[2]\n" + runner_body, encoding="utf-8")
+                "report = sys.argv[2]\n"
+                + (dead_checks(GOOD_IDS) if source_block is None else source_block)
+                + runner_body, encoding="utf-8")
         return root
 
     def run(root, suite_id="demo"):
@@ -394,7 +534,9 @@ def self_test():
                 ("ids-not-list", json.dumps(
                     {"format_version": 1, "suite": "demo", "check_ids": "a/one"})),
                 ("bool-format-version", json.dumps(
-                    {"format_version": True, "suite": "demo", "check_ids": GOOD_IDS}))):
+                    {"format_version": True, "suite": "demo", "check_ids": GOOD_IDS})),
+                ("dup-member", '{"format_version": 1, "suite": "demo", "check_ids": ["a/wrong"], '
+                 '"check_ids": ["a/one", "a/two", "a/three"]}')):
             code, _out, _err = run(build(_manifest_text(), _raw_body(raw)))
             expect("st/report-{}-2".format(label), code, 2)
 
@@ -451,6 +593,72 @@ def self_test():
         expect("st/near-miss-names-only-it", out.count("missing (registered, never executed)"), 1)
         code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0)))
         expect("st/near-miss-twin-passes", code, 0)
+
+        # 17 (FIX 1): the static source-to-manifest reconcile refuses, BEFORE any launch, a source
+        # check absent from the manifest (even an unreachable one), a registered id with no source
+        # site, a dead duplicate-id alias, and an unresolvable dynamic id; the loop-literal pattern
+        # resolves, and a clean source==manifest twin still passes
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(GOOD_IDS + ["a/dead"]))
+        code, _out, err = run(root)
+        expect("st/static-unregistered-2", code, 2)
+        expect("st/static-unregistered-named", "source check not registered: a/dead" in err, True)
+        expect("st/static-unregistered-no-launch", launched(root), False)
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(["a/one", "a/two"]))
+        code, _out, err = run(root)
+        expect("st/static-sourceless-2", code, 2)
+        expect("st/static-sourceless-named",
+               "registered id has no source check(): a/three" in err, True)
+        expect("st/static-sourceless-no-launch", launched(root), False)
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(GOOD_IDS + ["a/one"]))
+        code, _out, err = run(root)
+        expect("st/static-dup-alias-2", code, 2)
+        expect("st/static-dup-alias-named", "duplicate source check id 'a/one'" in err, True)
+        expect("st/static-dup-alias-no-launch", launched(root), False)
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(GOOD_IDS)
+                     + 'if False:\n    check("x-%s" % label, 0, 0)\n')
+        code, _out, err = run(root)
+        expect("st/static-dynamic-id-2", code, 2)
+        expect("st/static-dynamic-id-named", "unresolvable check id at" in err, True)
+        expect("st/static-dynamic-id-no-launch", launched(root), False)
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0), source_block=(
+            'if False:\n'
+            '    for check_id, other in (("a/one", 1), ("a/two", 2)):\n'
+            '        check(check_id, 0, 0)\n'
+            '    check("a/three", 0, 0)\n'))
+        code, _out, _err = run(root)
+        expect("st/static-loop-literal-passes", code, 0)
+        code, _out, _err = run(build(_manifest_text(), _report_body(GOOD_IDS, 0)))
+        expect("st/static-clean-twin-passes", code, 0)
+
+        # 18 (FIX 3): an exported copy of this gate run from outside a git checkout refuses to guess
+        # its target instead of validating whatever tree the cwd happens to sit in
+        exported = base / "exported"
+        exported.mkdir()
+        gate_copy = exported / "check_selftest_execution.py"
+        gate_copy.write_text(Path(__file__).resolve().read_text(encoding="utf-8"),
+                             encoding="utf-8")
+        proc = subprocess.run([sys.executable, "-I", "-B", str(gate_copy), "--suite", "demo"],
+                              capture_output=True)
+        expect("st/exported-no-git-2", proc.returncode, 2)
+        expect("st/exported-no-git-named",
+               "cannot confirm the gate's own repo root"
+               in proc.stderr.decode("utf-8", errors="replace"), True)
+
+        # 19 (FIX 4): unavailable temp storage for the private report directory is cannot-evaluate,
+        # never a finding, and the child is never launched; the pinned tempdir is restored after
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0))
+        real_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(base / "no-such-dir" / "nested")
+        try:
+            code, _out, _err = run(root)
+        finally:
+            tempfile.tempdir = real_tempdir
+        expect("st/mkdtemp-oserror-2", code, 2)
+        expect("st/mkdtemp-oserror-no-launch", launched(root), False)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -462,10 +670,15 @@ def self_test():
     print("SELF-TEST PASS: the execution-set gate passes an exact or reordered set, names a missing and "
           "an extra id, refuses duplicate observed and expected ids (the latter with no launch), refuses "
           "a malformed expectation manifest before any launch, treats a missing, malformed, wrong-suite, "
-          "or non-regular report as no verdict, never masks a failing child behind a complete set, "
-          "refuses a child harness error, refuses an escaping, non-regular, or symlinked runner without "
-          "launching, and catches the near-miss (a green child that never executed a registered check) "
-          "while its complete-report twin passes")
+          "duplicate-member, or non-regular report as no verdict, never masks a failing child behind a "
+          "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
+          "runner without launching, reconciles the runner's static check() source set against the "
+          "manifest before any launch (refusing an unregistered source check, a registered id with no "
+          "source site, a dead duplicate-id alias, and an unresolvable dynamic id, while the "
+          "loop-literal pattern resolves and a clean twin passes), treats unavailable temp storage as "
+          "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
+          "near-miss (a green child that never executed a registered check) while its complete-report "
+          "twin passes")
     return 0
 
 
@@ -474,7 +687,13 @@ def main(argv=None):
     if argv == ["--self-test"]:
         return self_test()
     if len(argv) == 2 and argv[0] == "--suite" and argv[1]:
-        return run_suite(repo_root(), argv[1])
+        # Anchored to this file, never the cwd: an exported copy run from inside another checkout
+        # must refuse rather than validate the wrong tree. A worktree's .git is a file, so .exists().
+        root = Path(__file__).resolve().parent.parent
+        if not (root / ".git").exists():
+            _cannot("cannot confirm the gate's own repo root (no .git at {})".format(root))
+            return 2
+        return run_suite(root, argv[1])
     print("usage: check_selftest_execution.py --suite <id> | --self-test", file=sys.stderr)
     return 2
 

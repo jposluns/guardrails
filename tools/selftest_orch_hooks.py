@@ -292,15 +292,20 @@ def main(report_path=None):
         # R2/R3: malformed AEI provenance is a cannot-evaluate (FIX 1 DENIES the stop; ignorance
         # refuses the wind-down), never a clean backlog
         nowv = now_iso(0)
-        for label, env in [
-                ("bool-version", '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
-                ("float-version", '{"version": 1.0, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
-                ("unparseable-ts", '{"version": 1, "generated_at_utc": "banana", "source": {"locator":"f"}, "items": []}'),
-                ("future-ts", '{"version": 1, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % now_iso(-48)),
-                ("no-locator", '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
+        for check_id, env in [
+                ("stop/malformed-provenance-bool-version-denies",
+                 '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
+                ("stop/malformed-provenance-float-version-denies",
+                 '{"version": 1.0, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
+                ("stop/malformed-provenance-unparseable-ts-denies",
+                 '{"version": 1, "generated_at_utc": "banana", "source": {"locator":"f"}, "items": []}'),
+                ("stop/malformed-provenance-future-ts-denies",
+                 '{"version": 1, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % now_iso(-48)),
+                ("stop/malformed-provenance-no-locator-denies",
+                 '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
             f.enum_payload.write_text(env, encoding="utf-8")
             f.set_turn_state({})
-            check("stop/malformed-provenance-%s-denies" % label, _verdict(stop()), "block2")
+            check(check_id, _verdict(stop()), "block2")
         # a blank-evidence external blocker does not prove a block (R3-CX-M7)
         f.set_items([item("A-be", blocker={"kind": "external", "ref": "ci", "evidence": "   ",
                                            "observed_at_utc": now_iso(1)})])
@@ -1335,6 +1340,12 @@ def main(report_path=None):
                 json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
                 handle.write("\n")
         except OSError as exc:
+            # A failed report write must not swallow the assertion diagnostics already collected:
+            # surface what the suite found first, then the harness error.
+            if FAILURES:
+                print("SELF-TEST FAIL:")
+                for f_ in FAILURES:
+                    print("  - " + f_)
             print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
                 report_path, exc), file=sys.stderr)
             return 2
