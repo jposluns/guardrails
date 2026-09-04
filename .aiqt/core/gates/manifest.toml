@@ -624,3 +624,33 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = "Token-level set parity between the two named files only (tools/run_all_checks.sh and .github/workflows/quality.yml), read as data and never executed. Identity is the normalized command including all script arguments, with python/shell launcher words and the interpreter-only flags (-I, -B, -E, -s, -P, -u, glued forms included) removed, and the value of a runtime-derived flag (--base, --protected, --head) masked as <ref:expression> (preserving which expression supplied it) only when it carries a shell expansion or GitHub expression, so a change among runtime spellings including a self-comparison diverges, while a literal value stays in identity and two different literals diverge. It does NOT compare environment values, operating systems, tool versions, execution order, multiplicity, step placement across jobs, labels, or whether the shell harness propagates a child failure; interpreter-flag differences are owned by check_python_launcher_isolation.py. Scope is exactly the two files, so gates in other workflows are not enumerated. Argument order is identity-relevant, so a harmless reorder fails loud. Coordinated removal of both of this gate's own invocations is undetectable if nobody runs the remaining file manually (branch protection and review own that case). The extractors implement a disclosed shell and YAML subset; an unknown construct is cannot-evaluate (exit 2), never a clean pass. Two disclosed masking/parse edges remain: tokenization does not preserve quote type, so a $ inside single quotes is treated as runtime-derived like a double-quoted one, and a duplicate run: key within one step is counted as two members although YAML keeps one. The shadow scan has one soft edge: exotic quoting outside the supported grammar could hide a tools/ path from comment stripping. It fails closed (cannot-evaluate) on an unknown top-level or job-level workflow key, a top-level unconditional exit that would strand later local gates, unbalanced if/fi nesting in the runner, job content without a job mapping, and a run_gate() body outside its recognized shape; deeper nested non-gate YAML (under on:, env:, with:, strategy:) is structurally recognized but not exhaustively schema-validated, though the shadow scan still blocks a hidden tools/ gate and reachability is outside token-parity scope: a gate counts as declared regardless of an enclosing conditional (a job-level if:, a shell conditional inside a run: block, or an if/fi in the local runner) that could keep it from running, validating a single gate's own argument semantics beyond the runtime expression is that gate's responsibility. Intended local-vs-CI asymmetries are reconciled through a reviewed in-gate allowlist, not silently ignored."
+
+# --- QA-suite foundation: the discovery seam, the reference audit that proves the harness end to end, ---
+# --- and the internal-name leak gate (each a roster gate script, so each carries one entry here) --------
+
+[[gate]]
+id = "qa-adapter-selftest"
+script = "tools/_qa_adapter.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "The self-test for the QA discovery seam and result contract (tools/_qa_adapter.py), the module every QA audit reads its surfaces through. It asserts that a present required surface is PASS, a missing required surface is UNVERIFIABLE and never PASS, an optional-disabled surface is SKIP, a disabled required surface is a distinct malformed-UNVERIFIABLE, an unknown adapter is UNVERIFIABLE, the result contract rejects an out-of-set status, and config resolution is fail-loud on a pinned config. It arguably serves the guard-input-soundness and change-carries-a-check disciplines, but the linkage to a single corpus rule is not undeniable, so none is claimed here; an empty rules list is an open question, not a coverage statement. It asserts representative scenarios with exact status and exit-code matches, not the adapter's whole input space, and it does not exercise a live adopter tree (the reference audit and the advisory digest read the real repository)."
+
+[[gate]]
+id = "audit-reference-selftest"
+script = "tools/audit_reference.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "The trivial reference audit (tools/audit_reference.py) that proves the QA harness end to end; it ships no substantive assurance logic. Its gating leg is --self-test, which asserts the audit returns PASS end to end on a present gate roster (carrying located evidence), UNVERIFIABLE on an absent one (missing evidence never reads as PASS), and emits valid result-contract JSON. Its --digest leg is an ADVISORY report-only surface board that always exits 0 on a finding, so an advisory finding never gates and only a tool crash (unexpected non-zero exit) fails the build. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative scenarios with exact status and exit-code matches, not the whole discovery input space, and it audits only the gate-roster surface's availability, not the semantic correctness of any real assurance property."
+
+[[gate]]
+id = "internal-names"
+script = "tools/check_internal_names.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "A best-effort scan of the QA-suite shipped surfaces for internal provenance vocabulary, in two layers (per tools/check_internal_names.py): structural SHAPE patterns for generic forms (the leak gate's host-path, private-IP, token, and account shapes plus provenance-id and internal-incident-id shapes) and a hashed-codename denylist (tools/internal-name-hashes.txt, SHA-256 only, shipped empty) for names no shape catches. It covers a recognizable SUBSET of the internal-name surface: like the sibling check_leaks.py whose normalization and structural patterns it reuses, deliberate obfuscation (mid-word splits, HTML entities, zero-width characters) can evade the hashed layer, binary and archive contents are not unpacked, and a novel private string outside the shape patterns and the denylist slips it (class c, partial, the check_leaks archetype). Scope is deliberately narrow: only the QA-suite deliverables in SCOPE_RELPATHS are scanned (absent future surfaces skipped, a present unreadable one fail-closed), and a line carrying an internal-allow marker is exempt from the structural layer. Its linkage to a single corpus rule is arguable, so none is claimed here; an empty rules list is an open question, not a coverage statement."
