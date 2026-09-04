@@ -21,7 +21,10 @@ failure this gate exists to catch); there is deliberately no accept, update, or 
 
 The child is launched [sys.executable, -I, -B, <runner>, --execution-report, <private abs path>] with
 cwd at the repo root and a git-neutral environment (every ambient GIT_* variable dropped;
-GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pinned to os.devnull, GIT_CONFIG_NOSYSTEM=1), so ambient git
+GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM pinned to os.devnull, GIT_CONFIG_NOSYSTEM=1;
+core.excludesFile and core.attributesFile overridden to os.devnull through injected
+GIT_CONFIG_COUNT/KEY/VALUE entries, neutralizing the global ignore and attributes surfaces the
+pinned config files do not cover), so ambient git
 configuration cannot steer the child's git subprocesses; its full stdout and stderr are forwarded
 UNFILTERED to this gate's own streams (no
 grep, no truncation), and its verdict is judged by its real return code plus the strict report
@@ -47,12 +50,20 @@ schema is machine-validated here but whose completeness rests on source review. 
 source-to-manifest SET EQUALITY, not reachability (a dead literal call still counts as a source site;
 proving execution is the runtime layer's job), and resolves only DIRECT call sites of the bare name
 check with string-literal or for-loop-literal ids: a non-call reference to that bare name (an alias
-would carry a call site beyond the scan) and an id Name bound inside a comprehension (whose scope the
-lexical for-stack does not model) are refused fail-closed, never silently resolved, while an
-invocation route that never names check as a bare Name (getattr, exec) is invisible to this layer and
-lands as a pre-launch set mismatch or a runtime extra rather than a silent resolve. The remaining
+would carry a call site beyond the scan), an id Name bound inside a comprehension (whose scope the
+lexical for-stack does not model), and a statically empty literal loop (whose check() site would
+otherwise resolve to no id at all) are refused fail-closed, never silently resolved. An invocation
+route that never names check as a bare Name in Load context (getattr, exec, an import alias, or a
+Store, with, or except rebinding of the name) is invisible to this layer and is caught, if at all,
+by the runtime set reconcile; a route that re-executes an already-registered id whose direct call
+site is dead passes both set layers and is bounded only by the non-discrimination residual (a
+constant-true check counts as executed). The remaining
 lexical binding (the innermost enclosing for) does not model function boundaries; the runtime
-reconcile still proves the executed set independently. The child runs un-timed
+reconcile still proves the executed set independently. Repo-root confirmation is a .git-existence
+proxy anchored to this gate's own file, not a full git-identity check; and the static scan and the
+launch read the runner's source at two moments, so a concurrent same-user writer between them is
+outside this repo's sole-orchestrator threat model (the runtime layer still reconciles what
+actually ran). The child runs un-timed
 (parity with the roster's other selftest steps; the CI job timeout is the outer bound).
 """
 import ast
@@ -249,7 +260,9 @@ class _CheckIdVisitor(ast.NodeVisitor):
 
     def _loop_rows(self, name):
         """The (id, line) rows the innermost enclosing for binds to Name <name>, or None when no
-        enclosing for binds it as a tuple target over all-literal rows at its position."""
+        enclosing for binds it as a tuple target over all-literal rows at its position, or when the
+        literal iterable is empty (a statically empty loop would otherwise resolve its check() site
+        to zero ids and silently drop it)."""
         for loop in reversed(self.for_stack):
             target = loop.target
             if isinstance(target, ast.Name):
@@ -271,7 +284,7 @@ class _CheckIdVisitor(ast.NodeVisitor):
                         or not isinstance(row.elts[pos].value, str)):
                     return None
                 rows.append((row.elts[pos].value, row.lineno))
-            return rows
+            return rows if rows else None
         return None
 
 
@@ -414,9 +427,14 @@ def run_suite(root, suite_id):
         # Git-neutral child environment: drop every ambient GIT_* variable, then pin the global and
         # system config surfaces to os.devnull, so a hostile GIT_CONFIG_GLOBAL or core.hooksPath
         # cannot make the child's git subprocesses run an external hook or read a decoy repository
-        # (the runner's fixtures set their git identity inline, so commits still work). This hardens
-        # the GATE-launched child only; the runner's own direct-invocation hermeticity is tracked
-        # separately (F-249).
+        # (the runner's fixtures set their git identity inline with -c, which outranks the injected
+        # entries below, so commits still work). GIT_CONFIG_GLOBAL covers only the global CONFIG
+        # file: git reads the global ignore and attributes surfaces from
+        # XDG_CONFIG_HOME/git/{ignore,attributes} defaults even with no config file, so
+        # core.excludesFile and core.attributesFile are overridden to os.devnull through git's
+        # environment-config mechanism (GIT_CONFIG_COUNT/KEY/VALUE, set AFTER the drop loop so they
+        # survive it). This hardens the GATE-launched child only; the runner's own direct-invocation
+        # hermeticity is tracked separately (F-249).
         child_env = dict(os.environ)
         for key in list(child_env):
             if key.startswith("GIT_"):
@@ -424,6 +442,11 @@ def run_suite(root, suite_id):
         child_env["GIT_CONFIG_GLOBAL"] = os.devnull
         child_env["GIT_CONFIG_SYSTEM"] = os.devnull
         child_env["GIT_CONFIG_NOSYSTEM"] = "1"
+        child_env["GIT_CONFIG_COUNT"] = "2"
+        child_env["GIT_CONFIG_KEY_0"] = "core.excludesFile"
+        child_env["GIT_CONFIG_VALUE_0"] = os.devnull
+        child_env["GIT_CONFIG_KEY_1"] = "core.attributesFile"
+        child_env["GIT_CONFIG_VALUE_1"] = os.devnull
         try:
             child = subprocess.run(command, cwd=str(root), capture_output=True, env=child_env)
         except OSError as exc:
@@ -742,10 +765,13 @@ def self_test():
         code, _out, _err = run(root)
         expect("st/static-comp-literal-passes", code, 0)
 
-        # 22 (round 3, FIX C): the child is launched under a git-neutral environment: every ambient
-        # GIT_* variable is dropped and the config surfaces pin to os.devnull, so a poisoned
-        # GIT_CONFIG_GLOBAL (for example a core.hooksPath naming an attacker hook) never reaches
-        # the child; the fake runner dumps the GIT_* environment it actually saw
+        # 22 (round 3, FIX C; round 4, FIX 3): the child is launched under a git-neutral
+        # environment: every ambient GIT_* variable is dropped, the config surfaces pin to
+        # os.devnull, and core.excludesFile and core.attributesFile are overridden to os.devnull by
+        # injected GIT_CONFIG_* entries (the global ignore and attributes surfaces the pinned config
+        # files do not cover), so a poisoned GIT_CONFIG_GLOBAL (for example a core.hooksPath naming
+        # an attacker hook) or a hostile global ignore never reaches the child; the fake runner
+        # dumps the GIT_* environment it actually saw, asserted as the exact injected set
         root = build(_manifest_text(),
                      "git_env = dict((k, v) for k, v in os.environ.items() "
                      "if k.startswith('GIT_'))\n"
@@ -768,7 +794,20 @@ def self_test():
         if env_dump.exists():
             expect("st/git-env-neutralized", json.loads(env_dump.read_text(encoding="utf-8")),
                    dict(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
-                        GIT_CONFIG_NOSYSTEM="1"))
+                        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2",
+                        GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=os.devnull,
+                        GIT_CONFIG_KEY_1="core.attributesFile", GIT_CONFIG_VALUE_1=os.devnull))
+
+        # 23 (round 4, FIX 1): a statically EMPTY literal loop is refused fail-closed, no launch: an
+        # empty iterable resolves its check() site to zero ids, so without the refusal the site
+        # would be silently invisible (the exact "loop that no longer iterates" failure)
+        root = build(_manifest_text(), _report_body(GOOD_IDS, 0),
+                     source_block=dead_checks(GOOD_IDS)
+                     + 'for check_id, other in ():\n    check(check_id, 0, 0)\n')
+        code, _out, err = run(root)
+        expect("st/static-empty-loop-2", code, 2)
+        expect("st/static-empty-loop-named", "unresolvable check id at" in err, True)
+        expect("st/static-empty-loop-no-launch", launched(root), False)
 
         # Round 3 (FIX E note): leg 19 witnesses run_suite's mkdtemp guard; self_test's own base
         # tempdir guard above cannot be witnessed from inside this self-test without circularity,
@@ -790,10 +829,12 @@ def self_test():
           "complete set, refuses a child harness error, refuses an escaping, non-regular, or symlinked "
           "runner without launching, reconciles the runner's static check() source set against the "
           "manifest before any launch (refusing an unregistered source check, a registered id with no "
-          "source site, a dead duplicate-id alias, an unresolvable dynamic id, a non-call reference to "
+          "source site, a dead duplicate-id alias, an unresolvable dynamic id, a statically empty "
+          "literal loop, a non-call reference to "
           "the bare name check, and a comprehension-bound id, while the loop-literal pattern and a "
           "literal id inside a comprehension resolve and a clean twin passes), launches the child under "
-          "a git-neutral environment (ambient GIT_* dropped, config surfaces pinned to os.devnull), "
+          "a git-neutral environment (ambient GIT_* dropped, config surfaces pinned to os.devnull, "
+          "global ignore and attributes overridden to os.devnull by injected config), "
           "treats unavailable temp storage as "
           "cannot-evaluate, refuses to guess its repo root when run outside a checkout, and catches the "
           "near-miss (a green child that never executed a registered check) while its complete-report "
