@@ -279,6 +279,24 @@ def _self_test():
         f = scan_scope(tmp, ("tools/check_leaks.py",), hashes, maxn)
         if f:
             failures.append("a scoped file whose basename is in SKIP_NAMES expected to be skipped, got {}".format(f))
+
+        # 10. DISCRIMINATING (scope MEMBERSHIP of the shipped gate-runner and CI-workflow files): the real
+        #     SCOPE_RELPATHS includes tools/run_all_checks.sh and .github/workflows/quality.yml, so a
+        #     synthetic provenance id (GD-000; the 000 ordinal is not a real project id) planted in each is
+        #     caught when scanning the LIVE scope. Removing either path from SCOPE_RELPATHS leaves it
+        #     unscanned and the finding absent, failing this case. (Only these two fixtures exist under tmp;
+        #     the other SCOPE_RELPATHS entries are absent and skipped.)
+        write_hashes([])
+        (toolsdir / "run_all_checks.sh").write_text("echo references GD-000\n", encoding="utf-8")
+        wf = tmp / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "quality.yml").write_text("# a step that references GD-000\n", encoding="utf-8")
+        hashes, maxn, bad = load_hashes(tmp)
+        live = scan_scope(tmp, SCOPE_RELPATHS, hashes, maxn)
+        for rel in ("tools/run_all_checks.sh", ".github/workflows/quality.yml"):
+            if not any(rel in x and "guardrail-decision" in x for x in live):
+                failures.append("live-scope member {} expected a provenance finding (scope membership "
+                                "untested if absent), got {}".format(rel, live))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -290,8 +308,11 @@ def _self_test():
     print("SELF-TEST PASS: clean generic content passes; a seeded provenance id, a fixed host path, and a "
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
           "the structural layer; a malformed hashes file is reported, never a silent empty denylist; a "
-          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; and a scoped file "
-          "whose BASENAME is in SKIP_NAMES is skipped by basename (not by full relpath).")
+          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a scoped file "
+          "whose BASENAME is in SKIP_NAMES is skipped by basename (not by full relpath); and the shipped "
+          "gate-runner and CI-workflow paths (tools/run_all_checks.sh, .github/workflows/quality.yml) are "
+          "live SCOPE_RELPATHS members, so a synthetic provenance id planted in each is caught (removing "
+          "either from scope fails the case).")
     return 0
 
 

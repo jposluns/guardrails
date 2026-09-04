@@ -61,6 +61,10 @@ KIND_REQUIRED_DISABLED = "required-disabled-malformed"
 KIND_UNKNOWN_ADAPTER = "unknown-adapter"
 KIND_UNDECLARED = "undeclared-surface"
 KIND_ADAPTER_ERROR = "adapter-error"
+# A config that binds a canonically-recognized surface to a DIFFERENT adapter type than its canonical one
+# (e.g. rebinding backlog from gfm-task-list to record-file to point it at any present file) is a config
+# fault, kept distinct so a substituted adapter resolves UNVERIFIABLE/adapter-mismatch, never a PASS.
+KIND_ADAPTER_MISMATCH = "adapter-mismatch"
 
 RESULT_SCHEMA = "aiqt-qa-result/1"
 
@@ -114,10 +118,15 @@ def validate_result(result):
     evidence = result.get("evidence")
     if not isinstance(evidence, list):
         raise ValueError("a result's evidence must be a list, got {}".format(type(evidence).__name__))
+    # Evidence ELEMENTS must be non-empty strings for EVERY status, uniformly, not only for a PASS: a FAIL
+    # or UNVERIFIABLE carrying evidence=[7] or [""] is a malformed provenance record and is refused here.
+    # A non-PASS status may legitimately carry an EMPTY list (no located evidence); a PASS may not.
+    if not all(isinstance(e, str) and e for e in evidence):
+        raise ValueError("a result's evidence must be a list of non-empty strings")
     if status == PASS:
         if kind != KIND_AVAILABLE:
             raise ValueError("a PASS result must carry the {!r} kind, got {!r}".format(KIND_AVAILABLE, kind))
-        if not evidence or not all(isinstance(e, str) and e for e in evidence):
+        if not evidence:
             raise ValueError("a PASS result must carry a non-empty list of non-empty evidence strings")
     elif status in (UNVERIFIABLE, SKIP) and kind == KIND_AVAILABLE:
         raise ValueError("kind {!r} cannot pair with status {!r}".format(KIND_AVAILABLE, status))
@@ -392,32 +401,44 @@ def _adapter_glob_roster(spec, root):
 
 
 def _adapter_git(spec, root):
+    # SANITIZE the environment for every git subprocess: an ambient GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR
+    # (or any other GIT_-prefixed redirect) is honoured by git OVER cwd, so an inherited GIT_DIR pointing at
+    # a different repository made a non-repo root read PASS for that other repo. Scrub every GIT_* variable
+    # (an allowlist stance, not an enumerated family) so the probe is bound to `root` alone, and run cwd=root.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(root),
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "git not runnable ({})".format(exc), [], None
     if proc.returncode != 0:
         return False, "not a git repository", [], None
     top = proc.stdout.strip()
+    # The toplevel git resolves must BE `root` (realpath-equal), not merely SOME repository: a toplevel that
+    # differs from root means the evidence is bound to a different tree (an ambient redirect, or root sitting
+    # inside an unrelated repo), which is UNVERIFIABLE (evidence not bound to root), never a PASS.
+    if not top or os.path.realpath(top) != os.path.realpath(str(root)):
+        return False, "git toplevel '{}' does not resolve to the surface root".format(top), [], None
     branch = spec.get("protected-branch", "main")
-    # A PASS must be backed by the PROTECTED BRANCH actually existing (real located evidence), not merely
-    # by the repository root: a git surface whose protected branch does not resolve to a commit is
-    # UNVERIFIABLE (missing evidence), never a PASS supported only by repository-root evidence. Verify the
-    # branch resolves and carry its located sha as evidence.
+    # A PASS must be backed by the protected branch existing as an actual BRANCH ref (refs/heads/<branch>),
+    # real located evidence, not merely by any commit-ish: a raw 40-hex SHA, a tag, HEAD, or an ancestry
+    # expression is NOT a branch, so a `rev-parse <value>^{commit}` accepting any commit-ish let a non-branch
+    # value read PASS. Verify refs/heads/<branch> resolves and carry that branch ref (not an arbitrary sha
+    # alias) as evidence.
+    ref = "refs/heads/{}".format(branch)
     try:
-        bp = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "{}^{{commit}}".format(branch)],
-                            cwd=str(root), capture_output=True, text=True, timeout=10)
+        bp = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref],
+                            cwd=str(root), capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "git not runnable ({})".format(exc), [], None
     sha = bp.stdout.strip()
     if bp.returncode != 0 or not sha:
-        return False, "protected branch '{}' does not resolve to a commit in the repository".format(branch), [top], top
+        return False, "protected branch '{}' does not exist as a branch ref in the repository".format(branch), [top], top
     provider = spec.get("remote-landing-provider", "")
     detail = "git root at repo toplevel, protected branch '{}' at {}".format(branch, sha[:12])
     if provider:
         detail += ", remote-landing provider '{}'".format(provider)
-    return True, detail, [top, "{}@{}".format(branch, sha)], top
+    return True, detail, [top, "{}@{}".format(ref, sha)], top
 
 
 def _adapter_record_file(spec, root):
@@ -476,8 +497,8 @@ def _validate_probe_return(ret):
         return False, "available must be a bool, got {}".format(type(available).__name__)
     if not isinstance(detail, str):
         return False, "detail must be a str, got {}".format(type(detail).__name__)
-    if not isinstance(provenance, list) or not all(isinstance(p, str) for p in provenance):
-        return False, "provenance must be a list of strings"
+    if not isinstance(provenance, list) or not all(isinstance(p, str) and p for p in provenance):
+        return False, "provenance must be a list of non-empty strings"
     if target is not None and not isinstance(target, str):
         return False, "target must be a str or None, got {}".format(type(target).__name__)
     return True, ""
@@ -492,9 +513,11 @@ def _surface(name, adapter, required, enabled, available, status, kind, detail, 
     yet discovery never crashes mid-walk."""
     # A non-list provenance never char-splits: list('x:1') would yield ['x', ':', '1'] and, at PASS,
     # satisfy the non-empty-string-list check below with hollow single-character "evidence". Only a real
-    # list is copied; anything else (a bare string above all, or None) becomes empty evidence, which then
-    # DOWNGRADES a would-be PASS to UNVERIFIABLE rather than handing back a false green.
-    evidence = list(provenance) if isinstance(provenance, list) else []
+    # list is copied, and only its NON-EMPTY STRING elements survive, uniformly for every status, so a
+    # would-be UNVERIFIABLE/FAIL record can never carry a [7] or [""] element any more than a PASS can.
+    # Anything else (a bare string above all, or None) becomes empty evidence, which then DOWNGRADES a
+    # would-be PASS to UNVERIFIABLE rather than handing back a false green.
+    evidence = [e for e in provenance if isinstance(e, str) and e] if isinstance(provenance, list) else []
     if status == PASS and not (available is True and kind == KIND_AVAILABLE
                                and evidence and all(isinstance(e, str) and e for e in evidence)):
         status, kind, available = UNVERIFIABLE, KIND_ADAPTER_ERROR, False
@@ -532,6 +555,20 @@ def discover(name, cfg, root):
     canonical_required = bool(canonical.get("required", False)) if isinstance(canonical, dict) else False
     required = bool(spec.get("required", False)) or canonical_required
     enabled = bool(spec.get("enabled", False))
+
+    # ADAPTER-TYPE SUBSTITUTION GUARD: a canonically-recognized surface must be bound to its CANONICAL
+    # adapter type. Consulting PORTABLE_DEFAULTS only for `required` (never the adapter type) let a config
+    # rebind a canonically-required surface (backlog/gate_roster/git) to a DIFFERENT adapter, e.g. the
+    # record-file adapter aimed at any present file, and read PASS on that decoy. When the config NAMES an
+    # adapter that differs from the canonical one for this surface, it is a config fault resolving
+    # UNVERIFIABLE/adapter-mismatch, never a PASS. An OMITTED adapter (None) is not a substitution: it
+    # flows to the disabled/unknown-adapter handling below (a present-but-empty required surface is a
+    # required-disabled malformed, not a mismatch). Applies to every canonical surface, not just backlog.
+    canonical_adapter = canonical.get("adapter") if isinstance(canonical, dict) else None
+    if canonical_adapter is not None and adapter is not None and adapter != canonical_adapter:
+        return _surface(name, adapter, required, enabled, False, UNVERIFIABLE, KIND_ADAPTER_MISMATCH,
+                        "surface '{}' is bound to adapter {!r} but its canonical adapter is {!r}".format(
+                            name, adapter, canonical_adapter), [], None)
 
     if not enabled:
         # A REQUIRED surface disabled in config is a configuration fault, kept DISTINCT from an
@@ -910,13 +947,18 @@ def _self_test():
         except ValueError:
             pass
 
-        # 27. DISCRIMINATING (_surface non-list provenance): a PASS handed to _surface with a NON-LIST
-        #     provenance never char-splits into hollow single-character evidence; it becomes empty evidence
-        #     and downgrades to UNVERIFIABLE. Reverting `evidence` to list(provenance or []) splits a string
-        #     into characters that satisfy the non-empty-string-list check, returning a false PASS.
+        # 27. DISCRIMINATING (_surface non-list provenance downgrade, exact status AND kind): a PASS handed
+        #     to _surface with a NON-LIST provenance never char-splits into hollow single-character evidence;
+        #     it becomes empty evidence and downgrades to EXACTLY UNVERIFIABLE with the adapter-error kind.
+        #     Reverting `evidence` to list(provenance or []) splits the string into characters that satisfy
+        #     the non-empty-string-list check, returning a false PASS; changing the downgrade STATUS (to FAIL)
+        #     or KIND (to required-unavailable) is caught by asserting both exactly, not merely non-PASS.
         r = _surface("np", "record-file", True, True, True, PASS, KIND_AVAILABLE, "d", "x:1", "t")
-        if r["status"] == PASS:
-            failures.append("_surface returned a false PASS from a char-split non-list provenance")
+        if r["status"] != UNVERIFIABLE or r["kind"] != KIND_ADAPTER_ERROR:
+            failures.append("_surface malformed-PASS downgrade expected UNVERIFIABLE/adapter-error, got "
+                            "{}/{}".format(r["status"], r["kind"]))
+        if any(not (isinstance(e, str) and e) for e in r["evidence"]):
+            failures.append("_surface downgrade carried malformed evidence: {!r}".format(r["evidence"]))
 
         # 28. DISCRIMINATING (canonically-required surface not downgradable): a config presenting the
         #     canonically-REQUIRED backlog as enabled=false, or present-but-empty, must resolve
@@ -978,17 +1020,68 @@ def _self_test():
             _git("commit", "-q", "-m", "init")
             cur = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(gitrepo),
                                  capture_output=True, text=True, env=genv).stdout.strip()
+            head_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(gitrepo),
+                                      capture_output=True, text=True, env=genv).stdout.strip()
+            _git("tag", "v-selftest")
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": cur}}}, gitrepo)
             if r["status"] != PASS:
                 failures.append("git surface on an existing protected branch expected PASS, got {} ({})".format(
                     r["status"], r["detail"]))
+            # 31a. DISCRIMINATING (finding-6a: git PASS carries the protected-BRANCH ref as located
+            #      evidence): the successful evidence includes refs/heads/<branch>@<sha>. Removing the
+            #      branch ref from the returned evidence (carrying only the repo top) fails this case.
+            if not any(e.startswith("refs/heads/{}@".format(cur)) for e in r["evidence"]):
+                failures.append("git PASS evidence expected to carry the protected-branch ref, got "
+                                "{!r}".format(r["evidence"]))
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": "no-such-branch-xyz"}}}, gitrepo)
             if r["status"] != UNVERIFIABLE:
                 failures.append("git surface on a nonexistent protected branch expected UNVERIFIABLE, got "
                                 "{} (a PASS must be backed by the branch existing, not the repo root)".format(
                                     r["status"]))
+            # 31b. DISCRIMINATING (finding-3: protected-branch must be a BRANCH ref, not any commit-ish): a
+            #      raw SHA, a tag name, and HEAD each resolve to a commit but are NOT branch refs, so each is
+            #      UNVERIFIABLE. Reverting the check to `rev-parse <value>^{commit}` accepts every one of
+            #      them and reads PASS, failing these cases.
+            for label, value in (("raw sha", head_sha), ("tag", "v-selftest"), ("HEAD", "HEAD")):
+                r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                             "enabled": True, "protected-branch": value}}}, gitrepo)
+                if r["status"] != UNVERIFIABLE:
+                    failures.append("git protected-branch given a {} ({!r}) that is not a branch expected "
+                                    "UNVERIFIABLE, got {}".format(label, value, r["status"]))
+            # 31c. DISCRIMINATING (finding-4: git evidence bound to root, ambient GIT_* scrubbed): with root a
+            #      NON-repo directory and ambient GIT_DIR/GIT_WORK_TREE redirected at the real repo, the scrub
+            #      binds the probe to root (a non-repo) -> UNVERIFIABLE. Reverting the env scrub lets git
+            #      honour the redirect and read PASS for the unrelated repo, failing this case.
+            nonrepo = tmp / "gitnonrepo"
+            nonrepo.mkdir()
+            saved_env = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_WORK_TREE")}
+            os.environ["GIT_DIR"] = str(gitrepo / ".git")
+            os.environ["GIT_WORK_TREE"] = str(nonrepo)
+            try:
+                r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                             "enabled": True, "protected-branch": cur}}}, nonrepo)
+                if r["status"] != UNVERIFIABLE:
+                    failures.append("git surface on a non-repo root with an ambient GIT_* redirect expected "
+                                    "UNVERIFIABLE, got {} (evidence must be bound to root, not an ambient "
+                                    "GIT_DIR)".format(r["status"]))
+            finally:
+                for k, v in saved_env.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+            # 31d. DISCRIMINATING (finding-4: toplevel realpath-equal to root): root a SUBDIRECTORY of the
+            #      repo resolves a toplevel that differs from root -> UNVERIFIABLE. Removing the realpath
+            #      equality check lets the subdirectory read PASS on the ancestor repo, failing this case.
+            subdir = gitrepo / "sub"
+            subdir.mkdir()
+            r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
+                         "protected-branch": cur}}}, subdir)
+            if r["status"] != UNVERIFIABLE:
+                failures.append("git surface on a subdirectory root (toplevel != root) expected "
+                                "UNVERIFIABLE, got {}".format(r["status"]))
 
         # 32. DISCRIMINATING (present-but-empty pinned env var): AIQT_ASSURANCE_CONFIG set to "" is a loud
         #     ConfigError (a pinned source that names nothing), never a silent fall-through to the nearest
@@ -1083,6 +1176,83 @@ def _self_test():
             failures.append("load_config accepted a non-boolean 'required' flag")
         except ConfigError:
             pass
+
+        # 40. DISCRIMINATING (finding-1: canonical adapter-type substitution rejected): a config that binds a
+        #     canonically-recognized surface to a DIFFERENT adapter than its canonical one resolves
+        #     UNVERIFIABLE/adapter-mismatch, never PASS, so a required surface cannot be rebound to the
+        #     record-file adapter aimed at any present file and read PASS. Removing the adapter-type guard in
+        #     discover() lets the substituted adapter probe and PASS, failing these cases. Applies to every
+        #     canonical surface (backlog/gate_roster/git), not just backlog.
+        (tmp / "TODO.md").write_text("- [ ] x1 task\n", encoding="utf-8")  # a present file the decoy points at
+        subst = (("backlog", "record-file"), ("gate_roster", "record-file"), ("git", "record-file"))
+        for name, decoy in subst:
+            r = discover(name, {"surfaces": {name: {"adapter": decoy, "required": True, "enabled": True,
+                         "path": "TODO.md", "dir": "tools", "pattern": "check_*.py"}}}, tmp)
+            if r["status"] != UNVERIFIABLE or r["kind"] != KIND_ADAPTER_MISMATCH:
+                failures.append("canonical surface '{}' rebound to adapter {!r} expected UNVERIFIABLE/"
+                                "adapter-mismatch, got {}/{}".format(name, decoy, r["status"], r["kind"]))
+        # The canonical adapter for a canonical surface is accepted (no false mismatch): backlog on
+        # gfm-task-list with the present TODO.md is a real PASS.
+        r = discover("backlog", {"surfaces": {"backlog": {"adapter": "gfm-task-list", "required": True,
+                     "enabled": True, "path": "TODO.md"}}}, tmp)
+        if r["status"] != PASS:
+            failures.append("backlog on its canonical adapter expected PASS, got {}/{}".format(
+                r["status"], r["kind"]))
+
+        # 41. DISCRIMINATING (finding-2: non-PASS malformed evidence rejected uniformly): evidence elements
+        #     must be NON-EMPTY strings for EVERY status, not only PASS. make_result(FAIL, evidence=[7]) and
+        #     emit of a FAIL with evidence=[""] are each refused, and _surface handed [7] for an UNVERIFIABLE
+        #     yields clean (no malformed-element) evidence. Reverting the uniform element check (keeping the
+        #     non-empty-string test only under `if status == PASS`) lets a FAIL/UNVERIFIABLE carry [7] or [""].
+        try:
+            make_result("x", FAIL, "s", kind=KIND_AVAILABLE, evidence=[7])
+            failures.append("make_result accepted a FAIL with a non-string evidence element [7]")
+        except ValueError:
+            pass
+        try:
+            emit({"schema": RESULT_SCHEMA, "audit": "x", "status": FAIL, "summary": "s", "surface": None,
+                  "required": True, "kind": KIND_AVAILABLE, "evidence": [""]})
+            failures.append("emit accepted a FAIL with an empty-string evidence element")
+        except ValueError:
+            pass
+        r = _surface("me", "record-file", True, True, False, UNVERIFIABLE, KIND_REQUIRED_UNAVAILABLE,
+                     "d", [7], "t")
+        if any(not (isinstance(e, str) and e) for e in r["evidence"]):
+            failures.append("_surface returned an UNVERIFIABLE with malformed evidence: {!r}".format(r["evidence"]))
+
+        # 42. DISCRIMINATING (finding-6d: record-file 'path' is type-checked): a record-file surface with a
+        #     LIST-valued 'path' is a loud ConfigError, so the record-file adapter's path field cannot load
+        #     wrong-typed and then read PASS. Removing "record-file": ("path",) from ADAPTER_STR_FIELDS lets
+        #     the list-valued path load, failing this case.
+        rf = tmp / "recordfile-path.toml"
+        rf.write_text("schema-version = 1\n[surfaces.register]\nadapter='record-file'\npath=['a','b']\n",
+                      encoding="utf-8")
+        try:
+            load_config(rf)
+            failures.append("load_config accepted a list-valued record-file 'path' field")
+        except ConfigError:
+            pass
+
+        # 43. DISCRIMINATING (finding-5: pinned config resolves BEFORE --self-test dispatch): a subprocess
+        #     given `--config <absent> --self-test`, or `AIQT_ASSURANCE_CONFIG="" --self-test`, exits 2 (the
+        #     loud pinned-source resolution), never 0. Moving the resolve_config call back AFTER the
+        #     --self-test dispatch lets the self-test run and exit 0 on a config the caller pinned, failing
+        #     these. Guarded by the recursion sentinel so a regressed build cannot spawn nested children.
+        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+            selfpath = str(Path(__file__).resolve())
+            childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath,
+                                   "--config", str(tmp / "no-such-config.toml"), "--self-test"],
+                                  capture_output=True, text=True, env=childenv)
+            if proc.returncode != 2:
+                failures.append("pinned absent --config did not exit 2 under --self-test (pinned resolution "
+                                "must precede the self-test dispatch), got {}".format(proc.returncode))
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test"],
+                                  capture_output=True, text=True,
+                                  env=dict(childenv, AIQT_ASSURANCE_CONFIG=""))
+            if proc.returncode != 2:
+                failures.append("present-but-empty AIQT_ASSURANCE_CONFIG did not exit 2 under --self-test, "
+                                "got {}".format(proc.returncode))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1097,26 +1267,35 @@ def _self_test():
           "the gate roster counts only readable regular files (an unreadable-only roster is UNVERIFIABLE); "
           "optional-disabled is SKIP (never malformed-required); a disabled required surface is a distinct "
           "malformed-UNVERIFIABLE, and a config can NEVER downgrade a canonically-required surface (an "
-          "enabled=false or present-but-empty backlog) to an optional SKIP; the git surface returns PASS "
-          "only when the configured protected branch actually resolves to a commit (real located evidence), "
-          "UNVERIFIABLE when it does not; an unknown adapter, an adapter that RAISES, and an adapter whose "
+          "enabled=false or present-but-empty backlog) to an optional SKIP, nor REBIND a canonically-"
+          "recognized surface (backlog/gate_roster/git) to a different adapter type (UNVERIFIABLE/adapter-"
+          "mismatch, never a PASS on the substituted adapter); the git surface returns PASS only when the "
+          "configured protected branch exists as an actual BRANCH ref (refs/heads/<branch>), carrying that "
+          "branch ref as located evidence, UNVERIFIABLE for a raw sha, tag, HEAD, or other non-branch value, "
+          "and the git probe is bound to root (ambient GIT_* scrubbed, toplevel realpath-equal to root) so "
+          "an ambient GIT_DIR cannot bind a non-repo root to another repository; an unknown adapter, an "
+          "adapter that RAISES, and an adapter whose "
           "RETURN is malformed (a truthy-string available, a non-list provenance, or a wrong-arity tuple) "
           "are each UNVERIFIABLE (never a crash or a pass), and an available return with empty located "
           "evidence is fail-safe-downgraded at the discover boundary rather than handed back as a false "
           "PASS; make_result rejects a non-list (bare-string) evidence at construction rather than "
           "char-splitting it, and _surface downgrades a char-split non-list provenance and a wrong-kind "
           "PASS instead of returning a false green; the result contract rejects an out-of-set status, a "
-          "non-list evidence, and an inconsistent result (a PASS with an unavailable kind or without a "
-          "non-empty list of non-empty evidence strings, or an UNVERIFIABLE/SKIP wearing the available "
-          "kind) while ACCEPTING a legitimate FAIL on an available surface; load_config rejects a "
+          "non-list evidence, evidence elements that are not non-empty strings for EVERY status uniformly "
+          "(a FAIL or UNVERIFIABLE carrying [7] or [\"\"] is refused, not only a PASS), and an inconsistent "
+          "result (a PASS with an unavailable kind or without a non-empty list of non-empty evidence "
+          "strings, or an UNVERIFIABLE/SKIP wearing the available kind) while ACCEPTING a legitimate FAIL "
+          "on an available surface; load_config rejects a "
           "wrong-typed surface schema (a non-table surface entry, a non-string adapter, a non-boolean "
           "required/enabled flag, or a wrong-typed adapter-specific field such as a list-valued "
           "protected-branch or a table-valued remote-landing-provider) and a missing, wrong-typed, boolean, "
           "or unknown schema-version (a present integer drawn from the supported set); config resolution is "
           "fail-loud on a pinned config and on a malformed --config operand (absent, empty, =-joined-empty, "
           "a next-flag, or a duplicate), with a present-but-empty AIQT_ASSURANCE_CONFIG treated as a loud "
-          "ConfigError on the SAME pinned-source path as --config, and argument validation preceding the "
-          "--self-test dispatch; the config root is derived consistently so an explicit .aiqt config "
+          "ConfigError on the SAME pinned-source path as --config, and both argument validation and the "
+          "loud pinned-source resolution preceding the --self-test dispatch (a pinned-but-absent/empty "
+          "config exits 2 even under --self-test); the config root is derived consistently so an explicit "
+          ".aiqt config "
           "resolves surfaces at the tree root; and discover_all enumerates the full expected set so a "
           "required surface omitted from config resolves UNVERIFIABLE.")
     return 0
@@ -1132,14 +1311,19 @@ def main():
     except ValueError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if "--self-test" in argv:
-        return _self_test()
-    # Default: resolve the config for the current tree and print the surface digest (a read-only view).
+    # The loud PINNED-source resolution runs BEFORE the --self-test dispatch, so a pinned-but-absent or
+    # pinned-but-empty config (an explicit --config PATH that does not exist, or AIQT_ASSURANCE_CONFIG set
+    # to "") is a loud exit 2 even under --self-test, rather than the self-test silently running and exiting
+    # 0 on a config the caller pinned. resolve_config raises ConfigError on such a pinned source; with no
+    # pinned source it walks to the nearest/portable config (never an error).
     try:
         cfg, root, prov = resolve_config(explicit=explicit)
     except ConfigError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
+    if "--self-test" in argv:
+        return _self_test()
+    # Default: print the surface digest for the resolved config (a read-only view).
     surfaces = discover_all(cfg, root)
     print("config: {}".format(prov))
     print(render_digest(surfaces))

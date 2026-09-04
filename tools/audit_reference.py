@@ -60,13 +60,18 @@ def main():
     except ValueError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if "--self-test" in argv:
-        return _self_test()
+    # The loud PINNED-source resolution runs BEFORE the --self-test dispatch, so a pinned-but-absent or
+    # pinned-but-empty config (an explicit --config PATH that does not exist, or AIQT_ASSURANCE_CONFIG set
+    # to "") is a loud exit 2 even under --self-test, rather than a silent self-test that exits 0 on a
+    # config the caller pinned. resolve_config raises on such a pinned source; with none it walks to the
+    # nearest/portable config (never an error).
     try:
         cfg, root, prov = _resolve(explicit)
     except qa.ConfigError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
+    if "--self-test" in argv:
+        return _self_test()
 
     if "--digest" in argv:
         # ADVISORY report-only digest: the surface board plus this audit's verdict line, never gating.
@@ -129,12 +134,30 @@ def _self_test():
         import os
         import subprocess
         if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
-            proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+            selfpath = str(Path(__file__).resolve())
+            childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath,
                                    "--config", "--self-test"], capture_output=True, text=True,
-                                  env=dict(os.environ, AIQT_QA_SELFTEST_CHILD="1"))
+                                  env=childenv)
             if proc.returncode != 2:
                 failures.append("main did not validate --config before dispatching --self-test "
                                 "(expected loud exit 2, got {})".format(proc.returncode))
+            # 5. DISCRIMINATING (finding-5: pinned config resolves BEFORE --self-test dispatch): a subprocess
+            #    given `--config <absent> --self-test`, or `AIQT_ASSURANCE_CONFIG="" --self-test`, exits 2
+            #    (the loud pinned-source resolution), never 0. Moving the resolve back AFTER the --self-test
+            #    dispatch lets the self-test run and exit 0 on a config the caller pinned, failing these.
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath,
+                                   "--config", str(tmp / "no-such-config.toml"), "--self-test"],
+                                  capture_output=True, text=True, env=childenv)
+            if proc.returncode != 2:
+                failures.append("pinned absent --config did not exit 2 under --self-test (pinned resolution "
+                                "must precede the self-test dispatch), got {}".format(proc.returncode))
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test"],
+                                  capture_output=True, text=True,
+                                  env=dict(childenv, AIQT_ASSURANCE_CONFIG=""))
+            if proc.returncode != 2:
+                failures.append("present-but-empty AIQT_ASSURANCE_CONFIG did not exit 2 under --self-test, "
+                                "got {}".format(proc.returncode))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -144,8 +167,10 @@ def _self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: the reference audit returns PASS end to end on a present gate roster (with "
-          "located evidence), UNVERIFIABLE on an absent one (missing evidence never reads as PASS), and "
-          "emits valid result-contract JSON.")
+          "located evidence), UNVERIFIABLE on an absent one (missing evidence never reads as PASS), "
+          "emits valid result-contract JSON, and runs both --config operand validation and the loud "
+          "pinned-source resolution before the --self-test dispatch (a malformed operand or a "
+          "pinned-but-absent/empty config exits 2 even under --self-test).")
     return 0
 
 
