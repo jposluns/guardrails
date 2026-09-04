@@ -68,7 +68,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 15
 end-line = 17
 canonical-text = "A completion-class claim over a set, that all of it is handled, that none remains, that every item is\ncovered, or that the set is exhausted, is made only by enumerating that set from its authoritative index and\nshowing the enumeration, never from an impression of having covered it."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "setcmp.2"
@@ -77,7 +77,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 15
 end-line = 17
 canonical-text = "A completion-class claim over a set, that all of it is handled, that none remains, that every item is\ncovered, or that the set is exhausted, is made only by enumerating that set from its authoritative index and\nshowing the enumeration, never from an impression of having covered it."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "setcmp.3"
@@ -86,7 +86,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 17
 end-line = 20
 canonical-text = "The authoritative index is the\nsource that defines the set's membership, such as a registry, a manifest, a directory listing, or a backlog;\na count or a work-list the assistant holds in its own context is not that index, and is reconciled against it\nbefore it can support a claim about the whole set."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "setcmp.4"
@@ -95,7 +95,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 22
 end-line = 24
 canonical-text = "A claim that licenses less work, that nothing remains, or that an item may stop, defer, wind down, or close,\nclears a higher evidence bar than a claim that licenses more, because an unfounded stop conceals work that is\nstill owed while an unfounded continue only spends effort."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "setcmp.5"
@@ -104,7 +104,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 24
 end-line = 25
 canonical-text = "Under partial or missing evidence the default is\nto continue rather than to declare the set complete."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "setcmp.6"
@@ -113,7 +113,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 25
 end-line = 27
 canonical-text = "When such a claim rests on the remaining items being\nunable to proceed, the enumeration records, for each remaining item, the observed condition that blocks it,\nso the claim cannot rest on an unshown assertion that work is blocked."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "corrob.1"
@@ -4565,10 +4565,10 @@ source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab7
 clause-id = "setcmp.7"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 38
-end-line = 39
+start-line = 39
+end-line = 40
 canonical-text = "Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a\ncompletion-class claim over the backlog, and it carries the same enumeration burden."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
 
 [[clause]]
 clause-id = "trkasy.5"
@@ -4764,6 +4764,6 @@ clause-id = "setcmp.8"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 27
-end-line = 30
-canonical-text = "The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked."
-source-digest = "ba3f21d9d3ff2b7af7be3f93d1c6bc99d681da51dbd6be069fc7c12ae577c329"
+end-line = 31
+canonical-text = "The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path remains open."
+source-digest = "84d7868d1ff7e37c8bc2604ef2b3ac6cf9ced8e9f9adbc09df351c540b52b4ec"
