@@ -54,11 +54,11 @@ def main():
     argv = sys.argv[1:]
     if "--self-test" in argv:
         return _self_test()
-    explicit = None
-    if "--config" in argv:
-        i = argv.index("--config")
-        if i + 1 < len(argv):
-            explicit = argv[i + 1]
+    try:
+        explicit = qa.config_arg(argv)  # --config with no operand is a loud error, never a silent skip
+    except ValueError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
     try:
         cfg, root, prov = _resolve(explicit)
     except qa.ConfigError as exc:

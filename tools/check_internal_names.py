@@ -18,8 +18,17 @@ SCOPE, deliberately narrow and explicit. This gate scans ONLY the QA-suite shipp
 tree: the existing pack legitimately carries guardrail-decision ids in its hooks and a dogfood-adopter name
 in its site and docs, so a whole-tree provenance-id scan would be a wall of false positives. The scope is
 the QA-suite deliverables listed in SCOPE_RELPATHS (files scanned directly, directories walked fail-closed);
-absent future surfaces are skipped, an unreadable present one fails closed. A line carrying an
-`internal-allow` marker is exempt from the STRUCTURAL layer (the same escape hatch the leak gate offers).
+absent future surfaces are skipped, a present one that cannot be read fails closed (an OSError is exit 2, a
+non-UTF-8/undecodable file is a fail-closed unscannable-surface finding). A line carrying an `internal-allow`
+marker is exempt from the STRUCTURAL layer (the same escape hatch the leak gate offers).
+
+DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
+surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
+by omission. Mixed-content metadata files that legitimately carry existing provenance tokens (for example
+.aiqt/core/gates/manifest.toml and .aiqt/core/ownership.toml) are DELIBERATELY OUT OF SCOPE: scanning them
+would be a wall of false positives on legitimate ids, so their QA-suite-relevant content is hand-verified
+rather than machine-scanned here. Adding either class of file to this scope is a deliberate, reviewed edit,
+not an automatic one.
 
 Exit 0 clean, 1 on any finding or a malformed hashes file, 2 on a read error (fail-closed). `--self-test`
 proves the gate FAILS on a seeded internal name (a provenance id, a host path, and a hashed codename) and
@@ -135,13 +144,17 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
     findings = []
     for path in _iter_scope(root, scope_relpaths):
         try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue  # binary / non-utf8: a text scanner skips it
-        try:
             rel = path.relative_to(root).as_posix()
         except ValueError:
             rel = str(path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # A non-UTF-8 in-scope surface is UNSCANNABLE, not clean: an internal name held in bytes this
+            # text scanner cannot decode would otherwise evade silently. Fail closed with a finding (exit
+            # 1), the same fail-closed posture as an unreadable present file, never a silent skip.
+            findings.append("{}: unscannable in-scope surface (not valid UTF-8); fail-closed".format(rel))
+            continue
         for number, label in scan_text(text, hashes, maxn):
             findings.append("{}:{}: {}".format(rel, number, label) if number is not None
                             else "{}: {}".format(rel, label))
@@ -203,8 +216,10 @@ def _self_test():
             failures.append("clean generic content expected no findings, got {} {}".format(state, f))
 
         # 2. DISCRIMINATING: a seeded provenance id is caught. Removing the provenance SHAPE patterns
-        #    makes this pass (no finding), failing the case.
-        state, f = run("This references GD-127 in prose.\n")
+        #    makes this pass (no finding), failing the case. The token is a SYNTHETIC fixture: GD-000 has
+        #    the guardrail-decision shape the detector matches, but the 000 ordinal is not a real project
+        #    id (ordinals are 1-based), so no live internal provenance id sits in this shipped source.
+        state, f = run("This references GD-000 in prose.\n")
         if state != "ok" or not any("guardrail-decision" in x for x in f):
             failures.append("seeded provenance id expected a finding, got {} {}".format(state, f))
 
@@ -223,8 +238,8 @@ def _self_test():
         if state != "ok" or not any("hash match" in x for x in f):
             failures.append("seeded hashed codename expected a hash-match finding, got {} {}".format(state, f))
 
-        # 5. An `internal-allow` line is exempt from the STRUCTURAL layer.
-        state, f = run("GD-127 kept on purpose  # internal-allow\n")
+        # 5. An `internal-allow` line is exempt from the STRUCTURAL layer (synthetic GD-000 fixture id).
+        state, f = run("GD-000 kept on purpose  # internal-allow\n")
         if state != "ok" or f:
             failures.append("internal-allow line expected exemption, got {} {}".format(state, f))
 
@@ -237,6 +252,16 @@ def _self_test():
         # 7. term_hash normalization agrees with check_leaks (so a codename matches across separators).
         if check_leaks.term_hash("Foo Bar") != hashlib.sha256(b"foo-bar").hexdigest():
             failures.append("term_hash normalization drifted from the leak gate's")
+
+        # 8. DISCRIMINATING: a non-UTF-8 in-scope surface FAILS CLOSED (an unscannable-surface finding),
+        #    never a silent skip that would let an internal name hide in undecodable bytes. Removing the
+        #    fail-closed branch makes this pass (no finding), failing the case.
+        write_hashes([])
+        (toolsdir / "subject.md").write_bytes(b"\xff\xfe internal name in undecodable bytes \xff\n")
+        hashes, maxn, bad = load_hashes(tmp)
+        f = scan_scope(tmp, scope, hashes, maxn)
+        if not any("unscannable" in x for x in f):
+            failures.append("non-UTF-8 in-scope surface expected a fail-closed finding, got {}".format(f))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -247,7 +272,8 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: clean generic content passes; a seeded provenance id, a fixed host path, and a "
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
-          "the structural layer; a malformed hashes file is reported, never a silent empty denylist.")
+          "the structural layer; a malformed hashes file is reported, never a silent empty denylist; and a "
+          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip.")
     return 0
 
 
