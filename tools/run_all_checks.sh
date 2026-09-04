@@ -127,7 +127,8 @@ run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
-run_gate "orch-behaviour-selftest" python3 -I -B tools/selftest_orch_hooks.py
+run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
+run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

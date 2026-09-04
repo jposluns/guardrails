@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """Behavioural self-test for the GD-112 orchestrator-integrity handlers in
 .aiqt/core/hooks/scripts/aiqt_hooks.py (the section-e acceptance vectors; authored BEFORE the core,
-test-first). Hermetic: every case runs against throwaway fixtures under a temp dir (its own git repo,
-its own registry, its own enumerator stub, its own state dir), removed in a finally; nothing on the
-host is read or written. Verdicts are judged on the STRUCTURED result each handler returns (the
-(code, stdout_obj, stderr) tuple), never by grepping diagnostic prose.
+test-first). Filesystem-write hermetic in its fixtures: every case runs against throwaway fixtures
+under a per-case temp dir (its own git repo, its own registry, its own enumerator stub, its own
+state dir), removed in a finally, and the fixtures write nowhere else. A DIRECT invocation is NOT
+read-hermetic: the fixtures' git calls still read the ambient per-user git configuration (the
+HOME/XDG surfaces), and the run's own interpreter honours the ambient PYTHON* environment; running
+the suite through tools/check_selftest_execution.py neutralizes both (HOME and XDG_CONFIG_HOME
+pinned, GIT_* and PYTHON* dropped, the child launched -I -B), and the runner's own direct-invocation
+git-config hermeticity is tracked separately (F-249). Verdicts are judged on the STRUCTURED result
+each handler returns (the (code, stdout_obj, stderr) tuple), never by grepping diagnostic prose.
 
-  selftest_orch_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
+  selftest_orch_hooks.py                              exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL
+  selftest_orch_hooks.py --execution-report ABS_PATH  additionally write the executed check ids as a
+                                                      JSON report to ABS_PATH, on pass AND fail
+
+Exit 1 covers assertion failures and an execution-set mismatch against tools/selftest_checks.toml (the
+in-run self-guard; tools/check_selftest_execution.py reconciles the report independently). Exit 2 is a
+harness/setup error: bad argv, a relative report path, a duplicate check id, a failed report write, or
+an unreadable, malformed, or suite-missing expectation manifest.
 """
 import json
 import os
@@ -16,6 +28,10 @@ import tempfile
 import shutil
 import datetime
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    sys.exit("error: selftest_orch_hooks.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
@@ -24,11 +40,45 @@ sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 
 FAILURES = []
+EXECUTED = []        # ordered check ids actually reached this run
+_EXECUTED_SET = set()
+SUITE_ID = "orch-behaviour-selftest"
+CHECKS_MANIFEST = repo_root() / "tools" / "selftest_checks.toml"
 
 
 def check(name, got, want):
+    if name in _EXECUTED_SET:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    _EXECUTED_SET.add(name)
+    EXECUTED.append(name)
     if got != want:
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+
+
+def _expected_check_ids():
+    """The registered execution set from the hand-authored expectation manifest, or None on an
+    unreadable, malformed, or suite-missing manifest (the caller fails closed, exit 2). Light
+    validation only; the strict schema gate lives in tools/check_selftest_execution.py."""
+    try:
+        with open(CHECKS_MANIFEST, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
+              file=sys.stderr)
+        return None
+    suites = data.get("suite")
+    for row in (suites if isinstance(suites, list) else []):
+        if isinstance(row, dict) and row.get("id") == SUITE_ID:
+            ids = row.get("expected-check-ids")
+            if isinstance(ids, list) and ids and all(isinstance(i, str) and i for i in ids):
+                return set(ids)
+            print("SELF-TEST HARNESS ERROR: malformed expected-check-ids for suite {!r} in {}".format(
+                SUITE_ID, CHECKS_MANIFEST), file=sys.stderr)
+            return None
+    print("SELF-TEST HARNESS ERROR: no suite {!r} registered in {}".format(SUITE_ID, CHECKS_MANIFEST),
+          file=sys.stderr)
+    return None
 
 
 def _verdict(result):
@@ -83,8 +133,11 @@ class Fixture:
         self.lease.write_text("holder: selftest\n", encoding="utf-8")
         registry = {
             "version": 1,
-            "enumerator": {"argv": [sys.executable, str(stub), str(self.enum_payload),
-                                    str(self.enum_exit)], "timeout": 30},
+            # -I -B on every interpreter grandchild: a direct developer run must not honour an
+            # ambient PYTHONPATH/sitecustomize (the gate launch additionally drops PYTHON* from
+            # the child environment; this is the defence-in-depth layer for a bare invocation).
+            "enumerator": {"argv": [sys.executable, "-I", "-B", str(stub),
+                                    str(self.enum_payload), str(self.enum_exit)], "timeout": 30},
             "record": {"findings": str(self.findings),
                        "pending_decisions": str(self.pending),
                        "handoff": str(self.handoff)},
@@ -152,7 +205,7 @@ def now_iso(hours_ago=0):
     return t.isoformat()
 
 
-def main():
+def main(report_path=None):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-selftest-"))
     except OSError as exc:
@@ -247,15 +300,20 @@ def main():
         # R2/R3: malformed AEI provenance is a cannot-evaluate (FIX 1 DENIES the stop; ignorance
         # refuses the wind-down), never a clean backlog
         nowv = now_iso(0)
-        for label, env in [
-                ("bool-version", '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
-                ("float-version", '{"version": 1.0, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
-                ("unparseable-ts", '{"version": 1, "generated_at_utc": "banana", "source": {"locator":"f"}, "items": []}'),
-                ("future-ts", '{"version": 1, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % now_iso(-48)),
-                ("no-locator", '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
+        for check_id, env in [
+                ("stop/malformed-provenance-bool-version-denies",
+                 '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
+                ("stop/malformed-provenance-float-version-denies",
+                 '{"version": 1.0, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
+                ("stop/malformed-provenance-unparseable-ts-denies",
+                 '{"version": 1, "generated_at_utc": "banana", "source": {"locator":"f"}, "items": []}'),
+                ("stop/malformed-provenance-future-ts-denies",
+                 '{"version": 1, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % now_iso(-48)),
+                ("stop/malformed-provenance-no-locator-denies",
+                 '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
             f.enum_payload.write_text(env, encoding="utf-8")
             f.set_turn_state({})
-            check("stop/malformed-provenance-%s-denies" % label, _verdict(stop()), "block2")
+            check(check_id, _verdict(stop()), "block2")
         # a blank-evidence external blocker does not prove a block (R3-CX-M7)
         f.set_items([item("A-be", blocker={"kind": "external", "ref": "ci", "evidence": "   ",
                                            "observed_at_utc": now_iso(1)})])
@@ -496,17 +554,23 @@ def main():
         h = Fixture(tmp, "ask")
         ask = lambda: aiqt_hooks.orch_ask_guard(g_ask)
         # regression vectors imported from the live host hook's self-test
-        for mode_text, want in (("Operating-mode: overnight-unattended\n", "deny"),
-                                ("Operating-mode: unattended (overnight; ipad-origin)\n", "deny"),
-                                ("Operating-mode: daytime-unattended\n", "deny"),
-                                ("Operating-mode: attended-autonomous\n", "allow"),
-                                ("Operating-mode: fully-attended\n", "allow"),
-                                ("", "allow")):  # absent mode line fails open
+        for check_id, mode_text, want in (
+                ("ask/mode-overnight-unattended-denies",
+                 "Operating-mode: overnight-unattended\n", "deny"),
+                ("ask/mode-unattended-parenthetical-denies",
+                 "Operating-mode: unattended (overnight; ipad-origin)\n", "deny"),
+                ("ask/mode-daytime-unattended-denies",
+                 "Operating-mode: daytime-unattended\n", "deny"),
+                ("ask/mode-attended-autonomous-allows",
+                 "Operating-mode: attended-autonomous\n", "allow"),
+                ("ask/mode-fully-attended-allows",
+                 "Operating-mode: fully-attended\n", "allow"),
+                ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
-            check("ask/mode {!r}".format(mode_text.strip()), _verdict(ask()), want)
+            check(check_id, _verdict(ask()), want)
         # unreadable mode record fails open
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
@@ -641,11 +705,13 @@ def main():
         b = Fixture(tmp, "surfb")
         regpath = b.root / ".aiqt" / "orchestration.local.json"
         base_reg = json.loads(regpath.read_text(encoding="utf-8"))
-        for badver in (True, 1.0, "1", 2):
+        for check_id, badver in (("vB/registry-version-bool-true-bad", True),
+                                 ("vB/registry-version-float-one-bad", 1.0),
+                                 ("vB/registry-version-string-one-bad", "1"),
+                                 ("vB/registry-version-int-two-bad", 2)):
             base_reg["version"] = badver
             regpath.write_text(json.dumps(base_reg), encoding="utf-8")
-            check("vB/registry-version-{!r}".format(badver),
-                  aiqt_hooks._orch_registry(str(b.root))[0], "bad")
+            check(check_id, aiqt_hooks._orch_registry(str(b.root))[0], "bad")
         base_reg["version"] = 1
         regpath.write_text(json.dumps(base_reg), encoding="utf-8")
         check("vB/registry-version-ok", aiqt_hooks._orch_registry(str(b.root))[0], "ok")
@@ -953,7 +1019,8 @@ def main():
         regtool = str(repo_root() / "tools" / "orch_register.py")
 
         def mr_append(rid, check_ref):
-            subprocess.run([sys.executable, regtool, "append", "--register", str(mr_reg),
+            subprocess.run([sys.executable, "-I", "-B", regtool, "append",
+                            "--register", str(mr_reg),
                             "--id", rid, "--mistake", "premature wind-down claim",
                             "--evidence", "resume-audit finding", "--rule", "cntdef",
                             "--guardrail", "stop-guard hardening", "--klass", "systemic-lapse",
@@ -963,7 +1030,8 @@ def main():
         mr_append("MR-1", "seed.txt")
         check("lapse/klass-recorded",
               '"class": "systemic-lapse"' in mr_reg.read_text(encoding="utf-8"), True)
-        proj = subprocess.run([sys.executable, regtool, "project", "--register", str(mr_reg)],
+        proj = subprocess.run([sys.executable, "-I", "-B", regtool, "project",
+                               "--register", str(mr_reg)],
                               check=True, capture_output=True, text=True, timeout=30)
         lapse_items = json.loads(proj.stdout)["items"]
         # (a) a lapse row plus one actionable item: still DENY, no bypass of any kind
@@ -1276,12 +1344,42 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    if report_path is not None:
+        try:
+            with open(report_path, "w", encoding="utf-8") as handle:
+                json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
+                handle.write("\n")
+        except OSError as exc:
+            # A failed report write must not swallow the assertion diagnostics already collected:
+            # surface what the suite found first, then the harness error.
+            if FAILURES:
+                print("SELF-TEST FAIL:")
+                for f_ in FAILURES:
+                    print("  - " + f_)
+            print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
+                report_path, exc), file=sys.stderr)
+            return 2
+
+    # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
+    # executed set reconciles against the hand-authored expectation manifest even on a direct developer
+    # run. The report above is written FIRST, so it always reflects what actually executed.
+    expected_ids = _expected_check_ids()
+    if expected_ids is None:
+        return 2
+    for cid in sorted(expected_ids - _EXECUTED_SET):
+        FAILURES.append("execution-set/missing: {}".format(cid))
+    for cid in sorted(_EXECUTED_SET - expected_ids):
+        FAILURES.append("execution-set/extra: {}".format(cid))
+
     if FAILURES:
         print("SELF-TEST FAIL:")
         for f_ in FAILURES:
             print("  - " + f_)
         return 1
-    print("SELF-TEST PASS: the stop guard denies enumerated actionable work and unproven or stale "
+    print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
+          "tools/selftest_checks.toml".format(len(EXECUTED)))
+    print("Coverage narrative (human orientation, not evidence): the stop guard denies enumerated "
+          "actionable work and unproven or stale "
           "blockers, allows proven blockers, live tracked tasks, proposed-only backlogs, absent "
           "registry/lease scope, a genuinely operator-owned escape sentinel, and DENIES a BELOW-BOUND "
           "cannot-evaluate (ignorance refuses the wind-down; the operator escape OR the bounded loop-exit "
@@ -1305,5 +1403,17 @@ def main():
     return 0
 
 
+def _parse_argv(argv):
+    """No arguments (unchanged behaviour), or exactly --execution-report ABS_PATH. Anything else,
+    including a relative report path, is usage: exit 2."""
+    if not argv:
+        return None
+    if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
+        return argv[1]
+    print("usage: selftest_orch_hooks.py [--execution-report ABS_PATH] "
+          "(the report path must be absolute)", file=sys.stderr)
+    sys.exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(report_path=_parse_argv(sys.argv[1:])))
