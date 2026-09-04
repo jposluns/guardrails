@@ -3360,7 +3360,8 @@ def _push_protected(tokens, args, cwd):
     delete destination over the branch namespace, --mirror, a forced --all/--branches, the MATCHING
     refspec ':' (every branch existing on both ends; '+:' is its forced form), which is empty on BOTH
     sides so the per-operand loop has no destination to judge (round-3 skipped it - a silent allow),
-    and --prune with a wildcard or matching refspec, which DELETES every remote branch absent locally
+    and --prune with a wildcard or matching refspec or --all/--branches, which DELETES every remote
+    branch absent locally
     with NO force flag (witnessed deleting a remote master). Only the refspec-less force-push and a
     forced or deleted HEAD/@ consult the HEAD probe, and only when the repository view is provable
     (no non-cosmetic ambient GIT_* var, no command-local redirect, a usable session cwd); otherwise
@@ -3425,7 +3426,8 @@ def _push_protected(tokens, args, cwd):
     if prune and (wild_branch or matching or sweep_all):
         return ("ask", "combines --prune with a sweeping selector (a wildcard or matching refspec, "
                        "or --all/--branches), which DELETES every selected remote ref whose local "
-                       "counterpart is absent, with no force flag; the sweep can remove a protected "
+                       "counterpart is absent, without requiring a force flag; the sweep can remove a "
+                       "protected "
                        "branch and cause potentially irreversible loss, and this guard cannot prove "
                        "it misses the protected branches", None)
     if matching:
@@ -3466,7 +3468,11 @@ def _push_protected(tokens, args, cwd):
     # by a configured remote.<name>.push refspec, and a configured mirror mode (remote.<name>.mirror
     # =true in git config, or a command-local 'git -c remote.<name>.mirror=true push'), which
     # reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard reads
-    # no git config offline, so these are disclosed residuals, not modelled (GD-145).
+    # no git config offline, so these are disclosed residuals, not modelled (GD-145). A '--repo=<remote>'
+    # option does not displace the positional repository operand: git gives the command-line positional
+    # precedence (git-push(1)), so operands[0] stays the repository and the guard's slice is correct; a
+    # '--repo' form carrying a refspec-shaped positional is rejected by git as an unknown repository
+    # rather than executed as a push (verified, git 2.53).
     act, act_noun = (("deletes", "branch deletion") if delete and not force
                      else ("force-pushes", "force-push"))
     if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
@@ -3558,7 +3564,7 @@ def protected_line(data):
     unprovable; the deleted-HEAD deny is a harmless over-deny, git itself rejecting a HEAD delete as
     a nonexistent ref). A sweep this guard cannot prove misses the protected names ASKS: a wildcard
     force or delete refspec over the branch namespace, --mirror, a forced --all/--branches, the
-    matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec (round-4: prune
+    matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec or --all/--branches (round-4: prune
     deletes absent remote branches with no force flag). A force-push or delete to a non-protected
     ref and a plain non-force push ALLOW. ASK a git commit segment while HEAD is a protected branch
     (probed read-only under the ambient-GIT_* scrub; fail-to-ASK when HEAD cannot be resolved): the

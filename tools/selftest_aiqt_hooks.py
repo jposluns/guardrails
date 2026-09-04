@@ -2625,6 +2625,17 @@ def main():
         pexpect("(pl-y3c) --prune with the matching ':' refspec asks as a prune sweep (GD-145: judged "
                 "before the plain matching case so its deletion effect is named)",
                 "git push --prune origin :", "ask", cwd=plr)
+        # pl-y3c-reason (GD-145): the pruning matching-refspec's ASK reason must name the prune
+        # deletion, not the non-deleting matching explanation; this gates the prune-before-matching
+        # reorder (the verdict is ASK under both orders, so only a reason check fails without the fix).
+        _pm_data = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": "git push --prune origin :"}, "cwd": plr}
+        _pm_code, _pm_obj, _pm_err = plg(_pm_data)
+        _pm_reason = _pm_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
+            if isinstance(_pm_obj, dict) else ""
+        if "prune" not in _pm_reason:
+            failures.append("(pl-y3c-reason) --prune origin : ASK reason must name the prune deletion, "
+                            "got: {!r}".format(_pm_reason))
         pexpect("(pl-y4) a wrapped clustered '-dv' delete asks via the widened fallback",
                 "env git push -dv origin main", "ask", cwd=plr)
         pexpect("(pl-y5) a wrapped git commit asks via the fallback",
