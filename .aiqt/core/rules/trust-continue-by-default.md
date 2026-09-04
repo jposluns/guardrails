@@ -56,7 +56,7 @@ unavailable source, or an operator decision genuinely still pending in the decis
 Observability is necessary, not sufficient: a condition is terminal for an item only when, while
 the condition holds, the item can proceed by no sanctioned path, not by a reduced floor on the
 terms the governing verification discipline sets, not by advancing the build and holding only the
-step that needs the affected resource, and not by routing that step around the condition. A
+step that needs the affected resource, and not by an alternative sanctioned route for that step. A
 recoverable degradation of a resource the work would draw on, such as a tool, worker pool,
 verifier family, model, or service that is temporarily unavailable, limited, empty, or
 rate-limited, is externally observable yet not terminal while any such path keeps the item

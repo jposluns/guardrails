@@ -17,9 +17,9 @@ still owed while an unfounded continue only spends effort. Under partial or miss
 to continue rather than to declare the set complete. When such a claim rests on the remaining items being
 unable to proceed, the enumeration records, for each remaining item, the observed condition that blocks it,
 so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the
-item only when it leaves the item no step that can proceed while the condition holds; a condition that
-gates only a later step of the item, or that degrades a resource only that later step consumes, shows that
-step held, not the item blocked.
+item only when it leaves the item no step that can proceed while the condition holds, every sanctioned
+path completed or observed closed; a condition that gates only a later step of the item, or that degrades
+a resource only that later step consumes, shows that step held, not the item blocked.
 
 This governs completion-class quantifiers over an open or indexed set. A partial statement scoped to what was
 actually examined, such as that the files that were checked are clean, and an explicitly bounded claim over a
