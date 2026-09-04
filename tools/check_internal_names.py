@@ -21,7 +21,10 @@ guardrail-decision ids in its hooks and a dogfood-adopter name in its site and d
 provenance-id scan would be a wall of false positives. The scope is the surfaces listed in SCOPE_RELPATHS
 (files scanned directly, directories walked fail-closed);
 absent future surfaces are skipped, a present one that cannot be read fails closed (an OSError is exit 2, a
-non-UTF-8/undecodable file is a fail-closed unscannable-surface finding). A line carrying an `internal-allow`
+non-UTF-8/undecodable file is a fail-closed unscannable-surface finding). A BROKEN SYMLINK (a present dentry
+whose target is missing) is a present-but-unreadable input, not an absent one: it fails closed (re-raised as
+an OSError, exit 2) at both the hashes-file load and the scoped-file scan, never read as absent. A line
+carrying an `internal-allow`
 marker is exempt from the STRUCTURAL layer (the same escape hatch the leak gate offers).
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
@@ -83,6 +86,12 @@ def load_hashes(root):
     try:
         content = f.read_text(encoding="utf-8")
     except FileNotFoundError:
+        # A genuinely ABSENT denylist (no dentry at all) is intended: an empty set. But a BROKEN SYMLINK is
+        # a PRESENT dentry whose target is missing; read_text raises FileNotFoundError for it exactly as for
+        # an absent path, yet it must FAIL CLOSED (a present-but-unreadable input), never read as absent. So
+        # re-raise it to the fail-closed caller (an OSError -> exit 2) rather than treating it as an empty set.
+        if f.is_symlink():
+            raise
         content = None
     if content is not None:
         for number, line in enumerate(content.splitlines(), 1):
@@ -132,6 +141,11 @@ def _iter_scope(root, scope_relpaths):
         try:
             st = p.stat()
         except FileNotFoundError:
+            # An ABSENT scope entry is skipped, but a BROKEN SYMLINK is a present dentry whose target is
+            # missing: p.stat() (which follows the link) raises FileNotFoundError just as for an absent path,
+            # yet it must FAIL CLOSED, never be silently skipped. Re-raise it to the fail-closed caller.
+            if p.is_symlink():
+                raise
             continue
         if (st.st_mode & 0o170000) == 0o040000:  # directory
             for f in walk_files(p, SKIP_DIRS):
@@ -189,6 +203,7 @@ def main():
 # --- self-test --------------------------------------------------------------------------------------
 def _self_test():
     import hashlib
+    import os
     import shutil
     import tempfile
 
@@ -297,6 +312,53 @@ def _self_test():
             if not any(rel in x and "guardrail-decision" in x for x in live):
                 failures.append("live-scope member {} expected a provenance finding (scope membership "
                                 "untested if absent), got {}".format(rel, live))
+
+        # 11. DISCRIMINATING (finding-4: a BROKEN SYMLINK at a SCOPED path FAILS CLOSED, never reads as
+        #     absent): a scope entry that is a present dentry whose symlink target is missing must raise
+        #     (fail closed), not be silently skipped. Removing the is_symlink() re-raise in _iter_scope lets
+        #     p.stat()'s FileNotFoundError read as absent (a silent skip, no finding), failing this. Needs
+        #     os.symlink; asserted only where it is available and creating a dangling symlink succeeds.
+        write_hashes([])
+        broken = toolsdir / "broken.md"
+        made = False
+        try:
+            os.symlink(str(tmp / "no-such-scope-target"), str(broken))
+            made = True
+        except (OSError, NotImplementedError, AttributeError):
+            made = False
+        if made:
+            raised = False
+            try:
+                scan_scope(tmp, ("tools/broken.md",), set(), 3)
+            except OSError:
+                raised = True
+            if not raised:
+                failures.append("a broken symlink at a scoped path expected fail-closed (raise), got a silent skip")
+            broken.unlink()
+
+        # 12. DISCRIMINATING (finding-4: a BROKEN SYMLINK at the HASH-FILE path FAILS CLOSED): a broken
+        #     symlink at tools/internal-name-hashes.txt must raise from load_hashes (a present dentry with a
+        #     missing target), never read as an intended-absent empty denylist. Removing the is_symlink()
+        #     re-raise in load_hashes lets read_text's FileNotFoundError read as absent, failing this.
+        hf = toolsdir / "internal-name-hashes.txt"
+        if hf.exists() or hf.is_symlink():
+            hf.unlink()
+        made = False
+        try:
+            os.symlink(str(tmp / "no-such-hashfile-target"), str(hf))
+            made = True
+        except (OSError, NotImplementedError, AttributeError):
+            made = False
+        if made:
+            raised = False
+            try:
+                load_hashes(tmp)
+            except OSError:
+                raised = True
+            if not raised:
+                failures.append("a broken symlink at the hash-file path expected fail-closed (raise), got an "
+                                "absent (empty-denylist) read")
+            hf.unlink()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -308,7 +370,9 @@ def _self_test():
     print("SELF-TEST PASS: clean generic content passes; a seeded provenance id, a fixed host path, and a "
           "hashed codename each fail (removing a layer fails a case); an internal-allow line is exempt from "
           "the structural layer; a malformed hashes file is reported, never a silent empty denylist; a "
-          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a scoped file "
+          "non-UTF-8 in-scope surface fails closed as unscannable, never a silent skip; a broken symlink "
+          "(a present dentry with a missing target) at a scoped path and at the hash-file path each fails "
+          "closed (re-raised), never read as absent; a scoped file "
           "whose BASENAME is in SKIP_NAMES is skipped by basename (not by full relpath); and the shipped "
           "gate-runner and CI-workflow paths (tools/run_all_checks.sh, .github/workflows/quality.yml) are "
           "live SCOPE_RELPATHS members, so a synthetic provenance id planted in each is caught (removing "

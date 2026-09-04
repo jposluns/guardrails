@@ -34,6 +34,7 @@ returns UNVERIFIABLE (never PASS) on a missing REQUIRED surface, so deleting tha
 """
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -103,7 +104,9 @@ def make_result(audit, status, summary, surface=None, required=None, kind=None, 
 
 def validate_result(result):
     """Enforce the mutual consistency of a result-contract object so a caller cannot hand-build a false
-    green (for example status PASS with a required-unavailable kind and no evidence). `evidence` must be a
+    green (for example status PASS with a required-unavailable kind and no evidence). The result must
+    carry the exact RESULT_SCHEMA tag: a substituted or missing schema is a different contract and is
+    refused for every status, before any status/kind/evidence check. `evidence` must be a
     LIST; a PASS additionally requires it to be a NON-EMPTY list of NON-EMPTY strings, so an empty string or
     a non-list can never stand in for located evidence. A PASS must carry the available kind. The available
     kind is legitimate on a PASS and on a FAIL: a FAIL on an AVAILABLE surface is a real verdict (the
@@ -111,6 +114,11 @@ def validate_result(result):
     UNVERIFIABLE and SKIP, the missing-evidence and declared-no-op states, may not wear an 'available'
     label. Raises ValueError on an inconsistent result; returns it unchanged when consistent. is_pass alone
     checks only the status field, so this is the guard that keeps status, kind, and evidence from disagreeing."""
+    # The schema tag is part of the contract, not decoration: a result carrying a SUBSTITUTED schema
+    # ("aiqt-qa-result/999") or NO schema field is written to a different, unhonoured contract and is
+    # refused here for EVERY status, so a substitution or omission can never serialize as a clean line.
+    if result.get("schema") != RESULT_SCHEMA:
+        raise ValueError("a result's schema must be {!r}, got {!r}".format(RESULT_SCHEMA, result.get("schema")))
     status = result.get("status")
     if status not in STATUSES:
         raise ValueError("status {!r} is not one of {}".format(status, ", ".join(STATUSES)))
@@ -410,6 +418,16 @@ def _is_commit_id(value):
     return isinstance(value, str) and len(value) in (40, 64) and all(c in _COMMIT_ID_HEXDIGITS for c in value)
 
 
+# Resolve the git executable ONCE, via a trusted ABSOLUTE path where one is discoverable, to shrink the
+# window in which a PATH edit DURING the run could swap in a decoy `git`. Fall back to the bare name
+# "git" (PATH-resolved per call) when git is not on PATH at import, since a portable tool must not
+# hard-fail merely because git is only reachable through PATH. This is a mitigation, not a categorical
+# defence: a decoy already FIRST on PATH at process launch is exactly what shutil.which itself resolves,
+# so a PATH-controlled precise decoy `git` remains an OS/adopter-hardening residual, not something a
+# portable tool can fully close. The self-test overrides this module global to bind a decoy `git`.
+_GIT = shutil.which("git") or "git"
+
+
 def _adapter_git(spec, root):
     # SANITIZE the environment for every git subprocess: an ambient GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR
     # (or any other GIT_-prefixed redirect) is honoured by git OVER cwd, so an inherited GIT_DIR pointing at
@@ -417,7 +435,7 @@ def _adapter_git(spec, root):
     # (an allowlist stance, not an enumerated family) so the probe is bound to `root` alone, and run cwd=root.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(root),
+        proc = subprocess.run([_GIT, "rev-parse", "--show-toplevel"], cwd=str(root),
                               capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "git not runnable ({})".format(exc), [], None
@@ -443,7 +461,7 @@ def _adapter_git(spec, root):
     if not branch or branch.startswith("-"):
         return False, "protected-branch value '{}' is not a valid branch name".format(branch), [top], top
     try:
-        crf = subprocess.run(["git", "check-ref-format", "--branch", branch], cwd=str(root),
+        crf = subprocess.run([_GIT, "check-ref-format", "--branch", branch], cwd=str(root),
                              capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "git not runnable ({})".format(exc), [], None
@@ -455,25 +473,33 @@ def _adapter_git(spec, root):
     #      it. Carry refs/heads/<branch>@<sha> (the exact ref, not an arbitrary sha alias) as evidence.
     ref = "refs/heads/{}".format(branch)
     try:
-        bp = subprocess.run(["git", "show-ref", "--verify", "--", ref], cwd=str(root),
+        bp = subprocess.run([_GIT, "show-ref", "--verify", "--", ref], cwd=str(root),
                             capture_output=True, text=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "git not runnable ({})".format(exc), [], None
     if bp.returncode != 0:
         return False, "protected branch '{}' does not exist as a branch ref in the repository".format(branch), [top], top
+    #  (c) PARSE git's ACTUAL output and DERIVE the evidence from it, never a self-constructed string.
+    #      show-ref --verify prints exactly one line, "<sha> <ref>", for the matched ref. A git that
+    #      returns a MISMATCHED ref (a wrong-ref bug, or a decoy `git` that emits refs/heads/main for a
+    #      request of refs/heads/<branch>) or a malformed line must NOT read PASS on a ref the caller
+    #      merely asked for, so require both: the RETURNED ref field EXACTLY equals the requested
+    #      refs/heads/<branch>, AND the returned sha is a strict 40-hex (sha1) or 64-hex (sha256)
+    #      lowercase object id (a decoy's garbage line is not a resolved ref). Any mismatch or malformed
+    #      field is UNVERIFIABLE, never a PASS. The evidence carried is git's own returned ref and sha.
     fields = bp.stdout.split()
-    sha = fields[0] if fields else ""
-    #  (c) VALIDATE the resolved commit id. show-ref resolves an exact ref, but the git binary is trusted
-    #      from the ambient PATH, so a decoy `git` earlier on PATH could emit a non-sha line and, unchecked,
-    #      read PASS with garbage carried as the branch sha. A commit id that is not a strict 40-hex (sha1)
-    #      or 64-hex (sha256) lowercase object name is not a resolved ref: UNVERIFIABLE, never PASS.
+    if len(fields) != 2:
+        return False, "protected branch '{}' show-ref returned a malformed line".format(branch), [top], top
+    sha, returned_ref = fields[0], fields[1]
+    if returned_ref != ref:
+        return False, "protected branch '{}' resolved to a mismatched ref '{}'".format(branch, returned_ref), [top], top
     if not _is_commit_id(sha):
         return False, "protected branch '{}' resolved to a non-sha commit id".format(branch), [top], top
     provider = spec.get("remote-landing-provider", "")
     detail = "git root at repo toplevel, protected branch '{}' at {}".format(branch, sha[:12])
     if provider:
         detail += ", remote-landing provider '{}'".format(provider)
-    return True, detail, [top, "{}@{}".format(ref, sha)], top
+    return True, detail, [top, "{}@{}".format(returned_ref, sha)], top
 
 
 def _adapter_record_file(spec, root):
@@ -840,11 +866,13 @@ def _self_test():
         #     validate_result ACCEPTS it; an UNVERIFIABLE carrying the available kind is still REJECTED. A
         #     guard that rejects EVERY non-PASS available result (the round-1 regression) fails the accept half.
         try:
-            validate_result({"status": FAIL, "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"]})
+            validate_result({"schema": RESULT_SCHEMA, "status": FAIL, "kind": KIND_AVAILABLE,
+                             "evidence": ["tools/x.py:1"]})
         except ValueError as exc:
             failures.append("validate_result wrongly rejected a legitimate FAIL/available result: {}".format(exc))
         try:
-            validate_result({"status": UNVERIFIABLE, "kind": KIND_AVAILABLE, "evidence": []})
+            validate_result({"schema": RESULT_SCHEMA, "status": UNVERIFIABLE, "kind": KIND_AVAILABLE,
+                             "evidence": []})
             failures.append("validate_result accepted an UNVERIFIABLE carrying the available kind")
         except ValueError:
             pass
@@ -853,12 +881,13 @@ def _self_test():
         #     string) or a bare string (not a list) is rejected. Dropping the non-empty-strings or list-type
         #     checks lets a hollow PASS through, failing these.
         try:
-            validate_result({"status": PASS, "kind": KIND_AVAILABLE, "evidence": [""]})
+            validate_result({"schema": RESULT_SCHEMA, "status": PASS, "kind": KIND_AVAILABLE, "evidence": [""]})
             failures.append("validate_result accepted a PASS with an empty-string evidence entry")
         except ValueError:
             pass
         try:
-            validate_result({"status": PASS, "kind": KIND_AVAILABLE, "evidence": "tools/x.py:1"})
+            validate_result({"schema": RESULT_SCHEMA, "status": PASS, "kind": KIND_AVAILABLE,
+                             "evidence": "tools/x.py:1"})
             failures.append("validate_result accepted a PASS with a non-list (string) evidence")
         except ValueError:
             pass
@@ -1062,16 +1091,16 @@ def _self_test():
             _git("tag", "v-selftest")
             r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True, "enabled": True,
                          "protected-branch": cur}}}, gitrepo)
-            # 31a. DISCRIMINATING (finding-6a + finding-2-ii): a git PASS carries the EXACT protected-BRANCH
-            #      ref-and-sha as located evidence, refs/heads/<branch>@<40-hex-sha>, asserted exactly (not a
-            #      prefix). Removing the branch ref from the evidence fails the membership; changing the sha
-            #      to a bogus token (refs/heads/<branch>@bogus) fails it too, since the exact head sha is
-            #      required, not merely a refs/heads/<branch>@ prefix.
+            # 31a. DISCRIMINATING (finding-6a + finding-2-ii + finding-2c): a git PASS carries EXACTLY the
+            #      two-element evidence vector [<repo-top>, refs/heads/<branch>@<40-hex-sha>], asserted by
+            #      EXACT VECTOR EQUALITY (==), not membership. Removing the branch ref, changing the sha to a
+            #      bogus token, OR appending an arbitrary decoy element each breaks the exact equality; a
+            #      membership test would let an appended decoy through, which exact equality catches.
             pass_ref = "refs/heads/{}@{}".format(cur, head_sha)
-            if r["status"] != PASS or r["kind"] != KIND_AVAILABLE or pass_ref not in r["evidence"]:
-                failures.append("git surface on an existing protected branch expected PASS/available carrying "
-                                "{!r}, got {}/{} evidence={!r} ({})".format(
-                                    pass_ref, r["status"], r["kind"], r["evidence"], r["detail"]))
+            if r["status"] != PASS or r["kind"] != KIND_AVAILABLE or r["evidence"] != [git_top, pass_ref]:
+                failures.append("git surface on an existing protected branch expected PASS/available with "
+                                "evidence exactly {!r}, got {}/{} evidence={!r} ({})".format(
+                                    [git_top, pass_ref], r["status"], r["kind"], r["evidence"], r["detail"]))
             # 31a-2. DISCRIMINATING (finding-2-iii): a nonexistent protected branch is UNVERIFIABLE/
             #      required-unavailable carrying EXACTLY the repo-root evidence [<repo-top>]. Removing that
             #      [repo-root] evidence (returning []) fails the exact evidence assertion; a PASS fails the
@@ -1104,15 +1133,19 @@ def _self_test():
                                     "UNVERIFIABLE/required-unavailable rejected as an invalid branch name "
                                     "with repo-root evidence, got {}/{} detail={!r} evidence={!r}".format(
                                         value, r["status"], r["kind"], r["detail"], r["evidence"]))
-            # 31a-4. DISCRIMINATING (finding-3: the resolved commit id must be a strict sha): a decoy `git`
-            #      earlier on PATH that emits a non-sha line for show-ref (while echoing the surface root as
-            #      the toplevel so the root-binding checks pass) must yield UNVERIFIABLE/required-unavailable,
-            #      the detail naming a non-sha commit id, never a PASS carrying garbage as the branch sha.
-            #      Removing the _is_commit_id sha-format check lets the decoy's line read PASS, failing this.
-            #      Needs a POSIX shell for the decoy; asserted only where /bin/sh is present.
+            # The decoy-git cases below bind a decoy `git` through the module _GIT global (not PATH), because
+            # _adapter_git resolves git through the captured absolute _GIT: overriding it SIMULATES a decoy
+            # that was already first on PATH at process launch, which is exactly the residual the captured
+            # absolute path cannot itself close. Each needs a POSIX shell; asserted where /bin/sh is present.
+            this_mod = sys.modules[__name__]
             if os.path.exists("/bin/sh"):
                 decoy_bin = tmp / "decoybin"
                 decoy_bin.mkdir()
+                # 31a-4. DISCRIMINATING (finding-3: the resolved commit id must be a strict sha): a decoy
+                #      `git` that emits a NON-SHA line for show-ref (while echoing the surface root as the
+                #      toplevel so the root-binding checks pass) must yield UNVERIFIABLE/required-unavailable,
+                #      the detail naming a non-sha commit id, never a PASS carrying garbage as the branch sha.
+                #      Removing the _is_commit_id sha-format check lets the decoy's line read PASS, failing it.
                 decoy_root = tmp / "decoyroot"
                 decoy_root.mkdir()
                 decoy_git = decoy_bin / "git"
@@ -1124,8 +1157,8 @@ def _self_test():
                     "esac\n"
                     "exit 0\n".format(root=decoy_root), encoding="utf-8")
                 decoy_git.chmod(0o755)
-                saved_path = os.environ.get("PATH", "")
-                os.environ["PATH"] = str(decoy_bin) + os.pathsep + saved_path
+                saved_git = this_mod._GIT
+                this_mod._GIT = str(decoy_git)
                 try:
                     r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
                                  "enabled": True, "protected-branch": "main"}}}, decoy_root)
@@ -1135,7 +1168,108 @@ def _self_test():
                                         "UNVERIFIABLE/required-unavailable naming a non-sha commit id, got "
                                         "{}/{} detail={!r}".format(r["status"], r["kind"], r["detail"]))
                 finally:
-                    os.environ["PATH"] = saved_path
+                    this_mod._GIT = saved_git
+
+                # 31a-5. DISCRIMINATING (finding-1: the RETURNED ref field must equal the requested ref): a
+                #      PRECISE-looking decoy `git` that emits a VALID-format sha but a MISMATCHED ref line
+                #      (refs/heads/main for a request of refs/heads/fabricated) must be UNVERIFIABLE, the
+                #      detail naming a mismatched ref, never a PASS on a self-constructed
+                #      refs/heads/fabricated@<sha> evidence string. Its sha is a valid 40-hex, so ONLY the
+                #      returned-ref-equality check can catch it: removing that check lets the mismatched line
+                #      read PASS with the branch name the caller asked for fabricated into evidence.
+                mm_root = tmp / "mismatchroot"
+                mm_root.mkdir()
+                mm_git = decoy_bin / "git-mismatch"
+                mm_git.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in\n"
+                    "  *--show-toplevel*) printf '%s\\n' \"{root}\" ;;\n"
+                    "  *show-ref*) printf '%s refs/heads/main\\n' {sha} ;;\n"
+                    "esac\n"
+                    "exit 0\n".format(root=mm_root, sha="a" * 40), encoding="utf-8")
+                mm_git.chmod(0o755)
+                saved_git = this_mod._GIT
+                this_mod._GIT = str(mm_git)
+                try:
+                    r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                                 "enabled": True, "protected-branch": "fabricated"}}}, mm_root)
+                    if (r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_UNAVAILABLE
+                            or "mismatched ref" not in r["detail"]):
+                        failures.append("git surface with a decoy emitting a mismatched ref expected "
+                                        "UNVERIFIABLE/required-unavailable naming a mismatched ref, got "
+                                        "{}/{} detail={!r}".format(r["status"], r["kind"], r["detail"]))
+                finally:
+                    this_mod._GIT = saved_git
+
+                # 31a-6. DISCRIMINATING (finding-2b: show-ref matches a LITERAL ref and does NOT apply
+                #      revision operators, unlike rev-parse): a decoy `git` that ACCEPTS the grammar (so the
+                #      value reaches resolution) and whose show-ref rejects a revision-suffix ref as a
+                #      non-existent literal (exit 1) while its rev-parse WOULD resolve it models the exact
+                #      divergence. Under the current `show-ref --verify --` resolution a main~0 value is
+                #      UNVERIFIABLE; a revert to `rev-parse --verify --quiet refs/heads/main~0` resolves
+                #      THROUGH the ~0 operator to main's commit and reads PASS. Asserting UNVERIFIABLE here
+                #      catches that revert (with real git the check-ref-format grammar guard, test 31a-3,
+                #      short-circuits main~0 first, so this decoy is what isolates the resolution layer).
+                sv_root = tmp / "showrefroot"
+                sv_root.mkdir()
+                sv_git = decoy_bin / "git-showref"
+                sv_git.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in\n"
+                    "  *--show-toplevel*) printf '%s\\n' \"{root}\" ;;\n"
+                    "  *check-ref-format*) exit 0 ;;\n"
+                    "  *show-ref*)\n"
+                    "    case \"$*\" in *'~'*|*'^'*|*'@{{'*) exit 1 ;; esac\n"
+                    "    printf '%s refs/heads/main\\n' {sha} ; exit 0 ;;\n"
+                    "  *rev-parse*) printf '%s\\n' {sha} ; exit 0 ;;\n"
+                    "esac\n"
+                    "exit 0\n".format(root=sv_root, sha="a" * 40), encoding="utf-8")
+                sv_git.chmod(0o755)
+                saved_git = this_mod._GIT
+                this_mod._GIT = str(sv_git)
+                try:
+                    r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                                 "enabled": True, "protected-branch": cur + "~0"}}}, sv_root)
+                    if r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_UNAVAILABLE:
+                        failures.append("git surface with a decoy modelling show-ref literal matching expected "
+                                        "UNVERIFIABLE/required-unavailable on a revision-suffix value (show-ref "
+                                        "does not apply revision operators, unlike a rev-parse revert), got "
+                                        "{}/{} detail={!r}".format(r["status"], r["kind"], r["detail"]))
+                finally:
+                    this_mod._GIT = saved_git
+
+                # 31a-7. DISCRIMINATING (finding-2a: a LEADING-DASH branch value is rejected UP FRONT, before
+                #      it can be handed to git as an option): a decoy `git` that ACCEPTS the grammar
+                #      (check-ref-format exit 0) and would emit a self-consistent line for refs/heads/-x is
+                #      used so that ONLY the leading-dash guard stands between the value and a PASS. With the
+                #      `branch.startswith("-")` guard the value '-x' is UNVERIFIABLE (detail names an invalid
+                #      branch name) before any resolution; removing that guard lets '-x' flow to the decoy's
+                #      accepting grammar and self-consistent show-ref line and read PASS, failing this case.
+                ld_root = tmp / "leadingdashroot"
+                ld_root.mkdir()
+                ld_git = decoy_bin / "git-leadingdash"
+                ld_git.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in\n"
+                    "  *--show-toplevel*) printf '%s\\n' \"{root}\" ;;\n"
+                    "  *check-ref-format*) exit 0 ;;\n"
+                    "  *show-ref*) printf '%s refs/heads/-x\\n' {sha} ; exit 0 ;;\n"
+                    "esac\n"
+                    "exit 0\n".format(root=ld_root, sha="a" * 40), encoding="utf-8")
+                ld_git.chmod(0o755)
+                saved_git = this_mod._GIT
+                this_mod._GIT = str(ld_git)
+                try:
+                    r = discover("git", {"surfaces": {"git": {"adapter": "git", "required": True,
+                                 "enabled": True, "protected-branch": "-x"}}}, ld_root)
+                    if (r["status"] != UNVERIFIABLE or r["kind"] != KIND_REQUIRED_UNAVAILABLE
+                            or "not a valid branch name" not in r["detail"]):
+                        failures.append("git surface with a leading-dash protected-branch '-x' expected "
+                                        "UNVERIFIABLE/required-unavailable rejected as an invalid branch name "
+                                        "before resolution, got {}/{} detail={!r}".format(
+                                            r["status"], r["kind"], r["detail"]))
+                finally:
+                    this_mod._GIT = saved_git
             # 31b. DISCRIMINATING (finding-3: protected-branch must be a BRANCH ref, not any commit-ish): a
             #      raw SHA, a tag name, and HEAD each resolve to a commit but are NOT branch refs, so each is
             #      UNVERIFIABLE. Reverting the check to `rev-parse <value>^{commit}` accepts every one of
@@ -1194,8 +1328,32 @@ def _self_test():
         #     UNVERIFIABLE). Removing SKIP from the disallowed-status set lets a SKIP wear the available
         #     kind, failing this case.
         try:
-            validate_result({"status": SKIP, "kind": KIND_AVAILABLE, "evidence": []})
+            validate_result({"schema": RESULT_SCHEMA, "status": SKIP, "kind": KIND_AVAILABLE, "evidence": []})
             failures.append("validate_result accepted a SKIP carrying the available kind")
+        except ValueError:
+            pass
+
+        # 33b. DISCRIMINATING (finding-3: the result SCHEMA is validated): a result whose schema is
+        #      SUBSTITUTED, and one with NO schema field, are each rejected by validate_result/emit, for
+        #      EVERY status (a PASS and a FAIL shown). Removing the schema-equality check lets a substituted
+        #      or missing schema serialize as a clean line, failing these. The base object is otherwise
+        #      well-formed (available kind, located evidence) so only the schema check can reject it.
+        base = {"audit": "x", "status": PASS, "summary": "s", "surface": None, "required": True,
+                "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"]}
+        try:
+            emit(dict(base, schema="aiqt-qa-result/999"))
+            failures.append("emit accepted a substituted schema on a PASS")
+        except ValueError:
+            pass
+        try:
+            emit(dict(base))  # no schema field at all
+            failures.append("emit accepted a result with no schema field")
+        except ValueError:
+            pass
+        try:
+            validate_result({"status": FAIL, "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"],
+                             "schema": "aiqt-qa-result/999"})
+            failures.append("validate_result accepted a substituted schema on a FAIL")
         except ValueError:
             pass
 
@@ -1390,8 +1548,10 @@ def _self_test():
           "enabled=false or present-but-empty backlog) to an optional SKIP, nor REBIND a canonically-"
           "recognized surface (backlog/gate_roster/git) to a different adapter type (UNVERIFIABLE/adapter-"
           "mismatch, never a PASS on the substituted adapter); the git surface returns PASS only when the "
-          "configured protected branch exists as an actual BRANCH ref (refs/heads/<branch>), carrying that "
-          "branch ref as located evidence, UNVERIFIABLE for a raw sha, tag, HEAD, or other non-branch value, "
+          "configured protected branch exists as an actual BRANCH ref (refs/heads/<branch>), with the "
+          "returned show-ref ref field required to equal the requested ref and the located evidence derived "
+          "from git's own output, UNVERIFIABLE for a raw sha, tag, HEAD, other non-branch value, a "
+          "leading-dash value, or a decoy git returning a mismatched ref or a non-sha commit id, "
           "and the git probe is bound to root (ambient GIT_* scrubbed, toplevel realpath-equal to root) so "
           "an ambient GIT_DIR cannot bind a non-repo root to another repository; an unknown adapter, an "
           "adapter that RAISES, and an adapter whose "
@@ -1400,7 +1560,8 @@ def _self_test():
           "evidence is fail-safe-downgraded at the discover boundary rather than handed back as a false "
           "PASS; make_result rejects a non-list (bare-string) evidence at construction rather than "
           "char-splitting it, and _surface downgrades a char-split non-list provenance and a wrong-kind "
-          "PASS instead of returning a false green; the result contract rejects an out-of-set status, a "
+          "PASS instead of returning a false green; the result contract rejects a substituted or missing "
+          "schema tag (for every status), an out-of-set status, a "
           "non-list evidence, evidence elements that are not non-empty strings for EVERY status uniformly "
           "(a FAIL or UNVERIFIABLE carrying [7] or [\"\"] is refused, not only a PASS), and an inconsistent "
           "result (a PASS with an unavailable kind or without a non-empty list of non-empty evidence "
