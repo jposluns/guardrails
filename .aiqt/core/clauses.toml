@@ -1283,7 +1283,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 16
 end-line = 17
 canonical-text = "A change that alters behaviour lands together with an automated test or gate that fails when the change is\nabsent."
-source-digest = "2b782669d40a18319cb1855fd8c02275bc994d94248430d953734f2817c2e588"
+source-digest = "09c63b73d0ea6a4d1e49a8a648158921efe34cc7003780060f9e093d8d65406d"
 
 [[clause]]
 clause-id = "chgchk.2"
@@ -1292,7 +1292,16 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 17
 end-line = 18
 canonical-text = "Verification leaves a durable artefact that keeps guarding the behaviour after the one-time\nverification pass has moved on."
-source-digest = "2b782669d40a18319cb1855fd8c02275bc994d94248430d953734f2817c2e588"
+source-digest = "09c63b73d0ea6a4d1e49a8a648158921efe34cc7003780060f9e093d8d65406d"
+
+[[clause]]
+clause-id = "chgchk.3"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 20
+end-line = 26
+canonical-text = "The check is confirmed to run, not merely to exist. A test or gate that is present but never reached,\nmisplaced in its file, wrongly indented, or never registered with the runner, provides no coverage, and a\npassing suite is not evidence that it holds: a check that never executed and one that executed and passed are\nindistinguishable from the suite's green alone. Before that green is trusted for the new behaviour, confirm\nthe check executed, by observing it run or by a deliberate flip that shows it failing without the change, and\nprefer a runner that reports the count or identity of the checks it actually ran over a hand-maintained\nassertion that they are all present."
+source-digest = "09c63b73d0ea6a4d1e49a8a648158921efe34cc7003780060f9e093d8d65406d"
 
 [[clause]]
 clause-id = "cmpmig.1"
