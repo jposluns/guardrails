@@ -2613,3 +2613,7 @@ born-release = "1.1.0"
 [[born]]
 id = "chkfcl.4"
 born-release = "1.1.0"
+
+[[born]]
+id = "setcmp.8"
+born-release = "1.1.0"
