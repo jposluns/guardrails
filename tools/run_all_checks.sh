@@ -10,11 +10,9 @@ cd "$(dirname "$0")/.." || exit 2
 # roster. `-I` implies `-E`, which makes the export below ineffective for the gate itself, so `-B`
 # carries the bytecode suppression per step. The export remains only for any non-isolated grandchild a
 # gate may spawn (which does not inherit `-I`).
-# Never let a gate leave Python bytecode: a stray __pycache__/*.pyc in the shippable surface trips the
-# portability gate as a non-portable file class, a spurious local FAIL a fresh CI checkout never sees.
-# A gate runner reports the tree, it does not mutate it: a stray cache left by another tool is a real
-# dirty-tree signal the portability gate should surface. If it does, delete the SPECIFIC __pycache__
-# path the gate names (a scoped `rm -rf <that dir>`). Do NOT blanket `git clean` ignored paths, which
+# The portability gate now enumerates the git-tracked shippable surface, so a stray ignored
+# __pycache__/*.pyc artefact no longer trips it. PYTHONDONTWRITEBYTECODE=1 remains tree hygiene: a gate
+# runner reports the tree without littering it. Do NOT blanket `git clean` ignored paths, which
 # would also delete unrelated local files (a stray .venv, .idea, or node_modules); this runner never
 # auto-sweeps.
 export PYTHONDONTWRITEBYTECODE=1

@@ -31,9 +31,11 @@ What portability adds beyond the leak gate (nothing here duplicates it):
      is a fail-open, so here every file outside the text-suffix set (or failing UTF-8 decode) must be on the
      binary allow-list or it is a finding, an allow-listed binary is OPENED so an unreadable one fails
      closed, and a symlink or unsupported entry type under a shipped root is itself a finding.
-  C4 surface existence and walkability: check_leaks has no concept of a required surface; here every scan
-     root must exist and walk cleanly (an absent or unlistable root is fail-closed, never "nothing to scan"),
-     and enumeration under a shipped root applies NO skip rules, so nothing under it is silently unscanned.
+  C4 tracked-surface existence and enumerability: check_leaks has no concept of a required surface; here
+     every required root must be tracked-non-empty and enumerable from git (a failed enumeration, an absent
+     or empty root, or an untracked required file is fail-closed, never "nothing to scan"), and enumeration
+     applies NO skip rules over the tracked set, so no shipped file is silently unscanned; untracked and
+     ignored working-tree paths are outside the surface because they do not ship.
   C5 no shipped exemption marker: a `leak-allow` marker inside shipped content would ship the exemption and
      weaken the leak gate's structural layer wherever the content lands, so its presence is a finding.
 
@@ -50,15 +52,17 @@ marker of any kind), so every exemption is a reviewed code change and never trav
   check_portability.py               scan the shippable surface (default: the repo root above tools/)
   check_portability.py --self-test   deterministic self-test: the finding-1..5 regressions (including
                                       value-span masking, the whole-document cross-line identity catch, the
-                                      malformed-attribution fail-closed, and the injected-walker enumeration,
-                                      symlink/type, and unreadable-binary cases) run in memory with no
+                                      malformed-attribution fail-closed, the injected-lister enumeration,
+                                      symlink/type and unreadable-binary cases, and the GD-130 tracked/untracked
+                                      stray-artifact pair) run in memory with no
                                       filesystem dependency and ALWAYS run; a real-surface end-to-end layer
                                       runs too where a writable tempdir exists and is reported PARTIAL where not
 
 Exit convention (matches the repo's gates):
   0  clean
   1  a real finding (operator identity, operational vocabulary, an exemption marker, or an unscannable file)
-  2  an unreadable identity source, an absent or unwalkable required root, an unreadable allow-listed binary,
+  2  an unreadable identity source, an absent or unwalkable required root, a failed or unconfirmable
+     tracked-file enumeration, a required file that is not git-tracked, an unreadable allow-listed binary,
      or a read error (fail-closed). A text file that does not decode as UTF-8 is the ONE read outcome that is
      a C3 finding (exit 1), not a fail-closed exit 2, since an unscannable shipped file is itself the thing
      this gate is asserting against.
@@ -66,6 +70,7 @@ Exit convention (matches the repo's gates):
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,13 +84,14 @@ from check_leaks import _tokens, ngram_forms  # noqa: E402  reuse the leak gate'
 
 
 class GateError(Exception):
-    """An input the gate cannot read, resolve, or walk. Caught at run() and reported as exit 2
-    (fail-closed): an unreadable identity source, an absent/unwalkable root, or an unreadable
-    allow-listed binary is never treated as clean."""
+    """An input the gate cannot read, resolve, or enumerate. Caught at run() and reported as exit 2
+    (fail-closed): an unreadable identity source, an absent/unwalkable root, an unconfirmable tracked
+    surface, or an unreadable allow-listed binary is never treated as clean."""
 
 
-# The shippable surface. Every root is REQUIRED: an absent or unwalkable root in the authoring repo can
-# never read as "nothing to check" (a stranger's install is validated separately, by conformance.py).
+# The shippable surface. Every root is REQUIRED: an absent, unwalkable, empty, or untracked root in the
+# authoring repo can never read as "nothing to check" (a stranger's install is validated separately, by
+# conformance.py).
 REQUIRED_DIR_ROOTS = [
     ".aiqt/core",                        # rules, hooks and scripts, chat-skill source, conformance checklist
     ".claude/rules",                     # the generated read tree
@@ -425,18 +431,41 @@ def scan_pathname(rel, ident_forms, ident_maxn, term_grams, maxn):
     return findings
 
 
-def _classify_entry(entry):
-    """Classify one directory entry by TYPE, following no symlink: 'reject-symlink' for a symlink,
-    'dir' for a real subdirectory (descended, with NO skip rules), 'file' for a regular file, and
-    'reject-type' for anything else (fifo, socket, device). Takes anything exposing is_symlink /
-    is_dir(follow_symlinks=False) / is_file(follow_symlinks=False), so an injected entry can test it."""
-    if entry.is_symlink():
+def _classify_mode(mode):
+    """Classify one git index mode: tracked symlinks and gitlinks are C3 findings, regular executable and
+    non-executable files are scanned, and every unknown mode is malformed enumeration input."""
+    if mode == 0o120000:
         return "reject-symlink"
-    if entry.is_dir(follow_symlinks=False):
-        return "dir"
-    if entry.is_file(follow_symlinks=False):
+    if mode == 0o160000:
+        return "reject-gitlink"
+    if mode in (0o100644, 0o100755):
         return "file"
-    return "reject-type"
+    return "reject-unknown"
+
+
+def _disk_kind(root, rel):
+    """Classify the working-tree object for a tracked path, SAFE against a symlinked ancestor.
+
+    A symlink at rel's final component OR at any intermediate ancestor beneath root classifies as
+    "symlink" and is never followed: a name-based read through a symlinked ancestor could scan external
+    content (SECI-symlink-resolution), so it is rejected here rather than followed, matching the old
+    walk's per-entry symlink detection and preserving the anti-skip guarantee. Residual (disclosed): like
+    the old walk, the ancestor lstat check and the later content read are not one atomic operation, so a
+    mid-scan ancestor swap is not defended; this gate is a best-effort portability check, not a race-safe
+    security boundary."""
+    base = root
+    for comp in rel.split("/")[:-1]:
+        base = base / comp
+        if base.is_symlink():
+            return "symlink"
+    path = root / rel
+    if path.is_symlink():
+        return "symlink"
+    if path.is_file():
+        return "file"
+    if path.exists():
+        return "other"
+    return "missing"
 
 
 # --- identity source, surface gathering, per-file scan ----------------------------------------------
@@ -465,50 +494,156 @@ def load_identity(root):
     return name, email
 
 
-def _walk_dir_root(base, root, files, findings, scandir=os.scandir):
-    """Recursively account for EVERY entry under base (a required dir root), following no symlink and
-    applying NO skip rules, so nothing under a shipped root (not even node_modules/__pycache__/.git) is
-    silently unscanned. A regular file is collected to scan; a symlink or unsupported entry type is a C3
-    finding; a real subdirectory is descended. scandir (os.scandir by default; injectable for the self-test)
-    raises OSError on an unlistable directory, which the caller converts to fail-closed exit 2."""
-    with scandir(base) as it:
-        entries = sorted(it, key=lambda e: e.name)
-    for entry in entries:
-        path = Path(entry.path)
-        rel = path.relative_to(root).as_posix()
-        kind = _classify_entry(entry)
-        if kind == "dir":
-            _walk_dir_root(path, root, files, findings, scandir)
-        elif kind == "file":
-            files.append(path)
-        elif kind == "reject-symlink":
-            findings.append("{}: symlink in shipped content is not portable (portability C3)".format(rel))
-        else:
-            findings.append("{}: unsupported file type in shipped content is not portable "
-                            "(portability C3)".format(rel))
+def _safe_resolve(path):
+    """Resolve a path fail-closed: canonicalize it, converting any resolution failure into a GateError.
+    Path.resolve() raises RuntimeError on a symlink loop under Python 3.11/3.12 (changed to return-the-path
+    in 3.13) and can raise OSError; either becomes the gate's fail-closed exit 2, never an uncaught crash."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise GateError("cannot resolve path {} ({})".format(path, exc))
 
 
-def gather_surface(root):
-    """Return (files, findings): every regular file in the shippable surface to scan, plus any C3 finding
-    for a symlink or unsupported entry type under a required root. Each required dir root must exist as a
-    real directory and list cleanly, and each required file root must exist (a symlink there is a C3
-    finding); anything absent or unlistable is fail-closed (GateError, or an OSError from os.scandir on an
-    unlistable subtree, both caught at run() as exit 2)."""
+def _list_tracked(root, runner=subprocess.run):
+    """Enumerate the git-tracked shippable surface as ``[(mode, rel), ...]``. Every degraded outcome is
+    fail-closed (GateError); runner is injectable for the self-test."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        top = runner(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                     capture_output=True, env=env)
+    except OSError as exc:
+        raise GateError("cannot confirm the git working-tree root ({})".format(exc))
+    try:
+        top_returncode, top_stdout = top.returncode, top.stdout
+    except AttributeError as exc:
+        raise GateError("git working-tree confirmation returned a malformed result ({})".format(exc))
+    if top_returncode != 0:
+        raise GateError("git could not confirm the working-tree root (exit {})".format(top_returncode))
+    try:
+        top_text = top_stdout.decode("utf-8").strip()
+    except (AttributeError, UnicodeDecodeError) as exc:
+        raise GateError("git working-tree root is not valid UTF-8 ({})".format(exc))
+    if not top_text or _safe_resolve(Path(top_text)) != _safe_resolve(root):
+        raise GateError("git working-tree root {!r} does not match required root {!r}".format(
+            top_text, str(_safe_resolve(root))))
+
+    try:
+        result = runner(["git", "-C", str(root), "ls-files", "-s", "-z", "--",
+                         *REQUIRED_DIR_ROOTS, *REQUIRED_FILE_ROOTS], capture_output=True, env=env)
+    except OSError as exc:
+        raise GateError("cannot enumerate the git-tracked surface ({})".format(exc))
+    try:
+        returncode, payload = result.returncode, result.stdout
+    except AttributeError as exc:
+        raise GateError("git tracked-file enumeration returned a malformed result ({})".format(exc))
+    if returncode != 0:
+        raise GateError("git tracked-file enumeration failed (exit {})".format(returncode))
+    if not isinstance(payload, bytes):
+        raise GateError("git tracked-file enumeration returned non-byte output")
+    if payload and not payload.endswith(b"\0"):
+        raise GateError("git tracked-file enumeration returned a malformed non-NUL-terminated record")
+
+    entries, seen = [], set()
+    records = payload[:-1].split(b"\0") if payload else []
+    for raw in records:
+        try:
+            record = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GateError("git tracked-file enumeration contains a non-UTF-8 pathname ({})".format(exc))
+        header, separator, rel = record.partition("\t")
+        fields = header.split(" ")
+        if (not separator or not rel or len(fields) != 3 or any(not field for field in fields)
+                or not re.fullmatch(r"[0-7]{6}", fields[0])
+                or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", fields[1])
+                or not re.fullmatch(r"[0-9]+", fields[2])):
+            raise GateError("git tracked-file enumeration contains a malformed record")
+        mode, stage = int(fields[0], 8), int(fields[2])
+        if stage != 0:
+            raise GateError("git tracked-file enumeration contains unmerged path {!r} (stage {})".format(
+                rel, stage))
+        if rel in seen:
+            raise GateError("git tracked-file enumeration contains duplicate path {!r}".format(rel))
+        seen.add(rel)
+        entries.append((mode, rel))
+    return entries
+
+
+def _surface_from_tracked(root, entries, disk_kind):
+    """Turn tracked index entries into working-tree files and C3 findings, while proving coverage of every
+    required root. The injected disk_kind keeps the coverage and type regressions hermetic."""
     files, findings = [], []
+    dir_counts = {rel: 0 for rel in REQUIRED_DIR_ROOTS}
+    tracked = set()
+    try:
+        iterator = iter(entries)
+    except TypeError as exc:
+        raise GateError("git tracked-file enumeration is not iterable ({})".format(exc))
+    for entry in iterator:
+        try:
+            mode, rel = entry
+        except (TypeError, ValueError):
+            raise GateError("git tracked-file enumeration contains a malformed entry")
+        if not isinstance(mode, int) or not isinstance(rel, str) or not rel:
+            raise GateError("git tracked-file enumeration contains a malformed entry")
+        if rel in tracked:
+            raise GateError("git tracked-file enumeration contains duplicate path {!r}".format(rel))
+        tracked.add(rel)
+
+        owner = next((dr for dr in REQUIRED_DIR_ROOTS if rel.startswith(dr + "/")), None)
+        if owner is not None:
+            dir_counts[owner] += 1
+        elif rel not in REQUIRED_FILE_ROOTS:
+            raise GateError("git tracked-file enumeration returned out-of-surface path {!r}".format(rel))
+
+        kind = _classify_mode(mode)
+        if kind == "reject-symlink":
+            findings.append("{}: symlink in shipped content is not portable (portability C3)".format(rel))
+        elif kind == "reject-gitlink":
+            findings.append("{}: submodule (gitlink) in shipped content is not portable "
+                            "(portability C3)".format(rel))
+        elif kind == "reject-unknown":
+            raise GateError("git tracked-file enumeration contains unknown mode {:06o} for {!r}".format(
+                mode, rel))
+        else:
+            path = root / rel
+            on_disk = disk_kind(root, rel)
+            if on_disk == "file":
+                files.append(path)
+            elif on_disk == "symlink":
+                findings.append("{}: symlink in shipped content is not portable "
+                                "(portability C3)".format(rel))
+            elif on_disk == "other":
+                findings.append("{}: unsupported file type in shipped content is not portable "
+                                "(portability C3)".format(rel))
+            elif on_disk == "missing":
+                raise GateError("git-tracked surface file {} is absent from the working tree".format(rel))
+            else:
+                raise GateError("cannot classify git-tracked surface file {} in the working tree".format(rel))
+
+    for rel, count in dir_counts.items():
+        if count == 0:
+            raise GateError("required surface root {} has no git-tracked (shippable) files".format(rel))
+    for rel in REQUIRED_FILE_ROOTS:
+        if rel not in tracked:
+            raise GateError("required surface file {} is not git-tracked (not shipped)".format(rel))
+    if IDENTITY_MANIFEST not in tracked:
+        raise GateError("identity source {} is not git-tracked (not shipped)".format(IDENTITY_MANIFEST))
+    return files, findings
+
+
+def gather_surface(root, lister=_list_tracked, disk_kind=_disk_kind):
+    """Return (files, findings) for the git-tracked shippable surface, reading each tracked regular file
+    from the working tree. Required directory roots must exist as real directories and contain tracked
+    entries; required file roots and the identity manifest must be tracked. Enumeration, coverage, or
+    working-tree read/type uncertainty fails closed. Tracked symlinks/gitlinks and working-tree symlinks or
+    unsupported objects are C3 findings. By design this gate asserts nothing about untracked or ignored
+    working-tree paths because they do not ship; it scans working-tree copies, not committed blobs."""
     for rel in REQUIRED_DIR_ROOTS:
         d = root / rel
         if d.is_symlink() or not d.is_dir():
             raise GateError("required surface root {} is absent, a symlink, or not a directory".format(rel))
-        _walk_dir_root(d, root, files, findings)
-    for rel in REQUIRED_FILE_ROOTS:
-        f = root / rel
-        if f.is_symlink():
-            findings.append("{}: symlink in shipped content is not portable (portability C3)".format(rel))
-            continue
-        if not f.is_file():
-            raise GateError("required surface file {} is absent".format(rel))
-        files.append(f)
-    return files, findings
+    entries = lister(root)
+    return _surface_from_tracked(root, entries, disk_kind)
 
 
 def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open, attribution=None,
@@ -544,9 +679,11 @@ def scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn, opener=open
     return findings
 
 
-def run(root):
+def run(root, lister=_list_tracked):
     """Scan the shippable surface under root. Returns the exit code 0/1/2."""
     try:
+        root = _safe_resolve(root)  # canonicalize the anchor (like main()): a symlinked ROOT is not
+                                    # followed mid-scan; every component below it is then checked by _disk_kind.
         name, email = load_identity(root)
         ident_forms = identity_deny_forms(name, email)
         ident_maxn = max(len(_tokens(name)), len(_tokens(email)))
@@ -554,7 +691,7 @@ def run(root):
         maxn = max(len(_tokens(t)) for t in OPERATIONAL_TERMS)
         attribution = attribution_line(name)  # GD-56 exempt line, from the same runtime identity source
         author_header = author_header_line(name)  # GD-56 SKILL.md header line, same runtime identity source
-        files, findings = gather_surface(root)
+        files, findings = gather_surface(root, lister=lister)
         for path in sorted(files):
             findings.extend(scan_file(root, path, ident_forms, ident_maxn, term_grams, maxn,
                                       attribution=attribution, header_line=author_header))
@@ -562,8 +699,8 @@ def run(root):
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     except OSError as exc:
-        # An unlistable directory or an unreadable file on a required root is a read failure on a required
-        # input, not a clean skip: fail closed so an unreadable surface can never read as portable.
+        # A filesystem classification or read failure on a required input is not a clean skip: fail closed
+        # so an unreadable surface can never read as portable.
         print("error: cannot read a required surface input ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
     print("scanned surface roots: {} ({} files)".format(
@@ -582,8 +719,8 @@ def run(root):
 # --- self-test --------------------------------------------------------------------------------------
 # The finding-1..5 regressions are pure in-memory cases (value-span identity masking, the whole-document
 # cross-line identity catch, the malformed-attribution fail-closed, case-folded and operator-scoped
-# matching, pathname scanning, and, through an INJECTED walker/reader, the enumeration, symlink/type
-# classification, and unreadable-binary/unlistable-directory fail-closed paths). They ALWAYS run: no
+# matching, pathname scanning, and, through an INJECTED lister/reader, the enumeration, symlink/type
+# classification, and unreadable-binary/git-enumeration fail-closed paths). They ALWAYS run: no
 # writable tempdir, no chmod, no symlink support, no wall clock, no randomness. A real-surface end-to-end
 # layer runs additionally where a writable tempdir exists, and every case it cannot run is tracked so the
 # result is reported PARTIAL (never a full PASS) whenever ANY case skips.
@@ -591,76 +728,57 @@ def run(root):
 _CLEAN_MD = "# Heading\n\nPortable governance content with no operator identity and no operating vocabulary.\n"
 
 
-class _FakeEntry:
-    """A stand-in os.DirEntry for the injected-walker self-test: it classifies an entry by TYPE without a
-    real filesystem entry (the symlink/type rejection logic) and carries a name/path so _walk_dir_root can
-    enumerate and descend it deterministically in memory."""
+class _FakeProc:
+    """A minimal subprocess.CompletedProcess stand-in for injected git-enumerator self-tests."""
 
-    def __init__(self, name="e", path="/fake/e", symlink=False, isdir=False, isfile=False):
-        self.name, self.path = name, path
-        self._symlink, self._dir, self._file = symlink, isdir, isfile
-
-    def is_symlink(self):
-        return self._symlink
-
-    def is_dir(self, follow_symlinks=True):
-        return self._dir
-
-    def is_file(self, follow_symlinks=True):
-        return self._file
+    def __init__(self, returncode=0, stdout=b""):
+        self.returncode = returncode
+        self.stdout = stdout
 
 
-class _FakeScanContext:
-    """The context-manager iterator os.scandir returns, backed by an in-memory entry list."""
+def _fake_runner(*results):
+    """Return a runner that yields fake process results, or raises a queued OSError."""
+    queued = iter(results)
 
-    def __init__(self, entries):
-        self._entries = entries
-
-    def __enter__(self):
-        return iter(self._entries)
-
-    def __exit__(self, *exc):
-        return False
-
-
-class _FakeScandir:
-    """A fake os.scandir for the injected-walker self-test: called with a directory path it returns that
-    directory's mapped entries (as a context manager, like os.scandir) or raises its mapped OSError, so the
-    enumeration, descent (no skip rules), and unlistable-directory fail-closed paths run in memory."""
-
-    def __init__(self, by_dir):
-        self._by_dir = by_dir
-
-    def __call__(self, base):
-        result = self._by_dir.get(str(base))
+    def runner(*_args, **_kwargs):
+        result = next(queued)
         if isinstance(result, OSError):
             raise result
-        return _FakeScanContext(result or [])
+        return result
+
+    return runner
 
 
 def _build_surface(base, name, email):
-    """Create a minimal clean-but-complete shippable surface under base and return it."""
+    """Create a minimal clean-but-complete shippable surface and return (base, tracked entries)."""
+    entries = []
     for rel in REQUIRED_DIR_ROOTS:
         d = base / rel
         d.mkdir(parents=True, exist_ok=True)
-        (d / "placeholder.md").write_text(_CLEAN_MD, encoding="utf-8")
+        placeholder = d / "placeholder.md"
+        placeholder.write_text(_CLEAN_MD, encoding="utf-8")
+        entries.append((0o100644, placeholder.relative_to(base).as_posix()))
     manifest = base / IDENTITY_MANIFEST
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         '[plugin]\nname = "aiqt-guardrails-hooks"\nversion = "0.1.0"\n'
         'author-name = "{}"\nauthor-email = "{}"\n'.format(name, email), encoding="utf-8")
+    entries.append((0o100644, IDENTITY_MANIFEST))
     plugin_json = base / PLUGIN_JSON
     plugin_json.parent.mkdir(parents=True, exist_ok=True)
     plugin_json.write_text(
         '{{\n  "name": "aiqt-guardrails-hooks",\n  "author": {{\n    "name": "{}",\n'
         '    "email": "{}"\n  }}\n}}\n'.format(name, email), encoding="utf-8")
+    entries.append((0o100644, PLUGIN_JSON))
     for rel in REQUIRED_FILE_ROOTS:
         f = base / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(_CLEAN_MD, encoding="utf-8")
-    (base / "site/downloads/aiqt-skill.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
-    (base / "site/downloads/aiqt-skill-1.0.4.zip").write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
-    return base
+        entries.append((0o100644, rel))
+    for rel in sorted(BINARY_ALLOW):
+        (base / rel).write_bytes(b"PK\x03\x04 synthetic zip bytes, not text")
+        entries.append((0o100644, rel))
+    return base, entries
 
 
 def self_test_main():
@@ -843,54 +961,125 @@ def self_test_main():
     if _handle_c1(".claude/rules/x.md", "mail someone@{}.example today\n".format(PERSONAL_HANDLE)):
         failures.append("handle: an email local@handle form was wrongly flagged as a handle mention")
 
-    # Finding 3: a pathname operational term fails even with clean bytes; a clean pathname passes; and the
-    # symlink/type classification rejects a symlink and an unsupported type while descending a dir.
+    # Finding 3: a pathname operational term fails even with clean bytes; a clean pathname passes; and git
+    # modes classify regular files, symlinks, gitlinks, and unknown input distinctly.
     if not scan_pathname(".claude/rules/session-handoff.md", ident_forms, ident_maxn, term_grams, maxn):
         failures.append("finding 3: an operational term in a pathname was not flagged")
     if scan_pathname(".claude/rules/portable-note.md", ident_forms, ident_maxn, term_grams, maxn):
         failures.append("finding 3: a clean pathname was flagged")
-    if _classify_entry(_FakeEntry(symlink=True)) != "reject-symlink":
-        failures.append("finding 3: a symlink entry was not rejected")
-    if _classify_entry(_FakeEntry(isdir=True)) != "dir":
-        failures.append("finding 3: a real directory entry was not descended")
-    if _classify_entry(_FakeEntry(isfile=True)) != "file":
-        failures.append("finding 3: a regular file entry was not collected")
-    if _classify_entry(_FakeEntry()) != "reject-type":
-        failures.append("finding 3: an unsupported entry type was not rejected")
+    if _classify_mode(0o120000) != "reject-symlink":
+        failures.append("finding 3: a tracked symlink mode was not rejected")
+    if _classify_mode(0o160000) != "reject-gitlink":
+        failures.append("finding 3: a tracked gitlink mode was not rejected")
+    if _classify_mode(0o100644) != "file" or _classify_mode(0o100755) != "file":
+        failures.append("finding 3: a tracked regular-file mode was not collected")
+    if _classify_mode(0o040000) != "reject-unknown":
+        failures.append("finding 3: an unknown tracked mode was not rejected")
 
-    # Finding 3 (injected walker): enumeration and symlink/type classification run in memory against a fake
-    # scandir. A directory holds a regular file, a symlink, an unsupported type, and a subdirectory with its
-    # own file; the walk collects BOTH regular files (proving descent with NO skip rules) and raises a C3
-    # finding for the symlink and for the unsupported type.
+    # Finding 3 (injected lister): tracked content under __pycache__ is still collected (NO skip rules),
+    # while a tracked symlink and gitlink are C3 findings. Placeholders cover every other required root.
     iw_root = Path("/surface")
-    iw_base = iw_root / ".aiqt/core"
-    iw_sub = iw_base / "__pycache__"
-    iw_scandir = _FakeScandir({
-        str(iw_base): [
-            _FakeEntry("good.md", str(iw_base / "good.md"), isfile=True),
-            _FakeEntry("link.md", str(iw_base / "link.md"), symlink=True),
-            _FakeEntry("pipe", str(iw_base / "pipe")),
-            _FakeEntry("__pycache__", str(iw_sub), isdir=True),
-        ],
-        str(iw_sub): [_FakeEntry("note.md", str(iw_sub / "note.md"), isfile=True)],
-    })
-    iw_files, iw_findings = [], []
-    _walk_dir_root(iw_base, iw_root, iw_files, iw_findings, scandir=iw_scandir)
-    if len(iw_files) != 2 or not any(p.name == "note.md" for p in iw_files):
-        failures.append("finding 3: the injected walk did not enumerate both files (descent/no-skip broke)")
-    if not any("symlink" in f for f in iw_findings):
-        failures.append("finding 3: the injected walk did not reject a symlink entry")
-    if not any("unsupported file type" in f for f in iw_findings):
-        failures.append("finding 3: the injected walk did not reject an unsupported entry type")
+    iw_entries = [
+        (0o100644, ".aiqt/core/good.md"),
+        (0o100644, ".aiqt/core/__pycache__/note.md"),
+        (0o120000, ".aiqt/core/link.md"),
+        (0o160000, ".aiqt/core/sub"),
+        (0o100644, IDENTITY_MANIFEST),
+    ]
+    iw_entries.extend((0o100644, rel + "/placeholder.md") for rel in REQUIRED_DIR_ROOTS[1:])
+    iw_entries.extend((0o100644, rel) for rel in REQUIRED_FILE_ROOTS)
+    iw_files, iw_findings = _surface_from_tracked(iw_root, iw_entries, lambda _root, _rel: "file")
+    iw_rels = {path.relative_to(iw_root).as_posix() for path in iw_files}
+    if not {".aiqt/core/good.md", ".aiqt/core/__pycache__/note.md"}.issubset(iw_rels):
+        failures.append("finding 3: the injected lister did not collect tracked __pycache__ content")
+    if not any("symlink" in finding for finding in iw_findings):
+        failures.append("finding 3: the injected lister did not reject a tracked symlink")
+    if not any("gitlink" in finding for finding in iw_findings):
+        failures.append("finding 3: the injected lister did not reject a tracked gitlink")
 
-    # Finding 4a (injected walker): an unlistable directory raises OSError, which run() converts to
-    # fail-closed exit 2. The fake scandir raises deterministically, with no chmod.
-    try:
-        _walk_dir_root(iw_base, iw_root, [], [],
-                       scandir=_FakeScandir({str(iw_base): OSError("injected unlistable directory")}))
-        failures.append("finding 4: an unlistable directory did not raise (fail-closed path broke)")
-    except OSError:
-        pass
+    def _expect_gate_error(label, thunk, contains=None):
+        try:
+            thunk()
+        except GateError as exc:
+            if contains and contains not in str(exc):
+                failures.append("{} raised GateError without naming {!r}".format(label, contains))
+        except Exception as exc:  # a degraded guard input must become GateError, not escape another way
+            failures.append("{} raised {} instead of GateError".format(label, type(exc).__name__))
+        else:
+            failures.append("{} did not fail closed".format(label))
+
+    # Finding 4a (injected git lister): binary absence, either nonzero call, target mismatch, malformed or
+    # non-UTF-8 output, nonzero conflict stage, and duplicate records all become GateError.
+    top_ok = _FakeProc(stdout=b"/surface\n")
+    oid = b"0" * 40
+    good_record = b"100644 " + oid + b" 0\t.aiqt/core/good.md\0"
+    parsed = _list_tracked(iw_root, runner=_fake_runner(top_ok, _FakeProc(stdout=good_record)))
+    if parsed != [(0o100644, ".aiqt/core/good.md")]:
+        failures.append("finding 4: the injected git lister did not parse a valid record")
+    _expect_gate_error("finding 4: absent git binary",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(FileNotFoundError("git"))))
+    _expect_gate_error("finding 4: nonzero git root confirmation",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(_FakeProc(returncode=1))))
+    _expect_gate_error("finding 4: nonzero git enumeration",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(
+                           top_ok, _FakeProc(returncode=1))))
+    _expect_gate_error("finding 4: git toplevel mismatch",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(
+                           _FakeProc(stdout=b"/elsewhere\n"))))
+    _expect_gate_error("finding 4: malformed git record",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(
+                           top_ok, _FakeProc(stdout=b"malformed\0"))))
+    _expect_gate_error("finding 4: non-UTF-8 git pathname",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(
+                           top_ok, _FakeProc(stdout=b"100644 " + oid + b" 0\tbad-\xff\0"))))
+    _expect_gate_error("finding 4: unmerged git path",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(
+                           top_ok, _FakeProc(stdout=b"100644 " + oid + b" 2\tconflict.md\0"))))
+    _expect_gate_error("finding 4: duplicate git path",
+                       lambda: _list_tracked(iw_root, runner=_fake_runner(
+                           top_ok, _FakeProc(stdout=good_record + good_record))))
+
+    # Coverage and working-tree kind checks remain fail-closed or C3 exactly as the tracked-surface roster
+    # specifies, including the identity manifest as a shipped deny input.
+    empty_dir = REQUIRED_DIR_ROOTS[1]
+    _expect_gate_error("finding 4: empty tracked directory root",
+                       lambda: _surface_from_tracked(
+                           iw_root, [(mode, rel) for mode, rel in iw_entries
+                                     if not rel.startswith(empty_dir + "/")], lambda _root, _rel: "file"),
+                       empty_dir)
+    untracked_file = REQUIRED_FILE_ROOTS[1]
+    _expect_gate_error("finding 4: untracked required file",
+                       lambda: _surface_from_tracked(
+                           iw_root, [(mode, rel) for mode, rel in iw_entries if rel != untracked_file],
+                           lambda _root, _rel: "file"), untracked_file)
+    _expect_gate_error("finding 4: untracked identity manifest",
+                       lambda: _surface_from_tracked(
+                           iw_root, [(mode, rel) for mode, rel in iw_entries
+                                     if rel != IDENTITY_MANIFEST], lambda _root, _rel: "file"),
+                       IDENTITY_MANIFEST)
+    _expect_gate_error("finding 4: unknown git mode",
+                       lambda: _surface_from_tracked(
+                           iw_root, iw_entries + [(0o040000, ".aiqt/core/unknown")],
+                           lambda _root, _rel: "file"))
+    missing_rel = ".aiqt/core/good.md"
+    _expect_gate_error("finding 4: missing tracked working-tree file",
+                       lambda: _surface_from_tracked(
+                           iw_root, iw_entries,
+                           lambda _root, rel: "missing" if rel == missing_rel else "file"),
+                       missing_rel)
+    kind_entries = iw_entries + [
+        (0o100644, ".aiqt/core/disk-link.md"),
+        (0o100644, ".aiqt/core/pipe"),
+    ]
+    _, kind_findings = _surface_from_tracked(
+        iw_root, kind_entries,
+        lambda _root, rel: {".aiqt/core/disk-link.md": "symlink",
+                      ".aiqt/core/pipe": "other"}.get(rel, "file"))
+    if not any("disk-link.md: symlink" in finding for finding in kind_findings):
+        failures.append("finding 3: a working-tree symlink at a tracked regular path was not rejected")
+    if not any("pipe: unsupported file type" in finding for finding in kind_findings):
+        failures.append("finding 3: an unsupported working-tree type at a tracked path was not rejected")
+
 
     # Finding 4b (injected reader): an unreadable allow-listed binary fails closed (GateError -> exit 2),
     # never a silent clean pass. The injected opener raises OSError, with no filesystem path or chmod.
@@ -910,21 +1099,141 @@ def self_test_main():
         failures.append("a shipped leak-allow marker (C5) was not flagged")
 
     # --- real-surface end-to-end layer (runs where a writable tempdir exists) ----------------------
-    # These cases drive the full run() over a real synthetic tree (real scandir, real reads). They use NO
-    # chmod and NO symlink, so given a writable tempdir they ALL run; the previously flaky symlink,
-    # unreadable-binary, and unlistable-directory cases are covered deterministically by the injected
-    # walker/reader above. The ONLY skip is the whole layer when no writable tempdir exists, tracked so the
-    # result is honestly reported PARTIAL.
+    # Cases (a)-(n) use an injected tracked-entry roster over real files. Case (o) uses a real git index
+    # when git is available; its absence is tracked as PARTIAL, never reported as a full PASS.
     import io
     import shutil
     import tempfile
     from contextlib import redirect_stderr, redirect_stdout
 
+    # GD-130: _safe_resolve fails CLOSED (GateError) on a resolve() that raises RuntimeError (Python
+    # 3.11/3.12 symlink-loop behavior) or OSError, never an uncaught crash. Discriminating: without the
+    # (OSError, RuntimeError) catch, the exception escapes and the second `except` records the failure.
+    class _RaisingResolve:
+        def __init__(self, exc):
+            self._exc = exc
+
+        def resolve(self, *_a, **_k):
+            raise self._exc
+
+        def __str__(self):
+            return "<raising-resolve>"
+
+    for _exc in (RuntimeError("Too many levels of symbolic links"), OSError("ELOOP")):
+        try:
+            _safe_resolve(_RaisingResolve(_exc))
+            failures.append("GD-130: _safe_resolve did not fail closed on {}".format(type(_exc).__name__))
+        except GateError:
+            pass
+        except (OSError, RuntimeError):
+            failures.append("GD-130: _safe_resolve let a {} escape instead of GateError".format(
+                type(_exc).__name__))
+
+    # GD-130: main() routes its __file__ resolve through _safe_resolve and returns fail-closed exit 2.
+    # Discriminating: monkeypatch the module _safe_resolve to raise GateError, invoke main() on a
+    # non-self-test argv, and confirm it returns 2 WITHOUT running the gate. Reverting main() to a bare
+    # resolve would skip _safe_resolve, so the injected failure would not fire and main() would not return 2.
+    _mod = sys.modules[__name__]
+    _orig_safe_resolve, _orig_argv = _mod._safe_resolve, sys.argv
+    _file_str = str(Path(__file__))
+
+    def _selective_raise(path):
+        # raise ONLY for main()'s own __file__ resolve; other paths (run()'s root) resolve normally, so this
+        # discriminates main()'s guard specifically (run() also routes through _safe_resolve).
+        if str(path) == _file_str:
+            raise GateError("injected __file__ resolve failure")
+        return _orig_safe_resolve(path)
+
+    _main_err = io.StringIO()
+    try:
+        _mod._safe_resolve = _selective_raise
+        sys.argv = ["check_portability.py"]
+        with redirect_stdout(io.StringIO()), redirect_stderr(_main_err):
+            _main_code = main()
+        if _main_code != 2:
+            failures.append("GD-130: main() did not fail closed (exit 2) when its __file__ resolve raised; "
+                            "is main() routed through _safe_resolve?")
+        if "; fail-closed" not in _main_err.getvalue():
+            failures.append("GD-130: main()'s fail-closed exit-2 message did not carry the '; fail-closed' marker")
+    finally:
+        _mod._safe_resolve, sys.argv = _orig_safe_resolve, _orig_argv
+
+    # GD-130 round-8: run() routes its ROOT resolve through _safe_resolve and fails closed (exit 2) with
+    # the "; fail-closed" marker. Discriminating: record whether the injected resolver fired for run()'s
+    # root; reverting run() to a bare root.resolve() would skip _safe_resolve, so the injected raise would
+    # never fire on the root and _root_seen would stay False. This also asserts the fail-closed marker.
+    _root_arg = Path(tempfile.gettempdir()) / "gd130-run-resolve-probe"
+    _root_seen = {"hit": False}
+
+    def _selective_raise_root(path):
+        if str(path) == str(_root_arg):
+            _root_seen["hit"] = True
+            raise GateError("injected root resolve failure")
+        return _orig_safe_resolve(path)
+
+    _run_err = io.StringIO()
+    try:
+        _mod._safe_resolve = _selective_raise_root
+        with redirect_stdout(io.StringIO()), redirect_stderr(_run_err):
+            _run_code = run(_root_arg, lister=lambda _root: [])
+        if not _root_seen["hit"]:
+            failures.append("GD-130: run() did not route its root through _safe_resolve (injected resolver "
+                            "never fired on the root); is run()'s root resolve routed through _safe_resolve?")
+        if _run_code != 2:
+            failures.append("GD-130: run() did not fail closed (exit 2) when its root resolve raised GateError")
+        if "; fail-closed" not in _run_err.getvalue():
+            failures.append("GD-130: run()'s fail-closed exit-2 message did not carry the '; fail-closed' marker")
+    finally:
+        _mod._safe_resolve = _orig_safe_resolve
+
+    # GD-130 round-8b: run()'s OSError fail-close (a read failure on a required surface input) returns
+    # exit 2 with the "; fail-closed" marker. Discriminating: force a required-surface read to raise
+    # OSError after the anchor resolves; removing run()'s `except OSError` catch lets it escape (the
+    # self-test errors instead of passing), and dropping the marker fails the assertion.
+    _orig_load_identity = _mod.load_identity
+
+    def _raise_oserror(*_a, **_k):
+        raise OSError("EIO: simulated required-surface read failure")
+
+    _osr_arg = Path(tempfile.gettempdir()) / "gd130-run-oserror-probe"
+    _os_err = io.StringIO()
+    try:
+        _mod.load_identity = _raise_oserror
+        with redirect_stdout(io.StringIO()), redirect_stderr(_os_err):
+            _os_code = run(_osr_arg, lister=lambda _root: [])
+        if _os_code != 2:
+            failures.append("GD-130: run() did not fail closed (exit 2) when a required-surface read raised "
+                            "OSError")
+        if "; fail-closed" not in _os_err.getvalue():
+            failures.append("GD-130: run()'s OSError fail-closed exit-2 message did not carry the "
+                            "'; fail-closed' marker")
+    finally:
+        _mod.load_identity = _orig_load_identity
+
+    # GD-130 round-8: the CLI-misuse (unknown-argument) exit-2 path also carries the "; fail-closed" marker,
+    # so every exit-2 outcome is unambiguously a non-pass, never mistaken for a clean result. Discriminating:
+    # dropping the marker from _parse_args's usage line leaves this assertion unsatisfied.
+    _usage_err = io.StringIO()
+    _orig_argv2 = sys.argv
+    try:
+        sys.argv = ["check_portability.py", "--bogus-unknown-arg"]
+        with redirect_stdout(io.StringIO()), redirect_stderr(_usage_err):
+            _usage_code = main()
+        if _usage_code != 2:
+            failures.append("GD-130: main() did not return exit 2 on an unknown CLI argument")
+        if "; fail-closed" not in _usage_err.getvalue():
+            failures.append("GD-130: the unknown-argument usage/exit-2 path did not carry the "
+                            "'; fail-closed' marker")
+    finally:
+        sys.argv = _orig_argv2
+
     skipped = []
 
-    def _run_quiet(sroot):
+    def _run_quiet(sroot, entries=None):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            return run(sroot)
+            if entries is None:
+                return run(sroot)
+            return run(sroot, lister=lambda _root: entries)
 
     e2e_name, e2e_email = "Test Operator", "operator@example.invalid"
     try:
@@ -939,71 +1248,169 @@ def self_test_main():
             return _build_surface(base_tmp / tag, e2e_name, e2e_email)
 
         try:
+            # GD-130: the REAL _disk_kind rejects a symlinked ANCESTOR (never follows it) and a terminal
+            # symlink; run() canonicalizes a symlinked ROOT anchor. ALL symlink/fs setup is inside the guard
+            # so a symlink-less host reports PARTIAL (never a raise); the root-boundary check DISCRIMINATES
+            # (it fails if root.resolve() is absent, because the injected lister would then receive the
+            # symlink rather than the canonical root).
+            _dk = base_tmp / "disk-kind"
+            try:
+                (_dk / "ext").mkdir(parents=True); (_dk / "ext" / "f.md").write_text("decoy")
+                (_dk / "sub" / "real").mkdir(parents=True); (_dk / "sub" / "real" / "g.md").write_text("ok")
+                os.symlink(_dk / "ext", _dk / "sub" / "mid")
+                os.symlink(_dk / "ext" / "f.md", _dk / "sub" / "real" / "term.md")
+                _rsroot, _rentries = _fresh("rootlink-real")
+                _rlink = base_tmp / "rootlink-link"
+                os.symlink(_rsroot, _rlink)
+            except OSError:
+                skipped.append("_disk_kind ancestor-symlink and root-boundary real-fs tests "
+                               "(no symlink support)")
+            else:
+                if _disk_kind(_dk, "sub/mid/f.md") != "symlink":
+                    failures.append("GD-130: _disk_kind followed an intermediate symlinked ancestor")
+                if _disk_kind(_dk, "sub/real/g.md") != "file":
+                    failures.append("GD-130: _disk_kind mis-classified a real file under real directories")
+                if _disk_kind(_dk, "sub/real/term.md") != "symlink":
+                    failures.append("GD-130: _disk_kind did not reject a terminal symlink")
+                _got_root = []
+                def _cap_lister(_r):
+                    _got_root.append(_r)
+                    return _rentries
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    run(_rlink, lister=_cap_lister)
+                if not _got_root or _got_root[0].is_symlink():
+                    failures.append("GD-130: run() did not canonicalize a symlinked root before the lister")
+
             # (a) a clean surface, identity present ONLY in the two attribution fields, passes.
-            if _run_quiet(_fresh("clean")) != 0:
+            sroot, entries = _fresh("clean")
+            if _run_quiet(sroot, entries) != 0:
                 failures.append("e2e: a clean synthetic surface (identity in its attribution fields) "
                                 "expected exit 0")
 
             # (b) the operator email planted in a rule fails (email scoped to the operator address).
-            s = _fresh("planted-email")
-            (s / ".claude/rules/leak.md").write_text(
+            sroot, entries = _fresh("planted-email")
+            planted = ".claude/rules/leak.md"
+            (sroot / planted).write_text(
                 "# Rule\n\nquestions to {}\n".format(e2e_email), encoding="utf-8")
-            if _run_quiet(s) != 1:
+            entries.append((0o100644, planted))
+            if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: the operator email planted in a rule expected exit 1")
 
             # (c) the operator name planted (lowercase) outside the attribution fields fails.
-            s = _fresh("planted-name")
-            (s / "AGENTS.md").write_text(
+            sroot, entries = _fresh("planted-name")
+            (sroot / "AGENTS.md").write_text(
                 "# Adapter\n\nauthored by {}\n".format(e2e_name.lower()), encoding="utf-8")
-            if _run_quiet(s) != 1:
+            if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: the lowercase operator name outside its attribution expected exit 1")
 
             # (d) a camel-cased operational term fails.
-            s = _fresh("camel-term")
-            (s / ".aiqt/core/placeholder.md").write_text(
+            sroot, entries = _fresh("camel-term")
+            (sroot / ".aiqt/core/placeholder.md").write_text(
                 "# Note\n\nrun the SessionHandoff at close\n", encoding="utf-8")
-            if _run_quiet(s) != 1:
+            if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: a camel-cased operational term expected exit 1")
 
             # (e) a pathname operational term fails on the NAME alone, with clean bytes.
-            s = _fresh("pathname-term")
-            (s / ".claude/rules/session-handoff.md").write_text(_CLEAN_MD, encoding="utf-8")
-            if _run_quiet(s) != 1:
+            sroot, entries = _fresh("pathname-term")
+            planted = ".claude/rules/session-handoff.md"
+            (sroot / planted).write_text(_CLEAN_MD, encoding="utf-8")
+            entries.append((0o100644, planted))
+            if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: a file NAMED session-handoff.md expected exit 1")
 
-            # (f) an unknown non-text file fails while the allow-listed zip (present in every surface) passes.
-            s = _fresh("unknown-binary")
-            (s / "site/downloads/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n not text")
-            if _run_quiet(s) != 1:
+            # (f) an unknown non-text file fails while the allow-listed zips pass.
+            sroot, entries = _fresh("unknown-binary")
+            planted = "site/downloads/logo.png"
+            (sroot / planted).write_bytes(b"\x89PNG\r\n\x1a\n not text")
+            entries.append((0o100644, planted))
+            if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: an unknown .png in the surface expected exit 1")
 
             # (g) a planted leak-allow exemption marker fails.
-            s = _fresh("planted-marker")
-            (s / ".claude/rules/marked.md").write_text(
+            sroot, entries = _fresh("planted-marker")
+            planted = ".claude/rules/marked.md"
+            (sroot / planted).write_text(
                 "# Rule\n\nthis line carries a leak-allow marker\n", encoding="utf-8")
-            if _run_quiet(s) != 1:
+            entries.append((0o100644, planted))
+            if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: a shipped leak-allow marker expected exit 1")
 
-            # (h) NO skip rules: a clean-named file with an operational term inside a __pycache__ directory
-            # under a shipped root is now enumerated and fails (the old walk pruned it).
-            s = _fresh("no-skip")
-            pycache = s / ".aiqt/core/__pycache__"
-            pycache.mkdir(parents=True, exist_ok=True)
-            (pycache / "note.md").write_text("# x\n\nrun the SessionHandoff\n", encoding="utf-8")
-            if _run_quiet(s) != 1:
-                failures.append("e2e: content under a __pycache__ dir was not enumerated (skip rule leaked)")
+            # (h) tracked content under __pycache__ is enumerated despite its directory name and fails.
+            sroot, entries = _fresh("no-skip")
+            planted = ".aiqt/core/__pycache__/note.md"
+            (sroot / planted).parent.mkdir(parents=True, exist_ok=True)
+            (sroot / planted).write_text("# x\n\nrun the SessionHandoff\n", encoding="utf-8")
+            entries.append((0o100644, planted))
+            if _run_quiet(sroot, entries) != 1:
+                failures.append("e2e: tracked content under __pycache__ was not enumerated")
 
             # (i) a missing required root is fail-closed exit 2.
-            s = _fresh("missing-root")
-            shutil.rmtree(s / ".cursor/rules/aiqt-guardrails")
-            if _run_quiet(s) != 2:
+            sroot, entries = _fresh("missing-root")
+            shutil.rmtree(sroot / ".cursor/rules/aiqt-guardrails")
+            if _run_quiet(sroot, entries) != 2:
                 failures.append("e2e: a missing required root expected fail-closed exit 2")
 
             # (j) an absent identity manifest is fail-closed exit 2.
-            s = _fresh("no-manifest")
-            (s / IDENTITY_MANIFEST).unlink()
-            if _run_quiet(s) != 2:
+            sroot, entries = _fresh("no-manifest")
+            (sroot / IDENTITY_MANIFEST).unlink()
+            if _run_quiet(sroot, entries) != 2:
                 failures.append("e2e: an absent identity manifest expected fail-closed exit 2")
+
+            # (k) GD-130: an untracked stray bytecode artefact is outside the shipped surface and passes.
+            sroot, entries = _fresh("untracked-pyc")
+            stray = ".aiqt/core/hooks/scripts/__pycache__/x.cpython-312.pyc"
+            (sroot / stray).parent.mkdir(parents=True, exist_ok=True)
+            (sroot / stray).write_bytes(b"stray bytecode")
+            if _run_quiet(sroot, entries) != 0:
+                failures.append("GD-130: an untracked stray .pyc expected exit 0")
+
+            # (l) Paired guard: the same bytecode artefact in the tracked roster is a C3 finding.
+            entries.append((0o100644, stray))
+            if _run_quiet(sroot, entries) != 1:
+                failures.append("GD-130: the tracked stray .pyc expected exit 1")
+
+            # (m) A required file present on disk but absent from the tracked roster fails closed.
+            sroot, entries = _fresh("untracked-required-file")
+            entries = [(mode, rel) for mode, rel in entries if rel != "GEMINI.md"]
+            if _run_quiet(sroot, entries) != 2:
+                failures.append("GD-130: an untracked required GEMINI.md expected fail-closed exit 2")
+
+            # (n) A required dir root present on disk but empty in the tracked roster fails closed.
+            sroot, entries = _fresh("empty-tracked-root")
+            entries = [(mode, rel) for mode, rel in entries
+                       if not rel.startswith("site/downloads/")]
+            if _run_quiet(sroot, entries) != 2:
+                failures.append("GD-130: a tracked-empty site/downloads expected fail-closed exit 2")
+
+            # (o) Canonical real-git witness: untracked stray passes, then the same path tracked fails C3.
+            if shutil.which("git") is None:
+                skipped.append("real-git tracked/untracked GD-130 pair (git is unavailable)")
+            else:
+                sroot, _entries = _fresh("real-git")
+                git_env = {key: value for key, value in os.environ.items()
+                           if not key.startswith("GIT_")}
+
+                def _git(*args):
+                    try:
+                        return subprocess.run(["git", "-C", str(sroot), *args], capture_output=True,
+                                              env=git_env).returncode
+                    except OSError:
+                        return None
+
+                if _git("init", "-q") != 0:
+                    failures.append("GD-130 real-git: git init failed")
+                elif _git("add", "-A") != 0:
+                    failures.append("GD-130 real-git: initial git add failed")
+                else:
+                    stray = ".aiqt/core/hooks/scripts/__pycache__/x.cpython-312.pyc"
+                    (sroot / stray).parent.mkdir(parents=True, exist_ok=True)
+                    (sroot / stray).write_bytes(b"stray bytecode")
+                    if _run_quiet(sroot) != 0:
+                        failures.append("GD-130 real-git: untracked stray .pyc expected exit 0")
+                    if _git("add", "-f", "--", stray) != 0:
+                        failures.append("GD-130 real-git: git add of stray .pyc failed")
+                    elif _run_quiet(sroot) != 1:
+                        failures.append("GD-130 real-git: tracked stray .pyc expected exit 1")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -1015,15 +1422,15 @@ def self_test_main():
     core = ("the finding-1..5 regressions ran in memory and hold (value-span identity masking, the "
             "whole-document cross-line catch, nested-author non-exemption, malformed-attribution "
             "fail-closed, case-folded and operator-scoped matching, pathname scanning, and the injected "
-            "walker/reader enumeration, symlink/type, unlistable-directory and unreadable-binary "
+            "lister/reader enumeration, symlink/gitlink/type, git-enumeration and unreadable-binary "
             "fail-closed paths, plus the exemption marker)")
     if skipped:
         print("SELF-TEST PASS (PARTIAL): {}; the following were SKIPPED, so those invariants are UNVERIFIED "
               "this run: {}".format(core, "; ".join(skipped)))
     else:
         print("SELF-TEST PASS: {}; the end-to-end surface cases hold (clean pass, planted identity/email/"
-              "vocabulary/pathname/marker/unknown-file findings, no-skip enumeration, missing-root and "
-              "absent-manifest fail-closed)".format(core))
+              "vocabulary/pathname/marker/unknown-file findings, tracked no-skip enumeration, GD-130 "
+              "tracked/untracked stray-artifact pairs, and missing/untracked roots fail-closed)".format(core))
     return 0
 
 
@@ -1035,7 +1442,7 @@ def _parse_args(argv):
             self_test = True
             i += 1
         else:
-            print("usage: check_portability.py [--self-test]", file=sys.stderr)
+            print("usage: check_portability.py [--self-test]; fail-closed", file=sys.stderr)
             return None
     return (self_test,)
 
@@ -1047,7 +1454,11 @@ def main():
     (self_test,) = parsed
     if self_test:
         return self_test_main()
-    root = Path(__file__).resolve().parents[1]
+    try:
+        root = _safe_resolve(Path(__file__)).parents[1]  # last resolve site; guarded for completeness
+    except GateError as exc:
+        print("error: {}; fail-closed".format(exc), file=sys.stderr)
+        return 2
     return run(root)
 
 

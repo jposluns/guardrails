@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "f3cc6906c4df48ee6cffbfa14cbd298591fef1321c55f071682bdd149b1cfaed"
+tree-sha256 = "963adc506e8cb48c82fcfc578dae4d8838a29d3b5a200e9569778390ed67df8b"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2586,8 +2586,8 @@ sha256 = "7f6444c17c8955e826e967ee116878f61edc75940464e3b30e62b0aefa617b75"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 62633
-sha256 = "773e224c7d24b996d5ac481280702d07e8bd7e7cf7cb56441c9cfb8dcc3f6a6e"
+bytes = 86182
+sha256 = "eb365cf34be8e7057a5458d8a2693111c3994992564a518f0e63b7810c415fbb"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -2826,8 +2826,8 @@ sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 11678
-sha256 = "b621ce7fec2f633fa88639da7afdbf23690fb68e2080fffb48b0a890d85681da"
+bytes = 11459
+sha256 = "ae5efb5cfae28915cee675cf38633a6f375aac5afca6db0d369dca2e56eeb146"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
