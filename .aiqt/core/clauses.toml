@@ -68,7 +68,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 15
 end-line = 17
 canonical-text = "A completion-class claim over a set, that all of it is handled, that none remains, that every item is\ncovered, or that the set is exhausted, is made only by enumerating that set from its authoritative index and\nshowing the enumeration, never from an impression of having covered it."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "setcmp.2"
@@ -77,7 +77,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 15
 end-line = 17
 canonical-text = "A completion-class claim over a set, that all of it is handled, that none remains, that every item is\ncovered, or that the set is exhausted, is made only by enumerating that set from its authoritative index and\nshowing the enumeration, never from an impression of having covered it."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "setcmp.3"
@@ -86,7 +86,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 17
 end-line = 20
 canonical-text = "The authoritative index is the\nsource that defines the set's membership, such as a registry, a manifest, a directory listing, or a backlog;\na count or a work-list the assistant holds in its own context is not that index, and is reconciled against it\nbefore it can support a claim about the whole set."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "setcmp.4"
@@ -95,7 +95,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 22
 end-line = 24
 canonical-text = "A claim that licenses less work, that nothing remains, or that an item may stop, defer, wind down, or close,\nclears a higher evidence bar than a claim that licenses more, because an unfounded stop conceals work that is\nstill owed while an unfounded continue only spends effort."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "setcmp.5"
@@ -104,7 +104,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 24
 end-line = 25
 canonical-text = "Under partial or missing evidence the default is\nto continue rather than to declare the set complete."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "setcmp.6"
@@ -113,7 +113,7 @@ source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
 start-line = 25
 end-line = 27
 canonical-text = "When such a claim rests on the remaining items being\nunable to proceed, the enumeration records, for each remaining item, the observed condition that blocks it,\nso the claim cannot rest on an unshown assertion that work is blocked."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "corrob.1"
@@ -4565,10 +4565,10 @@ source-digest = "1a6ce97b0599e10e961d0c99689fbaa583b37ea208386216e9cdf46e1ea5ab7
 clause-id = "setcmp.7"
 corpus-id = "setcmp"
 source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
-start-line = 35
-end-line = 36
+start-line = 39
+end-line = 40
 canonical-text = "Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a\ncompletion-class claim over the backlog, and it carries the same enumeration burden."
-source-digest = "220f9d7d78239eb40a79239c369b602f722a684a38bed7d9d6941c21430090bb"
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
 clause-id = "trkasy.5"
@@ -4695,7 +4695,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 14
 end-line = 19
 canonical-text = "The default at every point is to continue the work: the assistant carries out the next queued or\nplanned item rather than ending its turn to seek permission for work it is already authorized to do.\nStanding authorization is not re-sought each turn; an authorized next step is executed, not\nre-offered, and a turn does not end by proposing a course and waiting for a go on work already\ncovered by that authorization. A question raised for a genuine decision does not halt other queued\nwork that can proceed independently of its answer."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.2"
@@ -4704,7 +4704,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 21
 end-line = 26
 canonical-text = "The failure this guards against is the manufactured stop: with authorized work still open and every\ngate green, the assistant does not talk itself into winding down on a reason that only sounds like\nprudence, a long or heavy session, having done a lot, being deep into the run, a milestone reached,\nwork that feels best done fresh later, or a large series, migration, or audit lying ahead. None of\nthese is a signal; each is the assistant's own felt state or the mere shape of the work, dressed as\na considered call, and acting on it stops productive work that no observable problem asked to stop."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.3"
@@ -4712,8 +4712,8 @@ corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 28
 end-line = 37
-canonical-text = "A wind-down, or a turn handed back to the human, happens only on a named, externally-observable\ntrigger: the task is complete; a human has explicitly stopped, paused, or changed the mode; a hard\nexternal block leaves no other queued work able to proceed, which is tool-verified whole-set\nexhaustion, the backlog enumerated item by item with each remaining item shown to carry the observed\ncondition that blocks it; the next action meets the human-oversight threshold and lacks the\nauthorization that threshold requires, or that authorization is in doubt; a decision reserved to a\nhuman, not covered by standing authorization and determining the next action, must be answered\nfirst; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,\nquotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single\nsituation may satisfy more than one, and any one of them suffices."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+canonical-text = "A wind-down, or a turn handed back to the human, happens only on a named, externally-observable\ntrigger: the task is complete; a human has explicitly stopped, paused, or changed the mode; a hard\nexternal block leaves no other queued work able to proceed, which is tool-verified whole-set\nexhaustion, the backlog enumerated item by item with each remaining item shown to carry the observed,\nterminal condition that blocks it; the next action meets the human-oversight threshold and lacks the\nauthorization that threshold requires, or that authorization is in doubt; a decision reserved to a\nhuman, not covered by standing authorization and determining the next action, must be answered\nfirst; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,\nquotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single\nsituation may satisfy more than one, and any one of them suffices."
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.4"
@@ -4722,25 +4722,25 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 43
 end-line = 49
 canonical-text = "This rule never narrows the oversight threshold; it defers to it. The distinction is what a finding\nreveals, not the instrument that surfaced it: a failing check, gate, or audit whose finding is an\nordinary defect is fixed in place while the run continues and is not a wind-down signal, while the\nsame check, gate, or audit is a wind-down trigger when its finding reveals a process-integrity or\nsystemic lapse. A self-reported claim that the actionable items are exhausted is a set-completeness\nclaim that licenses less work, so it is enumerated from the authoritative backlog rather than\nasserted, and the default under partial evidence is to continue on the highest-priority open item."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.5"
 corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
-start-line = 66
-end-line = 75
+start-line = 82
+end-line = 91
 canonical-text = "Elapsed run length, session depth, the number of compaction events, accumulated progress or a\nreached milestone, and the anticipated size of the work still ahead, whether observed, measured, or\nestimated, are not members of that set, so none of them, alone or combined, is a wind-down trigger;\nlarge work is done unit by unit with independent verification sustaining quality, and its size is a\nreason to keep going. Felt degradation or context-heaviness is not a trigger either, being\nun-observable. Where a harness exposes a measured context or token budget, imminent truncation is an\nexternally-observable boundary, but it is not one of the triggers above and licenses no\nassistant-initiated wind-down: it is handled as non-completion, the assistant continuing until the\nharness acts and never reporting a truncated turn as completion, rather than a felt state read as\nfatigue."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.6"
 corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
-start-line = 76
-end-line = 82
+start-line = 92
+end-line = 98
 canonical-text = "A project may set a minimum-effort floor below which a discretionary wind-down is not even proposed,\nbut such a floor is a minimum, never a ceiling that authorizes a stop, and a caught-and-fixed issue\nis normal operation, not a stop: the unit in hand is finished, the issue fixed, and the run\ncontinues. A need for fresh or uncluttered context is a continuation mechanism, not a trigger: where\nan isolated-context worker or sub-agent is available and its use is authorized, the assistant\ndelegates that work, stays live to collect and integrate the result, and continues rather than\nending the run; where no such authorized mechanism exists, it continues within its own context."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.7"
@@ -4749,13 +4749,21 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 38
 end-line = 42
 canonical-text = "A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the\nmoment it is confirmed, the work is parked behind the human decision it now awaits or exits through\nthe project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles\nit. A lapse the assistant itself asserts never converts into a self-granted clean close of open\nwork; a clean close past open work belongs to the operator alone."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
 
 [[clause]]
 clause-id = "cntdef.8"
 corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 51
-end-line = 64
-canonical-text = "A blocking condition that licenses a wind-down is granted and externally observable, never\nself-authored. A hard external block, or a reserved decision that must be answered first, counts\nonly when the condition that blocks the item is granted by an authority other than the assistant\nand is observable in the authoritative record: a granted status, a failing check, an unavailable\nsource, or an operator decision genuinely still pending in the decision record. A \"blocked\",\n\"held\", or \"needs a go\" that the assistant authored about its own work is a proposal, not a grant,\nand does not gate a stop; nor does reclassifying work the operating mode already authorizes, such\nas already-decided queued backlog, as newly needing a fresh authorization. A self-authored demotion\nof decided work to \"proposed\" or \"not granted\" is likewise a proposal, not a grant, and licenses no\nwind-down. The requirement for express authorization gates a plan-initiating new unit of work; it is\nnever repurposed as a blocker to manufacture a stop over work already decided. The check that reads\nexhaustion reads that authoritative grant source, not the assistant's narration of it or a bare\nstatus marker, and it validates its own input, so a blocker it cannot confirm to be real and granted\nresolves to continue, never to a stop. Ignorance refuses the wind-down."
-source-digest = "e9f5465a64f943173cadf4c356fb6524efeb9583c539999386b5b1805a4cb64b"
+end-line = 80
+canonical-text = "A blocking condition that licenses a wind-down is granted, externally observable, and terminal\n(no sanctioned path remains while the condition holds), never self-authored. A hard external\nblock, or a reserved decision that must be answered first,\ncounts only when the condition that blocks the item is granted by an authority other than the\nassistant and is observable in the authoritative record: a granted status, a failing check, an\nunavailable source, or an operator decision genuinely still pending in the decision record.\nObservability is necessary, not sufficient: a condition is terminal for an item only when, while\nthe condition holds, the item can proceed by no sanctioned path, not by a reduced floor on the\nterms the governing verification discipline sets, not by advancing the build and holding only the\nstep that needs the affected resource, and not by an alternative sanctioned route for that step. A\nrecoverable degradation of a resource the work would draw on, such as a tool, worker pool,\nverifier family, model, or service that is temporarily unavailable, limited, empty, or\nrate-limited, is externally observable yet not terminal while any such path keeps the item\nactionable: it gates only the downstream verification, integration, or promotion step that\nconsumes the resource, and the current build proceeds and holds for that step; the hold is never a\nlicence to take the gated step on the reduced or missing signal beyond what the governing\ndisciplines sanction. Such a degradation counts toward exhaustion only for an item with no step\nleft that can proceed while the condition holds, every sanctioned path completed or observed\nclosed, and the enumeration records that state for the item. A \"blocked\", \"held\", or \"needs a go\"\nthat the assistant authored about its own work is a proposal, not a grant, and does not gate a\nstop; nor does reclassifying work the operating mode already authorizes, such as already-decided\nqueued backlog, as newly needing a fresh authorization. A self-authored demotion of decided work\nto \"proposed\" or \"not granted\" is likewise a proposal, not a grant, and licenses no wind-down. The\nrequirement for express authorization gates a plan-initiating new unit of work; it is never\nrepurposed as a blocker to manufacture a stop over work already decided. The check that reads\nexhaustion reads that authoritative grant source, not the assistant's narration of it or a bare\nstatus marker, and it validates its own input, so a blocker it cannot confirm to be real, granted,\nand terminal resolves to continue, never to a stop; a stop whose claimed exhaustion rests on any\nnon-terminal condition is denied as a manufactured stop, however observable that condition is.\nIgnorance refuses the wind-down."
+source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+[[clause]]
+clause-id = "setcmp.8"
+corpus-id = "setcmp"
+source-path = ".aiqt/core/rules/accur-completeness-claim-enumerates-set.md"
+start-line = 27
+end-line = 31
+canonical-text = "so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
+source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
