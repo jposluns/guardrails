@@ -18,13 +18,15 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
-Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
-as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
+Contract (doc-confirmed 2026-08-17, re-confirmed 2026-09-04 against code.claude.com/docs/en/hooks):
+the hook payload arrives as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
 {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"|"deny",
 "permissionDecisionReason": "..."}}; an allow decision is expressed as NO output (exit 0 silent), so
 the user's own permission flow is never bypassed, and a deny decision blocks the tool. exit 2 is a
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
-as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
+as last_assistant_message. stop_hook_active/background_tasks/session_crons present as of Claude Code
+v2.1.196+ (re-confirmed 2026-09-04); stop_hook_active carries an 8-consecutive-block harness
+override, but the guard-owned stop_denials bound (2) is stricter and governs.
 
 Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
 deliberate boundary posture is stated next), gensrc_guard (a second stated exception, below), and
@@ -108,8 +110,8 @@ read-only and offline; it never mutates the repo.
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
-because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop
-block could re-fire on the forced continuation and wedge the session. The hard PREVENTION for console
+because a hard exit-2 Stop block re-fires on the forced continuation until the harness's stop_hook_active
+override relents (after 8 consecutive blocks, v2.1.196+), it could wedge the session. The hard PREVENTION for console
 diffs lives in the PreToolUse diff_source layer at the command source; the Stop layer only surfaces.
 
 This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
@@ -773,7 +775,7 @@ def detect_diff_wall(text):
 def diff_wall_stop(data):
     """cnsdif (trust/no-console-diff-dumps), Stop: SURFACE (non-blocking WARN) a final response that is
     a raw diff wall. This layer never blocks; see the module docstring's design note (the wall has
-    already rendered, and a hard Stop block could wedge the session with no documented loop bound). It
+    already rendered, and a hard Stop block re-fires until the harness's stop_hook_active override relents after 8 blocks (v2.1.196+)). It
     surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
     if data.get("hook_event_name") not in STOP_EVENTS:
         # Even a mis-wired event only WARNS here: the diff-wall Stop layer is warn-only end to end (the
@@ -5523,6 +5525,54 @@ def _orch_live_ledger_ids(root, task_hours):
     return (live, readable, detail)
 
 
+def _orch_reentry_live(data, root, task_hours, tstate):
+    """GD-137 Layer A liveness: is a LIVE mechanism poised to re-enter this session after a stop? Returns
+    ("live"|"none"|"cannot-evaluate", detail). Four contract-agnostic sources:
+      (a) data["background_tasks"], (b) data["session_crons"]: a Stop-payload array the current harness
+          MAY expose (present as of Claude Code v2.1.196+). ABSENT contributes nothing (the design does not
+          depend on it existing); a non-empty LIST is live (entries are NOT schema-validated, fail open
+          toward suppression per the plan); an empty list contributes nothing; present-but-not-a-list is
+          cannot-evaluate (a malformed control is never a clean "no tasks").
+      (c) the guard-owned dispatch ledger (_orch_live_ledger_ids), the AUTHORITATIVE fallback read whether
+          or not the arrays exist: a non-empty live set is live; readable False is cannot-evaluate; a
+          readable empty set (an absent ledger reads empty, not unreadable) contributes nothing.
+      (d) tstate wake_digests (a registered, unconsumed timer wake): a non-empty list is live; an empty or
+          absent list contributes nothing; a malformed (non-list) value is cannot-evaluate.
+    Aggregate (fail open toward suppression): ANY live wins; else ANY cannot-evaluate wins; else none."""
+    live, cannot = [], []
+
+    def _array(key):
+        if key not in data:
+            return  # absent contributes nothing; the design never depends on the array existing
+        val = data.get(key)
+        if isinstance(val, list):
+            if val:
+                live.append("data.{} ({} entr{})".format(
+                    key, len(val), "y" if len(val) == 1 else "ies"))
+        else:
+            cannot.append("data.{} is present but not a list".format(key))
+
+    _array("background_tasks")
+    _array("session_crons")
+    live_ids, ledger_readable, ledger_detail = _orch_live_ledger_ids(root, task_hours)
+    if live_ids:
+        live.append("{} live dispatched task(s)".format(len(live_ids)))
+    elif not ledger_readable:
+        cannot.append("dispatch ledger unreadable"
+                      + (": " + ledger_detail if ledger_detail else ""))
+    wd = tstate.get("wake_digests") if isinstance(tstate, dict) else None
+    if isinstance(wd, list):
+        if wd:
+            live.append("{} registered pending wake(s)".format(len(wd)))
+    else:
+        cannot.append("wake_digests unreadable or malformed")
+    if live:
+        return ("live", "; ".join(live))
+    if cannot:
+        return ("cannot-evaluate", "; ".join(cannot))
+    return ("none", "no background task, scheduled cron, live dispatched task, or pending wake")
+
+
 def _orch_pending_haystack(reg, root):
     """The human-decision proof surface: the DECLARED pending-decisions record ONLY. The machine-written
     pending-asks keys are NOT decision rows and are excluded (an ask key session::tool_use could otherwise
@@ -5673,7 +5723,8 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
 
 def decide_yield(ctx):
     """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
-    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
+    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged,
+    phantom_claim, reentry, reentry_detail.
     Returns (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
     kind = ctx["kind"]
     disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
@@ -5683,7 +5734,7 @@ def decide_yield(ctx):
                    + [("proposed", i, "", "") for i in ctx["proposed"]])
     if ctx["escape"]:
         return ("ALLOW", "operator escape artefact present (logged)", disposition)
-    if kind != "schedule_idle" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
+    if kind != "schedule_idle" and ctx["counter"] >= _ORCH_LOOP_BOUND:
         return ("ALLOW_WITH_FINDINGS",
                 "loop bound reached after {} denial(s); yielding with the unresolved items as "
                 "findings rather than re-firing".format(ctx["counter"]), disposition)
@@ -5737,6 +5788,32 @@ def decide_yield(ctx):
                     "unconfirmable blocker cannot license a stop (ignorance refuses the wind-down). "
                     "Fix the source; the operator-owned escape sentinel is the release for a genuine "
                     "block.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+        # GD-137 Layer A (cntdef/trkasy/clmobs): a phantom wait is a stop whose final message CLAIMS this
+        # session is waiting on an automated event to resume it, evaluated only on the stop path (a
+        # schedule_idle has already proved its wake) and only once the backlog is otherwise clean (no
+        # actionable, no cannot-evaluate item). A claim with a LIVE re-entry source is a genuine wait
+        # (inert, falls through to the clean ALLOW); a claim with NO live source is the phantom the
+        # continue-by-default rule forbids (DENY, counted against the shared stop_denials bound); a claim
+        # whose liveness cannot be read is ignorance, which refuses the wind-down (DENY variant naming the
+        # unreadable source). loop_signal (stop_hook_active) does NOT relieve this: the guard-owned bound
+        # governs (E2/D4), so a phantom wait raised after another hook's block is still denied below bound.
+        if kind == "stop" and ctx.get("phantom_claim"):
+            if ctx.get("reentry") == "none":
+                return ("DENY",
+                        "cntdef/trkasy: the final message claims this session is waiting on an automated "
+                        "event to resume it, but no live re-entry mechanism exists (no tracked background "
+                        "task, no scheduled cron, no live dispatched task, no pending wake): the wait is "
+                        "phantom and would wedge the session on a resume that never fires. Continue the "
+                        "highest-priority open item, or record a proven blocker; a claimed wait is not one "
+                        "(clmobs). The operator-owned escape sentinel releases a genuine stop.", disposition)
+            if ctx.get("reentry") == "cannot-evaluate":
+                return ("DENY",
+                        "cntdef/trkasy: the final message claims an automated-event wait, but the liveness "
+                        "of the re-entry mechanism cannot be read ({}); an unconfirmable wait cannot license "
+                        "a stop (ignorance refuses the wind-down, clmobs). Fix the source, or continue the "
+                        "highest-priority open item; the operator-owned escape sentinel is the release for a "
+                        "genuine block.".format(ctx.get("reentry_detail") or "source unreadable"),
+                        disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
@@ -5800,16 +5877,22 @@ def _schema_turn_state(raw):
     present and valid, and None when present-but-malformed OR the whole turn-state is unreadable (raw is
     not a dict). The CALLER maps None to the fail-safe direction (stop -> the loop bound, so a malformed
     or unreadable counter never licenses unbounded denies; schedule -> 0, so it never buys cap relief).
-    schedule_basis is a string or None."""
+    schedule_basis is a string or None. wake_digests is the list when present and a list, [] when absent
+    (no pending wake), and None when present-but-not-a-list or the whole turn-state is unreadable (a
+    malformed control the reentry-liveness reader maps to cannot-evaluate, never to 'no pending wake')."""
     if not isinstance(raw, dict):
-        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None})
+        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None,
+                       "wake_digests": None})
 
     def _count(key):
         return 0 if key not in raw else _v_exact_int(raw[key], 0, _ORCH_COUNTER_MAX)
     basis = raw.get("schedule_basis")
+    wd = raw.get("wake_digests")
     return ("ok", {"stop_denials": _count("stop_denials"),
                    "schedule_denials": _count("schedule_denials"),
-                   "schedule_basis": basis if isinstance(basis, str) else None})
+                   "schedule_basis": basis if isinstance(basis, str) else None,
+                   "wake_digests": (wd if isinstance(wd, list)
+                                    else ([] if "wake_digests" not in raw else None))})
 
 
 _ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
@@ -5823,7 +5906,67 @@ def _orch_token_present(needle, hay):
     return re.search(r"(?<![A-Za-z0-9_-]){}(?![A-Za-z0-9_-])".format(re.escape(needle)), hay) is not None
 
 
+def _orch_phantom_wait_claim(message):
+    """GD-137 Layer A (clmobs/cntdef/trkasy): does the final assistant message CLAIM this session is
+    waiting on an AUTOMATED event to resume it? Precision-first bool: a UNIT (split on newline and . ! ? ;)
+    is a claim only when it carries ALL five required signals (a first-person subject, a future/wait marker,
+    a resume/wait verb, and an automated-event noun) AND none of the exclusions (a human-wait object or a
+    negation/conditional in the unit, or an express manual-resume disclaimer ANYWHERE in the message).
+    Returns False on any non-str or over-long input. Fenced code blocks, inline code spans, and blockquote
+    lines are stripped before analysis. Paraphrase, non-English, novel vocabulary, and non-Markdown quoting
+    are DISCLOSED false negatives (dscres); Layers B/C are the overlap cover."""
+    if not isinstance(message, str) or len(message) > _ORCH_CLAIM_MAX_CHARS:
+        return False
+    text = _PW_FENCE.sub(" ", message)          # complete fenced blocks only (an unclosed fence stays)
+    text = _PW_INLINE.sub(" ", text)            # inline code spans
+    text = _PW_BLOCKQUOTE.sub(" ", text)        # blockquote lines (line-oriented; before whitespace collapse)
+    text = text.casefold().translate(_PW_APOS)
+    if _PW_DISCLAIM.search(text):
+        return False                            # an express manual-resume disclaimer suppresses every unit
+    for raw_unit in _PW_UNIT_SPLIT.split(text):
+        unit = _PW_WS.sub(" ", raw_unit).strip()
+        if not unit:
+            continue
+        if not (_PW_SUBJECT.search(unit) and _PW_MARKER.search(unit)
+                and _PW_VERB.search(unit) and _PW_EVENT.search(unit)):
+            continue
+        if _PW_HUMAN.search(unit) or _PW_NEG.search(unit):
+            continue
+        return True
+    return False
+
+
 _ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
+
+
+_ORCH_CLAIM_MAX_CHARS = 200000   # SECA bound: an over-long final message is not scanned (no claim)
+
+# GD-137 Layer A: the phantom-wait claim detector's five REQUIRED signals and three EXCLUSIONS. Matching is
+# PRECISION-FIRST: paraphrase, non-English, novel vocabulary, and non-Markdown quoting are DISCLOSED false
+# NEGATIVES (dscres), never false positives; Layers B/C are the overlap cover. Verbs and event nouns match
+# common inflections so an -ing/-s/-ed form of a listed stem still counts.
+_PW_SUBJECT = re.compile(r"\bi\b|\bi'll\b|\bwe\b|\bthis session\b|\bthis agent\b")
+_PW_MARKER = re.compile(r"\bwill\b|'ll\b|\bawaiting\b|\bwaiting\b|\bresuming\b|\bwatching\b|\bmonitoring\b")
+_PW_VERB = re.compile(
+    r"\bresum(?:e|es|ing)\b|\bcontinu(?:e|es|ing)\b|\breturn(?:s|ing)?\b|\bre-?enter(?:s|ing)?\b"
+    r"|\bproceed(?:s|ing)?\b|\bmerg(?:e|es|ing)\b|\bpick(?:s|ing)?\s+up\b|\bland(?:s|ing)?\b"
+    r"|\bawait(?:s|ing)?\b|\bwait(?:s|ing)?\b|\bwatch(?:es|ing)?\b|\bmonitor(?:s|ing)?\b")
+_PW_EVENT = re.compile(
+    r"\bci\b|\bchecks?\b|\bworkflows?\b|\bpipelines?\b|\bbuilds?\b|\bjobs?\b|\bruns?\b|\btasks?\b"
+    r"|\bnotifications?\b|\bmonitors?\b|\bwatch(?:es)?\b|\bcrons?\b|\bschedules?\b|\btimers?\b"
+    r"|\bgreen\b|\bfire(?:s|d)?\b|\bcomplete(?:s|d)?\b|\bcompletion\b")
+_PW_HUMAN = re.compile(
+    r"\byou\b|\byour\b|\bhuman\b|\bmaintainer\b|\boperator\b|\breview|\bapprov|\bconfirm"
+    r"|\bdecision\b|let me know")
+_PW_NEG = re.compile(r"\bnot\b|n't\b|\bno\b|\bnever\b|\bif\b|\bwould\b|\bcannot\b|\bunless\b")
+_PW_DISCLAIM = re.compile(
+    r"no automatic|must be resumed|please message|please prompt|requires a human|\bmanually\b")
+_PW_FENCE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+_PW_INLINE = re.compile(r"`[^`]*`")
+_PW_BLOCKQUOTE = re.compile(r"(?m)^\s*>.*$")
+_PW_UNIT_SPLIT = re.compile(r"[\n.!?;]+")
+_PW_WS = re.compile(r"\s+")
+_PW_APOS = {0x2018: 0x27, 0x2019: 0x27, 0x02BC: 0x27}   # curly/modifier apostrophes -> straight '
 
 
 def _orch_checkpoint_union(root, payload, record=True):
@@ -5972,14 +6115,23 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
                          for i, _c, p in rechecked)
     basis_unchanged = tstate["schedule_basis"] == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
+    # GD-137 Layer A: the phantom-wait claim + its re-entry liveness. The claim is cheap and computed
+    # unconditionally; the liveness read (ledger + arrays + wakes) runs ONLY when a claim is present, so a
+    # non-claiming stop stays byte-identical to prior behaviour. decide_yield consults these keys only for
+    # kind == "stop", after its actionable/cannot-evaluate checks.
+    phantom_claim = _orch_phantom_wait_claim(data.get("last_assistant_message"))
+    reentry, reentry_detail = ("none", "")
+    if phantom_claim:
+        reentry, reentry_detail = _orch_reentry_live(data, root, task_hours, tstate)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
-           "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
+           "loop_signal": data.get("stop_hook_active") is True,  # D4/E2: DIAGNOSTIC only, never relieves the bound
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
            "blocked": classes["blocked"], "cannot_evaluate": classes["cannot_evaluate"],
            "proposed": classes["proposed"],
            "wake_named": wake_named, "schedule_denials": schedule_denials,
-           "basis_unchanged": basis_unchanged}
+           "basis_unchanged": basis_unchanged,
+           "phantom_claim": phantom_claim, "reentry": reentry, "reentry_detail": reentry_detail}
     return ctx, (ts if isinstance(ts, dict) else None), basis
 
 
@@ -6081,6 +6233,12 @@ def _orch_stop_family(data, event_name, kind):
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
+    if ctx["loop_signal"]:
+        # D4/E2: stop_hook_active is DIAGNOSTIC only now. The harness carries an 8-consecutive-block
+        # override on this flag, but the guard-owned stop_denials bound (2) is stricter and governs, so it
+        # is recorded for observability and never consulted by the verdict.
+        _orch_guard_event(root, event_name, "loop_signal_diagnostic",
+                          "stop_hook_active true at counter {}".format(ctx["counter"]))
     if verdict == "DENY":
         if not _orch_record_denial(root, ts, kind, basis):
             warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
@@ -6094,7 +6252,7 @@ def _orch_stop_family(data, event_name, kind):
     _orch_guard_event(root, event_name, verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         extra = ""
-        if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
+        if ctx["counter"] >= _ORCH_LOOP_BOUND \
                 and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
             # C.4: the bound released this exit past open work; mark it forced_unresolved for the
             # next resume audit's triage. The fail-open verdict itself is unchanged.
@@ -6195,7 +6353,7 @@ def orch_yield_tool(data):
     _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         msg = "AIQT guardrail: {}".format(reason)
-        forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
+        forced = ((kind == "stop" and ctx["counter"] >= _ORCH_LOOP_BOUND)
                   or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
                       and ctx["basis_unchanged"]))
         if forced and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
@@ -7565,8 +7723,8 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop
-# bound), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
+# re-fire on the forced continuation and wedge the session (it re-fires until the harness's stop_hook_active override relents after 8 blocks,
+# v2.1.196+), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
 # emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is the intended
 # exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse handler
 # fails closed via exit 2 on error.
@@ -7610,7 +7768,7 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
+    # wedge the session (it re-fires until the harness's stop_hook_active override relents after 8 blocks, v2.1.196+), so a bad-argv Stop
     # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
     # still fails closed (exit 2).
     mode = argv[0] if argv else None

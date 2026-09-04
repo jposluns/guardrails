@@ -751,7 +751,8 @@ def main():
         base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
                 "enum_status": "ok", "enum_detail": "", "actionable": [], "waiting": [],
                 "blocked": [], "proposed": [], "wake_named": None,
-                "schedule_denials": 0, "basis_unchanged": False}
+                "schedule_denials": 0, "basis_unchanged": False,
+                "phantom_claim": False, "reentry": "none", "reentry_detail": ""}
         v, _r, _d = aiqt_hooks.decide_yield(dict(base))
         check("core/empty-backlog-stop-allows", v, "ALLOW")
         v, _r, _d = aiqt_hooks.decide_yield(dict(base, kind="schedule_idle",
@@ -782,6 +783,151 @@ def main():
         check("core/wake-hygiene-below-cap-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=3))
         check("core/wake-hygiene-at-cap-findings", v, "ALLOW_WITH_FINDINGS")
+
+        # GD-137 Layer A: the phantom deny is stop-only, after the actionable/cannot-evaluate checks.
+        pw = dict(base, phantom_claim=True)
+        check("core/phantom-none-denies", aiqt_hooks.decide_yield(dict(pw, reentry="none"))[0], "DENY")
+        check("core/phantom-cannot-eval-denies",
+              aiqt_hooks.decide_yield(dict(pw, reentry="cannot-evaluate", reentry_detail="ledger x"))[0], "DENY")
+        check("core/phantom-live-inert-allows", aiqt_hooks.decide_yield(dict(pw, reentry="live"))[0], "ALLOW")
+        check("core/no-claim-allows", aiqt_hooks.decide_yield(dict(base, reentry="none"))[0], "ALLOW")
+        # stop-only: a schedule_idle with a (spurious) claim is never phantom-denied on that basis
+        check("core/phantom-not-on-schedule",
+              aiqt_hooks.decide_yield(dict(pw, kind="schedule_idle", reentry="none",
+                                wake_named=True))[0] != "DENY"
+              or "actionable" in "", True)   # schedule path reaches clean ALLOW (no actionable, wake ok)
+        # phantom yields to the actionable check: a real actionable item denies with the setcmp reason,
+        # not the phantom reason (order proof)
+        v, r, _ = aiqt_hooks.decide_yield(dict(pw, actionable=[("A", "t", "no blocker")], reentry="none"))
+        check("core/actionable-precedes-phantom", (v, "setcmp" in r or "actionable" in r), ("DENY", True))
+        # phantom yields to the loop bound: at bound, ALLOW_WITH_FINDINGS, not a phantom re-deny
+        check("core/phantom-bounded-by-counter",
+              aiqt_hooks.decide_yield(dict(pw, reentry="none", counter=2))[0], "ALLOW_WITH_FINDINGS")
+
+        pwc = aiqt_hooks._orch_phantom_wait_claim
+        POS = [
+            "I'll resume when CI is green.",
+            "This session will continue once the workflow completes.",
+            "We'll pick up after the pipeline build finishes.",
+            "I am awaiting the CI run and will re-enter when it completes.",
+            "I'll land the merge when the job fires.",
+            "This agent will proceed after the scheduled cron runs.",
+        ]
+        NEG = [
+            "I'll resume once you approve.",                       # human-wait object
+            "I'll continue after the CI run once you confirm.",    # human-wait object near verb
+            "I will not wait for CI; continuing now.",             # negation
+            "If the workflow completes I'll resume.",              # conditional ("if")
+            "I'll resume when CI is green, but this must be resumed manually.",  # disclaimer anywhere
+            "Waiting on your review before I continue.",           # human review, no automated noun
+            "I will run the tests now.",                           # no wait marker + no resume verb pairing
+            "```\nI'll resume when CI is green\n```",              # inside a fenced block (stripped)
+            "`I'll resume when CI completes`",                     # inline code span (stripped)
+            "> I'll resume when CI is green",                      # blockquote (stripped)
+            "The build completed successfully.",                   # no subject/marker/verb
+            "",                                                    # empty
+        ]
+        for i, s in enumerate(POS):
+            check("claim/pos-{}".format(i), pwc(s), True)
+        for i, s in enumerate(NEG):
+            check("claim/neg-{}".format(i), pwc(s), False)
+        check("claim/non-str", pwc(None), False)
+        check("claim/over-long", pwc("I'll resume when CI is green. " * 20000), False)  # > 200k chars
+
+        # GD-137 Layer A: _orch_reentry_live over {bg} x {crons} x {ledger} x {wake_digests}.
+        rl = Fixture(tmp, "reentry")
+        rsd = Path(aiqt_hooks._orch_state_dir_for_root(str(rl.root)))
+        rsd.mkdir(parents=True, exist_ok=True)
+        rledger = rsd / "dispatch-ledger.jsonl"
+        LIVE_ROW = json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-1",
+                               "tool": "Bash", "wake": True}) + "\n"
+        # array states: absent (contributes nothing), empty list, non-empty list, non-list (cannot-eval)
+        ARRAYS = {"absent": "__absent__", "empty": [], "nonempty": [{"id": "x"}], "nonlist": "oops"}
+        LEDGERS = {"live": LIVE_ROW, "empty": "", "unreadable": "null\n{broken\n"}
+        WAKES = {"present": ["deadbeef"], "absent": None}   # None -> key omitted from turn-state
+
+        def contrib_array(state):
+            return "live" if state == "nonempty" else ("cannot" if state == "nonlist" else "none")
+
+        def oracle(bg, cr, led, wk):
+            sig = [contrib_array(bg), contrib_array(cr),
+                   "live" if led == "live" else ("cannot" if led == "unreadable" else "none"),
+                   "live" if wk == "present" else "none"]
+            if "live" in sig:
+                return "live"
+            if "cannot" in sig:
+                return "cannot-evaluate"
+            return "none"
+
+        for bgk, bgv in ARRAYS.items():
+            for crk, crv in ARRAYS.items():
+                for ledk, ledv in LEDGERS.items():
+                    rledger.write_text(ledv, encoding="utf-8")
+                    for wkk, wkv in WAKES.items():
+                        ts = {} if wkv is None else {"wake_digests": wkv}
+                        tstate = aiqt_hooks._orch_validate("turn_state", ts)[1]
+                        data = {}
+                        if bgv != "__absent__":
+                            data["background_tasks"] = bgv
+                        if crv != "__absent__":
+                            data["session_crons"] = crv
+                        got = aiqt_hooks._orch_reentry_live(data, str(rl.root), 24, tstate)[0]
+                        check("reentry/{}-{}-{}-{}".format(bgk, crk, ledk, wkk),
+                              got, oracle(bgk, crk, ledk, wkk))
+
+        e = Fixture(tmp, "phantom-e2e")
+        esd = Path(aiqt_hooks._orch_state_dir_for_root(str(e.root)))
+        esd.mkdir(parents=True, exist_ok=True)
+        eledger = esd / "dispatch-ledger.jsonl"
+        CLAIM = "I'll resume when CI is green."
+        NOCLAIM = "Done for now; nothing pending."
+        estop = lambda msg, **extra: aiqt_hooks.orch_stop_guard(
+            e.payload("Stop", extra=dict({"last_assistant_message": msg}, **extra)))
+        e.set_items([])
+
+        # claim + aggregate none (no arrays, absent ledger, no wakes) -> DENY
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/claim-none-denies", _verdict(estop(CLAIM)), "block2")
+        # no claim, same state -> clean ALLOW (byte-identical prior behaviour)
+        e.set_turn_state({})
+        check("e2e/no-claim-allows", _verdict(estop(NOCLAIM)), "allow")
+        # claim + live via background_tasks array -> inert ALLOW
+        e.set_turn_state({})
+        check("e2e/claim-live-array-allows",
+              _verdict(estop(CLAIM, background_tasks=[{"id": "bt-1"}])), "allow")
+        # claim + live via dispatch ledger -> inert ALLOW
+        e.set_turn_state({})
+        eledger.write_text(json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-1",
+                                       "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        check("e2e/claim-live-ledger-allows", _verdict(estop(CLAIM)), "allow")
+        # claim + live via registered wake -> inert ALLOW
+        e.set_turn_state({"wake_digests": ["deadbeef"]}); eledger.unlink(missing_ok=True)
+        check("e2e/claim-live-wake-allows", _verdict(estop(CLAIM)), "allow")
+        # claim + cannot-evaluate (unreadable ledger) -> DENY variant
+        e.set_turn_state({})
+        eledger.write_text("null\n{broken\n", encoding="utf-8")
+        code, obj, err = estop(CLAIM)
+        check("e2e/claim-cannot-eval-denies", code, 2)
+        check("e2e/cannot-eval-names-source", "unreadable" in (err or "").lower(), True)
+        eledger.unlink(missing_ok=True)
+
+        # stop_hook_active True + counter 0 + claim + aggregate none MUST deny (E2: loop_signal is
+        # diagnostic; before E2 the top-of-decide_yield relief allowed-with-findings on the signal alone).
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/cross-hook-trap-denies",
+              _verdict(estop(CLAIM, stop_hook_active=True)), "block2")
+
+        # unreadable/absent last_assistant_message -> no claim -> allow
+        e.set_turn_state({})
+        check("e2e/no-message-allows", _verdict(aiqt_hooks.orch_stop_guard(e.payload("Stop"))), "allow")
+        e.set_turn_state({})
+        check("e2e/nonstr-message-allows",
+              _verdict(estop({"not": "a string"})), "allow")   # claim rejects non-str -> inert
+        # unpersistable counter -> warned allow (existing _orch_record_denial False path); reuse the
+        # existing pattern: a claim+none that would DENY becomes a warn allow when the state dir is
+        # read-only. (Mirror the existing "denial counter could not be persisted" leg if one exists;
+        # otherwise assert code 0 + systemMessage.)
+        # unreadable registry -> warn + allow (shared _orch_stop_family bad-registry path, already tested)
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
