@@ -25,3 +25,11 @@ nothing; it does not by itself justify reducing the verifier panel, since one fa
 evidence that a verifier family is unavailable. A required family is dropped from the panel only when it
 is genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded
 and re-run when the family returns.
+The same fail-closed posture applies when the verifier itself cannot read or access a required input it was
+meant to cover: it does not emit a permissive verdict over the gap. It emits UNVERIFIABLE, the
+cannot-evaluate outcome guard-input-soundness names, identifying the input it could not read; this is a
+terminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it
+is treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.
+A clean verdict asserted over an input the verifier never actually read is the same false-clean this rule
+already guards against, applied to the unreadable-required-input case, meeting the fail-closed posture
+check-fails-closed-on-unreadable requires of a gate that cannot read its own input.

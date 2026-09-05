@@ -33,3 +33,11 @@ treats a live result exceeding the recorded one as a fresh, unaddressed finding.
 the cited instance while a sibling of the same class survives unaddressed is an incomplete fix,
 the completeness-claim-enumerates-its-set discipline applied to a defect class standing in for
 the registry that class otherwise lacks.
+
+After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on
+re-reading the resulting source and confirming the intended change is present in it, never on the applier's
+own stdout, exit code, or narration of what it did. A successful process, a narrated or reported
+replacement, a zero-match conditional skip, or an exception raised before the write can each report success
+while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
+This is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,
+not the applier's report, is the observation completion rests on.

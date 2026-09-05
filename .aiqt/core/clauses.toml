@@ -167,7 +167,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 15
 canonical-text = "Never claim completion without evidence."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.2"
@@ -176,7 +176,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.3"
@@ -185,7 +185,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.4"
@@ -194,7 +194,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.5"
@@ -203,7 +203,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.6"
@@ -212,7 +212,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 17
 end-line = 19
 canonical-text = "A success, health, or backup marker is evidence only when it rests on the expected payload\nbeing actually present and well-formed; the marker's existence, freshness, or age is not itself that\nevidence, so check the content it stands for rather than the marker."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.7"
@@ -221,7 +221,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 19
 end-line = 20
 canonical-text = "do not\nend a turn asserting work is proceeding unless it is."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.8"
@@ -230,7 +230,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 22
 end-line = 26
 canonical-text = "A machine-checkable status or completion assertion over a named set, such as all N gates being green at a\nrevision or a coverage figure, is emitted from an observation that ran that exact set, never narrated\nalongside the checks. For a claim about the current or working state, that observation follows the last\nwrite to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to\nan immutable revision remains evidence about that revision."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.9"
@@ -239,7 +239,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 28
 end-line = 29
 canonical-text = "A fix claim scoped to a defect class, not merely the cited instance, is complete only when it\nalso accounts for every sibling instance of that class."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.10"
@@ -248,7 +248,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 29
 end-line = 32
 canonical-text = "Such a claim carries either a recorded,\nre-runnable completeness probe (a class-wide search whose current run shows no remaining\ninstance) or a named exemption from a closed vocabulary accounting for every instance\ndeliberately left unfixed."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.11"
@@ -257,7 +257,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 32
 end-line = 37
 canonical-text = "The probe's defining token or pattern is author-declared, because\nderiving the class automatically from the finding's own wording cannot decide what else belongs\nto it, so the person who fixes the cited instance names the class and records the probe\nstanding for it; author-declaration is not licence to under-scope, so the probe is derived from\nand validated against the authoritative source that defines the class, per the\nguard-input-soundness principle, never an ad-hoc pattern a surviving sibling can fall outside."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.12"
@@ -266,7 +266,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 38
 end-line = 40
 canonical-text = "An independent verifier first confirms the probe is adequate against that authoritative source,\nthen reproduces it rather than re-judging relatedness from its own reading of the finding, and\ntreats a live result exceeding the recorded one as a fresh, unaddressed finding."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.13"
@@ -275,7 +275,16 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 40
 end-line = 43
 canonical-text = "Fixing only\nthe cited instance while a sibling of the same class survives unaddressed is an incomplete fix,\nthe completeness-claim-enumerates-its-set discipline applied to a defect class standing in for\nthe registry that class otherwise lacks."
-source-digest = "c1c76ea4da375592e27c5a1eed1b1a0bf25dab0a067e3153fc629d7815dd40d2"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.14"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 45
+end-line = 51
+canonical-text = "After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on\nre-reading the resulting source and confirming the intended change is present in it, never on the applier's\nown stdout, exit code, or narration of what it did. A successful process, a narrated or reported\nreplacement, a zero-match conditional skip, or an exception raised before the write can each report success\nwhile leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.\nThis is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,\nnot the applier's report, is the observation completion rests on."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "grdinp.1"
@@ -1787,7 +1796,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 13
 end-line = 16
 canonical-text = "A verifier's output counts as a verdict only when the verifier actually delivered one. Completeness is\njudged by a single criterion: the delivery carries the positive evidence of a finished verdict that the\nverification agreed on in advance, whether that agreed evidence is a completion marker the verifier emits,\nthe explicit verdict the verification asked for, or both."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.2"
@@ -1796,7 +1805,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 16
 end-line = 18
 canonical-text = "A delivery that lacks that agreed evidence, or\nthat is truncated, empty, or errored, is treated as no verdict, never as a pass, a vote, or a finding-free\nresult."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.3"
@@ -1805,7 +1814,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 21
 end-line = 23
 canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.4"
@@ -1814,7 +1823,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 21
 end-line = 23
 canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.5"
@@ -1823,7 +1832,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.6"
@@ -1832,7 +1841,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.7"
@@ -1841,7 +1850,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.8"
@@ -1850,7 +1859,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 25
 end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.9"
@@ -1859,7 +1868,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 25
 end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.10"
@@ -1868,7 +1877,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 25
 end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.11"
@@ -1877,7 +1886,16 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 19
 end-line = 20
 canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even when its retained\nprefix appears complete."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+
+[[clause]]
+clause-id = "vrfdlv.12"
+corpus-id = "vrfdlv"
+source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
+start-line = 28
+end-line = 35
+canonical-text = "The same fail-closed posture applies when the verifier itself cannot read or access a required input it was\nmeant to cover: it does not emit a permissive verdict over the gap. It emits UNVERIFIABLE, the\ncannot-evaluate outcome guard-input-soundness names, identifying the input it could not read; this is a\nterminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it\nis treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.\nA clean verdict asserted over an input the verifier never actually read is the same false-clean this rule\nalready guards against, applied to the unreadable-required-input case, meeting the fail-closed posture\ncheck-fails-closed-on-unreadable requires of a gate that cannot read its own input."
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdiv.1"
