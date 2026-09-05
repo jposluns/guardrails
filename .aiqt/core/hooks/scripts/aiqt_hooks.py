@@ -3218,10 +3218,16 @@ _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")
 # =ENV push'). Anchored to the OPTION token ('-c' then whitespace and/or a shell quote, or '--config-env'
 # then '='/whitespace and an optional shell quote) introducing 'remote.<something>.mirror', so a QUOTED
 # argument ("-c 'remote.origin.mirror=true'", "--config-env 'remote.origin.mirror=MFLAG'") fires like the
-# unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. A quote or
-# backslash splitting the OPTION TOKEN itself (-'c', \-c) is NOT matched: the same inherent
-# flag-fragmentation boundary disclosed for the raw force/delete spellings. It parses NO value: a falsy
-# value over-asks on this path (accepted, documented), mirroring the raw scan's over-matching posture.
+# unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. It matches
+# only the COMMON quoted-argument forms above: a quote or backslash that FRAGMENTS the option token, the
+# key, or the value (-'c', \-c, remote.origin.'mirror'=true which git 2.53 still reconstructs to
+# mirror=true, or a split value) is NOT matched. Arbitrary shell fragmentation of an unparseable or
+# wrapper-prefixed command cannot be robustly matched by a regex (only a shell parser could, which the
+# pack deliberately avoids), so this is an inherent lexical-scan boundary, the same class as the disclosed
+# wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not chased with more regex variants.
+# The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
+# branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
+# (accepted, documented), mirroring the raw scan's over-matching posture.
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")

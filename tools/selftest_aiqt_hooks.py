@@ -2774,6 +2774,20 @@ def main():
                 "residual, allows", "git -c alias.p='push --mirror' p origin", "allow", cwd=plf)
         pexpect("(gd146-m36) a command-local remote.<name>.push refspec is a disclosed follow-on "
                 "residual, allows", "git -c remote.origin.push=:main push origin", "allow", cwd=plf)
+        # (gd146-m37, round-2 QA BLOCKER) the raw fallback requires a CONTIGUOUS '.mirror', so a shell
+        # quote (or backslash) that FRAGMENTS THE KEY on a wrapped or unparseable command evades it and
+        # ALLOWS, while git 2.53 reconstructs the key to mirror=true. Arbitrary shell fragmentation of the
+        # option token, the key, or the value cannot be robustly matched by a regex (only a shell parser
+        # could, which the pack deliberately avoids), so this is an inherent lexical-scan boundary, the same
+        # class as the disclosed wrapper/alias/fragmented-command-word residuals. Disposition per
+        # disclose-guard-residuals: DISCLOSE, not a regex arms-race; the non-coverage is stated in the
+        # section-5 residue (manifest ~line 112), SYSTEM-HARDENING.md, and the _RAW_PUSH_MIRRORCFG_RE code
+        # comment. This lock asserts it is DELIBERATE, not accidental; the PARSED path stays complete (m1-m25)
+        # and network-side branch protection remains the backstop. Flip: contiguous 'remote.origin.mirror'
+        # (m28) ASKS, so this ALLOW isolates the key-fragmentation boundary.
+        pexpect("(gd146-m37) a KEY-FRAGMENTED wrapped raw mirror config is a DISCLOSED inherent "
+                "lexical-scan residual, allows",
+                "env git -c remote.origin.'mirror'=true push origin", "allow", cwd=plf)
 
         # === GD-146 round-1 tri-family QA fixes (a discriminating test per confirmed finding) =========
         # QA-BLOCKER (raw fallback): a shell quote BETWEEN the -c/--config-env option and its
