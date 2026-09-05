@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "9dbbe17c9bb1372b0bff9b01216d6860851d7b735983a0c40691d91329ca1fe4"
+tree-sha256 = "96cab53d843b4cf7e8c8630cdd04113202b19ab6dff9363c8ce4aae558903c7b"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,8 +46,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 71540
-sha256 = "09c37634fddd94b3a7c42e1783ebe5c3d8e072cbdbceb94bd95e121a3e25e5d7"
+bytes = 72997
+sha256 = "82354d1ca9f8daef956f77978cdcfe8dbc7a0a9e1c671ff84d0bb59264c6dd37"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2101,8 +2101,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 34073
-sha256 = "1985818f530ddfb6f5ff6ff5fbf5cad4c0caf0d8a746b7a796f631eae1a1e35c"
+bytes = 34148
+sha256 = "0a73d8d48343c7fd4d663b3832f5027686481d94625f500d2ce657ab42a72749"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2485,6 +2485,11 @@ bytes = 7991
 sha256 = "71f7a366e4d703c9b33a4f7c3d2f5f165260f590b62a38bd31e2c9062b8103bd"
 
 [[sources]]
+path = "tools/aiqt_corpus.py"
+bytes = 19503
+sha256 = "09353ed2bd671d243130a1f5cf158be30e9027ddc08af88c3ba1ea38b2728d34"
+
+[[sources]]
 path = "tools/check_applies.py"
 bytes = 10538
 sha256 = "e95bbb0dffb1fa9ab801bc3f44e387346ab0e166823b902955e38337e1364474"
@@ -2831,8 +2836,13 @@ sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 11595
-sha256 = "2146b61eb5e351be036c819875a3df0a8c9ca739e3fee2e95b49c7da1ad3c1ff"
+bytes = 11671
+sha256 = "8d9ccbde3e079796c4c3609d5efe4a204e73789ead91918d007967e3dbeee831"
+
+[[sources]]
+path = "tools/selftest_aiqt_corpus.py"
+bytes = 16674
+sha256 = "e02e15325a1da2cfad5da68ad1ca7456fedab1fc272f8f8648ca4a21758fd40f"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
