@@ -34,8 +34,10 @@ It also covers the protected-line guard (protected_line, prtbrn/artbr1): a force
 DELETION of a protected branch (main/master) denies, with the banner naming the actual act, while a
 force or delete to a feature branch allows; a refspec-less force-push, a forced or deleted HEAD/@, and
 a direct commit (the literal commit subcommand only) are judged by a read-only HEAD probe (fail-to-ASK
-when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks;
-and the parse-error/wrapper fallback fails safe for the force-push, deletion, AND commit spellings.
+when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks,
+as does a command-local remote.<name>.mirror=true config (or the key via --config-env) before the push
+subcommand (GD-146); and the parse-error/wrapper fallback fails safe for the force-push, deletion,
+mirror-config, AND commit spellings.
 
 It covers branch_root (brnrot) through H1-H32: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
@@ -2656,6 +2658,122 @@ def main():
                 "git commit -m 'x' && git push --force origin main", "deny", cwd=plr)
         pexpect("(pl-m1) a git_discard verb is out of protected_line scope (disjoint controls)",
                 "git reset --hard", "allow", cwd=plr)
+
+        # === GD-146: command-local mirror-config guard (m1-m36) ==============================
+        # A command-local `-c remote.<name>.mirror=true push` (or the key via --config-env) reproduces
+        # --mirror's force-and-delete sweep with no bulk flag, so it ASKS with the same disposition. The
+        # named-protected force/delete DENY still outranks it, and a falsy config never stands down an
+        # explicit --mirror. Labels are gd146-mN (the plan's m1-m36; the bare pl-mN space collides with
+        # the pl-m1 git_discard-scope case above). ASK/ALLOW cases run on the feature-branch fixture plf
+        # (the clause fires before the HEAD probe), DENY interactions on plr.
+        _mkey = "remote.origin.mirror"
+        # Parsed path, fires (ASK).
+        pexpect("(gd146-m1) '-c mirror=true' with an explicit refspec asks (beats the explicit-refspec "
+                "early return)", "git -c remote.origin.mirror=true push origin main", "ask", cwd=plf)
+        pexpect("(gd146-m2) '-c mirror=true' refspec-less asks (beats the no-force early return)",
+                "git -c remote.origin.mirror=true push origin", "ask", cwd=plf)
+        for _v in ("1", "yes", "on", "TRUE"):
+            pexpect("(gd146-m3/{}) truthy spelling asks".format(_v),
+                    "git -c remote.origin.mirror={} push origin".format(_v), "ask", cwd=plf)
+        pexpect("(gd146-m4) a bare key is boolean true, asks",
+                "git -c remote.origin.mirror push origin", "ask", cwd=plf)
+        pexpect("(gd146-m5) case-insensitive section/key asks",
+                "git -c ReMoTe.origin.MiRrOr=YeS push origin", "ask", cwd=plf)
+        pexpect("(gd146-m6) a dotted remote name (startswith/endswith, not a 3-way split) asks",
+                "git -c remote.a.b.mirror=true push origin", "ask", cwd=plf)
+        pexpect("(gd146-m7) separated --config-env naming the key asks (value unreadable)",
+                "git --config-env remote.origin.mirror=MFLAG push origin", "ask", cwd=plf)
+        pexpect("(gd146-m8) attached --config-env=... naming the key asks",
+                "git --config-env=remote.origin.mirror=MFLAG push origin", "ask", cwd=plf)
+        pexpect("(gd146-m9) --config-env forces unknown regardless of a later direct falsy, asks",
+                "git --config-env remote.origin.mirror=MFLAG -c remote.origin.mirror=false push origin",
+                "ask", cwd=plf)
+        pexpect("(gd146-m10) a not-provably-falsy value fires (git dies on the bad boolean; harmless "
+                "over-ask)", "git -c remote.origin.mirror=maybe push origin", "ask", cwd=plf)
+        pexpect("(gd146-m11) any truthy mirror key fires; the remote name is not resolved (locked "
+                "over-ask)", "git -c remote.backup.mirror=true push origin", "ask", cwd=plf)
+        pexpect("(gd146-m12) direct last-value-wins ends truthy, asks",
+                "git -c remote.origin.mirror=false -c remote.origin.mirror=true push origin",
+                "ask", cwd=plf)
+        pexpect("(gd146-m13) per-key independence: one key's falsy never cancels another's truthy",
+                "git -c remote.other.mirror=false -c remote.origin.mirror=true push origin",
+                "ask", cwd=plf)
+        pexpect("(gd146-m14) the '-c' region is pre-subcommand; the '--' operand boundary does not "
+                "shield it", "git -c remote.origin.mirror=true push -- origin main", "ask", cwd=plf)
+        # Parsed path, stands down (ALLOW).
+        for _v in ("false", "0", "no", "off", ""):
+            pexpect("(gd146-m15/{!r}) provably-falsy stands down, allows".format(_v),
+                    "git -c remote.origin.mirror={} push origin".format(_v), "allow", cwd=plf)
+        pexpect("(gd146-m16) direct last-value-wins ends falsy, allows (discriminates last-wins from "
+                "any-truthy)",
+                "git -c remote.origin.mirror=true -c remote.origin.mirror=false push origin",
+                "allow", cwd=plf)
+        pexpect("(gd146-m17a) a non-mirror key does not over-fire",
+                "git -c color.ui=always push origin main", "allow", cwd=plf)
+        pexpect("(gd146-m17b) another non-mirror key does not over-fire",
+                "git -c user.name=x push origin", "allow", cwd=plf)
+        for _k in ("remote.origin.mirrors=true", "remote.origin.fetch=true", "remotes.origin.mirror=true"):
+            pexpect("(gd146-m18/{}) near-miss key does not fire".format(_k),
+                    "git -c {} push origin".format(_k), "allow", cwd=plf)
+        pexpect("(gd146-m19) an empty remote name (remote..mirror) never fires",
+                "git -c remote..mirror=true push origin", "allow", cwd=plf)
+        pexpect("(gd146-m20a) mirror text in a push-option value is not pre-subcommand config",
+                "git push -o remote.origin.mirror=true origin main", "allow", cwd=plf)
+        pexpect("(gd146-m20b) mirror text in an operand position is not config",
+                "git push origin remote.origin.mirror=true", "allow", cwd=plf)
+        pexpect("(gd146-m21) the clause lives in the push handler only (status is untouched)",
+                "git -c remote.origin.mirror=true status", "allow", cwd=plf)
+        pexpect("(gd146-m22) the existing info-flag skip still wins over the config",
+                "git -c remote.origin.mirror=true push --help", "allow", cwd=plf)
+        # Precedence and interaction.
+        pexpect("(gd146-m23) named-protected forced refspec DENIES before the mirror ASK",
+                "git -c remote.origin.mirror=true push origin +main:main", "deny", cwd=plr)
+        pexpect("(gd146-m24) named-protected delete refspec DENIES before the mirror ASK",
+                "git -c remote.origin.mirror=true push origin :main", "deny", cwd=plr)
+        pexpect("(gd146-m25) a falsy config never stands down an explicit --mirror, asks",
+                "git -c remote.origin.mirror=false push --mirror origin", "ask", cwd=plf)
+        # Wording: the ASK detail names the concrete key and the effect (direct), or the unreadable env
+        # value (--config-env). Extracted from the reason like the pl-y3c-reason check above.
+        def _reason(command, cwd):
+            _d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                  "tool_input": {"command": command}, "cwd": cwd}
+            _c, _o, _e = plg(_d)
+            return _o.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
+                if isinstance(_o, dict) else ""
+        _m26 = _reason("git -c remote.origin.mirror=true push origin", plf)
+        if _mkey not in _m26 or "DELETES" not in _m26:
+            failures.append("(gd146-m26) direct-config ASK detail must name the {} key and the "
+                            "delete effect, got: {!r}".format(_mkey, _m26))
+        _m27 = _reason("git --config-env remote.origin.mirror=MFLAG push origin", plf)
+        if _mkey not in _m27 or "cannot read" not in _m27:
+            failures.append("(gd146-m27) config-env ASK detail must name the key and say the value "
+                            "cannot be read, got: {!r}".format(_m27))
+        # Raw fallback (wrapped or unparseable): asks on the same spellings, anchored to the option token.
+        pexpect("(gd146-m28) wrapped direct mirror config asks via the raw fallback",
+                "env git -c remote.origin.mirror=true push origin", "ask", cwd=plf)
+        pexpect("(gd146-m29) unparseable mirror config asks via the raw fallback",
+                'git -c remote.origin.mirror=true push origin "unbalanced', "ask", cwd=plf)
+        pexpect("(gd146-m30) wrapped attached --config-env asks via the raw fallback",
+                "env git --config-env=remote.origin.mirror=MFLAG push origin", "ask", cwd=plf)
+        pexpect("(gd146-m31) the raw path parses no values: a wrapped falsy config over-asks (accepted)",
+                "env git -c remote.origin.mirror=false push origin", "ask", cwd=plf)
+        pexpect("(gd146-m32) the raw pattern is anchored to the -c/--config-env option spelling: a "
+                "push-option value allows", "env git push -o remote.origin.mirror=true origin main",
+                "allow", cwd=plf)
+        # Residual locks (ALLOW today; each cross-referenced to the section-5 disclosure so non-coverage
+        # is asserted, not assumed). The guard reads no git config offline, so these stand down.
+        pl_mcfg = _init_repo(tmp / "pl-mcfg")
+        _git(pl_mcfg, "config", "remote.origin.mirror", "true")  # persisted file config: NOT read
+        pexpect("(gd146-m33) a PERSISTED file-config mirror mode is a disclosed residual, allows",
+                "git push origin", "allow", cwd=str(pl_mcfg))
+        pexpect("(gd146-m34) the GIT_CONFIG_* env protocol (and the explicit-refspec ambient gap) is a "
+                "disclosed residual, allows",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.mirror GIT_CONFIG_VALUE_0=true "
+                "git push origin main", "allow", cwd=plf)
+        pexpect("(gd146-m35) an alias hiding the push (subcommand is 'p', not 'push') is a disclosed "
+                "residual, allows", "git -c alias.p='push --mirror' p origin", "allow", cwd=plf)
+        pexpect("(gd146-m36) a command-local remote.<name>.push refspec is a disclosed follow-on "
+                "residual, allows", "git -c remote.origin.push=:main push origin", "allow", cwd=plf)
 
         # === L11 cross-hook redirect vectors (protected_line): the useful round-10 tests RESTORED via the
         # shared raw-aware tokenizer, plus the two regressions that caused the naive-strip revert ==========
