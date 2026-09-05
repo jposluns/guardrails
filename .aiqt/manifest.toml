@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "88fae55193583ec4a073b7475de6d1ad998e00d5a00c70be2899632d7f9f955d"
+tree-sha256 = "a983a1f87e47fea5812080638d6c5ae884436b2c43afe92eebb83cc285cf54fb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2476,8 +2476,8 @@ sha256 = "376dd10f129a3ce78e4125444a14bb7774acbdabc300915dbc0eab00d2880ee3"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
-bytes = 124792
-sha256 = "6a51ddabea26a499063bb178e9ec790ad840d83ff5f2fafd5b90c4ff88928100"
+bytes = 135810
+sha256 = "f94d4fc5bc2f1da4079c8412bab432603e3c8b259462090cbd2a1c1229b104f2"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -2501,8 +2501,8 @@ sha256 = "71f7a366e4d703c9b33a4f7c3d2f5f165260f590b62a38bd31e2c9062b8103bd"
 
 [[sources]]
 path = "tools/audit_reference.py"
-bytes = 11265
-sha256 = "88cb9bf89d41ca565c3f22e68992497f06d8866dcc47f28c34430e1bdc1343e7"
+bytes = 14001
+sha256 = "b091e92022b8ce2028280a318a6f6f880b02b6a4f8167413b8985401beca77ad"
 
 [[sources]]
 path = "tools/check_applies.py"
@@ -2561,8 +2561,8 @@ sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 23330
-sha256 = "0b15455c7ab68fbbd0792807894f11e461e358fcea151ce244c4a9ee15c45696"
+bytes = 30928
+sha256 = "06fd8c0b238970b2c77dd306236456ceb47f02437e67b7d61a37f0f2a42625b1"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -2616,8 +2616,8 @@ sha256 = "eb365cf34be8e7057a5458d8a2693111c3994992564a518f0e63b7810c415fbb"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 61761
-sha256 = "91d005759442b8db78a2bf765894c978fa207f888202d6329cc8fbd0c413598d"
+bytes = 67324
+sha256 = "b32872f1368297a33ec185039bd1980621aca43b01543c5265a1385d5c7f3a33"
 
 [[sources]]
 path = "tools/check_record_drift.py"

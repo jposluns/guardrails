@@ -40,10 +40,17 @@ proves the gate FAILS on a seeded internal name (a provenance id, a host path, a
 passes clean generic content, so removing a layer makes a case fail.
 """
 import re
+import stat
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Import the sibling modules WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.
+# Under `python3 -I` a sys.path insertion at index 0 would let a sibling json.py or hashlib.py (each
+# `raise SystemExit(0)`) shadow a stdlib import and silently neuter this gate. Appending keeps stdlib
+# precedence (a stdlib import still resolves from the stdlib first) while still resolving our own sibling
+# modules from this directory. The check_python_launcher_isolation gate enforces this by flagging a
+# reintroduced index-0 insertion in this file.
+sys.path.append(str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 import check_leaks  # noqa: E402  reuse the leak gate's normalization + structural host/account patterns
 
@@ -78,21 +85,36 @@ _PROVENANCE = [
 STRUCTURAL = list(check_leaks.STRUCTURAL) + _PROVENANCE
 
 
+def _read_present_text(path):
+    """Read `path` as UTF-8 text, failing closed on a present-but-unreadable input WITHOUT blocking. Presence
+    is classified with an S_ISREG check BEFORE any open (mirroring the QA adapter's _classify_presence), so a
+    NON-REGULAR file (a FIFO above all, whose open() would BLOCK waiting for a writer, but also a device,
+    socket, or directory) is a fail-closed OSError rather than a hanging open, and a BROKEN SYMLINK (a present
+    dentry whose target is missing) re-raises fail-closed. A genuinely ABSENT path (no dentry at all) returns
+    None so a caller for whom absence is intended (the denylist) can treat it as empty; every PRESENT dentry
+    that is not a readable regular file raises OSError to the fail-closed caller (exit 2). path.stat() FOLLOWS
+    a symlink, so a dangling link raises FileNotFoundError exactly as an absent path, and path.is_symlink()
+    (lstat) is what tells a present-but-dangling dentry from a truly missing one."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError("{} is present but not a regular file; fail closed".format(path))
+    return path.read_text(encoding="utf-8")
+
+
 def load_hashes(root):
     """Return (hashes, maxn, bad_lines) for the internal-name denylist, mirroring the leak gate's loader.
-    An ABSENT denylist is intended (empty set). An UNREADABLE one raises OSError to the fail-closed caller."""
+    An ABSENT denylist is intended (empty set). A PRESENT-but-unreadable one (a broken symlink, a NON-REGULAR
+    file such as a FIFO, an unreadable regular file) fails closed via the shared _read_present_text, which
+    classifies presence with S_ISREG BEFORE any open so a FIFO cannot BLOCK the load; the OSError reaches the
+    fail-closed caller (exit 2)."""
     f = root.joinpath(*HASHES_RELPATH)
     hashes, maxn, bad, maxn_set = set(), 3, [], False
-    try:
-        content = f.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        # A genuinely ABSENT denylist (no dentry at all) is intended: an empty set. But a BROKEN SYMLINK is
-        # a PRESENT dentry whose target is missing; read_text raises FileNotFoundError for it exactly as for
-        # an absent path, yet it must FAIL CLOSED (a present-but-unreadable input), never read as absent. So
-        # re-raise it to the fail-closed caller (an OSError -> exit 2) rather than treating it as an empty set.
-        if f.is_symlink():
-            raise
-        content = None
+    content = _read_present_text(f)
     if content is not None:
         for number, line in enumerate(content.splitlines(), 1):
             s = line.strip()
@@ -166,12 +188,18 @@ def scan_scope(root, scope_relpaths, hashes, maxn):
         except ValueError:
             rel = str(path)
         try:
-            text = path.read_text(encoding="utf-8")
+            text = _read_present_text(path)
         except UnicodeDecodeError:
             # A non-UTF-8 in-scope surface is UNSCANNABLE, not clean: an internal name held in bytes this
             # text scanner cannot decode would otherwise evade silently. Fail closed with a finding (exit
             # 1), the same fail-closed posture as an unreadable present file, never a silent skip.
             findings.append("{}: unscannable in-scope surface (not valid UTF-8); fail-closed".format(rel))
+            continue
+        # A NON-REGULAR in-scope file (a FIFO above all) is classified before any open by _read_present_text
+        # and raises OSError to the fail-closed caller (exit 2), never a blocking read. A yielded entry that
+        # has since vanished (returns None) is a race, failed closed as a finding rather than silently skipped.
+        if text is None:
+            findings.append("{}: in-scope surface vanished during scan; fail-closed".format(rel))
             continue
         for number, label in scan_text(text, hashes, maxn):
             findings.append("{}:{}: {}".format(rel, number, label) if number is not None
@@ -381,6 +409,81 @@ def _self_test():
             if proc.returncode != 2:
                 failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
                     badarg, proc.returncode))
+
+        # The subprocess-spawning cases below carry a sentinel so a child (which re-enters --self-test)
+        # skips them rather than recursing without bound.
+        if os.environ.get("AIQT_INTERNAL_NAMES_SELFTEST_CHILD") != "1":
+            childenv = dict(os.environ, AIQT_INTERNAL_NAMES_SELFTEST_CHILD="1")
+            toolsdir = str(Path(__file__).resolve().parent)
+
+            # 14. DISCRIMINATING (finding-1: a NON-REGULAR input FAILS CLOSED, never blocks on open): a FIFO
+            #     at the hash-file path and at a scoped path is classified non-regular BEFORE any open, so
+            #     load_hashes/scan_scope raise a fail-closed OSError PROMPTLY. Reverting the S_ISREG-before-open
+            #     guard (a bare read_text) blocks on open(FIFO) and the probe times out. Each probe imports
+            #     this module in a child and calls the function on a FIFO under a short timeout; a hang is a
+            #     recorded failure, never an unbounded wait. Needs os.mkfifo (POSIX); asserted where available.
+            if hasattr(os, "mkfifo"):
+                for label, target_rel, call in (
+                        ("hash-file", "tools/internal-name-hashes.txt", "cin.load_hashes(root)"),
+                        ("scoped-file", "tools/subject.md",
+                         "cin.scan_scope(root, ('tools/subject.md',), set(), 3)")):
+                    fifo_root = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-fifo-"))
+                    (fifo_root / "tools").mkdir()
+                    fifo_path = fifo_root / target_rel
+                    made = False
+                    try:
+                        os.mkfifo(str(fifo_path))
+                        made = True
+                    except OSError:
+                        made = False
+                    if not made:
+                        shutil.rmtree(fifo_root, ignore_errors=True)
+                        continue
+                    probe = (
+                        "import sys\n"
+                        "sys.path.append({tools!r})\n"
+                        "from pathlib import Path\n"
+                        "import check_internal_names as cin\n"
+                        "root = Path({root!r})\n"
+                        "try:\n"
+                        "    {call}\n"
+                        "except OSError:\n"
+                        "    sys.exit(0)\n"
+                        "sys.exit(3)\n"
+                    ).format(tools=toolsdir, root=str(fifo_root), call=call)
+                    try:
+                        proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe],
+                                              capture_output=True, text=True, env=childenv, timeout=20)
+                        if proc.returncode != 0:
+                            failures.append("a FIFO at the {} path expected a prompt fail-closed OSError "
+                                            "(probe exit 0), got rc={} err={!r}".format(
+                                                label, proc.returncode, proc.stderr))
+                    except subprocess.TimeoutExpired:
+                        failures.append("a FIFO at the {} path BLOCKED on open instead of failing closed "
+                                        "(S_ISREG must be checked before any open)".format(label))
+                    finally:
+                        shutil.rmtree(fifo_root, ignore_errors=True)
+
+            # 15. DISCRIMINATING (finding-6: a hostile sibling json.py/hashlib.py must NOT shadow a stdlib
+            #     import and neuter this gate). Copy this script and its sibling modules (_walk, check_leaks)
+            #     beside a hostile json.py and hashlib.py (each `raise SystemExit(0)`) and run `--self-test`
+            #     isolated: the self-test must actually RUN (it emits its SELF-TEST marker). Reverting the
+            #     sys.path.append import fix to an index-0 insertion puts the script dir first, so under -I the
+            #     sibling shadows check_leaks' `import hashlib` and silently exits 0 before the self-test runs.
+            sib = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-sibling-"))
+            try:
+                for name in ("check_internal_names.py", "_walk.py", "check_leaks.py"):
+                    shutil.copy(str(Path(toolsdir) / name), str(sib / name))
+                for hostile in ("json.py", "hashlib.py"):
+                    (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
+                proc = subprocess.run([sys.executable, "-I", "-B", str(sib / "check_internal_names.py"),
+                                       "--self-test"], capture_output=True, text=True, env=childenv)
+                if "SELF-TEST" not in (proc.stdout + proc.stderr):
+                    failures.append("a hostile sibling json.py/hashlib.py shadowed a stdlib import and "
+                                    "prevented the self-test from running (finding-6): rc={} out={!r} "
+                                    "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
+            finally:
+                shutil.rmtree(sib, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -398,9 +501,13 @@ def _self_test():
           "whose BASENAME is in SKIP_NAMES is skipped by basename (not by full relpath); and the shipped "
           "gate-runner and CI-workflow paths (tools/run_all_checks.sh, .github/workflows/quality.yml) are "
           "live SCOPE_RELPATHS members, so a synthetic provenance id planted in each is caught (removing "
-          "either from scope fails the case); and an UNRECOGNIZED option (a misspelled --self-testx or a "
+          "either from scope fails the case); an UNRECOGNIZED option (a misspelled --self-testx or a "
           "stray flag) is a loud exit 2, never a silent default scan that would let it masquerade as "
-          "--self-test.")
+          "--self-test; a NON-REGULAR input (a FIFO) at the hash-file path and at a scoped path fails closed "
+          "PROMPTLY (classified non-regular before any open) rather than blocking on the open; and a hostile "
+          "sibling json.py/hashlib.py beside the script does NOT shadow a stdlib import (the sibling modules "
+          "are imported via sys.path.append, keeping stdlib precedence), so the self-test still runs under -I "
+          "rather than being silently neutered.")
     return 0
 
 

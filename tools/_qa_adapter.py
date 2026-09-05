@@ -69,6 +69,13 @@ KIND_ADAPTER_MISMATCH = "adapter-mismatch"
 
 RESULT_SCHEMA = "aiqt-qa-result/1"
 
+# The mandatory keys every result object carries. PRESENCE is required for EVERY status (a missing key is
+# refused before any type or consistency check), so a result that OMITS a key can never serialize as a clean
+# line. `surface` above all: it is legitimately None-VALUED, so without a presence check a missing 'surface'
+# key would be indistinguishable from surface=None (read with .get()) and slip through. The value-level
+# checks below then constrain each present key.
+MANDATORY_RESULT_KEYS = ("schema", "audit", "status", "summary", "surface", "required", "kind", "evidence")
+
 
 class ConfigError(Exception):
     """A pinned config (explicit --config or AIQT_ASSURANCE_CONFIG) is absent, unreadable, or malformed.
@@ -108,12 +115,20 @@ def validate_result(result):
     carry the exact RESULT_SCHEMA tag: a substituted or missing schema is a different contract and is
     refused for every status, before any status/kind/evidence check. `evidence` must be a
     LIST; a PASS additionally requires it to be a NON-EMPTY list of NON-EMPTY strings, so an empty string or
-    a non-list can never stand in for located evidence. A PASS must carry the available kind. The available
-    kind is legitimate on a PASS and on a FAIL: a FAIL on an AVAILABLE surface is a real verdict (the
-    surface was present and probed, and the audit's own check observed the property violated), so only
-    UNVERIFIABLE and SKIP, the missing-evidence and declared-no-op states, may not wear an 'available'
-    label. Raises ValueError on an inconsistent result; returns it unchanged when consistent. is_pass alone
-    checks only the status field, so this is the guard that keeps status, kind, and evidence from disagreeing."""
+    a non-list can never stand in for located evidence. A PASS must carry the available kind, and a SKIP the
+    optional-disabled kind. The available kind is legitimate on a PASS and on a FAIL: a FAIL on an AVAILABLE
+    surface is a real verdict (the surface was present and probed, and the audit's own check observed the
+    property violated), so only UNVERIFIABLE and SKIP, the missing-evidence and declared-no-op states, may
+    not wear an 'available' label. Raises ValueError on an inconsistent result; returns it unchanged when
+    consistent. is_pass alone checks only the status field, so this is the guard that keeps status, kind, and
+    evidence from disagreeing."""
+    # STRUCTURAL PRESENCE: every mandatory key is PRESENT for EVERY status, refused before any value-level
+    # check, so no construction path (make_result, emit, or a hand-built dict) can OMIT a key. This is what
+    # keeps a missing None-valued 'surface' key from reading as surface=None; the type/value checks below
+    # then constrain each present key.
+    for key in MANDATORY_RESULT_KEYS:
+        if key not in result:
+            raise ValueError("a result is missing the mandatory key {!r}".format(key))
     # The schema tag is part of the contract, not decoration: a result carrying a SUBSTITUTED schema
     # ("aiqt-qa-result/999") or NO schema field is written to a different, unhonoured contract and is
     # refused here for EVERY status, so a substitution or omission can never serialize as a clean line.
@@ -155,7 +170,14 @@ def validate_result(result):
             raise ValueError("a PASS result must carry the {!r} kind, got {!r}".format(KIND_AVAILABLE, kind))
         if not evidence:
             raise ValueError("a PASS result must carry a non-empty list of non-empty evidence strings")
-    elif status in (UNVERIFIABLE, SKIP) and kind == KIND_AVAILABLE:
+    elif status == SKIP:
+        # A SKIP is the OPTIONAL-disabled declared no-op, so it carries EXACTLY the optional-disabled kind:
+        # an inconsistent kind (required-unavailable, available, an arbitrary string) or a non-string kind on
+        # a SKIP is refused, the same status/kind consistency the contract holds the other statuses to.
+        if kind != KIND_OPTIONAL_DISABLED:
+            raise ValueError("a SKIP result must carry the {!r} kind, got {!r}".format(
+                KIND_OPTIONAL_DISABLED, kind))
+    elif status == UNVERIFIABLE and kind == KIND_AVAILABLE:
         raise ValueError("kind {!r} cannot pair with status {!r}".format(KIND_AVAILABLE, status))
     return result
 
@@ -287,9 +309,19 @@ def reject_unknown_options(argv, known_flags):
 
 def load_config(path):
     """Parse an assurance.toml. Raises ConfigError on an absent, unreadable, or malformed file, so a
-    pinned config that cannot be honoured is loud, never a silent empty pass."""
+    pinned config that cannot be honoured is loud, never a silent empty pass. Presence is classified with
+    the shared _classify_presence (an S_ISREG check BEFORE any open) so a NON-REGULAR pinned config, a FIFO
+    above all whose open() would BLOCK waiting for a writer, fails closed as a ConfigError rather than
+    hanging the load; a broken symlink is likewise a loud present-but-unreadable fault, and only a genuinely
+    absent path or a readable regular file passes the classifier to the read below."""
+    p = Path(path)
+    state, why = _classify_presence(p)
+    if state == _ABSENT:
+        raise ConfigError("cannot read assurance config {}: no such file".format(path))
+    if state == _UNREADABLE:
+        raise ConfigError("assurance config {} is present but unreadable ({}); fail closed".format(path, why))
     try:
-        raw = Path(path).read_bytes()
+        raw = p.read_bytes()
     except OSError as exc:
         raise ConfigError("cannot read assurance config {}: {}".format(path, exc))
     try:
@@ -1101,9 +1133,11 @@ def _self_test():
         # 26. DISCRIMINATING (make_result rejects non-list evidence): make_result with a bare STRING
         #     evidence is refused, never coerced with list() (which would split 'x:1' into ['x', ':', '1']
         #     and let a hollow PASS through). Reverting the non-list guard to list(evidence or []) lets the
-        #     string char-split and the result construct, failing this case (the round-4 BLOCKER).
+        #     string char-split and the result construct, failing this case (the round-4 BLOCKER). A VALID
+        #     `required` is passed so the construction reaches and ISOLATES the string-evidence guard rather
+        #     than failing first on a required=None field (the round-14 finding-4 masking).
         try:
-            make_result("x", PASS, "s", kind=KIND_AVAILABLE, evidence="x:1")
+            make_result("x", PASS, "s", required=True, kind=KIND_AVAILABLE, evidence="x:1")
             failures.append("make_result accepted a bare-string evidence (char-split into a hollow PASS)")
         except ValueError:
             pass
@@ -1799,6 +1833,130 @@ def _self_test():
                                         r["status"], r["kind"], r["detail"]))
             finally:
                 this_mod._GIT = saved_git
+
+        # 49. DISCRIMINATING (finding-2: every MANDATORY result key must be PRESENT): starting from a
+        #     structurally-complete result, DELETING each mandatory key in turn is rejected. `surface` is the
+        #     key this closes: it is legitimately None-valued, so a MISSING 'surface' key would otherwise read
+        #     as surface=None and slip; `kind` on a FAIL is likewise otherwise-unconstrained. Removing the
+        #     MANDATORY_RESULT_KEYS presence loop lets the surface and kind omissions through, failing this.
+        wf_result = {"schema": RESULT_SCHEMA, "audit": "x", "status": FAIL, "summary": "s",
+                     "surface": None, "required": True, "kind": KIND_AVAILABLE, "evidence": ["tools/x.py:1"]}
+        try:
+            validate_result(dict(wf_result))  # the structurally-complete result is accepted
+        except ValueError as exc:
+            failures.append("validate_result wrongly rejected a structurally-complete result: {}".format(exc))
+        for key in MANDATORY_RESULT_KEYS:
+            missing = dict(wf_result)
+            del missing[key]
+            try:
+                validate_result(missing)
+                failures.append("validate_result accepted a result missing the mandatory key {!r}".format(key))
+            except ValueError:
+                pass
+
+        # 50. DISCRIMINATING (finding-3: a SKIP carries EXACTLY the optional-disabled kind): a legit
+        #     optional SKIP (optional-disabled kind) is accepted; a SKIP wearing a required-unavailable,
+        #     available, arbitrary, or NON-STRING kind is refused, and make_result routes through the same
+        #     check. Removing the SKIP-kind clause lets an inconsistent SKIP kind through, failing this.
+        skip_ok = {"schema": RESULT_SCHEMA, "audit": "x", "status": SKIP, "summary": "s", "surface": None,
+                   "required": False, "kind": KIND_OPTIONAL_DISABLED, "evidence": []}
+        try:
+            validate_result(dict(skip_ok))  # a consistent optional SKIP is accepted
+        except ValueError as exc:
+            failures.append("validate_result wrongly rejected a consistent optional SKIP: {}".format(exc))
+        for badkind in (KIND_REQUIRED_UNAVAILABLE, KIND_AVAILABLE, "arbitrary-kind", 123, None):
+            try:
+                validate_result(dict(skip_ok, kind=badkind))
+                failures.append("validate_result accepted a SKIP with an inconsistent kind {!r}".format(badkind))
+            except ValueError:
+                pass
+        try:
+            make_result("x", SKIP, "s", surface=None, required=False, kind=KIND_REQUIRED_UNAVAILABLE)
+            failures.append("make_result accepted a SKIP with a required-unavailable kind")
+        except ValueError:
+            pass
+
+        # 51. DISCRIMINATING (finding-4: 'summary' is validated and the non-empty clause holds): a
+        #     present-but-EMPTY or present-but-NON-STRING summary is rejected (so removing 'summary' from the
+        #     ("audit", "summary") identity tuple fails a case), and a present-but-EMPTY audit and summary are
+        #     each rejected (so removing the `or not value` non-empty clause, which lets an empty string pass
+        #     the isinstance test, fails a case).
+        for badsummary in ("", 123):
+            try:
+                validate_result(dict(wf_result, summary=badsummary))
+                failures.append("validate_result accepted a bad summary {!r} (summary must be validated "
+                                "in the identity tuple)".format(badsummary))
+            except ValueError:
+                pass
+        for field in ("audit", "summary"):
+            try:
+                validate_result(dict(wf_result, **{field: ""}))
+                failures.append("validate_result accepted an empty {!r} (the non-empty clause must "
+                                "reject it)".format(field))
+            except ValueError:
+                pass
+
+        # 52. DISCRIMINATING (finding-1: a NON-REGULAR pinned --config FAILS CLOSED, never blocks on open): a
+        #     FIFO passed via --config is classified non-regular BEFORE any open, so a subprocess exits 2
+        #     promptly rather than BLOCKING on open(FIFO) (which would time out). Reverting load_config to a
+        #     bare read_bytes() (no _classify_presence guard) blocks on the FIFO and the subprocess times out,
+        #     failing this. Needs os.mkfifo (POSIX); asserted where it is available and the sentinel is unset.
+        if hasattr(os, "mkfifo") and os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+            fifo = tmp / "config.fifo"
+            made_fifo = False
+            try:
+                os.mkfifo(str(fifo))
+                made_fifo = True
+            except OSError:
+                made_fifo = False
+            if made_fifo:
+                selfpath = str(Path(__file__).resolve())
+                childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--config", str(fifo)],
+                                          capture_output=True, text=True, env=childenv, timeout=20)
+                    if proc.returncode != 2:
+                        failures.append("a FIFO passed via --config expected a loud exit 2 (fail closed), "
+                                        "got {}".format(proc.returncode))
+                except subprocess.TimeoutExpired:
+                    failures.append("a FIFO passed via --config BLOCKED on open instead of failing closed "
+                                    "(the non-regular-file hang; _classify_presence must precede any open)")
+                finally:
+                    fifo.unlink()
+
+        # 53. DISCRIMINATING (finding-5: the module-level _GIT routes through _resolve_git): reverting the
+        #     global `_GIT = _resolve_git(shutil.which("git"))` to `shutil.which("git") or "git"` is invisible
+        #     when git resolves to an ABSOLUTE path (os.path.abspath is idempotent), so this exercises the one
+        #     case that separates them: a `git` reachable ONLY through a RELATIVE PATH component. In a child
+        #     with PATH set to a relative dir holding a `git`, the module-level _GIT is absolute ONLY if the
+        #     assignment routed through _resolve_git; the reverted form leaves it relative. Needs a writable,
+        #     executable git-like stub; asserted where one can be created and the sentinel is unset.
+        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+            relroot = tmp / "relgitroot"
+            (relroot / "relbin").mkdir(parents=True)
+            gitstub = relroot / "relbin" / "git"
+            can_exec = False
+            try:
+                gitstub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                gitstub.chmod(0o755)
+                can_exec = os.access(str(gitstub), os.X_OK)
+            except OSError:
+                can_exec = False
+            if can_exec:
+                toolsdir = str(Path(__file__).resolve().parent)
+                probe = ("import sys; sys.path.append({tools!r}); import _qa_adapter as qa; "
+                         "print(qa._GIT)").format(tools=toolsdir)
+                childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1", PATH="relbin")
+                proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe], cwd=str(relroot),
+                                      capture_output=True, text=True, env=childenv)
+                out = proc.stdout.strip()
+                if proc.returncode != 0:
+                    failures.append("finding-5 _GIT probe subprocess failed: rc={} err={!r}".format(
+                        proc.returncode, proc.stderr))
+                elif out != "git" and not os.path.isabs(out):
+                    failures.append("module-level _GIT did not route through _resolve_git: a git reachable "
+                                    "via a RELATIVE PATH left _GIT relative ({!r}); the global must "
+                                    "absolutize".format(out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1830,7 +1988,9 @@ def _self_test():
           "hex-but-wrong-length, a right-length-but-non-hex, an uppercased-hex, an empty, or a non-string "
           "value rejected), and the git executable resolved ONCE to an ABSOLUTE path when discoverable; "
           "and the git probe is bound to root (ambient GIT_* scrubbed, toplevel realpath-equal to root) so "
-          "an ambient GIT_DIR cannot bind a non-repo root to another repository; an unknown adapter, an "
+          "an ambient GIT_DIR cannot bind a non-repo root to another repository, with the MODULE-LEVEL "
+          "_GIT routing through _resolve_git (proven via a git reachable only on a relative PATH, where "
+          "only routing absolutizes it); an unknown adapter, an "
           "adapter that RAISES, and an adapter whose "
           "RETURN is malformed (a truthy-string available, a non-list provenance, or a wrong-arity tuple) "
           "are each UNVERIFIABLE (never a crash or a pass), and an available return with empty located "
@@ -1851,7 +2011,9 @@ def _self_test():
           "required/enabled flag, or a wrong-typed adapter-specific field such as a list-valued "
           "protected-branch or a table-valued remote-landing-provider) and a missing, wrong-typed, boolean, "
           "or unknown schema-version (a present integer drawn from the supported set); config resolution is "
-          "fail-loud on a pinned config and on a malformed --config operand (absent, empty, =-joined-empty, "
+          "fail-loud on a pinned config, including a NON-REGULAR pinned --config (a FIFO, classified "
+          "non-regular BEFORE any open so it fails closed rather than BLOCKING on open), and on a malformed "
+          "--config operand (absent, empty, =-joined-empty, "
           "a next-flag, or a duplicate), with a present-but-empty AIQT_ASSURANCE_CONFIG treated as a loud "
           "ConfigError on the SAME pinned-source path as --config, and both argument validation and the "
           "loud pinned-source resolution preceding the --self-test dispatch (a pinned-but-absent/empty "

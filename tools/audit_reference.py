@@ -18,7 +18,13 @@ UNVERIFIABLE on an absent one (removing the missing-evidence guard fails it).
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Import the sibling _qa_adapter WITHOUT placing this script's own directory AHEAD of the stdlib on
+# sys.path. Under `python3 -I` a sys.path insertion at index 0 would let a sibling json.py or hashlib.py
+# (each `raise SystemExit(0)`) shadow a stdlib import and silently neuter this gate before its self-test
+# runs. Appending keeps stdlib precedence (a stdlib import still resolves from the stdlib first) while
+# still resolving our own sibling module from this directory. The check_python_launcher_isolation gate
+# enforces this by flagging a reintroduced index-0 insertion in this file.
+sys.path.append(str(Path(__file__).resolve().parent))
 import _qa_adapter as qa  # noqa: E402
 
 
@@ -177,6 +183,29 @@ def _self_test():
                 if proc.returncode != 2:
                     failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
                         badarg, proc.returncode))
+
+            # 7. DISCRIMINATING (finding-6: a hostile sibling json.py/hashlib.py must NOT shadow a stdlib
+            #    import and neuter this gate). Copy this script and _qa_adapter beside a hostile json.py and
+            #    hashlib.py (each `raise SystemExit(0)`) and run `--self-test` isolated: the self-test must
+            #    actually RUN (it emits its SELF-TEST marker). Reverting the sys.path.append import fix to an
+            #    index-0 insertion lets the sibling shadow _qa_adapter's `import json` under -I and silently
+            #    exit 0 before the self-test runs, so no marker appears. The child carries the sentinel so it
+            #    skips this (and the other subprocess) case rather than recursing.
+            sib = Path(tempfile.mkdtemp(prefix="aiqt-audit-reference-sibling-"))
+            try:
+                srcdir = Path(__file__).resolve().parent
+                shutil.copy(str(srcdir / "audit_reference.py"), str(sib / "audit_reference.py"))
+                shutil.copy(str(srcdir / "_qa_adapter.py"), str(sib / "_qa_adapter.py"))
+                for hostile in ("json.py", "hashlib.py"):
+                    (sib / hostile).write_text("raise SystemExit(0)\n", encoding="utf-8")
+                proc = subprocess.run([sys.executable, "-I", "-B", str(sib / "audit_reference.py"),
+                                       "--self-test"], capture_output=True, text=True, env=childenv)
+                if "SELF-TEST" not in (proc.stdout + proc.stderr):
+                    failures.append("a hostile sibling json.py/hashlib.py shadowed a stdlib import and "
+                                    "prevented the self-test from running (finding-6): rc={} out={!r} "
+                                    "err={!r}".format(proc.returncode, proc.stdout, proc.stderr))
+            finally:
+                shutil.rmtree(sib, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -190,7 +219,9 @@ def _self_test():
           "emits valid result-contract JSON, and runs --config operand validation, unknown-option rejection, "
           "and the loud pinned-source resolution before the --self-test dispatch (a malformed operand, an "
           "unrecognized option such as --self-testx, or a pinned-but-absent/empty config exits 2 even under "
-          "--self-test).")
+          "--self-test); and a hostile sibling json.py/hashlib.py beside the script does NOT shadow a stdlib "
+          "import (the sibling module is imported via sys.path.append, keeping stdlib precedence), so the "
+          "self-test still runs under -I rather than being silently neutered.")
     return 0
 
 
