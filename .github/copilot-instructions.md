@@ -96,6 +96,14 @@ the cited instance while a sibling of the same class survives unaddressed is an 
 the completeness-claim-enumerates-its-set discipline applied to a defect class standing in for
 the registry that class otherwise lacks.
 
+After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on
+re-reading the resulting source and confirming the intended change is present in it, never on the applier's
+own stdout, exit code, or narration of what it did. A successful process, a narrated or reported
+replacement, a zero-match conditional skip, or an exception raised before the write can each report success
+while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
+This is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,
+not the applier's report, is the observation completion rests on.
+
 ## A guard is only as good as its input
 
 A check whose logic is correct is still worthless when its input cannot answer the question asked of it. Ask
@@ -550,6 +558,14 @@ nothing; it does not by itself justify reducing the verifier panel, since one fa
 evidence that a verifier family is unavailable. A required family is dropped from the panel only when it
 is genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded
 and re-run when the family returns.
+The same fail-closed posture applies when the verifier itself cannot read or access a required input it was
+meant to cover: it does not emit a permissive verdict over the gap. It emits UNVERIFIABLE, the
+cannot-evaluate outcome guard-input-soundness names, identifying the input it could not read; this is a
+terminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it
+is treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.
+A clean verdict asserted over an input the verifier never actually read is the same false-clean this rule
+already guards against, applied to the unreadable-required-input case, meeting the fail-closed posture
+check-fails-closed-on-unreadable requires of a gate that cannot read its own input.
 
 ## Verifier diversity
 
