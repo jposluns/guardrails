@@ -2,7 +2,17 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "bc22d9b92261269db2fbf90cae1686af5fc1262bea7314084a68545752a3abc8"
+tree-sha256 = "a983a1f87e47fea5812080638d6c5ae884436b2c43afe92eebb83cc285cf54fb"
+
+[[sources]]
+path = ".aiqt/assurance-schema.md"
+bytes = 3918
+sha256 = "a1307638d240891cc8b22b03464109a5e97db6cc2780fca9c39d89bb78405309"
+
+[[sources]]
+path = ".aiqt/assurance.toml"
+bytes = 3345
+sha256 = "9bf86b7a1a51656b13907f3422bf3bf974d3d41fa6cf2c9bc4b04686ee8f8190"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -46,8 +56,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 71540
-sha256 = "09c37634fddd94b3a7c42e1783ebe5c3d8e072cbdbceb94bd95e121a3e25e5d7"
+bytes = 85307
+sha256 = "d4acf2792cbdf0b56e028bd4d3906159e25ee65e702933fa2a883eed5d9b5ad0"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -81,8 +91,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 11908
-sha256 = "76b70e65c7fba5331ad474f13cc8359f1443ae33a21c8189cc3ba3d6d8ad4162"
+bytes = 12061
+sha256 = "394fbad381d864f05a5a01ca5db86e508f669bf2c03532d547221ad06a0e49db"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2101,8 +2111,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 34073
-sha256 = "1985818f530ddfb6f5ff6ff5fbf5cad4c0caf0d8a746b7a796f631eae1a1e35c"
+bytes = 34299
+sha256 = "0cc17d17920eb05300bac66c6038b44fca98967fa9abb72386370f6542568cad"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2465,6 +2475,11 @@ bytes = 64972
 sha256 = "376dd10f129a3ce78e4125444a14bb7774acbdabc300915dbc0eab00d2880ee3"
 
 [[sources]]
+path = "tools/_qa_adapter.py"
+bytes = 135810
+sha256 = "f94d4fc5bc2f1da4079c8412bab432603e3c8b259462090cbd2a1c1229b104f2"
+
+[[sources]]
 path = "tools/_release_schema.py"
 bytes = 46385
 sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
@@ -2483,6 +2498,11 @@ sha256 = "08ea73b8873bdb0871e9e449303d5c176a0c64863ae0a7feafe96c6c75f29a54"
 path = "tools/aei_backlog_md.py"
 bytes = 7991
 sha256 = "71f7a366e4d703c9b33a4f7c3d2f5f165260f590b62a38bd31e2c9062b8103bd"
+
+[[sources]]
+path = "tools/audit_reference.py"
+bytes = 14001
+sha256 = "b091e92022b8ce2028280a318a6f6f880b02b6a4f8167413b8985401beca77ad"
 
 [[sources]]
 path = "tools/check_applies.py"
@@ -2540,6 +2560,11 @@ bytes = 35619
 sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
 
 [[sources]]
+path = "tools/check_internal_names.py"
+bytes = 30928
+sha256 = "06fd8c0b238970b2c77dd306236456ceb47f02437e67b7d61a37f0f2a42625b1"
+
+[[sources]]
 path = "tools/check_leaks.py"
 bytes = 8234
 sha256 = "8c50b046b24f5a44dcfa4dba9bbcbc5de3e74eeda6cb57c1670a896232aeb829"
@@ -2591,8 +2616,8 @@ sha256 = "eb365cf34be8e7057a5458d8a2693111c3994992564a518f0e63b7810c415fbb"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
-bytes = 61761
-sha256 = "91d005759442b8db78a2bf765894c978fa207f888202d6329cc8fbd0c413598d"
+bytes = 67324
+sha256 = "b32872f1368297a33ec185039bd1980621aca43b01543c5265a1385d5c7f3a33"
 
 [[sources]]
 path = "tools/check_record_drift.py"
@@ -2795,6 +2820,11 @@ bytes = 40598
 sha256 = "26903b5f57fb530b0311460291eae16c8d6aaafc04237115b4a04dec9fe87a71"
 
 [[sources]]
+path = "tools/internal-name-hashes.txt"
+bytes = 1083
+sha256 = "49960dad994a6cda99e4a3c0c5dad5306eb329ea718c7e52a169feb53a1e2cdc"
+
+[[sources]]
 path = "tools/leak-hashes.txt"
 bytes = 442
 sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
@@ -2831,8 +2861,8 @@ sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 11595
-sha256 = "2146b61eb5e351be036c819875a3df0a8c9ca739e3fee2e95b49c7da1ad3c1ff"
+bytes = 12696
+sha256 = "cc2d2a11829beb2524c5e89b0dcc14d38f283c1bd74e95d52b20eca909450c8f"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"

@@ -1,0 +1,15 @@
+# Internal-name denylist (hashed) for tools/check_internal_names.py.
+#
+# SHA-256 hashes only, never the words, so no internal codename or sibling-repo name is ever a literal
+# in the shipped pack. Text is normalized the same way tools/check_leaks.py normalizes (camelCase split,
+# lowercased, every non-alphanumeric run a separator), so a term written with a space, hyphen, underscore,
+# or CamelCase all match the same hash. This is the mechanism for names that cannot be caught by a generic
+# SHAPE pattern (a sibling-repo name, an internal codename): the private generator adds their hashes here.
+#
+# HONEST SCOPE, same as the leak gate: this catches ACCIDENTAL reintroduction, not deliberate obfuscation;
+# the hashes are unsalted low-entropy n-grams and so dictionary-reversible. It is obscurity, not secrecy.
+#
+# Shipped EMPTY by default (only this directive), so no high-entropy hash lines sit in the public tree;
+# the shape patterns in the gate still fire, and the self-test seeds its own synthetic hashes in a temp
+# fixture to prove the hash layer discriminates.
+# maxn 3
