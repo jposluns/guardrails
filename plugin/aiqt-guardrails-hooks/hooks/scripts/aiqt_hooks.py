@@ -3215,13 +3215,16 @@ _RAW_PUSH_DELETE_RE = re.compile(
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
 # GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
 # (a wrapped or unparseable 'git -c remote.<name>.mirror=true push' / '--config-env=remote.<name>.mirror
-# =ENV push'). Anchored to the OPTION token ('-c' followed by whitespace, or '--config-env' followed by
-# '=' or whitespace) immediately introducing 'remote.<something>.mirror', so a push-option value
-# ('-o remote.origin.mirror=true') and prose do not fire. It parses NO value: a falsy value over-asks
-# on this path (accepted, documented), mirroring the raw scan's over-matching posture.
+# =ENV push'). Anchored to the OPTION token ('-c' then whitespace and/or a shell quote, or '--config-env'
+# then '='/whitespace and an optional shell quote) introducing 'remote.<something>.mirror', so a QUOTED
+# argument ("-c 'remote.origin.mirror=true'", "--config-env 'remote.origin.mirror=MFLAG'") fires like the
+# unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. A quote or
+# backslash splitting the OPTION TOKEN itself (-'c', \-c) is NOT matched: the same inherent
+# flag-fragmentation boundary disclosed for the raw force/delete spellings. It parses NO value: a falsy
+# value over-asks on this path (accepted, documented), mirroring the raw scan's over-matching posture.
 _RAW_PUSH_MIRRORCFG_RE = re.compile(
-    r"(?i)(?:^|[\s'\"])-c\s+remote\.[^\s=]+\.mirror"
-    r"|(?:^|[\s'\"])--config-env[=\s]remote\.[^\s=]+\.mirror")
+    r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
+    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 
 def _head_branch(repo):

@@ -2775,6 +2775,31 @@ def main():
         pexpect("(gd146-m36) a command-local remote.<name>.push refspec is a disclosed follow-on "
                 "residual, allows", "git -c remote.origin.push=:main push origin", "allow", cwd=plf)
 
+        # === GD-146 round-1 tri-family QA fixes (a discriminating test per confirmed finding) =========
+        # QA-BLOCKER (raw fallback): a shell quote BETWEEN the -c/--config-env option and its
+        # remote.<name>.mirror key defeated the old raw pattern (it required the key IMMEDIATELY after the
+        # flag + whitespace), so a wrapped/unparseable QUOTED mirror config silently ALLOWED (confirmed by
+        # codex runtime probes on git 2.53). The widened quote-tolerant pattern ASKS; reverting the quote
+        # tolerance ('-c[\s\x27"]+' -> '-c\s+', config-env '[=\s][\x27"]*' -> '[=\s]') makes all three fail.
+        pexpect("(gd146-qa1r1) a WRAPPED quoted '-c' mirror config asks via the raw fallback",
+                "env git -c 'remote.origin.mirror=true' push origin", "ask", cwd=plf)
+        pexpect("(gd146-qa1r2) a WRAPPED quoted separated '--config-env' mirror key asks via the raw "
+                "fallback", "env git --config-env 'remote.origin.mirror=MFLAG' push origin", "ask", cwd=plf)
+        pexpect("(gd146-qa1r3) an UNPARSEABLE (unbalanced-quote) quoted '-c' mirror config asks via the "
+                "raw fallback", 'git -c \'remote.origin.mirror=true\' push origin "unbalanced', "ask",
+                cwd=plf)
+        # QA-MAJOR (parsed path, per-remote key identity): m13 above (falsy 'other' FIRST, truthy 'origin'
+        # LAST) does NOT discriminate - a mutant that collapses all remote identities to one, or case-folds
+        # the case-sensitive subsection, still ends truthy ('origin' last) and ASKS. These two put the
+        # TRUTHY key FIRST and a would-collapse FALSY key LAST, so under a collapsing or case-folding mutant
+        # last-value-wins ends FALSY and ALLOWS, making the test (expecting ASK) fail - the proving flip.
+        pexpect("(gd146-qa1k1) per-key: a DIFFERENT remote's falsy-last never cancels origin's truthy-first "
+                "(fails under an identity-collapse mutant)",
+                "git -c remote.origin.mirror=true -c remote.other.mirror=false push origin", "ask", cwd=plf)
+        pexpect("(gd146-qa1k2) case-sensitive subsection: 'origin' truthy-first and 'ORIGIN' falsy-last are "
+                "DISTINCT remotes, asks (fails under a subsection-case-fold OR identity-collapse mutant)",
+                "git -c remote.origin.mirror=true -c remote.ORIGIN.mirror=false push origin", "ask", cwd=plf)
+
         # === L11 cross-hook redirect vectors (protected_line): the useful round-10 tests RESTORED via the
         # shared raw-aware tokenizer, plus the two regressions that caused the naive-strip revert ==========
         # A redirect anywhere no longer hides the subcommand, operand, or force flag.
