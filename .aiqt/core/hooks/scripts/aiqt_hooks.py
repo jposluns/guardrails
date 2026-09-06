@@ -1847,6 +1847,18 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
+# Read-only forms of branch/tag exempted from the mutation classifier: a filtered LISTING is a read, not
+# a mutation, so pairing one with a cd must not ASK. A bare 'git branch'/'git tag' (no args) also lists.
+_GIT_BRANCH_READ_FLAGS = frozenset((
+    "-l", "--list", "--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"))
+_GIT_TAG_READ_FLAGS = frozenset((
+    "-l", "--list", "-n", "--column", "--no-column", "--contains", "--no-contains", "--merged",
+    "--no-merged", "--points-at"))
+_GIT_CONFIG_WRITE_FLAGS = frozenset((
+    "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
+    "-e", "--edit"))
+_EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
 _RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd)(?=$|[\s;&|()])")
 _RAW_EXPBND_MUTATE_RE = re.compile(
     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
@@ -1859,24 +1871,44 @@ _RAW_EXPBND_BREADTH_RE = re.compile(
 _RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
 
 
+def _is_abs_binding(value):
+    """A -C/--git-dir value counts as an explicit binding only when it is a non-empty ABSOLUTE path; a
+    relative or missing value still resolves against the ambient cwd and so is not a complete binding."""
+    return isinstance(value, str) and value != "" and _is_absolute(value)
+
+
 def _git_target_is_explicit(tokens):
-    """Whether git's global-option region carries a nonempty -C/--git-dir/--work-tree binding."""
+    """Whether git's global-option region carries a COMPLETE, ABSOLUTE explicit binding: an absolute -C
+    directory, or an absolute --git-dir (with or without --work-tree). A RELATIVE -C/--git-dir still
+    resolves against the ambient cwd, and a lone --work-tree without --git-dir does not name which
+    repository, so neither is a complete explicit binding; both leave the target ambient and are not
+    credited (they route to the same ASK a bare ambient mutation would)."""
     i = _command_word_index(tokens) + 1
     n = len(tokens)
+    dash_c = None
+    git_dir = None
     while i < n:
         token = tokens[i]
         if not token.startswith("-"):
-            return False
-        if token in _EXPLICIT_GIT_TARGET_OPTS:
-            return i + 1 < n and bool(tokens[i + 1])
-        if any(token.startswith(opt + "=") and token != opt + "="
-               for opt in ("--git-dir", "--work-tree")):
-            return True
+            break  # the subcommand: the global-option region has ended
+        if token == "-C":
+            dash_c = tokens[i + 1] if i + 1 < n else None
+            i += 2
+            continue
+        if token in ("--git-dir", "--work-tree"):
+            if token == "--git-dir" and i + 1 < n:
+                git_dir = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith("--git-dir=") and token != "--git-dir=":
+            git_dir = token.split("=", 1)[1]
+            i += 1
+            continue
         if "=" not in token and token in _GIT_ARG_OPTS:
             i += 2
-        else:
-            i += 1
-    return False
+            continue
+        i += 1
+    return _is_abs_binding(dash_c) or _is_abs_binding(git_dir)
 
 
 def _git_is_mutating(sub, args):
@@ -1888,13 +1920,25 @@ def _git_is_mutating(sub, args):
     if sub not in _GIT_MUTATING_VERBS:
         return False
     if sub == "branch":
-        return bool(args) and "--list" not in args
+        if not args:
+            return False
+        return not any(a in _GIT_BRANCH_READ_FLAGS or
+                       a.startswith(("--contains=", "--no-contains=", "--merged=", "--no-merged=",
+                                     "--points-at=")) for a in args)
     if sub == "tag":
-        return not any(a in ("-l", "--list") or a.startswith("--list=") for a in args)
+        if not args:
+            return False
+        return not any(a in _GIT_TAG_READ_FLAGS or
+                       a.startswith(("--list=", "--contains=", "--no-contains=", "--merged=",
+                                     "--no-merged=", "--points-at=")) for a in args)
     if sub == "stash":
         return not args or args[0] not in ("list", "show")
     if sub == "config":
-        return not any(a == "-l" or a == "--list" or a.startswith("--get") for a in args)
+        if any(a == "-l" or a == "--list" or a.startswith("--get") for a in args):
+            return False
+        if any(a in _GIT_CONFIG_WRITE_FLAGS for a in args):
+            return True
+        return len([a for a in args if not a.startswith("-")]) >= 2
     if sub == "worktree":
         return not args or args[0] != "list"
     if sub == "notes":
@@ -1903,25 +1947,46 @@ def _git_is_mutating(sub, args):
 
 
 def _git_is_breadth(sub, args):
-    """Whether add/commit takes scope from the ambient whole tree rather than enumerated paths."""
+    """Whether add/commit takes scope from the ambient whole tree rather than enumerated paths. Option
+    recognition STOPS at a '--' end-of-options marker, so a file literally named '--all'/'-A' after '--'
+    is an operand, not a breadth selector; a genuine whole-tree pathspec ('.'/':/'') still counts on
+    either side of the marker."""
     if sub == "add":
-        for arg in args:
+        pre, post, _had = _split_pre_post(args)
+        for arg in pre:
             if arg in (".", ":/", "--all"):
                 return True
-            if arg in _EOO_TOKENS:
-                continue
             if arg.startswith("-") and not arg.startswith("--") and "A" in arg[1:]:
                 return True
-        return False
+        return any(arg in (".", ":/") for arg in post)
     if sub == "commit":
-        for arg in args:
-            if arg in _EOO_TOKENS:
-                break
+        pre, _post, _had = _split_pre_post(args)
+        for arg in pre:
             if arg == "--all":
                 return True
             if arg.startswith("-") and not arg.startswith("--") and "a" in arg[1:]:
                 return True
     return False
+
+
+def _expbnd_effective_tokens(tokens):
+    """Peel a leading env-assignment prefix and any run of BARE command/exec/builtin/env/sudo wrappers,
+    returning the tokens from the real command word onward so a wrapped 'command git ...'/'sudo git ...'
+    /'command cd ...' is judged like the bare form. A wrapper carrying its own option or assignment
+    ('env -i', 'env FOO=1', 'sudo -u u') stops the run and is left in place, a disclosed residual whose
+    option grammar is never guessed."""
+    idx = _command_word_index(tokens)
+    while idx < len(tokens):
+        if tokens[idx].rsplit("/", 1)[-1] not in _EXPBND_WRAPPER_WORDS:
+            break
+        nxt = idx + 1
+        if nxt >= len(tokens):
+            break
+        following = tokens[nxt]
+        if following.startswith("-") or _ENV_ASSIGN_RE.match(following):
+            break
+        idx = nxt
+    return tokens[idx:]
 
 
 def _expbnd_target_ask(verb):
@@ -1977,18 +2042,19 @@ def git_explicit_binding(data):
     untargeted = []
     breadth = []
     for tokens, _sep in segments:
-        word = _command_word(tokens)
+        eff = _expbnd_effective_tokens(tokens)
+        word = _command_word(eff)
         if word in _CD_BUILTINS:
             saw_cd = True
             continue
         if word != "git":
             continue
-        sub, args = _git_sub_and_args(tokens)
+        sub, args = _git_sub_and_args(eff)
         if sub is None:
             continue
         if sub == "push":
             saw_push = True
-        if _git_is_mutating(sub, args) and not _git_target_is_explicit(tokens):
+        if _git_is_mutating(sub, args) and not _git_target_is_explicit(eff):
             untargeted.append(sub)
         if _git_is_breadth(sub, args):
             breadth.append(sub)

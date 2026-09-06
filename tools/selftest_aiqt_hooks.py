@@ -4140,15 +4140,56 @@ def main():
         ebexpect("(eb-e19b) pruning fetch under cd asks", "cd /abs && git fetch --prune", "ask")
         ebexpect("(eb-e20) branch list is an enumerated read-only form",
                  "cd /abs && git branch --list", "allow")
+        # GD-158 QA round-1: an explicit binding is credited only when ABSOLUTE and complete; a relative
+        # -C/--git-dir or a lone --work-tree still leaves the target ambient and routes to the same ASK.
+        ebexpect("(eb-e23) relative -C is not a complete binding",
+                 "cd /abs/repo && git -C repo commit -m x", "ask")
+        ebexpect("(eb-e24) lone --work-tree without --git-dir is not credited",
+                 "cd /abs && git --work-tree=/abs commit -m x", "ask")
+        ebexpect("(eb-e25) relative --git-dir is not credited",
+                 "cd /abs && git --git-dir=rel/.git commit -m x", "ask")
+        # Common bare wrappers are peeled so they do not bypass the detector; an option/assignment-carrying
+        # wrapper is a disclosed residual left unpeeled.
+        ebexpect("(eb-e26) 'command git' wrapper under cd asks",
+                 "cd /abs && command git commit -m x", "ask")
+        ebexpect("(eb-e27) leading sudo git under cd asks",
+                 "cd /abs && sudo git commit -m x", "ask")
+        ebexpect("(eb-e28) wrapped 'command cd' feeding a mutation asks",
+                 "command cd /abs && git commit -m x", "ask")
+        ebexpect("(eb-e29) option-carrying wrapper is a disclosed residual (allows)",
+                 "cd /abs && env -i git commit -m x", "allow")
+        # Read-only forms stay exempt even under a cd (no false ASK).
+        ebexpect("(eb-e30) branch --show-current is read-only",
+                 "cd /abs && git branch --show-current", "allow")
+        ebexpect("(eb-e31) tag --points-at is read-only",
+                 "cd /abs && git tag --points-at HEAD", "allow")
+        ebexpect("(eb-e32) bare 'git config <key>' read is not a mutation",
+                 "cd /abs && git config user.name", "allow")
+        ebexpect("(eb-e33) 'git config <key> <value>' write under cd asks",
+                 "cd /abs && git config user.name value", "ask")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
                 ("add", ["--", "src/a.c"], False),
+                ("add", ["--", "--all"], False),
+                ("add", ["--", "-A"], False),
+                ("add", ["--", "."], True),
                 ("commit", ["-m", "x"], False)):
             _eb_got = aiqt_hooks._git_is_breadth(_eb_sub, _eb_args)
             if _eb_got is not _eb_want:
                 failures.append("(eb-e21) _git_is_breadth({}, {!r}): expected {}, got {}"
                                 .format(_eb_sub, _eb_args, _eb_want, _eb_got))
+        for _tg_tokens, _tg_want in (
+                (["git", "-C", "/abs/repo", "commit"], True),
+                (["git", "-C", "repo", "commit"], False),
+                (["git", "--git-dir=/abs/.git", "commit"], True),
+                (["git", "--git-dir=rel/.git", "commit"], False),
+                (["git", "--work-tree=/abs", "commit"], False),
+                (["git", "--git-dir", "/abs/.git", "--work-tree", "/abs", "commit"], True),
+                (["git", "commit", "-m", "x"], False)):
+            if aiqt_hooks._git_target_is_explicit(_tg_tokens) is not _tg_want:
+                failures.append("(eb-e34) _git_target_is_explicit({!r}): expected {}"
+                                .format(_tg_tokens, _tg_want))
         if (aiqt_hooks.HANDLERS.get("git_explicit_binding") is not aiqt_hooks.git_explicit_binding or
                 aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
