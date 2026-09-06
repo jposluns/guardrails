@@ -7452,81 +7452,115 @@ _ORCH_STATUS_NEGATIVE = frozenset(("failed", "failure", "error", "errored", "den
                                    "unsuccessful", "incomplete", "rejected"))
 _ORCH_STATUS_POSITIVE = frozenset(("ok", "success", "succeeded", "completed", "complete", "done",
                                    "scheduled", "created", "registered", "accepted"))
+# B5 premise-review (round 5): a DOCUMENTED soft-failure PHRASE lexicon, applied to ALL text at ANY
+# depth (not just top-level content). These are multi-word failure phrasings a single-token veto misses
+# (the round-4 "fell through" counterexample and its siblings). DISCLOSED NON-EXHAUSTIVE: a NOVEL
+# soft-failure phrase absent here, appearing beside a positive signal, is irreducible residual (a) that
+# the affirmative-confirmation ambiguity screen is the by-construction partner for. Extending it never
+# weakens the fail-safe direction (do-not-register), since over-matching only DECLINES a wake.
+_ORCH_SOFT_FAILURE_RE = re.compile(
+    r"fell\s+through|fall[s]?\s+through|falling\s+through|fell\s+back|fall[s]?\s+back|falling\s+back|"
+    r"fall[- ]?back|could\s*n['’]?t|could\s+not|would\s+not|will\s+not|did\s+not|does\s+not|"
+    r"was\s+not|were\s+not|wo\s*n['’]?t|do(?:es)?\s*n['’]?t|unable\s+to|failed\s+to|no\s+wake|"
+    r"not\s+schedul|never\s+schedul|not\s+creat|not\s+regist|timed\s*out|time[- ]?out|gave\s+up|"
+    r"giving\s+up|backed\s+off|no[- ]?op|bailed\s+out|short[- ]?circuit",
+    re.IGNORECASE)
+# SECA resource-bounds: the negative scan is UNBOUNDED in DEPTH (the round-4 depth-6 cap is removed) but
+# bounded by a cycle guard (id-set) and a node budget, and it FAILS SAFE - an over-large or
+# self-referential structure is treated as a negative (the wake is DECLINED), so a pathological response
+# can neither recurse unbounded nor be trusted by exhausting the scan.
+_ORCH_SCAN_NODE_BUDGET = 10000
 
 
-def _orch_response_strings(value, _depth=0):
-    """Yield every string reachable in a (possibly nested) tool-response value, so a negation, absence,
-    or uncertainty token ANYWHERE (a content text block, or any other string field/value) can veto. The
-    walk is depth-bounded (SECA resource-bounds) so a pathological structure cannot recurse unbounded."""
-    if _depth > 6:
-        return
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _orch_response_strings(v, _depth + 1)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            yield from _orch_response_strings(v, _depth + 1)
-
-
-def _orch_response_text_negative(response):
-    """True when ANY string anywhere in the tool response carries a FAILURE, NEGATION/absence, or
-    UNCERTAINTY token. B5 by construction: decided BEFORE any positive-shaped field, so a positive field
-    ({"ok":true}/{"is_error":false}) NEVER overrides negative, negated, absent, or uncertain content
-    sitting anywhere in the same response; ambiguity fails safe to no registration. DISCLOSED RESIDUAL:
-    over open natural language the token families cannot be exhaustive, so this veto is paired with the
-    affirmative-confirmation ambiguity screen in _orch_tool_succeeded, which turns an unrecognized,
-    non-confirming phrasing into a no-register too rather than relying on this denylist alone."""
-    for s in _orch_response_strings(response):
-        if _ORCH_FAILURE_TOKEN_RE.search(s) or _ORCH_NEG_UNSURE_RE.search(s):
-            return True
+def _orch_response_has_negative(response):
+    """True when ANY negative appears ANYWHERE in a (possibly nested) tool response: a STRUCTURED
+    negative control field at ANY dict depth (success/ok present-and-falsy; failure/error/is_error/
+    isError present-and-truthy; a status token in _ORCH_STATUS_NEGATIVE) OR a failure/negation/
+    uncertainty/soft-failure PHRASE in ANY string. B5 premise-review (round 5): the round-4 depth-6 cap
+    and the top-level-only structured checks are REMOVED - this walk is UNBOUNDED in depth, bounded
+    instead by a cycle guard and a node budget (SECA), and it FAILS SAFE (an over-large or
+    self-referential structure returns True, declining the wake). Fail-safe direction: an orphan wake
+    (a digest for a wake that did not happen) is a LIVENESS failure, so over-matching a negative only
+    DECLINES a wake (safe), never manufactures one."""
+    stack = [response]
+    seen = set()
+    budget = _ORCH_SCAN_NODE_BUDGET
+    while stack:
+        if budget <= 0:
+            return True                       # SECA: an over-large structure fails safe to declined
+        budget -= 1
+        value = stack.pop()
+        if isinstance(value, str):
+            if (_ORCH_FAILURE_TOKEN_RE.search(value) or _ORCH_NEG_UNSURE_RE.search(value)
+                    or _ORCH_SOFT_FAILURE_RE.search(value)):
+                return True
+        elif isinstance(value, dict):
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            lowered = {k.lower(): v for k, v in value.items() if isinstance(k, str)}
+            for k in ("success", "ok"):
+                if k in lowered and not lowered.get(k):
+                    return True               # a present-and-falsy positive field is a negative
+            for k in ("failure", "is_error", "iserror", "error"):
+                if lowered.get(k) not in (None, "", False, 0):
+                    return True               # a present-and-truthy failure field (isError normalized)
+            status = lowered.get("status")
+            if isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_NEGATIVE:
+                return True
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            stack.extend(value)
     return False
 
 
-def _orch_tool_succeeded(response):
-    """A2 success test over a PostToolUse tool_response. STRICT and CONSERVATIVE BY CONSTRUCTION: a wake
-    registers ONLY on a positively-and-unambiguously confirmed success; anything else (a missing/bare
-    response, any recognized error signal, a negated-success/absent/uncertain token anywhere, or an
-    ambiguous content that does not affirmatively confirm) reads as NOT succeeded, so no wake digest is
-    written. Fail-safe = do-not-register: an unregistered wake means a later identical human prompt still
-    resets the loop counters (safe), whereas a falsely-registered wake would orphan a digest and
-    misclassify that human prompt as timer-originated (the exact A2 orphan this prevents).
-
-    Two by-construction layers, so success does not rest on enumerating every negation phrase:
-      1. VETO: any failure/negation/absence/uncertainty token ANYWHERE in the response (recursively over
-         every string) returns False, decided BEFORE any positive-shaped field. A positive field NEVER
-         overrides negative content.
-      2. AMBIGUITY screen: after an explicit affirmative structured success marker (is_error false,
-         success/ok true, or a positive status token, never the mere ABSENCE of an error), if the
-         response carries free-text content then at least one content text block must AFFIRMATIVELY
-         confirm (a positive-confirmation token); content that neither negates nor confirms is ambiguous
-         and fails safe to no registration. So an unrecognized negative phrasing that slips the veto but
-         lacks a confirmation token is still declined, and the residual (content that both confirms and
-         yet means failure while avoiding every negation token) is a narrow, disclosed one."""
-    if not isinstance(response, dict):
-        # a bare string / None carries no structured success field: no affirmative confirmation, so the
-        # fail-safe direction is do-not-register (a string 'FAILED' also carries a failure token).
-        return False
-    if response.get("is_error") is True or response.get("success") is False \
-            or response.get("ok") is False:
-        return False
-    if response.get("error") not in (None, "", False):
-        return False
+def _orch_has_positive_signal(response):
+    """An EXPLICIT affirmative structured success marker at the TOP LEVEL (the tool's own contract
+    fields), never the mere ABSENCE of an error: is_error False, success True, ok True, or a status
+    token in _ORCH_STATUS_POSITIVE. A positive nested inside a data payload is NOT the tool's own
+    success signal and does not count."""
     status = response.get("status")
-    if isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_NEGATIVE:
+    return (response.get("is_error") is False or response.get("success") is True
+            or response.get("ok") is True
+            or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE))
+
+
+def _orch_tool_succeeded(response):
+    """A2 success test over a PostToolUse tool_response, INVERTED to a FAIL-SAFE POSITIVE CONTRACT
+    (B5 premise-review, round 5): 'is there AFFIRMATIVE, UNAMBIGUOUS evidence of success?', not 'is
+    there any failure token?'. A wake digest registers ONLY when all three by-construction gates pass;
+    anything else reads NOT succeeded, so no digest is written. Fail-safe = do-not-register: an
+    unregistered wake still lets a later identical human prompt reset the loop counters (safe), whereas
+    a falsely-registered wake orphans a digest and misclassifies that human prompt as timer-originated
+    (the A2 orphan, a LIVENESS failure). So EVERY doubt returns False.
+
+    THREE GATES, all required (the round-4 counterexamples are closed by G1+G2 by construction, not by
+    enumerating phrases):
+      G1  no STRUCTURED negative anywhere: the UNBOUNDED, cycle-guarded, node-budgeted walk
+          (_orch_response_has_negative) finds no negative control field at ANY depth (success/ok falsy,
+          failure/error/is_error/isError present-and-truthy, a negative status token). This closes the
+          round-4 depth-6 cap AND the top-level-only structured checks.
+      G2  no soft-failure PHRASE anywhere: the same walk finds no failure/negation/uncertainty/
+          soft-failure phrase in ANY string at ANY depth (the extended lexicon covers 'fell through').
+      G3  an affirmative positive signal (_orch_has_positive_signal) AND, when free-text content is
+          present, at least one content text block AFFIRMATIVELY confirms (the ambiguity screen; content
+          that neither negates nor confirms fails safe to no register).
+
+    DISCLOSED IRREDUCIBLE RESIDUAL (stated honestly, NOT closed): (a) a NOVEL soft-failure phrase absent
+    from the lexicon appearing beside a positive signal; (b) a failure token hidden inside an ENCODED
+    payload (e.g. base64). The depth-bound and the shape restriction are NOT residual - they are closed
+    here by construction (G1/G2 are unbounded and structural)."""
+    if not isinstance(response, dict):
+        # a bare string / None carries no structured success field: no affirmative confirmation.
         return False
-    # layer 1: the negation/absence/uncertainty veto, decided before the positive-shaped fields.
-    if _orch_response_text_negative(response):
+    if _orch_response_has_negative(response):        # G1 + G2
         return False
-    # require an explicit affirmative structured success marker (never the mere ABSENCE of an error).
-    has_positive = (response.get("is_error") is False or response.get("success") is True
-                    or response.get("ok") is True
-                    or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE))
-    if not has_positive:
+    if not _orch_has_positive_signal(response):      # G3: the affirmative positive signal
         return False
-    # layer 2: the ambiguity screen over free-text content.
-    content = response.get("content")
+    content = response.get("content")                # G3: the ambiguity screen over free-text content
     if isinstance(content, list):
         texts = [b["text"] for b in content
                  if isinstance(b, dict) and isinstance(b.get("text"), str) and b["text"].strip()]

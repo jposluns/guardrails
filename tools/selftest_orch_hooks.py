@@ -1754,6 +1754,30 @@ def main(report_path=None):
                 ("a2/succeeded-false-ambiguous-no-field-4", "processing at node-7")):
             check(check_id,
                   aiqt_hooks._orch_tool_succeeded({"content": [{"text": _amb}]}), False)
+        # ---------- FIX 3 (round-5 premise review): the round-4 BLOCKER counterexamples ----------
+        # By construction (unbounded structured+phrase scan), each reads NOT-success. A mutation
+        # restoring the depth-6 cap fails the nested-deep case; restoring the top-level-only structured
+        # check fails the nested-structured case; dropping the 'failure' key fails the top-level case;
+        # dropping 'fell through' from the lexicon fails the soft-failure case.
+        check("a2/succeeded-false-nested-deep-failure",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}],
+                   "nested": {"a": {"b": {"c": {"d": {"e": {"f": {"g": "FAILED"}}}}}}}}), False)
+        check("a2/succeeded-false-nested-structured-negative",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}], "result": {"success": False}}), False)
+        check("a2/succeeded-false-soft-failure-phrase",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "Scheduling fell through"}]}), False)
+        check("a2/succeeded-false-top-level-failure-field",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}], "failure": True}), False)
+        # positive control: a DEEPLY-nested CLEAN structure still registers, so the unbounded walk did
+        # not break the affirmative path (no false negative introduced by the walk itself).
+        check("a2/succeeded-true-deep-clean",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}],
+                   "meta": {"a": {"b": {"c": {"d": {"e": {"f": {"g": "all good"}}}}}}}}), True)
 
         # ---------- GD-164: the prep discipline ----------
         p2 = Fixture(tmp, "prep")

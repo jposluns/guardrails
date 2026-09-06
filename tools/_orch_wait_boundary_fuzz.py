@@ -224,6 +224,18 @@ def sweep_tool_succeeded():
         if aiqt_hooks._orch_tool_succeeded({"content": [{"type": "text", "text": txt}]}) is not False:
             breaches.append("B5 BREACH: non-confirming content {!r} with no positive field "
                             "registered".format(txt))
+    # FIX3 (round-5 premise review): the round-4 BLOCKER counterexamples the depth-6 cap and the
+    # top-level-only structured checks let slip. Each MUST read NOT-success by construction (the
+    # unbounded structured+phrase scan), not by enumerating phrases.
+    for i, resp in enumerate((
+            {"ok": True, "content": [{"text": "scheduled"}],
+             "nested": {"a": {"b": {"c": {"d": {"e": {"f": {"g": "FAILED"}}}}}}}},
+            {"ok": True, "content": [{"text": "scheduled"}], "result": {"success": False}},
+            {"ok": True, "content": [{"text": "Scheduling fell through"}]},
+            {"ok": True, "content": [{"text": "scheduled"}], "failure": True}), 1):
+        if aiqt_hooks._orch_tool_succeeded(resp) is not False:
+            breaches.append("FIX3 BREACH: counterexample {} registered a wake (must be NOT-success): {}"
+                            .format(i, resp))
     return breaches
 
 
@@ -310,6 +322,53 @@ def sweep_boundary():
         if _wait_verdict(root, "collect WA-1") != "allow":
             breaches.append("the single genuinely-licensed wait (a named live waiting row) did NOT "
                             "reach the sole ALLOW through the full read/parse path")
+    with tempfile.TemporaryDirectory(prefix="aiqt-wbf-b3-") as tmp:
+        # FIX4 (B3 load-bearing): a fixed close whose ref RESOLVES to a real commit but declares NO
+        # close.paths must reconcile UNRECONCILABLE (held/cannot-evaluate), so the wait DENIES. If B3 is
+        # reverted (a no-paths fixed close read as terminal), the item leaves cannot-evaluate and the
+        # wait flips to a cap-relieving ALLOW on the named live waiting row - the breach this makes
+        # load-bearing. A live WA-1 waiting row is present so the flip is a genuine allow, not a
+        # no-target deny.
+        root = _mkrepo(tmp, {}, [{"id": "A-1", "state": "open", "granted": True}])
+        for k, v in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(["git", "-C", root, "config", k, v], capture_output=True, check=False)
+        subprocess.run(["git", "-C", root, "add", "-A"], capture_output=True, check=False)
+        subprocess.run(["git", "-C", root, "commit", "-q", "-m", "seed"],
+                       capture_output=True, check=False)
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        (Path(root) / "aei.json").write_text(json.dumps({
+            "version": 2, "generated_at_utc": aiqt_hooks._orch_now().isoformat(),
+            "source": {"locator": "b"},
+            "items": [{"id": "F-1", "state": "closed", "granted": True,
+                       "close": {"reason": "fixed", "ref": sha}},          # NO paths -> unreconcilable
+                      {"id": "WA-1", "state": "open", "granted": True,
+                       "blocker": {"kind": "tracked-task", "ref": "T-1"}}]}), encoding="utf-8")
+        sd = Path(aiqt_hooks._orch_state_dir_for_root(root))
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "dispatch-ledger.jsonl").write_text(json.dumps({
+            "ts": aiqt_hooks._orch_now().isoformat(), "event": "launch", "task_id": "T-1",
+            "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        if _wait_verdict(root, "collect WA-1") == "allow":
+            breaches.append("B3: a fixed close with NO declared paths (a resolving real commit) yielded "
+                            "a cap-relieving allow; a no-paths fixed close must HOLD (cannot-evaluate)")
+    with tempfile.TemporaryDirectory(prefix="aiqt-wbf-fa-") as tmp:
+        # FIX4 (Flag A load-bearing): a proposed/ungranted item with no maintainer-controlled park is
+        # ACTIONABLE (a self-authored 'proposed' label parks nothing; its preparatory pipeline
+        # continues), so the wait DENIES on that actionable item. If Flag A is reverted (a proposed item
+        # moved to blocked, a self-authored park), the item leaves the actionable set and the wait flips
+        # to a cap-relieving ALLOW on the named live waiting row - the breach this makes load-bearing.
+        root = _mkrepo(tmp, {}, [{"id": "P-1", "state": "proposed", "granted": True},
+                                 {"id": "WA-1", "state": "open", "granted": True,
+                                  "blocker": {"kind": "tracked-task", "ref": "T-1"}}])
+        sd = Path(aiqt_hooks._orch_state_dir_for_root(root))
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "dispatch-ledger.jsonl").write_text(json.dumps({
+            "ts": aiqt_hooks._orch_now().isoformat(), "event": "launch", "task_id": "T-1",
+            "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        if _wait_verdict(root, "collect WA-1") == "allow":
+            breaches.append("FlagA: a proposed/ungranted item yielded a cap-relieving allow; a "
+                            "self-authored proposed label is actionable, not a park, so the wait DENIES")
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf2-") as tmp:
         # a bad registry -> handler ASK/hold, never a cap-relieving allow
         tmp = Path(tmp)

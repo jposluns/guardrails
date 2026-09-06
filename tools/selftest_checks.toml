@@ -409,6 +409,11 @@ expected-check-ids = [
   "a2/succeeded-false-ambiguous-no-field-2",
   "a2/succeeded-false-ambiguous-no-field-3",
   "a2/succeeded-false-ambiguous-no-field-4",
+  "a2/succeeded-false-nested-deep-failure",
+  "a2/succeeded-false-nested-structured-negative",
+  "a2/succeeded-false-soft-failure-phrase",
+  "a2/succeeded-false-top-level-failure-field",
+  "a2/succeeded-true-deep-clean",
 ]
 
 [[suite]]

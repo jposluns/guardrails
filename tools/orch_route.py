@@ -139,20 +139,24 @@ def _find_item(reg, root, item_id):
     return (None, "item {!r} is not in the current enumeration".format(item_id))
 
 
-def _close_surface(backlog_path, item_id, reason, ref):
+def _close_surface(backlog_path, item_id, reason, ref, paths=None):
     """Mark the reference markdown-backlog line closed and append the v2 close annotation, matching
-    tools/aei_backlog_md.py's grammar (:: close:<reason>=<ref>). Fail-closed: the line must exist and
-    must NOT already carry a DIVERGENT close (a different reason/ref). B3: an existing divergent close
-    is REFUSED (never silently removed and replaced), honouring the contract in this docstring; only an
-    exact re-statement of the same close is idempotently allowed. Returns (ok, detail)."""
+    tools/aei_backlog_md.py's grammar (:: close:<reason>=<ref>[ :: paths=<p1>,<p2>]). FIX2/B3: when the
+    close is bound to declared paths (a `fixed` close verified against those paths), they are PERSISTED
+    in the annotation using the SAME grammar the enumerator and the liveness join read, so the written
+    surface RE-ENUMERATES as terminal; a path-less fixed close would re-enumerate unreconcilable (held),
+    the exact non-terminal close the adopter requirement forbids. Fail-closed: the line must exist and
+    must NOT already carry a DIVERGENT close (a different reason/ref); an exact re-statement of the same
+    (reason, ref) is idempotently allowed, and existing paths are preserved when none are supplied now.
+    Returns (ok, detail)."""
     try:
         text = Path(backlog_path).read_text(encoding="utf-8")
     except OSError as exc:
         return (False, "backlog unreadable ({})".format(exc))
     import re
     pat = re.compile(r"^(-\s+" + re.escape(item_id) + r"\s+)\[(x|X| |\.|o|O|BLOCKED)\](.*)$")
-    close_pat = re.compile(r"\s*::\s*close:([^=:]+)=(.+?)\s*$")
-    out, hits = [], 0
+    close_pat = re.compile(r"\s*::\s*close:([^=:]+)=(\S+)(?:\s*::\s*paths=([^:]+?))?\s*$")
+    out, hits, written = [], 0, None
     for line in text.splitlines():
         m = pat.match(line.strip())
         if not m:
@@ -165,17 +169,26 @@ def _close_surface(backlog_path, item_id, reason, ref):
             return (False, "{} already carries a divergent close (close:{}={}); refusing to overwrite "
                     "it with close:{}={} (hand-reconcile the surface first)".format(
                         item_id, existing.group(1).strip(), existing.group(2).strip(), reason, ref))
+        written = paths
+        if not written and existing and existing.group(3):
+            # idempotent re-statement with no new paths preserves the existing paths.
+            written = [p.strip() for p in existing.group(3).split(",") if p.strip()]
         rest = close_pat.sub("", rest).rstrip()
-        out.append("- {} [x]{} :: close:{}={}".format(item_id, rest, reason, ref))
+        annotation = "- {} [x]{} :: close:{}={}".format(item_id, rest, reason, ref)
+        if written:
+            annotation += " :: paths={}".format(",".join(written))
+        out.append(annotation)
     if hits != 1:
         return (False, "expected exactly one line for {} in the surface, found {}".format(
             item_id, hits))
     Path(backlog_path).write_text("\n".join(out) + "\n", encoding="utf-8")
-    return (True, "closed {} ({}={})".format(item_id, reason, ref))
+    return (True, "closed {} ({}={}{})".format(
+        item_id, reason, ref, "; paths " + ",".join(written) if written else ""))
 
 
 def route(root, reg, item_id, ground, ref, check_ref, backlog, paths=None):
     sd = aiqt_hooks._state_dir_from_registry(root, reg)
+    surface_paths = None
     if ground not in aiqt_hooks._ORCH_CLOSE_REASONS:
         _event(root, sd, "refused", "unknown ground {!r} (not in the closed vocabulary)".format(ground))
         print("orch_route: unknown ground {!r}; the closed vocabulary is {}".format(
@@ -278,9 +291,10 @@ def route(root, reg, item_id, ground, ref, check_ref, backlog, paths=None):
                   "{} (vfxcmt); {!r} is unrelated or resolves to no commit, so the close is refused"
                   .format(item_id, ref), file=sys.stderr)
             return 2
+        surface_paths = declared_paths     # verified terminal; persist the binding paths on the surface
 
     if backlog:
-        ok, cdetail = _close_surface(backlog, item_id, ground, ref)
+        ok, cdetail = _close_surface(backlog, item_id, ground, ref, paths=surface_paths)
         if not ok:
             _event(root, sd, "refused", "surface close failed: {}".format(cdetail))
             print("orch_route: could not close the surface ({})".format(cdetail), file=sys.stderr)
@@ -406,6 +420,19 @@ def self_test():
             fails.append("fixed bound by declared paths should route (exit 0), got {}".format(rc))
         if "close:fixed={}".format(real_sha) not in backlog.read_text(encoding="utf-8"):
             fails.append("fixed happy path did not write the close annotation")
+        # FIX2: RE-ENUMERATE the written surface and assert the fixed close re-enumerates TERMINAL
+        # end-to-end (paths persisted in the markdown annotation using the grammar the enumerator/join
+        # read), not merely that an annotation string was written.
+        import aei_backlog_md as _aei
+        _items, _errs = _aei.parse(backlog.read_text(encoding="utf-8"), version=2)
+        _c2 = next((i for i in _items if i["id"] == "C-2"), {})
+        if _errs or _c2.get("close", {}).get("paths") != ["seed.txt"]:
+            fails.append("FIX2: the routed fixed close did not persist close.paths in the surface "
+                         "(got {}; errs {})".format(_c2, _errs))
+        _vr, _okc = aiqt_hooks._orch_commit_fixes_item(root, real_sha, "C-2",
+                                                       _c2.get("close", {}).get("paths"))
+        if _vr != "terminal":
+            fails.append("FIX2: the re-enumerated routed fixed close is not terminal (got {})".format(_vr))
         # (g2) B3 reconciliation verdicts (direct against _orch_commit_fixes_item): a `fixed` close binds
         # to the item ONLY BY CONTENT. NO declared paths is UNRECONCILABLE (held), regardless of the
         # commit message; declared paths the commit does not touch are UNRELATED; matching declared paths

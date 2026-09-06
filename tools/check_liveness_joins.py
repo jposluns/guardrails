@@ -90,6 +90,40 @@ def _covered_keys(text, prefix, has_ground):
     return (keys, None)
 
 
+def _parse_surface(backlog_text):
+    """Detect a committed surface's TYPE and parse it, returning (items, cannot_detail). A surface whose
+    whole text parses as JSON is a JSON AEI surface and is held to the engine's OWN strict AEI validator
+    (aiqt_hooks.validate_enumeration, single-sourced with the yield-time reader); anything else is a
+    Markdown AEI surface parsed with the reference grammar. B3 FAIL-CLOSED: a surface that OPENS as JSON
+    ('{'/'[') but does not parse, or parses but fails AEI validation, is cannot-evaluate - it is NEVER
+    silently routed to the markdown parser, which would read a JSON file as an empty backlog and pass a
+    zero-terminal SUCCESS on a surface it never understood (the exact B3 defect this closes). A genuinely
+    empty or prose markdown surface with no items remains a valid empty enumeration, as before."""
+    stripped = backlog_text.lstrip("\ufeff \t\r\n")
+    looks_json = stripped[:1] in ("{", "[")
+    if stripped:
+        try:
+            payload = json.loads(stripped)
+        except ValueError as exc:
+            if looks_json:
+                return (None, "surface opens as JSON but is not parseable JSON ({})".format(exc))
+        else:
+            items, err = aiqt_hooks.validate_enumeration(payload)
+            if err:
+                return (None, "JSON AEI surface fails AEI validation: {}".format(err))
+            norm = []
+            for it in items:
+                row = {"id": it["id"], "state": it["state"]}
+                if it.get("close") is not None:
+                    row["close"] = it["close"]      # carries close.paths through the SAME reconcile loop
+                norm.append(row)
+            return (norm, None)
+    items, errors = aei_backlog_md.parse(backlog_text, version=2)
+    if errors:
+        return (None, "committed markdown backlog fails the grammar: " + "; ".join(errors[:5]))
+    return (items, None)
+
+
 def join(backlog_text, ds_text, df_text, fixed_reconcile=None):
     """Pure join over ONE committed surface. Returns (findings, cannot_evaluate, covered_terminals).
     fixed_reconcile(item_id, ref, declared_paths) -> (verdict, consultable): the B3 fix-attestation
@@ -97,15 +131,19 @@ def join(backlog_text, ds_text, df_text, fixed_reconcile=None):
     declared close.paths), not merely resolving it and never on an assistant-writable id-in-message
     match. When it is None the join cannot verify a `fixed` close, so a `fixed` terminal is
     cannot-evaluate (held), never accepted unconditionally. verdict "terminal" is bound (justified);
-    "unrelated"/non-resolving is a finding; "unreconcilable" (a `fixed` close with no declared paths, so
-    the commit cannot be bound to the item by content) is cannot-evaluate (held). NOTE: the committed
-    backlog markdown grammar cannot express close.paths, so a `fixed` close in a markdown backlog surface
-    always reconciles to "unreconcilable" (held), not accepted; adopters that need a `fixed` terminal to
-    pass this structural join declare the close.paths in a JSON AEI surface (see ORCHESTRATION.md)."""
+    "unrelated"/non-resolving is a finding;
+    "unreconcilable" (a `fixed` close with no declared paths, so the commit cannot be bound to the item
+    by content) is cannot-evaluate (held). SURFACE TYPE is detected per surface (_parse_surface): a JSON
+    AEI surface is validated by the engine's own AEI reader and a Markdown AEI surface by the reference
+    grammar, and BOTH carry close.paths into this one reconcile loop, so JSON and Markdown cannot diverge
+    on terminality. A surface that opens as JSON but does not parse, or fails AEI validation, is
+    cannot-evaluate (fail closed), never a silent empty backlog."""
     findings, cannot, terminals = [], [], []
-    items, errors = aei_backlog_md.parse(backlog_text, version=2)
-    if errors:
-        return ([], ["committed backlog fails the grammar: " + "; ".join(errors[:5])], [])
+    items, perr = _parse_surface(backlog_text)
+    if perr is not None:
+        # B3: an unparseable/invalid surface (neither valid JSON AEI nor valid Markdown AEI) is
+        # cannot-evaluate (fail closed), NEVER a silent empty backlog / zero-terminal success.
+        return ([], [perr], [])
     ds_keys = df_keys = None
     if ds_text is not None:
         ds_keys, d = _covered_keys(ds_text, "DS-", True)
@@ -371,6 +409,31 @@ def self_test():
     # an UNDECLARED register is a clean skip (not an error)
     if resolve_register_rel({}, "dispositions") != (None, False, None):
         fails.append("an undeclared register must be a clean skip, not an error")
+    # B3 lj/json-surface-fixed-terminal: a JSON AEI surface (not markdown) with a paths-bound fixed
+    # close reconciles TERMINAL through the SAME close.paths terminality, NEVER a silent empty backlog.
+    json_surface = json.dumps({
+        "version": 2, "generated_at_utc": "2026-01-01T00:00:00+00:00",
+        "source": {"locator": "aei.json"},
+        "items": [{"id": "J-1", "state": "closed", "granted": True,
+                   "close": {"reason": "fixed", "ref": "commit-x",
+                             "paths": ["tools/check_liveness_joins.py"]}}]})
+    findings, cannot, terminals = join(json_surface, chain([]), chain([]), fixed_reconcile=fr)
+    if findings or cannot or not any(t[0] == "J-1" for t in terminals):
+        fails.append("a JSON AEI fixed-close surface must reconcile TERMINAL, not a silent empty backlog "
+                     "(lj/json-surface-fixed-terminal): findings={} cannot={} terminals={}"
+                     .format(findings, cannot, terminals))
+    # B3 lj/unparseable-json-surface-fails-closed: opens as JSON but does not parse -> cannot-evaluate
+    # (fail closed), NEVER routed to the markdown parser as an empty backlog.
+    findings, cannot, _ = join('{ "version": 2, "items": broken', chain([]), chain([]),
+                               fixed_reconcile=fr)
+    if not cannot:
+        fails.append("an unparseable JSON-looking surface must fail closed "
+                     "(lj/unparseable-json-surface-fails-closed)")
+    # B3 lj/invalid-aei-json-surface-fails-closed: parses as JSON but fails AEI validation -> held
+    findings, cannot, _ = join('{"version": 3, "items": []}', chain([]), chain([]), fixed_reconcile=fr)
+    if not cannot:
+        fails.append("a JSON surface that fails AEI validation must fail closed "
+                     "(lj/invalid-aei-json-surface-fails-closed)")
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

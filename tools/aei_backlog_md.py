@@ -6,7 +6,7 @@ for the migration test). v2 carries the close object and closed vocabulary, the 
 fields, and the optional advance hint, all from checkbox annotations.
 
 Line grammar (one item per dash bullet; anything else is prose and ignored):
-  - <ID> [x]        <title> :: close:<reason>=<ref>     closed (v2 REQUIRES the close annotation)
+  - <ID> [x]        <title> :: close:<reason>=<ref>[ :: paths=<p1>,<p2>]  closed (v2 REQUIRES close)
   - <ID> [ |.|o|O]  <title>                             open, granted (all seed tokens mean open)
   - <ID> [BLOCKED]  <title> :: blocker:<kind>=<ref>[ :: observed=<iso>][ :: evidence=<text>]
   - ... a human-decision blocker MAY carry :: prep=complete|incomplete [ :: prep_ref=<ref> ]
@@ -18,7 +18,9 @@ carry a close annotation with a known reason and a non-blank ref, a human-decisi
 prep=complete|incomplete, and prep=complete MUST carry a non-blank prep_ref; a violation is an
 enumeration ERROR (exit 3), never a silently dropped or under-specified item (grdinp: the guard's
 input can never shrink the open-set or fabricate a ground). Under --v1 close/prep/advance annotations
-are ignored and the v1 shape is emitted unchanged.
+are ignored and the v1 shape is emitted unchanged. A `fixed` close MAY carry a trailing
+':: paths=<comma-separated repo-relative paths>' list, parsed into close.paths (the same field the JSON
+enumeration and the liveness join read); paths containing a ':' are the disclosed grammar residual.
 
 STAGE MAPPING NOTE (adopter-internal, NEVER in shipped rule/hook text): an adopter fleet maps its own
 pipeline stages onto open-plus-advance-hint here and in migration documentation only. The pack ships
@@ -43,6 +45,7 @@ BLOCKER_RE = re.compile(r"::\s*blocker:(?P<kind>[a-z-]+)=(?P<ref>\S+)")
 OBSERVED_RE = re.compile(r"::\s*observed=(?P<t>\S+)")
 EVIDENCE_RE = re.compile(r"::\s*evidence=(?P<e>[^:]+?)(?:\s*::|$)")
 CLOSE_RE = re.compile(r"::\s*close:(?P<reason>[a-z-]+)=(?P<ref>\S+)")
+PATHS_RE = re.compile(r"::\s*paths=(?P<p>[^:]+?)(?:\s*::|\s*$)")
 PREP_RE = re.compile(r"::\s*prep=(?P<v>complete|incomplete)\b")
 PREP_REF_RE = re.compile(r"::\s*prep_ref=(?P<r>\S+)")
 ADVANCE_RE = re.compile(r"::\s*advance=(?P<a>[^:]+?)(?:\s*::|$)")
@@ -79,6 +82,15 @@ def parse(text, version=2):
                 errors.append("line {}: unknown close reason {!r}".format(n, cm.group("reason")))
                 continue
             close = {"reason": cm.group("reason"), "ref": cm.group("ref")}
+            # B3/FIX2: an OPTIONAL '::' paths list (repo-relative, comma-separated, following the close
+            # annotation) binds a `fixed` close to the item BY CONTENT using the SAME field the JSON
+            # validator and the liveness join read (close.paths), so a routed fixed close RE-ENUMERATES
+            # as terminal. Parsed from the full rest before the close truncation drops the tail.
+            pm = PATHS_RE.search(rest)
+            if pm:
+                paths = [p.strip() for p in pm.group("p").split(",") if p.strip()]
+                if paths:
+                    close["paths"] = paths
             rest = rest[:cm.start()].rstrip()
         advance = None
         am = ADVANCE_RE.search(rest)
@@ -238,6 +250,19 @@ def self_test():
     empty_items, empty_errs = parse("", version=2)
     if empty_items != [] or empty_errs:
         ok_fail.append("empty backlog should be a valid empty enumeration")
+    # FIX2/B3: a `fixed` close MAY carry a '::' paths list, parsed into close.paths (the same field the
+    # JSON validator and the join read), so a routed fixed close re-enumerates as terminal.
+    pitems, perrs = parse("- A-9 [x] shipped :: close:fixed=commit-z :: paths=tools/x.py,tools/y.py\n",
+                          version=2)
+    a9 = next((i for i in pitems if i["id"] == "A-9"), {})
+    if perrs or a9.get("close") != {"reason": "fixed", "ref": "commit-z",
+                                    "paths": ["tools/x.py", "tools/y.py"]}:
+        ok_fail.append("v2 fixed close with a paths list must parse close.paths (got {})".format(a9))
+    # a path-less fixed close still parses with NO paths key (byte-identical to before)
+    p6 = next((i for i in parse("- A-6 [x] s :: close:fixed=commit-abc\n", version=2)[0]
+               if i["id"] == "A-6"), {})
+    if "paths" in p6.get("close", {}):
+        ok_fail.append("a path-less fixed close must not synthesize close.paths")
     if ok_fail:
         for f in ok_fail:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)
