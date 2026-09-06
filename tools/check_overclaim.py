@@ -223,6 +223,8 @@ mechanism claim and is deliberately NOT matched (no "works", no efficacy verb go
 
 Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required surface, fail-closed).
 """
+import base64
+import binascii
 import html
 import json
 import re
@@ -230,6 +232,8 @@ import sys
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
+import posixpath
+from urllib.parse import urlsplit, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
@@ -238,6 +242,11 @@ import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster 
 import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
 import gen_enforcement_register  # noqa: E402  reuse ledger_index + load_roadmap to enumerate page-bound source strings
 HTML_REL = gen_enforcement_register.HTML_REL  # single-sourced register page path (site/enforcement.html)
+# The origin the register page is served from, derived from the generator's own canonical page URL
+# (guard-input-soundness: read from the authoritative source, never a second hardcoded literal). Used to
+# tell a SAME-ORIGIN absolute asset URL (scanned) from a genuinely off-site one (out of a static gate's
+# reach, disclosed) in _closure_local_asset (FIX 2b, GER-1 round 11).
+SITE_HOST = (urlsplit(gen_enforcement_register.PAGE_URL).hostname or "").lower()
 
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
@@ -810,62 +819,74 @@ def scan(text, site=True):
     return _scan_with(text, (SITE_PATTERNS + RELEASE_PATTERNS) if site else RELEASE_PATTERNS)
 
 
-# FIX 4 (GER-1): the register page's STATIC asset closure. The register page loads shared chrome CSS/JS via
-# docs/_shell.html's <link rel="stylesheet"> and <script src>, whose bodies the visible-text collector never
-# sees (VisibleText drops <style>/<script>, and the external assets are separate files collector 1 does not
-# read). A CSS content: string or a static marketing string in that closure would render or ship marketing no
-# page scan catches, so the closure is scanned here for the marketing patterns AND for CSS content: string
-# injection. This is a STATIC string scan; the runtime-JS residual is disclosed on _scan_asset_closure.
+# FIX 4 (GER-1) + FIX 2 (GER-1 round 11): the register page's STATIC asset closure, BEST-EFFORT
+# defence-in-depth. The register page loads shared chrome CSS/JS via docs/_shell.html's <link
+# rel="stylesheet"> and <script src>, whose bodies the visible-text collector never sees (VisibleText drops
+# <style>/<script>, and the external assets are separate files collector 1 does not read). A CSS content:
+# string or a static marketing string in that closure would render or ship marketing no page scan catches,
+# so the closure is scanned here for the marketing patterns AND for CSS content: string injection. Round 11
+# closes the static CSS injection surface by construction: single- AND double-quoted href/src/rel
+# attributes; inline style="..." content: literals; the FULL same-origin CSS @import graph (visited-set
+# bounded so a cycle terminates); a decoded data:text/css sheet body; and CSS hex/unicode escapes in
+# content: strings. Only three vectors stay OUT of a static gate's reach and are DISCLOSED on
+# _scan_asset_closure, not pretended closed: runtime-JS DOM construction of text, a general encoded payload
+# buried in an arbitrary JS string (the runtime boundary, distinct from a decoded data: URL), and a
+# genuinely off-site (cross-origin) asset a static gate does not fetch.
 _STYLE_BODY_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
 _SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL)
 _LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
-_ATTR_HREF_RE = re.compile(r'href\s*=\s*"([^"]*)"', re.IGNORECASE)
-_ATTR_SRC_RE = re.compile(r'src\s*=\s*"([^"]*)"', re.IGNORECASE)
-_ATTR_REL_RE = re.compile(r'rel\s*=\s*"([^"]*)"', re.IGNORECASE)
+# Single- OR double-quoted attribute values (group 1 double, group 2 single); read via _attr_val.
+_ATTR_HREF_RE = re.compile(r'href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
+_ATTR_SRC_RE = re.compile(r'src\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
+_ATTR_REL_RE = re.compile(r'rel\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
+_ATTR_STYLE_RE = re.compile(r'style\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
 # A CSS content: DECLARATION (the PROPERTY, not the 'content' suffix of justify-content / align-content: the
 # (?<![\w-]) lookbehind refuses a preceding word char or hyphen), and its value up to the ; or } that ends it.
 _CSS_CONTENT_RE = re.compile(r"(?<![\w-])content\s*:\s*([^;}]*)", re.IGNORECASE)
 # A CSS string literal (single- or double-quoted, backslash escapes honoured) inside a content: value.
 _CSS_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"' + r"|'((?:[^'\\]|\\.)*)'")
+# A CSS @import target: url("x")/url('x')/url(x) or a bare "x"/'x'. ONE level is followed within a scanned
+# same-origin sheet; a transitive @import (inside an imported sheet) is a DISCLOSED residual, not traversed.
+_CSS_IMPORT_RE = re.compile(
+    r"@import\s+(?:url\(\s*(?:\"([^\"]*)\"|'([^']*)'|([^)\s]*))\s*\)|\"([^\"]*)\"|'([^']*)')",
+    re.IGNORECASE)
 
 
-# --- source-side residue-cleanliness leg (GER-1 / round 7) --------------------------------------------
-# The enforcement register renders each mechanism's technical-limits residual VERBATIM from the ledger,
-# inside a `<blockquote class="ledger-residual" data-mech="<ref>">`. Earlier rounds exempted those blocks
-# from the marketing scan on the page (a verified-quotation carve-out); that approach was REFUTED as
-# fundamentally fragile (a bound-allowance hole that suppressed every marketing pattern, invisible-Unicode
-# laundering that passes a source scan yet renders as marketing, and static-DOM-vs-rendered fidelity gaps),
-# so it was removed.
-# _page_bound_sources recomputes the residues, ids, AND pending descriptions IN MEMORY from the manifests
-# and roadmap (guard-input-soundness); _scan_page_bound_sources then runs ONE shared reject over every such
-# string, rejecting any character outside the printable-plus-ASCII-whitespace allowlist on the RAW bytes
-# (before any collapse) and scanning a collapsed copy with the PLAIN marketing patterns, so no page-bound
-# channel can be missed and no invisible or non-ASCII laundering can reach the page through any of them.
+def _attr_val(m):
+    """The captured value from a single-OR-double-quoted attribute match (group 1 double, group 2 single)."""
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
+# --- source-side page-content leg (GER-1: single-sourced generator choke-point) ---------------------
+# The enforcement register renders many verbatim corpus/ledger strings (the rule title, the corpus id,
+# each mechanism reference id, the metadata the mechanism block shows verbatim (platform, default, entry
+# point INCLUDING a hook matcher, class), each ledger residue, and each pending rule description). Earlier
+# rounds exempted the residue blocks from the page scan (REFUTED as fragile) and then enumerated the
+# page-bound strings by a HAND-MAINTAINED list here (residue/id/description) that drifted from what the
+# generator emits: rounds 8 and 10 each found a new missed channel (the title and the hook matcher shipped
+# unscanned). The fix is a GENERATOR CHOKE-POINT: gen_enforcement_register.page_content_strings(root) is
+# the single authoritative set, sitting beside the render functions and the shared _MECH_FIELDS they both
+# iterate, and _page_bound_sources below simply CONSUMES it, so the checked set cannot fork from the page.
+# _scan_page_bound_sources runs ONE shared reject over every tuple: _first_invisible (a printable-ASCII
+# allowlist over the RAW bytes, before any collapse) plus the PLAIN marketing patterns over a collapsed
+# copy, so no page-bound channel can be missed and no invisible or non-ASCII laundering can reach the page
+# through any of them. The ASCII-only PREDICATE (_first_invisible) is SOUND and unchanged.
 
 
 def _page_bound_sources(root):
-    """Every verbatim source string the enforcement register renders, recomputed IN MEMORY from the
-    manifests and the roadmap (guard-input-soundness), as (channel, key, raw) tuples: each mechanism's RAW
-    ledger residue (channel "residue") and its claim-bearing reference id ("id"), and each pending rule's
-    roadmap description ("description"). These are exactly the strings the generator emits verbatim into the
-    page (render_html / render_md), so scanning them at source is what keeps the page clean by construction.
-    The residue is the RAW string (NOT collapsed) so the invisible-Unicode reject downstream judges the exact
-    bytes the page ships; a non-ASCII space would otherwise be collapsed to an ASCII space before the reject
-    (FIX 2). Reuses the register generator's OWN validated ledger index and roadmap loader, so the channel
-    set here cannot fork from what the register renders. build_ledger / load_roadmap raise ValueError/OSError
-    on a malformed or unreadable input, which the caller lets propagate to a fail-closed exit 2."""
-    ledger = json.loads(gen_enforceability.build_ledger(root))
-    by_cid, controls, linkage = gen_enforcement_register.ledger_index(ledger)
-    roadmap = gen_enforcement_register.load_roadmap(
-        root / gen_enforcement_register.ROADMAP_REL, set(by_cid), linkage)
-    sources = []
-    for ref, ctrl in sorted(controls.items()):
-        sources.append(("residue", ref, ctrl["residue"]))
-        sources.append(("id", ref, ref.split(":", 1)[-1].replace("-", " ")))
-    for cid, row in sorted(roadmap.items()):
-        if row["status"] == "pending" and row["description"]:
-            sources.append(("description", cid, row["description"]))
-    return sources
+    """Every verbatim corpus/ledger-derived content string the enforcement register page interpolates,
+    taken from the register generator's OWN authoritative enumerator
+    (gen_enforcement_register.page_content_strings), as (channel, key, raw) tuples (FIX 1, GER-1 round 11).
+    The set is SINGLE-SOURCED in the generator, beside the render functions it feeds and the shared
+    _MECH_FIELDS they both iterate, so this scan cannot fork from what the page actually emits: a verbatim
+    channel added to the page is added to page_content_strings in the same file and flows here
+    automatically. This closes the round-8/round-10 class where the former hand-maintained list here
+    (residue/id/description) drifted from the generator (the rule TITLE and the hook MATCHER shipped
+    unscanned). Covers the rule title, corpus id, mechanism reference id, the metadata fields the page
+    emits verbatim (platform, default, entry point incl. the hook matcher, class), the ledger residue, and
+    each pending rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
+    malformed or unreadable input, which the caller maps to a fail-closed exit 2."""
+    return gen_enforcement_register.page_content_strings(root)
 
 
 def _first_invisible(text):
@@ -895,17 +916,19 @@ def _first_invisible(text):
 
 
 def _scan_page_bound_sources(sources):
-    """Source-side cleanliness leg (GER-1). Every page-bound verbatim source string (each mechanism residue
-    and reference id, and each pending description) must (a) carry NO character outside the printable-plus-
-    ASCII-whitespace allowlist and (b) pass the PLAIN marketing patterns. ONE shared reject runs over EVERY
-    channel, so no page-bound channel can be missed or diverge (FIX 3): a residue, a claim-bearing id, and a
-    pending description are held to the identical bar. The invisible/allowlist reject runs on the RAW string,
-    BEFORE any whitespace collapse (FIX 2), so the exact bytes the page ships are what is judged; the
-    marketing scan runs on a whitespace-collapsed copy for phrase-matching robustness (its guards are
-    honoured, and there is NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee
-    shape flags at source and is reworded there). The id's kebab body is scanned hyphens-as-spaces, so a
-    hyphenated claim id (gate:catch-all-secrets -> "catch all secrets") fails at source even though the page
-    render would not match a space-requiring pattern."""
+    """Source-side cleanliness leg (GER-1). Every page-bound verbatim source string page_content_strings
+    reports must (a) carry NO character outside the printable-plus-ASCII-whitespace allowlist and (b) pass
+    the PLAIN marketing patterns. ONE shared reject runs over EVERY channel (title, corpus-id, mech-id, the
+    metadata fields, residue, description), so no page-bound channel can be missed or diverge: each is held
+    to the identical bar, and the id/class/metadata channels that stay ASCII-constrained upstream are still
+    run through the reject here (removing the 'constrained upstream' assumption). The invisible/allowlist
+    reject runs on the RAW string, BEFORE any whitespace collapse, so the exact bytes the page ships are
+    judged; the marketing scan runs on a whitespace-collapsed copy for phrase robustness (guards honoured,
+    NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee shape flags at source).
+    For the mech-id channel a claim-bearing kebab id renders on the page with hyphens
+    (gate:catch-all-secrets), which a space-requiring marketing pattern would not match, so that channel is
+    ALSO scanned hyphens-as-spaces so a marketing id fails at source even though the page render carries the
+    literal hyphens."""
     findings = []
     for channel, key, raw in sources:
         bad = _first_invisible(raw)
@@ -914,58 +937,204 @@ def _scan_page_bound_sources(sources):
             findings.append("{} source [{}]: invisible or disallowed character U+{:04X} at index {}"
                             .format(channel, key, ord(ch), i))
         collapsed = _collapse(raw)
-        for name, pat, guard in SITE_PATTERNS:
-            for m in pat.finditer(collapsed):
-                if _guard_clears(guard, collapsed, m):
-                    continue
-                findings.append("{} source [{}]: overclaim [{}] -> {}".format(
-                    channel, key, name, _snippet(collapsed, m.start(), m.end())))
+        variants = [collapsed]
+        if channel == "mech-id":
+            dehyphenated = collapsed.replace("-", " ")
+            if dehyphenated != collapsed:
+                variants.append(dehyphenated)
+        for text in variants:
+            for name, pat, guard in SITE_PATTERNS:
+                for m in pat.finditer(text):
+                    if _guard_clears(guard, text, m):
+                        continue
+                    findings.append("{} source [{}]: overclaim [{}] -> {}".format(
+                        channel, key, name, _snippet(text, m.start(), m.end())))
     return findings
+
+
+# A CSS escape token: a backslash then 1-6 hex digits (an optional single trailing whitespace is consumed
+# per CSS Syntax), OR a backslash-newline line continuation, OR a backslash before any other single
+# character (that literal character). Ordered so the hex and newline branches win before the catch-all.
+_CSS_ESCAPE_RE = re.compile(
+    r"\\(?:([0-9A-Fa-f]{1,6})[ \t\n\r\f]?|(\r\n|[\n\r\f])|(.))", re.DOTALL)
+
+
+def _css_unescape(s):
+    """Decode CSS escape sequences in a string-literal body so a marketing term hidden behind CSS escapes is
+    scanned as the text a browser renders (FIX M3, GER-1 round 11). Per CSS Syntax: a backslash followed by 1
+    to 6 hex digits is that codepoint, and a single trailing whitespace after the hex digits is consumed as
+    the escape terminator; a backslash-newline inside a string is a line continuation (removed); a backslash
+    before any other character is that literal character. A zero, out-of-range, or surrogate codepoint decodes
+    to U+FFFD, matching a browser's handling. Returns the decoded string. Example: the fully hex-escaped
+    \\67\\75\\61\\72\\61\\6e\\74\\65\\65\\73 decodes to guarantees."""
+    def _repl(m):
+        hexd, cont, lit = m.group(1), m.group(2), m.group(3)
+        if hexd is not None:
+            cp = int(hexd, 16)
+            if cp == 0 or cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+                return "\uFFFD"
+            return chr(cp)
+        if cont is not None:
+            return ""       # backslash-newline: line continuation, removed
+        return lit          # backslash + literal character
+    return _CSS_ESCAPE_RE.sub(_repl, s)
 
 
 def _scan_css_content_strings(css, where, findings):
     """Extract the STRING LITERALS from every CSS content: declaration in `css` and marketing-scan each, so a
     `content: " ... marketing ... "` injection (text a browser renders through ::before/::after but no HTML
     scan sees) is caught. Only the content PROPERTY is matched, never the 'content' tail of justify-content /
-    align-content (the (?<![\\w-]) lookbehind). A fully hex-escaped payload (content: "\\...") is a DISCLOSED
-    residual: decoding CSS escapes is out of scope for this static string scan (see _scan_asset_closure)."""
+    align-content (the (?<![\\w-]) lookbehind). Each literal is scanned BOTH raw and CSS-escape-decoded
+    (FIX M3): a fully hex-escaped payload (content: "\\67\\75\\61...") decodes to visible marketing text and
+    is now caught, and a partially-escaped term ("gu\\61rantees") is caught via the decoded variant, while a
+    purely-literal term collapses to a single scan (decoded == raw)."""
     for decl in _CSS_CONTENT_RE.finditer(css):
         for sm in _CSS_STRING_RE.finditer(decl.group(1)):
             literal = sm.group(1) if sm.group(1) is not None else sm.group(2)
-            for name, snip in scan(literal, site=True):
-                findings.append("{}: CSS content injection [{}] -> {}".format(where, name, snip))
+            variants = [literal]
+            decoded = _css_unescape(literal)
+            if decoded != literal:
+                variants.append(decoded)
+            for text in variants:
+                for name, snip in scan(text, site=True):
+                    findings.append("{}: CSS content injection [{}] -> {}".format(where, name, snip))
 
 
-def _closure_local_asset(url):
-    """The repo-relative path under site/ for a same-origin CSS/JS asset URL, or None for an off-site or
-    non-local reference (an absolute http(s) URL, a protocol-relative //host, a data:/mailto: URL). The site
-    is served with site/ as web root, so a root-absolute "/styles.css?v=1" maps to site/styles.css; the query
-    and fragment are stripped. A '..' segment is refused (returns None) so the closure can never resolve
-    outside site/. An off-site URL returning None is the DISCLOSED runtime/off-origin boundary, not a failure:
-    only same-origin static assets are in a static gate's reach."""
-    path = url.split("?", 1)[0].split("#", 1)[0]
-    if not path or path.startswith(("http://", "https://", "//", "data:", "mailto:")):
+def _closure_local_asset(url, base_dir=""):
+    """Resolve a CSS/JS asset URL referenced by the register page (or by a scanned stylesheet) to a
+    repo-relative path UNDER site/, the web root the site is served from. Returns that path (a same-origin
+    static asset to scan), or None for a reference outside a static gate's reach (a genuinely cross-origin
+    http(s) URL on a foreign host, or a data:/mailto:/other-scheme URL), the DISCLOSED off-origin boundary.
+    A SAME-ORIGIN reference (relative, root-absolute, an absolute URL on the site host, or a
+    protocol-relative //host on the site host) resolves to a path under site/. base_dir is the directory
+    (relative to site/) of the sheet that referenced this URL, so a RELATIVE @import resolves against the
+    importing sheet's location; it is "" for a page-level <link>/<script src> (site root). A '..' or a
+    percent-encoded '..' segment is NORMALIZED and CONTAINMENT-checked: a path that escapes site/ is a
+    fail-closed error (_FailClosed), never a silent None, so the closure can neither wander outside site/
+    nor silently skip an escaping reference (FIX 2b). Distinguishing the site host from a foreign host means
+    a same-origin absolute URL is scanned, not dropped with the genuinely off-site ones."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    if scheme and scheme not in ("http", "https"):
+        return None  # data:/mailto:/other scheme: not a fetchable same-origin static asset. A CSS-context
+                     # data:text/css URL is decoded by _decode_data_css before this call (FIX M2); a data:
+                     # JS src reaching here stays the disclosed runtime boundary.
+    host = (parts.hostname or "").lower()
+    if host and host != SITE_HOST:
+        return None  # genuinely cross-origin: out of a static gate's reach (disclosed), not fetched
+    path = unquote(parts.path)  # decode %2e%2e etc. so an encoded '..' cannot slip the containment check
+    if not path:
         return None
-    rel = path.lstrip("/")
-    if not rel or ".." in rel.split("/"):
+    if path.startswith("/") or host:
+        base = path.lstrip("/")            # root-absolute or absolute/protocol-relative same-origin: site root
+    else:
+        base = posixpath.join(base_dir, path)  # relative: against the importing sheet's directory
+    norm = posixpath.normpath(base)
+    if norm in (".", ""):
         return None
-    return rel
+    if norm == ".." or norm.startswith("../"):
+        raise _FailClosed("register asset reference {!r} escapes site/ after normalization".format(url))
+    return norm
+
+
+def _decode_data_css(url):
+    """Decode a data: URL used in a CSS context (a <link rel=stylesheet> href or an @import target) to its
+    stylesheet text, so a data: sheet is scanned rather than silently skipped (FIX M2, GER-1 round 11).
+    Handles data:text/css,<percent-encoded> (percent-decoded) and data:text/css;base64,<b64> (base64-
+    decoded). An empty media type is treated as CSS in this CSS-only context (a data: URL defaults to
+    text/plain, but a stylesheet link or @import target is a CSS sink). A NON-css media type (for example
+    data:image/...) returns None (out of scope). A malformed or undecodable data: body FAILS CLOSED
+    (_FailClosed): a data: sheet that cannot be decoded is never a silent clean skip
+    (check-fails-closed-on-unreadable)."""
+    rest = url[5:] if url[:5].lower() == "data:" else url
+    header, sep, payload = rest.partition(",")
+    if not sep:
+        raise _FailClosed("register data: stylesheet {!r} has no comma-separated payload".format(url))
+    params = header.split(";")
+    media = params[0].strip().lower()
+    is_base64 = len(params) > 1 and params[-1].strip().lower() == "base64"
+    if media not in ("", "text/css"):
+        return None  # a non-css data: URL (e.g. data:image/...) is out of a CSS scan's scope
+    try:
+        if is_base64:
+            return base64.b64decode(payload, validate=True).decode("utf-8")
+        return unquote(payload, errors="strict")
+    except (binascii.Error, ValueError, UnicodeError) as exc:
+        raise _FailClosed("register data: stylesheet {!r} is undecodable ({})".format(url, exc))
+
+
+def _scan_css_imports(root, importer_rel, css, findings, visited=None):
+    """Follow the FULL @import graph over same-origin sheets reachable from `css`, bounded by a VISITED-SET of
+    resolved rel-paths so a cycle (a.css imports b.css imports a.css) terminates and no sheet is scanned twice
+    (FIX M1, GER-1 round 11). An explicit work-stack replaces the former one-level walk. Each newly-reached
+    same-origin sheet is read (fail-closed on an unreadable same-origin sheet, _FailClosed), whole-text
+    marketing-scanned, its content: strings scanned, and ITS @imports pushed for traversal. A data: @import
+    target is decoded and scanned in place (FIX M2); a genuinely cross-origin or other-scheme @import is out
+    of a static gate's reach (disclosed), not followed. The entry sheet (importer_rel), already scanned by the
+    caller, is seeded into the visited set so a transitive @import back to it is not re-scanned."""
+    if visited is None:
+        visited = set()
+    if importer_rel:
+        visited.add(importer_rel)
+    stack = [(importer_rel, css)]
+    while stack:
+        cur_rel, cur_css = stack.pop()
+        base_dir = posixpath.dirname(cur_rel)
+        for m in _CSS_IMPORT_RE.finditer(cur_css):
+            import_url = next((g for g in m.groups() if g is not None), None)
+            if not import_url:
+                continue
+            target = import_url.strip()
+            if target[:5].lower() == "data:":
+                data_css = _decode_data_css(target)
+                if data_css is not None:
+                    dwhere = "site/{} (via data: @import)".format(cur_rel) if cur_rel \
+                        else "data: @import (nested)"
+                    for name, snip in scan(data_css, site=True):
+                        findings.append("{}: overclaim [{}] -> {}".format(dwhere, name, snip))
+                    _scan_css_content_strings(data_css, dwhere, findings)
+                    stack.append(("", data_css))  # follow the data: sheet's own @imports (site-root relative)
+                continue
+            irel = _closure_local_asset(import_url, base_dir)
+            if not irel or irel in visited:
+                continue
+            visited.add(irel)
+            ipath = root / "site" / irel
+            try:
+                itext = ipath.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise _FailClosed(
+                    "register @import asset site/{} is absent or unreadable ({})".format(irel, exc))
+            iwhere = "site/{} (via @import from {})".format(irel, cur_rel or "data:")
+            for name, snip in scan(itext, site=True):
+                findings.append("{}: overclaim [{}] -> {}".format(iwhere, name, snip))
+            if irel.endswith(".css"):
+                _scan_css_content_strings(itext, iwhere, findings)
+            stack.append((irel, itext))
 
 
 def _scan_asset_closure(root):
-    """Scan the enforcement register page's STATIC asset closure for marketing overclaims (FIX 4, GER-1): the
-    page's own inline <style>/<script> bodies (which the visible-text collector drops), plus the same-origin
-    CSS/JS the page links, for the marketing patterns AND for CSS content: string injection. A referenced
-    LOCAL asset that cannot be read is a fail-closed error (_FailClosed -> exit 2), never a silent skip
-    (check-fails-closed-on-unreadable).
+    """Scan the enforcement register page's STATIC asset closure for marketing overclaims, BEST-EFFORT
+    defence-in-depth (FIX 4, GER-1; hardened FIX 2a/2b round 11; FIX M1-M4 round-11 maximal): the page's own
+    inline <style>/<script> bodies and inline style="..." attributes (which the visible-text collector
+    drops), plus the same-origin CSS/JS the page links (single- or double-quoted), for the marketing patterns
+    AND for CSS content: string injection. The STATIC CSS injection surface is closed BY CONSTRUCTION:
+    the FULL same-origin CSS @import graph is followed (bounded by a visited set so a cycle terminates),
+    a data: stylesheet body (base64 or percent-encoded text/css) is decoded and scanned, and CSS hex/unicode
+    escapes in content: strings are decoded before the scan. A referenced same-origin asset that cannot be
+    read, a same-origin asset URL that escapes site/, or a data: stylesheet that cannot be decoded, is a
+    fail-closed error (_FailClosed -> exit 2), never a silent skip (check-fails-closed-on-unreadable).
 
-    DISCLOSED IRREDUCIBLE RESIDUAL (honest, not pretended closed): this is a STATIC string scan. Runtime-JS
-    DOM construction of marketing text (theme.js building strings at run time) is beyond a static gate, and an
-    ENCODED payload (for example a base64 or fully CSS-hex-escaped string) is likewise beyond it. Both are
-    scoped OUT here as a chrome-integrity / code-review concern: the CSS/JS are hand-authored, reviewed,
-    version-controlled SHARED chrome, not generated from the ledger, so their integrity rests on code review,
-    not on this gate. An off-site (cross-origin) asset URL is out of a static gate's reach for the same
-    reason and is not fetched."""
+    DISCLOSED IRREDUCIBLE RESIDUAL (honest, not pretended closed): this is a STATIC string scan over the
+    hand-authored, version-controlled SHARED chrome (CSS/JS the shell brings in), which is NOT generated from
+    the ledger, so its integrity rests on code review plus the file-content gates, with this scan as an
+    overlapping best-effort layer. Only three vectors remain out of a static gate's reach and are DISCLOSED:
+    runtime-JS DOM construction of marketing text (theme.js building strings at run time); a general encoded
+    payload (for example base64) buried in an ARBITRARY JS string, where which bytes to decode is unbounded
+    (the runtime boundary, distinct from a data: URL, which IS decoded); and a genuinely off-site
+    (cross-origin) asset a static gate does not fetch. An inline content: on a normal element is generally
+    inert (content applies to ::before/::after), but its string is still scanned so a marketing literal cannot
+    hide in a style attribute."""
     findings = []
     page_path = root / HTML_REL
     try:
@@ -979,27 +1148,46 @@ def _scan_asset_closure(root):
         for name, snip in scan(body, site=True):
             findings.append("{} inline <style>: overclaim [{}] -> {}".format(HTML_REL, name, snip))
         _scan_css_content_strings(body, "{} inline <style>".format(HTML_REL), findings)
+    # (a2) inline style="..." attributes: content: string literals (entity-decoded first). Single- and
+    # double-quoted attributes both read.
+    for m in _ATTR_STYLE_RE.finditer(page):
+        style_val = html.unescape(_attr_val(m))
+        _scan_css_content_strings(style_val, "{} inline style attribute".format(HTML_REL), findings)
     # (b) <script> tags: an external src is a same-origin asset to scan; an inline body is scanned as text.
+    #     A data: (or off-site) script src is the disclosed runtime/off-site boundary (not decoded here).
     for m in _SCRIPT_TAG_RE.finditer(page):
         attrs, body = m.group(1), m.group(2)
         src = _ATTR_SRC_RE.search(attrs)
         if src:
-            rel = _closure_local_asset(src.group(1))
+            rel = _closure_local_asset(_attr_val(src))
             if rel:
                 assets.add(rel)
             continue
         for name, snip in scan(body, site=True):
             findings.append("{} inline <script>: overclaim [{}] -> {}".format(HTML_REL, name, snip))
-    # (c) same-origin stylesheets the page links.
+    # (c) same-origin stylesheets the page links; a data:text/css sheet is decoded and scanned in place.
     for m in _LINK_TAG_RE.finditer(page):
         tag = m.group(0)
         rel_attr = _ATTR_REL_RE.search(tag)
         href = _ATTR_HREF_RE.search(tag)
-        if rel_attr and "stylesheet" in rel_attr.group(1).lower() and href:
-            rel = _closure_local_asset(href.group(1))
-            if rel:
-                assets.add(rel)
-    # (d) each resolved same-origin asset: whole-text marketing scan, plus content: injection for CSS.
+        if not (rel_attr and "stylesheet" in _attr_val(rel_attr).lower() and href):
+            continue
+        href_val = _attr_val(href)
+        decoded_href = html.unescape(href_val).strip()
+        if decoded_href[:5].lower() == "data:":
+            data_css = _decode_data_css(decoded_href)
+            if data_css is not None:
+                where = "{} data: stylesheet".format(HTML_REL)
+                for name, snip in scan(data_css, site=True):
+                    findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
+                _scan_css_content_strings(data_css, where, findings)
+                _scan_css_imports(root, "", data_css, findings)
+            continue
+        rel = _closure_local_asset(href_val)
+        if rel:
+            assets.add(rel)
+    # (d) each resolved same-origin asset: whole-text marketing scan, content: injection for CSS, plus the
+    # full same-origin @import graph.
     for rel in sorted(assets):
         asset_path = root / "site" / rel
         try:
@@ -1011,6 +1199,7 @@ def _scan_asset_closure(root):
             findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
         if rel.endswith(".css"):
             _scan_css_content_strings(text, where, findings)
+            _scan_css_imports(root, rel, text, findings)
     return findings
 
 
@@ -1486,10 +1675,13 @@ def _page_bound_source_self_test():
     # (c) a genuinely clean governance residue stays clean.
     if one("residue", "gate:demo", "A best-effort guard, scoped to what it examines."):
         failures.append("SOURCE: a clean governance residue must stay clean")
-    # (d) a claim-bearing hyphenated id fails at source (hyphens read as spaces).
-    if not has(one("id", "gate:catch-all-secrets", "catch all secrets"),
-               "id source [gate:catch-all-secrets]"):
-        failures.append("SOURCE: a claim-bearing id must fail at source")
+    # (d) FIX 1: a claim-bearing hyphenated MECHANISM id fails at source. page_content_strings emits the
+    # RAW ref (gate:catch-all-secrets, hyphens intact, the bytes the page ships); _scan_page_bound_sources
+    # ALSO scans a hyphens-as-spaces copy so a space-requiring marketing pattern matches. MUTATION: dropping
+    # the channel == "mech-id" de-hyphenation branch makes the raw (hyphenated) form not match -> this fails.
+    if not has(one("mech-id", "gate:catch-all-secrets", "gate:catch-all-secrets"),
+               "mech-id source [gate:catch-all-secrets]"):
+        failures.append("SOURCE: a claim-bearing mechanism id must fail at source (hyphens-as-spaces)")
     # (e) FIX 1: an invisible MARK the old denylist missed (U+034F COMBINING GRAPHEME JOINER, category Mn) is
     # rejected by the allowlist. MUTATION: reverting _first_invisible to the category denylist makes this fail
     # (Mn is absent from Cc/Cf/Cs/Co/Cn/Zl/Zp/Zs).
@@ -1536,10 +1728,24 @@ def _page_bound_source_self_test():
     # (m) a benign residue produces nothing.
     if one("residue", "hook:branch-root", "Detects an orphaned branch, best-effort within a declared horizon."):
         failures.append("SOURCE: a benign residue must stay clean")
-    # (n) FIX 3 CHANNEL ENUMERATION (integration): _page_bound_sources emits a tuple for EVERY page-bound
-    # channel, INCLUDING a pending rule's description. Build the register generator's own conformant fixture
-    # and assert all three channels appear. MUTATION: dropping the description channel from _page_bound_sources
-    # makes this fail (the synthetic-tuple cases k/l alone would not catch that omission).
+    # (o) FIX 1: the mech-id and class channels stay ASCII-constrained upstream (the id/class grammars),
+    # but the shared reject still runs over them, so a homoglyph in either is rejected here too (this
+    # removes the 'constrained upstream' assumption). Synthetic tuples, since the upstream grammar would
+    # refuse these before they reached the ledger.
+    if not has(one("mech-id", "gate:demo", "gate:dem" + chr(0x0430)),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a homoglyph in the mech-id channel must be rejected (FIX 1)")
+    if not has(one("class", "gate:demo", chr(0x0430)),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a homoglyph in the class channel must be rejected (FIX 1)")
+    # (n) FIX 1 CHANNEL COMPLETENESS (integration, generator choke-point). Build the register generator's
+    # own conformant fixture and assert page_content_strings emits EVERY page-bound channel (a structural
+    # check against drift), that every enumerated string is actually emitted verbatim by the generator (no
+    # phantom channel), and that a homoglyph AND a zero-width injected into EACH free-text channel's SOURCE
+    # is flagged end-to-end (rule title and hook matcher covered EXPLICITLY, the round-10 escapes).
+    # MUTATION: dropping the title (or matcher/entry) channel from page_content_strings fails both the
+    # channel-set assertion and that channel's injection round-trip.
+    HOMO, ZW = chr(0x0430), chr(0x200B)
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-pagebound-selftest-"))
     except OSError as exc:
@@ -1547,10 +1753,55 @@ def _page_bound_source_self_test():
         return failures
     try:
         tree = gen_enforcement_register._build(tmp / "good")
+        # (n1) the conformant fixture is clean: the choke-point does not flag real (ASCII) content.
+        if _scan_page_bound_sources(_page_bound_sources(tree)):
+            failures.append("COMPLETENESS: a conformant fixture must be page-bound clean")
+        # (n2) the full channel set is present (structural, against drift).
         channels = {c for c, _k, _r in _page_bound_sources(tree)}
-        for needed in ("residue", "id", "description"):
+        for needed in ("title", "corpus-id", "mech-id", "platform", "default", "entry", "class",
+                       "residue", "description"):
             if needed not in channels:
-                failures.append("SOURCE: _page_bound_sources must emit the {!r} channel (FIX 3)".format(needed))
+                failures.append("COMPLETENESS: page_content_strings must emit the {!r} channel (FIX 1)"
+                                .format(needed))
+        # (n3) every enumerated raw string is emitted verbatim by the generator (bind the set to the page).
+        # The Markdown view carries every channel's raw bytes un-escaped, so a phantom channel would fail.
+        md_text, _html_page = gen_enforcement_register.build_views(tree)
+        for channel, key, raw in _page_bound_sources(tree):
+            if raw not in md_text:
+                failures.append("COMPLETENESS: {} source [{}] {!r} is not emitted verbatim on the page"
+                                .format(channel, key, raw))
+
+        def inject_and_scan(name, rel_path, needle, replacement):
+            sub = gen_enforcement_register._build(tmp / name)
+            p = sub / rel_path
+            text = p.read_text(encoding="utf-8")
+            if needle not in text:
+                failures.append("INJECT setup: {!r} not found in {}".format(needle, rel_path))
+                return []
+            p.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+            try:
+                return _scan_page_bound_sources(_page_bound_sources(sub))
+            except (ValueError, OSError) as exc:
+                failures.append("INJECT {}: scan raised instead of flagging ({})".format(name, exc))
+                return []
+
+        # (n4) per free-text channel, a homoglyph AND a zero-width in the SOURCE is flagged.
+        cases = [
+            ("title", ".aiqt/core/rules/rule-aa.md", "Title of ruleaa", "Title of rule{}aa", "title source"),
+            ("matcher(entry)", ".aiqt/core/hooks/manifest.toml", 'matcher = "Bash"',
+             'matcher = "Ba{}sh"', "entry source"),
+            ("residue", ".aiqt/core/gates/manifest.toml", "an ampersand", "an{} ampersand",
+             "residue source"),
+            ("description", ".aiqt/core/enforcement-roadmap.toml",
+             "A self-test intended build for the apex rule.",
+             "A self-test intended build{} for the apex rule.", "description source"),
+        ]
+        for label, rel_path, needle, tmpl, expect in cases:
+            for tag, ch in (("homoglyph", HOMO), ("zerowidth", ZW)):
+                fs = inject_and_scan("{}-{}".format(label, tag), rel_path, needle, tmpl.format(ch))
+                if not has(fs, expect):
+                    failures.append("COMPLETENESS: a {} in the {} channel source must be flagged (FIX 1)"
+                                    .format(tag, label))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
@@ -1599,7 +1850,8 @@ def _asset_closure_self_test():
         f = _scan_asset_closure(build("js-asset", page, {"app.js": 'var m = "AIQT guarantees secure output.";'}))
         if not any("site/app.js" in x and "guarantees" in x for x in f):
             failures.append("ASSET: a marketing string in a linked JS asset must be flagged (FIX 4)")
-        # (d) NO OVER-FIRE: justify-content (not the content property) and a real glyph escape stay clean.
+        # (d) NO OVER-FIRE: justify-content (not the content property) stays clean, and (FIX M3) a real glyph
+        #     escape (\25B8) decodes to a triangle glyph, not a marketing hit, so the decoded scan stays clean.
         page = '<html><head><link rel="stylesheet" href="/ok.css"></head><body>ok</body></html>'
         okcss = (".navrow" + LB + "display:flex; justify-content:space-between" + RB
                  + " summary::after" + LB + 'content:" ' + BS + '25B8"' + RB)
@@ -1619,6 +1871,128 @@ def _asset_closure_self_test():
         f = _scan_asset_closure(build("offsite", page, {}))
         if f:
             failures.append("ASSET: an off-site asset must be out of scope, got {}".format(f))
+        # (g) FIX 2a: a SINGLE-quoted linked CSS asset is resolved and scanned (not only double-quoted).
+        page = "<html><head><link rel='stylesheet' href='/single.css'></head><body>ok</body></html>"
+        css = ".x::before" + LB + "content:'catches all mistakes'" + RB
+        f = _scan_asset_closure(build("single-quote", page, {"single.css": css}))
+        if not any("site/single.css" in x for x in f):
+            failures.append("ASSET: a single-quoted linked CSS asset must be scanned (FIX 2a)")
+        # (h) FIX 2a: a content: string literal in an inline style="..." attribute is scanned.
+        page = ('<html><body><div style="content: '
+                + "'This gate guarantees complete security.'" + '">x</div></body></html>')
+        f = _scan_asset_closure(build("style-attr", page, {}))
+        if not any("inline style attribute" in x and "guarantees" in x for x in f):
+            failures.append("ASSET: a content: literal in an inline style attribute must be scanned (FIX 2a)")
+        # (i) FIX 2b: a SAME-ORIGIN absolute URL (the site host) is resolved and scanned, not dropped with
+        # the off-site ones. MUTATION: mapping a same-origin absolute URL to None makes this fail.
+        page = ('<html><head><link rel="stylesheet" href="https://aiqt.ai/abs.css">'
+                '</head><body>ok</body></html>')
+        css = ".x::before" + LB + 'content:"catches all mistakes"' + RB
+        f = _scan_asset_closure(build("same-origin-abs", page, {"abs.css": css}))
+        if not any("site/abs.css" in x for x in f):
+            failures.append("ASSET: a same-origin absolute URL must be resolved and scanned (FIX 2b)")
+        # (j) FIX 2b: a same-origin '..' path that NORMALIZES back inside site/ is resolved and scanned.
+        page = '<html><head><link rel="stylesheet" href="/css/../in.css"></head><body>ok</body></html>'
+        css = ".x::before" + LB + 'content:"catches all mistakes"' + RB
+        f = _scan_asset_closure(build("dotdot-in", page, {"in.css": css}))
+        if not any("site/in.css" in x for x in f):
+            failures.append("ASSET: a '..' path normalizing inside site/ must be scanned (FIX 2b)")
+        # (k) FIX 2b: a same-origin '..' path that ESCAPES site/ fails closed (_FailClosed), never a silent
+        # None. MUTATION: restoring the '".." in rel -> return None' behaviour makes this a silent skip.
+        page = '<html><head><link rel="stylesheet" href="/../escape.css"></head><body>ok</body></html>'
+        try:
+            _scan_asset_closure(build("dotdot-escape", page, {}))
+            failures.append("ASSET: a '..' path escaping site/ must fail closed (FIX 2b)")
+        except _FailClosed:
+            pass
+        # (k2) FIX 2b: a PERCENT-ENCODED '..' (%2e%2e) escaping site/ also fails closed (decoded first).
+        page = '<html><head><link rel="stylesheet" href="/%2e%2e/escape.css"></head><body>ok</body></html>'
+        try:
+            _scan_asset_closure(build("dotdot-pct", page, {}))
+            failures.append("ASSET: a percent-encoded '..' escaping site/ must fail closed (FIX 2b)")
+        except _FailClosed:
+            pass
+        # (l) FIX 2a: ONE level of @import within a scanned same-origin sheet is followed and scanned.
+        page = '<html><head><link rel="stylesheet" href="/root.css"></head><body>ok</body></html>'
+        root_css = '@import "imported.css"; .x' + LB + "color:red" + RB
+        imported_css = ".y::before" + LB + 'content:"catches all mistakes"' + RB
+        f = _scan_asset_closure(build("import-one", page,
+                                      {"root.css": root_css, "imported.css": imported_css}))
+        if not any("site/imported.css" in x for x in f):
+            failures.append("ASSET: a marketing string in a directly-imported sheet must be scanned (FIX 2a)")
+        # (l2) FIX M1: a TRANSITIVE @import (a sheet imported BY the imported sheet) is now followed via the
+        # full same-origin @import graph. A marketing string reachable only at the second/third level IS
+        # flagged. MUTATION: reverting to a one-level walk makes the c.css case fail.
+        page = '<html><head><link rel="stylesheet" href="/a.css"></head><body>ok</body></html>'
+        f = _scan_asset_closure(build("import-transitive", page,
+                                      {"a.css": '@import "b.css";', "b.css": '@import "c.css";',
+                                       "c.css": ".z::before" + LB + 'content:"catches all mistakes"' + RB}))
+        if not any("site/c.css" in x for x in f):
+            failures.append("ASSET: a transitive (second/third-level) @import must now be followed (FIX M1)")
+
+        # (l3) FIX M1: an @import CYCLE (cyc-a imports cyc-b imports cyc-a) terminates via the visited set,
+        # with no duplicate scan of cyc-b. The marketing term sits in a CSS COMMENT so exactly one leg (the
+        # whole-text scan) catches it, making the count deterministic. MUTATION: dropping the visited set
+        # loops forever (CI timeout); a partial-dup bug scans cyc-b twice -> len 2.
+        page = '<html><head><link rel="stylesheet" href="/cyc-a.css"></head><body>ok</body></html>'
+        cyc = _scan_asset_closure(build("import-cycle", page,
+                    {"cyc-a.css": '@import "cyc-b.css"; .p' + LB + "color:red" + RB,
+                     "cyc-b.css": '@import "cyc-a.css"; /* catches all mistakes */ .q' + LB + "color:blue" + RB}))
+        hits = [x for x in cyc if "cyc-b.css" in x and "catches" in x]
+        if not hits:
+            failures.append("ASSET: an @import cycle must still reach and scan cyc-b.css (FIX M1)")
+        elif len(hits) != len(set(hits)):
+            failures.append("ASSET: an @import cycle must terminate with no DUPLICATE scan (FIX M1), got {}"
+                            .format(hits))
+
+        # (m) FIX M2: a data:text/css stylesheet is DECODED and scanned. A percent-encoded marketing content:
+        # in a data:text/css, body IS flagged. MUTATION: skipping data: decoding makes this pass silently.
+        page = ('<html><head><link rel="stylesheet" href="data:text/css,.a::before'
+                + LB + 'content:%22catches all mistakes%22' + RB + '"></head><body>ok</body></html>')
+        f = _scan_asset_closure(build("data-css-pct", page, {}))
+        if not any("data: stylesheet" in x and "catches" in x for x in f):
+            failures.append("ASSET: a percent-encoded data:text/css marketing content must be flagged (FIX M2)")
+
+        # (m2) FIX M2: a base64 data:text/css marketing body is DECODED and flagged.
+        _body = ".a::before" + LB + 'content:"catches all mistakes"' + RB
+        _b64 = base64.b64encode(_body.encode("utf-8")).decode("ascii")
+        page = ('<html><head><link rel="stylesheet" href="data:text/css;base64,' + _b64
+                + '"></head><body>ok</body></html>')
+        f = _scan_asset_closure(build("data-css-b64", page, {}))
+        if not any("data: stylesheet" in x and "catches" in x for x in f):
+            failures.append("ASSET: a base64 data:text/css marketing body must be flagged (FIX M2)")
+
+        # (m3) FIX M2: a MALFORMED base64 data:text/css body fails closed (_FailClosed), never a silent skip.
+        page = ('<html><head><link rel="stylesheet" href="data:text/css;base64,@@not-b64@@'
+                '"></head><body>ok</body></html>')
+        try:
+            _scan_asset_closure(build("data-css-bad", page, {}))
+            failures.append("ASSET: a malformed base64 data: stylesheet must fail closed (FIX M2)")
+        except _FailClosed:
+            pass
+
+        # (m4) FIX M2 bound: a NON-css data: URL (data:image/...) stays out of scope (not decoded, not flagged).
+        page = ('<html><head><link rel="stylesheet" href="data:image/svg+xml,'
+                '<svg>catches all mistakes</svg>"></head><body>ok</body></html>')
+        f = _scan_asset_closure(build("data-img", page, {}))
+        if any("catches" in x for x in f):
+            failures.append("ASSET: a non-css data: URL must stay out of scope (FIX M2 bound), got {}".format(f))
+
+        # (M3) FIX M3: a FULLY CSS-hex-escaped content: literal is DECODED and flagged. \\67\\75\\61... ==
+        # "guarantees". MUTATION: scanning only the raw literal makes this pass.
+        page = '<html><head><link rel="stylesheet" href="/esc.css"></head><body>ok</body></html>'
+        esc = (".e::before" + LB + 'content:"' + BS + "67" + BS + "75" + BS + "61" + BS + "72" + BS + "61"
+               + BS + "6e" + BS + "74" + BS + "65" + BS + "65" + BS + "73" + '"' + RB)
+        f = _scan_asset_closure(build("css-esc", page, {"esc.css": esc}))
+        if not any("guarantees" in x for x in f):
+            failures.append("ASSET: a fully CSS-hex-escaped content literal must be decoded and flagged (FIX M3)")
+
+        # (M3b) FIX M3: a PARTIALLY-escaped content: literal ("gu\\61rantees ...") is decoded and flagged.
+        page = '<html><head><link rel="stylesheet" href="/mix.css"></head><body>ok</body></html>'
+        mix = ".m::before" + LB + 'content:"gu' + BS + '61rantees strong output"' + RB
+        f = _scan_asset_closure(build("css-esc-mix", page, {"mix.css": mix}))
+        if not any("guarantees" in x for x in f):
+            failures.append("ASSET: a partially-escaped content literal must be decoded and flagged (FIX M3)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures

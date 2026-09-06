@@ -372,6 +372,21 @@ def _enforced_cell_md(mechanisms, controls):
     return "; ".join(parts)
 
 
+# The corpus/ledger-derived VERBATIM content fields a mechanism contributes to the page, as
+# (display label, control key) pairs in render order. SINGLE-SOURCED here so the render functions
+# (render_md / render_html) and the authoritative content enumerator (page_content_strings, which the
+# overclaim gate consumes) iterate the SAME field set and cannot fork on which fields ship: a field added
+# to the page is added here once and flows to both render and the source-side overclaim scan. The "entry"
+# field is the mechanism's entry point, which for a hook is "<event> on <matcher>", so the hook matcher is
+# a verbatim page-bound string carried through this field BY CONSTRUCTION (the round-10 escape channel).
+_MECH_FIELDS = (
+    ("Platform", "platform"),
+    ("Default", "default"),
+    ("Entry point", "entry"),
+    ("Class", "class"),
+)
+
+
 def render_md(rows, roadmap, controls, enforced_union):
     counts = {"enforced": 0, "pending": 0, "none": 0}
     for cid, _title, _fm in rows:
@@ -407,12 +422,10 @@ def render_md(rows, roadmap, controls, enforced_union):
         ctrl = controls[ref]
         residue = _no_ctrl(ctrl["residue"], "residue {}".format(ref))
         fence = _fence_for(residue)
-        lines += ["### `{}`".format(ref), "",
-                  "- Platform: `{}`".format(ctrl["platform"]),
-                  "- Default: `{}`".format(ctrl["default"]),
-                  "- Entry point: `{}`".format(ctrl["entry"]),
-                  "- Class: `{}`".format(ctrl["class"]), "",
-                  "{}:".format(RESIDUAL_HEADING), "",
+        lines += ["### `{}`".format(ref), ""]
+        for label, key in _MECH_FIELDS:
+            lines.append("- {}: `{}`".format(label, ctrl[key]))
+        lines += ["", "{}:".format(RESIDUAL_HEADING), "",
                   fence, residue, fence, ""]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -476,10 +489,8 @@ def render_html(rows, roadmap, controls, enforced_union):
         out.append('          <summary><code>{ref}</code></summary>'.format(ref=_t(ref)))
         out.append('          <div class="inner">')
         out.append('            <ul>')
-        out.append('              <li>Platform: <code>{}</code></li>'.format(_t(ctrl["platform"])))
-        out.append('              <li>Default: <code>{}</code></li>'.format(_t(ctrl["default"])))
-        out.append('              <li>Entry point: <code>{}</code></li>'.format(_t(ctrl["entry"])))
-        out.append('              <li>Class: <code>{}</code></li>'.format(_t(ctrl["class"])))
+        for label, key in _MECH_FIELDS:
+            out.append('              <li>{}: <code>{}</code></li>'.format(label, _t(ctrl[key])))
         out.append('            </ul>')
         # The technical-limits residual is rendered VERBATIM from the ledger inside a labelled blockquote:
         # the residue is element text (HTML-escaped by _t), so a residue token shaped like a tag renders
@@ -639,6 +650,53 @@ def build_views(root):
     html_page = compose_page(root, html_inner)
     _assert_display_fidelity(html_page, md_text, controls, enforced_union)
     return md_text, html_page
+
+
+def page_content_strings(root):
+    """Every corpus/ledger-derived VERBATIM content string the enforcement register page interpolates,
+    recomputed IN MEMORY from the corpus, the manifests, and the roadmap (guard-input-soundness), as
+    (channel, key, raw) tuples. This is the AUTHORITATIVE, single-sourced set the render functions draw
+    from (via the shared _MECH_FIELDS) and the overclaim gate's source-side scan consumes, so the checked
+    set cannot fork from what the page renders (FIX 1, GER-1 round 11: the round-8/round-10 class where a
+    hand-maintained channel list in check_overclaim drifted from the generator, letting the rule TITLE and
+    the hook MATCHER ship unscanned). One channel per verbatim interpolation the page emits:
+      - "title"       each rule's display title (the corpus '# ' heading render_* puts in the Rule cell)
+      - "corpus-id"   each rule's corpus id (the code-styled Corpus ID cell / anchor stem)
+      - "mech-id"     each enforced mechanism's namespaced reference (gate:<id> / hook:<id>)
+      - one channel per _MECH_FIELDS entry ("platform", "default", "entry", "class"): the metadata the
+        mechanism block emits verbatim. "entry" is the entry point, which carries the hook matcher
+        ("<event> on <matcher>") and the gate script path.
+      - "residue"     each enforced mechanism's ledger residue (rendered verbatim in both views)
+      - "description" each pending rule's roadmap description (the How cell for a pending row)
+    Every value is the RAW string (NOT whitespace-collapsed) so a downstream invisible/non-ASCII reject
+    judges the exact bytes the page ships. Scoped to what the page RENDERS: only mechanisms that appear in
+    an enforced row (enforced_union) contribute mechanism channels, exactly as render_md / render_html
+    iterate them. build_ledger / load_roadmap / load_corpus raise ValueError/OSError on a malformed or
+    unreadable input, which the caller lets propagate to a fail-closed exit 2."""
+    import json
+    rules_dir = root / RULES_DIR_REL
+    ledger = json.loads(gen_enforceability.build_ledger(root))
+    by_cid, controls, linkage = ledger_index(ledger)
+    roadmap = load_roadmap(root / ROADMAP_REL, set(by_cid), linkage)
+    enforced_union = set()
+    for cid, row in roadmap.items():
+        if row["status"] == "enforced":
+            enforced_union.update(row["mechanisms"])
+    rows = _rows_in_order(load_corpus(rules_dir), roadmap)
+    out = []
+    for cid, title, _fm in rows:
+        out.append(("title", cid, title))
+        out.append(("corpus-id", cid, cid))
+        row = roadmap[cid]
+        if row["status"] == "pending" and row["description"]:
+            out.append(("description", cid, row["description"]))
+    for ref in sorted(enforced_union):
+        ctrl = controls[ref]
+        out.append(("mech-id", ref, ref))
+        for _label, key in _MECH_FIELDS:
+            out.append((key, ref, ctrl[key]))
+        out.append(("residue", ref, ctrl["residue"]))
+    return out
 
 
 def run(root, check):
