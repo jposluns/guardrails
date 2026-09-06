@@ -84,6 +84,16 @@ Each entry follows the same shape:
 
 ---
 
+## 4. Reconcile a committed-review declaration before dispatching verification
+
+- **Guardrail:** Verify a fix is in its commit (`aiqt/10-ACCUR-verify-fix-in-commit`), the committed-review dispatch clauses.
+- **What the pack does:** ships the rule and the declaration convention: a verification over a committed state declares its revision and review set, and the dispatcher reconciles the declaration against the repository before any verifier runs, withholding an irreconcilable dispatch as unverifiable. The pack cannot run that reconciliation itself; the verification dispatcher is adopter code the pack does not ship.
+- **The gap:** without the reconciliation, a verifier can certify a committed revision that differs from the text on disk, and a partial commit that omits a planned file passes silently, because the omission removes the file from the diff and from the review together.
+- **What you set up:** a review-declaration gate embedded in your verification dispatcher, running before any verifier is dispatched: it resolves the declared revision to a commit, derives the base from the commit's structure (the sole parent for an ordinary commit, the first parent for a merge, the empty tree for a root commit), reconciles the declared changed set against the git-derived diff of that revision against that derived base for equality (so a path omitted from the commit, or a committed change absent from the declaration, is surfaced rather than silently absorbed), checks scoped working-tree cleanliness over the review set, and binds what the verifier reads to the declared revision, withholding an irreconcilable declaration as unverifiable.
+- **What remains even then:** a dishonest or under-scoped declaration, submodule and filter divergence, and a later commit that supersedes the reviewed revision.
+
+---
+
 *More entries are added here as guardrails with a host-level component are identified. Likely next
 candidates: an enforced network egress allow-list (`security/SECC-egress-destinations`) and kernel-enforced
 resource bounds (`security/SECA-resource-bounds`). If an entry does not apply to your

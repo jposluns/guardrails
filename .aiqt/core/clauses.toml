@@ -599,7 +599,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "81030e1a67152ffbaf7f9d28ca73f6739d0f5a4c06344f3c1f4a594a304fc149"
+source-digest = "312fa0222e3c1c0f8d7959583ec5067b9e7b17a682482f778ee28aa370946199"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -608,7 +608,34 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "81030e1a67152ffbaf7f9d28ca73f6739d0f5a4c06344f3c1f4a594a304fc149"
+source-digest = "312fa0222e3c1c0f8d7959583ec5067b9e7b17a682482f778ee28aa370946199"
+
+[[clause]]
+clause-id = "vfxcmt.3"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
+source-digest = "312fa0222e3c1c0f8d7959583ec5067b9e7b17a682482f778ee28aa370946199"
+
+[[clause]]
+clause-id = "vfxcmt.4"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit. The declared changed set matches the paths that revision changed against that derived base, so a path omitted from the commit or a committed change absent from the declaration is surfaced, never silently absorbed; no declared path carries an uncommitted change in the working tree; and the verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
+source-digest = "312fa0222e3c1c0f8d7959583ec5067b9e7b17a682482f778ee28aa370946199"
+
+[[clause]]
+clause-id = "vfxcmt.5"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
+source-digest = "312fa0222e3c1c0f8d7959583ec5067b9e7b17a682482f778ee28aa370946199"
 
 [[clause]]
 clause-id = "csttir.1"
