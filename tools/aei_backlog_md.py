@@ -64,7 +64,12 @@ def parse(text, version=2):
     shape is produced byte-identically."""
     items, errors, seen = [], [], set()
     for n, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
+        # FIX A (round 7): str.strip does NOT remove U+FEFF, so a BOM leading ANY line (byte 0, or the
+        # first line of a chunk concatenated after a header line) would leave the bullet un-anchored and
+        # the item silently dropped to prose -> an empty enumeration -> a manufactured stop. Strip a
+        # line-leading BOM between two whitespace strips, so a BOM with adjacent spaces is still removed;
+        # a mid-content U+FEFF stays literal because lstrip removes only a leading run.
+        stripped = line.strip().lstrip("\ufeff").strip()
         if not (CANDIDATE_RE.match(stripped) or CHECKBOX_RE.match(stripped)
                 or BLOCKER_PREFIX_RE.search(stripped)):
             continue
@@ -256,6 +261,28 @@ def self_test():
     empty_items, empty_errs = parse("", version=2)
     if empty_items != [] or empty_errs:
         ok_fail.append("empty backlog should be a valid empty enumeration")
+    # FIX A (round 7): a line-leading BOM (U+FEFF) never silently drops an item. str.strip does not remove
+    # U+FEFF, so a BOM leading ANY line (byte 0, or the first line after a header) must be stripped per
+    # line before the bullet screen, or the item is skipped as prose -> an empty enumeration -> a
+    # manufactured stop. A mid-content U+FEFF stays literal.
+    hdr_bom = "# header\n\ufeff- A-1 [x] done :: close:no-fix-needed=R-1\n"
+    hb_items, hb_errs = parse(hdr_bom, version=2)
+    hb1 = next((i for i in hb_items if i["id"] == "A-1"), {})
+    if hb_errs or hb1.get("state") != "closed" \
+            or hb1.get("close") != {"reason": "no-fix-needed", "ref": "R-1"}:
+        ok_fail.append("a BOM before a LATER bullet line must enumerate the item, not drop it "
+                       "(got items={} errs={})".format(hb_items, hb_errs))
+    b0_bom = "\ufeff- A-2 [x] done :: close:fixed=commit-z :: paths=tools/x.py\n"
+    b0_items, b0_errs = parse(b0_bom, version=2)
+    b0 = next((i for i in b0_items if i["id"] == "A-2"), {})
+    if b0_errs or b0.get("state") != "closed" \
+            or b0.get("close", {}).get("paths") != ["tools/x.py"]:
+        ok_fail.append("a byte-0 BOM before the first bullet must enumerate the item "
+                       "(got items={} errs={})".format(b0_items, b0_errs))
+    mid_bom = "- A-3 [ ] ti\ufefftle stays literal\n"
+    mid = next((i for i in parse(mid_bom, version=2)[0] if i["id"] == "A-3"), {})
+    if "\ufeff" not in mid.get("title", ""):
+        ok_fail.append("a mid-content U+FEFF must be preserved in the title (got {})".format(mid))
     # FIX2/B3: a `fixed` close MAY carry a '::' paths list, parsed into close.paths (the same field the
     # JSON validator and the join read), so a routed fixed close re-enumerates as terminal.
     pitems, perrs = parse("- A-9 [x] shipped :: close:fixed=commit-z :: paths=tools/x.py,tools/y.py\n",

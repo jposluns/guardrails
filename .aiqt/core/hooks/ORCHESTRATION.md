@@ -85,16 +85,22 @@ as does an unavailable git rail; a real-but-unrelated commit, or one whose decla
 not touch, stays actionable; resolving to some commit is not enough.
 
 ADOPTER REQUIREMENT (close `paths`): to have a `fixed` close read as a TERMINAL disposition (rather than
-held), the enumeration MUST declare the item's close `paths`, and the cited commit must actually touch
-them. BOTH surfaces can express `paths`: a JSON AEI enumeration carries them in the close object, and the
-committed-backlog markdown grammar (`tools/aei_backlog_md.py`) carries them as a trailing
-`:: paths=<comma-separated repo-relative paths>` on the fixed close, the same close.paths field the JSON
-surface and the liveness join read. A `fixed` close that declares its `paths` is TERMINAL when the cited
-commit's changed set intersects them, both at the yield boundary and at the committed-state liveness join
-(`tools/check_liveness_joins.py`). A `fixed` close that declares NO `paths`, in either surface, HOLDS
-(cannot-evaluate), as does an unavailable git rail or a commit whose changed set does not touch the
-declared paths. A held `fixed` close is safe (it refuses the wind-down, never a false clean close);
-declaring `paths` is only needed to let a genuine fix count as terminal rather than continue to hold.
+held or found unjustified), the enumeration MUST declare the item's close `paths`, and the cited commit
+must actually touch them. BOTH surfaces can express `paths`: a JSON AEI enumeration carries them in the
+close object, and the committed-backlog markdown grammar (`tools/aei_backlog_md.py`) carries them as a
+trailing `:: paths=<comma-separated repo-relative paths>` on the fixed close, the same close.paths field
+the JSON surface and the liveness join read. The reconciliation resolves to exactly three cases, identical
+at the yield boundary and at the committed-state liveness join (`tools/check_liveness_joins.py`): a `fixed`
+close that declares `paths` whose cited commit's changed set INTERSECTS them is TERMINAL; a `fixed` close
+that declares NO `paths` HOLDS (cannot-evaluate, unreconcilable), because the commit cannot be bound to the
+item by content and the close cannot be strong-verified; and a `fixed` close that declares `paths` whose
+cited commit does NOT touch them, or whose ref resolves to no commit, is an UNJUSTIFIED FINDING that stays
+ACTIONABLE (the fix did not land, so the item keeps being worked), never a hold. An unavailable git rail
+HOLDS every `fixed` close (cannot-evaluate). The distinction is material: a held close and an actionable
+unjustified finding both keep working the item safely, but only a hold is cannot-evaluate while an
+unjustified finding stays in the actionable set, and an actionable wait-denial can reach cap relief where a
+cannot-evaluate cannot. Declaring accurate `paths` that the fix actually touched is what lets a genuine fix
+count as terminal rather than hold or read as unjustified.
 
 A nonzero exit, malformed JSON, a duplicate id, or an unknown version is ENUMERATOR_ERROR, never an
 empty backlog; an empty `items` array is a valid enumeration, a parse failure never is. On the stop

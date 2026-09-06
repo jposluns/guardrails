@@ -1801,6 +1801,46 @@ def main(report_path=None):
         check("a2/succeeded-true-content-str-confirms",
               aiqt_hooks._orch_tool_succeeded(
                   {"ok": True, "content": "Wake scheduled"}), True)
+        # ---------- FIX C (round 7): a NESTED container of text must be walked, not bypassed ----------
+        # A shallow reader let a nested block yield NO texts, so the caller's `if texts and ...` fell
+        # through to success (an orphan wake). The full walk finds nested text; a present, non-empty
+        # content that yields no judgeable text is declined by the no-text fail-safe. Each reads NOT-success.
+        check("a2/succeeded-false-content-nested-dict-parts",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"parts": [{"text": "under review"}]}}), False)
+        check("a2/succeeded-false-content-nested-dict-blocks-barestr",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"blocks": ["under review"]}}), False)
+        check("a2/succeeded-false-content-nested-list-list",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [["under review"]]}), False)
+        check("a2/succeeded-false-content-list-dict-note",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"note": "under review"}]}), False)
+        check("a2/succeeded-false-content-dict-blank-text-note",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"text": "", "note": "under review"}}), False)
+        # recursion SENTINEL: a nested CONFIRMING block still registers (reverting the walk to shallow
+        # makes this yield no texts -> the no-text fail-safe declines it, flipping True -> False).
+        check("a2/succeeded-true-content-nested-confirms",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"blocks": [{"text": "scheduled successfully"}]}}), True)
+        # no-text fail-safe SENTINEL: a present, non-empty content with NO judgeable string declines
+        # (removing the `elif content:` fail-safe flips this False -> True, an orphan wake).
+        check("a2/succeeded-false-content-nonempty-no-text",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [[1, 2]]}), False)
+        # metadata-poison SENTINEL: a content-block metadata value ('type': 'scheduled') matching the
+        # positive vocabulary must NOT confirm; only the block's 'text' is judged, which is ambiguous ->
+        # decline. Collecting every scalar (the literal 'collect every string') flips this False -> True.
+        check("a2/succeeded-false-content-metadata-not-poison",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"type": "scheduled", "text": "under review"}]}), False)
+        # metadata-poison, no 'text': the block's confirming metadata is likewise not judged; the item has
+        # no judgeable text at all, so the no-text fail-safe declines it.
+        check("a2/succeeded-false-content-metadata-notext-not-poison",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"type": "scheduled", "note": "under review"}]}), False)
         # ---------- FIX D (round-6): the negative-walk cycle guard fails SAFE to declined ----------
         # A self-referential dict with an otherwise-POSITIVE shape reads NOT-success: the cycle returns
         # True from the negative walk, declining the wake (its stated contract, now literal). A JSON

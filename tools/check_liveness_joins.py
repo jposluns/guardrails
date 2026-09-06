@@ -97,13 +97,17 @@ def _parse_surface(backlog_text):
     is a Markdown AEI surface parsed with the reference grammar. B3 FAIL-CLOSED: a surface that OPENS as
     JSON ('{'/'[') but does not parse is cannot-evaluate - it is NEVER silently routed to the markdown
     parser, which would read a JSON file as an empty backlog and pass a zero-terminal SUCCESS on a surface
-    it never understood (the exact B3 defect this closes). A genuinely empty or prose markdown surface with
-    no items remains a valid empty enumeration, as before.
+    it never understood (the exact B3 defect this closes). A genuinely empty surface, or a prose surface
+    that does NOT wholly parse as a JSON object, remains a valid empty markdown enumeration, as before; a
+    surface whose WHOLE text parses as a bare JSON object WITHOUT AEI structure routes to the JSON AEI
+    validator and is cannot-evaluate (fail closed), never a silent empty enumeration.
 
-    FIX A (round 6): any leading BOM(s) (U+FEFF) are stripped and the SAME stripped text feeds BOTH
-    the JSON detection/parse AND the markdown parse, so a BOM-prefixed markdown item is not dropped by the
-    bullet grammar (str.strip does not remove U+FEFF, so the un-stripped text mis-parsed the first item as
-    prose -> a silent zero-terminal SUCCESS). Routing to the JSON AEI validator happens ONLY when json.loads
+    FIX A: the AUTHORITATIVE BOM fix is per line in aei_backlog_md.parse (round 7), which strips a
+    line-leading U+FEFF before the bullet screen, so a BOM leading ANY line (not only byte 0) cannot drop
+    an item; str.strip does not remove U+FEFF, so the un-stripped text mis-parsed a bullet as prose -> a
+    silent zero-terminal SUCCESS. The surface-level lstrip below is retained as redundant belt-and-
+    suspenders (it only ever covered a byte-0 BOM). Routing to the JSON AEI validator happens ONLY when
+    json.loads
     yields a DICT: a JSON AEI surface is always an object, so a bare JSON scalar (42, a quoted string) or a
     JSON array is NOT an AEI surface and falls through to the markdown grammar (a valid empty enumeration),
     never cannot-evaluate. Fail-closed is UNCHANGED for a surface that OPENS as JSON ('{'/'[') but does not
@@ -484,6 +488,20 @@ def self_test():
     if not any(t[0] == "B-2" for t in terminals):
         fails.append("a double-BOM-prefixed markdown item must be enumerated as a terminal, not dropped "
                      "(lj/double-bom-markdown-not-dropped): terminals={}".format(terminals))
+    # FIX A lj/header-then-bom-markdown-not-dropped (round 7): a BOM before a LATER line (here after a
+    # markdown header) is stripped PER LINE in aei_backlog_md.parse, so the item is enumerated as a
+    # terminal, never dropped to a zero-terminal SUCCESS -> schedule_idle/stop ALLOW. The round-6
+    # surface-level lstrip did NOT cover this (it strips only a byte-0 BOM).
+    hbom = ("# committed backlog\n"
+            "\ufeff- B-3 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n")
+    findings, cannot, terminals = join(hbom, chain([]), chain([]), fixed_reconcile=fr)
+    if not any(t[0] == "B-3" for t in terminals):
+        fails.append("a BOM before a LATER markdown line must be enumerated as a terminal, not dropped "
+                     "(lj/header-then-bom-markdown-not-dropped): terminals={}".format(terminals))
+    if findings or cannot:
+        fails.append("the header-then-BOM fixed close should reconcile clean-terminal "
+                     "(lj/header-then-bom-markdown-not-dropped): findings={} cannot={}".format(
+                         findings, cannot))
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

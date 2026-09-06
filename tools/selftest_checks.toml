@@ -420,6 +420,15 @@ expected-check-ids = [
   "a2/succeeded-false-content-dict-no-text-ambiguous",
   "a2/succeeded-true-content-dict-confirms",
   "a2/succeeded-true-content-str-confirms",
+  "a2/succeeded-false-content-nested-dict-parts",
+  "a2/succeeded-false-content-nested-dict-blocks-barestr",
+  "a2/succeeded-false-content-nested-list-list",
+  "a2/succeeded-false-content-list-dict-note",
+  "a2/succeeded-false-content-dict-blank-text-note",
+  "a2/succeeded-true-content-nested-confirms",
+  "a2/succeeded-false-content-nonempty-no-text",
+  "a2/succeeded-false-content-metadata-not-poison",
+  "a2/succeeded-false-content-metadata-notext-not-poison",
   "a2/succeeded-false-self-referential-cycle",
 ]
 

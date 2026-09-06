@@ -7529,33 +7529,54 @@ def _orch_has_positive_signal(response):
 
 
 def _orch_content_texts(content):
-    """FIX C: normalize ANY tool-response `content` shape to the list of non-blank free-text strings the
-    G3 ambiguity screen judges, closing the list-only bypass (a content DICT or a bare-STRING list slipped
-    past the screen and registered an orphan wake). A str is one text; a dict contributes its 'text' field,
-    or - when it has none - every string value; a list/tuple contributes each element's text (a dict
-    element's 'text' field, a bare-string element itself). An unrecognized shape with no extractable text
-    yields no texts (the caller then judges on G1/G2 + the positive signal alone). The fail-safe direction
-    is unchanged: normalizing more shapes can only DECLINE more wakes, never manufacture one."""
+    """FIX C (round 7): the judgeable free-text strings the G3 ambiguity screen reads, gathered by a FULL
+    walk into nested dicts/lists/tuples (cycle-guarded via an id-set, node-budgeted like
+    _orch_response_has_negative). A SHALLOW reader let a NESTED container of unconfirming text yield NO
+    texts, so the caller's `if texts and ...` screen fell through to success and registered an orphan wake
+    (content={"parts":[{"text":"under review"}]}, {"blocks":["under review"]}, [["under review"]],
+    [{"note":"under review"}], {"text":"","note":"under review"}). Walking to any depth finds nested text so
+    it is judged.
+
+    JUDGEABLE TEXT is a content block's OWN free text, NOT structural metadata: a dict contributes its
+    non-blank string 'text' field (a content block's text) and is then NOT descended into for its siblings;
+    a dict WITHOUT a non-blank 'text' field is descended into its CONTAINER-typed values only; a list/tuple
+    contributes each bare-string element and is descended for nested blocks. A dict's non-'text' SCALAR
+    values (a block's 'type', 'id', 'note', ...) are DELIBERATELY not collected: a metadata value matching
+    the positive-confirmation vocabulary (e.g. a scheduling tool's content-block type 'scheduled' or
+    'registered') would otherwise MANUFACTURE a confirming wake, breaking this module's fail-safe invariant
+    that normalizing a shape may only DECLINE a wake, never create one. A present, non-empty content whose
+    only text is under such a key thus yields NO texts and is DECLINED by the caller's no-text fail-safe,
+    never registered. On the node budget or a cycle the walk STOPS collecting (SECA); the caller's no-text
+    fail-safe then declines, so an exhausted or cyclic content never reads as success. Fail-safe direction
+    preserved: every path here only ever DECLINES a doubtful wake."""
     texts = []
-
-    def _add(s):
-        if isinstance(s, str) and s.strip():
-            texts.append(s)
-
-    if isinstance(content, str):
-        _add(content)
-    elif isinstance(content, dict):
-        if isinstance(content.get("text"), str):
-            _add(content.get("text"))
-        else:
-            for value in content.values():
-                _add(value)
-    elif isinstance(content, (list, tuple)):
-        for element in content:
-            if isinstance(element, str):
-                _add(element)
-            elif isinstance(element, dict) and isinstance(element.get("text"), str):
-                _add(element.get("text"))
+    stack = [content]
+    seen = set()
+    budget = _ORCH_SCAN_NODE_BUDGET
+    while stack:
+        if budget <= 0:
+            break                                 # SECA bound; the caller's no-text fail-safe then declines
+        budget -= 1
+        value = stack.pop()
+        if isinstance(value, str):
+            if value.strip():
+                texts.append(value)
+        elif isinstance(value, dict):
+            if id(value) in seen:
+                continue                          # a cycle contributes no further text (contract: acyclic)
+            seen.add(id(value))
+            block_text = value.get("text")
+            if isinstance(block_text, str) and block_text.strip():
+                texts.append(block_text)          # the block's own free text; siblings are metadata
+            else:
+                for v in value.values():
+                    if isinstance(v, (dict, list, tuple)):
+                        stack.append(v)           # descend for nested blocks; skip scalar metadata
+        elif isinstance(value, (list, tuple)):
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            stack.extend(value)
     return texts
 
 
@@ -7576,10 +7597,11 @@ def _orch_tool_succeeded(response):
           round-4 depth-6 cap AND the top-level-only structured checks.
       G2  no soft-failure PHRASE anywhere: the same walk finds no failure/negation/uncertainty/
           soft-failure phrase in ANY string at ANY depth (the extended lexicon covers 'fell through').
-      G3  an affirmative positive signal (_orch_has_positive_signal) AND, when free-text content is
-          present in ANY shape (a content str, dict, or list, normalized by _orch_content_texts), at least
-          one free-text string AFFIRMATIVELY confirms (the ambiguity screen; content that neither negates
-          nor confirms fails safe to no register).
+      G3  an affirmative positive signal (_orch_has_positive_signal) AND, when content is present in ANY
+          shape (a content str, dict, or list at ANY nesting depth, normalized by _orch_content_texts), at
+          least one judgeable free-text string AFFIRMATIVELY confirms; content that neither negates nor
+          confirms, and a present, non-empty content that yields NO judgeable text at all, both fail safe
+          to no register (the ambiguity screen and its no-text fail-safe partner).
 
     DISCLOSED IRREDUCIBLE RESIDUAL (stated honestly, NOT closed): (a) a NOVEL soft-failure phrase absent
     from the lexicon appearing beside a positive signal; (b) a failure token hidden inside an ENCODED
@@ -7593,12 +7615,18 @@ def _orch_tool_succeeded(response):
     if not _orch_has_positive_signal(response):      # G3: the affirmative positive signal
         return False
     content = response.get("content")                # G3: the ambiguity screen over free-text content
-    # FIX C: normalize ANY content shape (str, dict, list) to its free-text before the screen, so a content
-    # DICT or a bare-STRING list can no longer bypass it (the list-only guard let both slip past and
-    # register an orphan wake). If there is ANY free text and NONE of it affirmatively confirms, decline; a
-    # shape with no extractable text is judged on G1/G2 + the positive signal alone.
+    # FIX C (round 7): a FULL walk (_orch_content_texts) normalizes ANY content shape, including a NESTED
+    # container of text, to its judgeable free text before the screen, so a nested block can no longer yield
+    # NO texts and fall through this screen to an orphan wake. Two by-construction outcomes: (1) there is
+    # judgeable text and NONE of it affirmatively confirms -> decline; (2) content is PRESENT and NON-EMPTY
+    # but yields NO judgeable text (an opaque or non-'text'-keyed shape) -> decline (the fail-safe partner),
+    # so no non-empty content registers without an affirmative confirmation. Absent or empty content
+    # ({}/[]/"") is judged on G1/G2 + the positive signal alone.
     texts = _orch_content_texts(content)
-    if texts and not any(_ORCH_POS_CONFIRM_RE.search(t) for t in texts):
+    if texts:
+        if not any(_ORCH_POS_CONFIRM_RE.search(t) for t in texts):
+            return False
+    elif content:
         return False
     return True
 
