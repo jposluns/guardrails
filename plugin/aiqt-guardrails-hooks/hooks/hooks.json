@@ -183,6 +183,21 @@
         ]
       },
       {
+        "matcher": "Monitor|TaskOutput",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_wait_guard"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "ScheduleWakeup|CronCreate",
         "hooks": [
           {
@@ -254,6 +269,21 @@
               "-I",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
               "orch_dispatch_ledger"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_wait_recorder"
             ],
             "timeout": 10
           }

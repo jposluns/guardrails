@@ -57,6 +57,7 @@
 .aiqt/core/rules/integ-workers-produce-inert-data.md text eol=lf
 .aiqt/core/rules/progr-decision.md text eol=lf
 .aiqt/core/rules/progr-repeated-failure-triggers-premise-review.md text eol=lf
+.aiqt/core/rules/progr-wait-utilization.md text eol=lf
 .aiqt/core/rules/quali-absolute-paths.md text eol=lf
 .aiqt/core/rules/quali-change-carries-check.md text eol=lf
 .aiqt/core/rules/quali-compatibility-or-migration.md text eol=lf
@@ -245,6 +246,7 @@
 .claude/rules/aiqt/10-TRUST-trust-recovery-ext.md text eol=lf
 .claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md text eol=lf
 .claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md text eol=lf
+.claude/rules/aiqt/20-PROGR-wait-utilization-binds-to-state.md text eol=lf
 .claude/rules/aiqt/30-SPEED-background-work-during-ci-waits.md text eol=lf
 .claude/rules/aiqt/40-COST-cost-tier.md text eol=lf
 .claude/rules/security/SECA-resource-bounds.md text eol=lf
@@ -370,6 +372,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-TRUST-trust-recovery-ext.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-wait-utilization-binds-to-state.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/30-SPEED-background-work-during-ci-waits.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/40-COST-cost-tier.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/security/SECA-resource-bounds.mdc text eol=lf
