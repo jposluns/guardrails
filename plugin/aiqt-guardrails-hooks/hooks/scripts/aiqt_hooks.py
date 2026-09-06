@@ -3213,6 +3213,24 @@ _RAW_PUSH_DELETE_RE = re.compile(
     r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
+# GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
+# (a wrapped or unparseable 'git -c remote.<name>.mirror=true push' / '--config-env=remote.<name>.mirror
+# =ENV push'). Anchored to the OPTION token ('-c' then whitespace and/or a shell quote, or '--config-env'
+# then '='/whitespace and an optional shell quote) introducing 'remote.<something>.mirror', so a QUOTED
+# argument ("-c 'remote.origin.mirror=true'", "--config-env 'remote.origin.mirror=MFLAG'") fires like the
+# unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. It matches
+# only the COMMON quoted-argument forms above: a quote or backslash that FRAGMENTS the option token, the
+# key, or the value (-'c', \-c, remote.origin.'mirror'=true which git 2.53 still reconstructs to
+# mirror=true, or a split value) is NOT matched. Arbitrary shell fragmentation of an unparseable or
+# wrapper-prefixed command cannot be robustly matched by a regex (only a shell parser could, which the
+# pack deliberately avoids), so this is an inherent lexical-scan boundary, the same class as the disclosed
+# wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not chased with more regex variants.
+# The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
+# branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
+# (accepted, documented), mirroring the raw scan's over-matching posture.
+_RAW_PUSH_MIRRORCFG_RE = re.compile(
+    r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
+    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 
 def _head_branch(repo):
@@ -3341,6 +3359,94 @@ def _wildcard_hits_branches(dst):
             or not prefix.startswith("refs/"))
 
 
+# GD-146: a command-local `remote.<name>.mirror=true` configuration reproduces --mirror's force-and-delete
+# sweep with no bulk flag in the judged push args, so it is read on the parsed path. The falsy set is git's
+# documented boolean-false spellings plus empty; ANYTHING else fires (fail-safe): a documented truthy
+# spelling, a bare key (git boolean true), or a value git would reject as a non-boolean (git dies on it
+# before pushing, so firing there is a harmless safe-direction over-ask). Only a provably-falsy value stands
+# the guard down, so an unknown future spelling or a mis-split value can never slip to a silent allow.
+_MIRROR_FALSY = frozenset(("", "false", "no", "off", "0"))
+
+def _mirror_falsy(value):
+    """True when a `-c` value is PROVABLY falsy (git's false spellings plus empty), case-insensitive and
+    without stripping, so the guard stands down; a bare key (value None) is git boolean true and is NOT
+    falsy. Everything else returns False (fires), the fail-safe direction."""
+    if value is None:
+        return False  # a bare `-c remote.<name>.mirror` key is git boolean true: it fires
+    return value.lower() in _MIRROR_FALSY
+
+def _mirror_key_norm(key):
+    """The normalized identity of a git config key when it names remote.<name>.mirror, else None. Matched
+    by startswith('remote.')/endswith('.mirror') on the CASE-FOLDED key with a NONEMPTY middle, so a
+    dotted remote name (remote.a.b.mirror) matches and remote..mirror never does (no naive three-way
+    split). git treats the section and trailing key case-insensitively but the subsection (remote name)
+    case-sensitively, so the normalized identity lowercases the fixed remote./.mirror frame and preserves
+    the middle VERBATIM; last-value-wins keys on the same remote collapse to one identity, distinct remote
+    names stay distinct."""
+    low = key.lower()
+    if not (low.startswith("remote.") and low.endswith(".mirror")):
+        return None
+    middle = key[len("remote."):len(key) - len(".mirror")]
+    if not middle:
+        return None  # remote..mirror: an empty remote name never fires
+    return "remote." + middle + ".mirror"
+
+def _push_mirror_config(tokens):
+    """(state, key, value): scan the PRE-SUBCOMMAND global-option region for a command-local mirror
+    configuration and return ('on', firing key, its value or None for a bare key), ('unknown', the
+    --config-env key whose value this guard cannot read, None), or (None, None, None). Walks the same
+    eight-line global-option region as _git_subcommand/_git_sub_and_args (start after the command word,
+    stop at the first non-'-' token, a separated _GIT_ARG_OPTS member skips two tokens and any other
+    option one), reading the assignment carried by each `-c` (separated only; git 2.53 rejects the
+    attached -c<key>=<value> form and a top-level --config, so neither is parsed) and each --config-env
+    (separated or attached). A separated `-c` value is split at its first '=' into (key, value), value
+    absent (bare key, git boolean true) when no '=' is present. DIRECT `-c` assignments to the same
+    normalized key apply LAST-VALUE-WINS, as git applies command-line config in order (witnessed on git
+    2.53.0); a falsy assignment to one remote's key never cancels a truthy one on another's. A
+    --config-env naming a mirror key forces the result to 'unknown' for that key regardless of the order
+    of direct assignments to it, because the environment value is unreadable (a cannot-evaluate routes to
+    the safe outcome, ASK) and the relative precedence of -c and --config-env was not witnessed, so an
+    unwitnessed cross-mechanism ordering is not modelled (a deliberate safe-direction over-ask). 'on'
+    (any direct key's final state is not provably falsy) outranks 'unknown' for the wording when both
+    apply; both dispositions ASK. This is redirect-independent and reads no git config offline: it judges
+    only what the command string spells."""
+    i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
+    n = len(tokens)
+    direct = {}  # normalized key -> (fires: bool, original key, value or None); last direct assignment wins
+    env = {}     # normalized key -> original key, named via --config-env (forces 'unknown')
+    while i < n:
+        token = tokens[i]
+        if not token.startswith("-"):
+            break  # the subcommand: the global-option region ends here
+        if "=" not in token and token in _GIT_ARG_OPTS:
+            value = tokens[i + 1] if i + 1 < n else None  # a trailing bare -c/--config-env has none
+            if token == "-c" and value is not None:
+                key, sep, val = value.partition("=")
+                norm = _mirror_key_norm(key)
+                if norm is not None:
+                    val = val if sep else None  # no '=' present: a bare key (git boolean true)
+                    direct[norm] = (not _mirror_falsy(val), key, val)
+            elif token == "--config-env" and value is not None:
+                key = value.partition("=")[0]  # separated form: KEY=ENVVAR
+                norm = _mirror_key_norm(key)
+                if norm is not None:
+                    env[norm] = key
+            i += 2
+            continue
+        if token.startswith("--config-env="):  # attached form: --config-env=KEY=ENVVAR
+            key = token[len("--config-env="):].partition("=")[0]
+            norm = _mirror_key_norm(key)
+            if norm is not None:
+                env[norm] = key
+        i += 1
+    for _norm, (fires, key, value) in direct.items():
+        if fires:
+            return ("on", key, value)  # dict preserves order: the first firing key names the ASK
+    if env:
+        return ("unknown", next(iter(env.values())), None)
+    return (None, None, None)
+
+
 def _push_protected(tokens, args, cwd):
     """Classify one git push segment against the protected set: ('deny', detail, act_noun), where
     act_noun names the denied act for the banner ('force-push' or 'branch deletion'); ('ask', detail,
@@ -3434,11 +3540,35 @@ def _push_protected(tokens, args, cwd):
         return ("ask", "pushes the matching refspec ':' ('+:' is its forced form), a matching-refspec "
                        "push of every branch existing on both ends, which this guard cannot prove "
                        "misses the protected branches", None)
+    # --mirror OR a command-local mirror configuration (GD-146: '-c remote.<name>.mirror=true push', or
+    # the same key through --config-env, both PRE-subcommand) is the same runtime act, so both ASK with the
+    # same disposition. This joins the existing flag clause AFTER the named-protected force/delete DENY
+    # loops (so a truthy mirror config with a '+main:main' or ':main' refspec still DENIES) and BEFORE the
+    # early returns below (which would otherwise silent-allow 'push origin'/'push origin main' under the
+    # config). Only the separated '-c <key>[=<value>]' and both --config-env spellings in the command
+    # string are read; git 2.53 rejects a top-level '--config' and an attached '-c<key>=<value>', so
+    # neither is parsed. A non-boolean direct value over-asks harmlessly (git dies on the bad boolean
+    # before pushing), and the --config-env ASK is a deliberate over-ask on a value this guard cannot read.
+    mirror_state, mc_key, mc_val = _push_mirror_config(tokens)
     if mirror:
         return ("ask", "is a --mirror push, which force-updates every matching remote ref and DELETES "
                        "every remote ref (branch, tag, note) absent locally; on a shared remote this "
                        "removes branches, protected or not, and can cause potentially irreversible "
                        "loss, and this guard cannot prove it misses the protected branches", None)
+    if mirror_state == "on":
+        shown = "{}={}".format(mc_key, mc_val) if mc_val is not None else mc_key
+        return ("ask", "sets the command-local configuration '{}' (a bare '{}' is boolean true), which "
+                       "makes the push behave exactly like --mirror: it force-updates every matching "
+                       "remote ref and DELETES every remote ref (branch, tag, note) absent locally; on a "
+                       "shared remote this removes branches, protected or not, and can cause potentially "
+                       "irreversible loss, and this guard cannot prove it misses the protected branches"
+                       .format(shown, mc_key), None)
+    if mirror_state == "unknown":
+        return ("ask", "names the command-local configuration '{}' through --config-env, whose value "
+                       "lives in an environment variable this guard cannot read, so it cannot prove "
+                       "mirror mode is off; a mirror push force-updates every matching remote ref and "
+                       "DELETES every remote ref absent locally, and this guard cannot prove it misses "
+                       "the protected branches".format(mc_key), None)
     if force and sweep_all:
         return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch",
                 None)
@@ -3465,10 +3595,13 @@ def _push_protected(tokens, args, cwd):
     # HEAD/@). Resolve it via the read-only HEAD probe, only when the repository view is provable; the
     # push.default=matching configured-state residual (which could force every matching branch) is
     # disclosed, not modelled; likewise a bare 'git push --prune <remote>' whose deletion is driven
-    # by a configured remote.<name>.push refspec, and a configured mirror mode (remote.<name>.mirror
-    # =true in git config, or a command-local 'git -c remote.<name>.mirror=true push'), which
-    # reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard reads
-    # no git config offline, so these are disclosed residuals, not modelled (GD-145). A '--repo=<remote>'
+    # by a configured remote.<name>.push refspec, and a PERSISTED mirror mode (remote.<name>.mirror
+    # =true in repository, worktree, global, or system git config, or the GIT_CONFIG_* env protocol),
+    # which reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard
+    # reads no git config offline, so these are disclosed residuals, not modelled (GD-145). The
+    # COMMAND-LOCAL mirror configuration ('git -c remote.<name>.mirror=true push', or the key through
+    # --config-env) IS now modelled at the mirror clause above (GD-146), since it lives in the command
+    # string the guard can read. A '--repo=<remote>'
     # option does not displace the positional repository operand: git gives the command-line positional
     # precedence (git-push(1)), so operands[0] stays the repository and the guard's slice is correct; a
     # '--repo' form carrying a refspec-shaped positional is rejected by git as an unknown repository
@@ -3530,7 +3663,8 @@ def _protected_line_fallback(command):
     deletion. It OVER-MATCHES by design (a keyword in prose or an unrelated '+' or '-d' token asks),
     the documented posture of the sibling fallbacks (_diff_source_fallback, _git_discard_fallback)."""
     if _RAW_PUSH_RE.search(command) and (_RAW_PUSH_FORCE_RE.search(command)
-                                         or _RAW_PUSH_DELETE_RE.search(command)):
+                                         or _RAW_PUSH_DELETE_RE.search(command)
+                                         or _RAW_PUSH_MIRRORCFG_RE.search(command)):
         named = " a protected branch" if _RAW_PROTECTED_RE.search(command) else " a target this guard cannot read"
         return _ask(
             "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
