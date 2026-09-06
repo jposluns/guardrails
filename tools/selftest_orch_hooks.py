@@ -275,6 +275,30 @@ def main(report_path=None):
         check("stop/registry-absent", _verdict(aiqt_hooks.orch_stop_guard(
             {"hook_event_name": "Stop", "cwd": str(bare)})), "allow")
 
+        # FLAG B: a present-but-unreadable ('bad') registry is CANNOT-EVALUATE, DISTINCT from ABSENT. The
+        # stop family DENIES the wind-down fail-closed (never treating unreadable config as absence); the
+        # ABSENT registry stays the inert allow; and the INDEPENDENT operator escape (resolved without the
+        # unreadable registry) releases the wind-down.
+        badroot = tmp / "bad-registry"
+        badroot.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(badroot)],
+                       check=True, capture_output=True, timeout=30)
+        (badroot / ".aiqt").mkdir()
+        (badroot / ".aiqt" / "orchestration.local.json").write_text("{ not json", encoding="utf-8")
+        badstop = lambda: aiqt_hooks.orch_stop_guard({"hook_event_name": "Stop", "cwd": str(badroot)})
+        check("flagB/bad-registry-denies", _verdict(badstop()), "block2")
+        check("flagB/absent-registry-inert-allows", _verdict(aiqt_hooks.orch_stop_guard(
+            {"hook_event_name": "Stop", "cwd": str(bare)})), "allow")
+        # the honored-escape path needs a foreign-uid sentinel not creatable on a single-uid host, so the
+        # independent-escape resolution is injected; the point under test is that a bad registry with an
+        # escape present RELEASES (warn) rather than denying.
+        _real_escape_fb = aiqt_hooks._orch_escape_active
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root, state_dir=None: (True, None)
+            check("flagB/bad-registry-with-operator-escape-allows", _verdict(badstop()), "warn")
+        finally:
+            aiqt_hooks._orch_escape_active = _real_escape_fb
+
         # no live lease -> allow (scope)
         f.lease.unlink()
         f.set_items([item("A-1")])
@@ -306,16 +330,25 @@ def main(report_path=None):
         f.set_turn_state({})
         check("stop/stale-evidence-denies", _verdict(stop()), "block2")
 
-        # B4: a proposed/ungranted item is ASSISTANT-WRITABLE label text and cannot remove buildable
-        # work from the actionable set (a self-authored proposal is not a grant and licenses no
-        # wind-down; cntdef/deccls). A proposed-only backlog is ACTIONABLE -> the stop DENIES (its
-        # preparatory work continues; only a genuine maintainer decision holds the final step).
-        f.set_items([item("P-1", state="proposed")])
+        # B4/FLAG A (v2): an ordinary proposed/ungranted item is ASSISTANT-WRITABLE label text and cannot
+        # remove buildable work from the actionable set (a self-authored proposal is not a grant and
+        # licenses no wind-down; cntdef/deccls). A v2 proposed-only backlog is ACTIONABLE -> the stop
+        # DENIES (its preparatory work continues; only a maintainer-provenance park holds).
+        f.set_items([item("P-1", state="proposed")], version=2)
         f.set_turn_state({})
         check("stop/proposed-is-actionable", _verdict(stop()), "block2")
-        f.set_items([item("P-2", granted=False)])
+        f.set_items([item("P-2", granted=False)], version=2)
         f.set_turn_state({})
         check("stop/ungranted-is-actionable", _verdict(stop()), "block2")
+        # B6: a v1 (any non-v2) proposed/ungranted item keeps the shipped BYTE-IDENTICAL non-compelling
+        # `proposed` bucket AND decision to main: it does NOT block the wind-down (stop ALLOWS -> warn).
+        # This is the v1 compatibility regression vector: the proposed->actionable change is v2-only.
+        f.set_items([item("P-1", state="proposed")], version=1)
+        f.set_turn_state({})
+        check("v1/proposed-non-compelling-allows", _verdict(stop()), "warn")
+        f.set_items([item("P-2", granted=False)], version=1)
+        f.set_turn_state({})
+        check("v1/ungranted-non-compelling-allows", _verdict(stop()), "warn")
 
         # live ledger task -> allow; past staleness -> deny
         sd = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root)))
@@ -938,10 +971,25 @@ def main(report_path=None):
             dict(base, kind="schedule_idle", actionable=[("A", "t", "w")], schedule_denials=3,
                  basis_unchanged=True))
         check("core/schedule-actionable-wedge-cap-relieved", v, "ALLOW_WITH_FINDINGS")
+        # B1: the wait cap relief is SANCTIONED ONLY in the single-live-waiting-row wedge (a named live
+        # waiting row present). The relief survives WITH such a target...
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, kind="wait", actionable=[("A", "t", "w")],
+                 waiting=[("W-1", "tracked-task", "t9")], wake_named=True,
+                 schedule_denials=3, basis_unchanged=True))
+        check("core/wait-actionable-wedge-cap-relieved", v, "ALLOW_WITH_FINDINGS")
+        # ...but an actionable-work wait with an ABSENT/UNNAMED wait target is an ignorance path DENIED
+        # UNCONDITIONALLY even at the cap on an unchanged basis (the exact B1 residual: the old code
+        # cap-relieved it before requiring a live wait target).
         v, _r, _d = aiqt_hooks.decide_yield(
             dict(base, kind="wait", actionable=[("A", "t", "w")], schedule_denials=3,
                  basis_unchanged=True))
-        check("core/wait-actionable-wedge-cap-relieved", v, "ALLOW_WITH_FINDINGS")
+        check("core/wait-actionable-absent-target-not-cap-relieved", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, kind="wait", actionable=[("A", "t", "w")],
+                 waiting=[("W-1", "tracked-task", "t9")], wake_named=False,
+                 schedule_denials=3, basis_unchanged=True))
+        check("core/wait-actionable-unnamed-target-not-cap-relieved", v, "DENY")
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
@@ -1132,23 +1180,42 @@ def main(report_path=None):
         a.set_items(lapse_items + [item("A-20")])
         a.set_turn_state({})
         check("lapse/no-bypass-still-denies", _verdict(astop()), "block2")
-        # (b) B4: a PROPOSED systemic-lapse guardrail obligation is ASSISTANT-WRITABLE label text and is
-        # ACTIONABLE (its guardrail preparatory work compels continuation; mistake-to-guardrail), so the
-        # stop DENIES rather than parking on the proposed label. A genuine maintainer-granted park would
-        # attach the awaited human-decision blocker to the lapse row (a maintainer grant), not rest on a
-        # bare 'proposed' status; see the GD-127-interaction note in the change record.
+        # (b) FLAG A / B6: the orch_register projection emits proposed mistake-register rows as v1
+        # NON-COMPELLING items (orch_register.py:71). Under the v1 byte-identity contract a proposed
+        # lapse row sits in the `proposed` bucket and does not itself compel a stop; with only a parked
+        # (human-decision-blocked) sibling present, the stop ALLOWS (warn). This IS GD-127's
+        # recorded-wind-down park: the lapse is recorded in the register and parked behind the maintainer
+        # decision it awaits. The stricter proposed->actionable treatment is a v2 behaviour (FLAG A
+        # vectors below).
         a.pending.write_text("| DEC-1 | 2026-09-03 | lapse triage | RAISED |\n", encoding="utf-8")
         a.set_items(lapse_items + [item("A-21",
                                         blocker={"kind": "human-decision", "ref": "DEC-1"})])
         a.set_turn_state({})
-        check("lapse/proposed-lapse-is-actionable", _verdict(astop()), "block2")
-        # (c) a lapse row whose pointer resolves to nothing is still surfaced as a resume-audit finding;
-        # the proposed lapse row remains actionable, so the stop denies (never a bare-label park).
+        check("lapse/v1-proposed-lapse-non-compelling", _verdict(astop()), "warn")
+        # (c) a lapse row whose pointer resolves to nothing is still surfaced as a resume-audit finding
+        # (the audit carries that, not the stop verdict); the v1 proposed lapse stays non-compelling.
         mr_append("MR-2", "nosuch-integrity-signal.txt")
         l_findings = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         check("lapse/unsubstantiated-lapse-finding", any("MR-2" in x for x in l_findings), True)
         a.set_turn_state({})
-        check("lapse/unsubstantiated-still-actionable", _verdict(astop()), "block2")
+        check("lapse/v1-unsubstantiated-lapse-non-compelling", _verdict(astop()), "warn")
+
+        # ---------- FLAG A: the v2 provenance-backed proposed distinction ----------
+        fa = Fixture(tmp, "flagA")
+        fastop = lambda: aiqt_hooks.orch_stop_guard(fa.payload("Stop"))
+        # ordinary-proposal-actionable: a v2 self-authored proposed item with NO maintainer-provenance
+        # blocker is ACTIONABLE (a self-authored label licenses no wind-down; cntdef) -> the stop DENIES.
+        fa.set_items([item("FA-1", state="proposed")], version=2)
+        fa.set_turn_state({})
+        check("flagA/ordinary-proposal-actionable", _verdict(fastop()), "block2")
+        # confirmed-lapse-park-honored: a v2 proposed item carrying a human-decision blocker that resolves
+        # to a genuinely-pending maintainer decision (provenance the assistant cannot self-author) PARKS
+        # at its final step (blocked) -> the stop ALLOWS (warn). The park is honored, not forced to prep.
+        fa.pending.write_text("| PD-A | 2026-09-05 | lapse park | RAISED |\n", encoding="utf-8")
+        fa.set_items([item("FA-2", state="proposed",
+                           blocker=hd_blocker("PD-A", prep_complete=True, prep_ref="PD-A"))], version=2)
+        fa.set_turn_state({})
+        check("flagA/confirmed-lapse-park-honored", _verdict(fastop()), "warn")
 
         # ---------- C.3: the anti-shrinkage checkpoint union ----------
         c = Fixture(tmp, "ckpt")
@@ -1548,14 +1615,18 @@ def main(report_path=None):
         cfstop = lambda: aiqt_hooks.orch_stop_guard(cf.payload("Stop"))
         _cfhead = subprocess.run(["git", "-C", str(cf.root), "rev-parse", "HEAD"],
                                  check=True, capture_output=True, text=True, timeout=30).stdout.strip()
-        # B3: a `fixed` close whose ref does NOT resolve to a real commit is NOT terminal; it is held as
-        # cannot-evaluate (closed_unjustified), so the stop DENIES (ignorance refuses the wind-down).
+        # B3: a `fixed` close whose ref does NOT resolve to a real commit is NOT terminal (unrelated, no
+        # commit); it is closed-unjustified + actionable, so the stop DENIES (ignorance refuses the
+        # wind-down).
         cf.set_items([item("CF-1", state="closed", close={"reason": "fixed", "ref": "fabricated-ref"})],
                      version=2)
         cf.set_turn_state({})
         check("close/fixed-fabricated-ref-holds", _verdict(cfstop()), "block2")
-        # B3: a `fixed` close whose ref resolves to a REAL commit (HEAD) is terminal -> stop ALLOWS (warn)
-        cf.set_items([item("CF-1", state="closed", close={"reason": "fixed", "ref": _cfhead})],
+        # B3 matching-commit-terminal (declared paths): a `fixed` close whose commit's CHANGED SET
+        # intersects the item's declared close.paths is bound to the item -> terminal -> stop ALLOWS
+        # (warn). The seed commit changed seed.txt, so CF-1 declaring paths ["seed.txt"] reconciles.
+        cf.set_items([item("CF-1", state="closed",
+                           close={"reason": "fixed", "ref": _cfhead, "paths": ["seed.txt"]})],
                      version=2)
         cf.set_turn_state({})
         check("close/fixed-verified-terminal", _verdict(cfstop()), "warn")
@@ -1570,6 +1641,33 @@ def main(report_path=None):
         check("close/fixed-terminal-in-table",
               any(r["class"] == "terminal" and r["id"] == "CF-1" for r in cfrows[-1]["disposition"]),
               True)
+        # B3 unrelated-real-commit-holds (the codex residual): a `fixed` close on a REAL commit that is
+        # UNRELATED to the item (no declared paths to reconcile, and the commit message does not name the
+        # item id) cannot be bound to the item, so it is HELD cannot-evaluate -> the stop DENIES, never
+        # accepted merely because the ref resolves to some commit.
+        cf.set_items([item("CF-2", state="closed", close={"reason": "fixed", "ref": _cfhead})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-unrelated-commit-holds", _verdict(cfstop()), "block2")
+        # B3 declared-paths mismatch: a commit that does NOT touch the item's declared paths is unrelated
+        # -> closed-unjustified + actionable -> the stop DENIES.
+        cf.set_items([item("CF-3", state="closed",
+                           close={"reason": "fixed", "ref": _cfhead, "paths": ["nowhere/x.py"]})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-declared-paths-mismatch-actionable", _verdict(cfstop()), "block2")
+        # B3 matching-commit-terminal (identity in the commit message): with NO declared paths, a commit
+        # whose message NAMES the item id binds it by identity -> terminal -> stop ALLOWS (warn).
+        (cf.root / "unrelated.txt").write_text("x\n", encoding="utf-8")
+        cf._git("add", "unrelated.txt")
+        cf._git("-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fix CF-9: land the guardrail")
+        _cfnamed = subprocess.run(["git", "-C", str(cf.root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        cf.set_items([item("CF-9", state="closed", close={"reason": "fixed", "ref": _cfnamed})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-matching-commit-terminal", _verdict(cfstop()), "warn")
 
         # ---------- GD-164 B5: _orch_tool_succeeded is strict (no A2 orphan on a failed schedule) ----
         check("a2/succeeded-false-on-FAILED-string",
@@ -1584,6 +1682,19 @@ def main(report_path=None):
               aiqt_hooks._orch_tool_succeeded({"note": "scheduled maybe"}), False)
         check("a2/succeeded-true-on-ok-true",
               aiqt_hooks._orch_tool_succeeded({"ok": True}), True)
+        # B5 residual: a POSITIVE-SHAPED field beside NEGATED-success content registers NO wake (strict
+        # positive confirmation; a positive field never overrides contradicting content). The two codex
+        # counterexamples:
+        check("a2/succeeded-false-on-ok-true-negated-content",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "Wake was not scheduled"}]}), False)
+        check("a2/succeeded-false-on-is-error-false-unsuccessful-content",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"is_error": False, "content": [{"text": "Request was unsuccessful"}]}), False)
+        # a genuinely positive content beside a positive field still registers (no false negative)
+        check("a2/succeeded-true-on-ok-true-positive-content",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "Wake scheduled for 5pm"}]}), True)
 
         # ---------- GD-164: the prep discipline ----------
         p2 = Fixture(tmp, "prep")
@@ -1621,6 +1732,27 @@ def main(report_path=None):
                                                       prep_ref="PD-9"))], version=2)
         p2.set_turn_state({})
         check("prep/declined-row-actionable", _verdict(p2stop()), "block2")
+        # B4 residual: pending is established by an ALLOWLISTED pending status, NOT by the ABSENCE of a
+        # resolved token. A row the OLD denylist never enumerated (APPROVED, ACCEPTED, DECIDED) is a
+        # RESOLVED decision that holds NOTHING -> the item stays ACTIONABLE (deny), even with a resolving
+        # prep_ref. These are the codex counterexamples the denylist let slip through as pending.
+        for _st, _cid in (("APPROVED", "prep/approved-row-actionable"),
+                          ("ACCEPTED", "prep/accepted-row-actionable"),
+                          ("DECIDED", "prep/decided-row-actionable")):
+            p2.pending.write_text("| PD-9 | 2026-01-01 | which db | {} |\n".format(_st),
+                                  encoding="utf-8")
+            p2.set_items([item("H-2r", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                          prep_ref="PD-9"))], version=2)
+            p2.set_turn_state({})
+            check(_cid, _verdict(p2stop()), "block2")
+        # B4 prep-ref-to-resolved-row-actionable: the DECISION row is genuinely pending, but the prep_ref
+        # points to a RESOLVED row -> the prep is not attested against a pending row -> ACTIONABLE (deny).
+        p2.pending.write_text("| PD-9 | 2026-01-01 | which db | RAISED |\n"
+                              "| PD-10 | 2026-01-02 | prep note | APPROVED |\n", encoding="utf-8")
+        p2.set_items([item("H-2p", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                      prep_ref="PD-10"))], version=2)
+        p2.set_turn_state({})
+        check("prep/prep-ref-to-resolved-row-actionable", _verdict(p2stop()), "block2")
         p2.pending.write_text("| PD-9 | 2026-01-01 | which db | RAISED |\n", encoding="utf-8")
         # prep_complete true but blank/missing prep_ref -> ENUMERATOR_ERROR -> DENY
         p2.enum_payload.write_text(json.dumps(
@@ -1662,6 +1794,31 @@ def main(report_path=None):
                      version=2, keep_checkpoint=True)
         k2.set_turn_state({})
         check("ckpt164/eligible-to-closed-terminal-leaves", _verdict(k2stop()), "warn")
+        # B2 residual: EXACTLY ONE classification per indexed id. A closed-unjustified transition puts an
+        # id in ACTIONABLE (classify: a declared dispositions register with the WRONG ref) while the
+        # anti-shrinkage checkpoint ALSO injects a CANNOT-EVALUATE hold for the SAME id. The emitted
+        # enumeration must dedup so item_count == the authoritative unique-id count (1), never double-count.
+        kd = Fixture(tmp, "ckpt164-dedup")
+        kdstop = lambda: aiqt_hooks.orch_stop_guard(kd.payload("Stop"))
+        kd.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                        [{"item": "K-9", "ground": "no-fix-needed", "ref": "R-OK",
+                          "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        kd.set_items([item("K-9")], version=2)                      # window 1: eligible
+        kd.set_turn_state({})
+        kdstop()
+        kd.set_items([item("K-9", state="closed",
+                           close={"reason": "no-fix-needed", "ref": "WRONG"})],
+                     version=2, keep_checkpoint=True)               # window 2: closed-unjustified
+        kd.set_turn_state({})
+        check("ckpt164/dedup-transition-denies", _verdict(kdstop()), "block2")
+        kdsd = Path(aiqt_hooks._state_dir_from_registry(
+            str(kd.root), aiqt_hooks._orch_registry(str(kd.root))[1]))
+        kdrows = [json.loads(x) for x in
+                  (kdsd / "liveness-evaluations.jsonl").read_text(encoding="utf-8").splitlines()
+                  if x.strip()]
+        check("ckpt164/dedup-item-count-unique", kdrows[-1]["item_count"], 1)
+        check("ckpt164/dedup-single-row-for-id",
+              sum(1 for r in kdrows[-1]["disposition"] if r["id"] == "K-9"), 1)
 
         # ---------- GD-164: the wait boundary ----------
         w = Fixture(tmp, "wait")
@@ -1713,16 +1870,25 @@ def main(report_path=None):
         w.set_turn_state({})
         check("wait/cannot-evaluate-denies", _verdict(waitcall("collect WA-1")), "deny")
         (wsd / "dispatch-ledger.jsonl").unlink()
-        # anti-wedge: repeated same-basis wait denials past the cap -> ALLOW_WITH_FINDINGS + forced-exit
-        w.set_items([item("WA-9")], version=2)   # actionable -> DENY basis
-        # prime the schedule counter to the cap on this exact basis
+        # anti-wedge (the B1 SANCTIONED single-live-waiting-row wedge): a NAMED LIVE WAITING ROW plus an
+        # actionable item, denied repeatedly on an unchanged basis past the cap -> ALLOW_WITH_FINDINGS +
+        # forced-exit. The relief requires the live waiting target (an absent/unnamed target denies, per
+        # wait/unnamed-target-denies above); it is NOT the bare-actionable relief the old code granted.
+        (wsd / "dispatch-ledger.jsonl").write_text(json.dumps(
+            {"ts": now_iso(1), "event": "launch", "task_id": "T-1", "tool": "Bash",
+             "wake": True}) + "\n", encoding="utf-8")
+        w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"}),
+                     item("WA-9")], version=2)   # one live waiting (named), one actionable -> DENY basis
+        # prime the schedule counter to the cap on this exact basis (wait naming the live waiting row)
         _ctx, _ts, _basis = aiqt_hooks._orch_build_ctx(
             aiqt_hooks._orch_registry(str(w.root))[1], str(w.root), "wait",
-            w.payload("PreToolUse", "Bash", {"command": "x"}), wake_text="x", record_checkpoint=False)
+            w.payload("PreToolUse", "Bash", {"command": "collect WA-1"}),
+            wake_text="collect WA-1", record_checkpoint=False)
         w.set_turn_state({"schedule_denials": 3, "schedule_basis": _basis})
-        check("wait/cap-relief-warns", _verdict(waitcall("x")), "warn")
+        check("wait/cap-relief-warns", _verdict(waitcall("collect WA-1")), "warn")
         check("wait/cap-relief-forced-exit",
               (wsd / "forced-exit.jsonl").exists(), True)
+        (wsd / "dispatch-ledger.jsonl").unlink()
         # an adopter registry with NO wait_tools key -> byte-identical inertness (allow)
         _wr2 = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
         del _wr2["wait_tools"]

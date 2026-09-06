@@ -40,6 +40,7 @@ import ast
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -204,6 +205,18 @@ def lint_python(name, src):
     return findings
 
 
+def _run_validator(vpath, script_path):
+    """B7: RUN the declared validator against the script and return its exit code, or None when it
+    could not be executed at all (existence is NOT coverage). The validator is a maintainer-declared
+    registry entry (same trust surface as the enumerator argv); it is invoked with the script path as
+    its single argument and given a bounded timeout so a hung validator cannot wedge the gate."""
+    try:
+        r = subprocess.run([vpath, script_path], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.returncode
+
+
 def check_one(name, src, language, validator):
     """Returns (covered:bool, findings:list, cannot_evaluate:str|None)."""
     if language == "posix-shell":
@@ -249,16 +262,28 @@ def run(root, reg):
         except OSError as exc:
             cannot.append("{}: declared script is absent or unreadable ({})".format(rel, exc))
             continue
-        # B7: a DECLARED validator must exist and be readable; a missing one is cannot-evaluate, never a
-        # silent defer (the gate cannot claim to have covered a script via a validator that is not there).
+        # B7: a DECLARED validator must exist AND be RUN; existence is not coverage. A missing validator
+        # is cannot-evaluate; a validator that cannot be executed, or that returns a non-zero exit (it did
+        # not pass the script), is cannot-evaluate fail-closed (chkfcl) - never a silent defer/pass.
         if validator:
             vpath = aiqt_hooks._orch_path(root, validator)
             if not vpath or not os.path.exists(vpath):
                 cannot.append("{}: declared validator {!r} is absent (cannot-evaluate)".format(
                     rel, validator))
                 continue
+            rc = _run_validator(vpath, path)
+            if rc is None:
+                cannot.append("{}: declared validator {!r} could not be executed (cannot-evaluate; "
+                              "existence is not coverage)".format(rel, validator))
+                continue
+            if rc != 0:
+                cannot.append("{}: declared validator {!r} returned non-zero exit {} (the script did "
+                              "not pass its declared validation; fail-closed)".format(rel, validator, rc))
+                continue
+            covered.append(rel)      # the validator RAN and passed: it is the coverage for this script
+            continue
         lang = _language_for(path, language)
-        ok, fnd, ce = check_one(rel, src, lang, validator)
+        ok, fnd, ce = check_one(rel, src, lang, None)
         if ce:
             cannot.append(ce)
             continue
@@ -374,6 +399,29 @@ def self_test():
         code3, result3 = run(str(tmp), reg3)
         if code3 != 2 or not any("validator" in c for c in result3.get("cannot_evaluate", [])):
             fails.append("a declared-but-absent validator must fail closed (wd/missing-validator-fails-closed)")
+        # B7 wd/validator-executed-*: existence is NOT coverage - the declared validator is RUN and its
+        # exit honored. A validator that REJECTS the script (non-zero exit) is cannot-evaluate fail-closed;
+        # one that PASSES it (exit 0) is the coverage. (The old code credited a validator that merely
+        # EXISTED, so a /bin/false-style validator passed - the exact B7 residual codex flagged.)
+        import stat as _stat
+        vfail = tmp / "validator-fail.sh"
+        vfail.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        vfail.chmod(vfail.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+        vpass = tmp / "validator-pass.sh"
+        vpass.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        vpass.chmod(vpass.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+        code_vf, res_vf = run(str(tmp), {"coordination_scripts": [
+            {"path": "coord.rb", "language": "ruby", "validator": str(vfail)}]})
+        if code_vf != 2 or not any("non-zero" in c for c in res_vf.get("cannot_evaluate", [])):
+            fails.append("a declared validator returning non-zero must fail closed "
+                         "(wd/validator-executed-fail-closed), got code={} {}".format(
+                             code_vf, res_vf.get("cannot_evaluate")))
+        code_vp, res_vp = run(str(tmp), {"coordination_scripts": [
+            {"path": "coord.rb", "language": "ruby", "validator": str(vpass)}]})
+        if code_vp != 0 or res_vp["covered"] != ["coord.rb"]:
+            fails.append("a declared validator that PASSES the script covers it "
+                         "(wd/validator-executed-passes), got code={} covered={}".format(
+                             code_vp, res_vp["covered"]))
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

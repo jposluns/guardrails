@@ -174,7 +174,7 @@ def _close_surface(backlog_path, item_id, reason, ref):
     return (True, "closed {} ({}={})".format(item_id, reason, ref))
 
 
-def route(root, reg, item_id, ground, ref, check_ref, backlog):
+def route(root, reg, item_id, ground, ref, check_ref, backlog, paths=None):
     sd = aiqt_hooks._state_dir_from_registry(root, reg)
     if ground not in aiqt_hooks._ORCH_CLOSE_REASONS:
         _event(root, sd, "refused", "unknown ground {!r} (not in the closed vocabulary)".format(ground))
@@ -250,21 +250,33 @@ def route(root, reg, item_id, ground, ref, check_ref, backlog):
                   file=sys.stderr)
             return 2
     else:
-        # ground == "fixed": B3 - NOT a self-authored bypass. It carries no DS/DF register row, but its
-        # ref MUST resolve to a real commit against the fix-attestation rail (vfxcmt/evgcmp), so a
-        # fabricated or absent ref is refused (cannot-evaluate) rather than silently closing the surface.
-        resolves, consultable = aiqt_hooks._orch_commit_resolves(root, ref)
+        # ground == "fixed": B3 - NOT a self-authored bypass, and NOT terminal merely because the ref
+        # resolves to SOME commit. The cited commit must CONTAIN the fix for THIS item: its changed set
+        # must touch the item's declared paths (--paths or the item's close.paths), or the commit message
+        # must name the item id (its identity). A fabricated/unrelated commit is refused; a real commit
+        # that cannot be reconciled to the item (no declared paths, and the message does not name it) is
+        # HELD (cannot-evaluate), never accepted.
+        declared_paths = paths if paths else (it.get("close") or {}).get("paths")
+        verdict, consultable = aiqt_hooks._orch_commit_fixes_item(root, ref, item_id, declared_paths)
         if not consultable:
             _event(root, sd, "refused", "fix-attestation rail unavailable for fixed close of {}"
                    .format(item_id))
             print("orch_route: could not consult the fix-attestation rail (git) to verify the fixed "
                   "close ref; held (cannot-evaluate)", file=sys.stderr)
             return 2
-        if not resolves:
+        if verdict == "unreconcilable":
             _event(root, sd, "refused",
-                   "fixed close ref {!r} does not resolve to a real commit".format(ref))
-            print("orch_route: a 'fixed' close requires --ref to name a real commit (vfxcmt); {!r} "
-                  "resolves to no commit, so the close is refused".format(ref), file=sys.stderr)
+                   "fixed close commit {!r} cannot be reconciled to item {}".format(ref, item_id))
+            print("orch_route: a 'fixed' close on commit {!r} cannot be bound to {} (declare --paths the "
+                  "fix touched, or name {} in the commit message); held (vfxcmt)".format(
+                      ref, item_id, item_id), file=sys.stderr)
+            return 2
+        if verdict != "terminal":
+            _event(root, sd, "refused",
+                   "fixed close ref {!r} does not contain the fix for {}".format(ref, item_id))
+            print("orch_route: a 'fixed' close requires --ref to name a commit that contains the fix for "
+                  "{} (vfxcmt); {!r} is unrelated or resolves to no commit, so the close is refused"
+                  .format(item_id, ref), file=sys.stderr)
             return 2
 
     if backlog:
@@ -289,6 +301,8 @@ def main():
     ap.add_argument("--ref", required=True)
     ap.add_argument("--check-ref", dest="check_ref", default="")
     ap.add_argument("--backlog", default=None)
+    ap.add_argument("--paths", nargs="+", default=None,
+                    help="repo-relative path(s) the fixed commit touched, binding it to the item (B3)")
     ap.add_argument("--title", default=None)   # accepted for symmetry with the surface grammar; unused
     a = ap.parse_args(argv)
     root = str(repo_root())
@@ -303,7 +317,7 @@ def main():
         surfaces = route_cfg.get("surfaces") if isinstance(route_cfg.get("surfaces"), list) else []
         if len(surfaces) == 1:
             backlog = aiqt_hooks._orch_path(root, surfaces[0])
-    return route(root, reg, a.item, a.ground, a.ref, a.check_ref, backlog)
+    return route(root, reg, a.item, a.ground, a.ref, a.check_ref, backlog, paths=a.paths)
 
 
 def self_test():
@@ -334,6 +348,9 @@ def self_test():
                    {"id": "C-2", "state": "open", "granted": True}])
         reg = {"version": 1, "enumerator": {"argv": ["/bin/sh", str(enum)]},
                "dispositions": str(tmp / "dispositions.jsonl"),
+               # test-hermeticity: pin the machine-written state dir INSIDE the fixture tmp root, so the
+               # guard-events/snapshot writes never touch ambient ${XDG_STATE_HOME:-~/.local/state}.
+               "state_dir": str(tmp / "state"),
                "route": {"surfaces": ["backlog.md"]}}
         (tmp / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
         root = str(tmp)
@@ -374,7 +391,8 @@ def self_test():
         # (f) a WHITESPACE-only ref is refused for every ground (exit 2)
         if route(root, reg, "C-2", "fixed", "   ", "", str(backlog)) != 2:
             fails.append("a whitespace-only ref should refuse (exit 2)")
-        # (g) fixed HAPPY path: a ref that resolves to a REAL commit routes (exit 0) and closes it
+        # (g) fixed HAPPY path: B3 - a real commit BOUND to the item by declared --paths that its changed
+        # set touches routes (exit 0) and closes it. (The seed commit changed seed.txt.)
         for k, v in (("user.email", "t@t"), ("user.name", "t")):
             subprocess.run(["git", "-C", str(tmp), "config", k, v], capture_output=True, check=False)
         subprocess.run(["git", "-C", str(tmp), "add", "-A"], capture_output=True, check=False)
@@ -383,11 +401,45 @@ def self_test():
         head = subprocess.run(["git", "-C", str(tmp), "rev-parse", "HEAD"],
                               capture_output=True, text=True, check=False)
         real_sha = head.stdout.strip()
-        rc = route(root, reg, "C-2", "fixed", real_sha, "", str(backlog))
+        rc = route(root, reg, "C-2", "fixed", real_sha, "", str(backlog), paths=["seed.txt"])
         if rc != 0:
-            fails.append("fixed with a real commit ref should route (exit 0), got {}".format(rc))
+            fails.append("fixed bound by declared paths should route (exit 0), got {}".format(rc))
         if "close:fixed={}".format(real_sha) not in backlog.read_text(encoding="utf-8"):
             fails.append("fixed happy path did not write the close annotation")
+        # (g2) B3 reconciliation verdicts (direct against _orch_commit_fixes_item): a REAL commit whose
+        # message does NOT name the item and with NO declared paths is UNRECONCILABLE (held); declared
+        # paths the commit does not touch are UNRELATED; matching declared paths, or the item id in the
+        # message, are TERMINAL.
+        vr, okc2 = aiqt_hooks._orch_commit_fixes_item(str(tmp), real_sha, "C-9", None)
+        if not okc2 or vr != "unreconcilable":
+            fails.append("a real commit not naming the item, no paths, must be unreconcilable, got {}".format(vr))
+        vr, _ = aiqt_hooks._orch_commit_fixes_item(str(tmp), real_sha, "C-9", ["nowhere/x.py"])
+        if vr != "unrelated":
+            fails.append("declared paths the commit does not touch must be unrelated, got {}".format(vr))
+        vr, _ = aiqt_hooks._orch_commit_fixes_item(str(tmp), real_sha, "C-9", ["seed.txt"])
+        if vr != "terminal":
+            fails.append("declared paths the commit touches must be terminal, got {}".format(vr))
+        # (g3) a commit whose MESSAGE names the item id binds it by identity (no declared paths) -> terminal
+        (tmp / "extra.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(tmp), "add", "extra.txt"], capture_output=True, check=False)
+        subprocess.run(["git", "-C", str(tmp), "commit", "-q", "-m", "fix C-9: land it"],
+                       capture_output=True, check=False)
+        named_sha = subprocess.run(["git", "-C", str(tmp), "rev-parse", "HEAD"],
+                                   capture_output=True, text=True, check=False).stdout.strip()
+        vr, _ = aiqt_hooks._orch_commit_fixes_item(str(tmp), named_sha, "C-9", None)
+        if vr != "terminal":
+            fails.append("a commit whose message names the item id must be terminal, got {}".format(vr))
+        # (g4) route-level: a `fixed` close on a real commit that cannot be reconciled to the item (no
+        # paths, message does not name it) is REFUSED (exit 2), never accepted merely because it resolves.
+        write_aei([{"id": "C-1", "state": "open", "granted": True},
+                   {"id": "C-3", "state": "open", "granted": True}])
+        before_g4 = backlog.read_text(encoding="utf-8")
+        if route(root, reg, "C-3", "fixed", real_sha, "", str(backlog)) != 2:
+            fails.append("a fixed close on an unrelated real commit must refuse (exit 2)")
+        if backlog.read_text(encoding="utf-8") != before_g4:
+            fails.append("a refused unreconcilable fixed close must NOT touch the surface")
+        write_aei([{"id": "C-1", "state": "open", "granted": True},
+                   {"id": "C-2", "state": "open", "granted": True}])
         # (h) _close_surface REFUSES a DIVERGENT existing close (never silently overwrites it), while an
         # exact re-statement of the same close is idempotently allowed.
         okc, _d = _close_surface(str(backlog), "C-2", "no-fix-needed", "R-2")

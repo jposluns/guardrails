@@ -90,12 +90,14 @@ def _covered_keys(text, prefix, has_ground):
     return (keys, None)
 
 
-def join(backlog_text, ds_text, df_text, fixed_verify=None):
+def join(backlog_text, ds_text, df_text, fixed_reconcile=None):
     """Pure join over ONE committed surface. Returns (findings, cannot_evaluate, covered_terminals).
-    fixed_verify(ref) -> (resolves, consultable): the B3 fix-attestation rail. When it is None the join
+    fixed_reconcile(item_id, ref, declared_paths) -> (verdict, consultable): the B3 fix-attestation
+    rail, binding the cited commit to the ITEM (not merely resolving it). When it is None the join
     cannot verify a `fixed` close, so a `fixed` terminal is cannot-evaluate (held), never accepted
-    unconditionally; a ref that does not resolve to a real commit is a finding; a rail that cannot be
-    consulted is cannot-evaluate."""
+    unconditionally. verdict "terminal" is bound (justified); "unrelated"/non-resolving is a finding;
+    "unreconcilable" (a real commit that cannot be bound to the item: no declared paths, and the commit
+    does not name the item id) is cannot-evaluate (held), never accepted merely because it resolves."""
     findings, cannot, terminals = [], [], []
     items, errors = aei_backlog_md.parse(backlog_text, version=2)
     if errors:
@@ -118,18 +120,24 @@ def join(backlog_text, ds_text, df_text, fixed_verify=None):
         reason, ref = close.get("reason"), close.get("ref")
         terminals.append((it["id"], reason, ref))
         if reason == "fixed":
-            # B3: `fixed` is not accepted unconditionally; its ref must resolve to a real commit.
-            if fixed_verify is None:
+            # B3: `fixed` is not accepted unconditionally; the cited commit must CONTAIN the fix for THIS
+            # item (its changed set touches the item's declared paths, or the commit names the item id).
+            if fixed_reconcile is None:
                 cannot.append("{} is closed (fixed) but the fix-attestation rail is unavailable to "
                               "verify {!r}".format(it["id"], ref))
                 continue
-            resolves, consultable = fixed_verify(ref)
+            verdict, consultable = fixed_reconcile(it["id"], ref, close.get("paths"))
             if not consultable:
                 cannot.append("{} is closed (fixed) but the fix-attestation rail could not be "
                               "consulted for {!r}".format(it["id"], ref))
-            elif not resolves:
-                findings.append("{} is closed (fixed) with a ref {!r} that resolves to no committed "
-                                "commit (vfxcmt)".format(it["id"], ref))
+            elif verdict == "unreconcilable":
+                cannot.append("{} is closed (fixed) with a commit {!r} that cannot be reconciled to the "
+                              "item (no declared paths, and the commit does not name the item); held "
+                              "(vfxcmt)".format(it["id"], ref))
+            elif verdict != "terminal":
+                findings.append("{} is closed (fixed) with a ref {!r} that does not contain the fix for "
+                                "this item (vfxcmt: an unrelated or non-resolving commit)".format(
+                                    it["id"], ref))
             continue
         if reason in ("no-fix-needed", "not-buildable"):
             if ds_keys is None:
@@ -150,6 +158,48 @@ def join(backlog_text, ds_text, df_text, fixed_verify=None):
     return (findings, cannot, terminals)
 
 
+def resolve_surfaces(reg):
+    """Return (surfaces_list, error_or_None). B8/setcmp: a DECLARED-but-malformed route (non-dict) or
+    route.surfaces (non-list) is an ERROR (cannot-evaluate), never silently coerced to a "nothing to
+    join" clean pass. gemini FINDING 2: when BOTH route.surfaces AND a legacy backlog key are declared,
+    the backlog is UNIONED in (order-preserving dedup), so a close on the backlog surface cannot bypass
+    the join."""
+    raw_route = reg.get("route")
+    if raw_route is not None and not isinstance(raw_route, dict):
+        return (None, "route is declared but is not a table/dict ({!r})".format(
+            type(raw_route).__name__))
+    route = raw_route if isinstance(raw_route, dict) else {}
+    raw_surfaces = route.get("surfaces")
+    if raw_surfaces is not None and not isinstance(raw_surfaces, list):
+        return (None, "route.surfaces is declared but is not a list ({!r})".format(
+            type(raw_surfaces).__name__))
+    surfaces = list(raw_surfaces) if isinstance(raw_surfaces, list) else []
+    if reg.get("backlog") is not None:
+        surfaces = surfaces + [reg.get("backlog")]
+    seen, ordered = set(), []
+    for s in surfaces:
+        key = s if isinstance(s, str) else json.dumps(s, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(s)
+    return (ordered, None)
+
+
+def resolve_register_rel(reg, key):
+    """Return (rel_or_None, declared_bool, error_or_None) for a dispositions/deferrals register spec.
+    B8/chkfcl: a DECLARED-but-malformed spec (a dict without a usable path, or a blank string) is an
+    ERROR (cannot-evaluate), never a silent skip that would let an unjustified terminal escape for want
+    of the register; an UNDECLARED register is (None, False, None)."""
+    spec = reg.get(key)
+    if spec is None:
+        return (None, False, None)
+    rel = spec.get("path") if isinstance(spec, dict) else spec
+    if not isinstance(rel, str) or not rel.strip():
+        return (None, True, "{} register is declared but has no usable path ({!r})".format(key, spec))
+    return (rel, True, None)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--self-test", action="store_true")
@@ -165,30 +215,22 @@ def main():
         print("check_liveness_joins: registry unreadable ({}); cannot-evaluate".format(reg),
               file=sys.stderr)
         return 2
-    route = reg.get("route") if isinstance(reg.get("route"), dict) else {}
-    raw_surfaces = route.get("surfaces")
-    if raw_surfaces is not None and not isinstance(raw_surfaces, list):
-        # B8: a DECLARED-but-malformed route.surfaces fails CLOSED (cannot-evaluate), never a silent
-        # "nothing to join" that would let an unjustified terminal on an unreadable surface escape.
-        print("CANNOT-EVALUATE: route.surfaces is declared but is not a list ({!r})".format(
-            type(raw_surfaces).__name__), file=sys.stderr)
+    surfaces, serr = resolve_surfaces(reg)
+    if serr is not None:
+        print("CANNOT-EVALUATE: " + serr, file=sys.stderr)
         return 2
-    surfaces = list(raw_surfaces) if isinstance(raw_surfaces, list) else []
-    if not surfaces and reg.get("backlog"):
-        surfaces = [reg.get("backlog")]
     if not surfaces:
         print("check_liveness_joins: no route.surfaces/backlog declared; nothing to join")
         return 0
 
-    def _reg_rel(key):
-        spec = reg.get(key)
-        return spec.get("path") if isinstance(spec, dict) else spec
-
     ds_text = df_text = None
     for key, sink in (("dispositions", "ds"), ("deferrals", "df")):
-        rel = _reg_rel(key)
-        if not rel:
-            continue
+        rel, declared, rerr = resolve_register_rel(reg, key)
+        if rerr is not None:
+            print("CANNOT-EVALUATE: " + rerr, file=sys.stderr)
+            return 2
+        if not declared:
+            continue                     # genuinely not declared: nothing to join for this register
         text, d = _git_show(root, rel)
         if text is None:
             print("CANNOT-EVALUATE: committed {} register {}: {}".format(key, rel, d), file=sys.stderr)
@@ -198,8 +240,8 @@ def main():
         else:
             df_text = text
 
-    def _fixed_verify(ref):
-        return aiqt_hooks._orch_commit_resolves(root, ref)
+    def _fixed_reconcile(item_id, ref, declared_paths):
+        return aiqt_hooks._orch_commit_fixes_item(root, ref, item_id, declared_paths)
 
     all_findings, all_cannot, all_terminals = [], [], []
     # B8: EVERY declared surface is joined (setcmp), not only surfaces[0]; an unjustified terminal in
@@ -212,7 +254,8 @@ def main():
         if backlog_text is None:
             all_cannot.append("committed backlog {}: {}".format(rel, d))
             continue
-        findings, cannot, terminals = join(backlog_text, ds_text, df_text, fixed_verify=_fixed_verify)
+        findings, cannot, terminals = join(backlog_text, ds_text, df_text,
+                                           fixed_reconcile=_fixed_reconcile)
         all_findings.extend("[{}] {}".format(rel, f) for f in findings)
         all_cannot.extend("[{}] {}".format(rel, c) for c in cannot)
         all_terminals.extend((rel, i, r, ref) for i, r, ref in terminals)
@@ -259,34 +302,70 @@ def self_test():
                  "status": "accepted", "ts": "2026-09-01T00:00:00+00:00", "check_ref": "seed.txt"}])
     df = chain([{"_p": "DF-", "item": "A-3", "ref": "PD-3", "status": "accepted",
                  "ts": "2026-09-01T00:00:00+00:00", "check_ref": "seed.txt"}])
-    # the fix-attestation rail stub: commit-x resolves, anything else does not (git WAS consultable)
-    fv = lambda ref: (ref == "commit-x", True)
-    findings, cannot, terminals = join(backlog, ds, df, fixed_verify=fv)
+    # the fix-attestation reconcile stub: commit-x is BOUND to its item (terminal); "fabricated" is a
+    # non-resolving/unrelated ref; "unrelated-real" is a real-but-unrelated commit that cannot be bound
+    # to the item (unreconcilable -> held). git WAS consultable in each case.
+    def fr(item_id, ref, paths):
+        if ref == "commit-x":
+            return ("terminal", True)
+        if ref == "unrelated-real":
+            return ("unreconcilable", True)
+        return ("unrelated", True)
+    findings, cannot, terminals = join(backlog, ds, df, fixed_reconcile=fr)
     if findings or cannot:
         fails.append("justified/fixed join should pass: findings={} cannot={}".format(findings, cannot))
     # lj/unjustified-terminal-fails: A-1 closed no-fix-needed but no covering DS row
-    findings, cannot, _ = join(backlog, chain([]), df, fixed_verify=fv)
+    findings, cannot, _ = join(backlog, chain([]), df, fixed_reconcile=fr)
     if not findings:
         fails.append("an unjustified terminal must fail (lj/unjustified-terminal-fails)")
     # lj/unreadable-register-fails-closed: a malformed register chain
-    findings, cannot, _ = join(backlog, "not json\n", df, fixed_verify=fv)
+    findings, cannot, _ = join(backlog, "not json\n", df, fixed_reconcile=fr)
     if not cannot:
         fails.append("a malformed committed register must fail closed (lj/unreadable-register-fails-closed)")
-    # B3 lj/fixed-fabricated-ref-fails: a fixed close whose ref resolves to no commit is a finding
+    # B3 lj/fixed-fabricated-ref-fails: a fixed close whose ref does not bind to the item is a finding
     fab = "- Z-1 [x] z :: close:fixed=fabricated\n"
-    findings, cannot, _ = join(fab, chain([]), chain([]), fixed_verify=fv)
+    findings, cannot, _ = join(fab, chain([]), chain([]), fixed_reconcile=fr)
     if not findings:
-        fails.append("a fixed close with a non-resolving ref must fail (lj/fixed-fabricated-ref-fails)")
+        fails.append("a fixed close with a non-resolving/unrelated ref must fail (lj/fixed-fabricated-ref-fails)")
+    # B3 lj/fixed-unrelated-real-commit-holds: a REAL but UNRELATED commit that cannot be reconciled to
+    # the item is HELD (cannot-evaluate), never accepted merely because it resolves (the codex residual)
+    unrel = "- Z-2 [x] z :: close:fixed=unrelated-real\n"
+    findings, cannot, _ = join(unrel, chain([]), chain([]), fixed_reconcile=fr)
+    if not cannot:
+        fails.append("a real-but-unrelated fixed commit must be cannot-evaluate (lj/fixed-unrelated-real-commit-holds)")
     # B3 lj/fixed-rail-unavailable-holds: no rail -> cannot-evaluate (held), never accepted
-    findings, cannot, _ = join(fab, chain([]), chain([]), fixed_verify=None)
+    findings, cannot, _ = join(fab, chain([]), chain([]), fixed_reconcile=None)
     if not cannot:
         fails.append("a fixed close with no rail must be cannot-evaluate (lj/fixed-rail-unavailable-holds)")
     # B8 lj/blank-line-register-fails-closed: a register with an interior blank line reads unreadable,
     # matching the engine reader (never a silently-skipped clean pass)
     ds_blank = ds.rstrip("\n") + "\n\n"
-    findings, cannot, _ = join(backlog, ds_blank, df, fixed_verify=fv)
+    findings, cannot, _ = join(backlog, ds_blank, df, fixed_reconcile=fr)
     if not cannot:
         fails.append("a register with a blank line must fail closed (lj/blank-line-register-fails-closed)")
+    # B8 lj/malformed-route-fails-closed: a declared-but-non-dict route is cannot-evaluate, never {}
+    if resolve_surfaces({"route": "malformed-declared-route"})[1] is None:
+        fails.append("a declared non-dict route must fail closed (lj/malformed-route-fails-closed)")
+    # B8 lj/malformed-surfaces-fails-closed: a declared-but-non-list route.surfaces is cannot-evaluate
+    if resolve_surfaces({"route": {"surfaces": "x.md"}})[1] is None:
+        fails.append("a declared non-list route.surfaces must fail closed (lj/malformed-surfaces-fails-closed)")
+    # gemini FINDING 2 lj/backlog-and-surfaces-both-covered: both declared -> BOTH joined (union)
+    both, berr = resolve_surfaces({"route": {"surfaces": ["other.md"]}, "backlog": "SCOPE.md"})
+    if berr is not None or "other.md" not in both or "SCOPE.md" not in both:
+        fails.append("both route.surfaces AND backlog must be covered (lj/backlog-and-surfaces-both-covered), got {}".format(both))
+    # a surface declared in both is joined ONCE (order-preserving dedup)
+    dedup, _e = resolve_surfaces({"route": {"surfaces": ["SCOPE.md"]}, "backlog": "SCOPE.md"})
+    if dedup != ["SCOPE.md"]:
+        fails.append("a surface declared in both must dedup (lj/surface-dedup), got {}".format(dedup))
+    # B8 lj/malformed-register-path-fails-closed: a declared register spec with no usable path is
+    # cannot-evaluate, never a silent skip
+    if resolve_register_rel({"dispositions": {"weak_proof_accepted": True}}, "dispositions")[2] is None:
+        fails.append("a declared register with no usable path must fail closed (lj/malformed-register-path-fails-closed)")
+    if resolve_register_rel({"deferrals": "   "}, "deferrals")[2] is None:
+        fails.append("a declared register with a blank path must fail closed (lj/blank-register-path-fails-closed)")
+    # an UNDECLARED register is a clean skip (not an error)
+    if resolve_register_rel({}, "dispositions") != (None, False, None):
+        fails.append("an undeclared register must be a clean skip, not an error")
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

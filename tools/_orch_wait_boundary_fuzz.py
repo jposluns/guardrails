@@ -50,56 +50,91 @@ import aiqt_hooks  # noqa: E402
 _SEED = 1729   # a fixed seed keeps the sweep deterministic (no ambient state feeds a verdict)
 
 
-def _is_single_valid_allow(ctx):
-    """The ONE case a non-escape wait ALLOW is permitted: enumeration ok, nothing actionable, nothing
-    cannot-evaluate, at least one waiting row, the wait names a live waiting row, and not cap-relieved."""
-    return (ctx.get("enum_status") == "ok"
-            and not ctx.get("cannot_evaluate")
-            and not ctx.get("actionable")
-            and bool(ctx.get("waiting"))
-            and ctx.get("wake_named") is True)
-
-
-def _is_sanctioned_cap_relief(ctx):
-    """The ONLY case an ALLOW_WITH_FINDINGS is sanctioned on the wait/schedule path: the repeated-
-    same-basis ACTIONABLE-work wedge (a farmed guard trains its own bypass), recorded as a forced exit.
-    It requires an OK enumeration, NO cannot-evaluate item, at least one ACTIONABLE item, and the cap
-    reached on an unchanged basis. It is NEVER sanctioned under an ignorance path (enum!=ok,
-    cannot-evaluate present, or an unnamed/absent wait target), so a cap-relieving ALLOW there is a
-    breach the fuzz must catch (B1)."""
-    return (ctx.get("enum_status") == "ok"
-            and not ctx.get("cannot_evaluate")
-            and bool(ctx.get("actionable"))
-            and ctx.get("schedule_denials", 0) >= aiqt_hooks._ORCH_SCHEDULE_CAP
+def _capped(ctx):
+    """The cap-relief basis: the shared schedule/wait denial cap reached on an UNCHANGED basis."""
+    return (ctx.get("schedule_denials", 0) >= aiqt_hooks._ORCH_SCHEDULE_CAP
             and ctx.get("basis_unchanged") is True)
 
 
+def _is_ignorance(ctx):
+    """An IGNORANCE path: a non-ok enumeration OR at least one cannot-evaluate item. Ignorance must
+    resolve to DENY on EVERY operation kind, and is NEVER cap-relieved (B1/B5-class)."""
+    return ctx.get("enum_status") != "ok" or bool(ctx.get("cannot_evaluate"))
+
+
+def _is_wait_absent_target(ctx):
+    """kind=wait only: an ABSENT or UNNAMED wait target (no waiting row, or the wait names none live).
+    This is an ignorance path denied UNCONDITIONALLY, even with actionable work at the cap (B1)."""
+    return not ctx.get("waiting") or ctx.get("wake_named") is not True
+
+
+def _is_wait_sanctioned_cap_relief(ctx):
+    """The ONLY case a wait ALLOW_WITH_FINDINGS is sanctioned: the single-live-waiting-row wedge - enum
+    ok, NO cannot-evaluate, at least one ACTIONABLE item, a NAMED LIVE WAITING ROW (waiting non-empty
+    AND wake_named True), and the cap reached on an unchanged basis. B1: waiting+wake_named are REQUIRED,
+    so an absent/unnamed target can never buy the relief (the residual this harness must make impossible)."""
+    return (ctx.get("enum_status") == "ok"
+            and not ctx.get("cannot_evaluate")
+            and bool(ctx.get("actionable"))
+            and bool(ctx.get("waiting"))
+            and ctx.get("wake_named") is True
+            and _capped(ctx))
+
+
+def _is_schedule_sanctioned_cap_relief(ctx):
+    """The ONLY case a schedule_idle ALLOW_WITH_FINDINGS is sanctioned: the actionable-work wedge - enum
+    ok, NO cannot-evaluate, at least one ACTIONABLE item, and the cap reached on an unchanged basis."""
+    return (ctx.get("enum_status") == "ok"
+            and not ctx.get("cannot_evaluate")
+            and bool(ctx.get("actionable"))
+            and _capped(ctx))
+
+
 def _classify(ctx, verdict):
-    """Return an invariant-breach string or None. A plain ALLOW is a breach unless it is the single
-    valid case or an operator escape; an ALLOW_WITH_FINDINGS is a breach unless it is the sanctioned
-    actionable-wedge cap relief or an operator escape. Only DENY is unconditionally safe. B1: the old
-    classifier returned None for EVERY non-ALLOW verdict, so it never asserted against a cap-relieving
-    ALLOW_WITH_FINDINGS under an ignorance path (the exact hole this harness must guard)."""
+    """Return an invariant-breach string or None, over ANY operation kind (stop | schedule_idle | wait)
+    below the stop loop bound (counter 0). The load-bearing invariants, asserted BY CONSTRUCTION:
+      (1) an operator escape ALLOW is the operator-owned release, excluded;
+      (2) IGNORANCE (enum!=ok or a cannot-evaluate item) must be DENY on every kind, never cap-relieved;
+      (3) for a wait, an ABSENT/UNNAMED target must be DENY even with actionable work at the cap (B1);
+      (4) any ALLOW_WITH_FINDINGS must be the kind's SANCTIONED cap-relief wedge (for a wait, the wedge
+          REQUIRES a named live waiting row) - a cap relief anywhere else is a breach;
+      (5) any plain ALLOW must be the kind's fully-evaluated clean case (for a wait, the single
+          live-waiting-row case)."""
+    kind = ctx.get("kind")
     if ctx.get("escape"):
-        return None                      # operator-owned release, not a fail-open
-    if verdict == "ALLOW":
-        if _is_single_valid_allow(ctx):
-            return None
-        return ("INVARIANT BREACH: wait decide_yield returned a plain ALLOW on a non-single, "
-                "non-escape case: enum={} actionable={} cannot_evaluate={} waiting={} wake_named={}"
-                .format(ctx.get("enum_status"), len(ctx.get("actionable", [])),
-                        len(ctx.get("cannot_evaluate", [])), len(ctx.get("waiting", [])),
-                        ctx.get("wake_named")))
+        return None                              # (1) operator-owned release
+    if verdict == "DENY":
+        return None                              # DENY is unconditionally safe
+    tag = ("enum={} kind={} actionable={} cannot_evaluate={} waiting={} wake_named={} "
+           "schedule_denials={} basis_unchanged={}").format(
+               ctx.get("enum_status"), kind, len(ctx.get("actionable", [])),
+               len(ctx.get("cannot_evaluate", [])), len(ctx.get("waiting", [])),
+               ctx.get("wake_named"), ctx.get("schedule_denials"), ctx.get("basis_unchanged"))
+    # (2)+(3): an ignorance path (or, for a wait, an absent/unnamed target) that did NOT DENY is a breach.
+    if _is_ignorance(ctx) or (kind == "wait" and _is_wait_absent_target(ctx)):
+        return "INVARIANT BREACH: an ignorance/absent-target path was NOT denied ({}): {}".format(
+            verdict, tag)
     if verdict == "ALLOW_WITH_FINDINGS":
-        if _is_sanctioned_cap_relief(ctx):
-            return None                  # the sanctioned actionable-wedge relief (recorded forced exit)
-        return ("INVARIANT BREACH: wait decide_yield CAP-RELIEVED (ALLOW_WITH_FINDINGS) outside the "
-                "sanctioned actionable-wedge case: enum={} actionable={} cannot_evaluate={} "
-                "waiting={} wake_named={} schedule_denials={} basis_unchanged={}".format(
-                    ctx.get("enum_status"), len(ctx.get("actionable", [])),
-                    len(ctx.get("cannot_evaluate", [])), len(ctx.get("waiting", [])),
-                    ctx.get("wake_named"), ctx.get("schedule_denials"), ctx.get("basis_unchanged")))
-    return None                          # DENY is the safe direction
+        sanctioned = (_is_wait_sanctioned_cap_relief(ctx) if kind == "wait"
+                      else _is_schedule_sanctioned_cap_relief(ctx) if kind == "schedule_idle"
+                      else False)          # stop has no cap relief below the loop bound
+        if sanctioned:
+            return None
+        return "INVARIANT BREACH: a cap relief outside the sanctioned wedge: {}".format(tag)
+    if verdict == "ALLOW":
+        if kind == "wait":
+            ok = (not ctx.get("actionable") and bool(ctx.get("waiting"))
+                  and ctx.get("wake_named") is True)
+        elif kind == "schedule_idle":
+            rechecked = list(ctx.get("waiting", [])) + list(ctx.get("blocked", []))
+            ok = (not ctx.get("actionable")
+                  and not (rechecked and ctx.get("wake_named") is False))
+        else:                              # stop
+            ok = not ctx.get("actionable")
+        if ok:
+            return None
+        return "INVARIANT BREACH: a plain ALLOW outside the fully-evaluated clean case: {}".format(tag)
+    return "INVARIANT BREACH: an unexpected verdict {!r}: {}".format(verdict, tag)
 
 
 def _base_ctx():
@@ -110,29 +145,70 @@ def _base_ctx():
 
 
 def sweep_pure(rounds):
-    """Layer 1: bounded deterministic mutation of the decide_yield ctx over the wait path."""
+    """Layer 1: EXHAUSTIVE deterministic sweep over the ignorance x verdict x operation-kind space -
+    every combination of kind (stop/schedule_idle/wait), enum_status, item cannot-evaluate present/absent,
+    waiting present/absent, wake_named T/F/None, actionable present/absent, blocked present/absent, escape,
+    and cap-relief basis - asserting the invariant in _classify BY CONSTRUCTION. This makes the B1/B5-class
+    residuals (an ignorance or absent-target path reaching a cap-relieving ALLOW) impossible to ship, not
+    caught per-instance."""
     rng = random.Random(_SEED)
     breaches = []
+    kinds = ["stop", "schedule_idle", "wait"]
     enum_states = ["ok", "ENUMERATOR_ERROR", "unreadable"]
     wa = [[], [("A-1", "A-1", "seedable")], [("A-1", "A-1", "x"), ("A-2", "A-2", "y")]]
     wt = [[], [("W-1", "tracked-task", "T-1")], [("W-1", "tracked-task", "T-1"),
                                                  ("W-2", "tracked-task", "T-2")]]
+    bl = [[], [("B-1", "external", "up")]]
     ce = [[], [("C-1", "cannot-evaluate", "unreadable")]]
     wn = [None, True, False]
     esc = [False, True]
     caps = [(0, False), (3, True), (3, False)]   # (schedule_denials, basis_unchanged)
-    combos = list(itertools.product(enum_states, wa, wt, ce, wn, esc, caps))
+    combos = list(itertools.product(kinds, enum_states, wa, wt, bl, ce, wn, esc, caps))
     rng.shuffle(combos)
-    for combo in combos[:max(rounds, len(combos)) if rounds >= len(combos) else rounds] \
-            if rounds else combos:
-        es, a, w, c, n, e, (sd, bu) = combo
+    selected = combos if not rounds else combos[:rounds]
+    for combo in selected:
+        k, es, a, w, b, c, n, e, (sd, bu) = combo
         ctx = _base_ctx()
-        ctx.update({"enum_status": es, "actionable": a, "waiting": w, "cannot_evaluate": c,
-                    "wake_named": n, "escape": e, "schedule_denials": sd, "basis_unchanged": bu})
+        ctx.update({"kind": k, "enum_status": es, "actionable": a, "waiting": w, "blocked": b,
+                    "cannot_evaluate": c, "wake_named": n, "escape": e,
+                    "schedule_denials": sd, "basis_unchanged": bu})
         verdict, _reason, _disp = aiqt_hooks.decide_yield(ctx)
         breach = _classify(ctx, verdict)
         if breach:
             breaches.append(breach + " | verdict={}".format(verdict))
+    return breaches
+
+
+_TOOL_POSITIVE = [{"ok": True}, {"success": True}, {"is_error": False}, {"status": "completed"},
+                  {"status": "scheduled"}]
+_TOOL_NEG_TEXT = ["Wake was not scheduled", "Request was unsuccessful", "the wake was not created",
+                  "FAILED", "could not schedule", "no wake scheduled", "unable to register"]
+_TOOL_POS_TEXT = ["Wake scheduled for 5pm", "done", "registered successfully", "scheduled"]
+
+
+def sweep_tool_succeeded():
+    """B5 by-construction: a POSITIVE-shaped field beside NEGATED/contradictory content must register NO
+    wake (strict positive confirmation; a positive field never overrides negative content). Exhaustively
+    cross every positive-shaped field with every negated content text and assert False; and cross a bare
+    positive field OR a positive field with clean-positive content and assert True."""
+    breaches = []
+    for pos in _TOOL_POSITIVE:
+        for neg in _TOOL_NEG_TEXT:
+            resp = dict(pos, content=[{"type": "text", "text": neg}])
+            if aiqt_hooks._orch_tool_succeeded(resp) is not False:
+                breaches.append("B5 BREACH: positive field {} beside negative content {!r} registered a "
+                                "wake".format(pos, neg))
+        if aiqt_hooks._orch_tool_succeeded(dict(pos)) is not True:
+            breaches.append("B5 BREACH: a bare positive-shaped field {} did NOT register".format(pos))
+        for good in _TOOL_POS_TEXT:
+            resp = dict(pos, content=[{"type": "text", "text": good}])
+            if aiqt_hooks._orch_tool_succeeded(resp) is not True:
+                breaches.append("B5 BREACH: positive field {} with clean-positive content {!r} did NOT "
+                                "register".format(pos, good))
+    # a negated content with NO positive field is likewise never a wake (ambiguity fails safe)
+    for neg in _TOOL_NEG_TEXT:
+        if aiqt_hooks._orch_tool_succeeded({"content": [{"type": "text", "text": neg}]}) is not False:
+            breaches.append("B5 BREACH: negated content {!r} with no positive field registered".format(neg))
     return breaches
 
 
@@ -158,7 +234,10 @@ def _mkrepo(tmp, reg, backlog_items):
     enum.write_text("#!/bin/sh\ncat '{}'\n".format(tmp / "aei.json"), encoding="utf-8")
     os.chmod(enum, 0o755)
     reg = dict(reg, version=1, lease={"path": "lease.txt"},
-               enumerator={"argv": ["/bin/sh", str(enum)]}, wait_tools=["Bash"])
+               enumerator={"argv": ["/bin/sh", str(enum)]}, wait_tools=["Bash"],
+               # test-hermeticity: pin the machine-written state dir INSIDE the fixture tmp root, so no
+               # guard-events/ledger/turn-state write touches ambient ${XDG_STATE_HOME:-~/.local/state}.
+               state_dir=str(tmp / ".aiqt" / "state"))
     (tmp / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
     return str(tmp)
 
@@ -229,7 +308,7 @@ def sweep_boundary():
 
 
 def run(rounds):
-    breaches = sweep_pure(rounds) + sweep_boundary()
+    breaches = sweep_pure(rounds) + sweep_tool_succeeded() + sweep_boundary()
     return breaches
 
 
@@ -238,7 +317,9 @@ def main():
     ap.add_argument("--rounds", type=int, default=0, help="0 = the full deterministic combo set")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
-    rounds = 64 if a.self_test else a.rounds
+    # --self-test runs the FULL deterministic combo set (rounds 0), so the invariant is asserted
+    # EXHAUSTIVELY over the ignorance x verdict x operation-kind space, not merely a 64-sample.
+    rounds = 0 if a.self_test else a.rounds
     breaches = run(rounds)
     if breaches:
         for b in breaches:

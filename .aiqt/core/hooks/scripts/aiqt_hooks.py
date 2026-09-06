@@ -5635,6 +5635,16 @@ def validate_enumeration(obj):
                 if not isinstance(cref, str) or not cref.strip():
                     return (None, "closed item {} close has no non-blank ref".format(iid))
                 close = {"reason": reason, "ref": cref}
+                # B3 (optional): a `fixed` close MAY declare the repo-relative paths it fixed, so the
+                # vfxcmt reconciliation binds the cited commit to the item by its changed set. When
+                # present it must be a list of non-blank strings (a malformed paths field fails closed).
+                raw_paths = raw_close.get("paths")
+                if raw_paths is not None:
+                    if not isinstance(raw_paths, list) or not raw_paths \
+                            or not all(isinstance(p, str) and p.strip() for p in raw_paths):
+                        return (None, "closed item {} close.paths is not a non-empty list of non-blank "
+                                "strings".format(iid))
+                    close["paths"] = [p for p in raw_paths]
             elif raw_close is not None:
                 return (None, "non-closed item {} carries a close object".format(iid))
         blocker = raw.get("blocker")
@@ -5817,7 +5827,17 @@ def _orch_attestation_refs(reg, root, staleness, state_dir=None):
 
 
 _ORCH_DECISION_RESOLVED_RE = re.compile(
-    r"\b(declined|withdrawn|superseded|resolved|answered|rejected|cancell?ed|closed|done)\b",
+    r"\b(declined|withdrawn|superseded|resolved|answered|rejected|cancell?ed|closed|done|"
+    r"approved|accepted|decided|granted|denied|confirmed|ruled)\b",
+    re.IGNORECASE)
+# B4: "pending" is established by an ALLOWLISTED pending-status token, NOT by the mere ABSENCE of a
+# resolved token. A resolved label the denylist did not enumerate (APPROVED, ACCEPTED, DECIDED, ...)
+# must never read as pending, so a genuinely-pending row is required to carry one of these open-status
+# tokens (raised, pending, open, awaiting, ...) AND to carry no resolved token; anything else is not a
+# pending decision and holds nothing (assistant-writable label text cannot manufacture a hold).
+_ORCH_DECISION_PENDING_RE = re.compile(
+    r"\b(raised|pending|open|awaiting|await|unresolved|unanswered|undecided|"
+    r"outstanding|to[ _-]?decide|needs[ _-]?decision|blocked|waiting)\b",
     re.IGNORECASE)
 
 
@@ -5838,14 +5858,19 @@ def _orch_decision_row_present(ref, haystack):
 
 def _orch_decision_row_pending(ref, haystack):
     """True when `ref` appears at a decision row-id position that reads GENUINELY PENDING: at least one
-    matching row carries no resolved/declined status token. A row marked resolved/declined is not a
-    pending decision and holds nothing (B4: assistant-writable label text cannot manufacture a hold)."""
+    matching row carries an ALLOWLISTED pending-status token AND no resolved/decided token. B4: pending
+    is established by the allowlist, not by the ABSENCE of a resolved token, so a resolved label the
+    denylist never enumerated (APPROVED, ACCEPTED, DECIDED) can no longer slip through as pending; a row
+    marked resolved/decided, or a row carrying no pending token at all, is not a pending decision and
+    holds nothing (assistant-writable label text cannot manufacture a hold)."""
     rows = _orch_decision_row_lines(ref, haystack)
-    return any(not _ORCH_DECISION_RESOLVED_RE.search(line) for line in rows)
+    return any(_ORCH_DECISION_PENDING_RE.search(line) and not _ORCH_DECISION_RESOLVED_RE.search(line)
+               for line in rows)
 
 
 def classify_backlog(items, live_ids, ledger_readable, pending_haystack, staleness,
-                     attestations=None, dispositions=None, deferrals=None, fix_refs=None):
+                     attestations=None, dispositions=None, deferrals=None, fixed_verdicts=None,
+                     version=2):
     """Pure classification of a VALID enumeration (step 5). Returns actionable/waiting/blocked/
     cannot_evaluate/proposed/terminal. A proof SOURCE that cannot be read (ledger unreadable-or-malformed,
     or pending_haystack is None) puts the item in cannot_evaluate: FIX 1 DENIES the stop on it (ignorance
@@ -5858,10 +5883,14 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
     GD-164 B2/B3: a TERMINAL close (a verified `fixed`, a validated no-fix-needed/not-buildable
     dispositions row) is kept in the `terminal` bucket so the complete machine enumeration counts EVERY
     indexed item (setcmp), never an empty backlog. GD-164 B3: `fixed` is NOT a self-authored bypass; it
-    is terminal ONLY when its ref is verified against the fix-attestation rail (fix_refs, commit refs
-    that resolve, per vfxcmt/evgcmp). fix_refs is None when that rail is unavailable (e.g. v1 has no
-    close object, so it never reaches here), which HOLDS a `fixed` close (cannot-evaluate); a ref not in
-    the resolved set is closed-unjustified and stays ACTIONABLE (ignorance refuses the wind-down)."""
+    is terminal ONLY when the cited commit is BOUND TO THE ITEM (fixed_verdicts, from
+    _orch_fixed_verdicts: a per-item vfxcmt reconciliation of the commit's changed set against the
+    item's declared paths/identity). fixed_verdicts is None when the rail is unavailable, which HOLDS a
+    `fixed` close (cannot-evaluate); a per-item "unrelated" verdict is closed-unjustified + ACTIONABLE
+    (a real-but-unrelated commit is not a fix); an "unreconcilable" verdict HOLDS (cannot-evaluate). B6:
+    the version gates the proposed/ungranted classification: v2 applies the FLAG-A provenance
+    distinction, while any non-v2 (v1) enumeration keeps the byte-identical non-compelling proposed
+    bucket the shipped v1 contract defines."""
     now = _orch_now()
     ext_hours = _orch_validate("staleness", staleness)[1]["external_hours"]
     out = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": [],
@@ -5873,19 +5902,23 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                 continue                       # v1: skip exactly as today (byte-identical)
             reason = close["reason"]
             if reason == "fixed":
-                # B3: `fixed` is verified against the fix-attestation rail, never self-authored. A ref
-                # covered by a resolved commit reference is terminal (counted); an unverifiable rail
-                # HOLDS (cannot-evaluate); a ref that does not resolve is closed-unjustified + actionable.
-                if fix_refs is None:
+                # B3: `fixed` is bound to the item by the fix-attestation rail, never self-authored and
+                # never accepted on a bare real-but-unrelated commit. terminal (counted) only when the
+                # commit contains the fix for THIS item; an unavailable rail or an unreconcilable commit
+                # HOLDS (cannot-evaluate); an unrelated/non-resolving commit is closed-unjustified +
+                # actionable (ignorance refuses the wind-down).
+                fv = None if fixed_verdicts is None else fixed_verdicts.get(it["id"])
+                if fixed_verdicts is None or fv == "unreconcilable":
                     out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
-                        "close ground fixed cannot be verified against the fix-attestation rail; held"))
+                        "close ground fixed cannot be reconciled to the item against the "
+                        "fix-attestation rail (vfxcmt); held"))
                     out["closed_unjustified"].append(it["id"])
-                elif close["ref"] in fix_refs:
+                elif fv == "terminal":
                     out["terminal"].append((it["id"], "fixed", close["ref"]))
                 else:
                     out["actionable"].append((it["id"], it["title"],
-                        "closed (fixed) with a ref {!r} that does not resolve to a verified commit "
-                        "(vfxcmt)".format(close["ref"])))
+                        "closed (fixed) with a ref {!r} that does not contain the fix for this item "
+                        "(vfxcmt: an unrelated or non-resolving commit)".format(close["ref"])))
                     out["closed_unjustified"].append(it["id"])
             elif reason in ("no-fix-needed", "not-buildable"):
                 if dispositions is None or dispositions == "unreadable":
@@ -5910,18 +5943,28 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                         "closed (maintainer-deferred) without a qualifying deferrals register entry"))
                     out["closed_unjustified"].append(it["id"])
             continue
-        if it["state"] == "proposed" or not it["granted"]:
-            # B4: state='proposed'/granted=False is ASSISTANT-WRITABLE label text and cannot remove
-            # buildable work from the actionable set (a self-authored proposal is not a grant and
-            # licenses no wind-down; cntdef/deccls). Such an item is ACTIONABLE, not parked: its
-            # preparatory pipeline continues, and only a genuine maintainer decision on the authoritative
-            # surface (a human-decision blocker below) ever holds the final step.
-            out["actionable"].append((it["id"], it["title"],
-                "state 'proposed'/ungranted is assistant-writable and licenses no wind-down; the "
-                "preparatory work is actionable"))
+        proposed = (it["state"] == "proposed" or not it["granted"])
+        if proposed and version != 2:
+            # B6: v1 (any non-v2) keeps the shipped byte-identical NON-COMPELLING proposed bucket: a
+            # proposed/ungranted v1 item does not block a wind-down (identical bucket AND decision to
+            # main). The stricter GD-127 treatment below is a v2 behaviour only.
+            out["proposed"].append(it["id"])
             continue
         blocker = it["blocker"]
-        if not blocker:
+        if proposed:
+            # FLAG A (GD-127/cntdef, v2): a self-authored 'proposed'/ungranted label is not a grant and
+            # licenses no wind-down, so an ORDINARY proposal is ACTIONABLE (its preparatory pipeline
+            # continues). But a maintainer/provenance-confirmed park is HONORED, not forced to prep: a
+            # proposed item carrying a human-decision blocker that resolves to a genuinely-pending
+            # maintainer decision on the authoritative surface (provenance the assistant cannot
+            # self-author) PARKS at its final step. So fall through to the human-decision handling for
+            # such an item; every other proposed item is actionable here.
+            if not blocker or blocker.get("kind") != "human-decision":
+                out["actionable"].append((it["id"], it["title"],
+                    "state 'proposed'/ungranted is assistant-writable and licenses no wind-down; the "
+                    "preparatory work is actionable"))
+                continue
+        elif not blocker:
             out["actionable"].append((it["id"], it["title"], "no blocker recorded"))
             continue
         kind, ref = blocker["kind"], blocker["ref"]
@@ -5961,10 +6004,10 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                     out["actionable"].append((it["id"], it["title"],
                         "the decision row for {} reads resolved/declined, not pending; a resolved "
                         "decision holds nothing".format(ref)))
-                elif not _orch_decision_row_present(it.get("prep_ref"), pending_haystack):
+                elif not _orch_decision_row_pending(it.get("prep_ref"), pending_haystack):
                     out["actionable"].append((it["id"], it["title"],
-                        "prep_complete is true but prep_ref {!r} does not resolve to a real "
-                        "pending-decision row; the hold is not attested".format(it.get("prep_ref"))))
+                        "prep_complete is true but prep_ref {!r} does not resolve to a genuinely-pending "
+                        "decision row; the hold is not attested".format(it.get("prep_ref"))))
                 else:
                     out["blocked"].append((it["id"], "human-decision", ref))
             else:
@@ -6013,13 +6056,28 @@ def _orch_disposition_table(ctx):
     liveness emitter so surface and verdict cannot disagree. B2: TERMINAL rows (a verified `fixed`, a
     validated no-fix-needed/not-buildable close) are PRESENT and COUNTED here, so the complete machine
     enumeration covers EVERY indexed item (setcmp) and never records an empty backlog for an index that
-    had closed rows; they carry no verdict weight (decide_yield never reads the terminal bucket)."""
-    return ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
+    had closed rows; they carry no verdict weight (decide_yield never reads the terminal bucket).
+
+    B2: EXACTLY ONE classification per indexed id. When an id lands in more than one bucket (for
+    example a closed-unjustified id classified ACTIONABLE while the anti-shrinkage checkpoint also
+    injects a CANNOT-EVALUATE hold for it), the row is emitted ONCE, keeping the most-blocking bucket in
+    this canonical order, so item_count equals the authoritative unique-id count and never double-counts.
+    decide_yield reads the class lists directly (not this table), so the dedup changes the emitted
+    enumeration only, never the verdict."""
+    rows = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
             + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
             + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
             + [("actionable", i, t, w) for i, t, w in ctx["actionable"]]
             + [("proposed", i, "", "") for i in ctx["proposed"]]
             + [("terminal", i, g, r) for i, g, r in ctx.get("terminal", [])])
+    seen, deduped = set(), []
+    for row in rows:
+        iid = row[1]
+        if iid in seen:
+            continue                 # already emitted in a more-blocking bucket (canonical order above)
+        seen.add(iid)
+        deduped.append(row)
+    return deduped
 
 
 def _decide_wait(ctx, disposition, capped):
@@ -6045,6 +6103,23 @@ def _decide_wait(ctx, disposition, capped):
                 "cap relief never applies to a cannot-evaluate item. Fix the source, or release "
                 "through the operator-owned escape sentinel."
                 .format(len(ctx.get("cannot_evaluate", []))), disposition)
+    if not ctx["waiting"] or ctx["wake_named"] is not True:
+        # B1: an ABSENT or UNNAMED wait target is an IGNORANCE path checked BEFORE any actionable
+        # cap-relief: a pause that collects no named live launched result is a manufactured wind-down,
+        # denied UNCONDITIONALLY (never cap-relieved), even when actionable work is present and the
+        # denial cap is reached. The sanctioned single-live-waiting-row wedge below requires a named
+        # live waiting row, so an absent/unnamed target can never buy the cap relief (the B1 residual).
+        if not ctx["waiting"]:
+            return ("DENY",
+                    "livbak: nothing is running; a wait that collects no launched result is a "
+                    "manufactured pause. There is nothing to wait for.", disposition)
+        n = len(ctx["waiting"]) + len(ctx["blocked"])
+        return ("DENY",
+                "livbak: the wait names no live launched result; a pause that collects nothing is a "
+                "wind-down, and the {} waiting/blocked item(s) do not include a named target."
+                .format(n), disposition)
+    # From here a named live waiting row exists (waiting non-empty AND wake_named True): the sanctioned
+    # single-live-waiting-row wedge. Only now can an actionable-work denial reach the cap relief.
     if ctx["actionable"]:
         if capped:
             return _wait_capped(ctx, disposition)
@@ -6058,18 +6133,6 @@ def _decide_wait(ctx, disposition, capped):
                 "is not an external block. Advance one of: {}. A wait is licensed only when the "
                 "awaited result blocks the very next step and no other item can proceed."
                 .format(len(ctx["actionable"]), listing), disposition)
-    if not ctx["waiting"] or ctx["wake_named"] is not True:
-        # an unnamed or absent wait target is an IGNORANCE path: a pause that collects no named live
-        # launched result is a manufactured wind-down, denied unconditionally (never cap-relieved).
-        if not ctx["waiting"]:
-            return ("DENY",
-                    "livbak: nothing is running; a wait that collects no launched result is a "
-                    "manufactured pause. There is nothing to wait for.", disposition)
-        n = len(ctx["waiting"]) + len(ctx["blocked"])
-        return ("DENY",
-                "livbak: the wait names no live launched result; a pause that collects nothing is a "
-                "wind-down, and the {} waiting/blocked item(s) do not include a named target."
-                .format(n), disposition)
     named = "; ".join("{} ({}: {})".format(i, k, r) for i, k, r in ctx["waiting"][:_ORCH_MAX_NAMED])
     return ("ALLOW",
             "livbak: a wait is licensed; no other item is advanceable and the wait names live "
@@ -6383,27 +6446,108 @@ def _orch_commit_resolves(root, ref):
     return (r.returncode == 0 and bool(r.stdout.strip()), True)
 
 
-def _orch_fix_refs(root, items):
-    """B3 fix-attestation rail (vfxcmt/evgcmp): the set of `fixed`-close refs over the enumeration that
-    resolve to a REAL commit in the repo. A `fixed` close is NOT a self-authored bypass; it is terminal
-    only when its ref names a commit that actually resolves, so a fabricated, absent, or whitespace-only
-    ref substantiates nothing. Returns a frozenset of the verified refs, or None when the rail cannot be
-    consulted at all (git unavailable / not a work tree), which HOLDS every `fixed` close as
-    cannot-evaluate (ignorance refuses the wind-down), never a clean terminal."""
-    refs = sorted({it["close"]["ref"] for it in items
-                   if it["state"] == "closed" and isinstance(it.get("close"), dict)
-                   and it["close"].get("reason") == "fixed"
-                   and isinstance(it["close"].get("ref"), str) and it["close"]["ref"].strip()})
-    if not refs:
-        return frozenset()
-    verified = set()
-    for ref in refs:
-        ok, consultable = _orch_commit_resolves(root, ref)
+def _orch_commit_changed_paths(root, ref):
+    """B3: the set of repo-relative paths a commit changed, or None when git could not produce it (a
+    degraded rail HOLDS rather than reads as an empty change set)."""
+    env = _isolate_git_env(dict(os.environ))
+    try:
+        # --root so a ROOT commit (no parent) still reports its full changed set rather than an empty one.
+        r = subprocess.run(["git", "-C", root, "diff-tree", "--no-commit-id", "--name-only", "-r",
+                            "--root", "--end-of-options", ref + "^{commit}"],
+                           capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
+
+
+def _orch_commit_message(root, ref):
+    """B3: the full commit message (subject + body) of `ref`, or None when git could not produce it."""
+    env = _isolate_git_env(dict(os.environ))
+    try:
+        r = subprocess.run(["git", "-C", root, "log", "-1", "--format=%B",
+                            "--end-of-options", ref + "^{commit}"],
+                           capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def _orch_path_relates(changed, declared):
+    """True when any changed path equals, sits under, or contains any declared path prefix. Both sides
+    are normalized to forward-slash, trimmed of surrounding slashes; a blank declared entry is ignored."""
+    norm_changed = {c.strip().strip("/") for c in changed if c and c.strip()}
+    for d in declared:
+        if not isinstance(d, str):
+            continue
+        d = d.strip().strip("/")
+        if not d:
+            continue
+        for c in norm_changed:
+            if c == d or c.startswith(d + "/") or d.startswith(c + "/"):
+                return True
+    return False
+
+
+def _orch_commit_fixes_item(root, ref, item_id, declared_paths):
+    """B3 vfxcmt reconciliation: does commit `ref` actually CONTAIN the fix for THIS item? A `fixed`
+    close is not a self-authored bypass, and it is not terminal merely because its ref resolves to SOME
+    commit: the cited commit must be bound to the item. Returns (verdict, consultable) where consultable
+    is False when git could not be consulted at all (the rail HOLDS every fixed close):
+      "terminal"        the commit relates to the item: its changed set intersects the item's declared
+                        paths, or (when no paths are declared) the commit message names the item id as a
+                        whole token (the item's identity).
+      "unrelated"       the ref resolves to no commit, or the item declared paths that the commit's
+                        changed set does not touch: the close is unjustified and stays ACTIONABLE.
+      "unreconcilable"  the ref resolves but neither a declared path nor an id-naming message can bind
+                        the commit to the item, so the close cannot be reconciled and is HELD
+                        (cannot-evaluate) rather than accepted on a bare real-but-unrelated commit."""
+    resolves, consultable = _orch_commit_resolves(root, ref)
+    if not consultable:
+        return (None, False)
+    if not resolves:
+        return ("unrelated", True)   # a ref resolving to no commit substantiates nothing (vfxcmt)
+    declared = [p for p in (declared_paths or []) if isinstance(p, str) and p.strip()]
+    if declared:
+        changed = _orch_commit_changed_paths(root, ref)
+        if changed is None:
+            return (None, False)     # the rail degraded mid-reconciliation: HOLD
+        return (("terminal" if _orch_path_relates(changed, declared) else "unrelated"), True)
+    # no declared paths: bind by the item's IDENTITY in the commit message, else HOLD (never accept an
+    # unrelated commit merely because it resolves).
+    msg = _orch_commit_message(root, ref)
+    if msg is None:
+        return (None, False)
+    if _orch_token_present(item_id, msg):
+        return ("terminal", True)
+    return ("unreconcilable", True)
+
+
+def _orch_fixed_verdicts(root, items):
+    """B3 fix-attestation rail (vfxcmt/evgcmp), per item: the reconciliation verdict for every
+    `fixed`-closed item in the enumeration. Returns a dict {item_id: "terminal"|"unrelated"|
+    "unreconcilable"}, or None when the rail cannot be consulted at all (git unavailable / not a work
+    tree), which HOLDS every `fixed` close as cannot-evaluate (ignorance refuses the wind-down). A
+    `fixed` close is terminal ONLY when the cited commit is bound to THAT item (its changed set touches
+    the item's declared paths, or the commit names the item id), never merely because the ref resolves
+    to a commit; the real-but-unrelated commit is the B3-residual this closes."""
+    verdicts = {}
+    for it in items:
+        close = it.get("close")
+        if it["state"] != "closed" or not isinstance(close, dict) or close.get("reason") != "fixed":
+            continue
+        ref = close.get("ref")
+        if not isinstance(ref, str) or not ref.strip():
+            verdicts[it["id"]] = "unrelated"   # a blank ref names no commit
+            continue
+        verdict, consultable = _orch_commit_fixes_item(root, ref, it["id"], close.get("paths"))
         if not consultable:
-            return None     # the rail cannot be consulted: HOLD every fixed close (cannot-evaluate)
-        if ok:
-            verified.add(ref)
-    return frozenset(verified)
+            return None      # the rail cannot be consulted: HOLD every fixed close (cannot-evaluate)
+        verdicts[it["id"]] = verdict
+    return verdicts
 
 
 def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=True):
@@ -6435,7 +6579,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
             attestations=_orch_attestation_refs(reg, root, staleness, state_dir=state_dir),
             dispositions=_orch_disposition_refs(reg, root, staleness, state_dir=state_dir),
             deferrals=_orch_deferral_refs(reg, root, staleness, state_dir=state_dir),
-            fix_refs=_orch_fix_refs(root, items))
+            fixed_verdicts=_orch_fixed_verdicts(root, items), version=env_version)
         closed_unjustified_ids = frozenset(classes.get("closed_unjustified", []))
         classes["cannot_evaluate"].extend(
             _orch_checkpoint_union(root, items, closed_unjustified_ids=closed_unjustified_ids,
@@ -6643,8 +6787,11 @@ def _orch_liveness_row(root, operation, ctx, verdict, reason, disposition, n, st
 
 def _orch_stop_family(data, event_name, kind):
     """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
-    mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on its own I/O errors;
-    a cannot-evaluate DENIES (FIX 1)."""
+    mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on genuine ABSENCE (no
+    registry: inert allow); a cannot-evaluate DENIES (FIX 1). FLAG B: a present-but-unreadable ('bad')
+    registry is CANNOT-EVALUATE, distinct from absent, and the stop/idle family DENIES the wind-down
+    fail-closed rather than treating unreadable config as absence; the anti-wedge release is supplied
+    INDEPENDENTLY by the operator escape sentinel resolved WITHOUT the unreadable registry."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -6652,10 +6799,22 @@ def _orch_stop_family(data, event_name, kind):
     if status == "absent":
         return _allow()
     if status == "bad":
-        return _stop_warn("AIQT guardrail: the orchestration registry could not be read "
-                          "({}); the {} fails open on its own read error and, because the registry is "
-                          "unreadable, writes NO guard-event (no record).".format(reg,
-                                                                                  event_name))
+        # FLAG B: unreadable config is NOT absence. An unreadable registry means the backlog cannot be
+        # enumerated, so whole-set exhaustion cannot be confirmed and the wind-down is DENIED fail-closed
+        # (ignorance refuses the wind-down). The escape is resolved from the DEFAULT anchor with an empty
+        # registry, so it never depends on the unreadable config; when present it releases the wind-down.
+        escape_active, _spoof = _orch_escape_active({}, root)
+        detail = ("AIQT guardrail ({}): the orchestration registry is present but unreadable ({}); a "
+                  "wind-down cannot confirm whole-set exhaustion, so it is refused (ignorance refuses "
+                  "the wind-down). Fix the registry, or release through the operator-owned escape "
+                  "sentinel.".format(event_name, reg))
+        if escape_active:
+            _orch_guard_event(root, event_name, "allow", "bad-registry released by operator escape")
+            return _stop_warn("AIQT guardrail ({}): the orchestration registry is unreadable ({}); an "
+                              "operator escape sentinel is present, so the wind-down is released "
+                              "(logged).".format(event_name, reg))
+        _orch_guard_event(root, event_name, "deny", "bad-registry cannot-evaluate (fail-closed)")
+        return (2, None, detail)
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
@@ -6949,9 +7108,19 @@ def orch_wait_guard(data):
         return _allow()
     status, reg = _orch_registry(root)
     if status != "ok":
-        return _allow() if status == "absent" else _ask(
-            "AIQT guardrail: the orchestration registry could not be read ({}); a wait call cannot "
-            "be judged, so it asks rather than silently proceeding.".format(reg),
+        # FLAG B: genuine ABSENCE is inert allow; a present-but-unreadable ('bad') registry is
+        # CANNOT-EVALUATE and never treated as absence. A PreToolUse handler cannot exit-2 an arbitrary
+        # tool call without hard-wedging tools that may not even be wait tools, so the fail-closed
+        # posture here is ASK (never a silent allow), the harness-capability asymmetry with the Stop
+        # family's exit-2 deny; the independent operator escape still releases it.
+        if status == "absent":
+            return _allow()
+        if _orch_escape_active({}, root)[0]:
+            return _allow()
+        return _ask(
+            "AIQT guardrail: the orchestration registry is present but unreadable ({}); a wait call "
+            "cannot be judged (cannot-evaluate), so it asks rather than silently proceeding. Fix the "
+            "registry, or release through the operator-owned escape sentinel.".format(reg),
             "AIQT guardrail: asked on a wait call under an unreadable orchestration registry.")
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()
@@ -7250,23 +7419,38 @@ def orch_wake_register(data):
     return _allow()
 
 
-_ORCH_FAILURE_TOKEN_RE = re.compile(r"\b(fail(?:ed|ure)?|error|denied|refused|timed?[ _-]?out|"
+_ORCH_FAILURE_TOKEN_RE = re.compile(r"\b(fail(?:ed|ure|ing|s)?|error|denied|refused|timed?[ _-]?out|"
                                     r"exception|abort(?:ed)?|cancell?ed)\b", re.IGNORECASE)
+# B5: a NEGATED-success or contradiction phrase in the response text overrides any positive-shaped
+# field. Strict positive confirmation means "Wake was not scheduled" and "Request was unsuccessful"
+# register NO wake even when {"ok":true} or {"is_error":false} sits beside them: the content contradicts
+# the field. The set is deliberately broad (a negation, a contraction, an 'un-'/'non-' negated word, a
+# no/never/without/unable/cannot) because the fail-safe direction is do-not-register, so an over-broad
+# negation match only declines a wake (safe), never manufactures one.
+_ORCH_NEGATION_RE = re.compile(
+    r"\bnot\b|\bno\b|\bnever\b|\bwithout\b|\bunable\b|\bcannot\b|\bnothing\b|\bnone\b|\bneither\b"
+    r"|\bnor\b|n['’]t\b|\bun(?:success|schedul|abl|avail|complet|verif|confirm|register|creat|"
+    r"expect|recogniz|recognis)\w*|\bnon-\w+", re.IGNORECASE)
 _ORCH_STATUS_NEGATIVE = frozenset(("failed", "failure", "error", "errored", "denied", "refused",
-                                   "timeout", "timed-out", "cancelled", "canceled", "aborted"))
+                                   "timeout", "timed-out", "cancelled", "canceled", "aborted",
+                                   "unsuccessful", "incomplete", "rejected"))
 _ORCH_STATUS_POSITIVE = frozenset(("ok", "success", "succeeded", "completed", "complete", "done",
                                    "scheduled", "created", "registered", "accepted"))
 
 
-def _orch_response_text_fails(response):
-    """True when any text block in a structured tool response carries a failure token (a
-    {"content": [{"type": "text", "text": ...}]} shape, the concrete PostToolUse content list)."""
+def _orch_response_text_negative(response):
+    """True when any text block in a structured tool response carries a FAILURE token OR a NEGATION /
+    contradiction ({"content": [{"type": "text", "text": ...}]}, the concrete PostToolUse content
+    list). B5: this is checked BEFORE any positive-shaped field, so a negated-success content
+    ('Wake was not scheduled', 'Request was unsuccessful') is never overridden by an {"ok":true} or
+    {"is_error":false} sitting beside it; ambiguity fails safe to no registration."""
     content = response.get("content")
     if not isinstance(content, list):
         return False
     for block in content:
         if isinstance(block, dict) and isinstance(block.get("text"), str) \
-                and _ORCH_FAILURE_TOKEN_RE.search(block["text"]):
+                and (_ORCH_FAILURE_TOKEN_RE.search(block["text"])
+                     or _ORCH_NEGATION_RE.search(block["text"])):
             return True
     return False
 
@@ -7274,13 +7458,17 @@ def _orch_response_text_fails(response):
 def _orch_tool_succeeded(response):
     """A2 success test over a PostToolUse tool_response. STRICT and CONSERVATIVE: a wake is registered
     only on a POSITIVELY CONFIRMED success; anything else (a missing response, any recognized error
-    signal, an ambiguous response with no affirmative success marker) reads as NOT succeeded, so no
-    wake digest is written. Fail-safe = do-not-register: an unregistered wake means a later identical
-    human prompt still resets the loop counters (safe), whereas a falsely-registered wake would orphan
-    a digest and misclassify that human prompt as timer-originated (the exact A2 orphan this prevents).
+    signal, a negated-success or contradictory content, an ambiguous response with no affirmative
+    success marker) reads as NOT succeeded, so no wake digest is written. Fail-safe = do-not-register:
+    an unregistered wake means a later identical human prompt still resets the loop counters (safe),
+    whereas a falsely-registered wake would orphan a digest and misclassify that human prompt as
+    timer-originated (the exact A2 orphan this prevents).
     Negative signals checked: is_error true, success false, ok false, a non-empty error field, a
-    negative status token, or a failure token in a content text block (so 'FAILED', {"status":
-    "failed"}, {"ok": false}, and {"content": [{"text": "FAILED"}]} all read as NOT succeeded."""
+    negative status token, OR a failure/negation token in a content text block (so 'FAILED', {"status":
+    "failed"}, {"ok": false}, {"content": [{"text": "FAILED"}]}, and B5's negated-success shapes
+    {"ok":true, content "Wake was not scheduled"} / {"is_error":false, content "Request was
+    unsuccessful"} all read as NOT succeeded). A positive-shaped field NEVER overrides negative
+    content."""
     if isinstance(response, dict):
         if response.get("is_error") is True or response.get("success") is False \
                 or response.get("ok") is False:
@@ -7290,7 +7478,9 @@ def _orch_tool_succeeded(response):
         status = response.get("status")
         if isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_NEGATIVE:
             return False
-        if _orch_response_text_fails(response):
+        # B5: negative/negated content is decided BEFORE the positive-shaped fields, so an {"ok":true}
+        # or {"is_error":false} beside a contradicting text block cannot buy a registration.
+        if _orch_response_text_negative(response):
             return False
         # a wake registers ONLY on an affirmative success marker (never on the mere ABSENCE of an
         # error, which an ambiguous or unknown-schema response would satisfy). Fail-safe otherwise.

@@ -16,6 +16,9 @@ runner = "tools/selftest_orch_hooks.py"
 expected-check-ids = [
   # ---------- component 1: the stop guard ----------
   "stop/registry-absent",
+  "flagB/bad-registry-denies",
+  "flagB/absent-registry-inert-allows",
+  "flagB/bad-registry-with-operator-escape-allows",
   "stop/no-lease",
   "stop/actionable-denies",
   "stop/deny-names-item",
@@ -25,6 +28,8 @@ expected-check-ids = [
   "stop/stale-evidence-denies",
   "stop/proposed-is-actionable",
   "stop/ungranted-is-actionable",
+  "v1/proposed-non-compelling-allows",
+  "v1/ungranted-non-compelling-allows",
   "stop/live-task-allows",
   "stop/stale-task-denies",
   "stop/waiting-plus-actionable-denies",
@@ -208,6 +213,8 @@ expected-check-ids = [
   "core/wait-unnamed-target-not-cap-relieved",
   "core/schedule-actionable-wedge-cap-relieved",
   "core/wait-actionable-wedge-cap-relieved",
+  "core/wait-actionable-absent-target-not-cap-relieved",
+  "core/wait-actionable-unnamed-target-not-cap-relieved",
   # ---------- C.2: the attestation register for blocker evidence ----------
   "attest/no-snapshot-stop-holds",
   "attest/no-snapshot-schedule-denies",
@@ -232,9 +239,11 @@ expected-check-ids = [
   # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",
-  "lapse/proposed-lapse-is-actionable",
+  "lapse/v1-proposed-lapse-non-compelling",
   "lapse/unsubstantiated-lapse-finding",
-  "lapse/unsubstantiated-still-actionable",
+  "lapse/v1-unsubstantiated-lapse-non-compelling",
+  "flagA/ordinary-proposal-actionable",
+  "flagA/confirmed-lapse-park-honored",
   # ---------- C.3: the anti-shrinkage checkpoint union ----------
   "ckpt/first-window-allows",
   "ckpt/shrink-stop-holds",
@@ -317,17 +326,27 @@ expected-check-ids = [
   "close/fixed-verified-terminal",
   "close/fixed-terminal-counted",
   "close/fixed-terminal-in-table",
+  "close/fixed-unrelated-commit-holds",
+  "close/fixed-declared-paths-mismatch-actionable",
+  "close/fixed-matching-commit-terminal",
   # ---------- GD-164: the prep discipline ----------
   "prep/incomplete-actionable-denies",
   "prep/incomplete-wait-denies",
   "prep/complete-attested-blocked-visible",
   "prep/complete-unattested-ref-actionable",
   "prep/declined-row-actionable",
+  "prep/approved-row-actionable",
+  "prep/accepted-row-actionable",
+  "prep/decided-row-actionable",
+  "prep/prep-ref-to-resolved-row-actionable",
   "prep/complete-blank-ref-enumerator-error",
   "prep/v1-human-decision-blocked",
   # ---------- GD-164: the checkpoint closed-unjustified hold ----------
   "ckpt164/eligible-to-closed-unjustified-holds",
   "ckpt164/eligible-to-closed-terminal-leaves",
+  "ckpt164/dedup-transition-denies",
+  "ckpt164/dedup-item-count-unique",
+  "ckpt164/dedup-single-row-for-id",
   # ---------- GD-164: the wait boundary ----------
   "wait/actionable-redirect-denies",
   "wait/actionable-redirect-names-item",
@@ -371,6 +390,9 @@ expected-check-ids = [
   "a2/succeeded-false-on-content-failed",
   "a2/succeeded-false-on-ambiguous",
   "a2/succeeded-true-on-ok-true",
+  "a2/succeeded-false-on-ok-true-negated-content",
+  "a2/succeeded-false-on-is-error-false-unsuccessful-content",
+  "a2/succeeded-true-on-ok-true-positive-content",
 ]
 
 [[suite]]
