@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Pre-yield preflight (GD-112, D2: non-blocking in v1): print the disposition table the stop guard
-would act on, so the orchestrator sees per-item (id, class, proof) BEFORE yielding. The hooks
-re-enumerate authoritatively at yield time; this CLI adds visibility, never enforcement, and
-escalating it to a required permit is a recorded phase-2 option.
-  orch_preflight.py [stop|idle|drain]   exit 0 with the table; exit 2 on no registry or a bad operation
+"""Pre-yield preflight (GD-112/GD-164, D2: non-blocking): print the disposition table and the bounded
+surface-N liveness block the guards would act on, so the orchestrator sees per-item (id, class, proof)
+and the wind-down summary BEFORE yielding, idling, draining, or waiting. The hooks re-enumerate
+authoritatively at yield time; this CLI adds visibility, never enforcement.
+  orch_preflight.py [stop|idle|drain|wait] [wait-text]   exit 0 with the table; 2 on no registry/bad op
 """
 import sys
 from pathlib import Path
@@ -18,11 +18,12 @@ import aiqt_hooks  # noqa: E402
 def main():
     argv = sys.argv[1:]
     op = argv[0] if argv else "stop"
-    # a drained declaration is verified by the stop path; an idle wake must use the schedule path so it
-    # gets deny-on-cannot-evaluate, never the stop path's fail-open (CX-preflight-mode finding).
-    kinds = {"stop": "stop", "drain": "stop", "idle": "schedule_idle"}
+    wake_text = argv[1] if len(argv) > 1 else None
+    # a drained declaration and a wait are verified by their own decision kinds; an idle wake uses the
+    # schedule path so it gets deny-on-cannot-evaluate, never the stop path's fail-open.
+    kinds = {"stop": "stop", "drain": "stop", "idle": "schedule_idle", "wait": "wait"}
     if op not in kinds:
-        print("usage: orch_preflight.py [stop|idle|drain]", file=sys.stderr)
+        print("usage: orch_preflight.py [stop|idle|drain|wait] [wait-text]", file=sys.stderr)
         return 2
     root = str(repo_root())
     status, reg = aiqt_hooks._orch_registry(root)
@@ -32,14 +33,16 @@ def main():
     # A preview makes NO state change (secpv): the checkpoint union is computed for display but not
     # persisted, and no guard-events are emitted. The real hook path keeps record_checkpoint=True.
     ctx, _ts, _basis = aiqt_hooks._orch_build_ctx(
-        reg, root, kinds[op], {}, record_checkpoint=False)
+        reg, root, kinds[op], {}, wake_text=wake_text, record_checkpoint=False)
     verdict, reason, disposition = aiqt_hooks.decide_yield(ctx)
+    n = aiqt_hooks._orch_validate("surface_n", reg.get("surface_n"))[1]["n"]
     print("operation: {} (decision kind: {})".format(op, kinds[op]))
     print("verdict if you {} now: {}".format(op, verdict))
     print("reason: {}".format(reason))
-    print("disposition ({} row(s)):".format(len(disposition)))
+    print(aiqt_hooks._orch_surface(ctx, disposition, n))
+    print("disposition ({} row(s), untruncated):".format(len(disposition)))
     for klass, iid, a, b in disposition:
-        print("  {:<11} {:<16} {} {}".format(klass, iid, a, b))
+        print("  {:<15} {:<16} {} {}".format(klass, iid, a, b))
     return 0
 
 

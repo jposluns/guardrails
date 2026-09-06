@@ -2673,3 +2673,47 @@ born-release = "1.1.0"
 [[born]]
 id = "gatdis.13"
 born-release = "1.1.0"
+
+[[born]]
+id = "livbak"
+born-release = "1.1.0"
+
+[[born]]
+id = "livbak.1"
+born-release = "1.1.0"
+
+[[born]]
+id = "livbak.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "livbak.3"
+born-release = "1.1.0"
+
+[[born]]
+id = "livbak.4"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntdef.11"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntdef.12"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntdef.13"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntdef.14"
+born-release = "1.1.0"
+
+[[born]]
+id = "setcmp.9"
+born-release = "1.1.0"
+
+[[born]]
+id = "deccls.3"
+born-release = "1.1.0"

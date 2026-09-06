@@ -5221,6 +5221,10 @@ _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minut
 _ORCH_DECISION_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-[A-Z0-9][A-Za-z0-9-]*$")
 _ORCH_CLOCK_SKEW = 300  # seconds of tolerance for a proof timestamp slightly ahead of the guard clock
 _ORCH_ATTEST_APPROVED = frozenset(("accepted", "landed"))  # FIX 3: a ref counts only from an approved row
+# GD-164 (livbak): the closed-item close-ground vocabulary. A v2 closed item is honoured as terminal
+# only on one of these grounds recorded in the disposition register the guard reads; any other close,
+# or an unverifiable one, classifies actionable or held, never terminal-invisible.
+_ORCH_CLOSE_REASONS = frozenset(("fixed", "no-fix-needed", "not-buildable", "maintainer-deferred"))
 
 
 def _orch_now():
@@ -5385,20 +5389,23 @@ def _orch_write_json_atomic(path, obj):
         return False
 
 
-def _orch_guard_event(root, kind, decision, detail):
+def _orch_guard_event(root, kind, decision, detail, state_dir=None):
     """Best-effort append of one guard-events row (the over-fire metric and the mistakes-register feed).
     Returns whether the append succeeded (False on an I/O failure); the caller decides what a failure means
-    and a guard never changes its decision over it."""
-    sd = _orch_state_dir_for_root(root)
+    and a guard never changes its decision over it. FIX A1: a decision-path caller threads the once-resolved
+    state_dir; a non-decision caller passes None and falls back to the single-read resolution."""
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
     return _orch_append_jsonl(os.path.join(sd, "guard-events.jsonl"),
                               {"ts": _orch_now().isoformat(), "kind": kind,
                                "decision": decision, "detail": detail})
 
 
-def _orch_turn_state(root):
+def _orch_turn_state(root, state_dir=None):
     """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
-    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
-    path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
+    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies).
+    FIX A1: a decision-path caller threads the once-resolved state_dir; None falls back to a single read."""
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
+    path = os.path.join(sd, "turn-state.json")
     try:
         if not os.path.lexists(path):
             return {}
@@ -5409,8 +5416,8 @@ def _orch_turn_state(root):
         return None
 
 
-def _orch_save_turn_state(root, state):
-    sd = _orch_state_dir_for_root(root)
+def _orch_save_turn_state(root, state, state_dir=None):
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
     try:
         os.makedirs(sd, exist_ok=True)
         with open(os.path.join(sd, "turn-state.json"), "w", encoding="utf-8") as fh:
@@ -5498,7 +5505,7 @@ def _orch_escape_stat(path):
         os.close(fd)
 
 
-def _orch_escape_active(reg, root):
+def _orch_escape_active(reg, root, state_dir=None):
     """C.1: the escape sentinel opens the clean-ALLOW channel only when it is demonstrably an
     operator-created artefact in a trusted place, NOT the assistant's own: a REGULAR file with a single
     hard link (st_nlink == 1), reached without following any symlinked path component, resolved under
@@ -5515,8 +5522,10 @@ def _orch_escape_active(reg, root):
     CATEGORICAL residual (closed only by an operator-owned, assistant-non-writable state dir at the OS
     layer); component resolution is a best-effort lstat walk under the anchor rather than a fully
     race-free openat-under-anchor (a narrow TOCTOU window between the walk and the O_NOFOLLOW open); and
-    uid inequality proves not-self, never operator identity."""
-    anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    uid inequality proves not-self, never operator identity.
+
+    FIX A1: a decision-path caller threads the once-resolved state_dir; None falls back to a single read."""
+    anchor = os.path.realpath(state_dir if state_dir is not None else _orch_state_dir_for_root(root))
     declared = (reg.get("escape") or {}).get("path") if isinstance(reg.get("escape"), dict) else None
     if declared is not None and (not isinstance(declared, str) or not declared):
         return (False, None)
@@ -5562,15 +5571,19 @@ def _orch_escape_active(reg, root):
 
 
 def validate_enumeration(obj):
-    """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
-    duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
-    payload is an error, never an empty backlog (grdinp: a parse failure is a distinct cannot-evaluate,
-    not a clean pass)."""
+    """AEI strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. version
+    is an exact integer 1 or 2 (grdinp: an unknown version is a distinct cannot-evaluate, never an
+    empty backlog). Under v2 a closed item MUST carry a close object (reason in _ORCH_CLOSE_REASONS,
+    non-blank string ref); a human-decision blocker MUST carry a boolean prep_complete, and
+    prep_complete true MUST carry a non-blank string prep_ref; any item MAY carry a non-blank string
+    advance hint (display metadata only, never verdict-bearing). Under v1 every check is byte-identical
+    to the shipped v1 contract and close/prep/advance normalize to None. A duplicate id, a malformed
+    item or field, an unknown version, a missing envelope, or a non-dict payload is an error."""
     if not isinstance(obj, dict):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
-    if type(version) is not int or version != 1:
-        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+    if type(version) is not int or version not in (1, 2):
+        return (None, "unknown AEI version {!r} (an exact integer 1 or 2 is required)".format(version))
     gen = obj.get("generated_at_utc")
     gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
     if gen_ts is None:
@@ -5603,7 +5616,26 @@ def validate_enumeration(obj):
         granted = raw.get("granted")
         if not isinstance(granted, bool):
             return (None, "item {} has a non-boolean granted".format(iid))
+        # v2 close object: required on a closed item, forbidden on a non-closed one. v1: always None.
+        close = None
+        if version == 2:
+            raw_close = raw.get("close")
+            if state == "closed":
+                if not isinstance(raw_close, dict):
+                    return (None, "closed item {} has no close object (v2)".format(iid))
+                reason = raw_close.get("reason")
+                cref = raw_close.get("ref")
+                if reason not in _ORCH_CLOSE_REASONS:
+                    return (None, "closed item {} has an unknown close reason {!r}"
+                            .format(iid, reason))
+                if not isinstance(cref, str) or not cref.strip():
+                    return (None, "closed item {} close has no non-blank ref".format(iid))
+                close = {"reason": reason, "ref": cref}
+            elif raw_close is not None:
+                return (None, "non-closed item {} carries a close object".format(iid))
         blocker = raw.get("blocker")
+        prep_complete = None
+        prep_ref = None
         if blocker is not None:
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
@@ -5614,8 +5646,28 @@ def validate_enumeration(obj):
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
                         .format(iid))
+            if version == 2 and blocker.get("kind") == "human-decision":
+                pc = blocker.get("prep_complete")
+                if not isinstance(pc, bool):
+                    return (None, "human-decision item {} has a non-boolean prep_complete (v2)"
+                            .format(iid))
+                prep_complete = pc
+                if pc:
+                    pr = blocker.get("prep_ref")
+                    if not isinstance(pr, str) or not pr.strip():
+                        return (None, "human-decision item {} has prep_complete true but no non-blank "
+                                "prep_ref (v2)".format(iid))
+                    prep_ref = pr
+        advance = None
+        if version == 2 and raw.get("advance") is not None:
+            adv = raw.get("advance")
+            if not isinstance(adv, str) or not adv.strip():
+                return (None, "item {} has a non-string or blank advance hint".format(iid))
+            advance = adv
         out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
-                    "state": state, "granted": granted, "blocker": blocker})
+                    "state": state, "granted": granted, "blocker": blocker,
+                    "close": close, "prep_complete": prep_complete, "prep_ref": prep_ref,
+                    "advance": advance})
     return (out, None)
 
 
@@ -5646,17 +5698,19 @@ def _orch_enumerate(reg, root):
     items, err = validate_enumeration(payload)
     if err:
         return ("ENUMERATOR_ERROR", err)
-    return ("ok", items)
+    return ("ok", {"version": payload["version"], "source": payload["source"],
+                   "generated_at_utc": payload["generated_at_utc"], "items": items})
 
 
-def _orch_live_ledger_ids(root, task_hours):
+def _orch_live_ledger_ids(root, task_hours, state_dir=None):
     """Task ids that are LIVE: the LAST ledger event for the id is a launch (relaunch after a completion
     counts as live again), the wake route is EXACTLY True (a non-bool truthy like "false" does not count),
     and the launch age is within the staleness horizon and not in the future beyond a small skew tolerance.
     Returns (live_set, readable, detail): readable is False when the ledger is unreadable OR carries any
-    malformed line (a cannot-evaluate the caller must NOT treat as 'no live task')."""
-    rows, bad = _orch_read_jsonl(os.path.join(_orch_state_dir_for_root(root),
-                                              "dispatch-ledger.jsonl"))
+    malformed line (a cannot-evaluate the caller must NOT treat as 'no live task'). FIX A1: a decision-path
+    caller threads the once-resolved state_dir; None falls back to a single read."""
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
+    rows, bad = _orch_read_jsonl(os.path.join(sd, "dispatch-ledger.jsonl"))
     if rows is None:
         return (set(), False, "dispatch ledger unreadable")
     now = _orch_now()
@@ -5707,7 +5761,7 @@ def _orch_pending_haystack(reg, root):
         return None
 
 
-def _orch_attestation_refs(reg, root, staleness):
+def _orch_attestation_refs(reg, root, staleness, state_dir=None):
     """The C.2 attestation proof surface. Three-valued, matching the proof-source idiom: None when the
     registry declares no attestations register; "unreadable" when one is declared but the validated
     snapshot is absent, malformed, not a status-ok run, stale, its binding to the register on disk no
@@ -5728,7 +5782,8 @@ def _orch_attestation_refs(reg, root, staleness):
     at_path = _orch_path(root, reg.get("attestations"))
     if not at_path:
         return None
-    path = os.path.join(_orch_state_dir_for_root(root), "attestations-validated.json")
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
+    path = os.path.join(sd, "attestations-validated.json")
     try:
         with open(path, "r", encoding="utf-8") as fh:
             snap = json.load(fh)
@@ -5753,13 +5808,12 @@ def _orch_attestation_refs(reg, root, staleness):
     rows, _detail = _orch_chained_rows(at_path, "AT-")
     if rows is None:
         return "unreadable"
-    refs, _unsub, _findings = _orch_attestation_derive(reg, root,
-                                                       _orch_state_dir_for_root(root), rows)
+    refs, _unsub, _findings = _orch_attestation_derive(reg, root, sd, rows)
     return frozenset(refs)
 
 
 def classify_backlog(items, live_ids, ledger_readable, pending_haystack, staleness,
-                     attestations=None):
+                     attestations=None, dispositions=None, deferrals=None):
     """Pure classification of a VALID enumeration (step 5). Returns actionable/waiting/blocked/
     cannot_evaluate/proposed. A proof SOURCE that cannot be read (ledger unreadable-or-malformed, or
     pending_haystack is None) puts the item in cannot_evaluate: FIX 1 DENIES the stop on it (ignorance
@@ -5771,9 +5825,38 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
     covered by a fresh validated row, the existing observed_at_utc freshness check still applying."""
     now = _orch_now()
     ext_hours = _orch_validate("staleness", staleness)[1]["external_hours"]
-    out = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": []}
+    out = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": [],
+           "closed_unjustified": []}
     for it in items:
         if it["state"] == "closed":
+            close = it.get("close")
+            if close is None:
+                continue                       # v1: skip exactly as today (byte-identical)
+            reason = close["reason"]
+            if reason == "fixed":
+                continue                       # terminal; the attestation/vfcmt rail governs landing
+            if reason in ("no-fix-needed", "not-buildable"):
+                if dispositions is None or dispositions == "unreadable":
+                    out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
+                        "close ground {} cannot be verified; held".format(reason)))
+                    out["closed_unjustified"].append(it["id"])
+                elif (it["id"], reason, close["ref"]) in dispositions:
+                    continue                   # terminal: a qualifying validated dispositions row
+                else:
+                    out["actionable"].append((it["id"], it["title"],
+                        "closed ({}) without a qualifying dispositions register entry".format(reason)))
+                    out["closed_unjustified"].append(it["id"])
+            else:  # maintainer-deferred
+                if deferrals is None or deferrals == "unreadable":
+                    out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
+                        "maintainer-deferral cannot be verified; held"))
+                    out["closed_unjustified"].append(it["id"])
+                elif (it["id"], close["ref"]) in deferrals:
+                    out["blocked"].append((it["id"], "maintainer-deferral", close["ref"]))
+                else:
+                    out["actionable"].append((it["id"], it["title"],
+                        "closed (maintainer-deferred) without a qualifying deferrals register entry"))
+                    out["closed_unjustified"].append(it["id"])
             continue
         if it["state"] == "proposed" or not it["granted"]:
             out["proposed"].append(it["id"])
@@ -5804,10 +5887,17 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                                           "human-decision ref {!r} is not a decision id".format(ref)))
             elif re.search(r"(?m)^[ \t]*(?:\|[ \t]*{0}[ \t]*\||{0}[ \t]*:)".format(re.escape(ref)),
                            pending_haystack):
-                out["blocked"].append((it["id"], "human-decision", ref))
+                # v2 prep gating: a decision blocks only the FINAL step. prep_complete is None under v1
+                # (byte-identical: blocked), True/False only under v2. False -> preparatory work remains.
+                if it.get("prep_complete") is False:
+                    out["actionable"].append((it["id"], it["title"],
+                        "a decision blocks only the final step; preparatory work remains"))
+                else:
+                    out["blocked"].append((it["id"], "human-decision", ref))
             else:
                 out["actionable"].append((it["id"], it["title"],
-                                          "ref {} is not at a pending-decision row-id position".format(ref)))
+                                          "ref {} is not at a pending-decision row-id position"
+                                          .format(ref)))
         elif kind in ("external", "foreign-lease"):
             observed = _orch_parse_utc(blocker.get("observed_at_utc"))
             age = (now - observed).total_seconds() if observed is not None else None
@@ -5834,25 +5924,107 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
             else:
                 out["actionable"].append((it["id"], it["title"],
                                           "not-before constraint unparseable or already met"))
+    # v2 advance hint: prefix the why-reason of any actionable item that carries one (display metadata
+    # only; the pack's own vocabulary stays the classifier's reason tokens, so a hint arrives solely
+    # from an adopter provider). v1 items carry no advance, so this is inert under v1 (byte-identical).
+    adv = {it["id"]: it["advance"] for it in items if it.get("advance")}
+    if adv:
+        out["actionable"] = [(i, t, "{}; {}".format(adv[i], w) if i in adv else w)
+                             for i, t, w in out["actionable"]]
     return out
+
+
+def _orch_disposition_table(ctx):
+    """The complete disposition list (the emitted enumeration order the guard never re-sorts): blocked,
+    then cannot-evaluate, waiting, actionable, proposed. Shared by decide_yield and the liveness
+    emitter so surface and verdict cannot disagree."""
+    return ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
+            + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
+            + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
+            + [("actionable", i, t, w) for i, t, w in ctx["actionable"]]
+            + [("proposed", i, "", "") for i in ctx["proposed"]])
+
+
+def _decide_wait(ctx, disposition, capped):
+    """The wait-boundary sub-decision (livbak): a pause is a wind-down and clears the same bar as a
+    stop. EVERY ignorance path DENIES the wait (cap-bounded anti-wedge relief via the shared schedule
+    counter); the ONLY ALLOW is the fully-evaluated single case: at least one live waiting row named
+    as a whole token in the wait text, zero actionable, zero cannot-evaluate, enumeration ok."""
+    if ctx["enum_status"] != "ok":
+        if capped:
+            return _wait_capped(ctx, disposition)
+        return ("DENY",
+                "livbak: the backlog is not enumerable ({}: {}); a wait cannot confirm whole-set "
+                "exhaustion, so it cannot license a pause (ignorance refuses the wind-down). Fix the "
+                "enumerator or the registry, or release through the operator-owned escape sentinel."
+                .format(ctx["enum_status"], ctx["enum_detail"]), disposition)
+    if ctx.get("cannot_evaluate", []):
+        if capped:
+            return _wait_capped(ctx, disposition)
+        return ("DENY",
+                "livbak: a proof source for {} open item(s) is unreadable (cannot-evaluate); a wait "
+                "cannot rest on an unconfirmable enumeration (ignorance refuses the wind-down). Fix "
+                "the source, or release through the operator-owned escape sentinel."
+                .format(len(ctx.get("cannot_evaluate", []))), disposition)
+    if ctx["actionable"]:
+        if capped:
+            return _wait_capped(ctx, disposition)
+        named = ctx["actionable"][:_ORCH_MAX_NAMED]
+        more = len(ctx["actionable"]) - len(named)
+        listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+        if more > 0:
+            listing += "; and {} more".format(more)
+        return ("DENY",
+                "livbak/cntdef: a wait is denied while {} item(s) are advanceable; a busy worker pool "
+                "is not an external block. Advance one of: {}. A wait is licensed only when the "
+                "awaited result blocks the very next step and no other item can proceed."
+                .format(len(ctx["actionable"]), listing), disposition)
+    if not ctx["waiting"] or ctx["wake_named"] is not True:
+        if capped:
+            return _wait_capped(ctx, disposition)
+        if not ctx["waiting"]:
+            return ("DENY",
+                    "livbak: nothing is running; a wait that collects no launched result is a "
+                    "manufactured pause. There is nothing to wait for.", disposition)
+        n = len(ctx["waiting"]) + len(ctx["blocked"])
+        return ("DENY",
+                "livbak: the wait names no live launched result; a pause that collects nothing is a "
+                "wind-down, and the {} waiting/blocked item(s) do not include a named target."
+                .format(n), disposition)
+    named = "; ".join("{} ({}: {})".format(i, k, r) for i, k, r in ctx["waiting"][:_ORCH_MAX_NAMED])
+    return ("ALLOW",
+            "livbak: a wait is licensed; no other item is advanceable and the wait names live "
+            "launched work it is genuinely blocked on: {}".format(named), disposition)
+
+
+def _wait_capped(ctx, disposition):
+    """The wait anti-wedge relief: repeated same-basis wait denials past the cap yield with findings so
+    a farmed guard cannot wedge forever (the caller records it as a forced exit)."""
+    return ("ALLOW_WITH_FINDINGS",
+            "{} wait denials on an unchanged basis; a guard that can be farmed trains its own bypass, "
+            "so this wait proceeds with findings".format(ctx["schedule_denials"]), disposition)
 
 
 def decide_yield(ctx):
     """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
-    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
-    Returns (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
+    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials,
+    basis_unchanged. kind is stop | schedule_idle | wait. Returns (verdict, reason, disposition) with
+    verdict ALLOW | ALLOW_WITH_FINDINGS | DENY. parkish (schedule_idle or wait) shares the schedule
+    denial counter and _ORCH_SCHEDULE_CAP anti-wedge relief and is excluded from the stop loop bound;
+    the wait boundary is a self-contained sub-decision so the stop/schedule verdict lattice stays
+    byte-identical (livbak)."""
     kind = ctx["kind"]
-    disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
-                   + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
-                   + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
-                   + [("actionable", i, t, w) for i, t, w in ctx["actionable"]]
-                   + [("proposed", i, "", "") for i in ctx["proposed"]])
+    parkish = kind in ("schedule_idle", "wait")
+    disposition = _orch_disposition_table(ctx)
     if ctx["escape"]:
         return ("ALLOW", "operator escape artefact present (logged)", disposition)
-    if kind != "schedule_idle" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
+    if not parkish and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
         return ("ALLOW_WITH_FINDINGS",
                 "loop bound reached after {} denial(s); yielding with the unresolved items as "
                 "findings rather than re-firing".format(ctx["counter"]), disposition)
+    if kind == "wait":
+        capped = ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]
+        return _decide_wait(ctx, disposition, capped)
     if ctx["enum_status"] != "ok":
         if kind == "schedule_idle":
             if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
@@ -5978,7 +6150,15 @@ def _schema_turn_state(raw):
                    "schedule_basis": basis if isinstance(basis, str) else None})
 
 
-_ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
+def _schema_surface_n(raw):
+    """The surface-N bound: an exact int in [1, 100] from the optional registry key, else the
+    _ORCH_MAX_NAMED default. Fail-safe: a malformed bound never truncates to zero nor explodes."""
+    n = _v_exact_int(raw, 1, 100)
+    return ("ok", {"n": n if n is not None else _ORCH_MAX_NAMED})
+
+
+_ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state,
+                 "surface_n": _schema_surface_n}
 
 
 def _orch_token_present(needle, hay):
@@ -5992,7 +6172,7 @@ def _orch_token_present(needle, hay):
 _ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
 
 
-def _orch_checkpoint_union(root, payload, record=True):
+def _orch_checkpoint_union(root, payload, closed_unjustified_ids=None, record=True, state_dir=None):
     """C.3 anti-shrinkage checkpoint union, run only after a status-ok enumeration. Compares the
     persisted checkpoint (<state_dir>/backlog-checkpoint.json) against the FULL validated payload
     (closed rows included: a closed row is the receipt that lets an id leave the checkpoint) and
@@ -6015,7 +6195,7 @@ def _orch_checkpoint_union(root, payload, record=True):
     is a possible reset (naive deletion or a crash) and is HELD (cannot-evaluate), never silently
     restarted. RESIDUAL (disclosed): the marker lives in the same actor-writable state dir, so this
     raises the bar (catches naive deletion) without being categorical. The checkpoint's eligibility memory (the FIX 2 demotion catch) lives in the same actor-writable state dir, so it raises the bar without being categorical."""
-    sd = _orch_state_dir_for_root(root)
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
     path = os.path.join(sd, "backlog-checkpoint.json")
     marker = os.path.join(sd, "checkpoint-init.marker")
     injected, prior = [], {}
@@ -6043,25 +6223,34 @@ def _orch_checkpoint_union(root, payload, record=True):
     # "eligible" == granted and open (the id will classify actionable/waiting/blocked/cannot-evaluate);
     # "proposed" == state proposed or ungranted; "closed" is the receipt that lets an id leave. A legacy
     # checkpoint's "open" value reads as "eligible" (a back-compatible migration, no memory lost).
+    cu = closed_unjustified_ids or frozenset()
+
     def _label(it):
         if it["state"] == "closed":
-            return "closed"
+            # a genuinely terminal close is the receipt that lets an id leave the checkpoint; an
+            # unjustified/unverifiable close is NOT a receipt and is held like an eligible id.
+            return "closed-unjustified" if it["id"] in cu else "closed"
         return "eligible" if (it["granted"] and it["state"] == "open") else "proposed"
     current = {it["id"]: _label(it) for it in payload}
     for iid in sorted(prior):
         was = "eligible" if prior[iid] == "open" else prior[iid]
-        if was in ("eligible", "proposed") and iid not in current:
+        if was in ("eligible", "proposed", "closed-unjustified") and iid not in current:
             injected.append((iid, "cannot-evaluate",
                              "vanished from the enumeration without a close receipt"))
         elif was == "eligible" and current.get(iid) == "proposed":
-            # the demotion variant: a previously-actionable id relabelled to proposed/ungranted routes
-            # to the harmless proposed bucket and evades both the deny and the vanish check; held.
             injected.append((iid, "cannot-evaluate",
-                             "demoted from actionable to proposed/ungranted without a close receipt; held"))
+                             "demoted from actionable to proposed/ungranted without a close receipt; "
+                             "held"))
+        elif was in ("eligible", "proposed") and current.get(iid) == "closed-unjustified":
+            injected.append((iid, "cannot-evaluate",
+                             "routed to closed without a qualifying register entry; held"))
+    # the union excludes ONLY genuinely closed (terminal) ids, so an unjustified close never buys a
+    # checkpoint receipt: a closed-unjustified id is retained and keeps being tracked.
     union = {iid: ("eligible" if st == "open" else st) for iid, st in prior.items()
-             if (st in ("open", "eligible", "proposed")) and current.get(iid) != "closed"}
+             if st in ("open", "eligible", "proposed", "closed-unjustified")
+             and current.get(iid) != "closed"}
     for it in payload:
-        if it["state"] != "closed":
+        if current[it["id"]] != "closed":
             union[it["id"]] = current[it["id"]]
     if len(union) > _ORCH_CHECKPOINT_MAX:
         dropped = sorted(union)[_ORCH_CHECKPOINT_MAX:]
@@ -6069,13 +6258,14 @@ def _orch_checkpoint_union(root, payload, record=True):
         if record:
             _orch_guard_event(root, "checkpoint-bound", "dropped",
                               "{} id(s) past the {} bound: {}".format(
-                                  len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])))
+                                  len(dropped), _ORCH_CHECKPOINT_MAX, ", ".join(dropped[:10])),
+                              state_dir=sd)
     if record:
         if not _orch_write_json_atomic(path, {"version": 1, "ts": _orch_now().isoformat(),
                                               "ids": union}):
             _orch_guard_event(root, "checkpoint-unwritable", "recorded",
                               "the checkpoint could not be rewritten; the next window compares "
-                              "against the prior state")
+                              "against the prior state", state_dir=sd)
         elif not os.path.lexists(marker):
             # FIX 4: record that a window has now been initialised, so a later deletion is detectable.
             # FIX C: a failed marker write leaves no init marker, so a later checkpoint deletion would
@@ -6084,7 +6274,7 @@ def _orch_checkpoint_union(root, payload, record=True):
             if not _orch_write_json_atomic(marker, {"version": 1, "ts": _orch_now().isoformat()}):
                 _orch_guard_event(root, "checkpoint-marker-unwritable", "recorded",
                                   "the checkpoint-init marker could not be written; a later "
-                                  "checkpoint deletion would be undetectable this window")
+                                  "checkpoint deletion would be undetectable this window", state_dir=sd)
                 injected.append(("backlog-checkpoint", "cannot-evaluate",
                                  "checkpoint-init marker unwritable; a later deletion would go "
                                  "undetected"))
@@ -6093,69 +6283,96 @@ def _orch_checkpoint_union(root, payload, record=True):
 
 def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=True):
     """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
-    (ctx, turn_state_or_None, basis). The C.1 escape unpack, the C.2 attestation threading, and the
-    C.3 checkpoint injection all land HERE, never in decide_yield: the decision core's verdict
-    lattice is untouched, and ctx["escape_spoof"] is a recorder-only key decide_yield never reads."""
+    (ctx, turn_state_or_None, basis). The C.1 escape unpack, C.2 attestation, GD-164 close-ground and
+    prep threading, and C.3 checkpoint injection all land HERE. FIX A1: the machine-written state dir
+    is resolved ONCE from the handler-validated registry (_state_dir_from_registry) and threaded into
+    every decision-path reader/recorder, so no second, independently-faulting registry read can
+    XDG-fall-back mid-turn onto the wrong directory."""
+    state_dir = _state_dir_from_registry(root, reg)   # FIX A1: resolved once from the validated reg
     staleness = _orch_validate("staleness", reg.get("staleness"))[1]
     task_hours = staleness["task_hours"]
-    ts = _orch_turn_state(root)
+    ts = _orch_turn_state(root, state_dir=state_dir)
     tstate = _orch_validate("turn_state", ts)[1]
-    # stop counter fails OPEN to the loop bound (an unreadable counter never licenses unbounded denies);
-    # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief, CX-R4-3).
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     status, payload = _orch_enumerate(reg, root)
+    closed_unjustified_ids = frozenset()
     if status == "ok":
-        live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours)
-        classes = classify_backlog(payload, live_ids, ledger_readable,
-                                   _orch_pending_haystack(reg, root), staleness,
-                                   attestations=_orch_attestation_refs(reg, root, staleness))
-        # C.3: an id recorded open/proposed at the checkpoint that vanished from this enumeration
-        # with no closed receipt is held (cannot-evaluate); the injected ids enter the class-tagged
-        # basis below, so under D12 a shrink is a CHANGED basis, never premature cap relief.
+        items = payload["items"]
+        env_version = payload["version"]
+        env_source = payload["source"]
+        env_generated = payload["generated_at_utc"]
+        live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours,
+                                                                   state_dir=state_dir)
+        classes = classify_backlog(
+            items, live_ids, ledger_readable,
+            _orch_pending_haystack(reg, root), staleness,
+            attestations=_orch_attestation_refs(reg, root, staleness, state_dir=state_dir),
+            dispositions=_orch_disposition_refs(reg, root, staleness, state_dir=state_dir),
+            deferrals=_orch_deferral_refs(reg, root, staleness, state_dir=state_dir))
+        closed_unjustified_ids = frozenset(classes.get("closed_unjustified", []))
         classes["cannot_evaluate"].extend(
-            _orch_checkpoint_union(root, payload, record=record_checkpoint))
+            _orch_checkpoint_union(root, items, closed_unjustified_ids=closed_unjustified_ids,
+                                   record=record_checkpoint, state_dir=state_dir))
         enum_detail = ""
-        # D12: tag each id with its class so an item flipping between classes reads as a CHANGED basis (an
-        # untagged merge let such a flip collide to the same basis and skip fresh handling). CONV4-CX2 +
-        # CONV6-C: waiting/blocked carry their blocker KIND:REF (a changed recheck obligation, e.g. a
-        # blocker ref vendor-A->vendor-B, is a changed basis) and proposed (p:) its membership, so any
-        # genuine backlog change resets the denial count rather than inheriting premature cap relief.
+        # D12 basis: an item flipping between classes reads as a CHANGED basis (no premature cap
+        # relief). GD-164: add a per-closed-id disposition tag so a manufactured close is a changed
+        # basis rather than an unchanged one that would earn cap relief.
         basis = json.dumps(sorted(
             ["a:" + i for i, _t, _w in classes["actionable"]]
             + ["c:" + i for i, _c, _p in classes["cannot_evaluate"]]
             + ["w:{}:{}:{}".format(i, k, r) for i, k, r in classes["waiting"]]
             + ["b:{}:{}:{}".format(i, k, r) for i, k, r in classes["blocked"]]
-            + ["p:" + i for i in classes["proposed"]]))
+            + ["p:" + i for i in classes["proposed"]]
+            + ["x:{}:{}:{}".format(it["id"], it["close"]["reason"],
+                                   "unjustified" if it["id"] in closed_unjustified_ids else "justified")
+               for it in items if it["state"] == "closed" and it.get("close")]))
+        # AEI v1 under a declared disposition register: the unjustified-close check is unavailable.
+        # Advisory only, gated by record_checkpoint (a preview makes no state change).
+        if record_checkpoint and env_version == 1 \
+                and (reg.get("dispositions") is not None or reg.get("deferrals") is not None):
+            _orch_guard_event(root, "aei-v1-advisory", "advisory",
+                              "AEI v1 under a declared disposition register: the unjustified-close "
+                              "check is unavailable; migrate the enumerator to v2", state_dir=state_dir)
     else:
-        classes = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": []}
+        classes = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [],
+                   "proposed": [], "closed_unjustified": []}
         enum_detail = payload
         basis = status
+        env_version = env_source = env_generated = None
     wake_named = None
     rechecked = classes["waiting"] + classes["blocked"]
     if kind == "schedule_idle" and rechecked:
         wake_named = any(_orch_token_present(i, wake_text) or _orch_token_present(p, wake_text)
                          for i, _c, p in rechecked)
+    elif kind == "wait":
+        # wait names a live WAITING row (the launched work it collects); always a bool for kind wait
+        # (False when nothing waiting matched), so decide_yield's wait branch can distinguish it.
+        wake_named = any(_orch_token_present(i, wake_text) or _orch_token_present(p, wake_text)
+                         for i, _c, p in classes["waiting"])
     basis_unchanged = tstate["schedule_basis"] == basis
-    escape_active, escape_spoof = _orch_escape_active(reg, root)
+    escape_active, escape_spoof = _orch_escape_active(reg, root, state_dir=state_dir)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
-           "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
+           "loop_signal": data.get("stop_hook_active") is True,
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
            "blocked": classes["blocked"], "cannot_evaluate": classes["cannot_evaluate"],
            "proposed": classes["proposed"],
            "wake_named": wake_named, "schedule_denials": schedule_denials,
-           "basis_unchanged": basis_unchanged}
+           "basis_unchanged": basis_unchanged,
+           # GD-164 emitter/A1 fields (decide_yield never reads these):
+           "state_dir": state_dir, "enum_version": env_version, "source": env_source,
+           "generated_at_utc": env_generated}
     return ctx, (ts if isinstance(ts, dict) else None), basis
 
 
-def _orch_record_denial(root, ts, kind, basis):
+def _orch_record_denial(root, ts, kind, basis, state_dir=None):
     """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
     successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
     a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
-    loop bound and would otherwise re-deny forever."""
+    loop bound and would otherwise re-deny forever. wait shares the schedule counter/basis (parkish)."""
     state = dict(ts or {})
-    if kind == "schedule_idle":
+    if kind in ("schedule_idle", "wait"):
         prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
         prior = prior if prior is not None else 0
         # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
@@ -6165,10 +6382,10 @@ def _orch_record_denial(root, ts, kind, basis):
     else:
         prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
         state["stop_denials"] = (prior if prior is not None else 0) + 1
-    return _orch_save_turn_state(root, state)
+    return _orch_save_turn_state(root, state, state_dir=state_dir)
 
 
-def _orch_record_escape_spoof(root, detail):
+def _orch_record_escape_spoof(root, detail, state_dir=None):
     """C.1 recorder: an ignored (foreign, symlinked, hardlinked, actor-owned, or writable) escape
     sentinel is a recorded fact, never a verdict input: the decision already proceeded exactly as with
     no sentinel. Appends a guard-events row and writes <state_dir>/escape-spoof.json so the next resume
@@ -6176,8 +6393,9 @@ def _orch_record_escape_spoof(root, detail):
     text the caller MUST append to its banner, so an ignored sentinel that could not be recorded is
     never silently dropped (which would contradict the always-recorded-and-surfaced claim, and leave
     the resume audit nothing to surface when both writes failed)."""
-    ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail)
-    ok_file = _orch_write_json(os.path.join(_orch_state_dir_for_root(root), "escape-spoof.json"),
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
+    ok_event = _orch_guard_event(root, "escape-spoof", "recorded", detail, state_dir=sd)
+    ok_file = _orch_write_json(os.path.join(sd, "escape-spoof.json"),
                                {"ts": _orch_now().isoformat(), "detail": detail})
     if ok_event and ok_file:
         return ""
@@ -6199,7 +6417,7 @@ def _orch_open_dispositions(ctx):
             + list(ctx["proposed"]))
 
 
-def _orch_record_forced_exit(root, event_name, ctx, reason):
+def _orch_record_forced_exit(root, event_name, ctx, reason, state_dir=None):
     """C.4 recorder: a bound- or cap-released ALLOW_WITH_FINDINGS past any non-closed disposition is
     marked forced_unresolved so the next resume audit surfaces it for triage. FIX 5: the record is
     APPEND-ONLY and uniquely keyed (<state_dir>/forced-exit.jsonl, one row per forced exit with a
@@ -6213,9 +6431,10 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
     key = _orch_now().isoformat() + "-" + os.urandom(6).hex()
     named = (", ".join(open_ids[:_ORCH_MAX_NAMED])
              or ("open set unestablished" if not enum_ok else "none"))
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
     ok_event = _orch_guard_event(root, "forced_unresolved", "allow_with_findings",
-                                 "{}: open ids {}".format(event_name, named))
-    ok_file = _orch_append_jsonl(os.path.join(_orch_state_dir_for_root(root), "forced-exit.jsonl"),
+                                 "{}: open ids {}".format(event_name, named), state_dir=sd)
+    ok_file = _orch_append_jsonl(os.path.join(sd, "forced-exit.jsonl"),
                                  {"ts": _orch_now().isoformat(), "event": event_name, "key": key,
                                   "open_ids": open_ids, "reason": reason,
                                   "enum_status": ctx.get("enum_status")})
@@ -6224,6 +6443,73 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
     return ("Additionally, the forced-exit record could not be fully persisted (guard-events {}, "
             "forced-exit.jsonl {}); record the forced exit manually before resuming (nocncl)."
             .format("ok" if ok_event else "FAILED", "ok" if ok_file else "FAILED"))
+
+
+def _orch_surface(ctx, disposition, n):
+    """The human-facing surface-N block (bounded to n), rendered from the SAME fresh enumeration the
+    verdict used, in the enumerator's emission order (never re-sorted). On an enum failure or any
+    cannot-evaluate it names that failure and the operator escape, never an empty clean list; else the
+    first n actionable rows, then (when actionable is empty) the waiting/blocked rows, then proposed.
+    A pure formatter: it makes no decision and reads no state."""
+    if ctx["enum_status"] != "ok":
+        return ("liveness: the backlog could not be enumerated ({}: {}); nothing is confirmed "
+                "exhausted. Fix the enumerator, or release through the operator-owned escape sentinel."
+                .format(ctx["enum_status"], ctx.get("enum_detail", "")))
+    ce = ctx.get("cannot_evaluate", [])
+    if ce:
+        rows = ce[:n]
+        body = "; ".join("{} ({})".format(i, p) for i, _c, p in rows)
+        more = len(ce) - len(rows)
+        return ("liveness: {} open item(s) cannot be evaluated, so a wind-down is refused: {}{}"
+                .format(len(ce), body, "; and {} more".format(more) if more > 0 else ""))
+    act = ctx["actionable"]
+    if act:
+        rows = act[:n]
+        body = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in rows)
+        more = len(act) - len(rows)
+        return "liveness: {} actionable item(s): {}{}".format(
+            len(act), body, "; and {} more".format(more) if more > 0 else "")
+    wb = ([("waiting", i, k, r) for i, k, r in ctx["waiting"]]
+          + [("blocked", i, k, r) for i, k, r in ctx["blocked"]])
+    if wb:
+        rows = wb[:n]
+        body = "; ".join("{} [{}] ({}: {})".format(i, cls, k, r) for cls, i, k, r in rows)
+        more = len(wb) - len(rows)
+        return ("liveness: no actionable item remains; {} waiting/blocked item(s): {}{}"
+                .format(len(wb), body, "; and {} more".format(more) if more > 0 else ""))
+    if ctx.get("proposed", []):
+        return ("liveness: no actionable, waiting, or blocked item remains; {} proposed item(s) "
+                "await a grant".format(len(ctx["proposed"])))
+    return "liveness: the backlog is empty; nothing remains"
+
+
+def _orch_liveness_row(root, operation, ctx, verdict, reason, disposition, n, state_dir=None):
+    """Append ONE untruncated liveness-evaluations.jsonl row per boundary evaluation (Stop,
+    TeammateIdle, yield-tool, wait): the clock-read timestamp, operation, verdict, reason, the
+    enumeration source locator/revision/generated_at_utc, the COMPLETE disposition table (item count
+    equal to the enumeration's, never the bounded surface sample), and a sha256 digest over the table's
+    canonical JSON. The digest is also written to a companion guard-events row as the pointer. Returns
+    (surface_block, warn): surface_block is the bounded human-facing block; warn is '' on success or
+    the fail-loud text the caller MUST append (the durable enumeration record can never fail silently)."""
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
+    source = ctx.get("source") if isinstance(ctx.get("source"), dict) else {}
+    table = [{"class": c, "id": i, "kind_or_title": kt, "detail": d} for c, i, kt, d in disposition]
+    digest = __import__("hashlib").sha256(
+        json.dumps(table, sort_keys=True).encode("utf-8")).hexdigest()
+    row = {"ts": _orch_now().isoformat(), "operation": operation, "verdict": verdict,
+           "reason": reason, "enum_status": ctx.get("enum_status"),
+           "source_locator": source.get("locator"), "source_revision": source.get("revision"),
+           "generated_at_utc": ctx.get("generated_at_utc"),
+           "item_count": len(table), "disposition": table, "digest": digest}
+    ok_row = _orch_append_jsonl(os.path.join(sd, "liveness-evaluations.jsonl"), row)
+    ok_evt = _orch_guard_event(root, "liveness", verdict.lower(),
+                               "{}: {} item(s); digest {}".format(operation, len(table), digest),
+                               state_dir=sd)
+    warn = "" if (ok_row and ok_evt) else (
+        "Additionally, the liveness evaluation record could not be fully persisted "
+        "(liveness-evaluations.jsonl {}, guard-events {}); record it manually before continuing "
+        "(nocncl).".format("ok" if ok_row else "FAILED", "ok" if ok_evt else "FAILED"))
+    return (_orch_surface(ctx, disposition, n), warn)
 
 
 def _orch_stop_family(data, event_name, kind):
@@ -6244,34 +6530,38 @@ def _orch_stop_family(data, event_name, kind):
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
-    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+    sd = ctx.get("state_dir")
+    n = _orch_validate("surface_n", reg.get("surface_n"))[1]["n"]
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"], state_dir=sd)
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
+    surface, live_warn = _orch_liveness_row(root, event_name, ctx, verdict, reason, disposition,
+                                            n, state_dir=sd)
     if verdict == "DENY":
-        if not _orch_record_denial(root, ts, kind, basis):
+        if not _orch_record_denial(root, ts, kind, basis, state_dir=sd):
             warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
                     "failing OPEN with findings rather than re-denying. Underlying: " + reason)
-            _orch_guard_event(root, event_name, "allow_unpersistable", warn)
-            return _stop_warn("AIQT guardrail ({}): {}{}".format(
-                event_name, warn, " " + spoof_warn if spoof_warn else ""))
-        _orch_guard_event(root, event_name, "deny", reason)
-        # a DENY blocks (exit 2); if the spoof record itself failed, surface it on the block reason too
-        return (2, None, reason + (" " + spoof_warn if spoof_warn else ""))
-    _orch_guard_event(root, event_name, verdict.lower(), reason)
+            _orch_guard_event(root, event_name, "allow_unpersistable", warn, state_dir=sd)
+            tail = " ".join(x for x in (spoof_warn, live_warn) if x)
+            return _stop_warn("AIQT guardrail ({}): {} {}{}".format(
+                event_name, warn, surface, " " + tail if tail else ""))
+        _orch_guard_event(root, event_name, "deny", reason, state_dir=sd)
+        tail = " ".join(x for x in (spoof_warn, live_warn) if x)
+        return (2, None, "{} {}{}".format(reason, surface, " " + tail if tail else ""))
+    _orch_guard_event(root, event_name, verdict.lower(), reason, state_dir=sd)
     if verdict == "ALLOW_WITH_FINDINGS":
         extra = ""
         if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
                 and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
-            # C.4: the bound released this exit past open work; mark it forced_unresolved for the
-            # next resume audit's triage. The fail-open verdict itself is unchanged.
-            extra = _orch_record_forced_exit(root, event_name, ctx, reason)
-        tail = " ".join(x for x in (extra, spoof_warn) if x)
-        return _stop_warn("AIQT guardrail ({}): {}{}".format(
-            event_name, reason, " " + tail if tail else ""))
-    if spoof_warn:
-        # a clean ALLOW whose spoof record FAILED still surfaces the failure (never a silent None)
-        return _stop_warn("AIQT guardrail ({}): {}".format(event_name, spoof_warn))
-    return _allow()
+            extra = _orch_record_forced_exit(root, event_name, ctx, reason, state_dir=sd)
+        tail = " ".join(x for x in (extra, spoof_warn, live_warn) if x)
+        return _stop_warn("AIQT guardrail ({}): {} {}{}".format(
+            event_name, reason, surface, " " + tail if tail else ""))
+    # clean ALLOW: an allowed stop still SHOWS what remains (on a true exhaustion, the waiting/blocked
+    # or empty table), so a bare silent allow becomes a non-blocking surface warn (GD-164 Step 17).
+    tail = " ".join(x for x in (spoof_warn, live_warn) if x)
+    return _stop_warn("AIQT guardrail ({}): {}{}".format(
+        event_name, surface, " " + tail if tail else ""))
 
 
 def orch_stop_guard(data):
@@ -6287,7 +6577,7 @@ def orch_teammate_idle(data):
     return _orch_stop_family(data, "TeammateIdle", "stop_idle" if False else "stop")
 
 
-def _orch_register_wake(root, ts, prompt):
+def _orch_register_wake(root, ts, prompt, state_dir=None):
     """Record the sha256 of an ALLOWED wake's prompt into turn-state wake_digests (bounded), so the
     returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
     the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
@@ -6300,7 +6590,7 @@ def _orch_register_wake(root, ts, prompt):
     wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
     wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
-    _orch_save_turn_state(root, state)
+    _orch_save_turn_state(root, state, state_dir=state_dir)
 
 
 def orch_yield_tool(data):
@@ -6327,7 +6617,9 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
-    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+    sd = ctx.get("state_dir")
+    n = _orch_validate("surface_n", reg.get("surface_n"))[1]["n"]
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"], state_dir=sd)
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
     claim = _ORCH_QUIET_CLAIM_RE.search(wake_text or "")
@@ -6341,42 +6633,46 @@ def orch_yield_tool(data):
         reason = ("AIQT rule estsep/tstamp: the call claims {} quiet minutes but the measured gap "
                   "since the last genuine human input is {:.1f} minutes; the measured figure wins. "
                   "Re-issue without the unmeasured claim.".format(claim.group(1), measured_min))
-        # The quiet-claim DENY has a trivial legit exit (re-issue without the claim), so it does NOT
-        # consume the schedule cap (CX-M2: repeated quiet-claim denials could otherwise farm the cap
-        # into an ALLOW_WITH_FINDINGS that parks genuinely actionable work).
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+        _, dtable, _dd = ("", _orch_disposition_table(ctx), None)
+        surface, live_warn = _orch_liveness_row(root, "yield-tool", ctx, "DENY", reason, dtable,
+                                                n, state_dir=sd)
+        _orch_guard_event(root, "yield-tool", "deny", reason, state_dir=sd)
+        tail = " ".join(x for x in (spoof_warn, live_warn) if x)
+        return _deny(reason + " " + surface + (" " + tail if tail else ""),
                      "AIQT guardrail: denied a scheduling call whose quiet-duration claim "
                      "contradicts the measured figure.")
-    verdict, reason, _disposition = decide_yield(ctx)
+    verdict, reason, disposition = decide_yield(ctx)
+    surface, live_warn = _orch_liveness_row(root, "yield-tool", ctx, verdict, reason, disposition,
+                                            n, state_dir=sd)
     if verdict == "DENY":
-        _orch_record_denial(root, ts, kind, basis)
-        _orch_guard_event(root, "yield-tool", "deny", reason)
-        return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+        _orch_record_denial(root, ts, kind, basis, state_dir=sd)
+        _orch_guard_event(root, "yield-tool", "deny", reason, state_dir=sd)
+        tail = " ".join(x for x in (spoof_warn, live_warn) if x)
+        return _deny(reason + " " + surface + (" " + tail if tail else ""),
                      "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
-    if kind == "schedule_idle":
-        # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
-        # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        _orch_register_wake(root, ts, tool_input.get("prompt"))
-    _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
+    # A2: wake registration is NO LONGER done here (PreToolUse, before the tool runs). It moved to the
+    # PostToolUse orch_wake_register handler, which registers only on scheduling-tool SUCCESS, so a
+    # failed scheduling tool leaves no orphan digest.
+    _orch_guard_event(root, "yield-tool", verdict.lower(), reason, state_dir=sd)
     if verdict == "ALLOW_WITH_FINDINGS":
-        msg = "AIQT guardrail: {}".format(reason)
+        msg = "AIQT guardrail: {} {}".format(reason, surface)
         forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
-                  or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
-                      and ctx["basis_unchanged"]))
+                  or (kind in ("schedule_idle", "wait")
+                      and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]))
         if forced and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
-            # C.4/FIX 5: cap or bound relief past ANY non-closed disposition (or during a whole-
-            # enumerator failure) is marked forced_unresolved; a failed record surfaces in the
-            # returned systemMessage rather than silently vanishing.
-            extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason)
+            extra = _orch_record_forced_exit(root, "yield-tool", ctx, reason, state_dir=sd)
             if extra:
                 msg += " " + extra
-        if spoof_warn:
-            msg += " " + spoof_warn
+        for x in (spoof_warn, live_warn):
+            if x:
+                msg += " " + x
         return (0, {"systemMessage": msg}, None)
-    if spoof_warn:
-        return (0, {"systemMessage": "AIQT guardrail: {}".format(spoof_warn)}, None)
-    return _allow()
+    # clean ALLOW: the yield tool's allowed schedule/stop still surfaces the disposition (Step 17).
+    msg = "AIQT guardrail: {}".format(surface)
+    for x in (spoof_warn, live_warn):
+        if x:
+            msg += " " + x
+    return (0, {"systemMessage": msg}, None)
 
 
 def orch_ask_guard(data):
@@ -6415,13 +6711,158 @@ def orch_ask_guard(data):
               "sits at the human-oversight threshold (high-consequence, irreversible, or "
               "outward-facing), record it and HOLD that item; the hold never licenses acting without "
               "the answer. If the maintainer is in fact present, set an attended operating-mode in "
-              "the mode record first, then re-issue.")
+              "the mode record first, then re-issue. If the question selects between viable buildable "
+              "options, that choice is ACT, not ASK (deccls): choose the option best for the project, "
+              "record the choice, and proceed.")
     _orch_guard_event(root, "ask-guard", "deny",
                       "pending key {}{}".format(key, "" if recorded else " (NOT persisted)"))
     banner = ("AIQT guardrail: denied a blocking question in unattended mode; recorded pending."
               if recorded else "AIQT guardrail: denied a blocking question in unattended mode, but the "
               "pending row could NOT be persisted; record the decision manually (nocncl).")
     return _deny(reason, banner)
+
+
+_ORCH_ROUTE_TOOLS = frozenset(("Write", "Edit", "MultiEdit"))
+
+
+def orch_route_guard(data):
+    """cntdef/setcmp, PreToolUse over Write/Edit/MultiEdit (plus registry-declared dispatch tools):
+    ASK before a direct hand-edit to a registry-declared route.surfaces path (a backlog/findings
+    register whose terminal dispositions must go through the supported command), directing to
+    'python3 tools/orch_route.py'. A REGISTRY-DRIVEN PATH guard: with no route key declared it is
+    fully inert (allow). Every fail branch fails SAFE to ASK; only a missing tool_name denies. The
+    repo root is the git toplevel of the session cwd via the scrubbed _recovery_toplevel primitive."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: orch_route_guard wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("cntdef")
+    if not isinstance(tool_name, str) or not tool_name:
+        return _ask("AIQT guardrail: the tool_name was unreadable; asking rather than allowing.",
+                    "AIQT guardrail: asked on a route-surface edit with an unreadable tool_name.")
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
+    if status == "bad":
+        return _ask("AIQT guardrail: the orchestration registry could not be read ({}); a route "
+                    "surface cannot be judged, so this edit asks rather than proceeding.".format(reg),
+                    "AIQT guardrail: asked on an edit under an unreadable orchestration registry.")
+    route = reg.get("route") if isinstance(reg.get("route"), dict) else None
+    surfaces = route.get("surfaces") if route and isinstance(route.get("surfaces"), list) else None
+    if not surfaces:
+        return _allow()  # inert: no declared route surfaces, no coverage
+    dispatch = reg.get("dispatch_tools") if isinstance(reg.get("dispatch_tools"), list) else []
+    if tool_name not in _ORCH_ROUTE_TOOLS and tool_name not in dispatch:
+        return _allow()
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return _ask("AIQT guardrail: the {} payload carried no readable tool_input; asking."
+                    .format(tool_name),
+                    "AIQT guardrail: asked on a route-surface edit with no readable tool_input.")
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path \
+            or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in file_path):
+        return _ask("AIQT guardrail: the {} payload carried no resolvable file_path; asking rather "
+                    "than allowing an unjudged edit.".format(tool_name),
+                    "AIQT guardrail: asked on a route-surface edit with an unresolvable target.")
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return _ask("AIQT guardrail: no session cwd, so the route surface cannot be judged; asking.",
+                    "AIQT guardrail: asked on a route-surface edit with no session cwd.")
+    try:
+        target = os.path.realpath(file_path if _is_absolute(file_path)
+                                  else os.path.join(cwd, file_path))
+        root_c = os.path.realpath(root)
+    except (OSError, ValueError):
+        return _ask("AIQT guardrail: the route-surface target could not be resolved; asking.",
+                    "AIQT guardrail: asked on an unresolvable route-surface target.")
+    argv = " ".join(route.get("argv")) if isinstance(route.get("argv"), list) \
+        and all(isinstance(a, str) for a in route.get("argv")) else "python3 tools/orch_route.py"
+    for entry in surfaces:
+        if not isinstance(entry, str) or not entry:
+            return _ask("AIQT guardrail: a route.surfaces entry is malformed; asking rather than "
+                        "allowing an unjudged edit.",
+                        "AIQT guardrail: asked on an edit under a malformed route.surfaces roster.")
+        try:
+            entry_c = os.path.realpath(os.path.join(root_c, entry))
+        except (OSError, ValueError):
+            return _ask("AIQT guardrail: a route.surfaces entry could not be resolved for "
+                        "containment; asking rather than proving a no-match.",
+                        "AIQT guardrail: asked on an edit under an unresolvable route surface.")
+        verdict = _gensrc_within(target, entry_c)
+        if verdict == "err":
+            return _ask("AIQT guardrail: a route-surface containment check faulted; asking.",
+                        "AIQT guardrail: asked on a route-surface containment fault.")
+        if entry_c == target or verdict == "in":
+            reason = ("AIQT rules cntdef/setcmp: {} is a route surface ({} in the orchestration "
+                      "registry route.surfaces). A terminal, deferred, or held disposition on it is "
+                      "moved through the supported command, not a hand-edit: run '{}' instead, which "
+                      "re-derives the item, requires the qualifying register entry, and refuses on a "
+                      "missing or stale one. Approve only to deliberately hand-edit the surface."
+                      .format(file_path, entry, argv))
+            return _ask(reason, "AIQT guardrail: asked before a {} to the route surface {} (edit via "
+                        "{}).".format(tool_name, entry, argv))
+    return _allow()
+
+
+def orch_wait_guard(data):
+    """livbak/cntdef/setcmp, PreToolUse over the registry-declared wait_tools: judge a call that waits
+    on a launched result (kind 'wait') against a fresh enumeration. Absent or empty wait_tools means
+    byte-identical inertness (the guard is off by default). Every ignorance path DENIES the wait,
+    cap-bounded by the shared schedule denial cap; the only ALLOW is the fully-evaluated single live-
+    waiting-row case, which returns the surface block."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow() if status == "absent" else _ask(
+            "AIQT guardrail: the orchestration registry could not be read ({}); a wait call cannot "
+            "be judged, so it asks rather than silently proceeding.".format(reg),
+            "AIQT guardrail: asked on a wait call under an unreadable orchestration registry.")
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()
+    tool = data.get("tool_name")
+    declared = reg.get("wait_tools")
+    if not isinstance(declared, list) or tool not in declared:
+        return _allow()  # inert standing posture: no declared wait tools, no coverage
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
+    ctx, ts, basis = _orch_build_ctx(reg, root, "wait", data, wake_text=wake_text)
+    sd = ctx.get("state_dir")
+    n = _orch_validate("surface_n", reg.get("surface_n"))[1]["n"]
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"], state_dir=sd)
+                  if ctx.get("escape_spoof") else "")
+    verdict, reason, disposition = decide_yield(ctx)
+    surface, live_warn = _orch_liveness_row(root, "wait", ctx, verdict, reason, disposition, n,
+                                            state_dir=sd)
+    if verdict == "DENY":
+        _orch_record_denial(root, ts, "wait", basis, state_dir=sd)
+        _orch_guard_event(root, "wait", "deny", reason, state_dir=sd)
+        tail = " ".join(x for x in (spoof_warn, live_warn) if x)
+        return _deny(reason + " " + surface + (" " + tail if tail else ""),
+                     "AIQT guardrail: denied a {} wait past the enumerated backlog.".format(tool))
+    _orch_guard_event(root, "wait", verdict.lower(), reason, state_dir=sd)
+    if verdict == "ALLOW_WITH_FINDINGS":
+        msg = "AIQT guardrail: {} {}".format(reason, surface)
+        if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"] \
+                and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
+            extra = _orch_record_forced_exit(root, "wait", ctx, reason, state_dir=sd)
+            if extra:
+                msg += " " + extra
+        for x in (spoof_warn, live_warn):
+            if x:
+                msg += " " + x
+        return (0, {"systemMessage": msg}, None)
+    msg = "AIQT guardrail: {}".format(surface)   # the one clean ALLOW: a genuinely licensed wait
+    for x in (spoof_warn, live_warn):
+        if x:
+            msg += " " + x
+    return (0, {"systemMessage": msg}, None)
 
 
 _ORCH_PLAIN_COMMAND_RE = re.compile(r"[A-Za-z0-9_ \t./=:@,+%-]+")
@@ -6640,6 +7081,64 @@ def orch_dispatch_ledger(data):
         return (0, {"systemMessage": "AIQT guardrail: the dispatch-ledger write failed; "
                                      "the launched work may be invisible to the stop guard."}, None)
     return _allow()
+
+
+def orch_wake_register(data):
+    """G1/A2, PostToolUse over the scheduling tools (recorder, never blocks): register the sha256 of an
+    ALLOWED wake's prompt into turn-state wake_digests, but ONLY when the scheduling tool actually
+    SUCCEEDED, so a FAILED ScheduleWakeup/CronCreate leaves no orphan digest (which would misclassify a
+    later byte-identical human prompt as timer-originated and fail to reset the loop-guard counters).
+    Fail-safe: when success cannot be determined the wake is NOT registered, which errs toward resetting
+    counters on the returning prompt (the continue-favouring direction)."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()
+    tool = data.get("tool_name")
+    declared = reg.get("yield_tools")
+    if not isinstance(declared, list) or tool not in declared:
+        return _allow()
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    if tool_input.get("stop") is True:
+        return _allow()  # a stop=true call is not a wake; nothing to register
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        return _allow()
+    if not _orch_tool_succeeded(data.get("tool_response")):
+        # A2: no orphan on a failed scheduling tool, and no orphan when success is unprovable.
+        _orch_guard_event(root, "wake-register", "skip",
+                          "{} did not succeed (or success unprovable); no wake registered".format(tool))
+        return _allow()
+    state_dir = _state_dir_from_registry(root, reg)
+    ts = _orch_turn_state(root, state_dir=state_dir)
+    _orch_register_wake(root, ts, prompt, state_dir=state_dir)
+    _orch_guard_event(root, "wake-register", "recorded",
+                      "{} succeeded; one wake registered".format(tool), state_dir=state_dir)
+    return _allow()
+
+
+def _orch_tool_succeeded(response):
+    """Best-effort success test over a PostToolUse tool_response. Conservative and FAIL-SAFE: a
+    response is a success only when it is present and carries NO error signal. A missing response, or
+    any recognized error marker, reads as NOT succeeded (so no wake is registered). FLAGGED: confirm
+    the concrete ScheduleWakeup/CronCreate response schema before finalizing."""
+    if response is None:
+        return False
+    if isinstance(response, dict):
+        if response.get("is_error") is True or response.get("success") is False:
+            return False
+        if isinstance(response.get("error"), str) and response.get("error").strip():
+            return False
+        if response.get("error") not in (None, "", False):
+            return False
+        return True
+    if isinstance(response, str):
+        return bool(response.strip()) and "error" not in response.lower()
+    return False
 
 
 def orch_prompt_stamp(data):
@@ -6958,6 +7457,108 @@ def _orch_attestation_derive(reg, root, sd, rows):
         elif fresh:
             refs.append(ref)
     return (sorted(set(refs)), unsub, findings)
+
+
+def _orch_ground_derive(reg, root, sd, rows, has_ground):
+    """Shared derivation over a chained ground register (dispositions/deferrals): the set of covered
+    close grounds, keyed (item, ground, ref) for a dispositions register and (item, ref) for a
+    deferrals register (has_ground selects which). Mirrors _orch_attestation_derive: latest row per
+    key, status APPROVED (_ORCH_ATTEST_APPROVED), fresh, and its integrity pointer resolves. The
+    snapshot's stored rows are never authoritative (FIX A1 parity): the reader recomputes from the
+    re-anchored register content, so a forged snapshot substantiates nothing."""
+    ext_hours = _orch_validate("staleness", reg.get("staleness"))[1]["external_hours"]
+    now = _orch_now()
+    latest = {}
+    for row in rows:
+        item = row.get("item")
+        ref = row.get("ref")
+        ground = row.get("ground") if has_ground else None
+        if not isinstance(item, str) or not item.strip() \
+                or not isinstance(ref, str) or not ref.strip() \
+                or (has_ground and (not isinstance(ground, str) or not ground.strip())):
+            continue  # a row with no key attests nothing (it never enters the covered set)
+        latest[(item, ground, ref)] = row
+    covered = set()
+    for key, row in latest.items():
+        if row.get("status") not in _ORCH_ATTEST_APPROVED:
+            continue
+        observed = _orch_parse_utc(row.get("ts"))
+        age = (now - observed).total_seconds() if observed is not None else None
+        if age is None or not (-_ORCH_CLOCK_SKEW <= age <= ext_hours * 3600):
+            continue
+        if not _orch_pointer_resolves(root, sd, row.get("check_ref") or row.get("evidence")):
+            continue
+        item, ground, ref = key
+        covered.add((item, ground, ref) if has_ground else (item, ref))
+    return frozenset(covered)
+
+
+def _orch_ground_refs(reg, root, staleness, reg_key, snap_name, prefix, has_ground,
+                      state_dir=None):
+    """Tri-state ground-register reader, mirroring _orch_attestation_refs: None when the registry
+    declares no such register; "unreadable" when one is declared but its validated snapshot (snap_name)
+    is absent, malformed, not status-ok, stale, unbound, or the register on disk no longer reads as a
+    clean append-only chain (held, never granted); else the frozenset re-derived from the re-anchored
+    register content (FIX A1 parity). reg[reg_key] may be a string path or a {"path": ...} object.
+    Validation snapshots are written at audit cadence (Step 22), never at yield.
+
+    A DEFERRALS register additionally passes the escape-sentinel OWNERSHIP test on the register file
+    itself (a regular file owned by a uid other than the guard's effective uid and not group- or
+    other-writable) unless reg["deferrals"].weak_proof_accepted is true; an ownership failure without
+    recorded acceptance returns "unreadable" (held, never granted), because a maintainer-granted
+    deferral is proven by provenance the assistant cannot forge."""
+    spec = reg.get(reg_key)
+    if isinstance(spec, dict):
+        reg_path = _orch_path(root, spec.get("path"))
+        weak = spec.get("weak_proof_accepted") is True
+    else:
+        reg_path = _orch_path(root, spec)
+        weak = False
+    if not reg_path:
+        return None
+    sd = state_dir if state_dir is not None else _orch_state_dir_for_root(root)
+    # deferrals ownership escape-sentinel test on the register FILE (operator-owned, or explicit weak)
+    if reg_key == "deferrals" and not weak:
+        try:
+            st = os.stat(reg_path)
+        except OSError:
+            return "unreadable"
+        if not stat.S_ISREG(st.st_mode) or st.st_uid == os.geteuid() or (st.st_mode & 0o022):
+            return "unreadable"
+    path = os.path.join(sd, snap_name)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            snap = json.load(fh)
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(snap, dict) or snap.get("status") != "ok":
+        return "unreadable"
+    generated = _orch_parse_utc(snap.get("ts"))
+    age = (_orch_now() - generated).total_seconds() if generated is not None else None
+    ext_hours = _orch_validate("staleness", staleness)[1]["external_hours"]
+    if age is None or not (-_ORCH_CLOCK_SKEW <= age <= ext_hours * 3600):
+        return "unreadable"
+    astatus, aseq, adigest = _orch_register_authority(root, reg_path)
+    if astatus != "ok" or snap.get("register") != os.path.realpath(reg_path) \
+            or snap.get("seq") != aseq or snap.get("digest") != adigest:
+        return "unreadable"
+    rows, _detail = _orch_chained_rows(reg_path, prefix)
+    if rows is None:
+        return "unreadable"
+    return _orch_ground_derive(reg, root, sd, rows, has_ground)
+
+
+def _orch_disposition_refs(reg, root, staleness, state_dir=None):
+    """The no-fix-needed/not-buildable close-ground proof surface (tri-state). See _orch_ground_refs."""
+    return _orch_ground_refs(reg, root, staleness, "dispositions",
+                             "dispositions-validated.json", "DS-", True, state_dir)
+
+
+def _orch_deferral_refs(reg, root, staleness, state_dir=None):
+    """The maintainer-deferred close-ground proof surface (tri-state), with the ownership escape-
+    sentinel test on the register file. See _orch_ground_refs."""
+    return _orch_ground_refs(reg, root, staleness, "deferrals",
+                             "deferrals-validated.json", "DF-", False, state_dir)
 
 
 def _orch_validate_attestations(reg, root):

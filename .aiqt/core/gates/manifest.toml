@@ -587,6 +587,44 @@ default = "block"
 class = "a"
 residue = "The reference enumerator's own grammar and fail-closed vectors: a malformed item-shaped line, an unknown token or blocker kind, and a duplicate id are enumeration errors (exit 3), never silently dropped items, and an empty backlog is a valid empty enumeration distinct from a parse failure. It proves the reference provider's contract, not any adopter's provider; the doctor probes those live."
 
+# --- GD-164 Phase 4: wait-discipline and liveness-join CI gates ----------------------------------------
+
+[[gate]]
+id = "wait-discipline"
+script = "tools/check_wait_discipline.py"
+rules = ["livbak"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "A lexical lint over the registry-declared coordination_scripts (POSIX shell and Python in v1) for the unbounded-wait and unsafe-completion classes a bounded, fail-loud, dormancy-backstopped wait must avoid. It fails closed NAMING a declared script that is absent, unreadable, or unparseable in its declared language, treats an unsupported language with no declared validator as cannot-evaluate, and defers a script with a declared validator to that validator; the machine result enumerates exactly the declared set the gate covered, so a declared script the gate could not cover is a failure, never a silent skip (setcmp applied to the gate itself). DISCLOSED RESIDUAL (open command grammar, class c): the lints are lexical and catch only recognizable shapes. An obfuscated or indirected loop (a bound hidden behind a variable or a helper function, a sleep reached through an alias), an indirected sentinel (a completion signal read through a computed path or a library call), library-internal polling inside a dependency the gate does not read, and any language outside POSIX shell and Python without a declared validator are NOT caught here. The yield-boundary re-enumeration (the livbak wait guard) is the net behind this lint; this gate narrows the class at commit time, it does not close it."
+
+[[gate]]
+id = "liveness-joins"
+script = "tools/check_liveness_joins.py"
+rules = ["cntdef", "setcmp"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "The committed-state structural join over backlog to disposition register to close-ref, read from HEAD (the reviewed, integrated state), so a close justified only in an uncommitted working tree cannot pass. Every terminal disposition in the committed backlog must resolve to a qualifying approved register row (a DS- row for no-fix-needed or not-buildable, a DF- row for maintainer-deferred) or the fixed ground, keyed exactly as the yield-time engine reader keys covered entries; an unjustified terminal is a finding, and an unreadable or malformed committed backlog or declared register fails closed (cannot-evaluate). DISCLOSED RESIDUAL (class c): this is the structural join only. It confirms a qualifying, approved row exists for each terminal disposition; it does NOT re-check runtime freshness, the deferrals ownership sentinel, or check_ref pointer resolution (the yield-time reader enforces those, and a register is itself actor-writable, the disclosed register-authority residual). A close whose justification row is present-but-stale, or unowned, passes this join and is caught at the yield boundary, not here."
+
+[[gate]]
+id = "orch-route-selftest"
+script = "tools/orch_route.py"
+rules = ["cntdef", "setcmp"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "The supported route command's own deterministic self-test over synthetic trees: it exercises the close-vocabulary resolution and the qualifying-register-entry requirement (a dispositions row for no-fix-needed or not-buildable, a validated ownership-passing deferral row for maintainer-deferred), the refusal on any missing, stale, malformed, contradictory, or unreadable input naming the record, and the attempted-transition row it appends to guard-events. It proves the command's validation contract, that a terminal disposition lands only with its qualifying register entry so a close is not self-authored onto buildable work; it does not exercise any adopter's live backlog, and the register the command reads is itself actor-writable (the disclosed register-authority residual), closed categorically only by an operator-owned register at the OS layer."
+
+[[gate]]
+id = "wait-boundary-fuzz"
+script = "tools/_orch_wait_boundary_fuzz.py"
+rules = ["livbak"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A property-based fuzz harness over the wait boundary's decide_yield lattice: it constructs randomized enumeration and wait states and asserts the deny-on-ignorance invariant by construction, that every unreadable enumeration, malformed item, unreadable proof source, or wait naming no live waiting row resolves to deny-continue, and that the only allow is the fully-evaluated case (enumeration ok, nothing actionable, nothing cannot-evaluate, and a live waiting row named as a whole token). It proves the boundary's own decision invariant over synthetic inputs; it does not exercise any live session, and coverage is bounded to the generated input grammar."
+
 # --- VER-CORE Section 12 step 7 (VC-7): pin lifecycle and the core doctor ------------------------------
 
 [[gate]]

@@ -290,6 +290,66 @@ expected-check-ids = [
   "forced5/surfaces-second-id",
   "forced5/both-keys-surfaced",
   "forced5/second-pass-clean",
+  # ---------- GD-164: the close-disposition split ----------
+  "close/no-fix-undeclared-holds",
+  "close/no-fix-covered-terminal",
+  "close/no-fix-uncovered-actionable",
+  "close/not-buildable-undeclared-holds",
+  "close/not-buildable-covered-terminal",
+  "close/deferred-undeclared-holds",
+  "close/deferred-self-owned-holds",
+  "close/deferred-covered-blocked-visible",
+  "close/deferred-unreadable-snapshot-holds",
+  "close/malformed-close-enumerator-error",
+  "close/unknown-close-reason-enumerator-error",
+  "close/v1-closed-skipped-allows",
+  "close/v1-advisory-guard-event",
+  # ---------- GD-164: the prep discipline ----------
+  "prep/incomplete-actionable-denies",
+  "prep/incomplete-wait-denies",
+  "prep/complete-blocked-visible",
+  "prep/complete-blank-ref-enumerator-error",
+  "prep/v1-human-decision-blocked",
+  # ---------- GD-164: the checkpoint closed-unjustified hold ----------
+  "ckpt164/eligible-to-closed-unjustified-holds",
+  "ckpt164/eligible-to-closed-terminal-leaves",
+  # ---------- GD-164: the wait boundary ----------
+  "wait/actionable-redirect-denies",
+  "wait/actionable-redirect-names-item",
+  "wait/nothing-running-denies",
+  "wait/unnamed-target-denies",
+  "wait/single-live-named-allows",
+  "wait/allow-carries-surface",
+  "wait/enum-error-denies",
+  "wait/cannot-evaluate-denies",
+  "wait/cap-relief-warns",
+  "wait/cap-relief-forced-exit",
+  "wait/no-wait-tools-inert",
+  # ---------- GD-164: surface-N and emission ----------
+  "surface/liveness-row-untruncated",
+  "surface/liveness-row-digest",
+  "surface/liveness-row-locator",
+  "surface/message-bounded",
+  "surface/surface-n-honoured",
+  "surface/surface-n-malformed-falls-back",
+  "surface/clean-allow-emits-block",
+  "surface/clean-allow-verdict",
+  "surface/enum-failure-named",
+  "surface/failed-append-fail-loud",
+  # ---------- GD-164: the route hook ----------
+  "route/declared-surface-asks",
+  "route/undeclared-target-allows",
+  "route/no-route-key-inert",
+  "route/unresolvable-target-asks",
+  # ---------- GD-164: the ask-guard ACT sentence ----------
+  "ask/act-sentence-present",
+  # ---------- Addendum A1: state-dir READ-path fail-closed ----------
+  "a1/valid-registry-reads-correct-state-dir",
+  "a1/read-path-holds-under-midturn-bad-registry",
+  # ---------- Addendum A2: wake registration on scheduling-tool success ----------
+  "a2/failed-schedule-no-orphan",
+  "a2/successful-schedule-registers-one",
+  "a2/failed-then-human-prompt-resets",
 ]
 
 [[suite]]

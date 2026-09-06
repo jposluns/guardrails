@@ -137,6 +137,12 @@ run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py
 run_gate "mistakes-register-selftest" python3 -I -B tools/check_mistakes_register.py --self-test
 run_gate "mistakes-register"          python3 -I -B tools/check_mistakes_register.py
 run_gate "aei-enumerator-selftest" python3 -I -B tools/aei_backlog_md.py --self-test
+run_gate "orch-route-selftest"      python3 -I -B tools/orch_route.py --self-test
+run_gate "wait-discipline-selftest" python3 -I -B tools/check_wait_discipline.py --self-test
+run_gate "wait-discipline"          python3 -I -B tools/check_wait_discipline.py
+run_gate "liveness-joins-selftest"  python3 -I -B tools/check_liveness_joins.py --self-test
+run_gate "liveness-joins"           python3 -I -B tools/check_liveness_joins.py
+run_gate "wait-boundary-fuzz"       python3 -I -B tools/_orch_wait_boundary_fuzz.py --self-test
 run_gate "skill-selftest"  python3 -I -B tools/gen_skill.py --self-test
 run_gate "skill-drift"     python3 -I -B tools/gen_skill.py --check
 run_gate "gensrc-registry-selftest" python3 -I -B tools/gen_gensrc.py --self-test

@@ -319,6 +319,24 @@ jobs:
       - name: AEI enumerator self-test
         run: python3 -I -B tools/aei_backlog_md.py --self-test
 
+      - name: Orch-route self-test
+        run: python3 -I -B tools/orch_route.py --self-test
+
+      - name: Wait-discipline self-test
+        run: python3 -I -B tools/check_wait_discipline.py --self-test
+
+      - name: Wait-discipline gate
+        run: python3 -I -B tools/check_wait_discipline.py
+
+      - name: Liveness-joins self-test
+        run: python3 -I -B tools/check_liveness_joins.py --self-test
+
+      - name: Liveness-joins gate
+        run: python3 -I -B tools/check_liveness_joins.py
+
+      - name: Wait-boundary fuzz self-test
+        run: python3 -I -B tools/_orch_wait_boundary_fuzz.py --self-test
+
       - name: Skill self-test
         run: python3 -I -B tools/gen_skill.py --self-test
       - name: Skill drift

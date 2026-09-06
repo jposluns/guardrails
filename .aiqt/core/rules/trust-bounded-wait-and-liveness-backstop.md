@@ -1,0 +1,48 @@
+---
+corpus-id: livbak
+origin: pack
+family: aiqt
+tier: 10
+facet: TRUST
+secondary: [PROGR, ACCUR]
+slug: bounded-wait-and-liveness-backstop
+---
+
+# Bounded waits and a liveness backstop
+
+An actor that waits on a background unit of work derives that work's completion from the work's own
+durable result, the artefact present and well-formed together with its recorded terminal status bound
+to the same task instance, never from a side-channel sentinel a separable wrapper emits. A sentinel
+written by a distinct process is only as live as that process: end the process and the sentinel never
+arrives though the work succeeded, so a waiter on it blocks on a condition that can no longer occur.
+A sentinel may serve as a wake hint; it never proves completion. Where a sentinel is structurally
+unavoidable, its producer and consumer share a lifetime, or the consumer falls back to inspecting the
+artefact and terminal status directly. An absent, malformed, contradictory, or unreadable result is
+cannot-evaluate, never success.
+
+Every wait is bounded and fails loud. A wait names the work it awaits and carries a maximum elapsed
+time or attempt count anchored to the wait episode; repeating short waits does not reset the bound.
+On expiry the actor surfaces the timeout and re-derives state from the durable records, consuming a
+completed result, recovering or safely retrying the work, or recording a genuine blocker; it never
+continues polling the same condition and never lapses into silence, because a wait with no ceiling
+cannot tell still-running from will-never-arrive.
+
+Before a process that emits signals is terminated, the signals it is responsible for emitting and the
+waiters that consume them are enumerated; a producer is not ended while a consumer still depends on a
+signal only it can emit, without re-homing the signal, satisfying the waiter from a verified terminal
+result, or switching the waiter to direct artefact observation. A yielding actor carries a bounded
+dormancy ceiling after which it re-engages and re-derives outstanding work from the durable records,
+so a lost or never-arriving event can never translate into indefinite inactivity: an event that fires
+is a hint to re-evaluate state, and an event that never fires is a bound that expires.
+
+A pause is a wind-down. An actor that idles, schedules a wake, or waits on a launched result
+while the authoritative enumeration shows an advanceable item has wound down past real work,
+whatever it calls the interval. A wait that collects a launched result is licensed only when
+both conditions hold: the awaited result blocks the very next step, shown by a live entry in
+the tracked-task record that the wait itself names, and the fresh enumeration shows no other
+advanceable item across the whole backlog. When any other item is advanceable, the actor
+advances that item and lets the launched work run; when the wait names no live launched work,
+there is nothing to collect and the wait is a manufactured pause. That the workers are busy, or
+that the actor is the serial bottleneck, describes the actor's own position, not an external
+block, and licenses no wait. An enumeration that cannot be read, or an item that cannot be
+evaluated, refuses the wait exactly as it refuses a stop.
