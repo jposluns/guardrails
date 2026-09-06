@@ -251,11 +251,11 @@ def route(root, reg, item_id, ground, ref, check_ref, backlog, paths=None):
             return 2
     else:
         # ground == "fixed": B3 - NOT a self-authored bypass, and NOT terminal merely because the ref
-        # resolves to SOME commit. The cited commit must CONTAIN the fix for THIS item: its changed set
-        # must touch the item's declared paths (--paths or the item's close.paths), or the commit message
-        # must name the item id (its identity). A fabricated/unrelated commit is refused; a real commit
-        # that cannot be reconciled to the item (no declared paths, and the message does not name it) is
-        # HELD (cannot-evaluate), never accepted.
+        # resolves to SOME commit. The cited commit must CONTAIN the fix for THIS item BY CONTENT: its
+        # changed set must touch the item's declared paths (--paths or the item's close.paths). An id
+        # merely named in the commit message is assistant-writable text and never binds (F-331). A
+        # fabricated/unrelated commit is refused; a real commit with no declared paths cannot be bound to
+        # the item and is HELD (cannot-evaluate), never accepted.
         declared_paths = paths if paths else (it.get("close") or {}).get("paths")
         verdict, consultable = aiqt_hooks._orch_commit_fixes_item(root, ref, item_id, declared_paths)
         if not consultable:
@@ -268,8 +268,8 @@ def route(root, reg, item_id, ground, ref, check_ref, backlog, paths=None):
             _event(root, sd, "refused",
                    "fixed close commit {!r} cannot be reconciled to item {}".format(ref, item_id))
             print("orch_route: a 'fixed' close on commit {!r} cannot be bound to {} (declare --paths the "
-                  "fix touched, or name {} in the commit message); held (vfxcmt)".format(
-                      ref, item_id, item_id), file=sys.stderr)
+                  "fix touched; an id named in the commit message does not bind); held (vfxcmt)".format(
+                      ref, item_id), file=sys.stderr)
             return 2
         if verdict != "terminal":
             _event(root, sd, "refused",
@@ -406,20 +406,21 @@ def self_test():
             fails.append("fixed bound by declared paths should route (exit 0), got {}".format(rc))
         if "close:fixed={}".format(real_sha) not in backlog.read_text(encoding="utf-8"):
             fails.append("fixed happy path did not write the close annotation")
-        # (g2) B3 reconciliation verdicts (direct against _orch_commit_fixes_item): a REAL commit whose
-        # message does NOT name the item and with NO declared paths is UNRECONCILABLE (held); declared
-        # paths the commit does not touch are UNRELATED; matching declared paths, or the item id in the
-        # message, are TERMINAL.
+        # (g2) B3 reconciliation verdicts (direct against _orch_commit_fixes_item): a `fixed` close binds
+        # to the item ONLY BY CONTENT. NO declared paths is UNRECONCILABLE (held), regardless of the
+        # commit message; declared paths the commit does not touch are UNRELATED; matching declared paths
+        # are TERMINAL. An id merely named in the commit message never binds (F-331).
         vr, okc2 = aiqt_hooks._orch_commit_fixes_item(str(tmp), real_sha, "C-9", None)
         if not okc2 or vr != "unreconcilable":
-            fails.append("a real commit not naming the item, no paths, must be unreconcilable, got {}".format(vr))
+            fails.append("a real commit, no paths, must be unreconcilable, got {}".format(vr))
         vr, _ = aiqt_hooks._orch_commit_fixes_item(str(tmp), real_sha, "C-9", ["nowhere/x.py"])
         if vr != "unrelated":
             fails.append("declared paths the commit does not touch must be unrelated, got {}".format(vr))
         vr, _ = aiqt_hooks._orch_commit_fixes_item(str(tmp), real_sha, "C-9", ["seed.txt"])
         if vr != "terminal":
             fails.append("declared paths the commit touches must be terminal, got {}".format(vr))
-        # (g3) a commit whose MESSAGE names the item id binds it by identity (no declared paths) -> terminal
+        # (g3) F-331: a commit whose MESSAGE names the item id does NOT bind it (no declared paths) ->
+        # UNRECONCILABLE (held), never terminal on an assistant-writable id-in-message match.
         (tmp / "extra.txt").write_text("x\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(tmp), "add", "extra.txt"], capture_output=True, check=False)
         subprocess.run(["git", "-C", str(tmp), "commit", "-q", "-m", "fix C-9: land it"],
@@ -427,8 +428,8 @@ def self_test():
         named_sha = subprocess.run(["git", "-C", str(tmp), "rev-parse", "HEAD"],
                                    capture_output=True, text=True, check=False).stdout.strip()
         vr, _ = aiqt_hooks._orch_commit_fixes_item(str(tmp), named_sha, "C-9", None)
-        if vr != "terminal":
-            fails.append("a commit whose message names the item id must be terminal, got {}".format(vr))
+        if vr != "unreconcilable":
+            fails.append("a commit naming the item id with no paths must be unreconcilable, got {}".format(vr))
         # (g4) route-level: a `fixed` close on a real commit that cannot be reconciled to the item (no
         # paths, message does not name it) is REFUSED (exit 2), never accepted merely because it resolves.
         write_aei([{"id": "C-1", "state": "open", "granted": True},

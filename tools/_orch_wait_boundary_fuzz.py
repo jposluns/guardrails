@@ -181,8 +181,15 @@ def sweep_pure(rounds):
 
 _TOOL_POSITIVE = [{"ok": True}, {"success": True}, {"is_error": False}, {"status": "completed"},
                   {"status": "scheduled"}]
+# F-331: SIBLING negation/absence phrasings the round-3 denylist let slip (skip/zero/absent/omit/never/
+# nothing) are included alongside the round-2 shapes; the veto must catch the whole family.
 _TOOL_NEG_TEXT = ["Wake was not scheduled", "Request was unsuccessful", "the wake was not created",
-                  "FAILED", "could not schedule", "no wake scheduled", "unable to register"]
+                  "FAILED", "could not schedule", "no wake scheduled", "unable to register",
+                  "Wake scheduling was skipped", "Zero wakes were scheduled", "The wake remains absent",
+                  "Wake scheduling was omitted", "the wake was never confirmed", "nothing was scheduled"]
+# F-331: AMBIGUOUS content (neither negates NOR affirmatively confirms) must fail safe to no register,
+# both beside a positive field and alone; the ambiguity screen is the by-construction partner to the veto.
+_TOOL_AMBIG_TEXT = ["under review", "in progress", "status uncertain", "processing at node-7", "hmm"]
 _TOOL_POS_TEXT = ["Wake scheduled for 5pm", "done", "registered successfully", "scheduled"]
 
 
@@ -205,10 +212,18 @@ def sweep_tool_succeeded():
             if aiqt_hooks._orch_tool_succeeded(resp) is not True:
                 breaches.append("B5 BREACH: positive field {} with clean-positive content {!r} did NOT "
                                 "register".format(pos, good))
-    # a negated content with NO positive field is likewise never a wake (ambiguity fails safe)
-    for neg in _TOOL_NEG_TEXT:
-        if aiqt_hooks._orch_tool_succeeded({"content": [{"type": "text", "text": neg}]}) is not False:
-            breaches.append("B5 BREACH: negated content {!r} with no positive field registered".format(neg))
+        # F-331: AMBIGUOUS content beside a positive field registers NO wake (the ambiguity screen: a
+        # positive field does not confirm an unconfirming content).
+        for amb in _TOOL_AMBIG_TEXT:
+            resp = dict(pos, content=[{"type": "text", "text": amb}])
+            if aiqt_hooks._orch_tool_succeeded(resp) is not False:
+                breaches.append("B5 BREACH: positive field {} beside ambiguous content {!r} registered a "
+                                "wake".format(pos, amb))
+    # a negated OR ambiguous content with NO positive field is likewise never a wake (fails safe)
+    for txt in list(_TOOL_NEG_TEXT) + list(_TOOL_AMBIG_TEXT):
+        if aiqt_hooks._orch_tool_succeeded({"content": [{"type": "text", "text": txt}]}) is not False:
+            breaches.append("B5 BREACH: non-confirming content {!r} with no positive field "
+                            "registered".format(txt))
     return breaches
 
 

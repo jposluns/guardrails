@@ -93,11 +93,15 @@ def _covered_keys(text, prefix, has_ground):
 def join(backlog_text, ds_text, df_text, fixed_reconcile=None):
     """Pure join over ONE committed surface. Returns (findings, cannot_evaluate, covered_terminals).
     fixed_reconcile(item_id, ref, declared_paths) -> (verdict, consultable): the B3 fix-attestation
-    rail, binding the cited commit to the ITEM (not merely resolving it). When it is None the join
-    cannot verify a `fixed` close, so a `fixed` terminal is cannot-evaluate (held), never accepted
-    unconditionally. verdict "terminal" is bound (justified); "unrelated"/non-resolving is a finding;
-    "unreconcilable" (a real commit that cannot be bound to the item: no declared paths, and the commit
-    does not name the item id) is cannot-evaluate (held), never accepted merely because it resolves."""
+    rail, binding the cited commit to the ITEM BY CONTENT (its changed set intersecting the item's
+    declared close.paths), not merely resolving it and never on an assistant-writable id-in-message
+    match. When it is None the join cannot verify a `fixed` close, so a `fixed` terminal is
+    cannot-evaluate (held), never accepted unconditionally. verdict "terminal" is bound (justified);
+    "unrelated"/non-resolving is a finding; "unreconcilable" (a `fixed` close with no declared paths, so
+    the commit cannot be bound to the item by content) is cannot-evaluate (held). NOTE: the committed
+    backlog markdown grammar cannot express close.paths, so a `fixed` close in a markdown backlog surface
+    always reconciles to "unreconcilable" (held), not accepted; adopters that need a `fixed` terminal to
+    pass this structural join declare the close.paths in a JSON AEI surface (see ORCHESTRATION.md)."""
     findings, cannot, terminals = [], [], []
     items, errors = aei_backlog_md.parse(backlog_text, version=2)
     if errors:
@@ -121,7 +125,8 @@ def join(backlog_text, ds_text, df_text, fixed_reconcile=None):
         terminals.append((it["id"], reason, ref))
         if reason == "fixed":
             # B3: `fixed` is not accepted unconditionally; the cited commit must CONTAIN the fix for THIS
-            # item (its changed set touches the item's declared paths, or the commit names the item id).
+            # item by content (its changed set touches the item's declared close.paths). An id merely
+            # named in the commit message is assistant-writable text and never binds (F-331).
             if fixed_reconcile is None:
                 cannot.append("{} is closed (fixed) but the fix-attestation rail is unavailable to "
                               "verify {!r}".format(it["id"], ref))
@@ -131,9 +136,9 @@ def join(backlog_text, ds_text, df_text, fixed_reconcile=None):
                 cannot.append("{} is closed (fixed) but the fix-attestation rail could not be "
                               "consulted for {!r}".format(it["id"], ref))
             elif verdict == "unreconcilable":
-                cannot.append("{} is closed (fixed) with a commit {!r} that cannot be reconciled to the "
-                              "item (no declared paths, and the commit does not name the item); held "
-                              "(vfxcmt)".format(it["id"], ref))
+                cannot.append("{} is closed (fixed) with a commit {!r} that cannot be bound to the item "
+                              "by content (no declared close.paths; a `fixed` terminal binds only by a "
+                              "changed-set/paths intersection); held (vfxcmt)".format(it["id"], ref))
             elif verdict != "terminal":
                 findings.append("{} is closed (fixed) with a ref {!r} that does not contain the fix for "
                                 "this item (vfxcmt: an unrelated or non-resolving commit)".format(

@@ -1208,14 +1208,31 @@ def main(report_path=None):
         fa.set_items([item("FA-1", state="proposed")], version=2)
         fa.set_turn_state({})
         check("flagA/ordinary-proposal-actionable", _verdict(fastop()), "block2")
-        # confirmed-lapse-park-honored: a v2 proposed item carrying a human-decision blocker that resolves
-        # to a genuinely-pending maintainer decision (provenance the assistant cannot self-author) PARKS
-        # at its final step (blocked) -> the stop ALLOWS (warn). The park is honored, not forced to prep.
+        # self-authored-proposal-with-self-blocker-actionable (F-331): a v2 proposed item that
+        # manufactures a human-decision blocker AND a self-authored pending-decisions label
+        # ('| PD-A | ... | RAISED |') does NOT park. The pending-decisions surface is assistant-writable,
+        # so it substantiates no proposed park; the item stays ACTIONABLE (its preparatory work
+        # continues) -> the stop DENIES. Only maintainer-controlled provenance can honor the park.
         fa.pending.write_text("| PD-A | 2026-09-05 | lapse park | RAISED |\n", encoding="utf-8")
         fa.set_items([item("FA-2", state="proposed",
                            blocker=hd_blocker("PD-A", prep_complete=True, prep_ref="PD-A"))], version=2)
         fa.set_turn_state({})
-        check("flagA/confirmed-lapse-park-honored", _verdict(fastop()), "warn")
+        check("flagA/self-authored-proposal-with-self-blocker-actionable",
+              _verdict(fastop()), "block2")
+        # maintainer-provenance-park-honored (F-331): GD-127's confirmed-lapse park IS honored when the
+        # proposed item's human-decision blocker ref is covered by a validated, ownership-passing
+        # deferrals register row keyed (item, ref) - the maintainer-controlled rail the assistant cannot
+        # self-author. Then the item PARKS (blocked) -> actionable empty, a visible blocked row -> warn.
+        fa.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                        [{"item": "FA-3", "ref": "PD-B", "status": "accepted",
+                          "ts": now_iso(0), "check_ref": "seed.txt"}], weak=True)
+        # prep fields are set only to satisfy the v2 enumerator schema (a human-decision blocker requires
+        # a boolean prep_complete); the proposed park is honored on the MAINTAINER deferrals provenance,
+        # not on the assistant-writable prep_ref, so the park does not rest on these fields.
+        fa.set_items([item("FA-3", state="proposed",
+                           blocker=hd_blocker("PD-B", prep_complete=True, prep_ref="PD-B"))], version=2)
+        fa.set_turn_state({})
+        check("flagA/maintainer-provenance-park-honored", _verdict(fastop()), "warn")
 
         # ---------- C.3: the anti-shrinkage checkpoint union ----------
         c = Fixture(tmp, "ckpt")
@@ -1656,8 +1673,10 @@ def main(report_path=None):
                      version=2)
         cf.set_turn_state({})
         check("close/fixed-declared-paths-mismatch-actionable", _verdict(cfstop()), "block2")
-        # B3 matching-commit-terminal (identity in the commit message): with NO declared paths, a commit
-        # whose message NAMES the item id binds it by identity -> terminal -> stop ALLOWS (warn).
+        # B3 id-in-message-only-holds (F-331): with NO declared close.paths, a commit whose message
+        # merely NAMES the item id is NOT bound to the item by content (an id-in-message match is
+        # assistant-writable text, not evidence the fix is in the commit; vfxcmt). The close cannot be
+        # strong-verified -> HELD (unreconcilable) -> the stop DENIES, never terminal on id-in-message.
         (cf.root / "unrelated.txt").write_text("x\n", encoding="utf-8")
         cf._git("add", "unrelated.txt")
         cf._git("-c", "user.name=T", "-c", "user.email=t@example.invalid",
@@ -1667,7 +1686,15 @@ def main(report_path=None):
         cf.set_items([item("CF-9", state="closed", close={"reason": "fixed", "ref": _cfnamed})],
                      version=2)
         cf.set_turn_state({})
-        check("close/fixed-matching-commit-terminal", _verdict(cfstop()), "warn")
+        check("close/fixed-id-in-message-only-holds", _verdict(cfstop()), "block2")
+        # B3 no-paths-holds (F-331): a `fixed` close on a REAL resolving commit with NO declared paths is
+        # HELD irrespective of the message, because a `fixed` terminal binds to the item ONLY by content
+        # (its changed set intersecting declared close.paths). CF-10's id is not named in _cfnamed either,
+        # but the id would not have helped: no declared paths always holds.
+        cf.set_items([item("CF-10", state="closed", close={"reason": "fixed", "ref": _cfnamed})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-no-paths-holds", _verdict(cfstop()), "block2")
 
         # ---------- GD-164 B5: _orch_tool_succeeded is strict (no A2 orphan on a failed schedule) ----
         check("a2/succeeded-false-on-FAILED-string",
@@ -1695,6 +1722,38 @@ def main(report_path=None):
         check("a2/succeeded-true-on-ok-true-positive-content",
               aiqt_hooks._orch_tool_succeeded(
                   {"ok": True, "content": [{"text": "Wake scheduled for 5pm"}]}), True)
+        # B5 by construction (F-331): SIBLING negation/absence phrasings the round-3 denylist let slip
+        # (skip/zero/absent/omit/never/nothing) register NO wake even beside a positive field. Do not
+        # rely on the exact phrases; the veto + ambiguity screen catch the whole family. (Loop-literal
+        # ids: the check id is the loop variable bound to a string literal, so the static execution gate
+        # resolves it.)
+        for check_id, _sib in (
+                ("a2/succeeded-false-sibling-1", "Wake scheduling was skipped"),
+                ("a2/succeeded-false-sibling-2", "Zero wakes were scheduled"),
+                ("a2/succeeded-false-sibling-3", "The wake remains absent"),
+                ("a2/succeeded-false-sibling-4", "Wake scheduling was omitted"),
+                ("a2/succeeded-false-sibling-5", "the wake was never confirmed"),
+                ("a2/succeeded-false-sibling-6", "nothing was scheduled")):
+            check(check_id,
+                  aiqt_hooks._orch_tool_succeeded({"ok": True, "content": [{"text": _sib}]}), False)
+        # B5 ambiguity screen (F-331): content that neither negates NOR affirmatively confirms is
+        # AMBIGUOUS and fails safe to no register, EVEN beside a positive-shaped field (the by-construction
+        # partner to the veto: a positive field does not confirm an unconfirming content).
+        for check_id, _amb in (
+                ("a2/succeeded-false-ambiguous-with-field-1", "under review"),
+                ("a2/succeeded-false-ambiguous-with-field-2", "in progress"),
+                ("a2/succeeded-false-ambiguous-with-field-3", "status uncertain"),
+                ("a2/succeeded-false-ambiguous-with-field-4", "processing at node-7")):
+            check(check_id,
+                  aiqt_hooks._orch_tool_succeeded({"ok": True, "content": [{"text": _amb}]}), False)
+        # the same ambiguous content with NO positive field is likewise never a wake.
+        for check_id, _amb in (
+                ("a2/succeeded-false-ambiguous-no-field-1", "under review"),
+                ("a2/succeeded-false-ambiguous-no-field-2", "in progress"),
+                ("a2/succeeded-false-ambiguous-no-field-3", "status uncertain"),
+                ("a2/succeeded-false-ambiguous-no-field-4", "processing at node-7")):
+            check(check_id,
+                  aiqt_hooks._orch_tool_succeeded({"content": [{"text": _amb}]}), False)
 
         # ---------- GD-164: the prep discipline ----------
         p2 = Fixture(tmp, "prep")

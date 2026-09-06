@@ -243,7 +243,8 @@ expected-check-ids = [
   "lapse/unsubstantiated-lapse-finding",
   "lapse/v1-unsubstantiated-lapse-non-compelling",
   "flagA/ordinary-proposal-actionable",
-  "flagA/confirmed-lapse-park-honored",
+  "flagA/self-authored-proposal-with-self-blocker-actionable",
+  "flagA/maintainer-provenance-park-honored",
   # ---------- C.3: the anti-shrinkage checkpoint union ----------
   "ckpt/first-window-allows",
   "ckpt/shrink-stop-holds",
@@ -328,7 +329,8 @@ expected-check-ids = [
   "close/fixed-terminal-in-table",
   "close/fixed-unrelated-commit-holds",
   "close/fixed-declared-paths-mismatch-actionable",
-  "close/fixed-matching-commit-terminal",
+  "close/fixed-id-in-message-only-holds",
+  "close/fixed-no-paths-holds",
   # ---------- GD-164: the prep discipline ----------
   "prep/incomplete-actionable-denies",
   "prep/incomplete-wait-denies",
@@ -393,6 +395,20 @@ expected-check-ids = [
   "a2/succeeded-false-on-ok-true-negated-content",
   "a2/succeeded-false-on-is-error-false-unsuccessful-content",
   "a2/succeeded-true-on-ok-true-positive-content",
+  "a2/succeeded-false-sibling-1",
+  "a2/succeeded-false-sibling-2",
+  "a2/succeeded-false-sibling-3",
+  "a2/succeeded-false-sibling-4",
+  "a2/succeeded-false-sibling-5",
+  "a2/succeeded-false-sibling-6",
+  "a2/succeeded-false-ambiguous-with-field-1",
+  "a2/succeeded-false-ambiguous-with-field-2",
+  "a2/succeeded-false-ambiguous-with-field-3",
+  "a2/succeeded-false-ambiguous-with-field-4",
+  "a2/succeeded-false-ambiguous-no-field-1",
+  "a2/succeeded-false-ambiguous-no-field-2",
+  "a2/succeeded-false-ambiguous-no-field-3",
+  "a2/succeeded-false-ambiguous-no-field-4",
 ]
 
 [[suite]]

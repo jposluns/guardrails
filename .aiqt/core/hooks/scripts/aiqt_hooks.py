@@ -5883,11 +5883,12 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
     GD-164 B2/B3: a TERMINAL close (a verified `fixed`, a validated no-fix-needed/not-buildable
     dispositions row) is kept in the `terminal` bucket so the complete machine enumeration counts EVERY
     indexed item (setcmp), never an empty backlog. GD-164 B3: `fixed` is NOT a self-authored bypass; it
-    is terminal ONLY when the cited commit is BOUND TO THE ITEM (fixed_verdicts, from
+    is terminal ONLY when the cited commit is BOUND TO THE ITEM BY CONTENT (fixed_verdicts, from
     _orch_fixed_verdicts: a per-item vfxcmt reconciliation of the commit's changed set against the
-    item's declared paths/identity). fixed_verdicts is None when the rail is unavailable, which HOLDS a
-    `fixed` close (cannot-evaluate); a per-item "unrelated" verdict is closed-unjustified + ACTIONABLE
-    (a real-but-unrelated commit is not a fix); an "unreconcilable" verdict HOLDS (cannot-evaluate). B6:
+    item's declared close.paths, never an assistant-writable id-in-message match). fixed_verdicts is
+    None when the rail is unavailable, which HOLDS a `fixed` close (cannot-evaluate); a per-item
+    "unrelated" verdict is closed-unjustified + ACTIONABLE (a real-but-unrelated commit is not a fix); an
+    "unreconcilable" verdict (a `fixed` close with no declared paths) HOLDS (cannot-evaluate). B6:
     the version gates the proposed/ungranted classification: v2 applies the FLAG-A provenance
     distinction, while any non-v2 (v1) enumeration keeps the byte-identical non-compelling proposed
     bucket the shipped v1 contract defines."""
@@ -5902,11 +5903,12 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                 continue                       # v1: skip exactly as today (byte-identical)
             reason = close["reason"]
             if reason == "fixed":
-                # B3: `fixed` is bound to the item by the fix-attestation rail, never self-authored and
-                # never accepted on a bare real-but-unrelated commit. terminal (counted) only when the
-                # commit contains the fix for THIS item; an unavailable rail or an unreconcilable commit
-                # HOLDS (cannot-evaluate); an unrelated/non-resolving commit is closed-unjustified +
-                # actionable (ignorance refuses the wind-down).
+                # B3: `fixed` is bound to the item by the fix-attestation rail BY CONTENT (its changed
+                # set touches the item's declared close.paths), never self-authored and never accepted on
+                # an id-in-message match or a bare real-but-unrelated commit. terminal (counted) only when
+                # the commit contains the fix for THIS item; an unavailable rail, or an unreconcilable
+                # commit (a `fixed` close with no declared paths), HOLDS (cannot-evaluate); an unrelated/
+                # non-resolving commit is closed-unjustified + actionable (ignorance refuses the wind-down).
                 fv = None if fixed_verdicts is None else fixed_verdicts.get(it["id"])
                 if fixed_verdicts is None or fv == "unreconcilable":
                     out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
@@ -5953,17 +5955,27 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
         blocker = it["blocker"]
         if proposed:
             # FLAG A (GD-127/cntdef, v2): a self-authored 'proposed'/ungranted label is not a grant and
-            # licenses no wind-down, so an ORDINARY proposal is ACTIONABLE (its preparatory pipeline
-            # continues). But a maintainer/provenance-confirmed park is HONORED, not forced to prep: a
-            # proposed item carrying a human-decision blocker that resolves to a genuinely-pending
-            # maintainer decision on the authoritative surface (provenance the assistant cannot
-            # self-author) PARKS at its final step. So fall through to the human-decision handling for
-            # such an item; every other proposed item is actionable here.
+            # licenses no wind-down, so a proposed item is ACTIONABLE (its preparatory pipeline continues)
+            # UNLESS its park rests on MAINTAINER-CONTROLLED provenance the assistant cannot self-author.
+            # GD-127's confirmed-lapse park is HONORED only when the item's human-decision blocker ref is
+            # covered by a validated, ownership-passing deferrals register row keyed (item, ref): the same
+            # maintainer-controlled rail the maintainer-deferred close requires. A self-authored proposal
+            # plus a self-authored pending-decisions label/blocker never parks (the pending-decisions
+            # surface is assistant-writable, so it substantiates no proposed park; CX Flag-A residual).
             if not blocker or blocker.get("kind") != "human-decision":
                 out["actionable"].append((it["id"], it["title"],
                     "state 'proposed'/ungranted is assistant-writable and licenses no wind-down; the "
                     "preparatory work is actionable"))
                 continue
+            pref = blocker["ref"]
+            if deferrals not in (None, "unreadable") and (it["id"], pref) in deferrals:
+                out["blocked"].append((it["id"], "human-decision", pref))
+            else:
+                out["actionable"].append((it["id"], it["title"],
+                    "a proposed/ungranted park is honored only on a maintainer-controlled deferrals "
+                    "register row the assistant cannot self-author; no such row covers this item, so the "
+                    "preparatory work is actionable (a self-authored pending label parks nothing)"))
+            continue
         elif not blocker:
             out["actionable"].append((it["id"], it["title"], "no blocker recorded"))
             continue
@@ -6462,20 +6474,6 @@ def _orch_commit_changed_paths(root, ref):
     return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
 
 
-def _orch_commit_message(root, ref):
-    """B3: the full commit message (subject + body) of `ref`, or None when git could not produce it."""
-    env = _isolate_git_env(dict(os.environ))
-    try:
-        r = subprocess.run(["git", "-C", root, "log", "-1", "--format=%B",
-                            "--end-of-options", ref + "^{commit}"],
-                           capture_output=True, text=True, timeout=10, env=env)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0:
-        return None
-    return r.stdout
-
-
 def _orch_path_relates(changed, declared):
     """True when any changed path equals, sits under, or contains any declared path prefix. Both sides
     are normalized to forward-slash, trimmed of surrounding slashes; a blank declared entry is ignored."""
@@ -6497,33 +6495,32 @@ def _orch_commit_fixes_item(root, ref, item_id, declared_paths):
     close is not a self-authored bypass, and it is not terminal merely because its ref resolves to SOME
     commit: the cited commit must be bound to the item. Returns (verdict, consultable) where consultable
     is False when git could not be consulted at all (the rail HOLDS every fixed close):
-      "terminal"        the commit relates to the item: its changed set intersects the item's declared
-                        paths, or (when no paths are declared) the commit message names the item id as a
-                        whole token (the item's identity).
+      "terminal"        the commit CONTAINS the fix: its changed set intersects the item's declared
+                        close.paths. This is the ONLY terminal ground; a `fixed` close binds to the item
+                        by CONTENT, never by an assistant-writable commit message.
       "unrelated"       the ref resolves to no commit, or the item declared paths that the commit's
                         changed set does not touch: the close is unjustified and stays ACTIONABLE.
-      "unreconcilable"  the ref resolves but neither a declared path nor an id-naming message can bind
-                        the commit to the item, so the close cannot be reconciled and is HELD
-                        (cannot-evaluate) rather than accepted on a bare real-but-unrelated commit."""
+      "unreconcilable"  the ref resolves but the item declares NO close.paths, so the commit cannot be
+                        bound to the item by content and the close cannot be strong-verified: HELD
+                        (cannot-evaluate). An item id merely NAMED in the commit message is not evidence
+                        the fix is in the commit (vfxcmt), so it is never accepted as terminal."""
     resolves, consultable = _orch_commit_resolves(root, ref)
     if not consultable:
         return (None, False)
     if not resolves:
         return ("unrelated", True)   # a ref resolving to no commit substantiates nothing (vfxcmt)
     declared = [p for p in (declared_paths or []) if isinstance(p, str) and p.strip()]
-    if declared:
-        changed = _orch_commit_changed_paths(root, ref)
-        if changed is None:
-            return (None, False)     # the rail degraded mid-reconciliation: HOLD
-        return (("terminal" if _orch_path_relates(changed, declared) else "unrelated"), True)
-    # no declared paths: bind by the item's IDENTITY in the commit message, else HOLD (never accept an
-    # unrelated commit merely because it resolves).
-    msg = _orch_commit_message(root, ref)
-    if msg is None:
-        return (None, False)
-    if _orch_token_present(item_id, msg):
-        return ("terminal", True)
-    return ("unreconcilable", True)
+    if not declared:
+        # No declared close.paths: the commit cannot be BOUND to THIS item by content, and the item id
+        # named in a commit message is assistant-writable text, not evidence the fix is in the commit
+        # (vfxcmt: a commit asserting a fix with no matching change is an inaccurate record). The close
+        # cannot be strong-verified, so it is HELD (unreconcilable / cannot-evaluate), never accepted as
+        # terminal on an id-in-message match. Ignorance refuses the wind-down.
+        return ("unreconcilable", True)
+    changed = _orch_commit_changed_paths(root, ref)
+    if changed is None:
+        return (None, False)         # the rail degraded mid-reconciliation: HOLD
+    return (("terminal" if _orch_path_relates(changed, declared) else "unrelated"), True)
 
 
 def _orch_fixed_verdicts(root, items):
@@ -6531,9 +6528,10 @@ def _orch_fixed_verdicts(root, items):
     `fixed`-closed item in the enumeration. Returns a dict {item_id: "terminal"|"unrelated"|
     "unreconcilable"}, or None when the rail cannot be consulted at all (git unavailable / not a work
     tree), which HOLDS every `fixed` close as cannot-evaluate (ignorance refuses the wind-down). A
-    `fixed` close is terminal ONLY when the cited commit is bound to THAT item (its changed set touches
-    the item's declared paths, or the commit names the item id), never merely because the ref resolves
-    to a commit; the real-but-unrelated commit is the B3-residual this closes."""
+    `fixed` close is terminal ONLY when the cited commit is bound to THAT item by CONTENT: its changed
+    set touches the item's declared close.paths, never merely because the ref resolves to a commit and
+    never on an assistant-writable id-in-message match; a `fixed` close with no declared paths is HELD
+    (unreconcilable), the B3-residual this closes."""
     verdicts = {}
     for it in items:
         close = it.get("close")
@@ -7421,16 +7419,34 @@ def orch_wake_register(data):
 
 _ORCH_FAILURE_TOKEN_RE = re.compile(r"\b(fail(?:ed|ure|ing|s)?|error|denied|refused|timed?[ _-]?out|"
                                     r"exception|abort(?:ed)?|cancell?ed)\b", re.IGNORECASE)
-# B5: a NEGATED-success or contradiction phrase in the response text overrides any positive-shaped
-# field. Strict positive confirmation means "Wake was not scheduled" and "Request was unsuccessful"
-# register NO wake even when {"ok":true} or {"is_error":false} sits beside them: the content contradicts
-# the field. The set is deliberately broad (a negation, a contraction, an 'un-'/'non-' negated word, a
-# no/never/without/unable/cannot) because the fail-safe direction is do-not-register, so an over-broad
-# negation match only declines a wake (safe), never manufactures one.
-_ORCH_NEGATION_RE = re.compile(
-    r"\bnot\b|\bno\b|\bnever\b|\bwithout\b|\bunable\b|\bcannot\b|\bnothing\b|\bnone\b|\bneither\b"
-    r"|\bnor\b|n['’]t\b|\bun(?:success|schedul|abl|avail|complet|verif|confirm|register|creat|"
-    r"expect|recogniz|recognis)\w*|\bnon-\w+", re.IGNORECASE)
+# B5 by construction: a FAILURE, NEGATION/absence, or UNCERTAINTY token ANYWHERE in the response vetoes
+# registration, so a positive-shaped field ({"ok":true}/{"is_error":false}) never overrides negative,
+# negated, absent, or uncertain content. The families are deliberately broad (negations and
+# contractions; absence/non-success outcome words like skip/omit/absent/zero/pending; morphological
+# un-/non-/in-/dis- negatives; uncertainty modals) because the fail-safe direction is do-not-register, so
+# an over-broad match only declines a wake (safe), never manufactures one. This veto is NOT relied on
+# alone: the ambiguity screen in _orch_tool_succeeded (a content text block must AFFIRMATIVELY confirm)
+# is the by-construction partner, so an unrecognized, non-confirming phrasing not caught here still fails
+# safe to no registration rather than trusting the positive field beside it.
+_ORCH_NEG_UNSURE_RE = re.compile(
+    r"\bnot\b|\bno\b|\bnever\b|\bwithout\b|\bunable\b|\bcannot\b|\bcan['’]?t\b|\bnothing\b|\bnone\b"
+    r"|\bneither\b|\bnor\b|\bn['’]t\b|\bnope\b"
+    r"|\bskip(?:ped|ping|s)?\b|\bomit(?:ted|ting|s)?\b|\babsent\b|\bmiss(?:ed|es|ing)?\b"
+    r"|\black(?:ed|ing|s)?\b|\bzero\b|\bempty\b|\bdrop(?:ped|ping|s)?\b|\bdiscard(?:ed|ing|s)?\b"
+    r"|\bignore(?:d|s)?\b|\bsuppress(?:ed|es|ing)?\b|\bdefer(?:red|ring|s)?\b|\bpostpone(?:d|s)?\b"
+    r"|\bpending\b|\bblocked\b|\bhalt(?:ed)?\b|\bunfinished\b|\bpartial(?:ly)?\b"
+    r"|\bdecline(?:d|s)?\b|\breject(?:ed|s)?\b|\brefus(?:ed|es|ing|al)?\b|\bfail\w*|\berror\w*"
+    r"|\babort\w*|\bcancel\w*"
+    r"|\bun(?:success|schedul|abl|avail|complet|verif|confirm|regist|creat|expect|recogni|"
+    r"finish|done|able)\w*|\bnon-?\w+|\bin(?:complet|valid|activ)\w*|\bdis(?:abl|allow|card)\w*"
+    r"|\bmaybe\b|\bmight\b|\bperhaps\b|\bpossibl\w+|\bunsure\b|\bunclear\b|\bunknown\b|\buncertain\b"
+    r"|\btentativ\w+|\bpresumabl\w+|\bapparent\w*|\bseem\w*|\bprobabl\w+|\btbd\b|\bunverified\b",
+    re.IGNORECASE)
+# The ambiguity screen's affirmative-confirmation vocabulary (positive-confirmation tokens). Content that
+# neither negates (above) nor affirmatively confirms (here) is AMBIGUOUS and fails safe to no register.
+_ORCH_POS_CONFIRM_RE = re.compile(
+    r"\bok\b|\bsuccess\w*|\bsucceed\w*|\bschedul\w*|\bregist\w*|\bcreat\w*|\bcomplet\w*|\bdone\b"
+    r"|\baccept\w*|\bconfirm\w*", re.IGNORECASE)
 _ORCH_STATUS_NEGATIVE = frozenset(("failed", "failure", "error", "errored", "denied", "refused",
                                    "timeout", "timed-out", "cancelled", "canceled", "aborted",
                                    "unsuccessful", "incomplete", "rejected"))
@@ -7438,60 +7454,85 @@ _ORCH_STATUS_POSITIVE = frozenset(("ok", "success", "succeeded", "completed", "c
                                    "scheduled", "created", "registered", "accepted"))
 
 
+def _orch_response_strings(value, _depth=0):
+    """Yield every string reachable in a (possibly nested) tool-response value, so a negation, absence,
+    or uncertainty token ANYWHERE (a content text block, or any other string field/value) can veto. The
+    walk is depth-bounded (SECA resource-bounds) so a pathological structure cannot recurse unbounded."""
+    if _depth > 6:
+        return
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _orch_response_strings(v, _depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _orch_response_strings(v, _depth + 1)
+
+
 def _orch_response_text_negative(response):
-    """True when any text block in a structured tool response carries a FAILURE token OR a NEGATION /
-    contradiction ({"content": [{"type": "text", "text": ...}]}, the concrete PostToolUse content
-    list). B5: this is checked BEFORE any positive-shaped field, so a negated-success content
-    ('Wake was not scheduled', 'Request was unsuccessful') is never overridden by an {"ok":true} or
-    {"is_error":false} sitting beside it; ambiguity fails safe to no registration."""
-    content = response.get("content")
-    if not isinstance(content, list):
-        return False
-    for block in content:
-        if isinstance(block, dict) and isinstance(block.get("text"), str) \
-                and (_ORCH_FAILURE_TOKEN_RE.search(block["text"])
-                     or _ORCH_NEGATION_RE.search(block["text"])):
+    """True when ANY string anywhere in the tool response carries a FAILURE, NEGATION/absence, or
+    UNCERTAINTY token. B5 by construction: decided BEFORE any positive-shaped field, so a positive field
+    ({"ok":true}/{"is_error":false}) NEVER overrides negative, negated, absent, or uncertain content
+    sitting anywhere in the same response; ambiguity fails safe to no registration. DISCLOSED RESIDUAL:
+    over open natural language the token families cannot be exhaustive, so this veto is paired with the
+    affirmative-confirmation ambiguity screen in _orch_tool_succeeded, which turns an unrecognized,
+    non-confirming phrasing into a no-register too rather than relying on this denylist alone."""
+    for s in _orch_response_strings(response):
+        if _ORCH_FAILURE_TOKEN_RE.search(s) or _ORCH_NEG_UNSURE_RE.search(s):
             return True
     return False
 
 
 def _orch_tool_succeeded(response):
-    """A2 success test over a PostToolUse tool_response. STRICT and CONSERVATIVE: a wake is registered
-    only on a POSITIVELY CONFIRMED success; anything else (a missing response, any recognized error
-    signal, a negated-success or contradictory content, an ambiguous response with no affirmative
-    success marker) reads as NOT succeeded, so no wake digest is written. Fail-safe = do-not-register:
-    an unregistered wake means a later identical human prompt still resets the loop counters (safe),
-    whereas a falsely-registered wake would orphan a digest and misclassify that human prompt as
-    timer-originated (the exact A2 orphan this prevents).
-    Negative signals checked: is_error true, success false, ok false, a non-empty error field, a
-    negative status token, OR a failure/negation token in a content text block (so 'FAILED', {"status":
-    "failed"}, {"ok": false}, {"content": [{"text": "FAILED"}]}, and B5's negated-success shapes
-    {"ok":true, content "Wake was not scheduled"} / {"is_error":false, content "Request was
-    unsuccessful"} all read as NOT succeeded). A positive-shaped field NEVER overrides negative
-    content."""
-    if isinstance(response, dict):
-        if response.get("is_error") is True or response.get("success") is False \
-                or response.get("ok") is False:
-            return False
-        if response.get("error") not in (None, "", False):
-            return False
-        status = response.get("status")
-        if isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_NEGATIVE:
-            return False
-        # B5: negative/negated content is decided BEFORE the positive-shaped fields, so an {"ok":true}
-        # or {"is_error":false} beside a contradicting text block cannot buy a registration.
-        if _orch_response_text_negative(response):
-            return False
-        # a wake registers ONLY on an affirmative success marker (never on the mere ABSENCE of an
-        # error, which an ambiguous or unknown-schema response would satisfy). Fail-safe otherwise.
-        if response.get("is_error") is False or response.get("success") is True \
-                or response.get("ok") is True \
-                or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE):
-            return True
+    """A2 success test over a PostToolUse tool_response. STRICT and CONSERVATIVE BY CONSTRUCTION: a wake
+    registers ONLY on a positively-and-unambiguously confirmed success; anything else (a missing/bare
+    response, any recognized error signal, a negated-success/absent/uncertain token anywhere, or an
+    ambiguous content that does not affirmatively confirm) reads as NOT succeeded, so no wake digest is
+    written. Fail-safe = do-not-register: an unregistered wake means a later identical human prompt still
+    resets the loop counters (safe), whereas a falsely-registered wake would orphan a digest and
+    misclassify that human prompt as timer-originated (the exact A2 orphan this prevents).
+
+    Two by-construction layers, so success does not rest on enumerating every negation phrase:
+      1. VETO: any failure/negation/absence/uncertainty token ANYWHERE in the response (recursively over
+         every string) returns False, decided BEFORE any positive-shaped field. A positive field NEVER
+         overrides negative content.
+      2. AMBIGUITY screen: after an explicit affirmative structured success marker (is_error false,
+         success/ok true, or a positive status token, never the mere ABSENCE of an error), if the
+         response carries free-text content then at least one content text block must AFFIRMATIVELY
+         confirm (a positive-confirmation token); content that neither negates nor confirms is ambiguous
+         and fails safe to no registration. So an unrecognized negative phrasing that slips the veto but
+         lacks a confirmation token is still declined, and the residual (content that both confirms and
+         yet means failure while avoiding every negation token) is a narrow, disclosed one."""
+    if not isinstance(response, dict):
+        # a bare string / None carries no structured success field: no affirmative confirmation, so the
+        # fail-safe direction is do-not-register (a string 'FAILED' also carries a failure token).
         return False
-    # a bare-string response carries no structured success field: a positive confirmation is absent,
-    # so the fail-safe direction is do-not-register (a string 'FAILED' also carries a failure token).
-    return False
+    if response.get("is_error") is True or response.get("success") is False \
+            or response.get("ok") is False:
+        return False
+    if response.get("error") not in (None, "", False):
+        return False
+    status = response.get("status")
+    if isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_NEGATIVE:
+        return False
+    # layer 1: the negation/absence/uncertainty veto, decided before the positive-shaped fields.
+    if _orch_response_text_negative(response):
+        return False
+    # require an explicit affirmative structured success marker (never the mere ABSENCE of an error).
+    has_positive = (response.get("is_error") is False or response.get("success") is True
+                    or response.get("ok") is True
+                    or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE))
+    if not has_positive:
+        return False
+    # layer 2: the ambiguity screen over free-text content.
+    content = response.get("content")
+    if isinstance(content, list):
+        texts = [b["text"] for b in content
+                 if isinstance(b, dict) and isinstance(b.get("text"), str) and b["text"].strip()]
+        if texts and not any(_ORCH_POS_CONFIRM_RE.search(t) for t in texts):
+            return False
+    return True
 
 
 def orch_prompt_stamp(data):
