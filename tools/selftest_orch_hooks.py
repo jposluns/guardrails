@@ -554,8 +554,8 @@ def main(report_path=None):
               _verdict(aiqt_hooks.orch_yield_tool(
                   g.payload("PreToolUse", "CronDelete", {"prompt": "x"}))), "allow")
 
-        # STOP-path fail-open: if the denial counter cannot be persisted, a denied stop allows with
-        # findings rather than re-denying forever (round-7 MAJOR; mirrors the ordinary Stop binding).
+        # STOP-path fail-open: an unpersistable denial allows with findings (NON-deny: no
+        # permissionDecision) rather than re-denying forever (round-7 MAJOR; mirrors the Stop binding).
         g.set_items([item("A-1")])
         g.set_turn_state({})
         _real_rd = aiqt_hooks._orch_record_denial
@@ -566,8 +566,45 @@ def main(report_path=None):
         finally:
             aiqt_hooks._orch_record_denial = _real_rd
         check("yield/stop-denial-unpersistable-fails-open",
-              (_fo[0], "could not be persisted" in (_fo[1] or {}).get("systemMessage", "")),
-              (0, True))
+              (_fo[0], "could not be persisted" in (_fo[1] or {}).get("systemMessage", ""),
+               "hookSpecificOutput" not in (_fo[1] or {})), (0, True, True))
+
+        # schedule_idle stays fail-CLOSED (DENY) on an unpersistable denial (only stop fails open).
+        g.set_items([item("A-1")])
+        g.set_turn_state({})
+        _real_rd2 = aiqt_hooks._orch_record_denial
+        try:
+            aiqt_hooks._orch_record_denial = lambda root, ts, kind, basis: False
+            _sc = aiqt_hooks.orch_yield_tool(
+                g.payload("PreToolUse", "ScheduleWakeup", {"prompt": "recheck A-1 later"}))
+        finally:
+            aiqt_hooks._orch_record_denial = _real_rd2
+        check("yield/schedule-denial-unpersistable-stays-deny",
+              (_sc[0], (_sc[1] or {}).get("hookSpecificOutput", {}).get("permissionDecision")),
+              (0, "deny"))
+
+        # A registry that goes unreadable at persist time fails the turn-state write CLOSED (never a
+        # silent XDG-fallback split that would leave the declared counter absent), so the denial reports
+        # not-persisted (round-9 MAJOR).
+        _real_reg = aiqt_hooks._orch_registry
+        try:
+            aiqt_hooks._orch_registry = lambda root: ("bad", "forced-unreadable")
+            _rc = aiqt_hooks._orch_record_denial(str(g.root), {}, "wait", "B")
+        finally:
+            aiqt_hooks._orch_registry = _real_reg
+        check("locked-update/bad-registry-fails-closed", _rc, False)
+
+        # orch_doctor roster validation (pure): absent optional keys clean; a present-but-null or a
+        # non-list yield_tools is flagged without raising (round-9 MINOR regression guard).
+        import orch_doctor
+        check("doctor/roster-absent-optional-clean",
+              orch_doctor._orch_roster_findings({"version": 1}), [])
+        check("doctor/roster-yield-null-flagged",
+              any("yield_tools must be a list" in _f
+                  for _f in orch_doctor._orch_roster_findings({"yield_tools": None})), True)
+        check("doctor/roster-yield-nonlist-flagged",
+              any("yield_tools must be a list" in _f
+                  for _f in orch_doctor._orch_roster_findings({"yield_tools": 1})), True)
 
         # A failed wake registration is SURFACED in the yield tool's returned systemMessage (round-5
         # MAJOR: the surfacing itself must be guarded, not just the helper's return contract).

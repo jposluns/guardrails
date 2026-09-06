@@ -76,7 +76,12 @@ expected-check-ids = [
   "yield/measured-beats-claimed",
   "yield/undeclared-tool-out-of-scope",
   "yield/stop-denial-unpersistable-fails-open",
+  "yield/schedule-denial-unpersistable-stays-deny",
   "yield/register-failure-surfaced",
+  "locked-update/bad-registry-fails-closed",
+  "doctor/roster-absent-optional-clean",
+  "doctor/roster-yield-null-flagged",
+  "doctor/roster-yield-nonlist-flagged",
   # ---------- component 4: the unattended-ask blocker ----------
   "ask/mode-overnight-unattended-denies",
   "ask/mode-unattended-parenthetical-denies",

@@ -19,6 +19,54 @@ YIELD_MATCHER_TOOLS = {"ScheduleWakeup", "CronCreate"}  # keep equal to the mani
 WAIT_MATCHER_TOOLS = {"Monitor", "TaskOutput"}  # keep equal to the wait-guard manifest matcher
 
 
+def _orch_roster_findings(reg):
+    """The registry roster validation, pure over reg (no filesystem), so it is unit-testable. Absent
+    optional keys yield no finding; a present-but-malformed value (an explicit null or a non-list) is a
+    finding; the yield and wait rosters are checked against their fixed matchers and the deny
+    subset/TaskOutput rules."""
+    findings = []
+    if "yield_tools" not in reg:
+        yield_roster = []
+    else:
+        yv = reg.get("yield_tools")
+        if not isinstance(yv, list) or not all(isinstance(t, str) and t for t in yv):
+            findings.append("yield_tools must be a list of non-empty tool names when present")
+            yield_roster = []
+        else:
+            yield_roster = yv
+    for tool in yield_roster:
+        if tool not in YIELD_MATCHER_TOOLS:
+            findings.append("yield tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
+                            "covered by the hook (a manifest matcher is fixed at generation)"
+                            .format(tool))
+    rosters = {}
+    for key in ("wait_tools", "wait_deny_tools", "poll_tools"):
+        if key not in reg:
+            rosters[key] = []
+            continue
+        value = reg.get(key)
+        if not isinstance(value, list) or not all(
+                isinstance(tool, str) and tool for tool in value):
+            findings.append("{} must be a list of non-empty tool names when present".format(key))
+            rosters[key] = []
+        else:
+            rosters[key] = value
+    wait_tools = rosters["wait_tools"]
+    if reg.get("wait_tools") is not None and not wait_tools:
+        findings.append("wait_tools is present but empty, so the wait-utilization guard cannot activate")
+    for tool in wait_tools:
+        if tool not in WAIT_MATCHER_TOOLS:
+            findings.append("wait tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
+                            "covered by the wait guard (a manifest matcher is fixed at generation)"
+                            .format(tool))
+    for tool in sorted(set(rosters["wait_deny_tools"]) - set(wait_tools)):
+        findings.append("wait deny tool {!r} is not declared in wait_tools".format(tool))
+    if "TaskOutput" in rosters["wait_deny_tools"]:
+        findings.append("wait deny tool 'TaskOutput' is permanently warning-only and cannot "
+                        "activate DENY")
+    return findings
+
+
 def main():
     root = str(repo_root())
     status, reg = aiqt_hooks._orch_registry(root)
@@ -43,49 +91,7 @@ def main():
             return 1
         print("resume audit clean: the barrier is cleared")
         return 0
-    if "yield_tools" not in reg:
-        yield_roster = []
-    else:
-        yv = reg.get("yield_tools")
-        if not isinstance(yv, list) or not all(isinstance(t, str) and t for t in yv):
-            findings.append("yield_tools must be a list of non-empty tool names when present")
-            yield_roster = []
-        else:
-            yield_roster = yv
-    for tool in yield_roster:
-        if tool not in YIELD_MATCHER_TOOLS:
-            findings.append("yield tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
-                            "covered by the hook (a manifest matcher is fixed at generation)"
-                            .format(tool))
-
-    rosters = {}
-    for key in ("wait_tools", "wait_deny_tools", "poll_tools"):
-        if key not in reg:
-            # All keys except version are optional (ORCHESTRATION.md); an ABSENT surface simply
-            # removes that protection and is never a doctor finding. A present-but-malformed value
-            # (including an explicit null) is still a finding below.
-            rosters[key] = []
-            continue
-        value = reg.get(key)
-        if not isinstance(value, list) or not all(
-                isinstance(tool, str) and tool for tool in value):
-            findings.append("{} must be a list of non-empty tool names when present".format(key))
-            rosters[key] = []
-        else:
-            rosters[key] = value
-    wait_tools = rosters["wait_tools"]
-    if reg.get("wait_tools") is not None and not wait_tools:
-        findings.append("wait_tools is present but empty, so the wait-utilization guard cannot activate")
-    for tool in wait_tools:
-        if tool not in WAIT_MATCHER_TOOLS:
-            findings.append("wait tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
-                            "covered by the wait guard (a manifest matcher is fixed at generation)"
-                            .format(tool))
-    for tool in sorted(set(rosters["wait_deny_tools"]) - set(wait_tools)):
-        findings.append("wait deny tool {!r} is not declared in wait_tools".format(tool))
-    if "TaskOutput" in rosters["wait_deny_tools"]:
-        findings.append("wait deny tool 'TaskOutput' is permanently warning-only and cannot "
-                        "activate DENY")
+    findings.extend(_orch_roster_findings(reg))
     sd = aiqt_hooks._orch_state_dir_for_root(root)
     try:
         os.makedirs(sd, exist_ok=True)

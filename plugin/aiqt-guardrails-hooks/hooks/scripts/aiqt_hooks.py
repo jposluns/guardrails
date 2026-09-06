@@ -5446,7 +5446,13 @@ def _orch_locked_turn_state_update(root, update):
         import fcntl
     except ImportError:
         return ("lock-unavailable", None)
-    sd = _orch_state_dir_for_root(root)
+    reg_status, reg = _orch_registry(root)
+    if reg_status == "bad":
+        # A present-but-unreadable registry must NOT silently split turn-state to the XDG fallback: a
+        # bad re-read would leave the declared counter absent and (on a denial) re-deny forever. Fail
+        # closed to an unpersistable status the caller treats as a persist failure (stop path -> open).
+        return ("registry-unreadable", None)
+    sd = _state_dir_from_registry(root, reg if reg_status == "ok" else None)
     path = os.path.join(sd, "turn-state.json")
     try:
         os.makedirs(sd, exist_ok=True)
