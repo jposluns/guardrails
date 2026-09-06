@@ -301,7 +301,7 @@
           "id": "orch-wait-guard",
           "matcher": "Monitor|TaskOutput",
           "platform": "claude-code",
-          "residue": "WARN-first redirect after a state-counted run of native waits or maintenance calls. DENY requires a fresh actionable item, a certain sequence, the in-run bake elapsed, and membership in the operator-declared wait_deny_tools roster; TaskOutput is permanently warning-only because polling and needed result collection are indistinguishable before the call. Enumerator failure, cannot-evaluate, malformed state, uncertainty, off-surface tools, and exhausted or human-gated turns allow or warn. Foreground Bash is never parsed and cannot produce DENY. A registry wait tool outside the fixed matcher is uncovered. The accepted escape is shared with the stop guard. Actor-writable, unlocked state makes this a nudge rather than a categorical backstop."
+          "residue": "WARN-first redirect after a state-counted run of native waits or maintenance calls. DENY requires a fresh actionable item, a fully classifiable recorder sequence whose concurrent updates were serialized under the turn-state lock, the in-run bake elapsed, and membership in the operator-declared wait_deny_tools roster; TaskOutput is permanently warning-only because polling and needed result collection are indistinguishable before the call. Enumerator failure, cannot-evaluate, malformed state, uncertainty, off-surface tools, and exhausted or human-gated turns allow or warn. Foreground Bash is never parsed and cannot produce DENY. A registry wait tool outside the fixed matcher is uncovered. The accepted escape is shared with the stop guard. The actor-writable state can still be deliberately reset, so this remains a nudge rather than a categorical backstop."
         },
         {
           "class": "b",
@@ -375,7 +375,7 @@
           "event": "UserPromptSubmit",
           "id": "orch-prompt-stamp",
           "platform": "claude-code",
-          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses the measured figure. It never blocks. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy). An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
+          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
         },
         {
           "class": "b",
@@ -896,7 +896,7 @@
           "id": "orch-wait-recorder",
           "matcher": ".*",
           "platform": "claude-code",
-          "residue": "Recorder only, never a block. Holder-scoped and registry-scoped, it classifies tool identity plus structured input, target path, and response status, never narration or a Bash command string. Foreground Bash and unknown or malformed actions are uncertain-Neutral and disable hard enforcement until certain progress or genuine human input. Omitted PostToolUse events are invisible. Actor-writable, unlocked state can be reset or lose a concurrent update. Classification does not prove that a backlog item advanced successfully."
+          "residue": "Recorder only, never a block. Holder-scoped and registry-scoped, it classifies tool identity plus structured input, target path, and response status, never narration or a Bash command string. Foreground Bash and unknown or malformed actions are uncertain-Neutral and disable hard enforcement until certain progress or genuine human input. Omitted PostToolUse events are invisible. Concurrent recorder updates are serialized by a POSIX flock and published by atomic replace; an unavailable lock, unreadable state, or failed publish is surfaced and leaves the counter unchanged. Actor-writable state can still be deliberately reset. Classification does not prove that a backlog item advanced successfully."
         }
       ],
       "source": ".aiqt/core/rules/trust-records-first.md",
@@ -1588,7 +1588,7 @@
           "id": "orch-wait-recorder",
           "matcher": ".*",
           "platform": "claude-code",
-          "residue": "Recorder only, never a block. Holder-scoped and registry-scoped, it classifies tool identity plus structured input, target path, and response status, never narration or a Bash command string. Foreground Bash and unknown or malformed actions are uncertain-Neutral and disable hard enforcement until certain progress or genuine human input. Omitted PostToolUse events are invisible. Actor-writable, unlocked state can be reset or lose a concurrent update. Classification does not prove that a backlog item advanced successfully."
+          "residue": "Recorder only, never a block. Holder-scoped and registry-scoped, it classifies tool identity plus structured input, target path, and response status, never narration or a Bash command string. Foreground Bash and unknown or malformed actions are uncertain-Neutral and disable hard enforcement until certain progress or genuine human input. Omitted PostToolUse events are invisible. Concurrent recorder updates are serialized by a POSIX flock and published by atomic replace; an unavailable lock, unreadable state, or failed publish is surfaced and leaves the counter unchanged. Actor-writable state can still be deliberately reset. Classification does not prove that a backlog item advanced successfully."
         }
       ],
       "source": ".aiqt/core/rules/integ-track-launched-work.md",
@@ -1621,7 +1621,7 @@
           "event": "UserPromptSubmit",
           "id": "orch-prompt-stamp",
           "platform": "claude-code",
-          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses the measured figure. It never blocks. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy). An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
+          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
         },
         {
           "class": "b",
@@ -1706,7 +1706,7 @@
           "id": "orch-wait-guard",
           "matcher": "Monitor|TaskOutput",
           "platform": "claude-code",
-          "residue": "WARN-first redirect after a state-counted run of native waits or maintenance calls. DENY requires a fresh actionable item, a certain sequence, the in-run bake elapsed, and membership in the operator-declared wait_deny_tools roster; TaskOutput is permanently warning-only because polling and needed result collection are indistinguishable before the call. Enumerator failure, cannot-evaluate, malformed state, uncertainty, off-surface tools, and exhausted or human-gated turns allow or warn. Foreground Bash is never parsed and cannot produce DENY. A registry wait tool outside the fixed matcher is uncovered. The accepted escape is shared with the stop guard. Actor-writable, unlocked state makes this a nudge rather than a categorical backstop."
+          "residue": "WARN-first redirect after a state-counted run of native waits or maintenance calls. DENY requires a fresh actionable item, a fully classifiable recorder sequence whose concurrent updates were serialized under the turn-state lock, the in-run bake elapsed, and membership in the operator-declared wait_deny_tools roster; TaskOutput is permanently warning-only because polling and needed result collection are indistinguishable before the call. Enumerator failure, cannot-evaluate, malformed state, uncertainty, off-surface tools, and exhausted or human-gated turns allow or warn. Foreground Bash is never parsed and cannot produce DENY. A registry wait tool outside the fixed matcher is uncovered. The accepted escape is shared with the stop guard. The actor-writable state can still be deliberately reset, so this remains a nudge rather than a categorical backstop."
         },
         {
           "class": "c",
@@ -1715,7 +1715,7 @@
           "id": "orch-wait-recorder",
           "matcher": ".*",
           "platform": "claude-code",
-          "residue": "Recorder only, never a block. Holder-scoped and registry-scoped, it classifies tool identity plus structured input, target path, and response status, never narration or a Bash command string. Foreground Bash and unknown or malformed actions are uncertain-Neutral and disable hard enforcement until certain progress or genuine human input. Omitted PostToolUse events are invisible. Actor-writable, unlocked state can be reset or lose a concurrent update. Classification does not prove that a backlog item advanced successfully."
+          "residue": "Recorder only, never a block. Holder-scoped and registry-scoped, it classifies tool identity plus structured input, target path, and response status, never narration or a Bash command string. Foreground Bash and unknown or malformed actions are uncertain-Neutral and disable hard enforcement until certain progress or genuine human input. Omitted PostToolUse events are invisible. Concurrent recorder updates are serialized by a POSIX flock and published by atomic replace; an unavailable lock, unreadable state, or failed publish is surfaced and leaves the counter unchanged. Actor-writable state can still be deliberately reset. Classification does not prove that a backlog item advanced successfully."
         }
       ],
       "source": ".aiqt/core/rules/progr-wait-utilization.md",

@@ -16,6 +16,7 @@ sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 
 YIELD_MATCHER_TOOLS = {"ScheduleWakeup", "CronCreate"}  # keep equal to the manifest matcher
+WAIT_MATCHER_TOOLS = {"Monitor", "TaskOutput"}  # keep equal to the wait-guard manifest matcher
 
 
 def main():
@@ -47,6 +48,29 @@ def main():
             findings.append("yield tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
                             "covered by the hook (a manifest matcher is fixed at generation)"
                             .format(tool))
+
+    rosters = {}
+    for key in ("wait_tools", "wait_deny_tools", "poll_tools"):
+        value = reg.get(key)
+        if not isinstance(value, list) or not all(
+                isinstance(tool, str) and tool for tool in value):
+            findings.append("{} must be present as a list of non-empty tool names".format(key))
+            rosters[key] = []
+        else:
+            rosters[key] = value
+    wait_tools = rosters["wait_tools"]
+    if not wait_tools:
+        findings.append("wait_tools is empty, so the wait-utilization guard cannot activate")
+    for tool in wait_tools:
+        if tool not in WAIT_MATCHER_TOOLS:
+            findings.append("wait tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
+                            "covered by the wait guard (a manifest matcher is fixed at generation)"
+                            .format(tool))
+    for tool in sorted(set(rosters["wait_deny_tools"]) - set(wait_tools)):
+        findings.append("wait deny tool {!r} is not declared in wait_tools".format(tool))
+    if "TaskOutput" in rosters["wait_deny_tools"]:
+        findings.append("wait deny tool 'TaskOutput' is permanently warning-only and cannot "
+                        "activate DENY")
     sd = aiqt_hooks._orch_state_dir_for_root(root)
     try:
         os.makedirs(sd, exist_ok=True)

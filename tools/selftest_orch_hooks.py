@@ -23,6 +23,7 @@ an unreadable, malformed, or suite-missing expectation manifest.
 import json
 import os
 import subprocess
+import threading
 import sys
 import tempfile
 import shutil
@@ -759,130 +760,188 @@ def main(report_path=None):
         check("ledger/complete-row", '"complete"' in text, True)
 
         # ---------- wait-utilization recorder and guard ----------
-        # Aggregate these vectors into the existing registered counter check below, so the source-only
-        # change does not edit the generated execution roster.
-        wait_results, wait_expected = [], []
-
-        def wait_case(name, got, want):
-            wait_results.append((name, got))
-            wait_expected.append((name, want))
-
         w = Fixture(tmp, "wait")
         wr = {"_wait_state_dir": str(w.state), "wait_tools": ["Monitor", "TaskOutput"],
               "poll_tools": ["CronList"], "dispatch_tools": ["Dispatch"]}
         outside, inside = str(w.root / "work.py"), str(w.state / "turn-state.json")
-        class_cases = [
-            ("edit-progress", "Edit", {"file_path": outside}, None, ("PROGRESS", True)),
-            ("edit-maint", "Edit", {"file_path": inside}, None, ("MAINTENANCE", True)),
-            ("background", "Bash", {"command": "sleep 60", "run_in_background": True}, None,
+        for check_id, tool, tool_input, response, want in [
+            ("wait/class/edit-progress", "Edit", {"file_path": outside}, None,
              ("PROGRESS", True)),
-            ("task-done", "TaskOutput", {"task_id": "t1"}, {"status": "completed"},
-             ("PROGRESS", True)),
-            ("task-running", "TaskOutput", {"task_id": "t1"}, {"status": "running"},
-             ("WAIT", True)),
-            ("schedule", "ScheduleWakeup", {"stop": False}, None, ("WAIT", True)),
-            ("poll", "CronList", {"narration": "busy"}, None, ("MAINTENANCE", True)),
-            ("research", "Read", {"file_path": outside}, None, ("NEUTRAL", True)),
-            ("unknown", "UnknownTool", {}, None, ("NEUTRAL", False)),
-        ]
-        for name, tool, tool_input, response, want in class_cases:
-            wait_case("class/" + name,
-                      aiqt_hooks.classify_wait_action(tool, tool_input, response, wr), want)
-        for command in ("sleep 60", "git commit", "echo waiting"):
-            wait_case("class/foreground-" + command,
-                      aiqt_hooks.classify_wait_action("Bash", {"command": command}, None, wr),
-                      ("NEUTRAL", False))
+            ("wait/class/edit-maint", "Edit", {"file_path": inside}, None,
+             ("MAINTENANCE", True)),
+            ("wait/class/background", "Bash",
+             {"command": "sleep 60", "run_in_background": True}, None, ("PROGRESS", True)),
+            ("wait/class/task-done", "TaskOutput", {"task_id": "t1"},
+             {"status": "completed"}, ("PROGRESS", True)),
+            ("wait/class/task-running", "TaskOutput", {"task_id": "t1"},
+             {"status": "running"}, ("WAIT", True)),
+            ("wait/class/schedule", "ScheduleWakeup", {"stop": False}, None, ("WAIT", True)),
+            ("wait/class/poll", "CronList", {"narration": "busy"}, None, ("MAINTENANCE", True)),
+            ("wait/class/research", "Read", {"file_path": outside}, None, ("NEUTRAL", True)),
+            ("wait/class/unknown", "UnknownTool", {}, None, ("NEUTRAL", False)),
+        ]:
+            check(check_id, aiqt_hooks.classify_wait_action(
+                tool, tool_input, response, wr), want)
+        for check_id, command in (
+                ("wait/class/foreground-sleep-60", "sleep 60"),
+                ("wait/class/foreground-git-commit", "git commit"),
+                ("wait/class/foreground-echo-waiting", "echo waiting")):
+            check(check_id, aiqt_hooks.classify_wait_action(
+                "Bash", {"command": command}, None, wr), ("NEUTRAL", False))
 
         base_wait = {"escape": False, "enum_status": "ok", "enum_detail": "",
                      "actionable": [("A-1", "work", "no blocker recorded")],
                      "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": [],
                      "wait_run": 4, "wait_uncertain": False, "wait_denials": 0,
                      "wait_basis_unchanged": False, "deny_eligible": True}
-        decision_cases = [
-            ("below", {}, "ALLOW"), ("fire", {"wait_run": 5}, "WARN"),
-            ("deny", {"wait_run": 7}, "DENY"),
-            ("off-surface", {"wait_run": 7, "deny_eligible": False}, "WARN"),
-            ("uncertain", {"wait_run": 7, "wait_uncertain": True}, "WARN"),
-            ("enum", {"wait_run": 7, "enum_status": "ENUMERATOR_ERROR"}, "WARN"),
-            ("cap", {"wait_run": 7, "wait_denials": 3, "wait_basis_unchanged": True}, "WARN"),
-            ("escape", {"wait_run": 7, "escape": True}, "ALLOW"),
-            ("empty", {"wait_run": 7, "actionable": []}, "ALLOW"),
-            ("cannot-evaluate", {"wait_run": 7, "actionable": [],
-                                 "cannot_evaluate": [("CE-1", "cannot-evaluate", "held")]}, "WARN"),
-        ]
-        for name, updates, want in decision_cases:
+        for check_id, updates, want in [
+            ("wait/core/below", {}, "ALLOW"),
+            ("wait/core/fire", {"wait_run": 5}, "WARN"),
+            ("wait/core/deny", {"wait_run": 7}, "DENY"),
+            ("wait/core/off-surface", {"wait_run": 7, "deny_eligible": False}, "WARN"),
+            ("wait/core/uncertain", {"wait_run": 7, "wait_uncertain": True}, "WARN"),
+            ("wait/core/enum", {"wait_run": 7, "enum_status": "ENUMERATOR_ERROR"}, "WARN"),
+            ("wait/core/cap",
+             {"wait_run": 7, "wait_denials": 3, "wait_basis_unchanged": True}, "WARN"),
+            ("wait/core/escape", {"wait_run": 7, "escape": True}, "ALLOW"),
+            ("wait/core/empty", {"wait_run": 7, "actionable": []}, "WARN"),
+            ("wait/core/cannot-evaluate",
+             {"wait_run": 7, "actionable": [],
+              "cannot_evaluate": [("CE-1", "cannot-evaluate", "held")]}, "WARN"),
+        ]:
             ctx = dict(base_wait)
             ctx.update(updates)
-            wait_case("core/" + name, aiqt_hooks.decide_wait(ctx)[0], want)
-        wait_case("schema/malformed",
-                  (aiqt_hooks._orch_validate("turn_state", {"wait_run": True})[1]["wait_run"],
-                   aiqt_hooks._orch_validate(
-                       "turn_state", {"wait_uncertain": "false"})[1]["wait_uncertain"]),
-                  (None, None))
+            check(check_id, aiqt_hooks.decide_wait(ctx)[0], want)
+        check("wait/schema/malformed",
+              (aiqt_hooks._orch_validate("turn_state", {"wait_run": True})[1]["wait_run"],
+               aiqt_hooks._orch_validate(
+                   "turn_state", {"wait_uncertain": "false"})[1]["wait_uncertain"]),
+              (None, None))
 
         w.set_items([item("A-1", title="advance this")])
         for _ in range(5):
             aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "CronList", {}))
-        wait_case("counter/five", w.turn_state().get("wait_run"), 5)
+        check("wait/counter/five", w.turn_state().get("wait_run"), 5)
         monitor = lambda: aiqt_hooks.orch_wait_guard(
             w.payload("PreToolUse", "Monitor", {"task_id": "t1"}))
-        wait_case("guard/warn-at-fire", _verdict(monitor()), "warn")
+        check("wait/guard/warn-at-fire", _verdict(monitor()), "warn")
         for _ in range(2):
             aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "CronList", {}))
-        wait_case("guard/deny-after-bake", _verdict(monitor()), "deny")
-        wait_case("guard/task-output-warn",
-                  _verdict(aiqt_hooks.orch_wait_guard(
-                      w.payload("PreToolUse", "TaskOutput", {"task_id": "t1"}))), "warn")
+        check("wait/guard/deny-after-bake", _verdict(monitor()), "deny")
+        check("wait/guard/task-output-warn",
+              _verdict(aiqt_hooks.orch_wait_guard(
+                  w.payload("PreToolUse", "TaskOutput", {"task_id": "t1"}))), "warn")
         w.set_turn_state({"wait_run": 7, "wait_uncertain": True})
-        wait_case("guard/poison-warn", _verdict(monitor()), "warn")
+        check("wait/guard/poison-warn", _verdict(monitor()), "warn")
         w.set_turn_state({"wait_run": 7, "wait_uncertain": False})
         w.enum_exit.write_text("9", encoding="utf-8")
-        wait_case("guard/enum-warn", _verdict(monitor()), "warn")
+        check("wait/guard/enum-warn", _verdict(monitor()), "warn")
         w.enum_exit.write_text("0", encoding="utf-8")
         w.set_items([])
-        wait_case("guard/exhausted", _verdict(monitor()), "allow")
+        check("wait/guard/exhausted-note", _verdict(monitor()), "warn")
 
         w.set_turn_state({"wait_run": 3, "wait_uncertain": False})
         aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "Read", {"file_path": outside}))
-        wait_case("counter/neutral", w.turn_state().get("wait_run"), 3)
+        check("wait/counter/neutral", w.turn_state().get("wait_run"), 3)
         aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "Bash", {"command": "echo work"}))
-        wait_case("counter/bash-poison", w.turn_state().get("wait_uncertain"), True)
+        check("wait/counter/bash-poison", w.turn_state().get("wait_uncertain"), True)
         aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "Edit", {"file_path": outside}))
-        wait_case("counter/progress-reset",
-                  (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain")),
-                  (0, False))
+        check("wait/counter/progress-reset",
+              (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain")),
+              (0, False))
         w.set_turn_state({"wait_run": aiqt_hooks._ORCH_COUNTER_MAX, "wait_uncertain": False})
         aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "CronList", {}))
-        wait_case("counter/saturates", w.turn_state().get("wait_run"), aiqt_hooks._ORCH_COUNTER_MAX)
+        check("wait/counter/saturates",
+              w.turn_state().get("wait_run"), aiqt_hooks._ORCH_COUNTER_MAX)
         w.set_turn_state({"wait_run": "bad"})
         aiqt_hooks.orch_wait_recorder(w.payload("PostToolUse", "CronList", {}))
-        wait_case("counter/malformed-preserved", w.turn_state().get("wait_run"), "bad")
+        check("wait/counter/malformed-preserved", w.turn_state().get("wait_run"), "bad")
+
+        # Hold the maintenance recorder after its locked read. A parallel progress recorder must not
+        # reach its own read until the first update publishes; after both finish, progress wins.
+        w.set_turn_state({"wait_run": 7, "wait_uncertain": False})
+        real_turn_read = aiqt_hooks._orch_read_turn_state_path
+        maintenance_read = threading.Event()
+        release_maintenance = threading.Event()
+        progress_read = threading.Event()
+        recorder_results = {}
+
+        def delayed_turn_read(path):
+            state = real_turn_read(path)
+            if threading.current_thread().name == "wait-maintenance":
+                maintenance_read.set()
+                release_maintenance.wait(5)
+            elif threading.current_thread().name == "wait-progress":
+                progress_read.set()
+            return state
+
+        def record_maintenance():
+            recorder_results["maintenance"] = _verdict(aiqt_hooks.orch_wait_recorder(
+                w.payload("PostToolUse", "CronList", {})))
+
+        def record_progress():
+            recorder_results["progress"] = _verdict(aiqt_hooks.orch_wait_recorder(
+                w.payload("PostToolUse", "Edit", {"file_path": outside})))
+
+        maintenance_thread = threading.Thread(
+            target=record_maintenance, name="wait-maintenance")
+        progress_thread = threading.Thread(target=record_progress, name="wait-progress")
+        aiqt_hooks._orch_read_turn_state_path = delayed_turn_read
+        try:
+            maintenance_thread.start()
+            maintenance_reached = maintenance_read.wait(5)
+            progress_thread.start()
+            progress_read_while_held = progress_read.wait(0.2)
+        finally:
+            release_maintenance.set()
+            maintenance_thread.join(5)
+            progress_thread.join(5)
+            aiqt_hooks._orch_read_turn_state_path = real_turn_read
+        check("wait/counter/concurrent-progress-reset",
+              (maintenance_reached, progress_read_while_held, progress_read.is_set(),
+               maintenance_thread.is_alive(), progress_thread.is_alive(),
+               recorder_results.get("maintenance"), recorder_results.get("progress"),
+               (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain"))),
+              (True, False, True, False, False, "allow", "allow", (0, False)))
 
         w.set_turn_state({"wait_run": 7, "wait_uncertain": False, "wait_denials": 2,
                           "wait_basis": "X"})
         aiqt_hooks._orch_record_denial(str(w.root), w.turn_state(), "wait", "Y")
-        wait_case("counter/basis-reset", w.turn_state().get("wait_denials"), 1)
+        check("wait/counter/basis-reset", w.turn_state().get("wait_denials"), 1)
         aiqt_hooks._orch_record_denial(str(w.root), w.turn_state(), "wait", "Y")
-        wait_case("counter/basis-increment", w.turn_state().get("wait_denials"), 2)
+        check("wait/counter/basis-increment", w.turn_state().get("wait_denials"), 2)
 
         wake_state = {"wait_run": 7, "wait_uncertain": True, "wait_denials": 2, "wait_basis": "B"}
         w.set_turn_state(wake_state)
-        aiqt_hooks._orch_register_wake(str(w.root), wake_state, "wake prompt")
+        aiqt_hooks._orch_register_wake(str(w.root), "wake prompt")
         aiqt_hooks.orch_prompt_stamp(w.payload(
             "UserPromptSubmit", extra={"prompt": "wake prompt"}))
-        wait_case("stamp/timer-preserves",
-                  (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain")), (7, True))
+        check("wait/stamp/timer-preserves",
+              (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain")), (7, True))
+
+        w.set_turn_state(wake_state)
+        aiqt_hooks._orch_register_wake(str(w.root), "recurring prompt", recurring=True)
+        first_firing = aiqt_hooks.orch_prompt_stamp(w.payload(
+            "UserPromptSubmit", extra={"prompt": "recurring prompt"}))
+        second_firing = aiqt_hooks.orch_prompt_stamp(w.payload(
+            "UserPromptSubmit", extra={"prompt": "recurring prompt"}))
+        check("wait/stamp/recurring-second-preserves",
+              (_verdict(first_firing), _verdict(second_firing),
+               w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain"),
+               w.turn_state().get("wait_denials"), w.turn_state().get("wait_basis")),
+              ("warn", "warn", 7, True, 2, "B"))
+
         aiqt_hooks.orch_prompt_stamp(w.payload(
             "UserPromptSubmit", extra={"prompt": "human prompt"}))
-        wait_case("stamp/human-resets",
-                  (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain"),
-                   w.turn_state().get("wait_denials"), "wait_basis" in w.turn_state()),
-                  (0, False, 0, False))
-        wait_case("dispatch/posture",
-                  (aiqt_hooks.HANDLER_EVENT.get("orch_wait_guard"),
-                   aiqt_hooks.HANDLER_EVENT.get("orch_wait_recorder"),
-                   "orch_wait_guard" in aiqt_hooks.FAIL_OPEN_HANDLERS),
-                  ("PreToolUse", "PostToolUse", True))
+        check("wait/stamp/human-resets",
+              (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain"),
+               w.turn_state().get("wait_denials"), "wait_basis" in w.turn_state()),
+              (0, False, 0, False))
+        check("wait/dispatch/posture",
+              (aiqt_hooks.HANDLER_EVENT.get("orch_wait_guard"),
+               aiqt_hooks.HANDLER_EVENT.get("orch_wait_recorder"),
+               "orch_wait_guard" in aiqt_hooks.FAIL_OPEN_HANDLERS),
+              ("PreToolUse", "PostToolUse", True))
 
         # ---------- component 5: the resume audit and barrier ----------
         r = Fixture(tmp, "resume")
@@ -941,8 +1000,7 @@ def main(report_path=None):
         st = r.turn_state()
         check("stamp/human-input-stamped", bool(st.get("last_human_input_utc")), True)
         check("stamp/counters-reset",
-              (st.get("stop_denials", 0), st.get("wait_run", 0), wait_results),
-              (0, 0, wait_expected))
+              (st.get("stop_denials", 0), st.get("wait_run", 0)), (0, 0))
 
         # ---------- pure-core spot checks (decide_yield directly) ----------
         base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
