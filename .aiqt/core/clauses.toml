@@ -4849,3 +4849,48 @@ start-line = 27
 end-line = 31
 canonical-text = "so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
 source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+
+[[clause]]
+clause-id = "expbnd.1"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 13
+end-line = 15
+canonical-text = "An action that has an authoritative, explicit way to name what it acts on, its identity, its target,\nor its scope, binds to that explicit name rather than inheriting the binding from ambient context\nthat can silently point elsewhere."
+source-digest = "a06bacc24f97c5cf30f652fdbab6556e914d313eb5486c0f8c949810bd27ef3f"
+
+[[clause]]
+clause-id = "expbnd.2"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 21
+end-line = 25
+canonical-text = "An asynchronous result is correlated to the dispatch that\nproduced it only through the authoritative identifier that dispatch returns, a handle, a path, or an\nid, never by wall-clock proximity or arrival order, because two dispatches can complete out of order\nor at the same instant and ambient timing cannot tell them apart; a result with no identifier is\nsurfaced as unbound, never assigned to the nearest or most recent dispatch."
+source-digest = "a06bacc24f97c5cf30f652fdbab6556e914d313eb5486c0f8c949810bd27ef3f"
+
+[[clause]]
+clause-id = "expbnd.3"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 25
+end-line = 29
+canonical-text = "A command with side\neffects names its target on the command that performs the mutation, a repository or working tree\nbound by an on-command flag rather than left to the current working directory; a directory change\nchained ahead of a mutation is that ambient dependency, not an explicit binding, because the\nmutation still reads its target from wherever the shell landed."
+source-digest = "a06bacc24f97c5cf30f652fdbab6556e914d313eb5486c0f8c949810bd27ef3f"
+
+[[clause]]
+clause-id = "expbnd.4"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 29
+end-line = 33
+canonical-text = "A destructive or broad operation\ntakes its scope from the specific thing under change, an enumerated set of paths, rather than from\nambient whole-tree state; a breadth selector that stages, commits, or discards whatever the tree\ncurrently holds sweeps in unrelated work, and where committed state is needed for a fixture or test,\nan isolated checkout provides it rather than reshaping the shared working tree in place."
+source-digest = "a06bacc24f97c5cf30f652fdbab6556e914d313eb5486c0f8c949810bd27ef3f"
+
+[[clause]]
+clause-id = "expbnd.5"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 17
+end-line = 19
+canonical-text = "Where an explicit binding is available\nand unused, the action is bound to it; where only an ambient binding exists, the execution target is\nconfirmed by observation before the action runs, per the confirm-execution-target discipline."
+source-digest = "a06bacc24f97c5cf30f652fdbab6556e914d313eb5486c0f8c949810bd27ef3f"

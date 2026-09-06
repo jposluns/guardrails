@@ -4094,6 +4094,65 @@ def main():
                           "tool_input": {"command": "cd rel"}}) != "deny":
             failures.append("(ap-c33) missing tool_name must DENY (fail-closed contract)")
 
+        # === expbnd: explicit git target and enumerated scope (GD-157/158/159) =======================
+        # Failing-first coverage: before git_explicit_binding existed, the ASK cases below had no
+        # dedicated decider. Absolute cd operands avoid the sibling abspth relative-path ASK, while
+        # direct handler calls keep every verdict attributable to this control.
+        def ebexpect(label, command, want):
+            got = _decision(aiqt_hooks.git_explicit_binding, command)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        ebexpect("(eb-e1) absolute cd feeding untargeted commit asks",
+                 "cd /abs/repo && git commit -m x", "ask")
+        ebexpect("(eb-e2) explicit -C target credits the binding",
+                 "cd /abs/repo && git -C /abs/repo commit -m x", "allow")
+        ebexpect("(eb-e3) inline --git-dir target credits the binding",
+                 "cd /abs/repo && git --git-dir=/abs/repo/.git commit -m x", "allow")
+        ebexpect("(eb-e4) breadth add feeding push asks", "git add -A && git push", "ask")
+        ebexpect("(eb-e5) relocated breadth stage and publish asks",
+                 "cd /abs/repo && git add --all && git commit -m x && git push", "ask")
+        ebexpect("(eb-e6) pushd feeding untargeted mutation asks",
+                 "pushd /abs/repo && git rm -r src && popd", "ask")
+        ebexpect("(eb-e7) dynamic cd still exposes the ambient binding",
+                 'cd "$D" && git commit -m x', "ask")
+        ebexpect("(eb-e8) lone bare mutation is a deliberate non-fire", "git commit -m x", "allow")
+        ebexpect("(eb-e9) lone breadth commit is a deliberate non-fire", "git commit -am x", "allow")
+        ebexpect("(eb-e10) dot pathspec feeding push asks", "git add . && git push", "ask")
+        ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
+        ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
+        ebexpect("(eb-e13) bare discard remains the git_discard control's boundary",
+                 "git reset --hard", "allow")
+        ebexpect("(eb-e14) quoted prose in a parseable command allows",
+                 'echo "cd /x && git commit -m y"', "allow")
+        ebexpect("(eb-e15) unparseable visible cd plus mutation fails safe to ask",
+                 "cd /abs && git commit -m x && (", "ask")
+        ebexpect("(eb-e16) unparseable command outside the visible patterns allows",
+                 'ls -la "unbalanced', "allow")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "ask":
+            failures.append("(eb-e17) absent command must ASK (cannot evaluate target or scope)")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_input": {"command": "git commit -m x"}}) != "deny":
+            failures.append("(eb-e18) missing tool_name must DENY (shared fail-closed contract)")
+        ebexpect("(eb-e19a) plain fetch under cd is deliberately non-mutating",
+                 "cd /abs && git fetch", "allow")
+        ebexpect("(eb-e19b) pruning fetch under cd asks", "cd /abs && git fetch --prune", "ask")
+        ebexpect("(eb-e20) branch list is an enumerated read-only form",
+                 "cd /abs && git branch --list", "allow")
+        for _eb_sub, _eb_args, _eb_want in (
+                ("commit", ["-am", "x"], True),
+                ("add", ["-A"], True),
+                ("add", ["--", "src/a.c"], False),
+                ("commit", ["-m", "x"], False)):
+            _eb_got = aiqt_hooks._git_is_breadth(_eb_sub, _eb_args)
+            if _eb_got is not _eb_want:
+                failures.append("(eb-e21) _git_is_breadth({}, {!r}): expected {}, got {}"
+                                .format(_eb_sub, _eb_args, _eb_want, _eb_got))
+        if (aiqt_hooks.HANDLERS.get("git_explicit_binding") is not aiqt_hooks.git_explicit_binding or
+                aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
+            failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
+
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
         # floor; inert on absence for slice confinement, fail-closed on cannot-evaluate once armed. Judged

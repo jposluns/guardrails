@@ -11,6 +11,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
   bash_absolute_paths PreToolUse  abspth  ask on a relative cd/pushd operand or redirect target in Bash
+  git_explicit_binding PreToolUse expbnd ask on an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   branch_root         PreToolUse  brnrot  block branch creation from an orphaned start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
@@ -27,8 +28,8 @@ blocking error whose stderr is fed back to Claude. The Stop payload carries the 
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
 Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
-deliberate boundary posture is stated next), gensrc_guard (a second stated exception, below), and
-commit_msg_subst (a third stated exception, below). A
+deliberate boundary posture is stated below), gensrc_guard (a second stated exception, below), and
+commit_msg_subst (a third stated exception, below), and git_explicit_binding (a fourth, below). A
 fail-closed control that cannot read the input it is meant
 to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
@@ -47,6 +48,11 @@ the failure surfaces as a gate the human must clear and can never read as clean.
 commit_msg_subst (sectvl) is the THIRD stated exception: its strongest normal finding is an ASK, so a
 missing or unreadable command string also fails safe to ASK rather than being punished more harshly than
 a confirmed substitution. Only a missing tool_name denies under the shared fail-closed contract; a
+mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
+
+git_explicit_binding (expbnd) is the FOURTH stated exception. Its strongest normal finding is an ASK, so
+an absent or unreadable command string fails safe to ASK rather than being punished more harshly than a
+confirmed ambient binding. Only a missing tool_name denies under the shared fail-closed contract; a
 mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
@@ -200,7 +206,7 @@ def _deny_missing_tool_name(rule):
 
 # --- shared raw-command tokenizer (quote/redirect-aware) ---------------------------------------------
 # ONE raw-character lexical pass over the Bash command, shared by every lexical Bash hook (diff-source,
-# commit-identity, protected-line, gate-weakening, and git-discard's lossy scan). It decides quoting and
+# commit-identity, protected-line, gate-weakening, git-explicit-binding, and git-discard's lossy scan). It
 # REDIRECTION from RAW character positions and quote provenance BEFORE any token stream exists, so a shell
 # redirection ANYWHERE in a command (leading, interspersed, or trailing: 'git >/dev/null commit', '>out
 # pytest') is recorded as redirect metadata and REMOVED from the argv the handlers judge, closing the
@@ -601,8 +607,8 @@ def _segments(command):
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
-    (protected_line, gate_weakening, git_discard's lossy scan, find_ai_authorship) read redirect-free
-    argv automatically; diff_source_pretool uses the richer _Segment records directly."""
+    (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
+    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
 
 
@@ -1833,6 +1839,164 @@ def _split_pre_post(args):
         if a in _EOO_TOKENS:
             return args[:idx], args[idx + 1:], True
     return args, [], False
+
+
+# --- expbnd: explicit git target and enumerated scope -----------------------------------------------
+_GIT_MUTATING_VERBS = frozenset((
+    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "init",
+    "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
+    "switch", "tag", "update-index", "update-ref", "worktree"))
+_EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
+_RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd)(?=$|[\s;&|()])")
+_RAW_EXPBND_MUTATE_RE = re.compile(
+    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
+    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
+_RAW_EXPBND_BREADTH_RE = re.compile(
+    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
+    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
+_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+
+
+def _git_target_is_explicit(tokens):
+    """Whether git's global-option region carries a nonempty -C/--git-dir/--work-tree binding."""
+    i = _command_word_index(tokens) + 1
+    n = len(tokens)
+    while i < n:
+        token = tokens[i]
+        if not token.startswith("-"):
+            return False
+        if token in _EXPLICIT_GIT_TARGET_OPTS:
+            return i + 1 < n and bool(tokens[i + 1])
+        if any(token.startswith(opt + "=") and token != opt + "="
+               for opt in ("--git-dir", "--work-tree")):
+            return True
+        if "=" not in token and token in _GIT_ARG_OPTS:
+            i += 2
+        else:
+            i += 1
+    return False
+
+
+def _git_is_mutating(sub, args):
+    """Conservative git mutation classifier, with only enumerated read-only forms exempted."""
+    if sub == "fetch":
+        return any(a in ("--prune", "--prune-tags", "-p") or
+                   (a.startswith("-") and not a.startswith("--") and "p" in a[1:])
+                   for a in args)
+    if sub not in _GIT_MUTATING_VERBS:
+        return False
+    if sub == "branch":
+        return bool(args) and "--list" not in args
+    if sub == "tag":
+        return not any(a in ("-l", "--list") or a.startswith("--list=") for a in args)
+    if sub == "stash":
+        return not args or args[0] not in ("list", "show")
+    if sub == "config":
+        return not any(a == "-l" or a == "--list" or a.startswith("--get") for a in args)
+    if sub == "worktree":
+        return not args or args[0] != "list"
+    if sub == "notes":
+        return not args or args[0] not in ("list", "show")
+    return True
+
+
+def _git_is_breadth(sub, args):
+    """Whether add/commit takes scope from the ambient whole tree rather than enumerated paths."""
+    if sub == "add":
+        for arg in args:
+            if arg in (".", ":/", "--all"):
+                return True
+            if arg in _EOO_TOKENS:
+                continue
+            if arg.startswith("-") and not arg.startswith("--") and "A" in arg[1:]:
+                return True
+        return False
+    if sub == "commit":
+        for arg in args:
+            if arg in _EOO_TOKENS:
+                break
+            if arg == "--all":
+                return True
+            if arg.startswith("-") and not arg.startswith("--") and "a" in arg[1:]:
+                return True
+    return False
+
+
+def _expbnd_target_ask(verb):
+    reason = ("AIQT rule expbnd: a directory change in this command feeds a git '{}' with no explicit "
+              "target; the mutation binds to wherever the shell landed. Reissue with "
+              "'git -C /absolute/repo {} ...' or confirm the working directory is the intended "
+              "repository.".format(verb, verb))
+    return _ask(reason, "AIQT guardrail: confirm the repository bound to git {} (rule expbnd)."
+                .format(verb))
+
+
+def _expbnd_breadth_ask(verb):
+    reason = ("AIQT rule expbnd: git '{}' takes its scope from the whole ambient tree and this command "
+              "relocates or publishes it. Stage enumerated pathspecs instead of -A/-a/'.', or confirm "
+              "the whole-tree scope is intended.".format(verb))
+    return _ask(reason, "AIQT guardrail: confirm the whole-tree git {} scope (rule expbnd)."
+                .format(verb))
+
+
+def _expbnd_fallback(command):
+    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command."""
+    if (_RAW_EXPBND_CD_RE.search(command) and
+            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
+        return _expbnd_target_ask("mutation")
+    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+        return _expbnd_breadth_ask("breadth operation")
+    return _allow()
+
+
+def git_explicit_binding(data):
+    """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash, ASK-strongest."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("expbnd")
+    if tool != "Bash":
+        return _allow()
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command:
+        return _ask("AIQT rule expbnd: the Bash command was absent or unreadable, so its git target and "
+                    "scope could not be checked; confirm the explicit target and enumerated scope.",
+                    "AIQT guardrail: confirm the unreadable Bash command's target and scope (rule expbnd).")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _expbnd_fallback(command)
+
+    saw_cd = False
+    saw_push = False
+    untargeted = []
+    breadth = []
+    for tokens, _sep in segments:
+        word = _command_word(tokens)
+        if word in _CD_BUILTINS:
+            saw_cd = True
+            continue
+        if word != "git":
+            continue
+        sub, args = _git_sub_and_args(tokens)
+        if sub is None:
+            continue
+        if sub == "push":
+            saw_push = True
+        if _git_is_mutating(sub, args) and not _git_target_is_explicit(tokens):
+            untargeted.append(sub)
+        if _git_is_breadth(sub, args):
+            breadth.append(sub)
+    if saw_cd and untargeted:
+        return _expbnd_target_ask(untargeted[0])
+    if breadth and (saw_cd or saw_push):
+        return _expbnd_breadth_ask(breadth[0])
+    return _allow()
 
 
 def _has_short(tokens, ch):
@@ -7709,6 +7873,7 @@ HANDLERS = {
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
     "bash_absolute_paths": bash_absolute_paths,
+    "git_explicit_binding": git_explicit_binding,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "branch_root": branch_root,
@@ -7742,6 +7907,7 @@ HANDLER_EVENT = {
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
     "bash_absolute_paths": PRETOOL,
+    "git_explicit_binding": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,

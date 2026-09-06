@@ -28,6 +28,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Cut branches from the live protected line and re-home after a rewrite](rules/aiqt/10-INTEG-branch-rooted-on-live-main.md)
 - [A check fails closed on input it cannot read](rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md)
 - [Commit identity](rules/aiqt/10-INTEG-commit-identity.md)
+- [Bind to the explicit target, not the ambient context](rules/aiqt/10-INTEG-explicit-binding-over-ambient-context.md)
 - [Gate discipline](rules/aiqt/10-INTEG-gate-discipline.md)
 - [A generated artefact is changed only through its source](rules/aiqt/10-INTEG-generated-artefact-source-only.md)
 - [Verify licence compatibility before introducing third-party material](rules/aiqt/10-INTEG-licence-compatibility.md)
