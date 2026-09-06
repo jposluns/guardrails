@@ -43,7 +43,16 @@ def main():
             return 1
         print("resume audit clean: the barrier is cleared")
         return 0
-    for tool in reg.get("yield_tools") or []:
+    if "yield_tools" not in reg:
+        yield_roster = []
+    else:
+        yv = reg.get("yield_tools")
+        if not isinstance(yv, list) or not all(isinstance(t, str) and t for t in yv):
+            findings.append("yield_tools must be a list of non-empty tool names when present")
+            yield_roster = []
+        else:
+            yield_roster = yv
+    for tool in yield_roster:
         if tool not in YIELD_MATCHER_TOOLS:
             findings.append("yield tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
                             "covered by the hook (a manifest matcher is fixed at generation)"

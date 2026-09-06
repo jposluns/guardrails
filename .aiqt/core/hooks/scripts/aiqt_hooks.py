@@ -6547,17 +6547,25 @@ def orch_yield_tool(data):
                      "contradicts the measured figure.")
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
-        _orch_record_denial(root, ts, kind, basis)
+        persisted = _orch_record_denial(root, ts, kind, basis)
+        if kind == "stop" and not persisted:
+            # STOP-path fail-open (mirrors the ordinary Stop binding): an un-persistable denial counter
+            # never reaches the loop bound and would otherwise re-deny a stop forever, trapping the run.
+            warn = ("AIQT guardrail: the stop denial counter could not be persisted, so the loop bound "
+                    "cannot advance; allowing this stop with findings rather than re-denying. "
+                    "Underlying: " + reason)
+            _orch_guard_event(root, "yield-tool", "allow_unpersistable", warn)
+            return (0, {"systemMessage": warn + (" " + spoof_warn if spoof_warn else "")}, None)
         _orch_guard_event(root, "yield-tool", "deny", reason)
         return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
                      "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
     wake_warn = ""
-    if tool_input.get("prompt"):
+    if kind == "schedule_idle":
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        # This covers BOTH a schedule_idle wake AND a stop-with-wake (ScheduleWakeup stop=true), whose
-        # returning prompt would otherwise be read as genuine human input and reset the counters,
-        # reopening the turn-splitting evasion the rule guards against.
+        # Scope: only a schedule_idle wake actually fires a returning prompt. A stop (ScheduleWakeup
+        # stop=true) ends the loop and fires nothing, so registering its digest would serve no firing and
+        # could only mis-classify a later coincidental human prompt; it is deliberately not registered.
         wake_status = _orch_register_wake(
             root, tool_input.get("prompt"), recurring=tool == "CronCreate")
         if wake_status != "ok":

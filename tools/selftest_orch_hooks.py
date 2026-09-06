@@ -554,18 +554,20 @@ def main(report_path=None):
               _verdict(aiqt_hooks.orch_yield_tool(
                   g.payload("PreToolUse", "CronDelete", {"prompt": "x"}))), "allow")
 
-        # A stop-with-wake (ScheduleWakeup stop=true carrying a prompt) registers its wake digest, so
-        # the returning firing is timer-classified, not read as genuine human input (round-5 MAJOR: the
-        # stop kind skipped registration, reopening the turn-splitting evasion).
-        g.set_items([])
-        g.set_turn_state({"wait_run": 7, "wait_uncertain": True})
-        _stopwake = aiqt_hooks.orch_yield_tool(
-            g.payload("PreToolUse", "ScheduleWakeup", {"stop": True, "prompt": "stop wake later"}))
-        aiqt_hooks.orch_prompt_stamp(
-            g.payload("UserPromptSubmit", extra={"prompt": "stop wake later"}))
-        check("yield/stop-wake-registers",
-              (_verdict(_stopwake), g.turn_state().get("wait_run"),
-               g.turn_state().get("wait_uncertain")), ("allow", 7, True))
+        # STOP-path fail-open: if the denial counter cannot be persisted, a denied stop allows with
+        # findings rather than re-denying forever (round-7 MAJOR; mirrors the ordinary Stop binding).
+        g.set_items([item("A-1")])
+        g.set_turn_state({})
+        _real_rd = aiqt_hooks._orch_record_denial
+        try:
+            aiqt_hooks._orch_record_denial = lambda root, ts, kind, basis: False
+            _fo = aiqt_hooks.orch_yield_tool(
+                g.payload("PreToolUse", "ScheduleWakeup", {"stop": True}))
+        finally:
+            aiqt_hooks._orch_record_denial = _real_rd
+        check("yield/stop-denial-unpersistable-fails-open",
+              (_fo[0], "could not be persisted" in (_fo[1] or {}).get("systemMessage", "")),
+              (0, True))
 
         # A failed wake registration is SURFACED in the yield tool's returned systemMessage (round-5
         # MAJOR: the surfacing itself must be guarded, not just the helper's return contract).
