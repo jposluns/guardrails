@@ -554,6 +554,34 @@ def main(report_path=None):
               _verdict(aiqt_hooks.orch_yield_tool(
                   g.payload("PreToolUse", "CronDelete", {"prompt": "x"}))), "allow")
 
+        # A stop-with-wake (ScheduleWakeup stop=true carrying a prompt) registers its wake digest, so
+        # the returning firing is timer-classified, not read as genuine human input (round-5 MAJOR: the
+        # stop kind skipped registration, reopening the turn-splitting evasion).
+        g.set_items([])
+        g.set_turn_state({"wait_run": 7, "wait_uncertain": True})
+        _stopwake = aiqt_hooks.orch_yield_tool(
+            g.payload("PreToolUse", "ScheduleWakeup", {"stop": True, "prompt": "stop wake later"}))
+        aiqt_hooks.orch_prompt_stamp(
+            g.payload("UserPromptSubmit", extra={"prompt": "stop wake later"}))
+        check("yield/stop-wake-registers",
+              (_verdict(_stopwake), g.turn_state().get("wait_run"),
+               g.turn_state().get("wait_uncertain")), ("allow", 7, True))
+
+        # A failed wake registration is SURFACED in the yield tool's returned systemMessage (round-5
+        # MAJOR: the surfacing itself must be guarded, not just the helper's return contract).
+        g.set_items([item("W-1", blocker={"kind": "tracked-task", "ref": "T-1"})])
+        g.set_turn_state({})
+        _real_rw = aiqt_hooks._orch_register_wake
+        try:
+            aiqt_hooks._orch_register_wake = lambda root, prompt, recurring=False: "lock-failed"
+            _sv = aiqt_hooks.orch_yield_tool(
+                g.payload("PreToolUse", "ScheduleWakeup", {"prompt": "recheck T-1 completion"}))
+        finally:
+            aiqt_hooks._orch_register_wake = _real_rw
+        check("yield/register-failure-surfaced",
+              _sv[0] == 0 and "could not be registered" in (_sv[1] or {}).get("systemMessage", ""),
+              True)
+
         # ---------- component 4: the unattended-ask blocker ----------
         h = Fixture(tmp, "ask")
         ask = lambda: aiqt_hooks.orch_ask_guard(g_ask)
@@ -978,7 +1006,7 @@ def main(report_path=None):
             _ws = aiqt_hooks._orch_register_wake(str(w.root), "some wake", recurring=False)
         finally:
             aiqt_hooks._orch_locked_turn_state_update = _real_locked
-        check("wait/register-wake/surfaces-failure", _ws, "lock-failed")
+        check("wait/register-wake/propagates-status", _ws, "lock-failed")
 
         check("wait/dispatch/posture",
               (aiqt_hooks.HANDLER_EVENT.get("orch_wait_guard"),

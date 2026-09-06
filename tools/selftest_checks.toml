@@ -75,6 +75,8 @@ expected-check-ids = [
   "yield/stop-kind-denies",
   "yield/measured-beats-claimed",
   "yield/undeclared-tool-out-of-scope",
+  "yield/stop-wake-registers",
+  "yield/register-failure-surfaced",
   # ---------- component 4: the unattended-ask blocker ----------
   "ask/mode-overnight-unattended-denies",
   "ask/mode-unattended-parenthetical-denies",
@@ -222,7 +224,7 @@ expected-check-ids = [
   "wait/stamp/one-shot-consumed-when-recurring",
   "wait/stamp/human-resets",
   "wait/dispatch/posture",
-  "wait/register-wake/surfaces-failure",
+  "wait/register-wake/propagates-status",
   # ---------- component 5: the resume audit and barrier ----------
   "resume/branch-divergence-warns",
   "resume/barrier-armed",

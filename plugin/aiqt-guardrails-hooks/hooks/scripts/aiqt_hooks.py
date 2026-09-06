@@ -6552,9 +6552,12 @@ def orch_yield_tool(data):
         return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
                      "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
     wake_warn = ""
-    if kind == "schedule_idle":
+    if tool_input.get("prompt"):
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
+        # This covers BOTH a schedule_idle wake AND a stop-with-wake (ScheduleWakeup stop=true), whose
+        # returning prompt would otherwise be read as genuine human input and reset the counters,
+        # reopening the turn-splitting evasion the rule guards against.
         wake_status = _orch_register_wake(
             root, tool_input.get("prompt"), recurring=tool == "CronCreate")
         if wake_status != "ok":

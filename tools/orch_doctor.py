@@ -51,12 +51,14 @@ def main():
 
     rosters = {}
     for key in ("wait_tools", "wait_deny_tools", "poll_tools"):
-        value = reg.get(key)
-        if value is None:
-            # All keys except version are optional (ORCHESTRATION.md); an undeclared surface simply
-            # removes that protection and is never a doctor finding.
+        if key not in reg:
+            # All keys except version are optional (ORCHESTRATION.md); an ABSENT surface simply
+            # removes that protection and is never a doctor finding. A present-but-malformed value
+            # (including an explicit null) is still a finding below.
             rosters[key] = []
-        elif not isinstance(value, list) or not all(
+            continue
+        value = reg.get(key)
+        if not isinstance(value, list) or not all(
                 isinstance(tool, str) and tool for tool in value):
             findings.append("{} must be a list of non-empty tool names when present".format(key))
             rosters[key] = []
