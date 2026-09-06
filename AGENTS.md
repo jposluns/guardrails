@@ -274,6 +274,27 @@ pending, missing, ambiguous, malformed, unknown, or unreadable result is unverif
 gated action stays a separate step, withheld until terminal success is observed, so a check folded into the
 same unverified apply or merge does not establish the checkpoint.
 
+When a command's own termination status is the evidence a verdict rests on, that status is taken only from a
+construct that faithfully propagates the gating command's own exit, never from one that can report success
+while the gate failed; sequencing that preserves the gate's failure, such as a short-circuit that runs the
+next command only on the gate's success or an explicit re-raise of the gate's saved exit, is not this
+hazard, so the test is whether the construct's terminal status still reflects the gate's, not merely whether
+another command follows it. An always-succeeding trailer appended after the gate, a `true`, a `:`, a
+status-printing echo of the prior exit, or any other no-op whose own success overwrites the gate's exit,
+makes the compound report the trailer's status, not the gate's, so a failing gate reads as a pass; a printed
+copy of the exit is output, not the verdict, and such a status-masking trailer is never appended to a
+command whose exit is relied on. The exit of a launcher, dispatcher, wrapper, or detached background task
+carries the gate's verdict only where it demonstrably propagates the gate's own exit; a carrier that reports
+its own success regardless of what the gate returned yields the vehicle's status, not the verdict, which is
+then read from the gate's own result instead.
+
+An event-triggered gate is relied on only after its trigger's preconditions are confirmed against
+authoritative state: a pipeline triggered by a change request needs an open change request for the exact
+revision and intended base before any run can exist, so where the precondition is unmet the absence of a
+reported failure is a missing result, never a pass. A pushed revision, an acknowledged dispatch, or an
+elapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate
+before anything is read from its outcome.
+
 ## A generated artefact is changed only through its source
 
 A derived or generated artefact is never hand-edited; it changes only by changing its source and
