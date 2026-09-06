@@ -7496,8 +7496,8 @@ def _orch_response_has_negative(response):
                 return True
         elif isinstance(value, dict):
             if id(value) in seen:
-                continue
-            seen.add(id(value))
+                return True               # FIX D: a detected cycle fails safe to declined (the stated
+            seen.add(id(value))           # contract; a JSON tool_response cannot be cyclic)
             lowered = {k.lower(): v for k, v in value.items() if isinstance(k, str)}
             for k in ("success", "ok"):
                 if k in lowered and not lowered.get(k):
@@ -7511,7 +7511,7 @@ def _orch_response_has_negative(response):
             stack.extend(value.values())
         elif isinstance(value, (list, tuple)):
             if id(value) in seen:
-                continue
+                return True               # FIX D: a detected cycle fails safe to declined (contract)
             seen.add(id(value))
             stack.extend(value)
     return False
@@ -7526,6 +7526,37 @@ def _orch_has_positive_signal(response):
     return (response.get("is_error") is False or response.get("success") is True
             or response.get("ok") is True
             or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE))
+
+
+def _orch_content_texts(content):
+    """FIX C: normalize ANY tool-response `content` shape to the list of non-blank free-text strings the
+    G3 ambiguity screen judges, closing the list-only bypass (a content DICT or a bare-STRING list slipped
+    past the screen and registered an orphan wake). A str is one text; a dict contributes its 'text' field,
+    or - when it has none - every string value; a list/tuple contributes each element's text (a dict
+    element's 'text' field, a bare-string element itself). An unrecognized shape with no extractable text
+    yields no texts (the caller then judges on G1/G2 + the positive signal alone). The fail-safe direction
+    is unchanged: normalizing more shapes can only DECLINE more wakes, never manufacture one."""
+    texts = []
+
+    def _add(s):
+        if isinstance(s, str) and s.strip():
+            texts.append(s)
+
+    if isinstance(content, str):
+        _add(content)
+    elif isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            _add(content.get("text"))
+        else:
+            for value in content.values():
+                _add(value)
+    elif isinstance(content, (list, tuple)):
+        for element in content:
+            if isinstance(element, str):
+                _add(element)
+            elif isinstance(element, dict) and isinstance(element.get("text"), str):
+                _add(element.get("text"))
+    return texts
 
 
 def _orch_tool_succeeded(response):
@@ -7546,8 +7577,9 @@ def _orch_tool_succeeded(response):
       G2  no soft-failure PHRASE anywhere: the same walk finds no failure/negation/uncertainty/
           soft-failure phrase in ANY string at ANY depth (the extended lexicon covers 'fell through').
       G3  an affirmative positive signal (_orch_has_positive_signal) AND, when free-text content is
-          present, at least one content text block AFFIRMATIVELY confirms (the ambiguity screen; content
-          that neither negates nor confirms fails safe to no register).
+          present in ANY shape (a content str, dict, or list, normalized by _orch_content_texts), at least
+          one free-text string AFFIRMATIVELY confirms (the ambiguity screen; content that neither negates
+          nor confirms fails safe to no register).
 
     DISCLOSED IRREDUCIBLE RESIDUAL (stated honestly, NOT closed): (a) a NOVEL soft-failure phrase absent
     from the lexicon appearing beside a positive signal; (b) a failure token hidden inside an ENCODED
@@ -7561,11 +7593,13 @@ def _orch_tool_succeeded(response):
     if not _orch_has_positive_signal(response):      # G3: the affirmative positive signal
         return False
     content = response.get("content")                # G3: the ambiguity screen over free-text content
-    if isinstance(content, list):
-        texts = [b["text"] for b in content
-                 if isinstance(b, dict) and isinstance(b.get("text"), str) and b["text"].strip()]
-        if texts and not any(_ORCH_POS_CONFIRM_RE.search(t) for t in texts):
-            return False
+    # FIX C: normalize ANY content shape (str, dict, list) to its free-text before the screen, so a content
+    # DICT or a bare-STRING list can no longer bypass it (the list-only guard let both slip past and
+    # register an orphan wake). If there is ANY free text and NONE of it affirmatively confirms, decline; a
+    # shape with no extractable text is judged on G1/G2 + the positive signal alone.
+    texts = _orch_content_texts(content)
+    if texts and not any(_ORCH_POS_CONFIRM_RE.search(t) for t in texts):
+        return False
     return True
 
 

@@ -1778,6 +1778,37 @@ def main(report_path=None):
               aiqt_hooks._orch_tool_succeeded(
                   {"ok": True, "content": [{"text": "scheduled"}],
                    "meta": {"a": {"b": {"c": {"d": {"e": {"f": {"g": "all good"}}}}}}}}), True)
+        # ---------- FIX C (round-6): the G3 ambiguity screen normalizes ANY content shape ----------
+        # By construction the screen judges the free-text of a content STR, DICT, or bare-string LIST, not
+        # only a list of text blocks. A mutation restoring the list-only guard fails the dict and
+        # bare-string-list cases (they would bypass the screen and register an orphan wake).
+        check("a2/succeeded-false-content-dict-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"type": "text", "text": "under review"}}), False)
+        check("a2/succeeded-false-content-bare-string-list-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": ["under review"]}), False)
+        check("a2/succeeded-false-content-str-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": "under review"}), False)
+        check("a2/succeeded-false-content-dict-no-text-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"note": "under review"}}), False)
+        # a content dict / str that DOES affirmatively confirm still registers (no false negative).
+        check("a2/succeeded-true-content-dict-confirms",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"type": "text", "text": "scheduled"}}), True)
+        check("a2/succeeded-true-content-str-confirms",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": "Wake scheduled"}), True)
+        # ---------- FIX D (round-6): the negative-walk cycle guard fails SAFE to declined ----------
+        # A self-referential dict with an otherwise-POSITIVE shape reads NOT-success: the cycle returns
+        # True from the negative walk, declining the wake (its stated contract, now literal). A JSON
+        # tool_response cannot be cyclic, so this never mis-declines a real response.
+        _cyc = {"ok": True, "content": [{"text": "scheduled"}]}
+        _cyc["self"] = _cyc
+        check("a2/succeeded-false-self-referential-cycle",
+              aiqt_hooks._orch_tool_succeeded(_cyc), False)
 
         # ---------- GD-164: the prep discipline ----------
         p2 = Fixture(tmp, "prep")

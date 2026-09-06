@@ -86,12 +86,15 @@ not touch, stays actionable; resolving to some commit is not enough.
 
 ADOPTER REQUIREMENT (close `paths`): to have a `fixed` close read as a TERMINAL disposition (rather than
 held), the enumeration MUST declare the item's close `paths`, and the cited commit must actually touch
-them. The committed-backlog markdown grammar (`tools/aei_backlog_md.py`) cannot express `paths`, so a
-`fixed` close in a markdown-checkbox backlog always HOLDS at the yield boundary and at the committed-state
-liveness join (`tools/check_liveness_joins.py`); an adopter that needs a `fixed` terminal to pass those
-declares the close `paths` in a JSON AEI enumeration surface. A held `fixed` close is safe (it refuses
-the wind-down, never a false clean close); declaring `paths` is only needed to let a genuine fix count as
-terminal rather than continue to hold.
+them. BOTH surfaces can express `paths`: a JSON AEI enumeration carries them in the close object, and the
+committed-backlog markdown grammar (`tools/aei_backlog_md.py`) carries them as a trailing
+`:: paths=<comma-separated repo-relative paths>` on the fixed close, the same close.paths field the JSON
+surface and the liveness join read. A `fixed` close that declares its `paths` is TERMINAL when the cited
+commit's changed set intersects them, both at the yield boundary and at the committed-state liveness join
+(`tools/check_liveness_joins.py`). A `fixed` close that declares NO `paths`, in either surface, HOLDS
+(cannot-evaluate), as does an unavailable git rail or a commit whose changed set does not touch the
+declared paths. A held `fixed` close is safe (it refuses the wind-down, never a false clean close);
+declaring `paths` is only needed to let a genuine fix count as terminal rather than continue to hold.
 
 A nonzero exit, malformed JSON, a duplicate id, or an unknown version is ENUMERATOR_ERROR, never an
 empty backlog; an empty `items` array is a valid enumeration, a parse failure never is. On the stop

@@ -414,6 +414,13 @@ expected-check-ids = [
   "a2/succeeded-false-soft-failure-phrase",
   "a2/succeeded-false-top-level-failure-field",
   "a2/succeeded-true-deep-clean",
+  "a2/succeeded-false-content-dict-ambiguous",
+  "a2/succeeded-false-content-bare-string-list-ambiguous",
+  "a2/succeeded-false-content-str-ambiguous",
+  "a2/succeeded-false-content-dict-no-text-ambiguous",
+  "a2/succeeded-true-content-dict-confirms",
+  "a2/succeeded-true-content-str-confirms",
+  "a2/succeeded-false-self-referential-cycle",
 ]
 
 [[suite]]

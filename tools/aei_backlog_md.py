@@ -44,8 +44,13 @@ BLOCKER_PREFIX_RE = re.compile(r"::\s*blocker:")
 BLOCKER_RE = re.compile(r"::\s*blocker:(?P<kind>[a-z-]+)=(?P<ref>\S+)")
 OBSERVED_RE = re.compile(r"::\s*observed=(?P<t>\S+)")
 EVIDENCE_RE = re.compile(r"::\s*evidence=(?P<e>[^:]+?)(?:\s*::|$)")
-CLOSE_RE = re.compile(r"::\s*close:(?P<reason>[a-z-]+)=(?P<ref>\S+)")
-PATHS_RE = re.compile(r"::\s*paths=(?P<p>[^:]+?)(?:\s*::|\s*$)")
+# FIX B: the close annotation and its OPTIONAL trailing paths list are ONE anchored unit at END of line,
+# so ':: paths=' is read as close.paths ONLY when it immediately follows the close (never smuggled from an
+# earlier ':: paths=' in the title). ref is non-greedy so the optional paths group binds; a path containing
+# a ':' truncates at that ':' (the disclosed grammar residual, unchanged).
+CLOSE_TAIL_RE = re.compile(
+    r"::\s*close:(?P<reason>[a-z-]+)=(?P<ref>\S+?)"
+    r"(?:\s*::\s*paths=(?P<paths>[^:]+?))?\s*$")
 PREP_RE = re.compile(r"::\s*prep=(?P<v>complete|incomplete)\b")
 PREP_REF_RE = re.compile(r"::\s*prep_ref=(?P<r>\S+)")
 ADVANCE_RE = re.compile(r"::\s*advance=(?P<a>[^:]+?)(?:\s*::|$)")
@@ -76,19 +81,20 @@ def parse(text, version=2):
         proposed = bool(re.search(r"::\s*proposed\s*$", rest))
         rest = re.sub(r"\s*::\s*proposed\s*$", "", rest)
         close = None
-        cm = CLOSE_RE.search(rest)
+        cm = CLOSE_TAIL_RE.search(rest)
         if cm:
             if cm.group("reason") not in CLOSE_REASONS:
                 errors.append("line {}: unknown close reason {!r}".format(n, cm.group("reason")))
                 continue
             close = {"reason": cm.group("reason"), "ref": cm.group("ref")}
-            # B3/FIX2: an OPTIONAL '::' paths list (repo-relative, comma-separated, following the close
-            # annotation) binds a `fixed` close to the item BY CONTENT using the SAME field the JSON
-            # validator and the liveness join read (close.paths), so a routed fixed close RE-ENUMERATES
-            # as terminal. Parsed from the full rest before the close truncation drops the tail.
-            pm = PATHS_RE.search(rest)
-            if pm:
-                paths = [p.strip() for p in pm.group("p").split(",") if p.strip()]
+            # B3/FIX2/FIX B: an OPTIONAL '::' paths list (repo-relative, comma-separated) binds a `fixed`
+            # close to the item BY CONTENT using the SAME field the JSON validator and the liveness join
+            # read (close.paths), so a routed fixed close RE-ENUMERATES as terminal. It is parsed ONLY from
+            # the anchored close-tail unit (the paths immediately following the close at END of line), never
+            # from a ':: paths=' earlier in the title, which stays literal title text and cannot smuggle a
+            # verdict-bearing path into the close.
+            if cm.group("paths"):
+                paths = [p.strip() for p in cm.group("paths").split(",") if p.strip()]
                 if paths:
                     close["paths"] = paths
             rest = rest[:cm.start()].rstrip()
@@ -263,6 +269,21 @@ def self_test():
                if i["id"] == "A-6"), {})
     if "paths" in p6.get("close", {}):
         ok_fail.append("a path-less fixed close must not synthesize close.paths")
+    # FIX B: a ':: paths=' that appears in the TITLE (not immediately part of the close annotation) is NOT
+    # parsed as close.paths and cannot smuggle a verdict-bearing path; it stays literal title text.
+    smug = next((i for i in parse(
+        "- A-1 [x] title :: paths=tools/x.py :: close:fixed=abc\n", version=2)[0]
+        if i["id"] == "A-1"), {})
+    if "paths" in smug.get("close", {}):
+        ok_fail.append("a ':: paths=' in the title must NOT yield close.paths (title-smuggle)")
+    if "paths=tools/x.py" not in smug.get("title", ""):
+        ok_fail.append("a misplaced ':: paths=' must remain literal title text (title-smuggle)")
+    # a correctly-placed close paths (immediately after the close) still parses close.paths.
+    good_place = next((i for i in parse(
+        "- A-2 [x] t :: close:fixed=def :: paths=tools/z.py\n", version=2)[0]
+        if i["id"] == "A-2"), {})
+    if good_place.get("close", {}).get("paths") != ["tools/z.py"]:
+        ok_fail.append("a correctly-placed close paths must parse close.paths (got {})".format(good_place))
     if ok_fail:
         for f in ok_fail:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

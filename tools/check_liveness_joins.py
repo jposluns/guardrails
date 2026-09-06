@@ -92,14 +92,24 @@ def _covered_keys(text, prefix, has_ground):
 
 def _parse_surface(backlog_text):
     """Detect a committed surface's TYPE and parse it, returning (items, cannot_detail). A surface whose
-    whole text parses as JSON is a JSON AEI surface and is held to the engine's OWN strict AEI validator
-    (aiqt_hooks.validate_enumeration, single-sourced with the yield-time reader); anything else is a
-    Markdown AEI surface parsed with the reference grammar. B3 FAIL-CLOSED: a surface that OPENS as JSON
-    ('{'/'[') but does not parse, or parses but fails AEI validation, is cannot-evaluate - it is NEVER
-    silently routed to the markdown parser, which would read a JSON file as an empty backlog and pass a
-    zero-terminal SUCCESS on a surface it never understood (the exact B3 defect this closes). A genuinely
-    empty or prose markdown surface with no items remains a valid empty enumeration, as before."""
-    stripped = backlog_text.lstrip("\ufeff \t\r\n")
+    whole text parses as a JSON OBJECT is a JSON AEI surface and is held to the engine's OWN strict AEI
+    validator (aiqt_hooks.validate_enumeration, single-sourced with the yield-time reader); anything else
+    is a Markdown AEI surface parsed with the reference grammar. B3 FAIL-CLOSED: a surface that OPENS as
+    JSON ('{'/'[') but does not parse is cannot-evaluate - it is NEVER silently routed to the markdown
+    parser, which would read a JSON file as an empty backlog and pass a zero-terminal SUCCESS on a surface
+    it never understood (the exact B3 defect this closes). A genuinely empty or prose markdown surface with
+    no items remains a valid empty enumeration, as before.
+
+    FIX A (round 6): any leading BOM(s) (U+FEFF) are stripped and the SAME stripped text feeds BOTH
+    the JSON detection/parse AND the markdown parse, so a BOM-prefixed markdown item is not dropped by the
+    bullet grammar (str.strip does not remove U+FEFF, so the un-stripped text mis-parsed the first item as
+    prose -> a silent zero-terminal SUCCESS). Routing to the JSON AEI validator happens ONLY when json.loads
+    yields a DICT: a JSON AEI surface is always an object, so a bare JSON scalar (42, a quoted string) or a
+    JSON array is NOT an AEI surface and falls through to the markdown grammar (a valid empty enumeration),
+    never cannot-evaluate. Fail-closed is UNCHANGED for a surface that OPENS as JSON ('{'/'[') but does not
+    parse, and for one that parses as a dict but fails AEI validation."""
+    text = backlog_text.lstrip("\ufeff")
+    stripped = text.lstrip(" \t\r\n")
     looks_json = stripped[:1] in ("{", "[")
     if stripped:
         try:
@@ -108,17 +118,20 @@ def _parse_surface(backlog_text):
             if looks_json:
                 return (None, "surface opens as JSON but is not parseable JSON ({})".format(exc))
         else:
-            items, err = aiqt_hooks.validate_enumeration(payload)
-            if err:
-                return (None, "JSON AEI surface fails AEI validation: {}".format(err))
-            norm = []
-            for it in items:
-                row = {"id": it["id"], "state": it["state"]}
-                if it.get("close") is not None:
-                    row["close"] = it["close"]      # carries close.paths through the SAME reconcile loop
-                norm.append(row)
-            return (norm, None)
-    items, errors = aei_backlog_md.parse(backlog_text, version=2)
+            if isinstance(payload, dict):
+                items, err = aiqt_hooks.validate_enumeration(payload)
+                if err:
+                    return (None, "JSON AEI surface fails AEI validation: {}".format(err))
+                norm = []
+                for it in items:
+                    row = {"id": it["id"], "state": it["state"]}
+                    if it.get("close") is not None:
+                        row["close"] = it["close"]      # carries close.paths through the SAME reconcile loop
+                    norm.append(row)
+                return (norm, None)
+            # a bare JSON scalar or array is not a JSON AEI OBJECT surface; fall through to the markdown
+            # grammar (an empty enumeration), never cannot-evaluate.
+    items, errors = aei_backlog_md.parse(text, version=2)
     if errors:
         return (None, "committed markdown backlog fails the grammar: " + "; ".join(errors[:5]))
     return (items, None)
@@ -434,6 +447,43 @@ def self_test():
     if not cannot:
         fails.append("a JSON surface that fails AEI validation must fail closed "
                      "(lj/invalid-aei-json-surface-fails-closed)")
+    # FIX A lj/bom-markdown-not-dropped: a BOM-prefixed markdown item is parsed (the single leading BOM is
+    # stripped once and the SAME text feeds the grammar), reconciling as a TERMINAL disposition, NEVER
+    # silently dropped to a zero-terminal SUCCESS (the codex counterexample).
+    bom = "﻿- B-1 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n"
+    findings, cannot, terminals = join(bom, chain([]), chain([]), fixed_reconcile=fr)
+    if not any(t[0] == "B-1" for t in terminals):
+        fails.append("a BOM-prefixed markdown item must be enumerated as a terminal, not dropped "
+                     "(lj/bom-markdown-not-dropped): terminals={}".format(terminals))
+    if findings or cannot:
+        fails.append("the BOM-markdown fixed close should reconcile clean-terminal "
+                     "(lj/bom-markdown-not-dropped): findings={} cannot={}".format(findings, cannot))
+    # FIX A lj/bare-scalar-routes-to-markdown: a bare JSON scalar (42) is not a JSON AEI OBJECT surface;
+    # it routes to the markdown grammar as a valid EMPTY enumeration, never cannot-evaluate.
+    findings, cannot, terminals = join("42\n", chain([]), chain([]), fixed_reconcile=fr)
+    if cannot or terminals:
+        fails.append("a bare JSON scalar must parse as an empty markdown enumeration, not cannot-evaluate "
+                     "(lj/bare-scalar-routes-to-markdown): cannot={} terminals={}".format(cannot, terminals))
+    # FIX A lj/json-array-routes-to-markdown: a JSON ARRAY parses as JSON but is not an AEI OBJECT surface,
+    # so it routes to the markdown grammar (empty enumeration), never to the JSON AEI validator.
+    findings, cannot, terminals = join("[1, 2, 3]\n", chain([]), chain([]), fixed_reconcile=fr)
+    if cannot or terminals:
+        fails.append("a JSON array surface must route to the markdown grammar (empty enumeration), not "
+                     "cannot-evaluate (lj/json-array-routes-to-markdown): cannot={} terminals={}"
+                     .format(cannot, terminals))
+    # FIX A lj/bracket-nonjson-still-fails-closed: a '['-leading surface that does NOT parse as JSON stays
+    # cannot-evaluate (unchanged; this is NOT the misroute bug).
+    findings, cannot, _ = join("[not json\n", chain([]), chain([]), fixed_reconcile=fr)
+    if not cannot:
+        fails.append("a '['-leading non-JSON surface must stay cannot-evaluate "
+                     "(lj/bracket-nonjson-still-fails-closed)")
+    # FIX A lj/double-bom-markdown-not-dropped: even a DOUBLE leading BOM is fully stripped (lstrip), so the
+    # markdown item is not dropped to a zero-terminal success.
+    dbom = "﻿﻿- B-2 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n"
+    findings, cannot, terminals = join(dbom, chain([]), chain([]), fixed_reconcile=fr)
+    if not any(t[0] == "B-2" for t in terminals):
+        fails.append("a double-BOM-prefixed markdown item must be enumerated as a terminal, not dropped "
+                     "(lj/double-bom-markdown-not-dropped): terminals={}".format(terminals))
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)
