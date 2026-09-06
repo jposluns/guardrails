@@ -195,14 +195,42 @@ def load_manifest(path):
     return plugin, hooks
 
 
+def _strip_dispatch_comments(body):
+    """Drop a trailing '# ...' comment from each line of a dispatcher-dict body. In HANDLERS /
+    HANDLER_EVENT the keys are handler identifiers and the values are the PRETOOL identifier or an
+    event-name string literal, none of which can contain a '#', so a '#' in this body is always a
+    comment. Cutting each line at its first '#' drops a COMMENTED-OUT pseudo-entry (A2): a commented
+    '# "x": x,' otherwise matched the key regex and read as a live, dispatchable handler though main()
+    would reject the mode at runtime."""
+    return "\n".join(line.split("#", 1)[0] for line in body.splitlines())
+
+
 def _dispatch_keys(script_text, dict_name):
     """The handler keys registered in a dispatcher dict literal (HANDLERS / HANDLER_EVENT) in the source
     script. A dict that cannot be located yields the empty set, which fails the membership check closed
-    (the declared handler then reads as undispatchable), per check-fails-closed-on-unreadable."""
+    (the declared handler then reads as undispatchable), per check-fails-closed-on-unreadable. Comments
+    are stripped first so a commented-out entry contributes no key (A2)."""
     m = re.search(r"^{}\s*=\s*\{{(.*?)^\}}".format(re.escape(dict_name)), script_text, re.M | re.S)
     if not m:
         return set()
-    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', m.group(1)))
+    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', _strip_dispatch_comments(m.group(1))))
+
+
+def _dispatch_event_map(script_text):
+    """Map handler name -> the event STRING its HANDLER_EVENT entry resolves to, for the value-equality
+    half of the dispatchability gate (A2). Key-membership alone let a PreToolUse hook be registered under
+    the wrong event (e.g. PostToolUse), routing to a mis-triggered control. A value is either the bare
+    PRETOOL identifier (-> 'PreToolUse') or an event-name string literal; a value in neither form is
+    absent from the map, so the caller's equality check fails closed. Comments are stripped first."""
+    m = re.search(r"^HANDLER_EVENT\s*=\s*\{(.*?)^\}", script_text, re.M | re.S)
+    if not m:
+        return {}
+    body = _strip_dispatch_comments(m.group(1))
+    mapping = {}
+    for handler, value in re.findall(
+            r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*(PRETOOL|"[A-Za-z]+")', body):
+        mapping[handler] = "PreToolUse" if value == "PRETOOL" else value.strip('"')
+    return mapping
 
 
 def cross_check(hooks, corpus_ids, script_text, name):
@@ -211,6 +239,7 @@ def cross_check(hooks, corpus_ids, script_text, name):
     script, so a rename can never silently orphan an enforcement control."""
     dispatch = _dispatch_keys(script_text, "HANDLERS")
     dispatch_events = _dispatch_keys(script_text, "HANDLER_EVENT")
+    event_map = _dispatch_event_map(script_text)
     for hook in hooks:
         where = "{}: [[hook]] {}".format(name, hook["id"])
         for rule in hook["rules"]:
@@ -231,6 +260,15 @@ def cross_check(hooks, corpus_ids, script_text, name):
         if hook["handler"] not in dispatch_events:
             raise ValueError("{}: handler '{}' is not registered in HANDLER_EVENT in scripts/{}".format(
                 where, hook["handler"], SCRIPT_NAME))
+        declared_event = event_map.get(hook["handler"])
+        if declared_event != hook["event"]:
+            # grdinp: a DEFINED, key-registered handler under the WRONG event still mis-routes. Compare
+            # the registered event VALUE to the manifest's declared event; a value that cannot be resolved
+            # (absent from the map) fails closed here too.
+            raise ValueError(
+                "{}: handler '{}' is registered in HANDLER_EVENT as {!r} but the manifest declares "
+                "event {!r}; the dispatcher would route it under the wrong event".format(
+                    where, hook["handler"], declared_event, hook["event"]))
 
 
 def render_hooks_json(hooks):
@@ -449,6 +487,17 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
         _MANIFEST.format(cid=cid, residue=residue), encoding="utf-8")
 
 
+def _set_script_event(tree, event):
+    """Round 9 (A2): keep a fixture script's HANDLER_EVENT value in step with a retargeted manifest
+    event. The pre-round-9 event-retargeting tests mutated only the manifest, leaving the script's
+    HANDLER_EVENT at PreToolUse; the round-9 value-equality dispatchability gate correctly rejects that
+    mismatch, so an event-retargeting fixture must set both surfaces to stay conformant (and so a masked
+    exit-2 does not stand in for the behaviour the test means to prove)."""
+    sp = tree / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+    sp.write_text(sp.read_text(encoding="utf-8").replace(
+        '"test_handler": "PreToolUse",', '"test_handler": "{}",'.format(event)), encoding="utf-8")
+
+
 def self_test_main():
     import io
     import shutil
@@ -528,6 +577,33 @@ def self_test_main():
         _spath.write_text(_stext.replace('"test_handler": test_handler,', ""), encoding="utf-8")
         if run_quiet(undispatch, check=False) != 2:
             failures.append("a handler defined but absent from HANDLERS must fail closed (exit 2)")
+
+        # N2 (round 9, A2): a COMMENTED-OUT HANDLERS entry must NOT read as a live handler. A regex over
+        #     raw source counted '# "x": x,' as a key (the control then never dispatches though --check is
+        #     green); stripping comments before key extraction fails it closed (exit 2).
+        commented = tmp / "commented"
+        commented.mkdir()
+        _build_tree(commented)
+        _cpath = commented / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _ctext = _cpath.read_text(encoding="utf-8")
+        _cpath.write_text(_ctext.replace('"test_handler": test_handler,',
+                                         '# "test_handler": test_handler,'), encoding="utf-8")
+        if run_quiet(commented, check=False) != 2:
+            failures.append("a commented-out HANDLERS entry must fail closed (exit 2)")
+
+        # N3 (round 9, A2): a HANDLER_EVENT VALUE disagreeing with the manifest event must fail closed.
+        #     Key-membership alone let a PreToolUse hook register under PostToolUse (a mis-triggered
+        #     control); comparing the registered event to the manifest event catches it.
+        wrongevent = tmp / "wrongevent"
+        wrongevent.mkdir()
+        _build_tree(wrongevent)
+        _wpath = wrongevent / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _wtext = _wpath.read_text(encoding="utf-8")
+        _wpath.write_text(_wtext.replace('"test_handler": "PreToolUse",',
+                                         '"test_handler": "PostToolUse",'), encoding="utf-8")
+        if run_quiet(wrongevent, check=False) != 2:
+            failures.append("a HANDLER_EVENT value disagreeing with the manifest event must fail closed "
+                            "(exit 2)")
 
         # 3. An unknown corpus-id in the manifest fails closed.
         badid = tmp / "badid"
@@ -621,6 +697,7 @@ def self_test_main():
                 # a non-tool event must drop the now-forbidden matcher as it flips to warn
                 _mutate(warntree, tool_block,
                         'event = "{}"\nhandler = "test_handler"\ndefault = "warn"'.format(event))
+            _set_script_event(warntree, event)
             if event in WARN_EVENTS:
                 if run_quiet(warntree, check=False) != 0 or run_quiet(warntree, check=True) != 0:
                     failures.append("'warn' default on WARN event {} expected a clean generate + "
@@ -637,11 +714,13 @@ def self_test_main():
         _build_tree(stop_block)
         _mutate(stop_block, tool_block,
                 'event = "Stop"\nhandler = "test_handler"\ndefault = "block"')
+        _set_script_event(stop_block, "Stop")
         stop_warn = tmp / "stop-warn"
         stop_warn.mkdir()
         _build_tree(stop_warn)
         _mutate(stop_warn, tool_block,
                 'event = "Stop"\nhandler = "test_handler"\ndefault = "warn"')
+        _set_script_event(stop_warn, "Stop")
         if run_quiet(stop_block, check=False) != 0 or run_quiet(stop_warn, check=False) != 0:
             failures.append("byte-identity setup: both Stop trees expected a clean generate (exit 0)")
         else:
@@ -680,6 +759,7 @@ def self_test_main():
         _build_tree(ssblock)
         _mutate(ssblock, tool_block,
                 'event = "SessionStart"\nhandler = "test_handler"\ndefault = "block"')
+        _set_script_event(ssblock, "SessionStart")
         if run_quiet(ssblock, check=True) != 2:
             failures.append("default 'block' on SessionStart expected exit 2 (an overclaim)")
     finally:

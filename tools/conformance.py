@@ -953,6 +953,15 @@ _HOOKS_SCRIPT = """#!/usr/bin/env python3
 # self-test hooks dispatcher stub
 def stub_handler(data):
     return (0, None, None)
+
+
+HANDLERS = {
+    "stub_handler": stub_handler,
+}
+
+HANDLER_EVENT = {
+    "stub_handler": "PreToolUse",
+}
 """
 
 _HOOKS_MANIFEST = """[plugin]

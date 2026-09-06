@@ -62,15 +62,28 @@ CLOSE_REASONS = ("fixed", "no-fix-needed", "not-buildable", "maintainer-deferred
 # un-anchor a bullet and silently drop the item -> an empty enumeration -> a manufactured stop. grdinp:
 # do NOT enumerate one codepoint. The whole Unicode format class (category Cf) covers U+FEFF, U+200B-200F,
 # U+2060-2064, U+00AD, the bidi controls, etc.; the explicit set is a safety net for a runtime whose table
-# does not yet class U+180E / U+200C / U+200D as Cf. Removing at ANY position also launders a mid-content
-# invisible out of a title while preserving the visible text. A legitimate ASCII line has no Cf char and
-# is returned byte-identical.
+# does not yet class U+180E / U+200C / U+200D as Cf. C1 (round 9): the strip normalizes only the
+# STRUCTURAL prefix (to anchor the bullet); the TITLE is recovered verbatim from the original line via the
+# offset map, so a legitimate ZWJ/ZWNJ inside a title (an emoji ZWJ sequence, or a script that uses ZWNJ/
+# ZWJ for shaping/spelling) is PRESERVED rather than laundered out of visible content. A legitimate ASCII
+# line has no Cf char, yields an identity map, and is returned byte-identical.
 _ZERO_WIDTH = frozenset("\u200b\u200c\u200d\u2060\u180e\ufeff")
 
 
-def _strip_invisibles(line):
-    return "".join(ch for ch in line
-                   if ch not in _ZERO_WIDTH and unicodedata.category(ch) != "Cf")
+def _strip_invisibles_mapped(line):
+    """(stripped, offsets): the line with every zero-width / Cf format char removed (so a bullet led or
+    interleaved by one still ANCHORS), and offsets[i] = the index in the ORIGINAL line of stripped[i],
+    with a trailing sentinel offsets[len(stripped)] == len(line). The offset map lets parse() recover the
+    TITLE verbatim from the original line (C1), so a legitimate ZWJ/ZWNJ inside a title is preserved while
+    the structural prefix is still normalized to anchor the bullet."""
+    kept, offsets = [], []
+    for idx, ch in enumerate(line):
+        if ch in _ZERO_WIDTH or unicodedata.category(ch) == "Cf":
+            continue
+        kept.append(ch)
+        offsets.append(idx)
+    offsets.append(len(line))
+    return "".join(kept), offsets
 
 
 def parse(text, version=2):
@@ -79,14 +92,13 @@ def parse(text, version=2):
     shape is produced byte-identically."""
     items, errors, seen = [], [], set()
     for n, line in enumerate(text.splitlines(), 1):
-        # FIX A (round 8): str.strip leaves a line-leading U+FEFF, and lstrip("\ufeff") still leaves EVERY
-        # OTHER invisible (U+200B, U+2060, U+200C/200D, U+180E, the bidi controls, U+00AD, ...), so a
-        # bullet led by any of them stays un-anchored and the item is silently dropped to prose -> an empty
-        # enumeration -> a manufactured stop. Remove the whole Cf class (plus the explicit zero-width set)
-        # at ANY position before the bullet screen, closing the invisible-drop class by construction
-        # (leading, interleaved, or mid-content); a laundered bullet re-anchors, a laundered title renders
-        # clean. Because the liveness join parses through this same parser, both surfaces are fixed.
-        stripped = _strip_invisibles(line).strip()
+        # FIX A (round 8) + C1 (round 9): normalize the STRUCTURAL region so a bullet led or interleaved by
+        # an invisible still anchors (a laundered bullet re-anchors instead of being dropped to prose -> an
+        # empty enumeration -> a manufactured stop), but recover the TITLE verbatim from the ORIGINAL line
+        # so a legitimate ZWJ/ZWNJ inside a title is PRESERVED rather than corrupted. The whole-line strip
+        # anchored the bullet but laundered visible title content; the offset map separates the two.
+        stripped_full, offsets = _strip_invisibles_mapped(line)
+        stripped = stripped_full.strip()
         if not (CANDIDATE_RE.match(stripped) or CHECKBOX_RE.match(stripped)
                 or BLOCKER_PREFIX_RE.search(stripped)):
             continue
@@ -95,7 +107,14 @@ def parse(text, version=2):
             errors.append("line {}: item-shaped line fails the grammar: {!r}".format(
                 n, line.strip()[:120]))
             continue
-        iid, tok, rest = m.group("id"), m.group("tok"), m.group("rest")
+        iid, tok = m.group("id"), m.group("tok")
+        # C1: id/token anchor off the normalized line, but the TITLE (rest) is taken VERBATIM from the
+        # ORIGINAL line at the matched offset. The leading whitespace .strip() removed is re-added via
+        # `lead`; rstrip() mirrors ITEM_RE's trailing `\s*$`. An invisible that survives inside a close/
+        # blocker annotation makes that annotation fail its grammar (fail-closed, exit 3), never a silent
+        # laundering into validity (grdinp).
+        lead = len(stripped_full) - len(stripped_full.lstrip())
+        rest = line[offsets[lead + m.start("rest")]:].rstrip()
         if iid in seen:
             errors.append("line {}: duplicate id {}".format(n, iid))
             continue
@@ -322,13 +341,28 @@ def self_test():
                    if i["id"] == "A-7"), {})
     if _plain.get("title") != "plain title":
         ok_fail.append("a legitimate ASCII line must be unchanged (got {!r})".format(_plain.get("title")))
-    # a mid-content invisible is REMOVED (laundering noise) while the visible title is preserved. This
-    # REPLACES the round-7 "preserve mid-content U+FEFF" assertion, which asserted the opposite.
+    # C1 (round 9): a mid-content invisible in the TITLE is now PRESERVED verbatim (the whole-line strip
+    # corrupted legitimate ZWJ/ZWNJ; only the STRUCTURAL prefix is normalized). This REPLACES the round-8
+    # "mid-content invisible removed" assertion, which corrupted visible title content.
     _mid = next((i for i in parse("- A-3 [ ] ti\ufefftle stays\u200bvisible\n", version=2)[0]
                  if i["id"] == "A-3"), {})
-    if _mid.get("title") != "title staysvisible":
-        ok_fail.append("a mid-content invisible must be removed, visible title preserved (got {!r})"
+    if _mid.get("title") != "ti\ufefftle stays\u200bvisible":
+        ok_fail.append("a mid-content title invisible must be preserved verbatim (got {!r})"
                        .format(_mid.get("title")))
+    # C1: a legitimate ZWJ emoji sequence in the title is preserved BYTE-FOR-BYTE. U+1F469 U+200D U+1F4BB
+    # is the "woman technologist" grapheme; the whole-line Cf strip removed the ZWJ and split it into two
+    # glyphs. The structural strip still anchors the bullet; the title is recovered from the original line.
+    _zwj = next((i for i in parse("- I-1 [ ] \U0001f469\u200d\U0001f4bb release\n", version=2)[0]
+                 if i["id"] == "I-1"), {})
+    if _zwj.get("title") != "\U0001f469\u200d\U0001f4bb release":
+        ok_fail.append("a title ZWJ sequence must be preserved verbatim (got {!r})"
+                       .format(_zwj.get("title")))
+    # a LEADING invisible still anchors the item WHILE the ZWJ title is preserved (both invariants hold).
+    _zwj_lead = next((i for i in parse(
+        "\u200b- I-2 [ ] \U0001f469\u200d\U0001f4bb ok\n", version=2)[0] if i["id"] == "I-2"), {})
+    if _zwj_lead.get("state") != "open" or _zwj_lead.get("title") != "\U0001f469\u200d\U0001f4bb ok":
+        ok_fail.append("a leading invisible must anchor the item AND preserve a ZWJ title (got {!r})"
+                       .format(_zwj_lead))
     # FIX2/B3: a `fixed` close MAY carry a '::' paths list, parsed into close.paths (the same field the
     # JSON validator and the join read), so a routed fixed close re-enumerates as terminal.
     pitems, perrs = parse("- A-9 [x] shipped :: close:fixed=commit-z :: paths=tools/x.py,tools/y.py\n",

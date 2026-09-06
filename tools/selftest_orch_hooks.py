@@ -1880,6 +1880,27 @@ def main(report_path=None):
         check("a2/succeeded-false-real-schedulewakeup-no-toolname",
               aiqt_hooks._orch_tool_succeeded(
                   {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False}), False)
+        # ---------- FIX 4 (round 9, A2/B1): a tool-specific cancel/invalid VETOES a generic ok ----------
+        # For a KNOWN wake tool the tool-specific contract is authoritative; a generic ok:true beside a
+        # cancel/invalid schedule must NOT register (the OR manufactured the orphan wake). The no-stopped
+        # cases are load-bearing for the tool-aware fix (the stopped case is also caught by the defence).
+        check("a2/succeeded-false-cancel-generic-ok-override",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 0, "stopped": True, "ok": True}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-zero-scheduledfor-generic-ok",
+              aiqt_hooks._orch_tool_succeeded({"scheduledFor": 0, "ok": True}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-neg-scheduledfor-generic-ok",
+              aiqt_hooks._orch_tool_succeeded({"scheduledFor": -1, "ok": True}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-bool-scheduledfor-generic-ok",
+              aiqt_hooks._orch_tool_succeeded({"scheduledFor": True, "ok": True}, "ScheduleWakeup"), False)
+        # the generic path is UNAFFECTED for a tool that is NOT a known wake tool: a bare ok:true registers.
+        check("a2/succeeded-true-generic-ok-nonwake-tool",
+              aiqt_hooks._orch_tool_succeeded({"ok": True}, "SomeOtherTool"), True)
+        # defence-in-depth SENTINEL: stopped:true is a structured negative in the negative walk, so a
+        # generic ok:true beside it declines even on a non-wake tool (removing the stopped:true negative
+        # flips this False -> True).
+        check("a2/succeeded-false-stopped-defence-in-depth",
+              aiqt_hooks._orch_tool_succeeded({"ok": True, "stopped": True}, "SomeOtherTool"), False)
         # dispatchability SENTINELS: a DEFINED handler must be a dispatchable one, or main() rejects the
         # mode (exit 2) and the control never runs. The direct-call tests above stay green either way, so
         # these observe the wired path explicitly (removing a handler from HANDLERS flips its check).
@@ -2049,23 +2070,23 @@ def main(report_path=None):
              "wake": True}) + "\n", encoding="utf-8")
         w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"})], version=2)
         w.set_turn_state({})
-        check("wait/unnamed-target-denies", _verdict(waitcall("just hang about")), "deny")
+        check("wait/unnamed-target-denies", _verdict(waitcall("sleep 600")), "deny")
         # exactly one live waiting row, named as a whole token, zero actionable/CE -> ALLOW + surface
         w.set_turn_state({})
-        code, obj, _e = waitcall("collect WA-1 result")
+        code, obj, _e = waitcall("wait WA-1")
         check("wait/single-live-named-allows", _verdict((code, obj, _e)), "warn")  # ALLOW -> systemMessage
         check("wait/allow-carries-surface",
               "liveness:" in (obj.get("systemMessage", "") if isinstance(obj, dict) else ""), True)
         # enum failure -> wait DENIES
         w.enum_exit.write_text("3", encoding="utf-8")
         w.set_turn_state({})
-        check("wait/enum-error-denies", _verdict(waitcall("collect WA-1")), "deny")
+        check("wait/enum-error-denies", _verdict(waitcall("sleep 600")), "deny")
         w.enum_exit.write_text("0", encoding="utf-8")
         # item-level cannot-evaluate (unreadable ledger) -> wait DENIES
         (wsd / "dispatch-ledger.jsonl").write_text("null\n{broken\n", encoding="utf-8")
         w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"})], version=2)
         w.set_turn_state({})
-        check("wait/cannot-evaluate-denies", _verdict(waitcall("collect WA-1")), "deny")
+        check("wait/cannot-evaluate-denies", _verdict(waitcall("sleep 600")), "deny")
         (wsd / "dispatch-ledger.jsonl").unlink()
         # anti-wedge (the B1 SANCTIONED single-live-waiting-row wedge): a NAMED LIVE WAITING ROW plus an
         # actionable item, denied repeatedly on an unchanged basis past the cap -> ALLOW_WITH_FINDINGS +
@@ -2079,13 +2100,32 @@ def main(report_path=None):
         # prime the schedule counter to the cap on this exact basis (wait naming the live waiting row)
         _ctx, _ts, _basis = aiqt_hooks._orch_build_ctx(
             aiqt_hooks._orch_registry(str(w.root))[1], str(w.root), "wait",
-            w.payload("PreToolUse", "Bash", {"command": "collect WA-1"}),
-            wake_text="collect WA-1", record_checkpoint=False)
+            w.payload("PreToolUse", "Bash", {"command": "wait WA-1"}),
+            wake_text="wait WA-1", record_checkpoint=False)
         w.set_turn_state({"schedule_denials": 3, "schedule_basis": _basis})
-        check("wait/cap-relief-warns", _verdict(waitcall("collect WA-1")), "warn")
+        check("wait/cap-relief-warns", _verdict(waitcall("wait WA-1")), "warn")
         check("wait/cap-relief-forced-exit",
               (wsd / "forced-exit.jsonl").exists(), True)
         (wsd / "dispatch-ledger.jsonl").unlink()
+        # ---------- GD-164 r9 FIX 1: the wait-intent discriminator (A1 anti-wedge) ----------
+        # An actionable item is present, so under the OLD tool-name-only classification EVERY Bash call
+        # would DENY (the production wedge); the discriminator makes an ordinary command an inert allow
+        # while a genuine wait is still judged and denied.
+        w.set_items([item("WA-9")], version=2)   # one actionable item; no live waiting row
+        w.set_turn_state({})
+        check("wait/ordinary-bash-inert-allow", _verdict(waitcall("git status --short")), "allow")
+        check("wait/ordinary-bash-ls-inert-allow", _verdict(waitcall("ls -la /tmp")), "allow")
+        # a GENUINE wait (a plain sleep, a while-poll loop, a bare wait builtin) is JUDGED -> DENY (livbak)
+        check("wait/genuine-sleep-denies", _verdict(waitcall("sleep 600")), "deny")
+        check("wait/genuine-poll-loop-denies",
+              _verdict(waitcall("while true; do sleep 5; done")), "deny")
+        check("wait/bare-wait-builtin-denies", _verdict(waitcall("wait")), "deny")
+        # wait_tools = [] (an EMPTY list) is fully inert even for a genuine wait command
+        _wr_empty = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
+        _wr_empty["wait_tools"] = []
+        (w.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_wr_empty))
+        w.set_turn_state({})
+        check("wait/empty-wait-tools-inert", _verdict(waitcall("sleep 600")), "allow")
         # an adopter registry with NO wait_tools key -> byte-identical inertness (allow)
         _wr2 = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
         del _wr2["wait_tools"]
@@ -2226,7 +2266,11 @@ def main(report_path=None):
               a2.turn_state().get("wake_digests", []), [])
         # a SUCCESSFUL scheduling tool registers exactly one wake
         a2.set_turn_state({})
-        post({"ok": True})
+        # FIX 4 (round 9): a wake tool's real success contract (a positive scheduledFor), not a bare
+        # generic ok:true, is what registers; a bare ok carries no confirmed schedule, so under the
+        # tool-authoritative rule it correctly declines. Assert the positive with a real (clamped)
+        # ScheduleWakeup success shape.
+        post({"scheduledFor": 60000, "clampedDelaySeconds": 60, "wasClamped": True})
         check("a2/successful-schedule-registers-one",
               len(a2.turn_state().get("wake_digests", [])), 1)
         # FIX 2 (round 8): the REAL success objects REGISTER through the wired, tool-aware register path.
@@ -2241,6 +2285,16 @@ def main(report_path=None):
               "stopped": True, "cancelledWakeups": 1})
         check("a2/real-schedulewakeup-cancel-no-register",
               a2.turn_state().get("wake_digests", []), [])
+        # FIX 4 (round 9): a cancel/invalid carrying a GENERIC ok:true registers NO digest through the
+        # WIRED register path (the generic marker must not override the tool-specific veto).
+        for _cid, _resp in (
+                ("a2/cancel-generic-ok-no-register", {"scheduledFor": 0, "stopped": True, "ok": True}),
+                ("a2/zero-scheduledfor-ok-no-register", {"scheduledFor": 0, "ok": True}),
+                ("a2/neg-scheduledfor-ok-no-register", {"scheduledFor": -1, "ok": True}),
+                ("a2/bool-scheduledfor-ok-no-register", {"scheduledFor": True, "ok": True})):
+            a2.set_turn_state({})
+            post(_resp)
+            check(_cid, a2.turn_state().get("wake_digests", []), [])
         # a real CronCreate success registers through the CronCreate matcher (yield_tools already lists it).
         post_cron = lambda resp: aiqt_hooks.orch_wake_register(
             {"hook_event_name": "PostToolUse", "cwd": str(a2.root), "session_id": "s1",

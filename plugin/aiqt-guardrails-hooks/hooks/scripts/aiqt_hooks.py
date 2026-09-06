@@ -7095,6 +7095,40 @@ def orch_route_guard(data):
     return _allow()
 
 
+_ORCH_WAIT_COMMANDS = frozenset(("sleep", "wait"))
+# A poll/busy-wait loop: a while/until whose body sleeps. `for` and other loop forms, and a spin loop
+# with no sleep, are the disclosed residual (see orch_wait_guard).
+_ORCH_WAIT_LOOP_KEYWORDS = frozenset(("while", "until"))
+
+
+def _orch_command_waits(command):
+    """A1 wait-intent discriminator: True only for a HIGH-CONFIDENCE Bash wait, judged over the
+    quote/redirect-aware lexer (never the raw string), so a quoted or argument `sleep` (echo sleep,
+    grep sleep) does not fire. A wait is a segment whose COMMAND WORD is `sleep`/`wait`, or a
+    while/until loop keyword co-occurring with a `sleep` token (a poll loop). An unparseable command is
+    NOT recognizably a wait (fail-safe: the caller inert-allows, never wedges). DISCLOSED RESIDUAL: an
+    obfuscated wait (a renamed/aliased detacher, a sleep/loop inside a nested shell string such as
+    bash -c '... sleep ...', a wait implemented by another program such as python -c 'time.sleep(...)',
+    a for-loop sleep, a no-sleep spin loop, or a stdin-blocking `read` - excluded to avoid mistaking
+    `read var < file` for a wait) is not caught here; the shared schedule-denial cap and the stop-guard
+    re-enumeration are the compensating layers."""
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return False  # unparseable/unsupported construct: not recognizably a wait -> caller allows
+    loop_kw = sleep_present = False
+    for argv, _sep in segments:
+        cw = _command_word(argv)
+        if cw in _ORCH_WAIT_COMMANDS:
+            return True                                   # a sleep/wait in command position
+        toks = set(argv)
+        if cw in _ORCH_WAIT_LOOP_KEYWORDS or (_ORCH_WAIT_LOOP_KEYWORDS & toks):
+            loop_kw = True
+        if "sleep" in toks:
+            sleep_present = True
+    return loop_kw and sleep_present                      # a while/until poll loop that sleeps
+
+
 def orch_wait_guard(data):
     """livbak/cntdef/setcmp, PreToolUse over the registry-declared wait_tools: judge a call that waits
     on a launched result (kind 'wait') against a fresh enumeration. Absent or empty wait_tools means
@@ -7127,6 +7161,17 @@ def orch_wait_guard(data):
     if not isinstance(declared, list) or tool not in declared:
         return _allow()  # inert standing posture: no declared wait tools, no coverage
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    # A1 WAIT-INTENT DISCRIMINATOR: a declared wait tool is judged as a wait ONLY when the call genuinely
+    # WAITS, never on any invocation of the tool. A Bash call is a wait only when its command actually
+    # waits (_orch_command_waits); an ordinary Bash command (git status, ls, a build step) is NOT a wait
+    # and is an INERT ALLOW, so declaring Bash in wait_tools never wedges an ordinary command (the r8
+    # production wedge). A NON-Bash declared wait tool is a dedicated wait tool, inherently a wait, matched
+    # by name. Fail-safe direction: a command that is not RECOGNIZABLY a wait (including an unreadable or
+    # unparseable command) allows; only a genuine wait is judged, and (when work is actionable) denied.
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str) or not _orch_command_waits(command):
+            return _allow()
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, "wait", data, wake_text=wake_text)
     sd = ctx.get("state_dir")
@@ -7502,6 +7547,8 @@ def _orch_response_has_negative(response):
             for k in ("success", "ok"):
                 if k in lowered and not lowered.get(k):
                     return True               # a present-and-falsy positive field is a negative
+            if lowered.get("stopped") is True:
+                return True               # B1 defence-in-depth: a stopped (cancelled) wake is a negative
             for k in ("failure", "is_error", "iserror", "error"):
                 if lowered.get(k) not in (None, "", False, 0):
                     return True               # a present-and-truthy failure field (isError normalized)
@@ -7526,6 +7573,12 @@ def _orch_has_positive_signal(response):
     return (response.get("is_error") is False or response.get("success") is True
             or response.get("ok") is True
             or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE))
+
+
+# The wake-scheduling tools whose tool-specific success contract is AUTHORITATIVE (must equal the set
+# _orch_wake_tool_positive recognizes): for these, a generic ok/success marker beside a cancel/invalid
+# result never overrides the tool-specific veto (B1).
+_ORCH_WAKE_TOOLS = frozenset(("ScheduleWakeup", "CronCreate"))
 
 
 def _orch_wake_tool_positive(response, tool_name):
@@ -7630,8 +7683,16 @@ def _orch_tool_succeeded(response, tool_name=None):
         return False
     if _orch_response_has_negative(response):        # G1 + G2
         return False
-    if not (_orch_has_positive_signal(response)
-            or _orch_wake_tool_positive(response, tool_name)):   # G3: generic OR the real tool contract
+    # G3 positive signal. For a KNOWN wake tool the tool-specific contract is AUTHORITATIVE: a cancel or
+    # invalid schedule (stopped, or a non-positive/boolean scheduledFor) is a VETO that a generic ok/
+    # success/is_error/status marker beside it must NOT override (B1: the old OR let a cancel carrying
+    # ok:true manufacture the orphan wake FIX C prevents). The generic predicate governs ONLY a tool that
+    # is not a known wake tool. G1/G2 (the negative walk) already ran above.
+    if tool_name in _ORCH_WAKE_TOOLS:
+        positive = _orch_wake_tool_positive(response, tool_name)
+    else:
+        positive = _orch_has_positive_signal(response)
+    if not positive:
         return False
     content = response.get("content")                # G3: the ambiguity screen over free-text content
     texts = _orch_content_texts(content)

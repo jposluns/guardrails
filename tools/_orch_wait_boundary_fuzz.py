@@ -295,10 +295,13 @@ def sweep_boundary():
     and the single genuinely-licensed case MUST reach the sole ALLOW through the full read/parse path
     (so a false-DENY there would be caught too)."""
     breaches = []
+    # Round 9 (A1): each command is a GENUINE wait (sleep / bare `wait <row>`), so the wait-intent
+    # discriminator lets it reach the decision layer these boundary cases exercise; the row-naming waits
+    # keep "WA-1" in the text so the named-live-row basis is unchanged.
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf-") as tmp:
         # a wait naming no live row -> DENY
         root = _mkrepo(tmp, {}, [{"id": "A-1", "state": "open", "granted": True}])
-        if _wait_verdict(root, "hang about") == "allow":
+        if _wait_verdict(root, "sleep 600") == "allow":
             breaches.append("a wait naming no live row yielded a cap-relieving allow")
         # a v2 malformed close -> ENUMERATOR_ERROR -> DENY
         (Path(root) / "aei.json").write_text(json.dumps({
@@ -306,7 +309,7 @@ def sweep_boundary():
             "source": {"locator": "b"},
             "items": [{"id": "C-1", "state": "closed", "granted": True, "close": {"ref": "x"}}]}),
             encoding="utf-8")
-        if _wait_verdict(root, "collect anything") == "allow":
+        if _wait_verdict(root, "sleep 600") == "allow":
             breaches.append("a malformed-close enumeration yielded a cap-relieving allow")
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf-allow-") as tmp:
         # the SINGLE VALID ALLOW through the full path (its own fresh repo, so the anti-shrinkage
@@ -319,7 +322,7 @@ def sweep_boundary():
         (sd / "dispatch-ledger.jsonl").write_text(json.dumps({
             "ts": aiqt_hooks._orch_now().isoformat(), "event": "launch", "task_id": "T-1",
             "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
-        if _wait_verdict(root, "collect WA-1") != "allow":
+        if _wait_verdict(root, "wait WA-1") != "allow":
             breaches.append("the single genuinely-licensed wait (a named live waiting row) did NOT "
                             "reach the sole ALLOW through the full read/parse path")
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf-b3-") as tmp:
@@ -349,7 +352,7 @@ def sweep_boundary():
         (sd / "dispatch-ledger.jsonl").write_text(json.dumps({
             "ts": aiqt_hooks._orch_now().isoformat(), "event": "launch", "task_id": "T-1",
             "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
-        if _wait_verdict(root, "collect WA-1") == "allow":
+        if _wait_verdict(root, "wait WA-1") == "allow":
             breaches.append("B3: a fixed close with NO declared paths (a resolving real commit) yielded "
                             "a cap-relieving allow; a no-paths fixed close must HOLD (cannot-evaluate)")
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf-fa-") as tmp:
@@ -366,7 +369,7 @@ def sweep_boundary():
         (sd / "dispatch-ledger.jsonl").write_text(json.dumps({
             "ts": aiqt_hooks._orch_now().isoformat(), "event": "launch", "task_id": "T-1",
             "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
-        if _wait_verdict(root, "collect WA-1") == "allow":
+        if _wait_verdict(root, "wait WA-1") == "allow":
             breaches.append("FlagA: a proposed/ungranted item yielded a cap-relieving allow; a "
                             "self-authored proposed label is actionable, not a park, so the wait DENIES")
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf2-") as tmp:
@@ -375,7 +378,7 @@ def sweep_boundary():
         _git_init(tmp)
         (tmp / ".aiqt").mkdir()
         (tmp / ".aiqt" / "orchestration.local.json").write_text("{ not json", encoding="utf-8")
-        v = _wait_verdict(str(tmp), "x")
+        v = _wait_verdict(str(tmp), "sleep 600")
         if v == "allow":
             breaches.append("a bad registry yielded a cap-relieving allow (expected ask/inert)")
     return breaches
