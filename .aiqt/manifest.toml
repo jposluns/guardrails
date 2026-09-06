@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "3508e634a15ef3d4f701963edc5f1a9df0a9d01108571eb9edd0e478b67c35dd"
+tree-sha256 = "13dc1415790d745f1ee49aead4b47f9340a6c80c7d64f3d56582879d3e89f95d"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2101,8 +2101,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 34148
-sha256 = "0a73d8d48343c7fd4d663b3832f5027686481d94625f500d2ce657ab42a72749"
+bytes = 34188
+sha256 = "bbbfc413398775087deef0a45d2d3bf1d390ec633a771b7d24de038836d7089d"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2676,8 +2676,8 @@ sha256 = "ea5c3f7a44f3ec2d3ffd2e2652e475e51325c196214162320497a484ee594e36"
 
 [[sources]]
 path = "tools/ci-status.sh"
-bytes = 6078
-sha256 = "e3f11b92f3ab99d699a1e2a29c35532a2efe7841004a1871b590115686df556b"
+bytes = 9791
+sha256 = "8242a22cad913707562eefb2c6f03efde48cd5e0180291a8a901e4aed16ccc87"
 
 [[sources]]
 path = "tools/conformance.py"
@@ -2836,8 +2836,8 @@ sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 11671
-sha256 = "8d9ccbde3e079796c4c3609d5efe4a204e73789ead91918d007967e3dbeee831"
+bytes = 11796
+sha256 = "222fd416c87f9214f10250a37703118ff2b70b17ab5e753808f82a1476c521d9"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -2851,8 +2851,13 @@ sha256 = "3b38b5078fce7259f79288e99059105fc8c28c1ccb4b55b411ff8312d8287457"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 10553
-sha256 = "20db7077acaae2808d628bfaf0d794c4e7e85afe873cf58f48261382e9245047"
+bytes = 11086
+sha256 = "d63e9c8c2c498a900a6aae25d457262beed2ea0400dc412acedf0324dcba8d85"
+
+[[sources]]
+path = "tools/selftest_ci_status.py"
+bytes = 13436
+sha256 = "8c4cbeed4fd44ee45c7fef858e8d0b84ed583c08416f560dcb38042afa659443"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

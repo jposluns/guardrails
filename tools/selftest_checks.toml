@@ -291,3 +291,23 @@ expected-check-ids = [
   "forced5/both-keys-surfaced",
   "forced5/second-pass-clean",
 ]
+
+[[suite]]
+id = "ci-status-behaviour-selftest"
+runner = "tools/selftest_ci_status.py"
+expected-check-ids = [
+  "ci/multi-pending-not-green",
+  "ci/late-run-no-premature-green",
+  "ci/all-success-green",
+  "ci/failed-run-exit1",
+  "ci/failed-run-named",
+  "ci/name-delimiter-cannot-green",
+  "ci/no-run-once-exit2",
+  "ci/no-run-wait-timeout-exit1",
+  "ci/not-accessible-exit2",
+  "ci/not-found-exit2",
+  "ci/pagination-all-runs",
+  "ci/settle-set-change-resets",
+  "ci/settle-nonterminal-resets",
+  "ci/pagination-race-not-green",
+]
