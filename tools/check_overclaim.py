@@ -225,7 +225,6 @@ Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required su
 """
 import base64
 import binascii
-import html
 import json
 import re
 import sys
@@ -676,6 +675,64 @@ class VisibleText(HTMLParser):
         return re.sub(r"\s+", " ", "".join(self.chunks)).strip()
 
 
+class _AssetClosureParser(HTMLParser):
+    """Extract the register page's STATIC asset closure with a real HTML parser (FIX 1, GER-1 round 13),
+    replacing the quoted-only attribute regexes a round-12 codex pass slipped past. Attribute values arrive
+    ENTITY-DECODED (HTMLParser unescapes character references in attributes) and quote-agnostic (an unquoted
+    attribute reads too), so `<link rel=stylesheet href=/x.css>`, `<link rel="style&#x73;heet" ...>`, and
+    `<link ... href="/x&period;css">` are all resolved by construction. <style> and inline <script> bodies
+    arrive as CDATA (character references NOT converted), i.e. the raw CSS/JS a browser executes. Collected:
+    inline <style> bodies, inline <script> bodies, <script src> values, <link rel~=stylesheet> href values,
+    every style="..." attribute value, and attr_index (lowercased attribute name -> list of decoded values
+    across every element), the source a CSS `content: attr(NAME)` reads (FIX 2)."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.styles = []            # inline <style> bodies (raw CSS)
+        self.inline_scripts = []    # inline <script> bodies (raw JS)
+        self.script_srcs = []       # <script src="..."> values
+        self.link_stylesheets = []  # <link rel~=stylesheet> href values
+        self.style_attrs = []       # style="..." attribute values (any element)
+        self.attr_index = {}        # {lower-name: [decoded values]} for content: attr(NAME)
+        self._grab = None           # "style" | "script" while capturing a CDATA body
+        self._buf = []
+
+    def _open(self, tag, attrs):
+        a = {}
+        for k, v in attrs:
+            key = k.lower()
+            val = v if v is not None else ""
+            self.attr_index.setdefault(key, []).append(val)
+            if key not in a:          # first occurrence wins, as HTML attribute parsing does
+                a[key] = val
+        if a.get("style"):
+            self.style_attrs.append(a["style"])
+        if tag == "link":
+            if "stylesheet" in (a.get("rel") or "").lower().split() and a.get("href"):
+                self.link_stylesheets.append(a["href"])
+        elif tag == "script" and a.get("src"):
+            self.script_srcs.append(a["src"])
+
+    def handle_starttag(self, tag, attrs):
+        self._open(tag, attrs)
+        if tag == "style":
+            self._grab, self._buf = "style", []
+        elif tag == "script" and not any(k.lower() == "src" and v for k, v in attrs):
+            self._grab, self._buf = "script", []   # only an inline (src-less) script has a body of record
+
+    def handle_startendtag(self, tag, attrs):
+        self._open(tag, attrs)                      # a self-closed style/script carries no body
+
+    def handle_data(self, data):
+        if self._grab is not None:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag):
+        if self._grab == "style" and tag == "style":
+            self.styles.append("".join(self._buf)); self._grab, self._buf = None, []
+        elif self._grab == "script" and tag == "script":
+            self.inline_scripts.append("".join(self._buf)); self._grab, self._buf = None, []
+
+
 def _snippet(text, start, end):
     a = max(0, start - 25)
     b = min(len(text), end + 25)
@@ -819,42 +876,34 @@ def scan(text, site=True):
     return _scan_with(text, (SITE_PATTERNS + RELEASE_PATTERNS) if site else RELEASE_PATTERNS)
 
 
-# FIX 4 (GER-1) + FIX 2 (GER-1 round 11): the register page's STATIC asset closure, BEST-EFFORT
-# defence-in-depth. The register page loads shared chrome CSS/JS via docs/_shell.html's <link
+# FIX 4 (GER-1) + FIX 2 (round 11) + FIX 1-4 (round 13): the register page's STATIC asset closure,
+# BEST-EFFORT defence-in-depth. The register page loads shared chrome CSS/JS via docs/_shell.html's <link
 # rel="stylesheet"> and <script src>, whose bodies the visible-text collector never sees (VisibleText drops
 # <style>/<script>, and the external assets are separate files collector 1 does not read). A CSS content:
 # string or a static marketing string in that closure would render or ship marketing no page scan catches,
-# so the closure is scanned here for the marketing patterns AND for CSS content: string injection. Round 11
-# closes the static CSS injection surface by construction: single- AND double-quoted href/src/rel
-# attributes; inline style="..." content: literals; the FULL same-origin CSS @import graph (visited-set
-# bounded so a cycle terminates); a decoded data:text/css sheet body; and CSS hex/unicode escapes in
-# content: strings. Only three vectors stay OUT of a static gate's reach and are DISCLOSED on
-# _scan_asset_closure, not pretended closed: runtime-JS DOM construction of text, a general encoded payload
-# buried in an arbitrary JS string (the runtime boundary, distinct from a decoded data: URL), and a
-# genuinely off-site (cross-origin) asset a static gate does not fetch.
-_STYLE_BODY_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
-_SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL)
-_LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
-# Single- OR double-quoted attribute values (group 1 double, group 2 single); read via _attr_val.
-_ATTR_HREF_RE = re.compile(r'href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
-_ATTR_SRC_RE = re.compile(r'src\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
-_ATTR_REL_RE = re.compile(r'rel\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
-_ATTR_STYLE_RE = re.compile(r'style\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE)
+# so the closure is scanned here for the marketing patterns AND for CSS content: string injection. Round 13
+# extracts the page with a REAL HTML PARSER (_AssetClosureParser), so unquoted and HTML-entity-encoded tag
+# attributes are read by construction (closing the round-12 quoted-only-regex bypasses), and closes the
+# static CSS/HTML injection surface by construction: a CSS normalizer (_normalize_css) strips comments and
+# decodes identifier escapes before content:/@import detection; adjacent content: strings are concatenated
+# and CSS-escape-decoded; a content: attr(NAME) is resolved across page elements; the FULL same-origin CSS
+# @import graph is followed (visited-set bounded so a cycle terminates); and a data: stylesheet OR a data:
+# script body (base64 or percent-encoded, size-bounded, fail-closed) is decoded and scanned. Only three
+# vectors stay OUT of a static gate's reach and are DISCLOSED on _scan_asset_closure, not pretended closed:
+# runtime-JS DOM construction of text, an encoded payload buried in an arbitrary JS string whose location
+# and encoding are not statically declared (distinct from a decoded data: URL), and a genuinely off-site
+# (cross-origin) asset a static gate does not fetch.
 # A CSS content: DECLARATION (the PROPERTY, not the 'content' suffix of justify-content / align-content: the
 # (?<![\w-]) lookbehind refuses a preceding word char or hyphen), and its value up to the ; or } that ends it.
 _CSS_CONTENT_RE = re.compile(r"(?<![\w-])content\s*:\s*([^;}]*)", re.IGNORECASE)
 # A CSS string literal (single- or double-quoted, backslash escapes honoured) inside a content: value.
 _CSS_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"' + r"|'((?:[^'\\]|\\.)*)'")
-# A CSS @import target: url("x")/url('x')/url(x) or a bare "x"/'x'. ONE level is followed within a scanned
-# same-origin sheet; a transitive @import (inside an imported sheet) is a DISCLOSED residual, not traversed.
+# A CSS @import target: url("x")/url('x')/url(x) or a bare "x"/'x'. The FULL same-origin @import graph is
+# traversed by _scan_css_imports (visited-set bounded so a cycle terminates); a data: @import target is decoded
+# and scanned in place; a genuinely cross-origin @import is out of a static gate's reach (disclosed).
 _CSS_IMPORT_RE = re.compile(
-    r"@import\s+(?:url\(\s*(?:\"([^\"]*)\"|'([^']*)'|([^)\s]*))\s*\)|\"([^\"]*)\"|'([^']*)')",
+    r"@import\b\s*(?:url\(\s*(?:\"([^\"]*)\"|'([^']*)'|([^)\s]*))\s*\)|\"([^\"]*)\"|'([^']*)')",
     re.IGNORECASE)
-
-
-def _attr_val(m):
-    """The captured value from a single-OR-double-quoted attribute match (group 1 double, group 2 single)."""
-    return m.group(1) if m.group(1) is not None else m.group(2)
 
 
 # --- source-side page-content leg (GER-1: single-sourced generator choke-point) ---------------------
@@ -980,24 +1029,104 @@ def _css_unescape(s):
     return _CSS_ESCAPE_RE.sub(_repl, s)
 
 
-def _scan_css_content_strings(css, where, findings):
-    """Extract the STRING LITERALS from every CSS content: declaration in `css` and marketing-scan each, so a
-    `content: " ... marketing ... "` injection (text a browser renders through ::before/::after but no HTML
-    scan sees) is caught. Only the content PROPERTY is matched, never the 'content' tail of justify-content /
-    align-content (the (?<![\\w-]) lookbehind). Each literal is scanned BOTH raw and CSS-escape-decoded
-    (FIX M3): a fully hex-escaped payload (content: "\\67\\75\\61...") decodes to visible marketing text and
-    is now caught, and a partially-escaped term ("gu\\61rantees") is caught via the decoded variant, while a
-    purely-literal term collapses to a single scan (decoded == raw)."""
+_CSS_MAX_BYTES = 1 << 20  # 1 MiB: bound a single normalize pass, fail-closed past it (SECA)
+_CSS_ATTR_RE = re.compile(r"\battr\(\s*([-\w]+)", re.IGNORECASE)  # content: attr(NAME[, ...]) name capture
+
+
+def _decode_css_escape_at(css, i):
+    """Decode ONE identifier-space CSS escape at css[i] == '\\', returning (decoded_str, next_index). Hex
+    (1-6 digits, one optional trailing whitespace consumed) -> its codepoint (0/surrogate/out-of-range ->
+    U+FFFD, as a browser does); backslash-newline -> line continuation (removed); backslash + any other char
+    -> that literal char; a lone trailing backslash -> U+FFFD. Mirrors _css_unescape, one escape at a time."""
+    m = _CSS_ESCAPE_RE.match(css, i)
+    if not m:
+        return ("\uFFFD", i + 1)
+    hexd, cont, lit = m.group(1), m.group(2), m.group(3)
+    if hexd is not None:
+        cp = int(hexd, 16)
+        if cp == 0 or cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+            return ("\uFFFD", m.end())
+        return (chr(cp), m.end())
+    if cont is not None:
+        return ("", m.end())
+    return (lit, m.end())
+
+
+def _normalize_css(css):
+    """Normalize CSS for content:/@import DETECTION (FIX 2, GER-1 round 13): strip comments and decode
+    identifier-space escapes, so a comment mid-token or an escaped `content`/`@import` keyword can no longer
+    hide a declaration from the detection regexes. A minimal single-pass tokenizer tracks string state:
+      - INSIDE a string literal, everything is copied verbatim (a backslash escapes the next char, so an
+        escaped quote or a line continuation does not close the string); the string's own escapes are decoded
+        later, per-literal, by _css_unescape. A `/*` inside a string is literal text, not a comment.
+      - OUTSIDE a string, a `/* ... */` comment is replaced by a SINGLE SPACE (a CSS comment is a token
+        separator, so `@import/**/"b.css"` normalizes to `@import "b.css"`, preserving the whitespace the
+        detection regex needs and never fusing two idents); a genuine quote opens a string (interior copied
+        verbatim, so a real rendered string's delimiters are never lost); and a CSS escape is DECODED to the
+        character it denotes, so `@\\69mport` -> `@import` and `\\63ontent:` -> `content:`.
+    Correctness note: because a real string's OPENING quote is a genuine (unescaped) quote that this pass is
+    always outside-a-string when it reaches, escape decoding can only ADD a spurious scan (the safe,
+    over-approximating direction: an escaped-quote ident becomes a scannable pseudo-string), never DROP a
+    real rendered string. Bounded fail-closed at _CSS_MAX_BYTES (SECA)."""
+    if len(css) > _CSS_MAX_BYTES:
+        raise _FailClosed("CSS sheet exceeds the {}-byte normalize bound".format(_CSS_MAX_BYTES))
+    out = []
+    i, n, quote = 0, len(css), None
+    while i < n:
+        ch = css[i]
+        if quote is not None:                       # inside a string literal: copy verbatim
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(css[i + 1]); i += 2; continue
+            if ch == quote:
+                quote = None
+            i += 1; continue
+        if ch == "/" and i + 1 < n and css[i + 1] == "*":
+            j = css.find("*/", i + 2)
+            if j == -1:                             # unterminated comment: rest is comment
+                out.append(" "); break
+            out.append(" "); i = j + 2; continue
+        if ch == '"' or ch == "'":
+            out.append(ch); quote = ch; i += 1; continue
+        if ch == "\\":
+            decoded, i = _decode_css_escape_at(css, i); out.append(decoded); continue
+        out.append(ch); i += 1
+    return "".join(out)
+
+
+def _scan_css_content_strings(css, where, findings, attr_index=None):
+    """Extract every CSS content: declaration's rendered text from ALREADY-NORMALIZED css (caller passes
+    _normalize_css(...)) and marketing-scan it (FIX 2, GER-1 round 13). Only the content PROPERTY matches,
+    never the '-content' tail of justify-content/align-content (the (?<![\\w-]) lookbehind). Per declaration:
+      1. all adjacent string literals are CSS-escape-decoded (_css_unescape) and CONCATENATED, so a phrase
+         split as `content: "a" "b"` is scanned as "ab" (multi-string); the raw concatenation is scanned too,
+         so a fully-escaped literal is caught via the decoded variant and a plain literal via the raw one.
+      2. each `attr(NAME)` renders the value of the NAME html attribute at run time, so every page element's
+         NAME attribute value (attr_index[NAME], lowercased, entity-decoded by the parser) is scanned, a safe
+         over-approximation of what attr() can surface.
+    Because css is normalized, a comment mid-token (content/**/:) and an escaped identifier (\\63ontent) no
+    longer hide the declaration. attr_index is None where no page-element map is available."""
     for decl in _CSS_CONTENT_RE.finditer(css):
-        for sm in _CSS_STRING_RE.finditer(decl.group(1)):
+        value = decl.group(1)
+        raw_parts, dec_parts = [], []
+        for sm in _CSS_STRING_RE.finditer(value):
             literal = sm.group(1) if sm.group(1) is not None else sm.group(2)
-            variants = [literal]
-            decoded = _css_unescape(literal)
-            if decoded != literal:
-                variants.append(decoded)
-            for text in variants:
-                for name, snip in scan(text, site=True):
-                    findings.append("{}: CSS content injection [{}] -> {}".format(where, name, snip))
+            raw_parts.append(literal)
+            dec_parts.append(_css_unescape(literal))
+        variants = []
+        for concat in ("".join(raw_parts), "".join(dec_parts)):
+            if concat and concat not in variants:
+                variants.append(concat)
+        for text in variants:
+            for name, snip in scan(text, site=True):
+                findings.append("{}: CSS content injection [{}] -> {}".format(where, name, snip))
+        if attr_index:
+            for am in _CSS_ATTR_RE.finditer(value):
+                attr_name = am.group(1).lower()
+                for aval in attr_index.get(attr_name, ()):
+                    for name, snip in scan(aval, site=True):
+                        findings.append("{}: CSS content attr({}) injection [{}] -> {}".format(
+                            where, attr_name, name, snip))
 
 
 def _closure_local_asset(url, base_dir=""):
@@ -1037,41 +1166,74 @@ def _closure_local_asset(url, base_dir=""):
     return norm
 
 
-def _decode_data_css(url):
-    """Decode a data: URL used in a CSS context (a <link rel=stylesheet> href or an @import target) to its
-    stylesheet text, so a data: sheet is scanned rather than silently skipped (FIX M2, GER-1 round 11).
-    Handles data:text/css,<percent-encoded> (percent-decoded) and data:text/css;base64,<b64> (base64-
-    decoded). An empty media type is treated as CSS in this CSS-only context (a data: URL defaults to
-    text/plain, but a stylesheet link or @import target is a CSS sink). A NON-css media type (for example
-    data:image/...) returns None (out of scope). A malformed or undecodable data: body FAILS CLOSED
-    (_FailClosed): a data: sheet that cannot be decoded is never a silent clean skip
-    (check-fails-closed-on-unreadable)."""
+_DATA_URL_MAX_BYTES = 1 << 20  # 1 MiB ceiling on a data: URL payload AND its decoded body (SECA, FIX 4)
+_CSS_DATA_MEDIA = ("", "text/css")
+_JS_DATA_MEDIA = ("", "text/javascript", "application/javascript", "application/ecmascript",
+                  "text/ecmascript", "text/jscript", "text/plain")
+_STRAY_PCT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")  # a '%' not starting a valid %HH escape
+
+
+def _decode_data_url(url, media_types, sink):
+    """Decode a data: URL to its text for a given sink (FIX M2 round 11; hardened FIX 3/4 round 13). Handles
+    the percent-encoded and ;base64 forms; an empty media type is treated as in-scope (a data: default is
+    text/plain, but a stylesheet/script sink consumes it as such). A media type OUTSIDE media_types returns
+    None (out of scope, e.g. data:image/...). BOUNDED and FAIL-CLOSED (_FailClosed, SECA): the raw payload and
+    the decoded body are each capped at _DATA_URL_MAX_BYTES; a malformed percent escape (a stray '%' not
+    forming %HH, which unquote(errors='strict') would SILENTLY PRESERVE) is rejected before decode; a base64
+    or UTF-8 decode error is rejected. A data: body that cannot be soundly decoded is never a silent clean
+    skip (check-fails-closed-on-unreadable)."""
     rest = url[5:] if url[:5].lower() == "data:" else url
     header, sep, payload = rest.partition(",")
     if not sep:
-        raise _FailClosed("register data: stylesheet {!r} has no comma-separated payload".format(url))
+        raise _FailClosed("register data: {} {!r} has no comma-separated payload".format(sink, url))
+    if len(payload) > _DATA_URL_MAX_BYTES:
+        raise _FailClosed("register data: {} {!r} payload exceeds the {}-byte bound".format(
+            sink, url, _DATA_URL_MAX_BYTES))
     params = header.split(";")
     media = params[0].strip().lower()
     is_base64 = len(params) > 1 and params[-1].strip().lower() == "base64"
-    if media not in ("", "text/css"):
-        return None  # a non-css data: URL (e.g. data:image/...) is out of a CSS scan's scope
+    if media not in media_types:
+        return None
     try:
         if is_base64:
-            return base64.b64decode(payload, validate=True).decode("utf-8")
-        return unquote(payload, errors="strict")
+            decoded = base64.b64decode(payload, validate=True).decode("utf-8")
+        else:
+            if _STRAY_PCT_RE.search(payload):
+                raise ValueError("malformed percent escape")
+            decoded = unquote(payload, errors="strict")
     except (binascii.Error, ValueError, UnicodeError) as exc:
-        raise _FailClosed("register data: stylesheet {!r} is undecodable ({})".format(url, exc))
+        raise _FailClosed("register data: {} {!r} is undecodable ({})".format(sink, url, exc))
+    if len(decoded) > _DATA_URL_MAX_BYTES:
+        raise _FailClosed("register data: {} {!r} decodes past the {}-byte bound".format(
+            sink, url, _DATA_URL_MAX_BYTES))
+    return decoded
 
 
-def _scan_css_imports(root, importer_rel, css, findings, visited=None):
-    """Follow the FULL @import graph over same-origin sheets reachable from `css`, bounded by a VISITED-SET of
-    resolved rel-paths so a cycle (a.css imports b.css imports a.css) terminates and no sheet is scanned twice
-    (FIX M1, GER-1 round 11). An explicit work-stack replaces the former one-level walk. Each newly-reached
-    same-origin sheet is read (fail-closed on an unreadable same-origin sheet, _FailClosed), whole-text
-    marketing-scanned, its content: strings scanned, and ITS @imports pushed for traversal. A data: @import
-    target is decoded and scanned in place (FIX M2); a genuinely cross-origin or other-scheme @import is out
-    of a static gate's reach (disclosed), not followed. The entry sheet (importer_rel), already scanned by the
-    caller, is seeded into the visited set so a transitive @import back to it is not re-scanned."""
+def _decode_data_css(url):
+    """A data: URL in a CSS context (a <link rel=stylesheet> href or an @import target) -> stylesheet text,
+    or None for a non-css media type. Bounded and fail-closed (see _decode_data_url)."""
+    return _decode_data_url(url, _CSS_DATA_MEDIA, "stylesheet")
+
+
+def _decode_data_script(url):
+    """A data: URL in a <script src> context -> the script TEXT, or None for a non-JS media type (FIX 3,
+    GER-1 round 13). A data: script's text is statically decodable (its encoding is declared), so it is
+    scanned to the same raw-string standard as an inline or linked script; the RUNTIME DOM effect stays the
+    disclosed residual. Bounded and fail-closed (see _decode_data_url)."""
+    return _decode_data_url(url, _JS_DATA_MEDIA, "script")
+
+
+def _scan_css_imports(root, importer_rel, css, findings, attr_index=None, visited=None):
+    """Follow the FULL @import graph over same-origin sheets reachable from `css`, bounded by a VISITED-SET
+    of resolved rel-paths so a cycle terminates and no sheet is scanned twice (FIX M1 round 11). Import
+    DETECTION runs over NORMALIZED css (FIX 2 round 13: comment-stripped, escapes decoded), so
+    `@import/**/"b.css"`, `@\\69mport "b.css"`, and `@import"b.css"` are all followed; each newly-reached
+    same-origin sheet is read (fail-closed on an unreadable same-origin sheet), whole-text marketing-scanned
+    over its RAW bytes (so marketing in a comment is still caught), its content: strings scanned over its
+    NORMALIZED text (with attr_index for attr() resolution), and its own @imports pushed. A data: @import
+    target is decoded and scanned in place; a genuinely cross-origin or other-scheme @import is disclosed,
+    not followed. The entry sheet (importer_rel) is seeded into the visited set so a transitive @import back
+    to it is not re-scanned."""
     if visited is None:
         visited = set()
     if importer_rel:
@@ -1080,7 +1242,7 @@ def _scan_css_imports(root, importer_rel, css, findings, visited=None):
     while stack:
         cur_rel, cur_css = stack.pop()
         base_dir = posixpath.dirname(cur_rel)
-        for m in _CSS_IMPORT_RE.finditer(cur_css):
+        for m in _CSS_IMPORT_RE.finditer(_normalize_css(cur_css)):
             import_url = next((g for g in m.groups() if g is not None), None)
             if not import_url:
                 continue
@@ -1092,8 +1254,8 @@ def _scan_css_imports(root, importer_rel, css, findings, visited=None):
                         else "data: @import (nested)"
                     for name, snip in scan(data_css, site=True):
                         findings.append("{}: overclaim [{}] -> {}".format(dwhere, name, snip))
-                    _scan_css_content_strings(data_css, dwhere, findings)
-                    stack.append(("", data_css))  # follow the data: sheet's own @imports (site-root relative)
+                    _scan_css_content_strings(_normalize_css(data_css), dwhere, findings, attr_index)
+                    stack.append(("", data_css))
                 continue
             irel = _closure_local_asset(import_url, base_dir)
             if not irel or irel in visited:
@@ -1109,85 +1271,93 @@ def _scan_css_imports(root, importer_rel, css, findings, visited=None):
             for name, snip in scan(itext, site=True):
                 findings.append("{}: overclaim [{}] -> {}".format(iwhere, name, snip))
             if irel.endswith(".css"):
-                _scan_css_content_strings(itext, iwhere, findings)
+                _scan_css_content_strings(_normalize_css(itext), iwhere, findings, attr_index)
             stack.append((irel, itext))
 
 
 def _scan_asset_closure(root):
     """Scan the enforcement register page's STATIC asset closure for marketing overclaims, BEST-EFFORT
-    defence-in-depth (FIX 4, GER-1; hardened FIX 2a/2b round 11; FIX M1-M4 round-11 maximal): the page's own
-    inline <style>/<script> bodies and inline style="..." attributes (which the visible-text collector
-    drops), plus the same-origin CSS/JS the page links (single- or double-quoted), for the marketing patterns
-    AND for CSS content: string injection. The STATIC CSS injection surface is closed BY CONSTRUCTION:
-    the FULL same-origin CSS @import graph is followed (bounded by a visited set so a cycle terminates),
-    a data: stylesheet body (base64 or percent-encoded text/css) is decoded and scanned, and CSS hex/unicode
-    escapes in content: strings are decoded before the scan. A referenced same-origin asset that cannot be
-    read, a same-origin asset URL that escapes site/, or a data: stylesheet that cannot be decoded, is a
+    defence-in-depth (round 13 maximal static closure). The page is parsed with a REAL HTML PARSER
+    (_AssetClosureParser), so unquoted and HTML-entity-encoded tag attributes are read by construction
+    (closing the round-12 quoted-only-regex bypasses). Scanned: the page's own inline <style>/<script>
+    bodies and every inline style="..." attribute (which the visible-text collector drops), plus the
+    same-origin CSS/JS the page links.
+
+    The STATIC CSS/HTML injection surface is closed BY CONSTRUCTION. A CSS NORMALIZER (_normalize_css)
+    strips comments and decodes identifier escapes before content:/@import detection, so a comment mid-token
+    or an escaped `content`/`@import` keyword cannot hide a declaration; a content: value's adjacent string
+    literals are CSS-escape-decoded and CONCATENATED before the scan (multi-string); a content: attr(NAME)
+    is resolved by scanning the NAME attribute across page elements; the FULL same-origin @import graph is
+    followed (visited-set bounded so a cycle terminates); and a data: stylesheet OR a data: script body
+    (base64 or percent-encoded, size-bounded) is decoded and scanned. A referenced same-origin asset that
+    cannot be read, an asset URL that escapes site/, or a data: body that cannot be soundly decoded, is a
     fail-closed error (_FailClosed -> exit 2), never a silent skip (check-fails-closed-on-unreadable).
 
-    DISCLOSED IRREDUCIBLE RESIDUAL (honest, not pretended closed): this is a STATIC string scan over the
-    hand-authored, version-controlled SHARED chrome (CSS/JS the shell brings in), which is NOT generated from
-    the ledger, so its integrity rests on code review plus the file-content gates, with this scan as an
-    overlapping best-effort layer. Only three vectors remain out of a static gate's reach and are DISCLOSED:
-    runtime-JS DOM construction of marketing text (theme.js building strings at run time); a general encoded
-    payload (for example base64) buried in an ARBITRARY JS string, where which bytes to decode is unbounded
-    (the runtime boundary, distinct from a data: URL, which IS decoded); and a genuinely off-site
-    (cross-origin) asset a static gate does not fetch. An inline content: on a normal element is generally
-    inert (content applies to ::before/::after), but its string is still scanned so a marketing literal cannot
-    hide in a style attribute."""
+    DISCLOSED IRREDUCIBLE RESIDUAL (honest, not pretended closed): this is a STATIC scan over the
+    hand-authored, version-controlled SHARED chrome, whose integrity rests on code review plus the
+    file-content gates, with this scan as an overlapping best-effort layer. Only three vectors remain out of
+    a static gate's reach and are DISCLOSED: runtime-JS DOM construction of marketing text (theme.js building
+    strings at run time); an ENCODED payload buried in an ARBITRARY JS string, where which bytes to decode
+    are not statically declared (the unbounded runtime boundary, distinct from a data: URL, which IS decoded);
+    and a genuinely off-site (cross-origin) asset a static gate does not fetch."""
     findings = []
     page_path = root / HTML_REL
     try:
         page = page_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise _FailClosed("register page {} is unreadable ({})".format(HTML_REL, exc))
+    parser = _AssetClosureParser()
+    try:
+        parser.feed(page)
+        parser.close()
+    except (ValueError, AssertionError) as exc:
+        raise _FailClosed("register page {} could not be parsed as HTML ({})".format(HTML_REL, exc))
+    attr_index = parser.attr_index
     assets = set()
-    # (a) inline <style> bodies: marketing scan + content: string injection.
-    for m in _STYLE_BODY_RE.finditer(page):
-        body = m.group(1)
+    # (a) inline <style> bodies: whole-text marketing scan (raw) + content: injection (normalized).
+    for body in parser.styles:
         for name, snip in scan(body, site=True):
             findings.append("{} inline <style>: overclaim [{}] -> {}".format(HTML_REL, name, snip))
-        _scan_css_content_strings(body, "{} inline <style>".format(HTML_REL), findings)
-    # (a2) inline style="..." attributes: content: string literals (entity-decoded first). Single- and
-    # double-quoted attributes both read.
-    for m in _ATTR_STYLE_RE.finditer(page):
-        style_val = html.unescape(_attr_val(m))
-        _scan_css_content_strings(style_val, "{} inline style attribute".format(HTML_REL), findings)
-    # (b) <script> tags: an external src is a same-origin asset to scan; an inline body is scanned as text.
-    #     A data: (or off-site) script src is the disclosed runtime/off-site boundary (not decoded here).
-    for m in _SCRIPT_TAG_RE.finditer(page):
-        attrs, body = m.group(1), m.group(2)
-        src = _ATTR_SRC_RE.search(attrs)
-        if src:
-            rel = _closure_local_asset(_attr_val(src))
-            if rel:
-                assets.add(rel)
+        _scan_css_content_strings(_normalize_css(body), "{} inline <style>".format(HTML_REL),
+                                  findings, attr_index)
+    # (a2) inline style="..." attributes (already entity-decoded by the parser): content: string literals.
+    for style_val in parser.style_attrs:
+        _scan_css_content_strings(_normalize_css(style_val),
+                                  "{} inline style attribute".format(HTML_REL), findings, attr_index)
+    # (b) <script>: a same-origin src is an asset to scan; a data: src is DECODED and its text scanned
+    #     (FIX 3), the runtime DOM effect staying disclosed; an off-site src is disclosed. An inline body
+    #     is scanned as text. Values are parser-decoded, so _closure_local_asset gets the resolved value.
+    for src in parser.script_srcs:
+        target = src.strip()
+        if target[:5].lower() == "data:":
+            data_js = _decode_data_script(target)
+            if data_js is not None:
+                where = "{} data: script".format(HTML_REL)
+                for name, snip in scan(data_js, site=True):
+                    findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
             continue
+        rel = _closure_local_asset(src)
+        if rel:
+            assets.add(rel)
+    for body in parser.inline_scripts:
         for name, snip in scan(body, site=True):
             findings.append("{} inline <script>: overclaim [{}] -> {}".format(HTML_REL, name, snip))
     # (c) same-origin stylesheets the page links; a data:text/css sheet is decoded and scanned in place.
-    for m in _LINK_TAG_RE.finditer(page):
-        tag = m.group(0)
-        rel_attr = _ATTR_REL_RE.search(tag)
-        href = _ATTR_HREF_RE.search(tag)
-        if not (rel_attr and "stylesheet" in _attr_val(rel_attr).lower() and href):
-            continue
-        href_val = _attr_val(href)
-        decoded_href = html.unescape(href_val).strip()
-        if decoded_href[:5].lower() == "data:":
-            data_css = _decode_data_css(decoded_href)
+    for href_val in parser.link_stylesheets:
+        target = href_val.strip()
+        if target[:5].lower() == "data:":
+            data_css = _decode_data_css(target)
             if data_css is not None:
                 where = "{} data: stylesheet".format(HTML_REL)
                 for name, snip in scan(data_css, site=True):
                     findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
-                _scan_css_content_strings(data_css, where, findings)
-                _scan_css_imports(root, "", data_css, findings)
+                _scan_css_content_strings(_normalize_css(data_css), where, findings, attr_index)
+                _scan_css_imports(root, "", data_css, findings, attr_index)
             continue
         rel = _closure_local_asset(href_val)
         if rel:
             assets.add(rel)
-    # (d) each resolved same-origin asset: whole-text marketing scan, content: injection for CSS, plus the
-    # full same-origin @import graph.
+    # (d) each resolved same-origin asset: whole-text scan (raw) + content: injection + @import graph.
     for rel in sorted(assets):
         asset_path = root / "site" / rel
         try:
@@ -1198,8 +1368,8 @@ def _scan_asset_closure(root):
         for name, snip in scan(text, site=True):
             findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
         if rel.endswith(".css"):
-            _scan_css_content_strings(text, where, findings)
-            _scan_css_imports(root, rel, text, findings)
+            _scan_css_content_strings(_normalize_css(text), where, findings, attr_index)
+            _scan_css_imports(root, rel, text, findings, attr_index)
     return findings
 
 
@@ -1771,6 +1941,38 @@ def _page_bound_source_self_test():
                 failures.append("COMPLETENESS: {} source [{}] {!r} is not emitted verbatim on the page"
                                 .format(channel, key, raw))
 
+        # (n5) FIX 5 BIDIRECTIONAL completeness. n3 above is the FORWARD leg (every enumerated string is
+        # emitted). This is the REVERSE leg: a corpus/ledger source field added to the RENDER without adding
+        # it to page_content_strings must FAIL (the round-12 regression where render began emitting
+        # fm['slug'], which the enumerator did not know about, and the forward-only test still passed). The
+        # rule slug, a real frontmatter field that is NOT a content channel, is seeded with a unique marker;
+        # the marker must not appear in either rendered view unless it belongs to an enumerated string.
+        SLUG_MARK = "zzslugmarker"
+        marked = gen_enforcement_register._build(tmp / "slugmark")
+        rp = marked / ".aiqt" / "core" / "rules" / "rule-aa.md"
+        rp.write_text(rp.read_text(encoding="utf-8").replace(
+            "slug: selftest-rule-aa", "slug: " + SLUG_MARK), encoding="utf-8")
+        # slug does not feed the ledger, so rebuild it to keep load_ledger's byte-identity check clean.
+        (marked / ".aiqt" / "enforceability.json").write_text(
+            gen_enforceability.build_ledger(marked), encoding="utf-8")
+        enumerated = [raw for _c, _k, raw in _page_bound_sources(marked)]
+        md_v, html_v = gen_enforcement_register.build_views(marked)
+        page_v = md_v + "\n" + html_v
+
+        def _unenumerated(page_text):
+            return SLUG_MARK in page_text and not any(SLUG_MARK in r for r in enumerated)
+
+        # slug is not a render channel today, so the marker must NOT leak into the page.
+        if _unenumerated(page_v):
+            failures.append("COMPLETENESS(reverse): the slug field leaked into the page but is not "
+                            "enumerated (FIX 5)")
+        # The reverse check is load-bearing: a page that DID emit the un-enumerated slug (as a new render
+        # channel would) is detected. MUTATION: render_md/render_html emitting fm['slug'] makes page_v itself
+        # satisfy _unenumerated and the clean-page assertion above fails.
+        if not _unenumerated(page_v + "\n            <td><code>" + SLUG_MARK + "</code></td>"):
+            failures.append("COMPLETENESS(reverse): a leaked un-enumerated slug marker must be detected "
+                            "(FIX 5)")
+
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
             p = sub / rel_path
@@ -1854,7 +2056,7 @@ def _asset_closure_self_test():
         #     escape (\25B8) decodes to a triangle glyph, not a marketing hit, so the decoded scan stays clean.
         page = '<html><head><link rel="stylesheet" href="/ok.css"></head><body>ok</body></html>'
         okcss = (".navrow" + LB + "display:flex; justify-content:space-between" + RB
-                 + " summary::after" + LB + 'content:" ' + BS + '25B8"' + RB)
+                 + " /* layout chrome, not marketing */ summary::after" + LB + 'content:" ' + BS + '25B8"' + RB)
         f = _scan_asset_closure(build("clean", page, {"ok.css": okcss}))
         if f:
             failures.append("ASSET: a benign closure must stay clean, got {}".format(f))
@@ -1993,6 +2195,79 @@ def _asset_closure_self_test():
         f = _scan_asset_closure(build("css-esc-mix", page, {"mix.css": mix}))
         if not any("guarantees" in x for x in f):
             failures.append("ASSET: a partially-escaped content literal must be decoded and flagged (FIX M3)")
+
+        # (p1) FIX 1: an UNQUOTED linked stylesheet is resolved and scanned (quoted-only regex missed it).
+        page = "<html><head><link rel=stylesheet href=/unq.css></head><body>ok</body></html>"
+        css = ".x::before" + LB + 'content:"catches all mistakes"' + RB
+        f = _scan_asset_closure(build("unquoted-link", page, {"unq.css": css}))
+        if not any("site/unq.css" in x for x in f):
+            failures.append("ASSET: an unquoted <link> attribute must be parsed and scanned (FIX 1)")
+        # (p2) FIX 1: an ENTITY-ENCODED rel ("style&#x73;heet") decodes to stylesheet and the sheet is scanned.
+        page = '<html><head><link rel="style&#x73;heet" href="/ent.css"></head><body>ok</body></html>'
+        f = _scan_asset_closure(build("entity-rel", page, {"ent.css": css}))
+        if not any("site/ent.css" in x for x in f):
+            failures.append("ASSET: an entity-encoded rel must decode to stylesheet and be scanned (FIX 1)")
+        # (p3) FIX 1: an ENTITY-ENCODED href ("/ent&#x2e;css") decodes to the real path and is scanned.
+        page = '<html><head><link rel="stylesheet" href="/ent&#x2e;css"></head><body>ok</body></html>'
+        f = _scan_asset_closure(build("entity-href", page, {"ent.css": css}))
+        if not any("site/ent.css" in x for x in f):
+            failures.append("ASSET: an entity-encoded href must decode to the real path and be scanned (FIX 1)")
+        # (p4) FIX 2: a COMMENT inside a content: value no longer hides the declaration.
+        page = '<html><head><link rel="stylesheet" href="/cc.css"></head><body>ok</body></html>'
+        f = _scan_asset_closure(build("comment-content", page,
+            {"cc.css": ".x::before" + LB + "content/**/:" + '"catches all mistakes"' + RB}))
+        if not any("CSS content injection" in x and "catches" in x for x in f):
+            failures.append("ASSET: a comment mid content: token must not hide the declaration (FIX 2)")
+        # (p5) FIX 2: an ESCAPED `content` identifier is canonicalized and scanned.
+        f = _scan_asset_closure(build("escaped-content", page,
+            {"cc.css": ".x::before" + LB + BS + "63ontent:" + '"catches all mistakes"' + RB}))
+        if not any("CSS content injection" in x and "catches" in x for x in f):
+            failures.append("ASSET: an escaped content identifier must be canonicalized and scanned (FIX 2)")
+        # (p6) FIX 2: a MULTI-STRING content value is concatenated before the scan.
+        f = _scan_asset_closure(build("multi-string", page,
+            {"cc.css": ".x::before" + LB + 'content:"catch" "es all mistakes"' + RB}))
+        if not any("CSS content injection" in x for x in f):
+            failures.append("ASSET: adjacent content: strings must be concatenated before the scan (FIX 2)")
+        # (p7) FIX 2: content: attr(NAME) is resolved against the named page-element attribute.
+        page_attr = ('<html><head><link rel="stylesheet" href="/at.css"></head>'
+                     '<body><span data-copy="AIQT guarantees secure output">x</span></body></html>')
+        f = _scan_asset_closure(build("attr-copy", page_attr,
+            {"at.css": ".x::before" + LB + "content:attr(data-copy)" + RB}))
+        if not any("attr(data-copy)" in x and "guarantees" in x for x in f):
+            failures.append("ASSET: content: attr(NAME) must scan the named page attribute value (FIX 2)")
+        # (p8) FIX 2: a COMMENT inside @import no longer hides the import target.
+        page = '<html><head><link rel="stylesheet" href="/imp.css"></head><body>ok</body></html>'
+        f = _scan_asset_closure(build("comment-import", page,
+            {"imp.css": '@import/**/"m.css";', "m.css": ".y::before" + LB + 'content:"catches all mistakes"' + RB}))
+        if not any("site/m.css" in x for x in f):
+            failures.append("ASSET: a comment inside @import must not hide the import target (FIX 2)")
+        # (p9) FIX 2: an ESCAPED @import identifier is canonicalized and the target followed.
+        f = _scan_asset_closure(build("escaped-import", page,
+            {"imp.css": "@" + BS + '69mport "m.css";',
+             "m.css": ".y::before" + LB + 'content:"catches all mistakes"' + RB}))
+        if not any("site/m.css" in x for x in f):
+            failures.append("ASSET: an escaped @import identifier must be followed (FIX 2)")
+        # (p10) FIX 3: a data: <script src> body is DECODED and its marketing text scanned.
+        page = ('<html><head><script src="data:text/javascript,'
+                'var m=%22AIQT guarantees secure output%22"></script></head><body>ok</body></html>')
+        f = _scan_asset_closure(build("data-script", page, {}))
+        if not any("data: script" in x and "guarantees" in x for x in f):
+            failures.append("ASSET: a data: script body must be decoded and scanned (FIX 3)")
+        # (p11) FIX 4: a MALFORMED percent escape in a data:text/css body fails closed (not silently kept).
+        page = '<html><head><link rel="stylesheet" href="data:text/css,%ZZ"></head><body>ok</body></html>'
+        try:
+            _scan_asset_closure(build("data-pct-bad", page, {}))
+            failures.append("ASSET: a malformed percent escape in a data: sheet must fail closed (FIX 4)")
+        except _FailClosed:
+            pass
+        # (p12) FIX 4: an OVERSIZED data:text/css payload fails closed (SECA bound).
+        page = ('<html><head><link rel="stylesheet" href="data:text/css,'
+                + "a" * ((1 << 20) + 1) + '"></head><body>ok</body></html>')
+        try:
+            _scan_asset_closure(build("data-oversize", page, {}))
+            failures.append("ASSET: an oversized data: sheet payload must fail closed (FIX 4, SECA)")
+        except _FailClosed:
+            pass
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
