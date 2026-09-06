@@ -35,6 +35,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 
 ITEM_RE = re.compile(r"^-\s+(?P<id>[A-Za-z][A-Za-z0-9_.-]*)\s+"
                      r"\[(?P<tok>x|X| |\.|o|O|BLOCKED)\]\s+(?P<rest>.+?)\s*$")
@@ -57,6 +58,20 @@ ADVANCE_RE = re.compile(r"::\s*advance=(?P<a>[^:]+?)(?:\s*::|$)")
 KINDS = ("tracked-task", "human-decision", "external", "foreign-lease", "not-before")
 CLOSE_REASONS = ("fixed", "no-fix-needed", "not-buildable", "maintainer-deferred")
 
+# FIX A (round 8): removing ONLY U+FEFF (the round-7 lstrip) left every other invisible able to
+# un-anchor a bullet and silently drop the item -> an empty enumeration -> a manufactured stop. grdinp:
+# do NOT enumerate one codepoint. The whole Unicode format class (category Cf) covers U+FEFF, U+200B-200F,
+# U+2060-2064, U+00AD, the bidi controls, etc.; the explicit set is a safety net for a runtime whose table
+# does not yet class U+180E / U+200C / U+200D as Cf. Removing at ANY position also launders a mid-content
+# invisible out of a title while preserving the visible text. A legitimate ASCII line has no Cf char and
+# is returned byte-identical.
+_ZERO_WIDTH = frozenset("\u200b\u200c\u200d\u2060\u180e\ufeff")
+
+
+def _strip_invisibles(line):
+    return "".join(ch for ch in line
+                   if ch not in _ZERO_WIDTH and unicodedata.category(ch) != "Cf")
+
 
 def parse(text, version=2):
     """(items, errors). Errors are strings; any error means the enumeration must not be emitted. Under
@@ -64,12 +79,14 @@ def parse(text, version=2):
     shape is produced byte-identically."""
     items, errors, seen = [], [], set()
     for n, line in enumerate(text.splitlines(), 1):
-        # FIX A (round 7): str.strip does NOT remove U+FEFF, so a BOM leading ANY line (byte 0, or the
-        # first line of a chunk concatenated after a header line) would leave the bullet un-anchored and
-        # the item silently dropped to prose -> an empty enumeration -> a manufactured stop. Strip a
-        # line-leading BOM between two whitespace strips, so a BOM with adjacent spaces is still removed;
-        # a mid-content U+FEFF stays literal because lstrip removes only a leading run.
-        stripped = line.strip().lstrip("\ufeff").strip()
+        # FIX A (round 8): str.strip leaves a line-leading U+FEFF, and lstrip("\ufeff") still leaves EVERY
+        # OTHER invisible (U+200B, U+2060, U+200C/200D, U+180E, the bidi controls, U+00AD, ...), so a
+        # bullet led by any of them stays un-anchored and the item is silently dropped to prose -> an empty
+        # enumeration -> a manufactured stop. Remove the whole Cf class (plus the explicit zero-width set)
+        # at ANY position before the bullet screen, closing the invisible-drop class by construction
+        # (leading, interleaved, or mid-content); a laundered bullet re-anchors, a laundered title renders
+        # clean. Because the liveness join parses through this same parser, both surfaces are fixed.
+        stripped = _strip_invisibles(line).strip()
         if not (CANDIDATE_RE.match(stripped) or CHECKBOX_RE.match(stripped)
                 or BLOCKER_PREFIX_RE.search(stripped)):
             continue
@@ -279,10 +296,39 @@ def self_test():
             or b0.get("close", {}).get("paths") != ["tools/x.py"]:
         ok_fail.append("a byte-0 BOM before the first bullet must enumerate the item "
                        "(got items={} errs={})".format(b0_items, b0_errs))
-    mid_bom = "- A-3 [ ] ti\ufefftle stays literal\n"
-    mid = next((i for i in parse(mid_bom, version=2)[0] if i["id"] == "A-3"), {})
-    if "\ufeff" not in mid.get("title", ""):
-        ok_fail.append("a mid-content U+FEFF must be preserved in the title (got {})".format(mid))
+    # FIX A (round 8): a line led by ANY invisible (not only U+FEFF) still enumerates the item; the
+    # round-7 lstrip("\ufeff") dropped every other zero-width/format char to prose. Removing the whole Cf
+    # class (plus the explicit set) closes the class by construction. Every fixture uses a Python ESCAPE.
+    for _label, _lead in (("zwsp", "\u200b"), ("word-joiner", "\u2060"),
+                          ("zwnj", "\u200c"), ("mongolian-vs", "\u180e")):
+        _src = _lead + "- A-1 [x] done :: close:no-fix-needed=R-1\n"
+        _it = next((i for i in parse(_src, version=2)[0] if i["id"] == "A-1"), {})
+        if _it.get("state") != "closed":
+            ok_fail.append("a line led by {} must enumerate the item, not drop it (got {})"
+                           .format(_label, _it))
+    # interleaved BOM/space before the dash, and a BOM AFTER the dash, both still enumerate.
+    _inter = next((i for i in parse(
+        "\ufeff \ufeff- A-1 [x] done :: close:no-fix-needed=R-1\n", version=2)[0]
+        if i["id"] == "A-1"), {})
+    if _inter.get("state") != "closed":
+        ok_fail.append("an interleaved BOM/space lead must enumerate the item (got {})".format(_inter))
+    _after = next((i for i in parse(
+        "-\ufeff A-2 [x] done :: close:fixed=commit-z :: paths=tools/x.py\n", version=2)[0]
+        if i["id"] == "A-2"), {})
+    if _after.get("state") != "closed" or _after.get("close", {}).get("paths") != ["tools/x.py"]:
+        ok_fail.append("a BOM after the dash must still enumerate the item (got {})".format(_after))
+    # a legitimate ASCII line is unchanged (no Cf char removed).
+    _plain = next((i for i in parse("- A-7 [ ] plain title\n", version=2)[0]
+                   if i["id"] == "A-7"), {})
+    if _plain.get("title") != "plain title":
+        ok_fail.append("a legitimate ASCII line must be unchanged (got {!r})".format(_plain.get("title")))
+    # a mid-content invisible is REMOVED (laundering noise) while the visible title is preserved. This
+    # REPLACES the round-7 "preserve mid-content U+FEFF" assertion, which asserted the opposite.
+    _mid = next((i for i in parse("- A-3 [ ] ti\ufefftle stays\u200bvisible\n", version=2)[0]
+                 if i["id"] == "A-3"), {})
+    if _mid.get("title") != "title staysvisible":
+        ok_fail.append("a mid-content invisible must be removed, visible title preserved (got {!r})"
+                       .format(_mid.get("title")))
     # FIX2/B3: a `fixed` close MAY carry a '::' paths list, parsed into close.paths (the same field the
     # JSON validator and the join read), so a routed fixed close re-enumerates as terminal.
     pitems, perrs = parse("- A-9 [x] shipped :: close:fixed=commit-z :: paths=tools/x.py,tools/y.py\n",

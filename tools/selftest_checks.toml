@@ -430,6 +430,18 @@ expected-check-ids = [
   "a2/succeeded-false-content-metadata-not-poison",
   "a2/succeeded-false-content-metadata-notext-not-poison",
   "a2/succeeded-false-self-referential-cycle",
+  "a2/succeeded-true-real-schedulewakeup",
+  "a2/succeeded-false-real-schedulewakeup-cancel",
+  "a2/succeeded-true-real-croncreate",
+  "a2/succeeded-false-real-schedulewakeup-negtoken",
+  "a2/succeeded-false-real-croncreate-negtoken",
+  "a2/succeeded-false-real-schedulewakeup-no-toolname",
+  "dispatch/wake-register-wired",
+  "dispatch/route-guard-wired",
+  "dispatch/wait-guard-wired",
+  "a2/real-schedulewakeup-registers",
+  "a2/real-schedulewakeup-cancel-no-register",
+  "a2/real-croncreate-registers",
 ]
 
 [[suite]]

@@ -454,7 +454,7 @@ def self_test():
     # FIX A lj/bom-markdown-not-dropped: a BOM-prefixed markdown item is parsed (the single leading BOM is
     # stripped once and the SAME text feeds the grammar), reconciling as a TERMINAL disposition, NEVER
     # silently dropped to a zero-terminal SUCCESS (the codex counterexample).
-    bom = "﻿- B-1 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n"
+    bom = "\ufeff- B-1 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n"
     findings, cannot, terminals = join(bom, chain([]), chain([]), fixed_reconcile=fr)
     if not any(t[0] == "B-1" for t in terminals):
         fails.append("a BOM-prefixed markdown item must be enumerated as a terminal, not dropped "
@@ -483,7 +483,7 @@ def self_test():
                      "(lj/bracket-nonjson-still-fails-closed)")
     # FIX A lj/double-bom-markdown-not-dropped: even a DOUBLE leading BOM is fully stripped (lstrip), so the
     # markdown item is not dropped to a zero-terminal success.
-    dbom = "﻿﻿- B-2 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n"
+    dbom = "\ufeff\ufeff- B-2 [x] done :: close:fixed=commit-x :: paths=tools/check_liveness_joins.py\n"
     findings, cannot, terminals = join(dbom, chain([]), chain([]), fixed_reconcile=fr)
     if not any(t[0] == "B-2" for t in terminals):
         fails.append("a double-BOM-prefixed markdown item must be enumerated as a terminal, not dropped "

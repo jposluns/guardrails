@@ -7404,7 +7404,7 @@ def orch_wake_register(data):
     prompt = tool_input.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         return _allow()
-    if not _orch_tool_succeeded(data.get("tool_response")):
+    if not _orch_tool_succeeded(data.get("tool_response"), tool):
         # A2: no orphan on a failed scheduling tool, and no orphan when success is unprovable.
         _orch_guard_event(root, "wake-register", "skip",
                           "{} did not succeed (or success unprovable); no wake registered".format(tool))
@@ -7528,6 +7528,33 @@ def _orch_has_positive_signal(response):
             or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE))
 
 
+def _orch_wake_tool_positive(response, tool_name):
+    """FIX 2 (round 8): the REAL success contracts of the wake-scheduling tools, taken from live
+    PostToolUse tool_response payloads, carry NONE of the generic is_error/success/ok/status markers, so
+    _orch_has_positive_signal returned False for EVERY real successful wake and the A2 substrate was inert
+    for real inputs (grdinp: the input could not answer the question asked of it). The real objects:
+      ScheduleWakeup success -> {"scheduledFor": <int ms > 0>, "clampedDelaySeconds": <int>,
+                                 "wasClamped": <bool>}
+      ScheduleWakeup cancel  -> {"scheduledFor": 0, ..., "stopped": true, "cancelledWakeups": <int>}
+      CronCreate     success -> {"id": "<non-empty>", "humanSchedule": <str>, "recurring": <bool>,
+                                 "durable": <bool>}
+    Recognize them TOOL-AWARE: a ScheduleWakeup is a scheduled wake only when scheduledFor is a positive
+    int AND it is not a cancel (a cancel schedules nothing and must NOT register a digest); a CronCreate
+    is a success on a non-empty id. bool is excluded from the int test (isinstance(True, int) is True), so
+    a scheduledFor of true/false never reads as a positive delay. The negative walk (G1/G2) still runs
+    first in _orch_tool_succeeded, so a real object carrying a negative token still declines. Fail-safe
+    direction is preserved: an unrecognized tool or shape returns False (do-not-register)."""
+    if tool_name == "ScheduleWakeup":
+        if response.get("stopped") is True:
+            return False
+        scheduled = response.get("scheduledFor")
+        return isinstance(scheduled, int) and not isinstance(scheduled, bool) and scheduled > 0
+    if tool_name == "CronCreate":
+        cron_id = response.get("id")
+        return isinstance(cron_id, str) and bool(cron_id.strip())
+    return False
+
+
 def _orch_content_texts(content):
     """FIX C (round 7): the judgeable free-text strings the G3 ambiguity screen reads, gathered by a FULL
     walk into nested dicts/lists/tuples (cycle-guarded via an id-set, node-budgeted like
@@ -7580,48 +7607,33 @@ def _orch_content_texts(content):
     return texts
 
 
-def _orch_tool_succeeded(response):
-    """A2 success test over a PostToolUse tool_response, INVERTED to a FAIL-SAFE POSITIVE CONTRACT
-    (B5 premise-review, round 5): 'is there AFFIRMATIVE, UNAMBIGUOUS evidence of success?', not 'is
-    there any failure token?'. A wake digest registers ONLY when all three by-construction gates pass;
-    anything else reads NOT succeeded, so no digest is written. Fail-safe = do-not-register: an
-    unregistered wake still lets a later identical human prompt reset the loop counters (safe), whereas
-    a falsely-registered wake orphans a digest and misclassifies that human prompt as timer-originated
-    (the A2 orphan, a LIVENESS failure). So EVERY doubt returns False.
+def _orch_tool_succeeded(response, tool_name=None):
+    """A2 success test over a PostToolUse tool_response, a FAIL-SAFE POSITIVE CONTRACT: 'is there
+    AFFIRMATIVE, UNAMBIGUOUS evidence of success?'. A wake digest registers ONLY when all three
+    by-construction gates pass; every doubt returns False. Fail-safe = do-not-register (an orphan digest
+    is the A2 liveness failure).
 
-    THREE GATES, all required (the round-4 counterexamples are closed by G1+G2 by construction, not by
-    enumerating phrases):
-      G1  no STRUCTURED negative anywhere: the UNBOUNDED, cycle-guarded, node-budgeted walk
-          (_orch_response_has_negative) finds no negative control field at ANY depth (success/ok falsy,
-          failure/error/is_error/isError present-and-truthy, a negative status token). This closes the
-          round-4 depth-6 cap AND the top-level-only structured checks.
-      G2  no soft-failure PHRASE anywhere: the same walk finds no failure/negation/uncertainty/
-          soft-failure phrase in ANY string at ANY depth (the extended lexicon covers 'fell through').
-      G3  an affirmative positive signal (_orch_has_positive_signal) AND, when content is present in ANY
-          shape (a content str, dict, or list at ANY nesting depth, normalized by _orch_content_texts), at
-          least one judgeable free-text string AFFIRMATIVELY confirms; content that neither negates nor
-          confirms, and a present, non-empty content that yields NO judgeable text at all, both fail safe
-          to no register (the ambiguity screen and its no-text fail-safe partner).
+    THREE GATES, all required:
+      G1  no STRUCTURED negative anywhere (_orch_response_has_negative, unbounded, cycle-guarded).
+      G2  no soft-failure PHRASE anywhere (same walk, extended lexicon).
+      G3  an affirmative positive signal AND, when content is present in any shape, at least one judgeable
+          free-text string affirmatively confirms. The positive signal is the generic contract
+          (_orch_has_positive_signal: is_error/success/ok/status) OR the REAL tool contract
+          (_orch_wake_tool_positive, FIX 2): the real ScheduleWakeup/CronCreate success objects carry
+          NONE of the generic markers, so the tool-aware branch is what makes a real wake register. The
+          real objects carry no `content` field, so G3's ambiguity screen is judged on the positive
+          signal alone for them (empty/absent content -> judged on the positive signal, as today).
 
-    DISCLOSED IRREDUCIBLE RESIDUAL (stated honestly, NOT closed): (a) a NOVEL soft-failure phrase absent
-    from the lexicon appearing beside a positive signal; (b) a failure token hidden inside an ENCODED
-    payload (e.g. base64). The depth-bound and the shape restriction are NOT residual - they are closed
-    here by construction (G1/G2 are unbounded and structural)."""
+    DISCLOSED IRREDUCIBLE RESIDUAL: (a) a NOVEL soft-failure phrase absent from the lexicon beside a
+    positive signal; (b) a failure token hidden in an ENCODED payload (e.g. base64)."""
     if not isinstance(response, dict):
-        # a bare string / None carries no structured success field: no affirmative confirmation.
         return False
     if _orch_response_has_negative(response):        # G1 + G2
         return False
-    if not _orch_has_positive_signal(response):      # G3: the affirmative positive signal
+    if not (_orch_has_positive_signal(response)
+            or _orch_wake_tool_positive(response, tool_name)):   # G3: generic OR the real tool contract
         return False
     content = response.get("content")                # G3: the ambiguity screen over free-text content
-    # FIX C (round 7): a FULL walk (_orch_content_texts) normalizes ANY content shape, including a NESTED
-    # container of text, to its judgeable free text before the screen, so a nested block can no longer yield
-    # NO texts and fall through this screen to an orphan wake. Two by-construction outcomes: (1) there is
-    # judgeable text and NONE of it affirmatively confirms -> decline; (2) content is PRESENT and NON-EMPTY
-    # but yields NO judgeable text (an opaque or non-'text'-keyed shape) -> decline (the fail-safe partner),
-    # so no non-empty content registers without an affirmative confirmation. Absent or empty content
-    # ({}/[]/"") is judged on G1/G2 + the positive signal alone.
     texts = _orch_content_texts(content)
     if texts:
         if not any(_ORCH_POS_CONFIRM_RE.search(t) for t in texts):
@@ -8821,6 +8833,9 @@ HANDLERS = {
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
+    "orch_route_guard": orch_route_guard,
+    "orch_wait_guard": orch_wait_guard,
+    "orch_wake_register": orch_wake_register,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -8854,6 +8869,9 @@ HANDLER_EVENT = {
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
+    "orch_route_guard": PRETOOL,
+    "orch_wait_guard": PRETOOL,
+    "orch_wake_register": "PostToolUse",
 }
 
 

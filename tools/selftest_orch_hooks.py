@@ -1850,6 +1850,49 @@ def main(report_path=None):
         check("a2/succeeded-false-self-referential-cycle",
               aiqt_hooks._orch_tool_succeeded(_cyc), False)
 
+        # ---------- FIX 2 (round 8): the REAL wake-tool success contracts (grounded, not synthetic) ----
+        # The real ScheduleWakeup/CronCreate objects carry NONE of the generic ok/success/is_error/status
+        # markers, so recognition is TOOL-AWARE. A mutation removing the scheduledFor/id recognition in
+        # _orch_wake_tool_positive flips every "true" case below to False (the load-bearing proof).
+        check("a2/succeeded-true-real-schedulewakeup",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False},
+                  "ScheduleWakeup"), True)
+        check("a2/succeeded-false-real-schedulewakeup-cancel",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 0, "clampedDelaySeconds": 0, "wasClamped": False,
+                   "stopped": True, "cancelledWakeups": 2}, "ScheduleWakeup"), False)
+        check("a2/succeeded-true-real-croncreate",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"id": "cron-7f3", "humanSchedule": "every day at 09:00",
+                   "recurring": True, "durable": True}, "CronCreate"), True)
+        # G1/G2 still governs a real object: a negative token beside the real success shape declines.
+        check("a2/succeeded-false-real-schedulewakeup-negtoken",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False,
+                   "reason": "clamp failed"}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-real-croncreate-negtoken",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"id": "cron-x", "humanSchedule": "cancelled daily",
+                   "recurring": True, "durable": True}, "CronCreate"), False)
+        # tool-awareness is REQUIRED: the SAME real success object with NO tool name cannot be recognized
+        # by the generic predicate, so it declines. This is why the register site must thread the tool name.
+        check("a2/succeeded-false-real-schedulewakeup-no-toolname",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False}), False)
+        # dispatchability SENTINELS: a DEFINED handler must be a dispatchable one, or main() rejects the
+        # mode (exit 2) and the control never runs. The direct-call tests above stay green either way, so
+        # these observe the wired path explicitly (removing a handler from HANDLERS flips its check).
+        check("dispatch/wake-register-wired",
+              "orch_wake_register" in aiqt_hooks.HANDLERS
+              and aiqt_hooks.HANDLER_EVENT.get("orch_wake_register") == "PostToolUse", True)
+        check("dispatch/route-guard-wired",
+              "orch_route_guard" in aiqt_hooks.HANDLERS
+              and aiqt_hooks.HANDLER_EVENT.get("orch_route_guard") == aiqt_hooks.PRETOOL, True)
+        check("dispatch/wait-guard-wired",
+              "orch_wait_guard" in aiqt_hooks.HANDLERS
+              and aiqt_hooks.HANDLER_EVENT.get("orch_wait_guard") == aiqt_hooks.PRETOOL, True)
+
         # ---------- GD-164: the prep discipline ----------
         p2 = Fixture(tmp, "prep")
         p2.pending.write_text("| PD-9 | 2026-01-01 | which db | RAISED |\n", encoding="utf-8")
@@ -2185,6 +2228,28 @@ def main(report_path=None):
         a2.set_turn_state({})
         post({"ok": True})
         check("a2/successful-schedule-registers-one",
+              len(a2.turn_state().get("wake_digests", [])), 1)
+        # FIX 2 (round 8): the REAL success objects REGISTER through the wired, tool-aware register path.
+        a2.set_turn_state({})
+        post({"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False})
+        check("a2/real-schedulewakeup-registers",
+              len(a2.turn_state().get("wake_digests", [])), 1)
+        # a real ScheduleWakeup CANCEL carried in the RESPONSE (not via tool_input.stop) registers NO
+        # digest: the response-level cancel check declines even when tool_input has no stop flag.
+        a2.set_turn_state({})
+        post({"scheduledFor": 0, "clampedDelaySeconds": 0, "wasClamped": False,
+              "stopped": True, "cancelledWakeups": 1})
+        check("a2/real-schedulewakeup-cancel-no-register",
+              a2.turn_state().get("wake_digests", []), [])
+        # a real CronCreate success registers through the CronCreate matcher (yield_tools already lists it).
+        post_cron = lambda resp: aiqt_hooks.orch_wake_register(
+            {"hook_event_name": "PostToolUse", "cwd": str(a2.root), "session_id": "s1",
+             "tool_name": "CronCreate", "tool_input": {"prompt": "cron A2"},
+             "tool_response": resp})
+        a2.set_turn_state({})
+        post_cron({"id": "cron-7f3", "humanSchedule": "every day at 09:00",
+                   "recurring": True, "durable": True})
+        check("a2/real-croncreate-registers",
               len(a2.turn_state().get("wake_digests", [])), 1)
         # after a FAILED schedule, a later byte-identical human prompt DOES reset the counters (not
         # misclassified timer-originated), because no orphan digest was registered

@@ -195,10 +195,22 @@ def load_manifest(path):
     return plugin, hooks
 
 
+def _dispatch_keys(script_text, dict_name):
+    """The handler keys registered in a dispatcher dict literal (HANDLERS / HANDLER_EVENT) in the source
+    script. A dict that cannot be located yields the empty set, which fails the membership check closed
+    (the declared handler then reads as undispatchable), per check-fails-closed-on-unreadable."""
+    m = re.search(r"^{}\s*=\s*\{{(.*?)^\}}".format(re.escape(dict_name)), script_text, re.M | re.S)
+    if not m:
+        return set()
+    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', m.group(1)))
+
+
 def cross_check(hooks, corpus_ids, script_text, name):
     """The manifest's outward references, fail-closed: every cited corpus-id exists in the loaded
     corpus (the check_mappings no-orphan pattern), and every named handler is defined in the source
     script, so a rename can never silently orphan an enforcement control."""
+    dispatch = _dispatch_keys(script_text, "HANDLERS")
+    dispatch_events = _dispatch_keys(script_text, "HANDLER_EVENT")
     for hook in hooks:
         where = "{}: [[hook]] {}".format(name, hook["id"])
         for rule in hook["rules"]:
@@ -208,6 +220,17 @@ def cross_check(hooks, corpus_ids, script_text, name):
         if not re.search(r"^def {}\(".format(re.escape(hook["handler"])), script_text, re.M):
             raise ValueError("{}: handler '{}' is not defined in scripts/{}"
                              .format(where, hook["handler"], SCRIPT_NAME))
+        # grdinp/observe-before-asserting-behaviour: a DEFINED handler is not a DISPATCHABLE one. The
+        # manifest declares the platform's invocation (python3 -I aiqt_hooks.py <handler>), so the handler
+        # MUST be a key in the dispatcher's HANDLERS and HANDLER_EVENT maps, or main() rejects the mode
+        # (exit 2) and the control never runs though its `def` and its direct-call self-tests are green.
+        if hook["handler"] not in dispatch:
+            raise ValueError("{}: handler '{}' is defined but not registered in HANDLERS in scripts/{}; "
+                             "the dispatcher cannot route to it".format(
+                                 where, hook["handler"], SCRIPT_NAME))
+        if hook["handler"] not in dispatch_events:
+            raise ValueError("{}: handler '{}' is not registered in HANDLER_EVENT in scripts/{}".format(
+                where, hook["handler"], SCRIPT_NAME))
 
 
 def render_hooks_json(hooks):
@@ -383,6 +406,15 @@ _SCRIPT = """#!/usr/bin/env python3
 # self-test dispatcher stub
 def test_handler(data):
     return (0, None, None)
+
+
+HANDLERS = {
+    "test_handler": test_handler,
+}
+
+HANDLER_EVENT = {
+    "test_handler": "PreToolUse",
+}
 """
 
 _MANIFEST = """[plugin]
@@ -483,6 +515,19 @@ def self_test_main():
         if run_quiet(good, check=True) != 1:
             failures.append("orphan under the plugin hooks/ expected exit 1")
         stray.unlink()
+
+        # N. Dispatchability gate: a handler DEFINED but not registered in the script's HANDLERS fails
+        #    closed (round 8, F-339). The conformant fixture wires test_handler; unwiring it must exit 2.
+        undispatch = tmp / "undispatch"
+        undispatch.mkdir()
+        _build_tree(undispatch)
+        _spath = undispatch / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _stext = _spath.read_text(encoding="utf-8")
+        if '"test_handler": test_handler,' not in _stext:
+            failures.append("self-test setup: fixture HANDLERS entry not found to unwire")
+        _spath.write_text(_stext.replace('"test_handler": test_handler,', ""), encoding="utf-8")
+        if run_quiet(undispatch, check=False) != 2:
+            failures.append("a handler defined but absent from HANDLERS must fail closed (exit 2)")
 
         # 3. An unknown corpus-id in the manifest fails closed.
         badid = tmp / "badid"
