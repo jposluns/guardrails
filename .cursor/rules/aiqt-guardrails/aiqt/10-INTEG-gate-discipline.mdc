@@ -16,3 +16,19 @@ truncated delivery, a textual success token, or a result for a different revisio
 pending, missing, ambiguous, malformed, unknown, or unreadable result is unverified, never a pass, and the
 gated action stays a separate step, withheld until terminal success is observed, so a check folded into the
 same unverified apply or merge does not establish the checkpoint.
+
+When a command's own termination status is the evidence a verdict rests on, that status is read from the
+gating command itself, never from a compound that sequences another command after it. An
+always-succeeding trailer, a status-printing echo of the prior exit, a `true`, or any other no-op
+appended after the gate, makes the compound report the trailer's status, not the gate's, so a failing
+gate reads as a pass; a printed copy of the exit is output, not the verdict, and such a trailer is never
+appended to a command whose exit is relied on. The exit of a launcher, dispatcher, wrapper, or detached
+background task that carried the gate is likewise the carrier's status, not the gate's verdict: the
+verdict is read from the gate's own result, never from the vehicle's success.
+
+An event-triggered gate is relied on only after its trigger's preconditions are confirmed against
+authoritative state: a pipeline triggered by a change request needs an open change request for the exact
+revision and intended base before any run can exist, so where the precondition is unmet the absence of a
+reported failure is a missing result, never a pass. A pushed revision, an acknowledged dispatch, or an
+elapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate
+before anything is read from its outcome.
