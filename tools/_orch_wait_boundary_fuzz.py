@@ -5,20 +5,24 @@ its wait/liveness decision path directly, asserting the load-bearing invariant B
 future fail-open sibling is caught here rather than round-by-round in QA.
 
 LOAD-BEARING INVARIANT: every unreadable, malformed, absent, or ambiguous input on the wait/liveness
-decision path resolves to DENY-the-wind-down (cannot-evaluate / hold), NEVER to a cap-relieving ALLOW;
-the ONLY ALLOW is the fully-evaluated single case (enumeration ok, zero actionable, zero
-cannot-evaluate, at least one live waiting row named as a whole token, not cap-relieved). An operator
-escape ALLOW is the operator-owned release, not a cap-relieving fail-open, and is excluded.
+decision path resolves to DENY-the-wind-down (cannot-evaluate / hold), NEVER to a cap-relieving ALLOW.
+The ONLY plain ALLOW is the fully-evaluated single case (enumeration ok, zero actionable, zero
+cannot-evaluate, at least one live waiting row named as a whole token, not cap-relieved). The ONLY
+ALLOW_WITH_FINDINGS is the sanctioned repeated-same-basis ACTIONABLE-work wedge (a recorded forced
+exit); a cap-relieving ALLOW_WITH_FINDINGS under an ignorance path (enum!=ok, a cannot-evaluate item,
+or an unnamed/absent wait target) is a BREACH (B1). An operator escape ALLOW is the operator-owned
+release, not a cap-relieving fail-open, and is excluded.
 
 Two layers:
   1. Pure-core sweep over decide_yield(ctx): a deterministic, bounded mutation of every ctx field on
      the wait/liveness path (enum_status, cannot_evaluate, actionable, waiting, wake_named, escape,
-     schedule_denials/basis_unchanged for the cap, kind). Every mutation is classified and the
-     invariant asserted.
+     schedule_denials/basis_unchanged for the cap). Every mutation is classified and the invariant
+     asserted, INCLUDING that a capped ignorance path is DENY (never a cap-relieving ALLOW_WITH_FINDINGS)
+     and that the only sanctioned cap relief is the actionable-work wedge.
   2. Read/parse boundary cases through _orch_build_ctx + orch_wait_guard against hermetic temp repos:
-     a bad registry (handler ASK/hold), a v2 malformed close (ENUMERATOR_ERROR -> DENY), an
-     ownership-failing deferrals register without weak_proof_accepted (held), a wait naming no live
-     row (DENY), and the single valid ALLOW case (must remain the sole ALLOW).
+     a bad registry (handler ASK/hold), a v2 malformed close (ENUMERATOR_ERROR -> DENY), a wait naming
+     no live row (DENY), and the single valid ALLOW case (a live ledger row the wait names -> the sole
+     licensed ALLOW).
 
 Determinism: a fixed PRNG seed and a bounded round count (test-hermeticity: no wall clock, locale, or
 ambient state feeds a verdict). This is a bounded deterministic property sweep, not an exhaustive proof
@@ -56,20 +60,46 @@ def _is_single_valid_allow(ctx):
             and ctx.get("wake_named") is True)
 
 
+def _is_sanctioned_cap_relief(ctx):
+    """The ONLY case an ALLOW_WITH_FINDINGS is sanctioned on the wait/schedule path: the repeated-
+    same-basis ACTIONABLE-work wedge (a farmed guard trains its own bypass), recorded as a forced exit.
+    It requires an OK enumeration, NO cannot-evaluate item, at least one ACTIONABLE item, and the cap
+    reached on an unchanged basis. It is NEVER sanctioned under an ignorance path (enum!=ok,
+    cannot-evaluate present, or an unnamed/absent wait target), so a cap-relieving ALLOW there is a
+    breach the fuzz must catch (B1)."""
+    return (ctx.get("enum_status") == "ok"
+            and not ctx.get("cannot_evaluate")
+            and bool(ctx.get("actionable"))
+            and ctx.get("schedule_denials", 0) >= aiqt_hooks._ORCH_SCHEDULE_CAP
+            and ctx.get("basis_unchanged") is True)
+
+
 def _classify(ctx, verdict):
-    """Return an invariant-breach string or None. A breach is a cap-relieving ALLOW on any input that
-    is NOT the single valid case and is NOT an operator escape."""
-    if verdict != "ALLOW":
-        return None                      # DENY / ALLOW_WITH_FINDINGS(capped) are the safe directions
+    """Return an invariant-breach string or None. A plain ALLOW is a breach unless it is the single
+    valid case or an operator escape; an ALLOW_WITH_FINDINGS is a breach unless it is the sanctioned
+    actionable-wedge cap relief or an operator escape. Only DENY is unconditionally safe. B1: the old
+    classifier returned None for EVERY non-ALLOW verdict, so it never asserted against a cap-relieving
+    ALLOW_WITH_FINDINGS under an ignorance path (the exact hole this harness must guard)."""
     if ctx.get("escape"):
         return None                      # operator-owned release, not a fail-open
-    if _is_single_valid_allow(ctx):
-        return None
-    return ("INVARIANT BREACH: wait decide_yield ALLOWed a non-single, non-escape case: "
-            "enum={} actionable={} cannot_evaluate={} waiting={} wake_named={}".format(
-                ctx.get("enum_status"), len(ctx.get("actionable", [])),
-                len(ctx.get("cannot_evaluate", [])), len(ctx.get("waiting", [])),
-                ctx.get("wake_named")))
+    if verdict == "ALLOW":
+        if _is_single_valid_allow(ctx):
+            return None
+        return ("INVARIANT BREACH: wait decide_yield returned a plain ALLOW on a non-single, "
+                "non-escape case: enum={} actionable={} cannot_evaluate={} waiting={} wake_named={}"
+                .format(ctx.get("enum_status"), len(ctx.get("actionable", [])),
+                        len(ctx.get("cannot_evaluate", [])), len(ctx.get("waiting", [])),
+                        ctx.get("wake_named")))
+    if verdict == "ALLOW_WITH_FINDINGS":
+        if _is_sanctioned_cap_relief(ctx):
+            return None                  # the sanctioned actionable-wedge relief (recorded forced exit)
+        return ("INVARIANT BREACH: wait decide_yield CAP-RELIEVED (ALLOW_WITH_FINDINGS) outside the "
+                "sanctioned actionable-wedge case: enum={} actionable={} cannot_evaluate={} "
+                "waiting={} wake_named={} schedule_denials={} basis_unchanged={}".format(
+                    ctx.get("enum_status"), len(ctx.get("actionable", [])),
+                    len(ctx.get("cannot_evaluate", [])), len(ctx.get("waiting", [])),
+                    ctx.get("wake_named"), ctx.get("schedule_denials"), ctx.get("basis_unchanged")))
+    return None                          # DENY is the safe direction
 
 
 def _base_ctx():
@@ -155,7 +185,9 @@ def _wait_verdict(root, text):
 
 
 def sweep_boundary():
-    """Layer 2: read/parse boundary cases. Each non-single case must NOT yield a cap-relieving allow."""
+    """Layer 2: read/parse boundary cases. Each non-single case must NOT yield a cap-relieving allow,
+    and the single genuinely-licensed case MUST reach the sole ALLOW through the full read/parse path
+    (so a false-DENY there would be caught too)."""
     breaches = []
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf-") as tmp:
         # a wait naming no live row -> DENY
@@ -170,6 +202,20 @@ def sweep_boundary():
             encoding="utf-8")
         if _wait_verdict(root, "collect anything") == "allow":
             breaches.append("a malformed-close enumeration yielded a cap-relieving allow")
+    with tempfile.TemporaryDirectory(prefix="aiqt-wbf-allow-") as tmp:
+        # the SINGLE VALID ALLOW through the full path (its own fresh repo, so the anti-shrinkage
+        # checkpoint has no prior window): a live ledger row for T-1, a WA-1 item blocked on it, and a
+        # wait naming WA-1 -> the sole licensed ALLOW (a false-DENY here would be a breach too).
+        root = _mkrepo(tmp, {}, [{"id": "WA-1", "state": "open", "granted": True,
+                                  "blocker": {"kind": "tracked-task", "ref": "T-1"}}])
+        sd = Path(aiqt_hooks._orch_state_dir_for_root(root))
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "dispatch-ledger.jsonl").write_text(json.dumps({
+            "ts": aiqt_hooks._orch_now().isoformat(), "event": "launch", "task_id": "T-1",
+            "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        if _wait_verdict(root, "collect WA-1") != "allow":
+            breaches.append("the single genuinely-licensed wait (a named live waiting row) did NOT "
+                            "reach the sole ALLOW through the full read/parse path")
     with tempfile.TemporaryDirectory(prefix="aiqt-wbf2-") as tmp:
         # a bad registry -> handler ASK/hold, never a cap-relieving allow
         tmp = Path(tmp)

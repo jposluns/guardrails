@@ -142,13 +142,16 @@ def _find_item(reg, root, item_id):
 def _close_surface(backlog_path, item_id, reason, ref):
     """Mark the reference markdown-backlog line closed and append the v2 close annotation, matching
     tools/aei_backlog_md.py's grammar (:: close:<reason>=<ref>). Fail-closed: the line must exist and
-    must not already carry a divergent close. Returns (ok, detail)."""
+    must NOT already carry a DIVERGENT close (a different reason/ref). B3: an existing divergent close
+    is REFUSED (never silently removed and replaced), honouring the contract in this docstring; only an
+    exact re-statement of the same close is idempotently allowed. Returns (ok, detail)."""
     try:
         text = Path(backlog_path).read_text(encoding="utf-8")
     except OSError as exc:
         return (False, "backlog unreadable ({})".format(exc))
     import re
     pat = re.compile(r"^(-\s+" + re.escape(item_id) + r"\s+)\[(x|X| |\.|o|O|BLOCKED)\](.*)$")
+    close_pat = re.compile(r"\s*::\s*close:([^=:]+)=(.+?)\s*$")
     out, hits = [], 0
     for line in text.splitlines():
         m = pat.match(line.strip())
@@ -157,7 +160,12 @@ def _close_surface(backlog_path, item_id, reason, ref):
             continue
         hits += 1
         rest = m.group(3)
-        rest = re.sub(r"\s*::\s*close:[^:]+\s*$", "", rest).rstrip()
+        existing = close_pat.search(rest)
+        if existing and (existing.group(1).strip(), existing.group(2).strip()) != (reason, ref):
+            return (False, "{} already carries a divergent close (close:{}={}); refusing to overwrite "
+                    "it with close:{}={} (hand-reconcile the surface first)".format(
+                        item_id, existing.group(1).strip(), existing.group(2).strip(), reason, ref))
+        rest = close_pat.sub("", rest).rstrip()
         out.append("- {} [x]{} :: close:{}={}".format(item_id, rest, reason, ref))
     if hits != 1:
         return (False, "expected exactly one line for {} in the surface, found {}".format(
@@ -172,6 +180,12 @@ def route(root, reg, item_id, ground, ref, check_ref, backlog):
         _event(root, sd, "refused", "unknown ground {!r} (not in the closed vocabulary)".format(ground))
         print("orch_route: unknown ground {!r}; the closed vocabulary is {}".format(
             ground, "/".join(sorted(aiqt_hooks._ORCH_CLOSE_REASONS))), file=sys.stderr)
+        return 2
+    if not isinstance(ref, str) or not ref.strip():
+        # B3: a whitespace-only or blank ref names nothing and can never substantiate a close.
+        _event(root, sd, "refused", "blank/whitespace ref for ground {}".format(ground))
+        print("orch_route: --ref must be a non-blank reference (a blank/whitespace ref substantiates "
+              "no close)", file=sys.stderr)
         return 2
     it, detail = _find_item(reg, root, item_id)
     if it is None:
@@ -235,7 +249,23 @@ def route(root, reg, item_id, ground, ref, check_ref, backlog):
                   "maintainer authors it on the operator-owned register first".format(item_id, ref),
                   file=sys.stderr)
             return 2
-    # ground == "fixed": no register row; the attestation/vfcmt rail governs the landing.
+    else:
+        # ground == "fixed": B3 - NOT a self-authored bypass. It carries no DS/DF register row, but its
+        # ref MUST resolve to a real commit against the fix-attestation rail (vfxcmt/evgcmp), so a
+        # fabricated or absent ref is refused (cannot-evaluate) rather than silently closing the surface.
+        resolves, consultable = aiqt_hooks._orch_commit_resolves(root, ref)
+        if not consultable:
+            _event(root, sd, "refused", "fix-attestation rail unavailable for fixed close of {}"
+                   .format(item_id))
+            print("orch_route: could not consult the fix-attestation rail (git) to verify the fixed "
+                  "close ref; held (cannot-evaluate)", file=sys.stderr)
+            return 2
+        if not resolves:
+            _event(root, sd, "refused",
+                   "fixed close ref {!r} does not resolve to a real commit".format(ref))
+            print("orch_route: a 'fixed' close requires --ref to name a real commit (vfxcmt); {!r} "
+                  "resolves to no commit, so the close is refused".format(ref), file=sys.stderr)
+            return 2
 
     if backlog:
         ok, cdetail = _close_surface(backlog, item_id, ground, ref)
@@ -333,6 +363,45 @@ def self_test():
             json.dumps({"seq": 0, "digest": ZERO}), encoding="utf-8")
         if route(root, reg, "C-2", "maintainer-deferred", "PD-2", "", str(backlog)) != 2:
             fails.append("maintainer-deferred without a grant should refuse (exit 2)")
+
+        # ---- B3: `fixed` is verified against the fix-attestation rail, not a self-authored bypass ----
+        # (e) fixed with a FABRICATED ref (resolves to no commit) is refused (exit 2), surface untouched
+        before = backlog.read_text(encoding="utf-8")
+        if route(root, reg, "C-2", "fixed", "fabricated-not-a-commit", "", str(backlog)) != 2:
+            fails.append("fixed with a fabricated ref should refuse (exit 2)")
+        if backlog.read_text(encoding="utf-8") != before:
+            fails.append("a refused fixed close must NOT touch the surface")
+        # (f) a WHITESPACE-only ref is refused for every ground (exit 2)
+        if route(root, reg, "C-2", "fixed", "   ", "", str(backlog)) != 2:
+            fails.append("a whitespace-only ref should refuse (exit 2)")
+        # (g) fixed HAPPY path: a ref that resolves to a REAL commit routes (exit 0) and closes it
+        for k, v in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(["git", "-C", str(tmp), "config", k, v], capture_output=True, check=False)
+        subprocess.run(["git", "-C", str(tmp), "add", "-A"], capture_output=True, check=False)
+        subprocess.run(["git", "-C", str(tmp), "commit", "-q", "-m", "seed"],
+                       capture_output=True, check=False)
+        head = subprocess.run(["git", "-C", str(tmp), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=False)
+        real_sha = head.stdout.strip()
+        rc = route(root, reg, "C-2", "fixed", real_sha, "", str(backlog))
+        if rc != 0:
+            fails.append("fixed with a real commit ref should route (exit 0), got {}".format(rc))
+        if "close:fixed={}".format(real_sha) not in backlog.read_text(encoding="utf-8"):
+            fails.append("fixed happy path did not write the close annotation")
+        # (h) _close_surface REFUSES a DIVERGENT existing close (never silently overwrites it), while an
+        # exact re-statement of the same close is idempotently allowed.
+        okc, _d = _close_surface(str(backlog), "C-2", "no-fix-needed", "R-2")
+        if okc:
+            fails.append("a divergent existing close must be refused by _close_surface")
+        if "close:fixed={}".format(real_sha) not in backlog.read_text(encoding="utf-8"):
+            fails.append("the refused divergent close must leave the prior close intact")
+        okc, _d = _close_surface(str(backlog), "C-2", "fixed", real_sha)
+        if not okc:
+            fails.append("an exact re-statement of the same close should be idempotently allowed")
+        # (i) an item absent from a FRESH enumeration (stale/removed) is cannot-evaluate (exit 2)
+        write_aei([{"id": "C-1", "state": "open", "granted": True}])   # C-2 gone from the index
+        if route(root, reg, "C-2", "fixed", real_sha, "", str(backlog)) != 2:
+            fails.append("routing an item absent from the fresh enumeration should refuse (exit 2)")
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

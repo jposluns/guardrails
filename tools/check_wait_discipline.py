@@ -65,7 +65,7 @@ def _language_for(path, declared):
 
 
 # ---- POSIX shell heuristics (lexical; residual disclosed) ---------------------------------------
-_SH_LOOP_HEAD = re.compile(r"\b(while|until)\b\s+(true|:|\[\s*1\s*\])", re.IGNORECASE)
+_SH_LOOP_HEAD = re.compile(r"\b(while|until)\b\s+(true|false|:|\[\s*1\s*\])", re.IGNORECASE)
 _SH_SLEEP = re.compile(r"\bsleep\b")
 _SH_BOUND = re.compile(r"\bbreak\b|-(ge|gt|le|lt)\b|\bSECONDS\b|date\s+\+%s")
 _SH_TIMEOUT_CONT = re.compile(r"(timeout|timed?\s*out|TMOUT|-t\s+\d)", re.IGNORECASE)
@@ -138,6 +138,10 @@ def parse_shell_ok(src):
     stripped = re.sub(r"#.*", "", src)
     stripped = re.sub(r"'[^']*'", "", stripped)
     stripped = re.sub(r'"[^"]*"', "", stripped)
+    # B7: after balanced quote spans are removed, ANY residual quote is an UNBALANCED (unterminated)
+    # quote, which reads as unparseable (fail-closed) rather than a clean pass on `echo 'unterminated`.
+    if "'" in stripped or '"' in stripped:
+        return False
     tokens = re.findall(r"(?<![\w$])(do|done|if|fi|case|esac)\b", stripped)
     bal = {"do": 0, "if": 0, "case": 0}
     for t in tokens:
@@ -221,9 +225,15 @@ def check_one(name, src, language, validator):
 
 def run(root, reg):
     declared = reg.get("coordination_scripts")
-    if not isinstance(declared, list):
+    if declared is None:
         print("no coordination_scripts declared: the gate is inert here (by design)")
         return 0, {"gate": "wait-discipline", "covered": [], "findings": []}
+    if not isinstance(declared, list):
+        # B7: a DECLARED-but-malformed coordination_scripts (e.g. a bare string) fails CLOSED
+        # (cannot-evaluate), never a silent inert pass (chkfcl: a declared input the gate cannot read).
+        return 2, {"gate": "wait-discipline", "covered": [], "findings": [],
+                   "cannot_evaluate": ["coordination_scripts is declared but is not a list ({!r})"
+                                       .format(type(declared).__name__)]}
     covered, findings, cannot = [], [], []
     for entry in declared:
         if isinstance(entry, dict):
@@ -239,6 +249,14 @@ def run(root, reg):
         except OSError as exc:
             cannot.append("{}: declared script is absent or unreadable ({})".format(rel, exc))
             continue
+        # B7: a DECLARED validator must exist and be readable; a missing one is cannot-evaluate, never a
+        # silent defer (the gate cannot claim to have covered a script via a validator that is not there).
+        if validator:
+            vpath = aiqt_hooks._orch_path(root, validator)
+            if not vpath or not os.path.exists(vpath):
+                cannot.append("{}: declared validator {!r} is absent (cannot-evaluate)".format(
+                    rel, validator))
+                continue
         lang = _language_for(path, language)
         ok, fnd, ce = check_one(rel, src, lang, validator)
         if ce:
@@ -320,6 +338,15 @@ def self_test():
     ok, fnd, ce = check_one("wd/unsupported-with-validator", "x", "ruby", "tools/ruby_wait_lint.rb")
     if not ok or ce:
         fails.append("unsupported language WITH a declared validator should defer (pass)")
+    # B7 wd/until-false-unbounded: `until false` is an unbounded poll loop (the regex-gap gemini flagged)
+    ok, fnd, ce = check_one("wd/until-false-unbounded", "until false; do sleep 5; done\n",
+                            "posix-shell", None)
+    if ce or not fnd:
+        fails.append("`until false` with sleep and no bound must be REJECTED (wd/until-false-unbounded)")
+    # B7 wd/unterminated-quote-fails-closed: an unbalanced quote reads as unparseable (fail-closed)
+    ok, fnd, ce = check_one("wd/unterminated-quote", "echo 'unterminated\n", "posix-shell", None)
+    if ok or not ce:
+        fails.append("an unterminated quote must be cannot-evaluate/fail-closed (wd/unterminated-quote)")
     # absent declared script + machine-result set enumeration via run()
     import tempfile
     with tempfile.TemporaryDirectory(prefix="aiqt-wd-") as tmp:
@@ -334,6 +361,19 @@ def self_test():
         if result["covered"] != ["coord.sh"]:
             fails.append("machine result must enumerate exactly the covered set "
                          "(wd/machine-result-enumerates-covered-set), got {}".format(result["covered"]))
+        # B7 wd/malformed-declared-fails-closed: a declared-but-not-a-list coordination_scripts is
+        # cannot-evaluate (exit 2), never a silent inert pass
+        code2, _r2 = run(str(tmp), {"coordination_scripts": "missing.sh"})
+        if code2 != 2:
+            fails.append("a declared-but-malformed coordination_scripts must fail closed (exit 2)")
+        # B7 wd/missing-validator-fails-closed: a declared validator that is absent is cannot-evaluate,
+        # never a silent defer/pass
+        reg3 = {"coordination_scripts": [{"path": "coord.rb", "language": "ruby",
+                                          "validator": "tools/does-not-exist.rb"}]}
+        (tmp / "coord.rb").write_text("puts 'x'\n", encoding="utf-8")
+        code3, result3 = run(str(tmp), reg3)
+        if code3 != 2 or not any("validator" in c for c in result3.get("cannot_evaluate", [])):
+            fails.append("a declared-but-absent validator must fail closed (wd/missing-validator-fails-closed)")
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

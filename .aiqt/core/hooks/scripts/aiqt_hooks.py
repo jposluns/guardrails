@@ -5576,9 +5576,13 @@ def validate_enumeration(obj):
     empty backlog). Under v2 a closed item MUST carry a close object (reason in _ORCH_CLOSE_REASONS,
     non-blank string ref); a human-decision blocker MUST carry a boolean prep_complete, and
     prep_complete true MUST carry a non-blank string prep_ref; any item MAY carry a non-blank string
-    advance hint (display metadata only, never verdict-bearing). Under v1 every check is byte-identical
-    to the shipped v1 contract and close/prep/advance normalize to None. A duplicate id, a malformed
-    item or field, an unknown version, a missing envelope, or a non-dict payload is an error."""
+    advance hint (display metadata only, never verdict-bearing). Under v1 every VALIDATION DECISION is
+    identical to the shipped v1 contract and the v1 classification BUCKETS and DECISION are unchanged;
+    the normalized item additionally carries the new keys close/prep_complete/prep_ref/advance as inert
+    None (and classify_backlog's output gains inert empty terminal/closed_unjustified lists), so the
+    internal representation is a SUPERSET of the v1 dict, not byte-identical to it, while no v1 code path
+    reads those inert keys. A duplicate id, a malformed item or field, an unknown version, a missing
+    envelope, or a non-dict payload is an error."""
     if not isinstance(obj, dict):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
@@ -5812,21 +5816,56 @@ def _orch_attestation_refs(reg, root, staleness, state_dir=None):
     return frozenset(refs)
 
 
+_ORCH_DECISION_RESOLVED_RE = re.compile(
+    r"\b(declined|withdrawn|superseded|resolved|answered|rejected|cancell?ed|closed|done)\b",
+    re.IGNORECASE)
+
+
+def _orch_decision_row_lines(ref, haystack):
+    """The line(s) where `ref` sits at a decision ROW-ID position (a leading '| ref |' table cell or a
+    'ref:' key), never merely in prose (CX-R2-B3). Returns [] for a blank ref or an unreadable surface,
+    so a fabricated/absent prep_ref resolves to no row."""
+    if not isinstance(ref, str) or not ref.strip() or not isinstance(haystack, str):
+        return []
+    pat = re.compile(r"(?m)^[ \t]*(?:\|[ \t]*{0}[ \t]*\||{0}[ \t]*:).*$".format(re.escape(ref)))
+    return pat.findall(haystack)
+
+
+def _orch_decision_row_present(ref, haystack):
+    """True when `ref` appears at a decision row-id position in the pending surface."""
+    return bool(_orch_decision_row_lines(ref, haystack))
+
+
+def _orch_decision_row_pending(ref, haystack):
+    """True when `ref` appears at a decision row-id position that reads GENUINELY PENDING: at least one
+    matching row carries no resolved/declined status token. A row marked resolved/declined is not a
+    pending decision and holds nothing (B4: assistant-writable label text cannot manufacture a hold)."""
+    rows = _orch_decision_row_lines(ref, haystack)
+    return any(not _ORCH_DECISION_RESOLVED_RE.search(line) for line in rows)
+
+
 def classify_backlog(items, live_ids, ledger_readable, pending_haystack, staleness,
-                     attestations=None, dispositions=None, deferrals=None):
+                     attestations=None, dispositions=None, deferrals=None, fix_refs=None):
     """Pure classification of a VALID enumeration (step 5). Returns actionable/waiting/blocked/
-    cannot_evaluate/proposed. A proof SOURCE that cannot be read (ledger unreadable-or-malformed, or
-    pending_haystack is None) puts the item in cannot_evaluate: FIX 1 DENIES the stop on it (ignorance
+    cannot_evaluate/proposed/terminal. A proof SOURCE that cannot be read (ledger unreadable-or-malformed,
+    or pending_haystack is None) puts the item in cannot_evaluate: FIX 1 DENIES the stop on it (ignorance
     refuses the wind-down) and the schedule path DENIES on it too (missing evidence never licenses an idle).
     attestations is the C.2 tri-state from _orch_attestation_refs: None (no register declared) keeps
     the free-text external/foreign-lease evidence path byte-identical; "unreadable" (declared but the
     validated snapshot is absent, stale, or malformed) HOLDS such an item (cannot-evaluate), never
     blocked or actionable; a validated ref-set classifies blocked only when the blocker's ref is
-    covered by a fresh validated row, the existing observed_at_utc freshness check still applying."""
+    covered by a fresh validated row, the existing observed_at_utc freshness check still applying.
+    GD-164 B2/B3: a TERMINAL close (a verified `fixed`, a validated no-fix-needed/not-buildable
+    dispositions row) is kept in the `terminal` bucket so the complete machine enumeration counts EVERY
+    indexed item (setcmp), never an empty backlog. GD-164 B3: `fixed` is NOT a self-authored bypass; it
+    is terminal ONLY when its ref is verified against the fix-attestation rail (fix_refs, commit refs
+    that resolve, per vfxcmt/evgcmp). fix_refs is None when that rail is unavailable (e.g. v1 has no
+    close object, so it never reaches here), which HOLDS a `fixed` close (cannot-evaluate); a ref not in
+    the resolved set is closed-unjustified and stays ACTIONABLE (ignorance refuses the wind-down)."""
     now = _orch_now()
     ext_hours = _orch_validate("staleness", staleness)[1]["external_hours"]
     out = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": [],
-           "closed_unjustified": []}
+           "terminal": [], "closed_unjustified": []}
     for it in items:
         if it["state"] == "closed":
             close = it.get("close")
@@ -5834,14 +5873,27 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                 continue                       # v1: skip exactly as today (byte-identical)
             reason = close["reason"]
             if reason == "fixed":
-                continue                       # terminal; the attestation/vfcmt rail governs landing
-            if reason in ("no-fix-needed", "not-buildable"):
+                # B3: `fixed` is verified against the fix-attestation rail, never self-authored. A ref
+                # covered by a resolved commit reference is terminal (counted); an unverifiable rail
+                # HOLDS (cannot-evaluate); a ref that does not resolve is closed-unjustified + actionable.
+                if fix_refs is None:
+                    out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
+                        "close ground fixed cannot be verified against the fix-attestation rail; held"))
+                    out["closed_unjustified"].append(it["id"])
+                elif close["ref"] in fix_refs:
+                    out["terminal"].append((it["id"], "fixed", close["ref"]))
+                else:
+                    out["actionable"].append((it["id"], it["title"],
+                        "closed (fixed) with a ref {!r} that does not resolve to a verified commit "
+                        "(vfxcmt)".format(close["ref"])))
+                    out["closed_unjustified"].append(it["id"])
+            elif reason in ("no-fix-needed", "not-buildable"):
                 if dispositions is None or dispositions == "unreadable":
                     out["cannot_evaluate"].append((it["id"], "cannot-evaluate",
                         "close ground {} cannot be verified; held".format(reason)))
                     out["closed_unjustified"].append(it["id"])
                 elif (it["id"], reason, close["ref"]) in dispositions:
-                    continue                   # terminal: a qualifying validated dispositions row
+                    out["terminal"].append((it["id"], reason, close["ref"]))
                 else:
                     out["actionable"].append((it["id"], it["title"],
                         "closed ({}) without a qualifying dispositions register entry".format(reason)))
@@ -5859,7 +5911,14 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                     out["closed_unjustified"].append(it["id"])
             continue
         if it["state"] == "proposed" or not it["granted"]:
-            out["proposed"].append(it["id"])
+            # B4: state='proposed'/granted=False is ASSISTANT-WRITABLE label text and cannot remove
+            # buildable work from the actionable set (a self-authored proposal is not a grant and
+            # licenses no wind-down; cntdef/deccls). Such an item is ACTIONABLE, not parked: its
+            # preparatory pipeline continues, and only a genuine maintainer decision on the authoritative
+            # surface (a human-decision blocker below) ever holds the final step.
+            out["actionable"].append((it["id"], it["title"],
+                "state 'proposed'/ungranted is assistant-writable and licenses no wind-down; the "
+                "preparatory work is actionable"))
             continue
         blocker = it["blocker"]
         if not blocker:
@@ -5885,13 +5944,27 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
             elif not _ORCH_DECISION_ID_RE.match(ref):
                 out["actionable"].append((it["id"], it["title"],
                                           "human-decision ref {!r} is not a decision id".format(ref)))
-            elif re.search(r"(?m)^[ \t]*(?:\|[ \t]*{0}[ \t]*\||{0}[ \t]*:)".format(re.escape(ref)),
-                           pending_haystack):
-                # v2 prep gating: a decision blocks only the FINAL step. prep_complete is None under v1
-                # (byte-identical: blocked), True/False only under v2. False -> preparatory work remains.
-                if it.get("prep_complete") is False:
+            elif _orch_decision_row_present(ref, pending_haystack):
+                # A decision blocks only the FINAL step. prep_complete is None under v1 (byte-identical:
+                # a matching pending row blocks), True/False only under v2.
+                pc = it.get("prep_complete")
+                if pc is None:
+                    out["blocked"].append((it["id"], "human-decision", ref))
+                elif pc is False:
                     out["actionable"].append((it["id"], it["title"],
                         "a decision blocks only the final step; preparatory work remains"))
+                # B4: a v2 hold counts only on an ACCEPTED authoritative decision (a genuinely pending
+                # row, not a resolved/declined one) AND an ATTESTED prep (prep_ref must resolve to a real
+                # pending-decision row). Assistant-writable label text ('DECLINED', a fabricated
+                # prep_ref) cannot manufacture a hold; either failure leaves the item ACTIONABLE.
+                elif not _orch_decision_row_pending(ref, pending_haystack):
+                    out["actionable"].append((it["id"], it["title"],
+                        "the decision row for {} reads resolved/declined, not pending; a resolved "
+                        "decision holds nothing".format(ref)))
+                elif not _orch_decision_row_present(it.get("prep_ref"), pending_haystack):
+                    out["actionable"].append((it["id"], it["title"],
+                        "prep_complete is true but prep_ref {!r} does not resolve to a real "
+                        "pending-decision row; the hold is not attested".format(it.get("prep_ref"))))
                 else:
                     out["blocked"].append((it["id"], "human-decision", ref))
             else:
@@ -5936,35 +6009,41 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
 
 def _orch_disposition_table(ctx):
     """The complete disposition list (the emitted enumeration order the guard never re-sorts): blocked,
-    then cannot-evaluate, waiting, actionable, proposed. Shared by decide_yield and the liveness
-    emitter so surface and verdict cannot disagree."""
+    then cannot-evaluate, waiting, actionable, proposed, then TERMINAL. Shared by decide_yield and the
+    liveness emitter so surface and verdict cannot disagree. B2: TERMINAL rows (a verified `fixed`, a
+    validated no-fix-needed/not-buildable close) are PRESENT and COUNTED here, so the complete machine
+    enumeration covers EVERY indexed item (setcmp) and never records an empty backlog for an index that
+    had closed rows; they carry no verdict weight (decide_yield never reads the terminal bucket)."""
     return ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
             + [("cannot_evaluate", i, c, p) for i, c, p in ctx.get("cannot_evaluate", [])]
             + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
             + [("actionable", i, t, w) for i, t, w in ctx["actionable"]]
-            + [("proposed", i, "", "") for i in ctx["proposed"]])
+            + [("proposed", i, "", "") for i in ctx["proposed"]]
+            + [("terminal", i, g, r) for i, g, r in ctx.get("terminal", [])])
 
 
 def _decide_wait(ctx, disposition, capped):
     """The wait-boundary sub-decision (livbak): a pause is a wind-down and clears the same bar as a
-    stop. EVERY ignorance path DENIES the wait (cap-bounded anti-wedge relief via the shared schedule
-    counter); the ONLY ALLOW is the fully-evaluated single case: at least one live waiting row named
-    as a whole token in the wait text, zero actionable, zero cannot-evaluate, enumeration ok."""
+    stop. EVERY IGNORANCE path DENIES the wait UNCONDITIONALLY (never cap-relieved): a non-ok
+    enumeration, an item that cannot be evaluated, or a wait that names no live launched target is
+    missing evidence, and ignorance refuses the wind-down (release only through the operator escape).
+    The cap-bounded anti-wedge relief exists SOLELY for the repeated-same-basis ACTIONABLE-work wedge
+    (a farmed guard trains its own bypass), and even then only as a recorded forced exit. The ONLY
+    plain ALLOW is the fully-evaluated single case: at least one live waiting row named as a whole
+    token in the wait text, zero actionable, zero cannot-evaluate, enumeration ok."""
     if ctx["enum_status"] != "ok":
-        if capped:
-            return _wait_capped(ctx, disposition)
         return ("DENY",
                 "livbak: the backlog is not enumerable ({}: {}); a wait cannot confirm whole-set "
-                "exhaustion, so it cannot license a pause (ignorance refuses the wind-down). Fix the "
-                "enumerator or the registry, or release through the operator-owned escape sentinel."
+                "exhaustion, so it cannot license a pause (ignorance refuses the wind-down). The cap "
+                "relief never applies to an unreadable enumeration. Fix the enumerator or the "
+                "registry, or release through the operator-owned escape sentinel."
                 .format(ctx["enum_status"], ctx["enum_detail"]), disposition)
     if ctx.get("cannot_evaluate", []):
-        if capped:
-            return _wait_capped(ctx, disposition)
         return ("DENY",
                 "livbak: a proof source for {} open item(s) is unreadable (cannot-evaluate); a wait "
-                "cannot rest on an unconfirmable enumeration (ignorance refuses the wind-down). Fix "
-                "the source, or release through the operator-owned escape sentinel."
+                "cannot rest on an unconfirmable enumeration (ignorance refuses the wind-down). The "
+                "cap relief never applies to a cannot-evaluate item. Fix the source, or release "
+                "through the operator-owned escape sentinel."
                 .format(len(ctx.get("cannot_evaluate", []))), disposition)
     if ctx["actionable"]:
         if capped:
@@ -5980,8 +6059,8 @@ def _decide_wait(ctx, disposition, capped):
                 "awaited result blocks the very next step and no other item can proceed."
                 .format(len(ctx["actionable"]), listing), disposition)
     if not ctx["waiting"] or ctx["wake_named"] is not True:
-        if capped:
-            return _wait_capped(ctx, disposition)
+        # an unnamed or absent wait target is an IGNORANCE path: a pause that collects no named live
+        # launched result is a manufactured wind-down, denied unconditionally (never cap-relieved).
         if not ctx["waiting"]:
             return ("DENY",
                     "livbak: nothing is running; a wait that collects no launched result is a "
@@ -6027,16 +6106,14 @@ def decide_yield(ctx):
         return _decide_wait(ctx, disposition, capped)
     if ctx["enum_status"] != "ok":
         if kind == "schedule_idle":
-            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
-                return ("ALLOW_WITH_FINDINGS",
-                        "{} schedule denials on an unchanged basis; a guard that can be farmed "
-                        "trains its own bypass, so this yield proceeds with findings"
-                        .format(ctx["schedule_denials"]), disposition)
+            # IGNORANCE path: an unreadable enumeration is missing evidence, denied UNCONDITIONALLY
+            # (never cap-relieved). The cap relief is reserved for the repeated-same-basis actionable
+            # wedge; it never buys a schedule idle over a backlog that cannot even be enumerated.
             return ("DENY",
                     "the backlog is not enumerable ({}: {}); missing evidence never licenses a new "
-                    "idle or wake. Fix the enumerator or the registry, or release through the "
-                    "operator-owned escape sentinel".format(ctx["enum_status"],
-                                                            ctx["enum_detail"]), disposition)
+                    "idle or wake, and the cap relief never applies to an unreadable enumeration. Fix "
+                    "the enumerator or the registry, or release through the operator-owned escape "
+                    "sentinel".format(ctx["enum_status"], ctx["enum_detail"]), disposition)
         return ("DENY",
                 "cntdef: the backlog is not enumerable ({}: {}); an unconfirmable enumeration cannot "
                 "confirm whole-set exhaustion, so it cannot license a stop (ignorance refuses the "
@@ -6048,26 +6125,23 @@ def decide_yield(ctx):
     # unconfirmable blocker cannot confirm exhaustion (ignorance refuses the wind-down); the operator
     # escape is the release.
     if ctx.get("cannot_evaluate", []) and kind == "schedule_idle":
-        if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
-            return ("ALLOW_WITH_FINDINGS",
-                    "{} schedule denials on an unchanged basis; yielding with findings"
-                    .format(ctx["schedule_denials"]), disposition)
+        # IGNORANCE path: an unreadable proof source is missing evidence, denied UNCONDITIONALLY
+        # (never cap-relieved). Cap relief is reserved for the repeated-same-basis actionable wedge.
         return ("DENY",
                 "a proof source for {} open item(s) is unreadable (cannot-evaluate); missing evidence "
-                "never licenses a new idle or wake. Fix the source, or release through the "
-                "operator-owned escape sentinel.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+                "never licenses a new idle or wake, and the cap relief never applies to a "
+                "cannot-evaluate item. Fix the source, or release through the operator-owned escape "
+                "sentinel.".format(len(ctx.get("cannot_evaluate", []))), disposition)
     if not ctx["actionable"]:
         rechecked = ctx["waiting"] + ctx["blocked"]
         if kind == "schedule_idle" and rechecked and ctx["wake_named"] is False:
-            if ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP and ctx["basis_unchanged"]:
-                # anti-farming: wake-hygiene denials are cap-relieved like every other schedule DENY, so
-                # a repeated unnamed idle on an unchanged basis yields with findings rather than forever.
-                return ("ALLOW_WITH_FINDINGS",
-                        "{} schedule denials on an unchanged basis; yielding with findings"
-                        .format(ctx["schedule_denials"]), disposition)
+            # IGNORANCE path: an idle that names no live item/blocker to recheck collects nothing and
+            # is a manufactured pause, denied UNCONDITIONALLY (never cap-relieved). The cap relief is
+            # reserved for the repeated-same-basis actionable wedge, so an unnamed idle cannot farm it.
             return ("DENY",
-                    "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
-                    "pending: {}".format(
+                    "wake hygiene: a permitted idle must name the item or blocker it will recheck; a "
+                    "wake naming no live target collects nothing and the cap relief never applies to "
+                    "it. Pending: {}".format(
                         ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
             return ("DENY",
@@ -6281,6 +6355,57 @@ def _orch_checkpoint_union(root, payload, closed_unjustified_ids=None, record=Tr
     return injected
 
 
+def _orch_basis_key(kind, wake_text, class_tokens):
+    """The denial-basis key the shared schedule/wait cap compares (B1 cross-kind farming defense). It
+    embeds the operation KIND and, for a wait, the wait-target text, alongside the sorted disposition
+    fingerprint (class_tokens), so a denial accrued under one kind (a schedule idle) can never buy cap
+    relief under another (a wait), nor one wait target buy relief for a different target: a change of
+    kind or wait target is a CHANGED basis that resets the shared denial counter."""
+    return json.dumps({"kind": kind,
+                       "wait_text": wake_text if kind == "wait" else None,
+                       "classes": list(class_tokens)}, sort_keys=True)
+
+
+def _orch_commit_resolves(root, ref):
+    """B3 vfxcmt primitive: (True/False, ok) where ok is False when git could not be consulted at all.
+    True only when `ref` resolves to a REAL commit object in the repo (a fabricated, absent, or
+    whitespace-only ref resolves to nothing). --end-of-options keeps a ref that starts with '-' from
+    being read as a git option."""
+    if not isinstance(ref, str) or not ref.strip():
+        return (False, True)   # a blank ref definitively resolves to nothing (git WAS consultable)
+    env = _isolate_git_env(dict(os.environ))
+    try:
+        r = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "--quiet",
+                            "--end-of-options", ref + "^{commit}"],
+                           capture_output=True, text=True, timeout=10, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return (False, False)  # the rail could not be consulted at all
+    return (r.returncode == 0 and bool(r.stdout.strip()), True)
+
+
+def _orch_fix_refs(root, items):
+    """B3 fix-attestation rail (vfxcmt/evgcmp): the set of `fixed`-close refs over the enumeration that
+    resolve to a REAL commit in the repo. A `fixed` close is NOT a self-authored bypass; it is terminal
+    only when its ref names a commit that actually resolves, so a fabricated, absent, or whitespace-only
+    ref substantiates nothing. Returns a frozenset of the verified refs, or None when the rail cannot be
+    consulted at all (git unavailable / not a work tree), which HOLDS every `fixed` close as
+    cannot-evaluate (ignorance refuses the wind-down), never a clean terminal."""
+    refs = sorted({it["close"]["ref"] for it in items
+                   if it["state"] == "closed" and isinstance(it.get("close"), dict)
+                   and it["close"].get("reason") == "fixed"
+                   and isinstance(it["close"].get("ref"), str) and it["close"]["ref"].strip()})
+    if not refs:
+        return frozenset()
+    verified = set()
+    for ref in refs:
+        ok, consultable = _orch_commit_resolves(root, ref)
+        if not consultable:
+            return None     # the rail cannot be consulted: HOLD every fixed close (cannot-evaluate)
+        if ok:
+            verified.add(ref)
+    return frozenset(verified)
+
+
 def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=True):
     """Assemble the decide_yield context from live state (the bindings' I/O half). Returns
     (ctx, turn_state_or_None, basis). The C.1 escape unpack, C.2 attestation, GD-164 close-ground and
@@ -6309,7 +6434,8 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
             _orch_pending_haystack(reg, root), staleness,
             attestations=_orch_attestation_refs(reg, root, staleness, state_dir=state_dir),
             dispositions=_orch_disposition_refs(reg, root, staleness, state_dir=state_dir),
-            deferrals=_orch_deferral_refs(reg, root, staleness, state_dir=state_dir))
+            deferrals=_orch_deferral_refs(reg, root, staleness, state_dir=state_dir),
+            fix_refs=_orch_fix_refs(root, items))
         closed_unjustified_ids = frozenset(classes.get("closed_unjustified", []))
         classes["cannot_evaluate"].extend(
             _orch_checkpoint_union(root, items, closed_unjustified_ids=closed_unjustified_ids,
@@ -6317,8 +6443,11 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
         enum_detail = ""
         # D12 basis: an item flipping between classes reads as a CHANGED basis (no premature cap
         # relief). GD-164: add a per-closed-id disposition tag so a manufactured close is a changed
-        # basis rather than an unchanged one that would earn cap relief.
-        basis = json.dumps(sorted(
+        # basis rather than an unchanged one that would earn cap relief. The basis is KEYED BY the
+        # operation KIND (and, for a wait, the wait-target text) so a schedule-idle denial can never buy
+        # a wait cap relief on an unchanged class-set (cross-kind cap farming): switching kind or wait
+        # target is a CHANGED basis that resets the shared denial counter.
+        basis = _orch_basis_key(kind, wake_text, sorted(
             ["a:" + i for i, _t, _w in classes["actionable"]]
             + ["c:" + i for i, _c, _p in classes["cannot_evaluate"]]
             + ["w:{}:{}:{}".format(i, k, r) for i, k, r in classes["waiting"]]
@@ -6336,9 +6465,9 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
                               "check is unavailable; migrate the enumerator to v2", state_dir=state_dir)
     else:
         classes = {"actionable": [], "waiting": [], "blocked": [], "cannot_evaluate": [],
-                   "proposed": [], "closed_unjustified": []}
+                   "proposed": [], "terminal": [], "closed_unjustified": []}
         enum_detail = payload
-        basis = status
+        basis = _orch_basis_key(kind, wake_text, [status])
         env_version = env_source = env_generated = None
     wake_named = None
     rechecked = classes["waiting"] + classes["blocked"]
@@ -6357,7 +6486,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
            "blocked": classes["blocked"], "cannot_evaluate": classes["cannot_evaluate"],
-           "proposed": classes["proposed"],
+           "proposed": classes["proposed"], "terminal": classes.get("terminal", []),
            "wake_named": wake_named, "schedule_denials": schedule_denials,
            "basis_unchanged": basis_unchanged,
            # GD-164 emitter/A1 fields (decide_yield never reads these):
@@ -7121,23 +7250,57 @@ def orch_wake_register(data):
     return _allow()
 
 
-def _orch_tool_succeeded(response):
-    """Best-effort success test over a PostToolUse tool_response. Conservative and FAIL-SAFE: a
-    response is a success only when it is present and carries NO error signal. A missing response, or
-    any recognized error marker, reads as NOT succeeded (so no wake is registered). FLAGGED: confirm
-    the concrete ScheduleWakeup/CronCreate response schema before finalizing."""
-    if response is None:
+_ORCH_FAILURE_TOKEN_RE = re.compile(r"\b(fail(?:ed|ure)?|error|denied|refused|timed?[ _-]?out|"
+                                    r"exception|abort(?:ed)?|cancell?ed)\b", re.IGNORECASE)
+_ORCH_STATUS_NEGATIVE = frozenset(("failed", "failure", "error", "errored", "denied", "refused",
+                                   "timeout", "timed-out", "cancelled", "canceled", "aborted"))
+_ORCH_STATUS_POSITIVE = frozenset(("ok", "success", "succeeded", "completed", "complete", "done",
+                                   "scheduled", "created", "registered", "accepted"))
+
+
+def _orch_response_text_fails(response):
+    """True when any text block in a structured tool response carries a failure token (a
+    {"content": [{"type": "text", "text": ...}]} shape, the concrete PostToolUse content list)."""
+    content = response.get("content")
+    if not isinstance(content, list):
         return False
+    for block in content:
+        if isinstance(block, dict) and isinstance(block.get("text"), str) \
+                and _ORCH_FAILURE_TOKEN_RE.search(block["text"]):
+            return True
+    return False
+
+
+def _orch_tool_succeeded(response):
+    """A2 success test over a PostToolUse tool_response. STRICT and CONSERVATIVE: a wake is registered
+    only on a POSITIVELY CONFIRMED success; anything else (a missing response, any recognized error
+    signal, an ambiguous response with no affirmative success marker) reads as NOT succeeded, so no
+    wake digest is written. Fail-safe = do-not-register: an unregistered wake means a later identical
+    human prompt still resets the loop counters (safe), whereas a falsely-registered wake would orphan
+    a digest and misclassify that human prompt as timer-originated (the exact A2 orphan this prevents).
+    Negative signals checked: is_error true, success false, ok false, a non-empty error field, a
+    negative status token, or a failure token in a content text block (so 'FAILED', {"status":
+    "failed"}, {"ok": false}, and {"content": [{"text": "FAILED"}]} all read as NOT succeeded."""
     if isinstance(response, dict):
-        if response.get("is_error") is True or response.get("success") is False:
-            return False
-        if isinstance(response.get("error"), str) and response.get("error").strip():
+        if response.get("is_error") is True or response.get("success") is False \
+                or response.get("ok") is False:
             return False
         if response.get("error") not in (None, "", False):
             return False
-        return True
-    if isinstance(response, str):
-        return bool(response.strip()) and "error" not in response.lower()
+        status = response.get("status")
+        if isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_NEGATIVE:
+            return False
+        if _orch_response_text_fails(response):
+            return False
+        # a wake registers ONLY on an affirmative success marker (never on the mere ABSENCE of an
+        # error, which an ambiguous or unknown-schema response would satisfy). Fail-safe otherwise.
+        if response.get("is_error") is False or response.get("success") is True \
+                or response.get("ok") is True \
+                or (isinstance(status, str) and status.strip().lower() in _ORCH_STATUS_POSITIVE):
+            return True
+        return False
+    # a bare-string response carries no structured success field: a positive confirmation is absent,
+    # so the fail-safe direction is do-not-register (a string 'FAILED' also carries a failure token).
     return False
 
 
@@ -7153,8 +7316,12 @@ def orch_prompt_stamp(data):
         return _allow()
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()  # only the holder session stamps/resets the shared turn-state (CX-M4b)
+    # A1 parity (claude MINOR-2): resolve the machine-written state dir ONCE from the handler-validated
+    # registry and thread it into every turn-state read/save, so this counter-reset recorder cannot
+    # XDG-fall-back mid-handler onto a different directory than the decision read path used.
+    state_dir = _state_dir_from_registry(root, reg)
     prompt = data.get("prompt")
-    ts = _orch_turn_state(root) or {}
+    ts = _orch_turn_state(root, state_dir=state_dir) or {}
     digest = __import__("hashlib").sha256(
         (prompt or "").encode("utf-8", "replace")).hexdigest() if isinstance(prompt, str) else ""
     _wds = ts.get("wake_digests")
@@ -7166,7 +7333,7 @@ def orch_prompt_stamp(data):
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
-        _orch_save_turn_state(root, ts)
+        _orch_save_turn_state(root, ts, state_dir=state_dir)
         return _allow()
     # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
     # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
@@ -7174,7 +7341,7 @@ def orch_prompt_stamp(data):
     if digest in wd:
         wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
     ts["wake_digests"] = wd
-    _orch_save_turn_state(root, ts)
+    _orch_save_turn_state(root, ts, state_dir=state_dir)
     gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
     if prev is not None:
         gap = "{:.1f} minutes".format((_orch_now() - prev).total_seconds() / 60.0)

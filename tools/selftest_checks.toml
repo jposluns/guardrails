@@ -23,7 +23,8 @@ expected-check-ids = [
   "stop/unproven-blocker-denies",
   "stop/proven-blockers-allow",
   "stop/stale-evidence-denies",
-  "stop/proposed-never-compels",
+  "stop/proposed-is-actionable",
+  "stop/ungranted-is-actionable",
   "stop/live-task-allows",
   "stop/stale-task-denies",
   "stop/waiting-plus-actionable-denies",
@@ -68,7 +69,8 @@ expected-check-ids = [
   "idle/actionable-denies",
   # ---------- component 1: the scheduled-yield tool binding ----------
   "yield/enum-error-denies",
-  "yield/denial-cap",
+  "yield/enum-error-not-cap-relieved",
+  "yield/actionable-denial-cap",
   "yield/wake-names-item-allows",
   "yield/wake-names-nothing-denies",
   "yield/actionable-denies-schedule",
@@ -198,7 +200,14 @@ expected-check-ids = [
   "core/stop-escape-releases-under-enum-error",
   "core/stop-enum-error-loop-bound-findings",
   "core/wake-hygiene-below-cap-denies",
-  "core/wake-hygiene-at-cap-findings",
+  "core/wake-hygiene-at-cap-still-denies",
+  "core/schedule-enum-error-not-cap-relieved",
+  "core/schedule-cannot-evaluate-not-cap-relieved",
+  "core/wait-enum-error-not-cap-relieved",
+  "core/wait-cannot-evaluate-not-cap-relieved",
+  "core/wait-unnamed-target-not-cap-relieved",
+  "core/schedule-actionable-wedge-cap-relieved",
+  "core/wait-actionable-wedge-cap-relieved",
   # ---------- C.2: the attestation register for blocker evidence ----------
   "attest/no-snapshot-stop-holds",
   "attest/no-snapshot-schedule-denies",
@@ -223,9 +232,9 @@ expected-check-ids = [
   # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",
-  "lapse/park-allows-with-disposition",
+  "lapse/proposed-lapse-is-actionable",
   "lapse/unsubstantiated-lapse-finding",
-  "lapse/unsubstantiated-blocks-nothing",
+  "lapse/unsubstantiated-still-actionable",
   # ---------- C.3: the anti-shrinkage checkpoint union ----------
   "ckpt/first-window-allows",
   "ckpt/shrink-stop-holds",
@@ -304,10 +313,16 @@ expected-check-ids = [
   "close/unknown-close-reason-enumerator-error",
   "close/v1-closed-skipped-allows",
   "close/v1-advisory-guard-event",
+  "close/fixed-fabricated-ref-holds",
+  "close/fixed-verified-terminal",
+  "close/fixed-terminal-counted",
+  "close/fixed-terminal-in-table",
   # ---------- GD-164: the prep discipline ----------
   "prep/incomplete-actionable-denies",
   "prep/incomplete-wait-denies",
-  "prep/complete-blocked-visible",
+  "prep/complete-attested-blocked-visible",
+  "prep/complete-unattested-ref-actionable",
+  "prep/declined-row-actionable",
   "prep/complete-blank-ref-enumerator-error",
   "prep/v1-human-decision-blocked",
   # ---------- GD-164: the checkpoint closed-unjustified hold ----------
@@ -350,6 +365,12 @@ expected-check-ids = [
   "a2/failed-schedule-no-orphan",
   "a2/successful-schedule-registers-one",
   "a2/failed-then-human-prompt-resets",
+  "a2/succeeded-false-on-FAILED-string",
+  "a2/succeeded-false-on-status-failed",
+  "a2/succeeded-false-on-ok-false",
+  "a2/succeeded-false-on-content-failed",
+  "a2/succeeded-false-on-ambiguous",
+  "a2/succeeded-true-on-ok-true",
 ]
 
 [[suite]]

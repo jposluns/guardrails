@@ -55,13 +55,15 @@ def _git_show(root, rel):
 
 def _covered_keys(text, prefix, has_ground):
     """Reduce a chained-register text to its approved covered keys, or (None, detail) when the chain is
-    malformed (fail-closed)."""
+    malformed (fail-closed). B8: a blank line is rejected exactly as the engine reader rejects it (the
+    engine's _orch_chained_rows treats a blank line as a non-JSON chain break), so a trailing/interior
+    blank line reads as unreadable here too, never a silently-skipped clean pass (reader parity)."""
     lines = text.splitlines()
     rows, prev = [], None
     import hashlib
     for n, line in enumerate(lines, 1):
         if not line.strip():
-            continue
+            return (None, "line {} is blank (a chain break; the engine reader rejects it too)".format(n))
         try:
             row = json.loads(line)
         except ValueError:
@@ -88,8 +90,12 @@ def _covered_keys(text, prefix, has_ground):
     return (keys, None)
 
 
-def join(backlog_text, ds_text, df_text):
-    """Pure join. Returns (findings, cannot_evaluate, covered_terminals)."""
+def join(backlog_text, ds_text, df_text, fixed_verify=None):
+    """Pure join over ONE committed surface. Returns (findings, cannot_evaluate, covered_terminals).
+    fixed_verify(ref) -> (resolves, consultable): the B3 fix-attestation rail. When it is None the join
+    cannot verify a `fixed` close, so a `fixed` terminal is cannot-evaluate (held), never accepted
+    unconditionally; a ref that does not resolve to a real commit is a finding; a rail that cannot be
+    consulted is cannot-evaluate."""
     findings, cannot, terminals = [], [], []
     items, errors = aei_backlog_md.parse(backlog_text, version=2)
     if errors:
@@ -112,6 +118,18 @@ def join(backlog_text, ds_text, df_text):
         reason, ref = close.get("reason"), close.get("ref")
         terminals.append((it["id"], reason, ref))
         if reason == "fixed":
+            # B3: `fixed` is not accepted unconditionally; its ref must resolve to a real commit.
+            if fixed_verify is None:
+                cannot.append("{} is closed (fixed) but the fix-attestation rail is unavailable to "
+                              "verify {!r}".format(it["id"], ref))
+                continue
+            resolves, consultable = fixed_verify(ref)
+            if not consultable:
+                cannot.append("{} is closed (fixed) but the fix-attestation rail could not be "
+                              "consulted for {!r}".format(it["id"], ref))
+            elif not resolves:
+                findings.append("{} is closed (fixed) with a ref {!r} that resolves to no committed "
+                                "commit (vfxcmt)".format(it["id"], ref))
             continue
         if reason in ("no-fix-needed", "not-buildable"):
             if ds_keys is None:
@@ -148,20 +166,23 @@ def main():
               file=sys.stderr)
         return 2
     route = reg.get("route") if isinstance(reg.get("route"), dict) else {}
-    surfaces = route.get("surfaces") if isinstance(route.get("surfaces"), list) else []
-    backlog_rel = surfaces[0] if surfaces else reg.get("backlog")
-    if not backlog_rel:
+    raw_surfaces = route.get("surfaces")
+    if raw_surfaces is not None and not isinstance(raw_surfaces, list):
+        # B8: a DECLARED-but-malformed route.surfaces fails CLOSED (cannot-evaluate), never a silent
+        # "nothing to join" that would let an unjustified terminal on an unreadable surface escape.
+        print("CANNOT-EVALUATE: route.surfaces is declared but is not a list ({!r})".format(
+            type(raw_surfaces).__name__), file=sys.stderr)
+        return 2
+    surfaces = list(raw_surfaces) if isinstance(raw_surfaces, list) else []
+    if not surfaces and reg.get("backlog"):
+        surfaces = [reg.get("backlog")]
+    if not surfaces:
         print("check_liveness_joins: no route.surfaces/backlog declared; nothing to join")
         return 0
-    backlog_text, d = _git_show(root, backlog_rel)
-    if backlog_text is None:
-        print("CANNOT-EVALUATE: committed backlog {}: {}".format(backlog_rel, d), file=sys.stderr)
-        return 2
 
     def _reg_rel(key):
         spec = reg.get(key)
-        rel = spec.get("path") if isinstance(spec, dict) else spec
-        return rel
+        return spec.get("path") if isinstance(spec, dict) else spec
 
     ds_text = df_text = None
     for key, sink in (("dispositions", "ds"), ("deferrals", "df")):
@@ -176,16 +197,39 @@ def main():
             ds_text = text
         else:
             df_text = text
-    findings, cannot, terminals = join(backlog_text, ds_text, df_text)
-    for c in cannot:
+
+    def _fixed_verify(ref):
+        return aiqt_hooks._orch_commit_resolves(root, ref)
+
+    all_findings, all_cannot, all_terminals = [], [], []
+    # B8: EVERY declared surface is joined (setcmp), not only surfaces[0]; an unjustified terminal in
+    # any surface is a finding.
+    for rel in surfaces:
+        if not rel:
+            all_cannot.append("a route.surfaces entry is blank/unusable")
+            continue
+        backlog_text, d = _git_show(root, rel)
+        if backlog_text is None:
+            all_cannot.append("committed backlog {}: {}".format(rel, d))
+            continue
+        findings, cannot, terminals = join(backlog_text, ds_text, df_text, fixed_verify=_fixed_verify)
+        all_findings.extend("[{}] {}".format(rel, f) for f in findings)
+        all_cannot.extend("[{}] {}".format(rel, c) for c in cannot)
+        all_terminals.extend((rel, i, r, ref) for i, r, ref in terminals)
+    for c in all_cannot:
         print("CANNOT-EVALUATE: " + c, file=sys.stderr)
-    for f in findings:
+    for f in all_findings:
         print("FINDING: " + f, file=sys.stderr)
-    if cannot:
+    if all_cannot:
         return 2
-    if findings:
+    if all_findings:
         return 1
-    print("liveness-joins: {} terminal disposition(s) all justified".format(len(terminals)))
+    # B8: emit the COMPLETE per-terminal machine evaluation on success, not a bare count.
+    print(json.dumps({"gate": "liveness-joins", "terminal_count": len(all_terminals),
+                      "terminals": [{"surface": s, "id": i, "reason": r, "ref": ref}
+                                    for s, i, r, ref in all_terminals]}, sort_keys=True))
+    print("liveness-joins: {} terminal disposition(s) across {} surface(s) all justified".format(
+        len(all_terminals), len(surfaces)))
     return 0
 
 
@@ -215,17 +259,34 @@ def self_test():
                  "status": "accepted", "ts": "2026-09-01T00:00:00+00:00", "check_ref": "seed.txt"}])
     df = chain([{"_p": "DF-", "item": "A-3", "ref": "PD-3", "status": "accepted",
                  "ts": "2026-09-01T00:00:00+00:00", "check_ref": "seed.txt"}])
-    findings, cannot, terminals = join(backlog, ds, df)
+    # the fix-attestation rail stub: commit-x resolves, anything else does not (git WAS consultable)
+    fv = lambda ref: (ref == "commit-x", True)
+    findings, cannot, terminals = join(backlog, ds, df, fixed_verify=fv)
     if findings or cannot:
         fails.append("justified/fixed join should pass: findings={} cannot={}".format(findings, cannot))
     # lj/unjustified-terminal-fails: A-1 closed no-fix-needed but no covering DS row
-    findings, cannot, _ = join(backlog, chain([]), df)
+    findings, cannot, _ = join(backlog, chain([]), df, fixed_verify=fv)
     if not findings:
         fails.append("an unjustified terminal must fail (lj/unjustified-terminal-fails)")
     # lj/unreadable-register-fails-closed: a malformed register chain
-    findings, cannot, _ = join(backlog, "not json\n", df)
+    findings, cannot, _ = join(backlog, "not json\n", df, fixed_verify=fv)
     if not cannot:
         fails.append("a malformed committed register must fail closed (lj/unreadable-register-fails-closed)")
+    # B3 lj/fixed-fabricated-ref-fails: a fixed close whose ref resolves to no commit is a finding
+    fab = "- Z-1 [x] z :: close:fixed=fabricated\n"
+    findings, cannot, _ = join(fab, chain([]), chain([]), fixed_verify=fv)
+    if not findings:
+        fails.append("a fixed close with a non-resolving ref must fail (lj/fixed-fabricated-ref-fails)")
+    # B3 lj/fixed-rail-unavailable-holds: no rail -> cannot-evaluate (held), never accepted
+    findings, cannot, _ = join(fab, chain([]), chain([]), fixed_verify=None)
+    if not cannot:
+        fails.append("a fixed close with no rail must be cannot-evaluate (lj/fixed-rail-unavailable-holds)")
+    # B8 lj/blank-line-register-fails-closed: a register with an interior blank line reads unreadable,
+    # matching the engine reader (never a silently-skipped clean pass)
+    ds_blank = ds.rstrip("\n") + "\n\n"
+    findings, cannot, _ = join(backlog, ds_blank, df, fixed_verify=fv)
+    if not cannot:
+        fails.append("a register with a blank line must fail closed (lj/blank-line-register-fails-closed)")
     if fails:
         for f in fails:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)
