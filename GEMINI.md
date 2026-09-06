@@ -819,6 +819,27 @@ When successive attempts along the same line fail, the repetition is treated as 
 working diagnosis, not as a prompt for another variant. The assistant stops, re-derives the problem from
 fresh observation, and either changes approach or escalates; a refuted premise is retired, never retried.
 
+## Wait utilization binds to state, not narration
+
+A wait is a resource: while a long operation is in flight, the next actionable item is advanced
+rather than the run left idle. Whether the run is idling is read from what it does, never from what
+it says: each action is classified as progress, wait, maintenance, or neutral from the action's own
+identity and structured target, so a synonym for waiting neither creates idling nor cures it, and a
+claim of being busy is not activity. A run of consecutive wait and maintenance actions with no
+intervening progress and no genuine human input is idling, however it is narrated; a fired timer is
+not genuine human input, nor is it activity that advances the work.
+
+When such an idle run passes a bounded threshold while an actionable item remains on a fresh
+enumeration of the authoritative backlog, the run is redirected to that item rather than permitted
+another wait. The redirection is surfaced first and enforced only after a short bake, and only on a
+wait primitive the operator has expressly placed on the enforcement surface, so early further waits
+warn rather than wedge. Where the backlog cannot be enumerated, where an action's classification is
+uncertain, where no actionable item remains, or where the wait is the genuinely needed collection of
+a launched result, the control degrades to a surfaced note and never wedges a legitimately exhausted
+or human-gated turn: it defers to the continue-by-default legitimate-stop conditions in full. This
+mechanizes continue-by-default against the turn-splitting evasion, in which a run sidesteps the
+guarded park primitive by dribbling the same idle across many small waits.
+
 ## Background work during CI waits
 
 A wait is a resource. While a check or another long operation is in flight, advance independent,

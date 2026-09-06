@@ -1,10 +1,11 @@
 # The orchestrator-integrity suite
 
-Six controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
-tools), a record-drift gate, a background-dispatch truncation guard, an unattended-ask blocker, a
-resume audit with a mutation barrier, and a mistakes register. One registry declares the adopter's
-bindings; one pure decision core (decide_yield in scripts/aiqt_hooks.py) makes every yield judgement,
-so a new yield path is covered by adding a binding, never by re-implementing judgement.
+Seven controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
+tools), a wait-utilization redirect, a record-drift gate, a background-dispatch truncation guard, an
+unattended-ask blocker, a resume audit with a mutation barrier, and a mistakes register. One registry
+declares the adopter's bindings; two pure decision cores (decide_yield and decide_wait in
+scripts/aiqt_hooks.py) make the yield and wait judgements, so a new path is covered by adding a
+binding, never by re-implementing judgement.
 
 ## The registry
 
@@ -24,6 +25,9 @@ keys except `version` are optional; an undeclared surface simply removes the pro
   "lease": {"path": "path", "max_age_hours": 24},
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
+  "wait_tools": ["Monitor", "TaskOutput"],
+  "wait_deny_tools": ["Monitor"],
+  "poll_tools": ["CronList", "ListAgents"],
   "dispatch_tools": [],
   "mistakes_register": "path",
   "attestations": "path",
@@ -32,9 +36,14 @@ keys except `version` are optional; an undeclared surface simply removes the pro
 }
 ```
 
+wait_tools must name tools covered by the shipped wait-guard matcher, and wait_deny_tools must be a
+subset of it; TaskOutput remains warning-only because a poll and needed result collection are
+indistinguishable before the call. poll_tools names structured maintenance calls counted by the
+PostToolUse recorder.
+
 `state_dir` defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/`
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
-`guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, `pending-asks.jsonl`,
+`guard-events.jsonl`, `turn-state.json`, `turn-state.lock`, `resume-barrier.json`, `pending-asks.jsonl`,
 `backlog-checkpoint.json`, `attestations-validated.json`, and, when their events occur,
 `escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it) and the
 append-only `forced-exit.jsonl` (every non-closed-disposition forced exit appended as its own row,

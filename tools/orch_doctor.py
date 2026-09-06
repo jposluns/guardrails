@@ -16,6 +16,55 @@ sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 
 YIELD_MATCHER_TOOLS = {"ScheduleWakeup", "CronCreate"}  # keep equal to the manifest matcher
+WAIT_MATCHER_TOOLS = {"Monitor", "TaskOutput"}  # keep equal to the wait-guard manifest matcher
+
+
+def _orch_roster_findings(reg):
+    """The registry roster validation, pure over reg (no filesystem), so it is unit-testable. Absent
+    optional keys yield no finding; a present-but-malformed value (an explicit null or a non-list) is a
+    finding; the yield and wait rosters are checked against their fixed matchers and the deny
+    subset/TaskOutput rules."""
+    findings = []
+    if "yield_tools" not in reg:
+        yield_roster = []
+    else:
+        yv = reg.get("yield_tools")
+        if not isinstance(yv, list) or not all(isinstance(t, str) and t for t in yv):
+            findings.append("yield_tools must be a list of non-empty tool names when present")
+            yield_roster = []
+        else:
+            yield_roster = yv
+    for tool in yield_roster:
+        if tool not in YIELD_MATCHER_TOOLS:
+            findings.append("yield tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
+                            "covered by the hook (a manifest matcher is fixed at generation)"
+                            .format(tool))
+    rosters = {}
+    for key in ("wait_tools", "wait_deny_tools", "poll_tools"):
+        if key not in reg:
+            rosters[key] = []
+            continue
+        value = reg.get(key)
+        if not isinstance(value, list) or not all(
+                isinstance(tool, str) and tool for tool in value):
+            findings.append("{} must be a list of non-empty tool names when present".format(key))
+            rosters[key] = []
+        else:
+            rosters[key] = value
+    wait_tools = rosters["wait_tools"]
+    if reg.get("wait_tools") is not None and not wait_tools:
+        findings.append("wait_tools is present but empty, so the wait-utilization guard cannot activate")
+    for tool in wait_tools:
+        if tool not in WAIT_MATCHER_TOOLS:
+            findings.append("wait tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
+                            "covered by the wait guard (a manifest matcher is fixed at generation)"
+                            .format(tool))
+    for tool in sorted(set(rosters["wait_deny_tools"]) - set(wait_tools)):
+        findings.append("wait deny tool {!r} is not declared in wait_tools".format(tool))
+    if "TaskOutput" in rosters["wait_deny_tools"]:
+        findings.append("wait deny tool 'TaskOutput' is permanently warning-only and cannot "
+                        "activate DENY")
+    return findings
 
 
 def main():
@@ -42,11 +91,7 @@ def main():
             return 1
         print("resume audit clean: the barrier is cleared")
         return 0
-    for tool in reg.get("yield_tools") or []:
-        if tool not in YIELD_MATCHER_TOOLS:
-            findings.append("yield tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
-                            "covered by the hook (a manifest matcher is fixed at generation)"
-                            .format(tool))
+    findings.extend(_orch_roster_findings(reg))
     sd = aiqt_hooks._orch_state_dir_for_root(root)
     try:
         os.makedirs(sd, exist_ok=True)
@@ -63,8 +108,11 @@ def main():
         else:
             print("enumerator OK: {} item(s)".format(len(payload)))
     else:
-        findings.append("no enumerator declared: the stop guard will fail open with findings on "
-                        "every yield (stop) and deny scheduling (schedule_idle)")
+        findings.append("no enumerator declared: the backlog is not enumerable, so the stop guard "
+                        "DENIES a stop (yield) until the loop bound (_ORCH_LOOP_BOUND denials, then "
+                        "ALLOW_WITH_FINDINGS) and DENIES scheduling (schedule_idle) until the schedule "
+                        "cap on an unchanged basis (_ORCH_SCHEDULE_CAP denials, then "
+                        "ALLOW_WITH_FINDINGS); the operator escape sentinel releases either")
     if reg.get("mode") and aiqt_hooks._orch_mode(reg, root) is None:
         findings.append("declared mode record carries no readable Operating-mode line")
     if findings:

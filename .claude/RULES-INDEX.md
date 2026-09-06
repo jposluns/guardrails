@@ -86,6 +86,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 **Progress**
 - [Decision classification before enacting](rules/aiqt/20-PROGR-decision-classification-before-enacting.md)
 - [Repeated failure triggers premise review](rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md)
+- [Wait utilization binds to state, not narration](rules/aiqt/20-PROGR-wait-utilization-binds-to-state.md)
 
 **Speed**
 - [Background work during CI waits](rules/aiqt/30-SPEED-background-work-during-ci-waits.md)

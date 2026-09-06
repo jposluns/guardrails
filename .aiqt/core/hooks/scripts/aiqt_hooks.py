@@ -5195,8 +5195,9 @@ def gensrc_guard(data):
 
 
 # --- the orchestrator-integrity suite ----------------------------------------------------------
-# One registry, one state directory, one PURE decision core (decide_yield), one delivery substrate; the
-# six components are thin bindings over them. The whole suite is REGISTRY-SCOPED: with no
+# One registry, one state directory, two PURE decision cores (decide_yield and decide_wait), and one
+# delivery substrate; the seven components are thin bindings over them. The whole suite is
+# REGISTRY-SCOPED: with no
 # .aiqt/orchestration.local.json or .aiqt/orchestration.json at the session repo root it is inert (the
 # gensrc.json precedent), and the backlog guards additionally require a live orchestrator lease or a
 # declared mode record, so bounded workers and plain sessions never inherit the global backlog. The
@@ -5211,6 +5212,11 @@ _ORCH_BLOCKER_KINDS = frozenset(
 _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
+_ORCH_WAIT_FIRE = 5            # completed wait/maintenance calls before the redirect fires
+_ORCH_WAIT_BAKE = 2            # warning-only calls after fire before hard enforcement
+_ORCH_WAIT_DENY_CAP = 3        # hard denials on an unchanged basis before warning-only relief
+_ORCH_WAKE_DIGEST_CAP = 64     # retained one-shot wake digests (a consumed-once multiset)
+_ORCH_RECURRING_WAKE_CAP = 256  # retained recurring cron digests (deduped; generous beyond a realistic session)
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
 _ORCH_MODE_RE = re.compile(r"^Operating-mode:\s*(.+?)\s*$", re.MULTILINE)
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
@@ -5395,10 +5401,8 @@ def _orch_guard_event(root, kind, decision, detail):
                                "decision": decision, "detail": detail})
 
 
-def _orch_turn_state(root):
-    """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
-    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
-    path = os.path.join(_orch_state_dir_for_root(root), "turn-state.json")
+def _orch_read_turn_state_path(path):
+    """Read one turn-state path. Split out as the deterministic concurrency-test seam."""
     try:
         if not os.path.lexists(path):
             return {}
@@ -5409,15 +5413,69 @@ def _orch_turn_state(root):
         return None
 
 
-def _orch_save_turn_state(root, state):
-    sd = _orch_state_dir_for_root(root)
+def _orch_turn_state(root):
+    """The turn-state dict, or None on an unreadable/malformed file (the loop guard treats None as
+    bound-reached, the fail-open direction: an unreadable counter can never license unbounded denies)."""
+    return _orch_read_turn_state_path(
+        os.path.join(_orch_state_dir_for_root(root), "turn-state.json"))
+
+
+def _orch_publish_turn_state(path, state):
+    """Atomically replace turn-state. The caller supplies any required RMW lock."""
+    tmp = "{}.tmp.{}.{}".format(path, os.getpid(), os.urandom(6).hex())
+    try:
+        with open(tmp, "x", encoding="utf-8") as fh:
+            json.dump(state, fh, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _orch_locked_turn_state_update(root, update):
+    """Run a turn-state read-modify-write under one OS-held lock and publish by atomic replace.
+
+    Returns (status, resulting_state). POSIX flock is the arbitration primitive on the supported hook
+    hosts; if it is absent or any lock/read/write step fails, no manufactured update is reported.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return ("lock-unavailable", None)
+    reg_status, reg = _orch_registry(root)
+    if reg_status == "bad":
+        # A present-but-unreadable registry must NOT silently split turn-state to the XDG fallback: a
+        # bad re-read would leave the declared counter absent and (on a denial) re-deny forever. Fail
+        # closed to an unpersistable status the caller treats as a persist failure (stop path -> open).
+        return ("registry-unreadable", None)
+    sd = _state_dir_from_registry(root, reg if reg_status == "ok" else None)
+    path = os.path.join(sd, "turn-state.json")
     try:
         os.makedirs(sd, exist_ok=True)
-        with open(os.path.join(sd, "turn-state.json"), "w", encoding="utf-8") as fh:
-            json.dump(state, fh, sort_keys=True)
-        return True
-    except (OSError, ValueError):
-        return False
+        with open(os.path.join(sd, "turn-state.lock"), "a", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state = _orch_read_turn_state_path(path)
+            if not isinstance(state, dict):
+                return ("unreadable", None)
+            updated = update(dict(state))
+            if updated is None:
+                return ("unchanged", state)
+            if not isinstance(updated, dict):
+                return ("invalid-update", None)
+            if not _orch_publish_turn_state(path, updated):
+                return ("write-failed", None)
+            return ("ok", updated)
+    except (OSError, TypeError, ValueError):
+        return ("lock-failed", None)
+
+
+def _orch_save_turn_state(root, state):
+    status, _updated = _orch_locked_turn_state_update(root, lambda _current: dict(state))
+    return status == "ok"
 
 
 def _orch_mode(reg, root):
@@ -5922,6 +5980,107 @@ def decide_yield(ctx):
             "an existing cron is neither.".format(len(ctx["actionable"]), listing), disposition)
 
 
+def _wait_path_in_state(path, state_dir):
+    """Pure lexical containment for a structured write target. None means the paths cannot answer."""
+    if not isinstance(path, str) or not path or not isinstance(state_dir, str) or not state_dir:
+        return None
+    if not os.path.isabs(path) or not os.path.isabs(state_dir):
+        return None
+    try:
+        return os.path.commonpath((os.path.normpath(path), os.path.normpath(state_dir))) \
+            == os.path.normpath(state_dir)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def classify_wait_action(tool_name, tool_input, tool_response, reg):
+    """Classify from tool identity and structured fields only. No command or narrative text is read."""
+    if (not isinstance(tool_name, str) or not tool_name
+            or not isinstance(tool_input, dict) or not isinstance(reg, dict)):
+        return ("NEUTRAL", False)
+    dispatch = reg.get("dispatch_tools") if isinstance(reg.get("dispatch_tools"), list) else []
+    waits = reg.get("wait_tools") if isinstance(reg.get("wait_tools"), list) else []
+    polls = reg.get("poll_tools") if isinstance(reg.get("poll_tools"), list) else []
+
+    if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        path = tool_input.get("file_path")
+        if path is None and tool_name == "NotebookEdit":
+            path = tool_input.get("notebook_path")
+        inside = _wait_path_in_state(path, reg.get("_wait_state_dir") or reg.get("state_dir"))
+        if inside is None:
+            return ("NEUTRAL", False)
+        return ("MAINTENANCE", True) if inside else ("PROGRESS", True)
+    if tool_name == "Bash":
+        if tool_input.get("run_in_background") is True:
+            return ("PROGRESS", True)
+        # Deliberate EN-9 boundary: foreground shell meaning is never parsed and never causes DENY.
+        return ("NEUTRAL", False)
+    if tool_name in dispatch:
+        return ("PROGRESS", True)
+    if tool_name == "SendMessage":
+        return ("PROGRESS", True) if tool_input else ("NEUTRAL", False)
+    if tool_name == "TaskOutput":
+        status = tool_response.get("status") if isinstance(tool_response, dict) else None
+        if status in ("completed", "complete", "done", "failed", "cancelled", "canceled"):
+            return ("PROGRESS", True)
+        if status in ("running", "pending", "queued", "in_progress"):
+            return ("WAIT", True)
+        return ("NEUTRAL", False)
+    if tool_name == "ScheduleWakeup":
+        return ("NEUTRAL", True) if tool_input.get("stop") is True else ("WAIT", True)
+    if tool_name == "CronCreate":
+        return ("NEUTRAL", True)
+    if tool_name == "Monitor" or tool_name in waits:
+        return ("WAIT", True)
+    if tool_name in ("CronList", "ListAgents") or tool_name in polls:
+        return ("MAINTENANCE", True)
+    if tool_name in ("Read", "Grep", "Glob", "WebFetch", "WebSearch", "AskUserQuestion"):
+        return ("NEUTRAL", True)
+    return ("NEUTRAL", False)
+
+
+def decide_wait(ctx):
+    """Pure wait-utilization core. Returns ALLOW, WARN, or DENY without reading narration."""
+    disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
+                   + [("cannot_evaluate", i, c, p) for i, c, p in ctx["cannot_evaluate"]]
+                   + [("waiting", i, c, p) for i, c, p in ctx["waiting"]]
+                   + [("actionable", i, t, w) for i, t, w in ctx["actionable"]]
+                   + [("proposed", i, "", "") for i in ctx["proposed"]])
+    if ctx["escape"]:
+        return ("ALLOW", "operator escape artefact present (logged)", disposition)
+    if ctx["wait_run"] < _ORCH_WAIT_FIRE:
+        return ("ALLOW", "wait run is below the redirect threshold", disposition)
+    if ctx["wait_denials"] >= _ORCH_WAIT_DENY_CAP and ctx["wait_basis_unchanged"]:
+        return ("WARN", "{} wait denials on an unchanged basis; warning-only relief prevents a wedge"
+                .format(ctx["wait_denials"]), disposition)
+    if ctx["enum_status"] != "ok":
+        return ("WARN", "AIQT rules waitut/cntdef: the backlog cannot be enumerated ({}: {}), so "
+                "another wait is surfaced but not denied".format(
+                    ctx["enum_status"], ctx["enum_detail"]), disposition)
+    if not ctx["actionable"]:
+        if ctx["cannot_evaluate"]:
+            return ("WARN", "AIQT rules waitut/cntdef: {} open item(s) have an unreadable proof "
+                    "source; uncertainty never wedges an exhausted or gated turn".format(
+                        len(ctx["cannot_evaluate"])), disposition)
+        return ("WARN", "no actionable item remains; legitimate-stop conditions govern", disposition)
+
+    named = ctx["actionable"][:_ORCH_MAX_NAMED]
+    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    if len(ctx["actionable"]) > len(named):
+        listing += "; and {} more".format(len(ctx["actionable"]) - len(named))
+    reason = ("AIQT rules waitut/cntdef: {} consecutive wait or maintenance calls since the last "
+              "progress or genuine human input, while {} granted item(s) are actionable: {}. Advance "
+              "one of them or record a proven blocker on each; a fired timer is neither.".format(
+                  ctx["wait_run"], len(ctx["actionable"]), listing))
+    if ctx["wait_uncertain"]:
+        return ("WARN", reason + " An uncertain structured action keeps hard enforcement off.", disposition)
+    if ctx["wait_run"] < _ORCH_WAIT_FIRE + _ORCH_WAIT_BAKE:
+        return ("WARN", reason + " The in-run warning bake has not elapsed.", disposition)
+    if not ctx["deny_eligible"]:
+        return ("WARN", reason + " This wait primitive is not on the operator's deny surface.", disposition)
+    return ("DENY", reason, disposition)
+
+
 _ORCH_MAX_HORIZON_HOURS = 8760   # a staleness horizon beyond one year is out of range
 _ORCH_COUNTER_MAX = 9999         # a denial counter beyond this is out of range (domain sanity)
 
@@ -5962,20 +6121,27 @@ def _schema_staleness(raw):
 
 
 def _schema_turn_state(raw):
-    """A counter is 0 when its key is ABSENT on a readable turn-state (a fresh count), the value when
-    present and valid, and None when present-but-malformed OR the whole turn-state is unreadable (raw is
-    not a dict). The CALLER maps None to the fail-safe direction (stop -> the loop bound, so a malformed
-    or unreadable counter never licenses unbounded denies; schedule -> 0, so it never buys cap relief).
-    schedule_basis is a string or None."""
+    """Absent counters are fresh zeroes; malformed counters and unreadable state are None.
+    Callers choose the safe direction; wait_uncertain accepts exact booleans only."""
     if not isinstance(raw, dict):
-        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None})
+        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None,
+                       "wait_run": None, "wait_uncertain": None, "wait_denials": None,
+                       "wait_basis": None})
 
     def _count(key):
         return 0 if key not in raw else _v_exact_int(raw[key], 0, _ORCH_COUNTER_MAX)
-    basis = raw.get("schedule_basis")
+
+    def _flag(key):
+        return False if key not in raw else raw[key] if type(raw[key]) is bool else None
+
+    schedule_basis = raw.get("schedule_basis")
+    wait_basis = raw.get("wait_basis")
     return ("ok", {"stop_denials": _count("stop_denials"),
                    "schedule_denials": _count("schedule_denials"),
-                   "schedule_basis": basis if isinstance(basis, str) else None})
+                   "schedule_basis": schedule_basis if isinstance(schedule_basis, str) else None,
+                   "wait_run": _count("wait_run"), "wait_uncertain": _flag("wait_uncertain"),
+                   "wait_denials": _count("wait_denials"),
+                   "wait_basis": wait_basis if isinstance(wait_basis, str) else None})
 
 
 _ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
@@ -6104,6 +6270,17 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     # schedule counter fails CLOSED to 0 (a malformed value never manufactures cap relief, CX-R4-3).
     counter = tstate["stop_denials"] if tstate["stop_denials"] is not None else _ORCH_LOOP_BOUND
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
+    # Every malformed wait field takes the no-wedge direction.
+    wait_run = tstate["wait_run"] if tstate["wait_run"] is not None else 0
+    # A malformed wait_basis (present but non-string) takes the no-wedge direction like every other
+    # malformed wait field: it forces uncertainty so the guard warns rather than denies on an
+    # untrustworthy basis.
+    malformed_wait_basis = isinstance(ts, dict) and "wait_basis" in ts and not isinstance(
+        ts.get("wait_basis"), str)
+    wait_uncertain = (tstate["wait_uncertain"] if tstate["wait_uncertain"] is not None else True
+                      ) or malformed_wait_basis
+    malformed_wait_denials = tstate["wait_denials"] is None
+    wait_denials = tstate["wait_denials"] if not malformed_wait_denials else _ORCH_WAIT_DENY_CAP
     status, payload = _orch_enumerate(reg, root)
     if status == "ok":
         live_ids, ledger_readable, _detail = _orch_live_ledger_ids(root, task_hours)
@@ -6137,6 +6314,7 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
         wake_named = any(_orch_token_present(i, wake_text) or _orch_token_present(p, wake_text)
                          for i, _c, p in rechecked)
     basis_unchanged = tstate["schedule_basis"] == basis
+    wait_basis_unchanged = malformed_wait_denials or tstate["wait_basis"] == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
            "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
@@ -6145,27 +6323,39 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
            "blocked": classes["blocked"], "cannot_evaluate": classes["cannot_evaluate"],
            "proposed": classes["proposed"],
            "wake_named": wake_named, "schedule_denials": schedule_denials,
-           "basis_unchanged": basis_unchanged}
+           "basis_unchanged": basis_unchanged, "wait_run": wait_run,
+           "wait_uncertain": wait_uncertain, "wait_denials": wait_denials,
+           "wait_basis_unchanged": wait_basis_unchanged}
     return ctx, (ts if isinstance(ts, dict) else None), basis
 
 
 def _orch_record_denial(root, ts, kind, basis):
-    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
-    successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
-    a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
-    loop bound and would otherwise re-deny forever."""
-    state = dict(ts or {})
-    if kind == "schedule_idle":
-        prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
-        prior = prior if prior is not None else 0
-        # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
-        # never buy premature cap relief on this one.
-        state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
-        state["schedule_basis"] = basis
-    else:
-        prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
-        state["stop_denials"] = (prior if prior is not None else 0) + 1
-    return _orch_save_turn_state(root, state)
+    """Persist the deny counters (the guard-owned loop bound; platform-independent) as a true locked
+    read-modify-write, so a denial write never clobbers a concurrent turn-state update (for example a
+    progress reset that landed between this guard's context snapshot and this write). The increment base
+    is read from the LIVE locked state, not the caller's snapshot; ``ts`` is retained only for signature
+    compatibility and is no longer read. The increment base is sanitized so a tampered non-int counter
+    cannot raise here; a STOP-path caller that gets False must fail OPEN, since an un-persistable counter
+    never reaches the loop bound and would otherwise re-deny forever."""
+    def _apply(state):
+        if kind == "wait":
+            prior = _v_exact_int(state.get("wait_denials"), 0, _ORCH_COUNTER_MAX)
+            prior = prior if prior is not None else 0
+            state["wait_denials"] = prior + 1 if state.get("wait_basis") == basis else 1
+            state["wait_basis"] = basis
+        elif kind == "schedule_idle":
+            prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
+            prior = prior if prior is not None else 0
+            # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
+            # never buy premature cap relief on this one.
+            state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
+            state["schedule_basis"] = basis
+        else:
+            prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
+            state["stop_denials"] = (prior if prior is not None else 0) + 1
+        return state
+    status, _updated = _orch_locked_turn_state_update(root, _apply)
+    return status == "ok"
 
 
 def _orch_record_escape_spoof(root, detail):
@@ -6287,20 +6477,33 @@ def orch_teammate_idle(data):
     return _orch_stop_family(data, "TeammateIdle", "stop_idle" if False else "stop")
 
 
-def _orch_register_wake(root, ts, prompt):
-    """Record the sha256 of an ALLOWED wake's prompt into turn-state wake_digests (bounded), so the
-    returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
-    the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
-    because nothing ever wrote wake_digests)."""
+def _orch_register_wake(root, prompt, recurring=False):
+    """Record an ALLOWED wake prompt digest without racing another turn-state recorder update.
+
+    One-shot wake digests are multiset tokens consumed once. A recurring cron digest is retained so
+    every later firing is timer-originated and cannot reset the wait counters.
+    """
     if not isinstance(prompt, str) or not prompt:
-        return
+        return "ok"  # nothing to register is not a registration failure
     digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
-    state = dict(ts or {})
-    wd = state.get("wake_digests")
-    wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
-    wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
-    state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
-    _orch_save_turn_state(root, state)
+
+    def update(state):
+        key = "recurring_wake_digests" if recurring else "wake_digests"
+        digests = state.get(key)
+        digests = [d for d in digests if isinstance(d, str)] if isinstance(digests, list) else []
+        if recurring:
+            if digest not in digests:
+                digests.append(digest)
+            # A recurring cron digest is retained across a generous window so a realistic session's
+            # repeat firings stay timer-originated; the bounded window is disclosed at the guard.
+            state[key] = digests[-_ORCH_RECURRING_WAKE_CAP:]
+        else:
+            digests.append(digest)
+            state[key] = digests[-_ORCH_WAKE_DIGEST_CAP:]
+        return state
+
+    status, _state = _orch_locked_turn_state_update(root, update)
+    return status
 
 
 def orch_yield_tool(data):
@@ -6350,14 +6553,34 @@ def orch_yield_tool(data):
                      "contradicts the measured figure.")
     verdict, reason, _disposition = decide_yield(ctx)
     if verdict == "DENY":
-        _orch_record_denial(root, ts, kind, basis)
+        persisted = _orch_record_denial(root, ts, kind, basis)
+        if kind == "stop" and not persisted:
+            # STOP-path fail-open (mirrors the ordinary Stop binding): an un-persistable denial counter
+            # never reaches the loop bound and would otherwise re-deny a stop forever, trapping the run.
+            warn = ("AIQT guardrail: the stop denial counter could not be persisted, so the loop bound "
+                    "cannot advance; allowing this stop with findings rather than re-denying. "
+                    "Underlying: " + reason)
+            _orch_guard_event(root, "yield-tool", "allow_unpersistable", warn)
+            return (0, {"systemMessage": warn + (" " + spoof_warn if spoof_warn else "")}, None)
         _orch_guard_event(root, "yield-tool", "deny", reason)
         return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
                      "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
+    wake_warn = ""
     if kind == "schedule_idle":
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        _orch_register_wake(root, ts, tool_input.get("prompt"))
+        # Scope: only a schedule_idle wake actually fires a returning prompt. A stop (ScheduleWakeup
+        # stop=true) ends the loop and fires nothing, so registering its digest would serve no firing and
+        # could only mis-classify a later coincidental human prompt; it is deliberately not registered.
+        wake_status = _orch_register_wake(
+            root, tool_input.get("prompt"), recurring=tool == "CronCreate")
+        if wake_status != "ok":
+            # A failed wake registration is surfaced, never swallowed: an unregistered wake's later
+            # firing is read as genuine human input and resets the loop-guard counters (the guard then
+            # silently under-enforces), so the operator sees the miss rather than a silent coverage hole.
+            wake_warn = ("AIQT guardrail: the wake digest could not be registered ({}); a later firing "
+                         "of this wake may be read as genuine human input and reset the loop-guard "
+                         "counters.".format(wake_status))
     _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         msg = "AIQT guardrail: {}".format(reason)
@@ -6373,7 +6596,58 @@ def orch_yield_tool(data):
                 msg += " " + extra
         if spoof_warn:
             msg += " " + spoof_warn
+        if wake_warn:
+            msg += " " + wake_warn
         return (0, {"systemMessage": msg}, None)
+    tail = " ".join(m for m in (
+        "AIQT guardrail: {}".format(spoof_warn) if spoof_warn else "", wake_warn) if m)
+    if tail:
+        return (0, {"systemMessage": tail}, None)
+    return _allow()
+
+
+def orch_wait_guard(data):
+    """waitut/cntdef, PreToolUse: redirect a repeated native wait to actionable work."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
+    if status != "ok":
+        return (0, {"systemMessage": "AIQT guardrail: wait utilization could not read the "
+                                     "orchestration registry ({}); warning without blocking."
+                                     .format(reg)}, None)
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()
+    tool = data.get("tool_name")
+    waits = reg.get("wait_tools")
+    if not isinstance(waits, list) or tool not in waits:
+        return _allow()
+
+    typed = _orch_validate("turn_state", _orch_turn_state(root))[1]
+    if (typed["wait_run"] if typed["wait_run"] is not None else 0) < _ORCH_WAIT_FIRE:
+        return _allow()
+    ctx, ts, basis = _orch_build_ctx(reg, root, "wait", data)
+    deny_tools = reg.get("wait_deny_tools")
+    deny_tools = deny_tools if isinstance(deny_tools, list) else []
+    # TaskOutput stays warning-only: a poll and needed result collection are identical before the call.
+    ctx["deny_eligible"] = tool != "TaskOutput" and tool in deny_tools
+    spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
+                  if ctx.get("escape_spoof") else "")
+    verdict, reason, _disposition = decide_wait(ctx)
+    if verdict == "DENY":
+        if _orch_record_denial(root, ts, "wait", basis):
+            _orch_guard_event(root, "wait-guard", "deny", reason)
+            return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
+                         "AIQT guardrail: denied another wait while actionable work remains.")
+        reason = ("the wait denial counter could not be persisted, so cap relief cannot advance; "
+                  "warning without blocking. Underlying: " + reason)
+        verdict = "WARN"
+    _orch_guard_event(root, "wait-guard", verdict.lower(), reason)
+    if verdict == "WARN":
+        return (0, {"systemMessage": "AIQT guardrail: {}{}".format(
+            reason, " " + spoof_warn if spoof_warn else "")}, None)
     if spoof_warn:
         return (0, {"systemMessage": "AIQT guardrail: {}".format(spoof_warn)}, None)
     return _allow()
@@ -6642,6 +6916,52 @@ def orch_dispatch_ledger(data):
     return _allow()
 
 
+def orch_wait_recorder(data):
+    """waitut/recfst/trkasy, PostToolUse recorder. It never blocks or parses narration."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok" or not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()
+    class_reg = dict(reg)
+    class_reg["_wait_state_dir"] = _state_dir_from_registry(root, reg)
+    cls, certain = classify_wait_action(
+        data.get("tool_name"), data.get("tool_input"), data.get("tool_response"), class_reg)
+    if cls == "NEUTRAL" and certain:
+        return _allow()
+
+    malformed = []
+
+    def update(state):
+        typed = _orch_validate("turn_state", state)[1]
+        if cls == "PROGRESS" and certain:
+            state.update({"wait_run": 0, "wait_uncertain": False, "wait_denials": 0,
+                          "last_progress_utc": _orch_now().isoformat()})
+            state.pop("wait_basis", None)
+        elif cls in ("WAIT", "MAINTENANCE") and certain:
+            if typed["wait_run"] is None:
+                malformed.append(True)
+                return None
+            state["wait_run"] = min(_ORCH_COUNTER_MAX, typed["wait_run"] + 1)
+        else:
+            state["wait_uncertain"] = True
+        return state
+
+    update_status, _state = _orch_locked_turn_state_update(root, update)
+    if update_status == "unreadable":
+        return (0, {"systemMessage": "AIQT guardrail: turn-state is unreadable; the wait-run "
+                                     "counter was not rewritten."}, None)
+    if malformed:
+        return (0, {"systemMessage": "AIQT guardrail: wait_run is malformed; the recorder "
+                                     "did not replace it with a manufactured zero."}, None)
+    if update_status != "ok":
+        return (0, {"systemMessage": "AIQT guardrail: the wait-run counter could not be "
+                                     "persisted under its lock ({}); the redirect may not engage."
+                                     .format(update_status)}, None)
+    return _allow()
+
+
 def orch_prompt_stamp(data):
     """tstamp/estsep, UserPromptSubmit (recorder, never blocks): stamp genuine human input from the
     clock, classify a prompt matching a registered wake as timer-originated, and inject the measured
@@ -6655,27 +6975,45 @@ def orch_prompt_stamp(data):
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()  # only the holder session stamps/resets the shared turn-state (CX-M4b)
     prompt = data.get("prompt")
-    ts = _orch_turn_state(root) or {}
     digest = __import__("hashlib").sha256(
         (prompt or "").encode("utf-8", "replace")).hexdigest() if isinstance(prompt, str) else ""
-    _wds = ts.get("wake_digests")
-    _wds = _wds if isinstance(_wds, list) else []  # a non-list wake_digests never enables substring match
-    timer_originated = digest and digest in _wds
-    prev = _orch_parse_utc(ts.get("last_human_input_utc"))
-    if not timer_originated:
-        ts["last_human_input_utc"] = _orch_now().isoformat()
-        ts["stop_denials"] = 0
-        ts["schedule_denials"] = 0
-        ts.pop("schedule_basis", None)
-        _orch_save_turn_state(root, ts)
+    classified = {}
+
+    def update(ts):
+        one_shot = ts.get("wake_digests")
+        one_shot = one_shot if isinstance(one_shot, list) else []
+        recurring = ts.get("recurring_wake_digests")
+        recurring = recurring if isinstance(recurring, list) else []
+        recurring_match = bool(digest and digest in recurring)
+        timer_originated = bool(recurring_match or (digest and digest in one_shot))
+        classified["timer_originated"] = timer_originated
+        classified["prev"] = _orch_parse_utc(ts.get("last_human_input_utc"))
+        if not timer_originated:
+            ts["last_human_input_utc"] = _orch_now().isoformat()
+            ts["stop_denials"] = 0
+            ts["schedule_denials"] = 0
+            ts.pop("schedule_basis", None)
+            ts["wait_run"] = 0
+            ts["wait_uncertain"] = False
+            ts["wait_denials"] = 0
+            ts.pop("wait_basis", None)
+            return ts
+        if digest in one_shot:
+            # Always consume a matching one-shot digest, even when the same prompt is also registered
+            # as recurring, so no stale one-shot token outlives its single firing.
+            one_shot = list(one_shot)
+            one_shot.remove(digest)
+            ts["wake_digests"] = one_shot
+        return ts
+
+    update_status, _state = _orch_locked_turn_state_update(root, update)
+    if update_status != "ok":
+        return (0, {"systemMessage": "AIQT guardrail: the prompt stamp could not update turn-state "
+                                     "under its lock ({}); counters were left unchanged."
+                                     .format(update_status)}, None)
+    if not classified["timer_originated"]:
         return _allow()
-    # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
-    # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
-    wd = list(ts.get("wake_digests") or [])
-    if digest in wd:
-        wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
-    ts["wake_digests"] = wd
-    _orch_save_turn_state(root, ts)
+    prev = classified["prev"]
     gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
     if prev is not None:
         gap = "{:.1f} minutes".format((_orch_now() - prev).total_seconds() / 60.0)
@@ -7720,9 +8058,11 @@ HANDLERS = {
     "orch_stop_guard": orch_stop_guard,
     "orch_teammate_idle": orch_teammate_idle,
     "orch_yield_tool": orch_yield_tool,
+    "orch_wait_guard": orch_wait_guard,
     "orch_ask_guard": orch_ask_guard,
     "orch_truncation_guard": orch_truncation_guard,
     "orch_dispatch_ledger": orch_dispatch_ledger,
+    "orch_wait_recorder": orch_wait_recorder,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
@@ -7753,13 +8093,19 @@ HANDLER_EVENT = {
     "orch_stop_guard": "Stop",
     "orch_teammate_idle": "TeammateIdle",
     "orch_yield_tool": PRETOOL,
+    "orch_wait_guard": PRETOOL,
     "orch_ask_guard": PRETOOL,
     "orch_truncation_guard": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
+    "orch_wait_recorder": "PostToolUse",
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
 }
+
+# Denying a wait on a guard crash could block needed result collection. Every other PreToolUse
+# handler keeps the dispatcher fail-closed default.
+FAIL_OPEN_HANDLERS = frozenset(("orch_wait_guard",))
 
 
 def _dispatcher_fail_open_warn(handler_name, detail):
@@ -7785,7 +8131,8 @@ def main(argv):
               file=sys.stderr)
         return 2
     handler_name = mode
-    is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
+    is_fail_open = (HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
+                    or handler_name in FAIL_OPEN_HANDLERS)
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
