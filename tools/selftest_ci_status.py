@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Behavioural self-test for tools/ci-status.sh.
 
-Every case runs the real script in a throwaway git repository with controlled gh and sleep executables.
-The gh fixture emulates the pre-GD-162 .workflow_runs[0] expression as well as the paginated TSV contract,
-so the multi-run, late-created-run, failed-second-run, and second-page cases discriminate against the old
-implementation. Verdicts use the child's return code and complete captured output, never a success token.
+Every case runs the real script in a throwaway git repository with controlled gh, date, and sleep
+executables. The gh fixture passes the script's jq expression to the real jq executable, and a separate
+check extracts that expression from ci-status.sh and exercises it directly against crafted JSON. Verdicts
+use the child's return code and complete captured output, never a success token.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
   selftest_ci_status.py --execution-report ABS_PATH  also write the executed check IDs as JSON
@@ -26,6 +26,9 @@ except ModuleNotFoundError:
     sys.exit("error: selftest_ci_status.py requires Python 3.11+ (tomllib).")
 
 ROOT = Path(__file__).resolve().parents[1]
+SYSTEM_PATH = "/usr/bin:/bin"
+GIT = "/usr/bin/git"
+JQ = "/usr/bin/jq"
 SCRIPT = ROOT / "tools" / "ci-status.sh"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
@@ -33,9 +36,9 @@ FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
 
-FAKE_GH = r"""#!/usr/bin/env python3
-import json
+FAKE_GH = r"""import json
 import os
+import subprocess
 import sys
 
 args = sys.argv[1:]
@@ -57,77 +60,50 @@ poll = polls[min(call - 1, len(polls) - 1)]
 if isinstance(poll, dict) and "error" in poll:
     print(poll["error"], file=sys.stderr)
     sys.exit(poll.get("exit", 1))
-
-pages = poll
-old_expression = ".workflow_runs[0]" in expression
-if old_expression:
-    runs = pages[0]["workflow_runs"]
-    if not runs:
-        print("__NORUN__")
-    else:
-        run = runs[0]
-        print("{}|{}|{}|{}".format(
-            run.get("status"), run.get("conclusion") or "-",
-            run.get("name"), run.get("html_url")))
-    sys.exit(0)
+if not isinstance(poll, list) or not poll:
+    print("gh fixture: malformed poll", file=sys.stderr)
+    sys.exit(1)
 
 endpoint = next((arg for arg in args if arg.startswith("repos/")), "")
-compact_expression = "".join(expression.split())
-tsv_contract = ('[(.status//"-"),(.conclusion//"-"),(.id|tostring),'
-                '.name,.html_url]|@tsv')
-if ("--paginate" not in args or "--slurp" not in args
-        or "&per_page=100" not in endpoint or "?head_sha=" not in endpoint
-        or tsv_contract not in compact_expression):
-    print("gh fixture: query must paginate and emit the status-first TSV contract", file=sys.stderr)
+if "?head_sha=" not in endpoint or "&per_page=100" not in endpoint:
+    print("gh fixture: query must request head_sha with per_page=100", file=sys.stderr)
     sys.exit(1)
-if not isinstance(pages, list) or not pages:
-    print("gh fixture: malformed workflow-runs response", file=sys.stderr)
-    sys.exit(1)
-totals = []
-all_runs = []
-for page in pages:
-    if (not isinstance(page, dict) or type(page.get("total_count")) is not int
-            or page["total_count"] < 0 or not isinstance(page.get("workflow_runs"), list)):
-        print("gh fixture: malformed workflow-runs response", file=sys.stderr)
-        sys.exit(1)
-    totals.append(page["total_count"])
-    all_runs.extend(page["workflow_runs"])
-if len(set(totals)) != 1:
-    print("gh fixture: inconsistent paginated workflow-runs snapshot", file=sys.stderr)
-    sys.exit(1)
-
-unique = {}
-for run in all_runs:
-    if (not isinstance(run, dict) or type(run.get("id")) is not int or run["id"] <= 0
-            or (run.get("status") is not None
-                and (not isinstance(run["status"], str) or not run["status"]))
-            or (run.get("conclusion") is not None
-                and (not isinstance(run["conclusion"], str) or not run["conclusion"]))
-            or not isinstance(run.get("name"), str) or not run["name"]
-            or not isinstance(run.get("html_url"), str) or not run["html_url"]):
-        print("gh fixture: malformed workflow run record", file=sys.stderr)
-        sys.exit(1)
-    unique[run["id"]] = run
-if len(unique) != totals[0]:
-    print("gh fixture: inconsistent paginated workflow-runs snapshot", file=sys.stderr)
-    sys.exit(1)
-if not unique:
-    print("__NORUN__")
-    sys.exit(0)
-
-def escape_tsv(value):
-    return (str(value).replace("\\", "\\\\").replace("\t", "\\t")
-            .replace("\r", "\\r").replace("\n", "\\n"))
-
-for run_id in sorted(unique):
-    run = unique[run_id]
-    fields = [run.get("status") or "-", run.get("conclusion") or "-", run_id,
-              run["name"], run["html_url"]]
-    print("\t".join(escape_tsv(value) for value in fields))
+pages = poll if "--paginate" in args else poll[:1]
+payload = pages if "--slurp" in args else pages[0]
+result = subprocess.run(
+    [os.environ["MOCK_JQ"], "-r", expression], input=json.dumps(payload),
+    text=True, capture_output=True, timeout=10,
+)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+sys.exit(result.returncode)
 """
 
-FAKE_SLEEP = """#!/usr/bin/env bash
-exit 0
+FAKE_DATE = r"""import os
+import sys
+
+if sys.argv[1:] == ["+%s"]:
+    with open(os.environ["MOCK_CLOCK"], "r", encoding="utf-8") as handle:
+        print(handle.read().strip())
+elif sys.argv[1:] == ["-u", "+%H:%M:%SZ"]:
+    print("00:00:00Z")
+else:
+    print("date fixture: unsupported arguments", file=sys.stderr)
+    sys.exit(1)
+"""
+
+FAKE_SLEEP = r"""import os
+import sys
+
+try:
+    seconds = int(sys.argv[1])
+    with open(os.environ["MOCK_CLOCK"], "r", encoding="utf-8") as handle:
+        now = int(handle.read().strip())
+    with open(os.environ["MOCK_CLOCK"], "w", encoding="utf-8") as handle:
+        handle.write(str(now + seconds) + "\n")
+except (IndexError, OSError, ValueError) as exc:
+    print("sleep fixture: {}".format(exc), file=sys.stderr)
+    sys.exit(1)
 """
 
 
@@ -156,38 +132,69 @@ def page(runs, total_count=None):
             "workflow_runs": runs}
 
 
+def jq_program():
+    source = SCRIPT.read_text(encoding="utf-8")
+    prefix = "    --jq '\n"
+    suffix = "' 2>&1\n}"
+    if source.count(prefix) != 1:
+        raise ValueError("ci-status.sh must contain exactly one gh --jq program")
+    start = source.index(prefix) + len(prefix)
+    end = source.index(suffix, start)
+    return source[start:end]
+
+
+def run_jq(program, pages):
+    return subprocess.run(
+        [JQ, "-r", program], input=json.dumps(pages), text=True,
+        capture_output=True, timeout=10,
+        env={"PATH": SYSTEM_PATH, "LC_ALL": "C", "TZ": "UTC"},
+    )
+
+
 class Fixture:
     def __init__(self, base):
         self.repo = base / "repo"
         self.bin = base / "bin"
+        self.home = base / "home"
         self.repo.mkdir()
         self.bin.mkdir()
-        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)],
-                       check=True, capture_output=True, timeout=30)
+        self.home.mkdir()
+        self.base_env = {
+            "PATH": SYSTEM_PATH,
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home),
+            "LC_ALL": "C",
+            "TZ": "UTC",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        subprocess.run([GIT, "init", "-q", "-b", "main", str(self.repo)],
+                       check=True, capture_output=True, timeout=30, env=self.base_env)
         (self.repo / "seed.txt").write_text("seed\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(self.repo), "add", "seed.txt"],
-                       check=True, capture_output=True, timeout=30)
+        subprocess.run([GIT, "-C", str(self.repo), "add", "seed.txt"],
+                       check=True, capture_output=True, timeout=30, env=self.base_env)
         subprocess.run(
-            ["git", "-C", str(self.repo), "-c", "user.name=Selftest",
+            [GIT, "-C", str(self.repo), "-c", "user.name=Selftest",
              "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
              "commit", "-q", "-m", "seed"],
-            check=True, capture_output=True, timeout=30)
+            check=True, capture_output=True, timeout=30, env=self.base_env)
         self.response = base / "responses.json"
         self.counter = base / "calls.txt"
-        gh = self.bin / "gh"
-        gh.write_text(FAKE_GH, encoding="utf-8")
-        gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
-        sleep = self.bin / "sleep"
-        sleep.write_text(FAKE_SLEEP, encoding="utf-8")
-        sleep.chmod(sleep.stat().st_mode | stat.S_IXUSR)
+        self.clock = base / "clock.txt"
+        for name, body in (("gh", FAKE_GH), ("date", FAKE_DATE), ("sleep", FAKE_SLEEP)):
+            executable = self.bin / name
+            executable.write_text("#!{}\n{}".format(sys.executable, body), encoding="utf-8")
+            executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
-    def invoke(self, polls, wait=False, timeout="30"):
+    def invoke(self, polls, wait=False, timeout="900"):
         self.response.write_text(json.dumps({"polls": polls}), encoding="utf-8")
         self.counter.write_text("0\n", encoding="utf-8")
-        env = os.environ.copy()
-        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
+        self.clock.write_text("100000\n", encoding="utf-8")
+        env = dict(self.base_env)
+        env["PATH"] = str(self.bin) + os.pathsep + SYSTEM_PATH
         env["MOCK_GH_RESPONSE"] = str(self.response)
         env["MOCK_GH_COUNTER"] = str(self.counter)
+        env["MOCK_CLOCK"] = str(self.clock)
+        env["MOCK_JQ"] = JQ
         env["CI_STATUS_REPO"] = "fixture/repository"
         env["CI_STATUS_TIMEOUT"] = timeout
         command = [str(SCRIPT), "HEAD"]
@@ -241,6 +248,36 @@ def main(report_path=None):
     with tempfile.TemporaryDirectory(prefix="ci-status-selftest-") as raw:
         fixture = Fixture(Path(raw))
 
+        conflict_a = workflow_run(101, "in_progress", None, "Web generator health")
+        overfull = [workflow_run(1000 + index, "completed", "success", "Run {}".format(index))
+                    for index in range(101)]
+        try:
+            program = jq_program()
+            conflict = run_jq(program, [page([success_a, conflict_a], 1)])
+            mismatched = run_jq(program, [page([success_a], 2)])
+            differing = run_jq(program, [page([success_a], 1), page([success_a], 2)])
+            successful = run_jq(program, [page([success_b, success_a], 2)])
+            too_many = run_jq(program, [page(overfull, 101)])
+            expected_rows = "\n".join(
+                "completed\tsuccess\t{}\t{}\t{}".format(
+                    run["id"], run["name"], run["html_url"])
+                for run in (success_a, success_b)
+            ) + "\n"
+            direct_result = (
+                conflict.returncode != 0
+                and "conflicting duplicate workflow-run records" in conflict.stderr,
+                mismatched.returncode != 0
+                and "inconsistent paginated workflow-runs snapshot" in mismatched.stderr,
+                differing.returncode != 0
+                and "inconsistent paginated workflow-runs snapshot" in differing.stderr,
+                (successful.returncode, successful.stdout) == (0, expected_rows),
+                too_many.returncode != 0
+                and "malformed workflow-runs response" in too_many.stderr,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            direct_result = "jq-filter setup failed: {}".format(exc)
+        check("ci/jq-filter-direct-cases", direct_result, (True, True, True, True, True))
+
         rc, output, _calls = fixture.invoke([[page([success_a, pending_b])]])
         check("ci/multi-pending-not-green", rc, 1)
 
@@ -281,6 +318,16 @@ def main(report_path=None):
             [{"error": "gh: Not Found (HTTP 404)", "exit": 1}])
         check("ci/not-found-exit2", (rc, "could not read workflow runs" in output), (2, True))
 
+        not_found_name = workflow_run(404, "completed", "success", "Not Found regression")
+        rc, output, _calls = fixture.invoke([[page([not_found_name])]])
+        check("ci/display-not-found-not-api-error",
+              (rc, "Not Found regression" in output), (0, True))
+
+        rc, output, _calls = fixture.invoke(
+            [{"error": "__NORUN__", "exit": 1}])
+        check("ci/nonzero-norun-is-api-error",
+              (rc, "could not read workflow runs" in output), (2, True))
+
         rc, output, _calls = fixture.invoke(
             [[page([success_a], 2), page([failed_b], 2)]])
         check("ci/pagination-all-runs",
@@ -296,6 +343,11 @@ def main(report_path=None):
                  + [[page([success_a])]] * 5)
         rc, _output, calls = fixture.invoke(polls, wait=True)
         check("ci/settle-nonterminal-resets", (rc, calls), (0, 8))
+
+        rc, output, calls = fixture.invoke(
+            [[page([success_a])]] * 5, wait=True, timeout="59")
+        check("ci/settle-deadline-strict",
+              (rc, calls, "TIMEOUT" in output), (1, 5, True))
 
         rc, _output, _calls = fixture.invoke(
             [[page([success_a], 3), page([success_b], 3)]])

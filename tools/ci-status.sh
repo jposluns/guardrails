@@ -67,8 +67,9 @@ query() {
   # gating field. Name and URL remain display-only.
   # The no-run case (empty array) gets an explicit sentinel rather than a rendered "null", because
   # a real run's .status is nullable in the schema and must not be mistaken for "no run yet".
-  # Pagination is part of the verdict: de-duplicate by run ID, then require the observed unique count to
-  # equal the API's stable total_count. A malformed or racing snapshot is an API error, never green.
+  # Pagination is part of the verdict: reject non-identical records sharing a run ID, collapse only
+  # identical duplicates, then reconcile the unique count with the API's stable total_count. A malformed
+  # or racing snapshot is an API error, never green.
   gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp \
     --jq '
       . as $pages
@@ -79,7 +80,8 @@ query() {
             or ((.total_count | type) != "number")
             or (.total_count < 0)
             or ((.total_count | floor) != .total_count)
-            or ((.workflow_runs | type) != "array")) then
+            or ((.workflow_runs | type) != "array")
+            or ((.workflow_runs | length) > 100)) then
           error("malformed workflow-runs response")
         else
           ([$pages[] | .workflow_runs[]]) as $all_runs
@@ -98,15 +100,24 @@ query() {
               error("malformed workflow run record")
             else
               ([$pages[].total_count] | unique) as $totals
-              | ($all_runs | unique_by(.id) | sort_by(.id)) as $runs
-              | if (($totals | length) != 1) or (($runs | length) != $totals[0]) then
-                  error("inconsistent paginated workflow-runs snapshot")
+              | ($all_runs | sort_by(.id) | group_by(.id)) as $run_groups
+              | if any($run_groups[];
+                  (([.[].status] | unique | length) > 1)
+                  or (([.[].conclusion] | unique | length) > 1)) then
+                  error("conflicting duplicate workflow-run records")
+                elif any($run_groups[]; ((unique | length) > 1)) then
+                  error("non-identical duplicate workflow-run records")
+                else
+                  ($run_groups | map(.[0]) | sort_by(.id)) as $runs
+                  | if (($totals | length) != 1) or (($runs | length) != $totals[0]) then
+                    error("inconsistent paginated workflow-runs snapshot")
                 elif ($runs | length) == 0 then
                   "__NORUN__"
                 else
                   $runs[]
                   | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
                   | @tsv
+                  end
                 end
             end
         end' 2>&1
@@ -125,6 +136,24 @@ last_summary="no workflow run registered"
 while :; do
   lines="$(query)"
   query_rc=$?
+  # A failed query is an API error even if its output resembles a valid sentinel or run row.
+  # Report-once fails with exit 2. Under --wait, ride through a transient query failure until the
+  # deadline, keeping API diagnostics separate from display fields in successful run rows.
+  if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
+    SETTLE_FINGERPRINT=""
+    SETTLE_COUNT=0
+    last_summary="workflow-runs API query failed"
+    echo "ERROR: could not read workflow runs for ${SHA} in ${REPO}"
+    echo "  raw: ${lines}"
+    [ "$WAIT" != "--wait" ] && exit 2
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+      echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
+      exit 1
+    fi
+    sleep "$POLL_SECONDS"
+    continue
+  fi
+
   # No workflow run registered yet (empty array): the query emits an explicit sentinel. This is
   # briefly true right after a push, and is distinct from "in progress", from an error, and from a
   # real run whose .status happens to be null (which falls through to the unrecognized-status path).
@@ -142,13 +171,8 @@ while :; do
     sleep "$POLL_SECONDS"
     continue
   fi
-  if [[ "$lines" == *"not accessible"* || "$lines" == *"Not Found"* || -z "$lines" ||
-        "$query_rc" -ne 0 ]]; then
-    echo "ERROR: could not read workflow runs for ${SHA} in ${REPO}"
-    echo "  raw: ${lines}"
-    exit 2
-  fi
 
+  settled=0
   run_ids=()
   failure_names=()
   failure_conclusions=()
@@ -214,14 +238,16 @@ while :; do
     fi
     last_summary="all ${#run_ids[@]} workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
     if [ "$SETTLE_COUNT" -ge "$SETTLE_OBSERVATIONS" ]; then
-      exit 0
+      settled=1
+    else
+      echo "RESULT: ${last_summary}; waiting for late-created runs."
     fi
-    echo "RESULT: ${last_summary}; waiting for late-created runs."
   fi
 
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
     echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
     exit 1
   fi
+  [ "$settled" -eq 1 ] && exit 0
   sleep "$POLL_SECONDS"
 done
