@@ -962,6 +962,24 @@ def main(report_path=None):
               (w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain"),
                w.turn_state().get("wait_denials"), "wait_basis" in w.turn_state()),
               (0, False, 0, False))
+
+        # A prompt registered in BOTH namespaces still consumes its one-shot token on firing (round-3
+        # MINOR): no stale one-shot outlives the recurring window.
+        w.set_turn_state({"wait_run": 7, "wait_uncertain": True})
+        aiqt_hooks._orch_register_wake(str(w.root), "dual prompt", recurring=True)
+        aiqt_hooks._orch_register_wake(str(w.root), "dual prompt", recurring=False)
+        aiqt_hooks.orch_prompt_stamp(w.payload("UserPromptSubmit", extra={"prompt": "dual prompt"}))
+        check("wait/stamp/one-shot-consumed-when-recurring", w.turn_state().get("wake_digests"), [])
+
+        # A failed wake registration propagates its status, never silently discarded (round-3 MAJOR).
+        _real_locked = aiqt_hooks._orch_locked_turn_state_update
+        try:
+            aiqt_hooks._orch_locked_turn_state_update = lambda root, update: ("lock-failed", None)
+            _ws = aiqt_hooks._orch_register_wake(str(w.root), "some wake", recurring=False)
+        finally:
+            aiqt_hooks._orch_locked_turn_state_update = _real_locked
+        check("wait/register-wake/surfaces-failure", _ws, "lock-failed")
+
         check("wait/dispatch/posture",
               (aiqt_hooks.HANDLER_EVENT.get("orch_wait_guard"),
                aiqt_hooks.HANDLER_EVENT.get("orch_wait_recorder"),

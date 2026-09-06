@@ -52,15 +52,19 @@ def main():
     rosters = {}
     for key in ("wait_tools", "wait_deny_tools", "poll_tools"):
         value = reg.get(key)
-        if not isinstance(value, list) or not all(
+        if value is None:
+            # All keys except version are optional (ORCHESTRATION.md); an undeclared surface simply
+            # removes that protection and is never a doctor finding.
+            rosters[key] = []
+        elif not isinstance(value, list) or not all(
                 isinstance(tool, str) and tool for tool in value):
-            findings.append("{} must be present as a list of non-empty tool names".format(key))
+            findings.append("{} must be a list of non-empty tool names when present".format(key))
             rosters[key] = []
         else:
             rosters[key] = value
     wait_tools = rosters["wait_tools"]
-    if not wait_tools:
-        findings.append("wait_tools is empty, so the wait-utilization guard cannot activate")
+    if reg.get("wait_tools") is not None and not wait_tools:
+        findings.append("wait_tools is present but empty, so the wait-utilization guard cannot activate")
     for tool in wait_tools:
         if tool not in WAIT_MATCHER_TOOLS:
             findings.append("wait tool {!r} is OUTSIDE the shipped PreToolUse matcher and is not "
@@ -88,9 +92,10 @@ def main():
             print("enumerator OK: {} item(s)".format(len(payload)))
     else:
         findings.append("no enumerator declared: the backlog is not enumerable, so the stop guard "
-                        "DENIES a yield (stop) and scheduling (schedule_idle) below the loop bound, "
-                        "releasing only at the loop bound (ALLOW_WITH_FINDINGS) or via the operator "
-                        "escape sentinel")
+                        "DENIES a stop (yield) until the loop bound (_ORCH_LOOP_BOUND denials, then "
+                        "ALLOW_WITH_FINDINGS) and DENIES scheduling (schedule_idle) until the schedule "
+                        "cap on an unchanged basis (_ORCH_SCHEDULE_CAP denials, then "
+                        "ALLOW_WITH_FINDINGS); the operator escape sentinel releases either")
     if reg.get("mode") and aiqt_hooks._orch_mode(reg, root) is None:
         findings.append("declared mode record carries no readable Operating-mode line")
     if findings:

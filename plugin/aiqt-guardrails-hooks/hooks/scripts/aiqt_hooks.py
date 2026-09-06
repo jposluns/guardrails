@@ -6478,7 +6478,7 @@ def _orch_register_wake(root, prompt, recurring=False):
     every later firing is timer-originated and cannot reset the wait counters.
     """
     if not isinstance(prompt, str) or not prompt:
-        return
+        return "ok"  # nothing to register is not a registration failure
     digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
 
     def update(state):
@@ -6496,7 +6496,8 @@ def _orch_register_wake(root, prompt, recurring=False):
             state[key] = digests[-_ORCH_WAKE_DIGEST_CAP:]
         return state
 
-    _orch_locked_turn_state_update(root, update)
+    status, _state = _orch_locked_turn_state_update(root, update)
+    return status
 
 
 def orch_yield_tool(data):
@@ -6550,11 +6551,19 @@ def orch_yield_tool(data):
         _orch_guard_event(root, "yield-tool", "deny", reason)
         return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
                      "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
+    wake_warn = ""
     if kind == "schedule_idle":
         # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
         # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        _orch_register_wake(
+        wake_status = _orch_register_wake(
             root, tool_input.get("prompt"), recurring=tool == "CronCreate")
+        if wake_status != "ok":
+            # A failed wake registration is surfaced, never swallowed: an unregistered wake's later
+            # firing is read as genuine human input and resets the loop-guard counters (the guard then
+            # silently under-enforces), so the operator sees the miss rather than a silent coverage hole.
+            wake_warn = ("AIQT guardrail: the wake digest could not be registered ({}); a later firing "
+                         "of this wake may be read as genuine human input and reset the loop-guard "
+                         "counters.".format(wake_status))
     _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         msg = "AIQT guardrail: {}".format(reason)
@@ -6570,9 +6579,13 @@ def orch_yield_tool(data):
                 msg += " " + extra
         if spoof_warn:
             msg += " " + spoof_warn
+        if wake_warn:
+            msg += " " + wake_warn
         return (0, {"systemMessage": msg}, None)
-    if spoof_warn:
-        return (0, {"systemMessage": "AIQT guardrail: {}".format(spoof_warn)}, None)
+    tail = " ".join(m for m in (
+        "AIQT guardrail: {}".format(spoof_warn) if spoof_warn else "", wake_warn) if m)
+    if tail:
+        return (0, {"systemMessage": tail}, None)
     return _allow()
 
 
@@ -6968,7 +6981,9 @@ def orch_prompt_stamp(data):
             ts["wait_denials"] = 0
             ts.pop("wait_basis", None)
             return ts
-        if not recurring_match:
+        if digest in one_shot:
+            # Always consume a matching one-shot digest, even when the same prompt is also registered
+            # as recurring, so no stale one-shot token outlives its single firing.
             one_shot = list(one_shot)
             one_shot.remove(digest)
             ts["wake_digests"] = one_shot

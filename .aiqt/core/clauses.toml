@@ -4856,8 +4856,8 @@ corpus-id = "waitut"
 source-path = ".aiqt/core/rules/progr-wait-utilization.md"
 start-line = 13
 end-line = 19
-canonical-text = "A wait is a resource: while a long operation is in flight, the next actionable item is advanced\nrather than the run left idle. Whether the run is idling is read from what it does, never from what\nit says: each action is classified as progress, wait, maintenance, or neutral from the action's own\nidentity and structured target, so a synonym for waiting neither creates idling nor cures it, and a\nclaim of being busy is not activity. A run of consecutive wait and maintenance actions with no\nintervening progress and no genuine human input is idling, however it is narrated; a fired timer is\nmaintenance, not the genuine human input that clears that state."
-source-digest = "9af8c53bf05eae03854fc67c7cd549e185de0ada3c03e0f76d9da2ae446f4f56"
+canonical-text = "A wait is a resource: while a long operation is in flight, the next actionable item is advanced\nrather than the run left idle. Whether the run is idling is read from what it does, never from what\nit says: each action is classified as progress, wait, maintenance, or neutral from the action's own\nidentity and structured target, so a synonym for waiting neither creates idling nor cures it, and a\nclaim of being busy is not activity. A run of consecutive wait and maintenance actions with no\nintervening progress and no genuine human input is idling, however it is narrated; a fired timer is\nnot genuine human input, nor is it activity that advances the work."
+source-digest = "74e4325c3c5e80374137497150b9b91ce78bd4cf947bb9dda9f96f1fc0d054f0"
 
 [[clause]]
 clause-id = "waitut.2"
@@ -4866,4 +4866,4 @@ source-path = ".aiqt/core/rules/progr-wait-utilization.md"
 start-line = 21
 end-line = 30
 canonical-text = "When such an idle run passes a bounded threshold while an actionable item remains on a fresh\nenumeration of the authoritative backlog, the run is redirected to that item rather than permitted\nanother wait. The redirection is surfaced first and enforced only after a short bake, and only on a\nwait primitive the operator has expressly placed on the enforcement surface, so early further waits\nwarn rather than wedge. Where the backlog cannot be enumerated, where an action's classification is\nuncertain, where no actionable item remains, or where the wait is the genuinely needed collection of\na launched result, the control degrades to a surfaced note and never wedges a legitimately exhausted\nor human-gated turn: it defers to the continue-by-default legitimate-stop conditions in full. This\nmechanizes continue-by-default against the turn-splitting evasion, in which a run sidesteps the\nguarded park primitive by dribbling the same idle across many small waits."
-source-digest = "9af8c53bf05eae03854fc67c7cd549e185de0ada3c03e0f76d9da2ae446f4f56"
+source-digest = "74e4325c3c5e80374137497150b9b91ce78bd4cf947bb9dda9f96f1fc0d054f0"

@@ -219,8 +219,10 @@ expected-check-ids = [
   "wait/stamp/timer-preserves",
   "wait/stamp/recurring-second-preserves",
   "wait/stamp/recurring-retained-past-old-cap",
+  "wait/stamp/one-shot-consumed-when-recurring",
   "wait/stamp/human-resets",
   "wait/dispatch/posture",
+  "wait/register-wake/surfaces-failure",
   # ---------- component 5: the resume audit and barrier ----------
   "resume/branch-divergence-warns",
   "resume/barrier-armed",
