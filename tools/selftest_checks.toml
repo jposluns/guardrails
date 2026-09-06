@@ -297,6 +297,7 @@ id = "ci-status-behaviour-selftest"
 runner = "tools/selftest_ci_status.py"
 expected-check-ids = [
   "ci/jq-filter-direct-cases",
+  "ci/mismatched-head-sha-exit2",
   "ci/multi-pending-not-green",
   "ci/late-run-no-premature-green",
   "ci/all-success-green",
@@ -307,11 +308,12 @@ expected-check-ids = [
   "ci/no-run-wait-timeout-exit1",
   "ci/not-accessible-exit2",
   "ci/not-found-exit2",
+  "ci/permanent-api-errors-wait-exit2",
   "ci/display-not-found-not-api-error",
   "ci/nonzero-norun-is-api-error",
   "ci/pagination-all-runs",
   "ci/settle-set-change-resets",
   "ci/settle-nonterminal-resets",
   "ci/settle-deadline-strict",
-  "ci/pagination-race-not-green",
+  "ci/pagination-count-mismatch-not-green",
 ]

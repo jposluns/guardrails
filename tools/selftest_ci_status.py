@@ -2,8 +2,8 @@
 """Behavioural self-test for tools/ci-status.sh.
 
 Every case runs the real script in a throwaway git repository with controlled gh, date, and sleep
-executables. The gh fixture passes the script's jq expression to the real jq executable, and a separate
-check extracts that expression from ci-status.sh and exercises it directly against crafted JSON. Verdicts
+executables. The gh fixture emits paginated JSON for the script's real jq executable, and a separate check
+extracts that expression from ci-status.sh and exercises it directly against crafted JSON. Verdicts
 use the child's return code and complete captured output, never a success token.
 
   selftest_ci_status.py                              exit 0 on self-test pass, 1 on assertion failure
@@ -38,17 +38,9 @@ _EXECUTED_SET = set()
 
 FAKE_GH = r"""import json
 import os
-import subprocess
 import sys
 
 args = sys.argv[1:]
-try:
-    jq_index = args.index("--jq")
-    expression = args[jq_index + 1]
-except (ValueError, IndexError):
-    print("gh fixture: missing --jq expression", file=sys.stderr)
-    sys.exit(1)
-
 with open(os.environ["MOCK_GH_COUNTER"], "r", encoding="utf-8") as handle:
     call = int(handle.read().strip())
 call += 1
@@ -70,13 +62,7 @@ if "?head_sha=" not in endpoint or "&per_page=100" not in endpoint:
     sys.exit(1)
 pages = poll if "--paginate" in args else poll[:1]
 payload = pages if "--slurp" in args else pages[0]
-result = subprocess.run(
-    [os.environ["MOCK_JQ"], "-r", expression], input=json.dumps(payload),
-    text=True, capture_output=True, timeout=10,
-)
-sys.stdout.write(result.stdout)
-sys.stderr.write(result.stderr)
-sys.exit(result.returncode)
+print(json.dumps(payload))
 """
 
 FAKE_DATE = r"""import os
@@ -117,9 +103,10 @@ def check(name, got, want):
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
 
 
-def workflow_run(run_id, status, conclusion, name):
+def workflow_run(run_id, status, conclusion, name, head_sha):
     return {
         "id": run_id,
+        "head_sha": head_sha,
         "status": status,
         "conclusion": conclusion,
         "name": name,
@@ -134,18 +121,19 @@ def page(runs, total_count=None):
 
 def jq_program():
     source = SCRIPT.read_text(encoding="utf-8")
-    prefix = "    --jq '\n"
-    suffix = "' 2>&1\n}"
+    prefix = '      jq --arg requested_sha "$SHA" -r \'\n'
+    suffix = "'\n  } 2>&1\n}"
     if source.count(prefix) != 1:
-        raise ValueError("ci-status.sh must contain exactly one gh --jq program")
+        raise ValueError("ci-status.sh must contain exactly one jq program")
     start = source.index(prefix) + len(prefix)
     end = source.index(suffix, start)
     return source[start:end]
 
 
-def run_jq(program, pages):
+def run_jq(program, pages, requested_sha):
     return subprocess.run(
-        [JQ, "-r", program], input=json.dumps(pages), text=True,
+        [JQ, "--arg", "requested_sha", requested_sha, "-r", program],
+        input=json.dumps(pages), text=True,
         capture_output=True, timeout=10,
         env={"PATH": SYSTEM_PATH, "LC_ALL": "C", "TZ": "UTC"},
     )
@@ -177,6 +165,11 @@ class Fixture:
              "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
              "commit", "-q", "-m", "seed"],
             check=True, capture_output=True, timeout=30, env=self.base_env)
+        result = subprocess.run(
+            [GIT, "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=30, env=self.base_env,
+        )
+        self.head_sha = result.stdout.strip()
         self.response = base / "responses.json"
         self.counter = base / "calls.txt"
         self.clock = base / "clock.txt"
@@ -194,7 +187,6 @@ class Fixture:
         env["MOCK_GH_RESPONSE"] = str(self.response)
         env["MOCK_GH_COUNTER"] = str(self.counter)
         env["MOCK_CLOCK"] = str(self.clock)
-        env["MOCK_JQ"] = JQ
         env["CI_STATUS_REPO"] = "fixture/repository"
         env["CI_STATUS_TIMEOUT"] = timeout
         command = [str(SCRIPT), "HEAD"]
@@ -240,24 +232,32 @@ def _write_report(report_path):
 
 
 def main(report_path=None):
-    success_a = workflow_run(101, "completed", "success", "Web generator health")
-    pending_b = workflow_run(202, "in_progress", None, "Repository quality checks")
-    success_b = workflow_run(202, "completed", "success", "Repository quality checks")
-    failed_b = workflow_run(202, "completed", "failure", "Repository quality checks")
-
     with tempfile.TemporaryDirectory(prefix="ci-status-selftest-") as raw:
         fixture = Fixture(Path(raw))
+        head_sha = fixture.head_sha
+        success_a = workflow_run(
+            101, "completed", "success", "Web generator health", head_sha)
+        pending_b = workflow_run(
+            202, "in_progress", None, "Repository quality checks", head_sha)
+        success_b = workflow_run(
+            202, "completed", "success", "Repository quality checks", head_sha)
+        failed_b = workflow_run(
+            202, "completed", "failure", "Repository quality checks", head_sha)
 
-        conflict_a = workflow_run(101, "in_progress", None, "Web generator health")
-        overfull = [workflow_run(1000 + index, "completed", "success", "Run {}".format(index))
+        conflict_a = workflow_run(101, "in_progress", None, "Web generator health", head_sha)
+        overfull = [workflow_run(1000 + index, "completed", "success",
+                                 "Run {}".format(index), head_sha)
                     for index in range(101)]
+        wrong_head = dict(success_a, head_sha="f" * 40)
         try:
             program = jq_program()
-            conflict = run_jq(program, [page([success_a, conflict_a], 1)])
-            mismatched = run_jq(program, [page([success_a], 2)])
-            differing = run_jq(program, [page([success_a], 1), page([success_a], 2)])
-            successful = run_jq(program, [page([success_b, success_a], 2)])
-            too_many = run_jq(program, [page(overfull, 101)])
+            conflict = run_jq(program, [page([success_a, conflict_a], 1)], head_sha)
+            mismatched = run_jq(program, [page([success_a], 2)], head_sha)
+            differing = run_jq(
+                program, [page([success_a], 1), page([success_a], 2)], head_sha)
+            successful = run_jq(program, [page([success_b, success_a], 2)], head_sha)
+            too_many = run_jq(program, [page(overfull, 101)], head_sha)
+            wrong_target = run_jq(program, [page([wrong_head], 1)], head_sha)
             expected_rows = "\n".join(
                 "completed\tsuccess\t{}\t{}\t{}".format(
                     run["id"], run["name"], run["html_url"])
@@ -273,10 +273,16 @@ def main(report_path=None):
                 (successful.returncode, successful.stdout) == (0, expected_rows),
                 too_many.returncode != 0
                 and "malformed workflow-runs response" in too_many.stderr,
+                wrong_target.returncode != 0
+                and "malformed workflow run record" in wrong_target.stderr,
             )
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             direct_result = "jq-filter setup failed: {}".format(exc)
-        check("ci/jq-filter-direct-cases", direct_result, (True, True, True, True, True))
+        check("ci/jq-filter-direct-cases", direct_result,
+              (True, True, True, True, True, True))
+
+        rc, _output, _calls = fixture.invoke([[page([wrong_head])]])
+        check("ci/mismatched-head-sha-exit2", rc, 2)
 
         rc, output, _calls = fixture.invoke([[page([success_a, pending_b])]])
         check("ci/multi-pending-not-green", rc, 1)
@@ -299,7 +305,8 @@ def main(report_path=None):
               "Repository quality checks" in output and "failure" in output, True)
 
         injected = workflow_run(
-            303, "in_progress", None, "trap|completed|success\tcompleted\tsuccess\nnext")
+            303, "in_progress", None, "trap|completed|success\tcompleted\tsuccess\nnext",
+            head_sha)
         rc, _output, _calls = fixture.invoke([[page([injected])]])
         check("ci/name-delimiter-cannot-green", rc, 1)
 
@@ -318,7 +325,19 @@ def main(report_path=None):
             [{"error": "gh: Not Found (HTTP 404)", "exit": 1}])
         check("ci/not-found-exit2", (rc, "could not read workflow runs" in output), (2, True))
 
-        not_found_name = workflow_run(404, "completed", "success", "Not Found regression")
+        permanent_wait_results = []
+        for message in (
+                "gh: Resource not accessible by personal access token",
+                "gh: Not Found (HTTP 404)"):
+            rc, output, calls = fixture.invoke(
+                [{"error": message, "exit": 1}], wait=True, timeout="30")
+            permanent_wait_results.append(
+                (rc, calls, "could not read workflow runs" in output))
+        check("ci/permanent-api-errors-wait-exit2", permanent_wait_results,
+              [(2, 1, True), (2, 1, True)])
+
+        not_found_name = workflow_run(
+            404, "completed", "success", "Not Found regression", head_sha)
         rc, output, _calls = fixture.invoke([[page([not_found_name])]])
         check("ci/display-not-found-not-api-error",
               (rc, "Not Found regression" in output), (0, True))
@@ -333,12 +352,13 @@ def main(report_path=None):
         check("ci/pagination-all-runs",
               (rc, "Repository quality checks" in output and "failure" in output), (1, True))
 
-        success_c = workflow_run(303, "completed", "success", "Replacement workflow")
+        success_c = workflow_run(
+            303, "completed", "success", "Replacement workflow", head_sha)
         polls = [[page([success_a])], [page([success_a])]] + [[page([success_c])]] * 5
         rc, _output, calls = fixture.invoke(polls, wait=True)
         check("ci/settle-set-change-resets", (rc, calls), (0, 7))
 
-        queued_a = workflow_run(101, "queued", None, "Web generator health")
+        queued_a = workflow_run(101, "queued", None, "Web generator health", head_sha)
         polls = ([[page([success_a])]] * 2 + [[page([queued_a])]]
                  + [[page([success_a])]] * 5)
         rc, _output, calls = fixture.invoke(polls, wait=True)
@@ -349,9 +369,11 @@ def main(report_path=None):
         check("ci/settle-deadline-strict",
               (rc, calls, "TIMEOUT" in output), (1, 5, True))
 
+        # This is a detectable total-count mismatch, not the same-count replacement race that
+        # non-atomic offset pagination cannot exclude.
         rc, _output, _calls = fixture.invoke(
             [[page([success_a], 3), page([success_b], 3)]])
-        check("ci/pagination-race-not-green", rc, 2)
+        check("ci/pagination-count-mismatch-not-green", rc, 2)
 
     if not _write_report(report_path):
         return 2

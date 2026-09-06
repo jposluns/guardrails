@@ -53,13 +53,18 @@ DEADLINE=$(( $(date +%s) + ${CI_STATUS_TIMEOUT:-900} ))
 
 POLL_SECONDS=15
 SETTLE_OBSERVATIONS=5
-# The Actions runs API cannot prove that no later run will be created. Under --wait, require an
-# unchanged, all-success run-ID set across five observations (60 seconds). A workflow created after
-# that window, an event whose runs are delayed longer than the window, or a workflow suppressed by
-# trigger, path, type, or commit-message rules is outside this mechanism's coverage. Report-once
-# evaluates only its single observed snapshot. Deriving the exact expected set here would require the
-# triggering event payload plus a complete GitHub workflow YAML, event-filter, and glob implementation;
-# the SHA and repository files alone cannot answer that question for pull_request base branches or paths.
+# The Actions runs API uses non-atomic offset pagination. A same-count replacement while pages are
+# fetched can therefore present a stale-consistent, all-green snapshot: for example, a completed run
+# can disappear from an earlier page while a new pending run moves onto a page already fetched. Under
+# --wait, requiring an unchanged, all-success run-ID set across five observations (60 seconds) narrows
+# that race window but cannot eliminate it. Server-side branch protection remains the backstop.
+#
+# The API also cannot prove that no later run will be created. A workflow created after the settle
+# window, an event whose runs are delayed longer than the window, or a workflow suppressed by trigger,
+# path, type, or commit-message rules is outside this mechanism's coverage. Report-once evaluates only
+# its single observed snapshot. Deriving the exact expected set here would require the triggering event
+# payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
+# repository files alone cannot answer that question for pull_request base branches or paths.
 
 query() {
   # Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs, newlines, and
@@ -68,10 +73,12 @@ query() {
   # The no-run case (empty array) gets an explicit sentinel rather than a rendered "null", because
   # a real run's .status is nullable in the schema and must not be mistaken for "no run yet".
   # Pagination is part of the verdict: reject non-identical records sharing a run ID, collapse only
-  # identical duplicates, then reconcile the unique count with the API's stable total_count. A malformed
-  # or racing snapshot is an API error, never green.
-  gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp \
-    --jq '
+  # identical duplicates, then reconcile the unique count with the reported total_count. This detects
+  # count changes and conflicting duplicates, but cannot detect the same-count replacement race
+  # described above.
+  {
+    gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp |
+      jq --arg requested_sha "$SHA" -r '
       . as $pages
       | if (($pages | type) != "array") or (($pages | length) == 0) then
           error("malformed workflow-runs response")
@@ -89,6 +96,8 @@ query() {
               ((.id | type) != "number")
               or (.id <= 0)
               or ((.id | floor) != .id)
+              or ((.head_sha | type) != "string")
+              or (.head_sha != $requested_sha)
               or ((.status != null)
                   and (((.status | type) != "string") or ((.status | length) == 0)))
               or ((.conclusion != null)
@@ -120,7 +129,8 @@ query() {
                   end
                 end
             end
-        end' 2>&1
+        end'
+  } 2>&1
 }
 
 report() {
@@ -145,6 +155,9 @@ while :; do
     last_summary="workflow-runs API query failed"
     echo "ERROR: could not read workflow runs for ${SHA} in ${REPO}"
     echo "  raw: ${lines}"
+    case "$lines" in
+      *"Resource not accessible"*|*"Not Found"*|*"404"*) exit 2 ;;
+    esac
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
       echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
@@ -236,7 +249,7 @@ while :; do
       SETTLE_FINGERPRINT="$fingerprint"
       SETTLE_COUNT=1
     fi
-    last_summary="all ${#run_ids[@]} workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
     if [ "$SETTLE_COUNT" -ge "$SETTLE_OBSERVATIONS" ]; then
       settled=1
     else
