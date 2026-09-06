@@ -5215,6 +5215,8 @@ _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis befor
 _ORCH_WAIT_FIRE = 5            # completed wait/maintenance calls before the redirect fires
 _ORCH_WAIT_BAKE = 2            # warning-only calls after fire before hard enforcement
 _ORCH_WAIT_DENY_CAP = 3        # hard denials on an unchanged basis before warning-only relief
+_ORCH_WAKE_DIGEST_CAP = 64     # retained one-shot wake digests (a consumed-once multiset)
+_ORCH_RECURRING_WAKE_CAP = 256  # retained recurring cron digests (deduped; generous beyond a realistic session)
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
 _ORCH_MODE_RE = re.compile(r"^Operating-mode:\s*(.+?)\s*$", re.MULTILINE)
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
@@ -6264,7 +6266,13 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
     schedule_denials = tstate["schedule_denials"] if tstate["schedule_denials"] is not None else 0
     # Every malformed wait field takes the no-wedge direction.
     wait_run = tstate["wait_run"] if tstate["wait_run"] is not None else 0
-    wait_uncertain = tstate["wait_uncertain"] if tstate["wait_uncertain"] is not None else True
+    # A malformed wait_basis (present but non-string) takes the no-wedge direction like every other
+    # malformed wait field: it forces uncertainty so the guard warns rather than denies on an
+    # untrustworthy basis.
+    malformed_wait_basis = isinstance(ts, dict) and "wait_basis" in ts and not isinstance(
+        ts.get("wait_basis"), str)
+    wait_uncertain = (tstate["wait_uncertain"] if tstate["wait_uncertain"] is not None else True
+                      ) or malformed_wait_basis
     malformed_wait_denials = tstate["wait_denials"] is None
     wait_denials = tstate["wait_denials"] if not malformed_wait_denials else _ORCH_WAIT_DENY_CAP
     status, payload = _orch_enumerate(reg, root)
@@ -6316,27 +6324,32 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
 
 
 def _orch_record_denial(root, ts, kind, basis):
-    """Persist the deny counters (the guard-owned loop bound; platform-independent). Returns True on a
-    successful persist. The increment base is sanitized so a tampered non-int counter cannot raise here;
-    a STOP-path caller that gets False must fail OPEN, since an un-persistable counter never reaches the
-    loop bound and would otherwise re-deny forever."""
-    state = dict(ts or {})
-    if kind == "wait":
-        prior = _v_exact_int(state.get("wait_denials"), 0, _ORCH_COUNTER_MAX)
-        prior = prior if prior is not None else 0
-        state["wait_denials"] = prior + 1 if state.get("wait_basis") == basis else 1
-        state["wait_basis"] = basis
-    elif kind == "schedule_idle":
-        prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
-        prior = prior if prior is not None else 0
-        # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
-        # never buy premature cap relief on this one.
-        state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
-        state["schedule_basis"] = basis
-    else:
-        prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
-        state["stop_denials"] = (prior if prior is not None else 0) + 1
-    return _orch_save_turn_state(root, state)
+    """Persist the deny counters (the guard-owned loop bound; platform-independent) as a true locked
+    read-modify-write, so a denial write never clobbers a concurrent turn-state update (for example a
+    progress reset that landed between this guard's context snapshot and this write). The increment base
+    is read from the LIVE locked state, not the caller's snapshot; ``ts`` is retained only for signature
+    compatibility and is no longer read. The increment base is sanitized so a tampered non-int counter
+    cannot raise here; a STOP-path caller that gets False must fail OPEN, since an un-persistable counter
+    never reaches the loop bound and would otherwise re-deny forever."""
+    def _apply(state):
+        if kind == "wait":
+            prior = _v_exact_int(state.get("wait_denials"), 0, _ORCH_COUNTER_MAX)
+            prior = prior if prior is not None else 0
+            state["wait_denials"] = prior + 1 if state.get("wait_basis") == basis else 1
+            state["wait_basis"] = basis
+        elif kind == "schedule_idle":
+            prior = _v_exact_int(state.get("schedule_denials"), 0, _ORCH_COUNTER_MAX)
+            prior = prior if prior is not None else 0
+            # D12: a CHANGED basis starts a fresh count (1), so denials accrued on a different basis can
+            # never buy premature cap relief on this one.
+            state["schedule_denials"] = prior + 1 if state.get("schedule_basis") == basis else 1
+            state["schedule_basis"] = basis
+        else:
+            prior = _v_exact_int(state.get("stop_denials"), 0, _ORCH_COUNTER_MAX)
+            state["stop_denials"] = (prior if prior is not None else 0) + 1
+        return state
+    status, _updated = _orch_locked_turn_state_update(root, _apply)
+    return status == "ok"
 
 
 def _orch_record_escape_spoof(root, detail):
@@ -6475,9 +6488,12 @@ def _orch_register_wake(root, prompt, recurring=False):
         if recurring:
             if digest not in digests:
                 digests.append(digest)
+            # A recurring cron digest is retained across a generous window so a realistic session's
+            # repeat firings stay timer-originated; the bounded window is disclosed at the guard.
+            state[key] = digests[-_ORCH_RECURRING_WAKE_CAP:]
         else:
             digests.append(digest)
-        state[key] = digests[-64:]
+            state[key] = digests[-_ORCH_WAKE_DIGEST_CAP:]
         return state
 
     _orch_locked_turn_state_update(root, update)

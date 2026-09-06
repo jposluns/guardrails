@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "fe7295bafa09de6077d716ccda76d46ff349554359ee9ca3068fee0d24c8cde1"
+tree-sha256 = "3fd69254874eb691dc3f6861250f3a19dad5e67bc3fdf4ac43258a1bd4497432"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -21,8 +21,8 @@ sha256 = "5f7d55dc7aa2696bd97b77e3f0e61b8ab1ec95d66284fe6e0477bf63d99205d8"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 251095
-sha256 = "d54f8d118a9d3d947a9795586e78815d26b5c04b2948b98677fd852a7b1233c9"
+bytes = 251134
+sha256 = "34d3d3e1d21e3a242aeee136d1b4ad2b24d6414dfc1c39bcca697279d74eb9ad"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -56,13 +56,13 @@ sha256 = "8bc4e1b40efecade02a7f02cb440ccb9b04b7a6c7f41bdb0f6412d54a623b8c2"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 109090
-sha256 = "7f4392a8221169a376715d62f726298ca607e944f0277f5dac71f8ce262d1988"
+bytes = 109134
+sha256 = "e310561ab4bf0233ec3817824b69bb0016fd57b737a95005a50b56427cb6c6d4"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 518406
-sha256 = "544fbc00bfdc165039069a20b62964fae1c0aae14e0b111a882c360d5c3fcf75"
+bytes = 519740
+sha256 = "141c651d7cb70eaef79cc10ce07b6cfbd67264d5996a386cec9ee0c835fc3457"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -296,8 +296,8 @@ sha256 = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
 
 [[sources]]
 path = ".aiqt/core/rules/progr-wait-utilization.md"
-bytes = 1764
-sha256 = "7e5a45a0af621cc828474635dcb8ad0ed8bd27dc15d3e857e69a276b23cd5b54"
+bytes = 1803
+sha256 = "9af8c53bf05eae03854fc67c7cd549e185de0ada3c03e0f76d9da2ae446f4f56"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-absolute-paths.md"
@@ -736,8 +736,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 252752
-sha256 = "ab3c47a70e16a1fa7f51600d56dc20fc7e1d43273c276f8208530d2009143bdb"
+bytes = 253987
+sha256 = "c89b659b6e5def8c06afc4068246995b203b5d9ce4a29bf9a49294ac4c34399e"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -1226,8 +1226,8 @@ sha256 = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
 
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-wait-utilization-binds-to-state.md"
-bytes = 1764
-sha256 = "7e5a45a0af621cc828474635dcb8ad0ed8bd27dc15d3e857e69a276b23cd5b54"
+bytes = 1803
+sha256 = "9af8c53bf05eae03854fc67c7cd549e185de0ada3c03e0f76d9da2ae446f4f56"
 
 [[sources]]
 path = ".claude/rules/aiqt/30-SPEED-background-work-during-ci-waits.md"
@@ -1856,8 +1856,8 @@ sha256 = "2add7f4d155347e1cb9d7a64e751d542b1bb614e24175cdd364a8870cfb87a69"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-wait-utilization-binds-to-state.mdc"
-bytes = 1659
-sha256 = "1d67006bc43e9bb23146dd42cad5fbfd515ff7f5440a1ef75bb96a4fb08f3da3"
+bytes = 1698
+sha256 = "dcc091863aa6d9c448271eefda787667976707da6945f5e03b9cbe88c7483443"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/30-SPEED-background-work-during-ci-waits.mdc"
@@ -2121,13 +2121,13 @@ sha256 = "ecfdcb669b5db2d01a9f04a2885998160ff50b7ebea0209533c691f1b2b3e427"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 84674
-sha256 = "88c3a2b47d8a322e9dd6b3a083eb9718068fe432fb4db6051ee9082a3a42b1da"
+bytes = 84713
+sha256 = "8e4a00ab7280ac9db60db0849d09ec00e82f7bfffd8b125e6aabe3e9d5c18852"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 84663
-sha256 = "a1ab1660827194934a3d6620b95118f26bc4116cf802e2526ce4fc311b071df9"
+bytes = 84702
+sha256 = "d5833f8cf4ccd3bf8339fcbafb50be26b8888da8b8d4bf6758b9314c56376ca3"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2141,8 +2141,8 @@ sha256 = "440b3f6c3a2ef516bdf433bff591c15c7d56c639f627363de6f9cff7c2591781"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 84670
-sha256 = "4c6aec02e50c7042dd283daa81404d8686206ce4fcc32957407105826fa0a659"
+bytes = 84709
+sha256 = "7626d0563b211f66f5e818daf7bb4643a65d22f4f0bd9f052a76a15e4bdb079b"
 
 [[sources]]
 path = "LICENSE"
@@ -2276,8 +2276,8 @@ sha256 = "947b03c21d2974cee0e5454b61ac9470203d7f9d679302ce2d4dc18dcda7973f"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 518406
-sha256 = "544fbc00bfdc165039069a20b62964fae1c0aae14e0b111a882c360d5c3fcf75"
+bytes = 519740
+sha256 = "141c651d7cb70eaef79cc10ce07b6cfbd67264d5996a386cec9ee0c835fc3457"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2831,8 +2831,8 @@ sha256 = "f9db0d0389214445e76ba144772f49f206de891507e4c392e9a52ce57893a898"
 
 [[sources]]
 path = "tools/orch_doctor.py"
-bytes = 4742
-sha256 = "7d83d15321b7c87ab8494775d3bd7cdd0a3b151463cd920df069a8a2e7430da2"
+bytes = 4909
+sha256 = "d1d9652c0d109dd249366b78541b6ffbeb70bcf1e3c408a1ecf11b22c0f35406"
 
 [[sources]]
 path = "tools/orch_preflight.py"
@@ -2866,8 +2866,8 @@ sha256 = "3b38b5078fce7259f79288e99059105fc8c28c1ccb4b55b411ff8312d8287457"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 12566
-sha256 = "c375696a0e405d5a51fbe848edf06f79ec2da36a5de66c3312ef5fe19ae5e706"
+bytes = 12695
+sha256 = "3bef50ecaf4a7722b563b4ecbab69be69a33b87e43d1d641bb1e024b1689728f"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -2881,8 +2881,8 @@ sha256 = "19256364a5bdaee5b48b8fad1f2c3b74560ead4e51e6e71d7f04a58f63eed839"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 100249
-sha256 = "4ffac09fe42f53f9c0bf891948ac4947b9173978692e2ad8252ad7c13385cdae"
+bytes = 101916
+sha256 = "8ee38ee38f3c7bc744d3a4bf018e83016f8260d1d31fd500ef27c4c3f360cbec"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
@@ -3343,7 +3343,7 @@ sha256 = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-wait-utilization-binds-to-state.md"
 path = ".claude/rules/aiqt/20-PROGR-wait-utilization-binds-to-state.md"
 kind = "file"
-sha256 = "7e5a45a0af621cc828474635dcb8ad0ed8bd27dc15d3e857e69a276b23cd5b54"
+sha256 = "9af8c53bf05eae03854fc67c7cd549e185de0ada3c03e0f76d9da2ae446f4f56"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/30-SPEED-background-work-during-ci-waits.md"
@@ -4099,7 +4099,7 @@ sha256 = "2add7f4d155347e1cb9d7a64e751d542b1bb614e24175cdd364a8870cfb87a69"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-wait-utilization-binds-to-state.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-wait-utilization-binds-to-state.mdc"
 kind = "file"
-sha256 = "1d67006bc43e9bb23146dd42cad5fbfd515ff7f5440a1ef75bb96a4fb08f3da3"
+sha256 = "dcc091863aa6d9c448271eefda787667976707da6945f5e03b9cbe88c7483443"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/30-SPEED-background-work-during-ci-waits.mdc"
@@ -4411,13 +4411,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "88c3a2b47d8a322e9dd6b3a083eb9718068fe432fb4db6051ee9082a3a42b1da"
+sha256 = "8e4a00ab7280ac9db60db0849d09ec00e82f7bfffd8b125e6aabe3e9d5c18852"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "a1ab1660827194934a3d6620b95118f26bc4116cf802e2526ce4fc311b071df9"
+sha256 = "d5833f8cf4ccd3bf8339fcbafb50be26b8888da8b8d4bf6758b9314c56376ca3"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -4430,7 +4430,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "4c6aec02e50c7042dd283daa81404d8686206ce4fcc32957407105826fa0a659"
+sha256 = "7626d0563b211f66f5e818daf7bb4643a65d22f4f0bd9f052a76a15e4bdb079b"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

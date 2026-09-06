@@ -204,6 +204,7 @@ expected-check-ids = [
   "wait/guard/deny-after-bake",
   "wait/guard/task-output-warn",
   "wait/guard/poison-warn",
+  "wait/guard/malformed-basis-warn",
   "wait/guard/enum-warn",
   "wait/guard/exhausted-note",
   "wait/counter/neutral",
@@ -214,8 +215,10 @@ expected-check-ids = [
   "wait/counter/concurrent-progress-reset",
   "wait/counter/basis-reset",
   "wait/counter/basis-increment",
+  "wait/counter/denial-preserves-progress",
   "wait/stamp/timer-preserves",
   "wait/stamp/recurring-second-preserves",
+  "wait/stamp/recurring-retained-past-old-cap",
   "wait/stamp/human-resets",
   "wait/dispatch/posture",
   # ---------- component 5: the resume audit and barrier ----------

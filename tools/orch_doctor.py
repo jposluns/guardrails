@@ -87,8 +87,10 @@ def main():
         else:
             print("enumerator OK: {} item(s)".format(len(payload)))
     else:
-        findings.append("no enumerator declared: the stop guard will fail open with findings on "
-                        "every yield (stop) and deny scheduling (schedule_idle)")
+        findings.append("no enumerator declared: the backlog is not enumerable, so the stop guard "
+                        "DENIES a yield (stop) and scheduling (schedule_idle) below the loop bound, "
+                        "releasing only at the loop bound (ALLOW_WITH_FINDINGS) or via the operator "
+                        "escape sentinel")
     if reg.get("mode") and aiqt_hooks._orch_mode(reg, root) is None:
         findings.append("declared mode record carries no readable Operating-mode line")
     if findings:

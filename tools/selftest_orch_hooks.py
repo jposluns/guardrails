@@ -719,12 +719,14 @@ def main(report_path=None):
         base_reg["version"] = 1
         regpath.write_text(json.dumps(base_reg), encoding="utf-8")
         check("vB/registry-version-ok", aiqt_hooks._orch_registry(str(b.root))[0], "ok")
-        # D12: schedule denials on basis X do not carry to basis Y (fresh count of 1); same basis increments
-        aiqt_hooks._orch_record_denial(str(b.root), {"schedule_denials": 2, "schedule_basis": "X"},
-                                       "schedule_idle", "Y")
+        # D12: schedule denials on basis X do not carry to basis Y (fresh count of 1); same basis
+        # increments. The increment base is the LIVE locked state (round-2 RMW fix), so the live state
+        # is established first rather than passed as a caller snapshot.
+        b.set_turn_state({"schedule_denials": 2, "schedule_basis": "X"})
+        aiqt_hooks._orch_record_denial(str(b.root), b.turn_state(), "schedule_idle", "Y")
         check("vB/d12-basis-change-resets", b.turn_state().get("schedule_denials"), 1)
-        aiqt_hooks._orch_record_denial(str(b.root), {"schedule_denials": 2, "schedule_basis": "X"},
-                                       "schedule_idle", "X")
+        b.set_turn_state({"schedule_denials": 2, "schedule_basis": "X"})
+        aiqt_hooks._orch_record_denial(str(b.root), b.turn_state(), "schedule_idle", "X")
         check("vB/d12-same-basis-increments", b.turn_state().get("schedule_denials"), 3)
         # D12(ii): the basis is class-tagged so an actionable/cannot-evaluate flip changes it
         b.set_items([item("Z-1")])
@@ -831,6 +833,9 @@ def main(report_path=None):
         check("wait/guard/task-output-warn",
               _verdict(aiqt_hooks.orch_wait_guard(
                   w.payload("PreToolUse", "TaskOutput", {"task_id": "t1"}))), "warn")
+        w.set_turn_state({"wait_run": 7, "wait_uncertain": False, "wait_denials": 3,
+                          "wait_basis": 123})
+        check("wait/guard/malformed-basis-warn", _verdict(monitor()), "warn")
         w.set_turn_state({"wait_run": 7, "wait_uncertain": True})
         check("wait/guard/poison-warn", _verdict(monitor()), "warn")
         w.set_turn_state({"wait_run": 7, "wait_uncertain": False})
@@ -911,6 +916,13 @@ def main(report_path=None):
         aiqt_hooks._orch_record_denial(str(w.root), w.turn_state(), "wait", "Y")
         check("wait/counter/basis-increment", w.turn_state().get("wait_denials"), 2)
 
+        # A denial write is a true locked RMW: a stale caller snapshot never clobbers the live state.
+        w.set_turn_state({"wait_run": 0, "wait_uncertain": False})
+        aiqt_hooks._orch_record_denial(
+            str(w.root), {"wait_run": 7, "wait_denials": 5, "wait_basis": "Z"}, "wait", "Z")
+        check("wait/counter/denial-preserves-progress",
+              (w.turn_state().get("wait_run"), w.turn_state().get("wait_denials")), (0, 1))
+
         wake_state = {"wait_run": 7, "wait_uncertain": True, "wait_denials": 2, "wait_basis": "B"}
         w.set_turn_state(wake_state)
         aiqt_hooks._orch_register_wake(str(w.root), "wake prompt")
@@ -930,6 +942,19 @@ def main(report_path=None):
                w.turn_state().get("wait_run"), w.turn_state().get("wait_uncertain"),
                w.turn_state().get("wait_denials"), w.turn_state().get("wait_basis")),
               ("warn", "warn", 7, True, 2, "B"))
+
+        # A recurring digest survives past the OLD one-shot cap (64) so realistic repeat firings stay
+        # timer-originated; MAJOR round-2 fix for digest displacement.
+        w.set_turn_state({"wait_run": 7, "wait_uncertain": True, "wait_denials": 2,
+                          "wait_basis": "B"})
+        aiqt_hooks._orch_register_wake(str(w.root), "recurring keeper", recurring=True)
+        for _i in range(70):
+            aiqt_hooks._orch_register_wake(str(w.root), "filler {}".format(_i), recurring=True)
+        kept = aiqt_hooks.orch_prompt_stamp(w.payload(
+            "UserPromptSubmit", extra={"prompt": "recurring keeper"}))
+        check("wait/stamp/recurring-retained-past-old-cap",
+              (_verdict(kept), w.turn_state().get("wait_run"),
+               w.turn_state().get("wait_uncertain")), ("warn", 7, True))
 
         aiqt_hooks.orch_prompt_stamp(w.payload(
             "UserPromptSubmit", extra={"prompt": "human prompt"}))

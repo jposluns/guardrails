@@ -375,7 +375,7 @@
           "event": "UserPromptSubmit",
           "id": "orch-prompt-stamp",
           "platform": "claude-code",
-          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
+          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters and the wait-utilization counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
         },
         {
           "class": "b",
@@ -1621,7 +1621,7 @@
           "event": "UserPromptSubmit",
           "id": "orch-prompt-stamp",
           "platform": "claude-code",
-          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
+          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters and the wait-utilization counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
         },
         {
           "class": "b",
@@ -1699,6 +1699,14 @@
       "family": "aiqt",
       "gates": [],
       "hooks": [
+        {
+          "class": "c",
+          "default": "warn",
+          "event": "UserPromptSubmit",
+          "id": "orch-prompt-stamp",
+          "platform": "claude-code",
+          "residue": "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE human prompt into turn-state (resetting the stop guard's deny counters and the wait-utilization counters), classifies a prompt matching a registered wake as timer-originated (not stamping it), and injects a measured-gap context line so any quiet-duration reasoning uses a measured figure. It never blocks. One-shot wake digests are consumed once; recurring cron digests remain registered across repeat firings. Classification is digest matching against wake registrations this suite itself recorded: a wake fired through a mechanism the suite never saw is stamped as genuine human input (the safe direction: it only narrows guard autonomy), while later genuine input exactly matching a retained recurring prompt is timer-classified until that digest is displaced from the bounded registry or turn-state is cleared. An unknown prior stamp yields an 'unknown' gap that authorizes nothing."
+        },
         {
           "class": "b",
           "default": "warn",

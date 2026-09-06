@@ -9,8 +9,8 @@ rather than the run left idle. Whether the run is idling is read from what it do
 it says: each action is classified as progress, wait, maintenance, or neutral from the action's own
 identity and structured target, so a synonym for waiting neither creates idling nor cures it, and a
 claim of being busy is not activity. A run of consecutive wait and maintenance actions with no
-intervening progress and no genuine human input is idling, however it is narrated, and a fired timer
-never resets that state.
+intervening progress and no genuine human input is idling, however it is narrated; a fired timer is
+maintenance, not the genuine human input that clears that state.
 
 When such an idle run passes a bounded threshold while an actionable item remains on a fresh
 enumeration of the authoritative backlog, the run is redirected to that item rather than permitted
