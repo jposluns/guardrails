@@ -236,6 +236,8 @@ from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not 
 import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
 import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
+import gen_enforcement_register  # noqa: E402  reuse ledger_index + load_roadmap to enumerate page-bound source strings
+HTML_REL = gen_enforcement_register.HTML_REL  # single-sourced register page path (site/enforcement.html)
 
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
@@ -808,89 +810,207 @@ def scan(text, site=True):
     return _scan_with(text, (SITE_PATTERNS + RELEASE_PATTERNS) if site else RELEASE_PATTERNS)
 
 
+# FIX 4 (GER-1): the register page's STATIC asset closure. The register page loads shared chrome CSS/JS via
+# docs/_shell.html's <link rel="stylesheet"> and <script src>, whose bodies the visible-text collector never
+# sees (VisibleText drops <style>/<script>, and the external assets are separate files collector 1 does not
+# read). A CSS content: string or a static marketing string in that closure would render or ship marketing no
+# page scan catches, so the closure is scanned here for the marketing patterns AND for CSS content: string
+# injection. This is a STATIC string scan; the runtime-JS residual is disclosed on _scan_asset_closure.
+_STYLE_BODY_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+_LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+_ATTR_HREF_RE = re.compile(r'href\s*=\s*"([^"]*)"', re.IGNORECASE)
+_ATTR_SRC_RE = re.compile(r'src\s*=\s*"([^"]*)"', re.IGNORECASE)
+_ATTR_REL_RE = re.compile(r'rel\s*=\s*"([^"]*)"', re.IGNORECASE)
+# A CSS content: DECLARATION (the PROPERTY, not the 'content' suffix of justify-content / align-content: the
+# (?<![\w-]) lookbehind refuses a preceding word char or hyphen), and its value up to the ; or } that ends it.
+_CSS_CONTENT_RE = re.compile(r"(?<![\w-])content\s*:\s*([^;}]*)", re.IGNORECASE)
+# A CSS string literal (single- or double-quoted, backslash escapes honoured) inside a content: value.
+_CSS_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"' + r"|'((?:[^'\\]|\\.)*)'")
+
+
 # --- source-side residue-cleanliness leg (GER-1 / round 7) --------------------------------------------
 # The enforcement register renders each mechanism's technical-limits residual VERBATIM from the ledger,
 # inside a `<blockquote class="ledger-residual" data-mech="<ref>">`. Earlier rounds exempted those blocks
 # from the marketing scan on the page (a verified-quotation carve-out); that approach was REFUTED as
 # fundamentally fragile (a bound-allowance hole that suppressed every marketing pattern, invisible-Unicode
 # laundering that passes a source scan yet renders as marketing, and static-DOM-vs-rendered fidelity gaps),
-# so it was removed. Instead the residues are kept marketing-clean AT THEIR SOURCE and the register page is
-# scanned plainly, exactly like any other site page. _residual_map recomputes the residues IN MEMORY from
-# the manifests (guard-input-soundness); _scan_residue_marketing then scans each residue (and its
-# claim-bearing reference id) with the PLAIN marketing patterns and rejects any invisible or control
-# Unicode, so a marketing overclaim or a zero-width/bidi laundering cannot reach the page through a residue.
+# so it was removed.
+# _page_bound_sources recomputes the residues, ids, AND pending descriptions IN MEMORY from the manifests
+# and roadmap (guard-input-soundness); _scan_page_bound_sources then runs ONE shared reject over every such
+# string, rejecting any character outside the printable-plus-ASCII-whitespace allowlist on the RAW bytes
+# (before any collapse) and scanning a collapsed copy with the PLAIN marketing patterns, so no page-bound
+# channel can be missed and no invisible or non-ASCII laundering can reach the page through any of them.
 
 
-def _residual_map(root):
-    """ref -> whitespace-collapsed ledger residue, recomputed IN MEMORY from the source of truth (the
-    ledger the manifests produce via gen_enforceability.build_ledger), never read from the page under
-    judgement. build_ledger raises ValueError/OSError on a malformed or unreadable manifest/corpus input,
-    which the caller lets propagate to a fail-closed exit 2."""
+def _page_bound_sources(root):
+    """Every verbatim source string the enforcement register renders, recomputed IN MEMORY from the
+    manifests and the roadmap (guard-input-soundness), as (channel, key, raw) tuples: each mechanism's RAW
+    ledger residue (channel "residue") and its claim-bearing reference id ("id"), and each pending rule's
+    roadmap description ("description"). These are exactly the strings the generator emits verbatim into the
+    page (render_html / render_md), so scanning them at source is what keeps the page clean by construction.
+    The residue is the RAW string (NOT collapsed) so the invisible-Unicode reject downstream judges the exact
+    bytes the page ships; a non-ASCII space would otherwise be collapsed to an ASCII space before the reject
+    (FIX 2). Reuses the register generator's OWN validated ledger index and roadmap loader, so the channel
+    set here cannot fork from what the register renders. build_ledger / load_roadmap raise ValueError/OSError
+    on a malformed or unreadable input, which the caller lets propagate to a fail-closed exit 2."""
     ledger = json.loads(gen_enforceability.build_ledger(root))
-    out = {}
-    for entry in ledger["rules"]:
-        for gate in entry["gates"]:
-            out["gate:" + gate["id"]] = _collapse(gate["residue"])
-        for hook in entry["hooks"]:
-            out["hook:" + hook["id"]] = _collapse(hook["residue"])
-    return out
+    by_cid, controls, linkage = gen_enforcement_register.ledger_index(ledger)
+    roadmap = gen_enforcement_register.load_roadmap(
+        root / gen_enforcement_register.ROADMAP_REL, set(by_cid), linkage)
+    sources = []
+    for ref, ctrl in sorted(controls.items()):
+        sources.append(("residue", ref, ctrl["residue"]))
+        sources.append(("id", ref, ref.split(":", 1)[-1].replace("-", " ")))
+    for cid, row in sorted(roadmap.items()):
+        if row["status"] == "pending" and row["description"]:
+            sources.append(("description", cid, row["description"]))
+    return sources
 
 
 def _first_invisible(text):
-    """Return (index, char) of the first INVISIBLE or CONTROL codepoint in `text`, or None. A residue is
-    plain printable technical prose, so only the space, tab, and newline whitespace is allowed; everything
-    else must be a normally-visible character. Rejected: C0 and C1 control characters (including DEL); every
-    Unicode FORMAT character (Cf: the zero-width space/joiner/non-joiner, the bidi overrides and isolates,
-    the word-joiner and BOM); surrogates, private-use, and unassigned codepoints (Cs/Co/Cn); the line and
-    paragraph separators (Zl/Zp); and any non-ASCII space separator (Zs, e.g. a no-break or thin space).
-    This closes the invisible-Unicode laundering codex found in round 6: a residue carrying a zero-width
-    space inside "guarantees" reads as "guaran<ZWSP>tees" to the visible-text marketing scan (the break
-    dodges the word pattern) yet renders as "guarantees" to a human, so it is rejected here at source."""
+    """Return (index, char) of the first character in `text` that is NOT printable ASCII or one of the four
+    explicit ASCII whitespace characters (space, tab, newline, carriage return), else None. This is a
+    printable-ASCII allowlist over the RAW string, stricter than the earlier category denylist and than a
+    Unicode letter/number/punctuation/symbol allowlist. A page-bound source string (a mechanism residue, a
+    reference id, a pending description) is house-authored technical English and is pure printable ASCII, so
+    only 0x21-0x7E plus the four ASCII whitespace bytes are permitted; every other codepoint, whatever its
+    Unicode category, is rejected on the exact raw bytes the page ships. This closes, by construction, the
+    whole laundering class in one predicate: an INVISIBLE character (a zero-width space U+200B, a combining
+    grapheme joiner U+034F, a variation selector U+FE00-FE0F, or a non-ASCII space such as U+200A HAIR SPACE)
+    reads as a word break to the marketing regex yet renders as the intact marketing word, AND a CONFUSABLE
+    HOMOGLYPH (a Cyrillic or Greek lookalike letter such as U+0430 that renders as an ASCII letter but evades
+    the ASCII marketing regex) are BOTH non-ASCII and so refused here. No normalization is applied: the check
+    is on the raw bytes, so a decomposed accent, an invisible mark, a non-ASCII space, and a homoglyph are all
+    rejected without any collapse or NFC step that could disagree with what the page emits. DISCLOSED SCOPE: a
+    legitimately non-ASCII residue would be rejected; this is by design for the pack's ASCII technical corpus,
+    and a maintainer introducing non-ASCII source must widen this allowlist deliberately."""
     for i, ch in enumerate(text):
-        if ch in (" ", "\t", "\n"):
+        if ch in (" ", "\t", "\n", "\r"):
             continue
-        o = ord(ch)
-        if o < 0x20 or 0x7f <= o <= 0x9f:      # C0 and C1 controls, including DEL
-            return (i, ch)
-        cat = unicodedata.category(ch)
-        if cat in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"):
-            return (i, ch)
-        if cat == "Zs":                        # any space separator other than the plain ASCII space above
-            return (i, ch)
+        if 0x21 <= ord(ch) <= 0x7E:
+            continue
+        return (i, ch)
     return None
 
 
-def _scan_residue_marketing(residual_map):
-    """Source-side residue-cleanliness leg (GER-1 / round 7). Every recomputed ledger residue (and its
-    claim-bearing reference id) must (a) pass the PLAIN marketing patterns and (b) carry NO invisible or
-    control Unicode. Because the register page renders each residue VERBATIM and is now scanned plainly like
-    any other site page, keeping the residues clean at their source is what makes the page clean by
-    construction; there is no per-block exemption to attack.
-
-    (a) The marketing scan is PLAIN: it honours only the patterns' own guards (neg/intent/sharealike/release)
-    and has NO bound-allowance heuristic, so an "honestly bounded" categorical or guarantee shape flags at
-    source and is reworded there rather than cleared by a fragile clause-parser. The reference id is a
-    claim-bearing display channel, so its kebab body (hyphens read as spaces) is scanned the same way: a
+def _scan_page_bound_sources(sources):
+    """Source-side cleanliness leg (GER-1). Every page-bound verbatim source string (each mechanism residue
+    and reference id, and each pending description) must (a) carry NO character outside the printable-plus-
+    ASCII-whitespace allowlist and (b) pass the PLAIN marketing patterns. ONE shared reject runs over EVERY
+    channel, so no page-bound channel can be missed or diverge (FIX 3): a residue, a claim-bearing id, and a
+    pending description are held to the identical bar. The invisible/allowlist reject runs on the RAW string,
+    BEFORE any whitespace collapse (FIX 2), so the exact bytes the page ships are what is judged; the
+    marketing scan runs on a whitespace-collapsed copy for phrase-matching robustness (its guards are
+    honoured, and there is NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee
+    shape flags at source and is reworded there). The id's kebab body is scanned hyphens-as-spaces, so a
     hyphenated claim id (gate:catch-all-secrets -> "catch all secrets") fails at source even though the page
-    render "catch-all-secrets" would not match a space-requiring pattern.
-
-    (b) The invisible/control-Unicode check rejects a residue that would render as marketing while slipping
-    past the visible-text scan (the U+200B laundering). The residual_map is recomputed IN MEMORY from the
-    manifests (guard-input-soundness), so this covers exactly the residues and ids the register renders."""
+    render would not match a space-requiring pattern."""
     findings = []
-    for ref, residue in sorted(residual_map.items()):
-        bad = _first_invisible(residue)
+    for channel, key, raw in sources:
+        bad = _first_invisible(raw)
         if bad is not None:
             i, ch = bad
-            findings.append("residue source [{}]: invisible or control character U+{:04X} at index {}"
-                            .format(ref, ord(ch), i))
-        for surface, txt in (("residue", residue), ("id", ref.split(":", 1)[-1].replace("-", " "))):
-            for name, pat, guard in SITE_PATTERNS:
-                for m in pat.finditer(txt):
-                    if _guard_clears(guard, txt, m):
-                        continue
-                    findings.append("{} source [{}]: overclaim [{}] -> {}".format(
-                        surface, ref, name, _snippet(txt, m.start(), m.end())))
+            findings.append("{} source [{}]: invisible or disallowed character U+{:04X} at index {}"
+                            .format(channel, key, ord(ch), i))
+        collapsed = _collapse(raw)
+        for name, pat, guard in SITE_PATTERNS:
+            for m in pat.finditer(collapsed):
+                if _guard_clears(guard, collapsed, m):
+                    continue
+                findings.append("{} source [{}]: overclaim [{}] -> {}".format(
+                    channel, key, name, _snippet(collapsed, m.start(), m.end())))
+    return findings
+
+
+def _scan_css_content_strings(css, where, findings):
+    """Extract the STRING LITERALS from every CSS content: declaration in `css` and marketing-scan each, so a
+    `content: " ... marketing ... "` injection (text a browser renders through ::before/::after but no HTML
+    scan sees) is caught. Only the content PROPERTY is matched, never the 'content' tail of justify-content /
+    align-content (the (?<![\\w-]) lookbehind). A fully hex-escaped payload (content: "\\...") is a DISCLOSED
+    residual: decoding CSS escapes is out of scope for this static string scan (see _scan_asset_closure)."""
+    for decl in _CSS_CONTENT_RE.finditer(css):
+        for sm in _CSS_STRING_RE.finditer(decl.group(1)):
+            literal = sm.group(1) if sm.group(1) is not None else sm.group(2)
+            for name, snip in scan(literal, site=True):
+                findings.append("{}: CSS content injection [{}] -> {}".format(where, name, snip))
+
+
+def _closure_local_asset(url):
+    """The repo-relative path under site/ for a same-origin CSS/JS asset URL, or None for an off-site or
+    non-local reference (an absolute http(s) URL, a protocol-relative //host, a data:/mailto: URL). The site
+    is served with site/ as web root, so a root-absolute "/styles.css?v=1" maps to site/styles.css; the query
+    and fragment are stripped. A '..' segment is refused (returns None) so the closure can never resolve
+    outside site/. An off-site URL returning None is the DISCLOSED runtime/off-origin boundary, not a failure:
+    only same-origin static assets are in a static gate's reach."""
+    path = url.split("?", 1)[0].split("#", 1)[0]
+    if not path or path.startswith(("http://", "https://", "//", "data:", "mailto:")):
+        return None
+    rel = path.lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    return rel
+
+
+def _scan_asset_closure(root):
+    """Scan the enforcement register page's STATIC asset closure for marketing overclaims (FIX 4, GER-1): the
+    page's own inline <style>/<script> bodies (which the visible-text collector drops), plus the same-origin
+    CSS/JS the page links, for the marketing patterns AND for CSS content: string injection. A referenced
+    LOCAL asset that cannot be read is a fail-closed error (_FailClosed -> exit 2), never a silent skip
+    (check-fails-closed-on-unreadable).
+
+    DISCLOSED IRREDUCIBLE RESIDUAL (honest, not pretended closed): this is a STATIC string scan. Runtime-JS
+    DOM construction of marketing text (theme.js building strings at run time) is beyond a static gate, and an
+    ENCODED payload (for example a base64 or fully CSS-hex-escaped string) is likewise beyond it. Both are
+    scoped OUT here as a chrome-integrity / code-review concern: the CSS/JS are hand-authored, reviewed,
+    version-controlled SHARED chrome, not generated from the ledger, so their integrity rests on code review,
+    not on this gate. An off-site (cross-origin) asset URL is out of a static gate's reach for the same
+    reason and is not fetched."""
+    findings = []
+    page_path = root / HTML_REL
+    try:
+        page = page_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise _FailClosed("register page {} is unreadable ({})".format(HTML_REL, exc))
+    assets = set()
+    # (a) inline <style> bodies: marketing scan + content: string injection.
+    for m in _STYLE_BODY_RE.finditer(page):
+        body = m.group(1)
+        for name, snip in scan(body, site=True):
+            findings.append("{} inline <style>: overclaim [{}] -> {}".format(HTML_REL, name, snip))
+        _scan_css_content_strings(body, "{} inline <style>".format(HTML_REL), findings)
+    # (b) <script> tags: an external src is a same-origin asset to scan; an inline body is scanned as text.
+    for m in _SCRIPT_TAG_RE.finditer(page):
+        attrs, body = m.group(1), m.group(2)
+        src = _ATTR_SRC_RE.search(attrs)
+        if src:
+            rel = _closure_local_asset(src.group(1))
+            if rel:
+                assets.add(rel)
+            continue
+        for name, snip in scan(body, site=True):
+            findings.append("{} inline <script>: overclaim [{}] -> {}".format(HTML_REL, name, snip))
+    # (c) same-origin stylesheets the page links.
+    for m in _LINK_TAG_RE.finditer(page):
+        tag = m.group(0)
+        rel_attr = _ATTR_REL_RE.search(tag)
+        href = _ATTR_HREF_RE.search(tag)
+        if rel_attr and "stylesheet" in rel_attr.group(1).lower() and href:
+            rel = _closure_local_asset(href.group(1))
+            if rel:
+                assets.add(rel)
+    # (d) each resolved same-origin asset: whole-text marketing scan, plus content: injection for CSS.
+    for rel in sorted(assets):
+        asset_path = root / "site" / rel
+        try:
+            text = asset_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise _FailClosed("register asset site/{} is absent or unreadable ({})".format(rel, exc))
+        where = "site/{}".format(rel)
+        for name, snip in scan(text, site=True):
+            findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
+        if rel.endswith(".css"):
+            _scan_css_content_strings(text, where, findings)
     return findings
 
 
@@ -989,10 +1109,15 @@ def main():
         registry = json.loads(gen_gensrc.build_registry(root))["generated"]
         _, _, _, binary_set = gen_manifest.load_ownership(root)
         findings = _collect(root, registry, binary_set)
-        # Source-side residue-cleanliness leg: the plain marketing scan over the recomputed ledger residues
-        # and their ids, plus an invisible/control-Unicode rejection, so a residue rendered verbatim on the
-        # register page cannot launder an overclaim. build_ledger raises on a bad input -> fail-closed exit 2.
-        findings += _scan_residue_marketing(_residual_map(root))
+        # Source-side cleanliness leg: the plain marketing scan plus the printable-plus-ASCII-whitespace
+        # allowlist reject, over EVERY page-bound verbatim source string the register renders (each mechanism
+        # residue and reference id, and each pending description), so none can launder an overclaim onto the
+        # page. build_ledger / load_roadmap raise on a bad input -> fail-closed exit 2.
+        findings += _scan_page_bound_sources(_page_bound_sources(root))
+        # Static asset-closure leg: the register page's inline <style>/<script> bodies and the same-origin
+        # CSS/JS it links, marketing-scanned (plus CSS content: string extraction), so marketing injected
+        # through page chrome is caught. An unreadable linked local asset is fail-closed (_FailClosed).
+        findings += _scan_asset_closure(root)
     except _FailClosed as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -1222,7 +1347,8 @@ def _self_test():
         failures.append("SCOPING: a release-integrity claim should flag on a generated surface too")
 
     failures.extend(_collector_self_test())
-    failures.extend(_residue_source_self_test())
+    failures.extend(_page_bound_source_self_test())
+    failures.extend(_asset_closure_self_test())
 
     if failures:
         print("FAIL: check_overclaim self-test")
@@ -1333,47 +1459,168 @@ def _collector_self_test():
     return failures
 
 
-def _residue_source_self_test():
-    """Adversarial roster for the source-side residue-cleanliness leg (GER-1 / round 7). A synthetic residual
-    map is injected, so no real ledger is built. It exercises the PLAIN marketing scan (no bound-allowance)
-    and the invisible/control-Unicode rejection: a marketing overclaim in a residue fails at source; a
-    formerly "bounded" categorical claim ALSO fails now (the fragile bound-allowance is gone); a genuinely
-    clean governance residue stays clean; a claim-bearing hyphenated id fails at source; invisible/control
-    Unicode in a residue is rejected (the U+200B laundering codex found in round 6); and a benign id with a
-    clean residue produces nothing."""
+def _page_bound_source_self_test():
+    """Adversarial roster for the shared page-bound source scan (GER-1, FIX 1/2/3). Synthetic source tuples
+    are injected, so no real ledger/roadmap is built, plus one integration case that builds a conformant tree
+    to prove the CHANNEL ENUMERATION. It exercises the PLAIN marketing scan (no bound-allowance), the RAW
+    printable-plus-ASCII-whitespace allowlist (pre-collapse), and the shared reject across ALL THREE channels
+    (residue, id, description)."""
+    import shutil
+    import tempfile
     failures = []
 
     def has(fs, needle):
         return any(needle in f for f in fs)
 
-    # (a) a marketing overclaim in a residue fails at source (plain scan).
-    f = _scan_residue_marketing({"gate:demo": "This gate guarantees complete security."})
-    if not has(f, "residue source [gate:demo]"):
-        failures.append("RESIDUE-SOURCE: a marketing overclaim in a residue must fail at source")
-    # (b) a formerly "honestly bounded" categorical claim now ALSO fails: the bound-allowance heuristic that
-    # cleared it (and that codex could exploit) was removed, so the residue is reworded clean at source.
-    f = _scan_residue_marketing({"gate:demo": "Denies every call, bounded by a cap."})
-    if not has(f, "residue source [gate:demo]"):
-        failures.append("RESIDUE-SOURCE: a bounded categorical claim must now fail (no bound-allowance)")
+    def one(channel, key, raw):
+        return _scan_page_bound_sources([(channel, key, raw)])
+
+    # (a) marketing overclaim in a residue fails at source (plain scan).
+    if not has(one("residue", "gate:demo", "This gate guarantees complete security."),
+               "residue source [gate:demo]"):
+        failures.append("SOURCE: a marketing overclaim in a residue must fail at source")
+    # (b) a formerly 'honestly bounded' categorical claim now ALSO fails (no bound-allowance).
+    if not has(one("residue", "gate:demo", "Denies every call, bounded by a cap."),
+               "residue source [gate:demo]"):
+        failures.append("SOURCE: a bounded categorical claim must fail (no bound-allowance)")
     # (c) a genuinely clean governance residue stays clean.
-    f = _scan_residue_marketing({"gate:demo": "A best-effort guard, scoped to what it examines."})
-    if f:
-        failures.append("RESIDUE-SOURCE: a clean governance residue must stay clean, got {}".format(f))
-    # (d) a claim-bearing hyphenated reference id fails at source (the id renders verbatim on the page, and a
-    # space-requiring pattern would miss "catch-all" on the page, so the id is scanned hyphens-as-spaces).
-    f = _scan_residue_marketing({"gate:catch-all-secrets": "A best-effort guard."})
-    if not has(f, "id source [gate:catch-all-secrets]"):
-        failures.append("RESIDUE-SOURCE: a claim-bearing id must fail at source")
-    # (e) INVISIBLE/CONTROL Unicode in a residue is rejected: a zero-width space breaks the word for the
-    # visible-text marketing scan yet the residue renders as "guarantees" (the round-6 laundering).
-    f = _scan_residue_marketing({"gate:demo": "This gate guaran\u200btees nothing new."})
-    if not has(f, "invisible or control character"):
-        failures.append("RESIDUE-SOURCE: invisible/control Unicode in a residue must be rejected")
-    # (f) a benign id with a clean residue produces nothing.
-    f = _scan_residue_marketing(
-        {"hook:branch-root": "Detects an orphaned branch, best-effort within a declared horizon."})
-    if f:
-        failures.append("RESIDUE-SOURCE: a benign id + clean residue must stay clean, got {}".format(f))
+    if one("residue", "gate:demo", "A best-effort guard, scoped to what it examines."):
+        failures.append("SOURCE: a clean governance residue must stay clean")
+    # (d) a claim-bearing hyphenated id fails at source (hyphens read as spaces).
+    if not has(one("id", "gate:catch-all-secrets", "catch all secrets"),
+               "id source [gate:catch-all-secrets]"):
+        failures.append("SOURCE: a claim-bearing id must fail at source")
+    # (e) FIX 1: an invisible MARK the old denylist missed (U+034F COMBINING GRAPHEME JOINER, category Mn) is
+    # rejected by the allowlist. MUTATION: reverting _first_invisible to the category denylist makes this fail
+    # (Mn is absent from Cc/Cf/Cs/Co/Cn/Zl/Zp/Zs).
+    if not has(one("residue", "gate:demo", "guaran" + chr(0x034F) + "tees nothing new."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: U+034F combining grapheme joiner must be rejected (FIX 1)")
+    # (f) FIX 1: a variation selector (U+FE01, category Mn) is rejected.
+    if not has(one("residue", "gate:demo", "complete" + chr(0xFE01) + " security."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a variation selector (U+FE01) must be rejected (FIX 1)")
+    # (g) FIX 1: a combining mark (U+0301 combining acute, non-ASCII) is rejected by the ASCII allowlist.
+    if not has(one("residue", "gate:demo", "secur" + chr(0x0301) + "ty guard."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a combining accent on a lone base must be rejected (FIX 1)")
+    # (h) FIX 1: the round-6 U+200B zero-width space is still rejected.
+    if not has(one("residue", "gate:demo", "guaran" + chr(0x200B) + "tees nothing."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: U+200B zero-width space must be rejected")
+    # (i) FIX 1: a non-ASCII precomposed accented character (U+00E9) is now REJECTED under the ASCII-only
+    # allowlist (the pack corpus is pure ASCII; no over-fire, since cases (c) and (m) confirm clean ASCII
+    # residues stay clean).
+    if not has(one("residue", "gate:demo", "A caf" + chr(0x00E9) + " guard, best-effort."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a non-ASCII precomposed character must be rejected (ASCII-only allowlist)")
+    # (i2) FIX 1: a CONFUSABLE homoglyph (Cyrillic small a U+0430) that renders as an ASCII letter but evades
+    # the ASCII marketing regex is REJECTED by the ASCII-only allowlist (closes the confusable class).
+    if not has(one("residue", "gate:demo", "This gate guar" + chr(0x0430) + "ntees security."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a Cyrillic homoglyph must be rejected (ASCII-only closes confusables)")
+    # (j) FIX 2: a NON-ASCII SPACE (U+200A HAIR SPACE, category Zs) is rejected on the RAW residue. _collapse
+    # turns it into an ASCII space, so a post-collapse reject would MISS it. MUTATION: moving the reject onto
+    # the collapsed copy makes this fail.
+    if not has(one("residue", "gate:demo", "guarantees" + chr(0x200A) + "complete security."),
+               "invisible or disallowed character"):
+        failures.append("SOURCE: a non-ASCII space must be rejected on the RAW residue pre-collapse (FIX 2)")
+    # (k) FIX 3: a laundered claim in the PENDING-DESCRIPTION channel is rejected by the same shared reject.
+    if not has(one("description", "somerule", "will guaran" + chr(0x200B) + "tee complete coverage."),
+               "description source [somerule]"):
+        failures.append("SOURCE: a laundered claim in the pending-description channel must fail (FIX 3)")
+    # (l) FIX 3: a visible marketing overclaim in the pending-description channel is also rejected.
+    if not has(one("description", "somerule", "Ensures every rule is covered."),
+               "description source [somerule]"):
+        failures.append("SOURCE: a marketing overclaim in the pending-description channel must fail (FIX 3)")
+    # (m) a benign residue produces nothing.
+    if one("residue", "hook:branch-root", "Detects an orphaned branch, best-effort within a declared horizon."):
+        failures.append("SOURCE: a benign residue must stay clean")
+    # (n) FIX 3 CHANNEL ENUMERATION (integration): _page_bound_sources emits a tuple for EVERY page-bound
+    # channel, INCLUDING a pending rule's description. Build the register generator's own conformant fixture
+    # and assert all three channels appear. MUTATION: dropping the description channel from _page_bound_sources
+    # makes this fail (the synthetic-tuple cases k/l alone would not catch that omission).
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-pagebound-selftest-"))
+    except OSError as exc:
+        failures.append("SOURCE: no writable temporary directory: {}".format(exc))
+        return failures
+    try:
+        tree = gen_enforcement_register._build(tmp / "good")
+        channels = {c for c, _k, _r in _page_bound_sources(tree)}
+        for needed in ("residue", "id", "description"):
+            if needed not in channels:
+                failures.append("SOURCE: _page_bound_sources must emit the {!r} channel (FIX 3)".format(needed))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
+def _asset_closure_self_test():
+    """Adversarial roster for the register-page asset-closure scan (FIX 4, GER-1). Synthetic site trees are
+    built so no real page is needed: a CSS content: marketing injection in an inline <style>, a marketing
+    content: string in a LINKED CSS asset, and a marketing string in a LINKED JS asset are each FLAGGED; a
+    benign closure (justify-content, a real glyph escape) stays clean; a linked-but-absent local asset fails
+    closed; and an off-site asset is out of scope."""
+    import shutil
+    import tempfile
+    failures = []
+    LB, RB, BS = chr(123), chr(125), chr(92)  # { } \  (kept as chars so the source carries no raw brace-string)
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-assetclosure-selftest-"))
+    except OSError as exc:
+        return ["ASSET: no writable temporary directory: {}".format(exc)]
+
+    def build(name, page_html, assets):
+        r = tmp / name
+        (r / "site").mkdir(parents=True)
+        (r / HTML_REL).write_text(page_html, encoding="utf-8")
+        for rel, text in assets.items():
+            (r / "site" / rel).write_text(text, encoding="utf-8")
+        return r
+
+    try:
+        # (a) a content: marketing injection in an inline <style> is flagged. MUTATION: restoring the
+        # drop-<style> behaviour (not scanning inline styles) makes this pass silently -> this test fails.
+        page = ("<html><head><style>.ledger-residual::after " + LB
+                + ' content: " This gate guarantees complete security." ' + RB
+                + "</style></head><body>ok</body></html>")
+        f = _scan_asset_closure(build("style-inject", page, {}))
+        if not any("CSS content injection" in x and "guarantees" in x for x in f):
+            failures.append("ASSET: a content: marketing injection in an inline <style> must be flagged (FIX 4)")
+        # (b) a marketing content: string in a LINKED CSS asset is flagged.
+        page = '<html><head><link rel="stylesheet" href="/app.css?v=1"></head><body>ok</body></html>'
+        css = ".x::before" + LB + 'content:"catches all mistakes"' + RB
+        f = _scan_asset_closure(build("css-asset", page, {"app.css": css}))
+        if not any("site/app.css" in x for x in f):
+            failures.append("ASSET: a marketing content: string in a linked CSS asset must be flagged (FIX 4)")
+        # (c) a marketing string in a LINKED JS asset is flagged by the whole-text marketing scan.
+        page = '<html><head><script src="/app.js"></script></head><body>ok</body></html>'
+        f = _scan_asset_closure(build("js-asset", page, {"app.js": 'var m = "AIQT guarantees secure output.";'}))
+        if not any("site/app.js" in x and "guarantees" in x for x in f):
+            failures.append("ASSET: a marketing string in a linked JS asset must be flagged (FIX 4)")
+        # (d) NO OVER-FIRE: justify-content (not the content property) and a real glyph escape stay clean.
+        page = '<html><head><link rel="stylesheet" href="/ok.css"></head><body>ok</body></html>'
+        okcss = (".navrow" + LB + "display:flex; justify-content:space-between" + RB
+                 + " summary::after" + LB + 'content:" ' + BS + '25B8"' + RB)
+        f = _scan_asset_closure(build("clean", page, {"ok.css": okcss}))
+        if f:
+            failures.append("ASSET: a benign closure must stay clean, got {}".format(f))
+        # (e) a LINKED-but-ABSENT local asset fails closed (_FailClosed), never a silent skip.
+        page = '<html><head><link rel="stylesheet" href="/missing.css"></head><body>ok</body></html>'
+        try:
+            _scan_asset_closure(build("absent-asset", page, {}))
+            failures.append("ASSET: a linked-but-absent local asset must fail closed (_FailClosed)")
+        except _FailClosed:
+            pass
+        # (f) an OFF-SITE asset URL is out of closure scope (not fetched, not a failure).
+        page = ('<html><head><link rel="stylesheet" href="https://cdn.example/x.css">'
+                '<script src="https://cdn.example/x.js"></script></head><body>ok</body></html>')
+        f = _scan_asset_closure(build("offsite", page, {}))
+        if f:
+            failures.append("ASSET: an off-site asset must be out of scope, got {}".format(f))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return failures
 
 
