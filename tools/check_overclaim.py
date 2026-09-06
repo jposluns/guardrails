@@ -26,7 +26,11 @@ is no future-tense exception; integrity is described only in plain validation la
 THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
   1. site/*.html: visible-text + meta scanning, SITE_PATTERNS + RELEASE_PATTERNS. site/ is a REQUIRED
      surface: an absent, unwalkable, or non-directory site/ is a fail-closed exit 2, never a silent PASS
-     (the 4.4c correction of the old "no site/ directory -> PASS" shape).
+     (the 4.4c correction of the old "no site/ directory -> PASS" shape). The enforcement register page
+     (site/enforcement.html) is scanned like any other site page, with NO exemption for its verbatim
+     ledger-residual blocks: the residues it renders are kept marketing-clean AT THEIR SOURCE (see the
+     source-side residue-cleanliness leg below), so no per-page carve-out is needed. This is robust by
+     construction: a plain scan over the whole page cannot be fooled by an exemption heuristic.
   2. The hand-authored repo prose roster (README.md, SCOPE.md, SYSTEM-HARDENING.md, aiqt-barebones.md):
      RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
      CLAUDE.md) are gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster
@@ -85,6 +89,20 @@ clean; a pattern that flagged a legitimate line would be too broad):
   - universal-RESULT paraphrase: an efficacy/coverage verb immediately governing "all"/"every"/"any"
     ("catches all mistakes", "catches any mistake", "eliminates all errors", "serves every assistant").
     Adjacency is required, so honest prose ("you stop trusting every suggestion") is clean.
+  - CATEGORICAL claim (F-318b): an efficacy/coverage verb reject/deny/catch/block/confirm/cover
+    immediately governing "all"/"each"/"every" ("Rejects all edits anywhere", "denies each schedule call",
+    "confirms every target"). This closes the genericized categorical-overclaim class the universal-RESULT
+    pattern above missed: that set omits the verbs reject/deny/confirm and the quantifier "each", so those
+    genericized shapes passed. It rides the SITE surface set, so it polices the register page's own hand
+    prose (the generator's EXPLAINER, page lead copy, and class legend) and any roadmap `pending`
+    description rendered there, while the rule corpus and adapters legitimately carry all/every/each
+    governance language. It is a PLAIN categorical scan: there is no bound-allowance heuristic (the earlier
+    natural-language clause-parser that tried to clear an "honestly bounded" categorical claim was removed,
+    F-330/round-7, because it kept yielding false clears codex could exploit). A categorical shape is kept
+    OUT of the register's own hand prose by construction; a residue that legitimately uses categorical
+    governance vocabulary is reworded at its manifest source to be marketing-clean, so nothing depends on a
+    per-claim exemption. Adjacency is required, so honest prose with a word between the verb and the
+    quantifier stays clean.
   - universal-SUBJECT "one standard serves every": a single-standard subject claiming it serves/covers/
     works all|every|any target. Requires the subject and a coverage verb, so "one standard your whole
     team can work to" and "one standard, three paths" stay clean.
@@ -209,6 +227,7 @@ import html
 import json
 import re
 import sys
+import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -216,6 +235,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 import gen_gensrc  # noqa: E402  build_registry: the in-memory gensrc recomputation (collector 3)
 import gen_manifest  # noqa: E402  load_ownership: the [checkout].binary roster (collector 3 skip set)
+import gen_enforceability  # noqa: E402  build_ledger: recompute the residual map for the source-side residue-cleanliness leg
 
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
@@ -379,6 +399,20 @@ SITE_PATTERNS = [
         r"\b(?:catch(?:es)?|detect(?:s)?|prevent(?:s)?|block(?:s)?|find(?:s)?|fix(?:es)?|"
         r"stop(?:s)?|secure(?:s)?|eliminat(?:e|es)|serves?|supports?|covers?)\s+"
         r"(?:all|every|any)\b", re.IGNORECASE), ""),
+    # CATEGORICAL claim: an efficacy/coverage verb (reject/deny/catch/block/confirm/cover) governing
+    # all|each|every. This closes the genericized categorical-overclaim gap (F-318b): the universal-result
+    # pattern above misses reject/deny/confirm and the quantifier "each", so a description such as "Rejects
+    # all edits anywhere" or "denies each schedule call" was NOT caught. It is a PLAIN scan (guard ""): the
+    # earlier bound-allowance heuristic that tried to clear an "honestly bounded" categorical claim was
+    # removed in round 7 (it was a fragile natural-language clause-parser with exploitable false clears), so
+    # ANY such categorical shape flags. Register-page hand prose and manifest residues are kept marketing-
+    # clean at their source instead of relying on a per-claim exemption. Adjacency is required (the verb
+    # IMMEDIATELY governs the quantifier), so honest prose with a word between the verb and the quantifier
+    # ("rejects a write outside each slice") does not trip. It rides the SITE surface set, so the rule corpus
+    # and adapters legitimately carry "all"/"every"/"each" governance language and it stays site-scoped.
+    ("categorical claim (verb + all/each/every)", re.compile(
+        r"\b(?:reject(?:s)?|den(?:y|ies)|catch(?:es)?|block(?:s)?|confirm(?:s)?|cover(?:s)?)\s+"
+        r"(?:all|each|every)\b", re.IGNORECASE), ""),
     # universal-SUBJECT: a single-standard subject claiming it serves/covers/works all|every|any target
     # ("one standard serves every assistant"). Requires the "one standard/rule/instruction" subject and
     # an in-range coverage verb governing the quantifier, so honest prose that merely contains "one
@@ -583,6 +617,12 @@ BLOCK_TAGS = {
 META_DESC_NAMES = {"description", "og:description"}
 
 
+def _collapse(value):
+    """Whitespace-collapse a string, the same normalization the visible-text scan applies, so a rendered
+    residual quotation compares equal to the ledger's own residue regardless of interior spacing."""
+    return re.sub(r"\s+", " ", value).strip()
+
+
 class VisibleText(HTMLParser):
     """Accumulate visible text, dropping <script>/<style> bodies. Entities are converted (default).
     A block-element boundary emits a space so text from two separate blocks cannot fuse into one
@@ -730,7 +770,8 @@ def _guard_clears(guard, text, m):
     surrounding sentence names BOTH the later-version and the BY-SA-compatible alternatives, the full
     permitted set from LICENSE 3(b)(1). "release" (release-integrity): a shipped third-party control TITLE
     that WHOLLY CONTAINS the matched span, OR a negator that DIRECTLY negates the banned term by tight
-    adjacency (_adjacent_denial_clears). There is no future-tense clearance. "" never clears."""
+    adjacency (_adjacent_denial_clears). There is no future-tense clearance, and there is no bound-allowance
+    (the categorical pattern is a plain scan, guard ""). "" never clears."""
     if guard == "neg":
         return bool(NEGATOR.search(_clause_window(text, m.start())))
     if guard == "intent":
@@ -746,18 +787,110 @@ def _guard_clears(guard, text, m):
     return False
 
 
-def scan(text, site=True):
-    """Return a list of (pattern_name, snippet) overclaim findings in one surface's text. RELEASE_PATTERNS
-    (release-integrity) always run; the guarantee-flavoured SITE_PATTERNS run only when `site` is True (the
-    site pages), because the rule corpus and generated adapters legitimately carry that governance
-    vocabulary."""
+def _scan_with(text, patterns):
+    """Return (pattern_name, snippet) findings for one pattern set over one text, honouring each pattern's
+    guard. `scan` uses this to run the release-integrity set alone on generated surfaces and both sets on
+    the site pages; the source-side residue leg uses the same guard-honouring loop over each residue."""
     findings = []
-    patterns = (SITE_PATTERNS + RELEASE_PATTERNS) if site else RELEASE_PATTERNS
     for name, pat, guard in patterns:
         for m in pat.finditer(text):
             if _guard_clears(guard, text, m):
                 continue
             findings.append((name, _snippet(text, m.start(), m.end())))
+    return findings
+
+
+def scan(text, site=True):
+    """Return a list of (pattern_name, snippet) overclaim findings in one surface's text. RELEASE_PATTERNS
+    (release-integrity) always run; the guarantee-flavoured SITE_PATTERNS run only when `site` is True (the
+    site pages), because the rule corpus and generated adapters legitimately carry that governance
+    vocabulary."""
+    return _scan_with(text, (SITE_PATTERNS + RELEASE_PATTERNS) if site else RELEASE_PATTERNS)
+
+
+# --- source-side residue-cleanliness leg (GER-1 / round 7) --------------------------------------------
+# The enforcement register renders each mechanism's technical-limits residual VERBATIM from the ledger,
+# inside a `<blockquote class="ledger-residual" data-mech="<ref>">`. Earlier rounds exempted those blocks
+# from the marketing scan on the page (a verified-quotation carve-out); that approach was REFUTED as
+# fundamentally fragile (a bound-allowance hole that suppressed every marketing pattern, invisible-Unicode
+# laundering that passes a source scan yet renders as marketing, and static-DOM-vs-rendered fidelity gaps),
+# so it was removed. Instead the residues are kept marketing-clean AT THEIR SOURCE and the register page is
+# scanned plainly, exactly like any other site page. _residual_map recomputes the residues IN MEMORY from
+# the manifests (guard-input-soundness); _scan_residue_marketing then scans each residue (and its
+# claim-bearing reference id) with the PLAIN marketing patterns and rejects any invisible or control
+# Unicode, so a marketing overclaim or a zero-width/bidi laundering cannot reach the page through a residue.
+
+
+def _residual_map(root):
+    """ref -> whitespace-collapsed ledger residue, recomputed IN MEMORY from the source of truth (the
+    ledger the manifests produce via gen_enforceability.build_ledger), never read from the page under
+    judgement. build_ledger raises ValueError/OSError on a malformed or unreadable manifest/corpus input,
+    which the caller lets propagate to a fail-closed exit 2."""
+    ledger = json.loads(gen_enforceability.build_ledger(root))
+    out = {}
+    for entry in ledger["rules"]:
+        for gate in entry["gates"]:
+            out["gate:" + gate["id"]] = _collapse(gate["residue"])
+        for hook in entry["hooks"]:
+            out["hook:" + hook["id"]] = _collapse(hook["residue"])
+    return out
+
+
+def _first_invisible(text):
+    """Return (index, char) of the first INVISIBLE or CONTROL codepoint in `text`, or None. A residue is
+    plain printable technical prose, so only the space, tab, and newline whitespace is allowed; everything
+    else must be a normally-visible character. Rejected: C0 and C1 control characters (including DEL); every
+    Unicode FORMAT character (Cf: the zero-width space/joiner/non-joiner, the bidi overrides and isolates,
+    the word-joiner and BOM); surrogates, private-use, and unassigned codepoints (Cs/Co/Cn); the line and
+    paragraph separators (Zl/Zp); and any non-ASCII space separator (Zs, e.g. a no-break or thin space).
+    This closes the invisible-Unicode laundering codex found in round 6: a residue carrying a zero-width
+    space inside "guarantees" reads as "guaran<ZWSP>tees" to the visible-text marketing scan (the break
+    dodges the word pattern) yet renders as "guarantees" to a human, so it is rejected here at source."""
+    for i, ch in enumerate(text):
+        if ch in (" ", "\t", "\n"):
+            continue
+        o = ord(ch)
+        if o < 0x20 or 0x7f <= o <= 0x9f:      # C0 and C1 controls, including DEL
+            return (i, ch)
+        cat = unicodedata.category(ch)
+        if cat in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"):
+            return (i, ch)
+        if cat == "Zs":                        # any space separator other than the plain ASCII space above
+            return (i, ch)
+    return None
+
+
+def _scan_residue_marketing(residual_map):
+    """Source-side residue-cleanliness leg (GER-1 / round 7). Every recomputed ledger residue (and its
+    claim-bearing reference id) must (a) pass the PLAIN marketing patterns and (b) carry NO invisible or
+    control Unicode. Because the register page renders each residue VERBATIM and is now scanned plainly like
+    any other site page, keeping the residues clean at their source is what makes the page clean by
+    construction; there is no per-block exemption to attack.
+
+    (a) The marketing scan is PLAIN: it honours only the patterns' own guards (neg/intent/sharealike/release)
+    and has NO bound-allowance heuristic, so an "honestly bounded" categorical or guarantee shape flags at
+    source and is reworded there rather than cleared by a fragile clause-parser. The reference id is a
+    claim-bearing display channel, so its kebab body (hyphens read as spaces) is scanned the same way: a
+    hyphenated claim id (gate:catch-all-secrets -> "catch all secrets") fails at source even though the page
+    render "catch-all-secrets" would not match a space-requiring pattern.
+
+    (b) The invisible/control-Unicode check rejects a residue that would render as marketing while slipping
+    past the visible-text scan (the U+200B laundering). The residual_map is recomputed IN MEMORY from the
+    manifests (guard-input-soundness), so this covers exactly the residues and ids the register renders."""
+    findings = []
+    for ref, residue in sorted(residual_map.items()):
+        bad = _first_invisible(residue)
+        if bad is not None:
+            i, ch = bad
+            findings.append("residue source [{}]: invisible or control character U+{:04X} at index {}"
+                            .format(ref, ord(ch), i))
+        for surface, txt in (("residue", residue), ("id", ref.split(":", 1)[-1].replace("-", " "))):
+            for name, pat, guard in SITE_PATTERNS:
+                for m in pat.finditer(txt):
+                    if _guard_clears(guard, txt, m):
+                        continue
+                    findings.append("{} source [{}]: overclaim [{}] -> {}".format(
+                        surface, ref, name, _snippet(txt, m.start(), m.end())))
     return findings
 
 
@@ -804,6 +937,9 @@ def _collect(root, registry, binary_set):
         except (ValueError, AssertionError):
             findings.append("{}: could not parse as HTML".format(rel))
             continue
+        # The enforcement register page is scanned exactly like any other site page (no carve-out): its
+        # verbatim ledger-residual blocks are just visible text, and the residues are kept marketing-clean
+        # at their source by _scan_residue_marketing (called from main), so the plain scan below is enough.
         for name, snip in scan(parser.text(), site=True):
             findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
         for meta in parser.meta:
@@ -853,6 +989,10 @@ def main():
         registry = json.loads(gen_gensrc.build_registry(root))["generated"]
         _, _, _, binary_set = gen_manifest.load_ownership(root)
         findings = _collect(root, registry, binary_set)
+        # Source-side residue-cleanliness leg: the plain marketing scan over the recomputed ledger residues
+        # and their ids, plus an invisible/control-Unicode rejection, so a residue rendered verbatim on the
+        # register page cannot launder an overclaim. build_ledger raises on a bad input -> fail-closed exit 2.
+        findings += _scan_residue_marketing(_residual_map(root))
     except _FailClosed as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -904,6 +1044,19 @@ POSITIVE = [
     "The result is one standard applied the same way wherever the work runs and whichever model does the reviewing.",  # F-108 live tech-details:293 regression: reach by whichever model
     "The same rules apply whichever assistant you use.",              # F-108 reach-by-whichever paraphrase
     "All assistants work to the same rules.",                        # F-108 bare-work plural-subject assertion (no hedge)
+    # F-318b categorical-overclaim positives: a reject/deny/confirm/cover verb governing all/each/every with
+    # NO disclosed bound in the sentence. These are the genericized shapes check_overclaim let through (a
+    # description overclaiming past its ledger residual). Each MUST flag.
+    "Rejects all edits anywhere in the repository.",                 # reject + all, no bound (codex repro line)
+    "It denies each schedule call.",                                 # deny + each, no bound (the new quantifier)
+    "The gate confirms every declared target.",                      # confirm + every, no bound (the new verb)
+    "This guard covers each registry entry.",                        # cover + each, no bound
+    # F-318b ANTI-BOUND positives: a NEGATED bound word ("without a cap", "no bound") states the claim is
+    # UNbounded, so it must NOT clear the categorical claim (the round-3 unsafe-direction false clear).
+    "It denies every call without a cap.",                           # "without a cap" is an anti-bound -> flags
+    "Blocks each push, with no bound on scope.",                     # "no bound on scope" is an anti-bound -> flags
+    # F-330 fix 6 false-clear: a bound word in a SEPARATE coordinated clause must NOT launder the claim.
+    "The gate rejects all edits, and the manual has a scope section.",  # "scope" sits past the "and" -> flags
     # RELEASE-INTEGRITY positives (VER-CORE 4.4, simplified deny-list): a banned claim term with NO negator
     # DIRECTLY negating it flags on every surface. There is no future-tense clearance any more; a forward
     # promise about tamper/signing/independent-anchor is itself banned (D2), so it flags too.
@@ -1069,6 +1222,7 @@ def _self_test():
         failures.append("SCOPING: a release-integrity claim should flag on a generated surface too")
 
     failures.extend(_collector_self_test())
+    failures.extend(_residue_source_self_test())
 
     if failures:
         print("FAIL: check_overclaim self-test")
@@ -1164,8 +1318,62 @@ def _collector_self_test():
         f = _collect(r, [{"target": "CLEAN.md", "kind": "file"}], set())
         if f:
             failures.append("COLLECTOR: a clean synthetic repo should have no findings, got {}".format(f))
+
+        # (i) the enforcement register page is scanned like any other site page: a ledger-residual block is
+        # just visible text now (no carve-out), so an overclaim inside such a block on any page is a finding.
+        r = _make_root("plainblock")
+        (r / "site" / "other.html").write_text(
+            '<html><body><blockquote class="ledger-residual" data-mech="gate:x">'
+            'This gate guarantees complete security.</blockquote></body></html>', encoding="utf-8")
+        f = _collect(r, [], set())
+        if not any("[guarantees]" in x for x in f):
+            failures.append("COLLECTOR: an overclaim inside a ledger-residual block must be plainly scanned")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
+def _residue_source_self_test():
+    """Adversarial roster for the source-side residue-cleanliness leg (GER-1 / round 7). A synthetic residual
+    map is injected, so no real ledger is built. It exercises the PLAIN marketing scan (no bound-allowance)
+    and the invisible/control-Unicode rejection: a marketing overclaim in a residue fails at source; a
+    formerly "bounded" categorical claim ALSO fails now (the fragile bound-allowance is gone); a genuinely
+    clean governance residue stays clean; a claim-bearing hyphenated id fails at source; invisible/control
+    Unicode in a residue is rejected (the U+200B laundering codex found in round 6); and a benign id with a
+    clean residue produces nothing."""
+    failures = []
+
+    def has(fs, needle):
+        return any(needle in f for f in fs)
+
+    # (a) a marketing overclaim in a residue fails at source (plain scan).
+    f = _scan_residue_marketing({"gate:demo": "This gate guarantees complete security."})
+    if not has(f, "residue source [gate:demo]"):
+        failures.append("RESIDUE-SOURCE: a marketing overclaim in a residue must fail at source")
+    # (b) a formerly "honestly bounded" categorical claim now ALSO fails: the bound-allowance heuristic that
+    # cleared it (and that codex could exploit) was removed, so the residue is reworded clean at source.
+    f = _scan_residue_marketing({"gate:demo": "Denies every call, bounded by a cap."})
+    if not has(f, "residue source [gate:demo]"):
+        failures.append("RESIDUE-SOURCE: a bounded categorical claim must now fail (no bound-allowance)")
+    # (c) a genuinely clean governance residue stays clean.
+    f = _scan_residue_marketing({"gate:demo": "A best-effort guard, scoped to what it examines."})
+    if f:
+        failures.append("RESIDUE-SOURCE: a clean governance residue must stay clean, got {}".format(f))
+    # (d) a claim-bearing hyphenated reference id fails at source (the id renders verbatim on the page, and a
+    # space-requiring pattern would miss "catch-all" on the page, so the id is scanned hyphens-as-spaces).
+    f = _scan_residue_marketing({"gate:catch-all-secrets": "A best-effort guard."})
+    if not has(f, "id source [gate:catch-all-secrets]"):
+        failures.append("RESIDUE-SOURCE: a claim-bearing id must fail at source")
+    # (e) INVISIBLE/CONTROL Unicode in a residue is rejected: a zero-width space breaks the word for the
+    # visible-text marketing scan yet the residue renders as "guarantees" (the round-6 laundering).
+    f = _scan_residue_marketing({"gate:demo": "This gate guaran\u200btees nothing new."})
+    if not has(f, "invisible or control character"):
+        failures.append("RESIDUE-SOURCE: invisible/control Unicode in a residue must be rejected")
+    # (f) a benign id with a clean residue produces nothing.
+    f = _scan_residue_marketing(
+        {"hook:branch-root": "Detects an orphaned branch, best-effort within a declared horizon."})
+    if f:
+        failures.append("RESIDUE-SOURCE: a benign id + clean residue must stay clean, got {}".format(f))
     return failures
 
 
