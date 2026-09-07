@@ -12,21 +12,27 @@ module writes the machine TOML itself.
 
 The constrained subset (closed by construction; anything else is EmitError, fail-closed):
   - scalars: str, int, bool, float (finite only; a non-finite float has no model-equivalent round trip)
-  - dates:   datetime.datetime (offset or local), datetime.date, datetime.time (local only)
+  - dates:   datetime.datetime (offset or local; fold=0, and an offset must be a plain fixed UTC offset
+             that is a whole number of minutes), datetime.date, datetime.time (local only, fold=0)
   - tables:  a dict, emitted as a `[header]` section (nested dicts nest the header path)
   - arrays of tables: a list whose every element is a dict, emitted as `[[header]]` blocks
   - arrays of scalars: a list whose every element is a scalar/date, emitted inline as `[a, b, c]`
   - an empty list is `[]`; an empty dict is a bare `[header]` (an empty table)
 Out of the subset (rejected): None, bytes, set, a nested array (list in a list), an array mixing tables
-and scalars, an inline table or an array of inline tables, a non-string key, a non-finite float, and a
-timezone-aware `time` (TOML local time carries no offset). Inline tables and arrays of inline tables are
+and scalars, an inline table or an array of inline tables, a non-string key, a non-finite float, a string
+(value or key) carrying a lone surrogate (no UTF-8 encoding), a datetime or time with fold=1, a datetime
+whose tzinfo is not a plain fixed UTC offset (a named or variable zone), a datetime whose UTC offset is
+not a whole number of minutes (outside TOML offset syntax), and a timezone-aware `time` (TOML local time
+carries no offset). Each rejected state is one TOML cannot round-trip, so its closed-subset boundary keeps
+the staging proof sound. Inline tables and arrays of inline tables are
 deliberately excluded: the record-envelope `links`/`refs` inline-table arrays (OPF-SPEC 8.3/8.6) are
 outside this minimal subset, matching the build plan's stated U8 coverage.
 
 Determinism (OPF-SPEC 10.3): output is UTF-8, LF-only, with keys ordered canonically (leaf key-values
 first, both groups sorted, so a table's rendering is independent of its dict insertion order), so
-re-emitting a model-equal input yields byte-identical output. No wall-clock content, no network, no
-model involvement.
+re-emitting a model-equal input yields byte-identical output. Signed zero is canonicalized on output
+(-0.0 emits as 0.0), so the two model-equal float inputs 0.0 and -0.0 emit byte-identically. No
+wall-clock content, no network, no model involvement.
 
 Byte-canon (check_byte_canon.py, VER-CORE 3.1): the output is byte-canonical by construction. Every
 string value and quoted key is rendered as an escaped basic string, so a body carrying a carriage
@@ -38,7 +44,9 @@ byte-canon for an arbitrary captured body (a CRLF, a line with trailing whitespa
 codepoint would land in the bytes verbatim). The subset supports strings of any content, including
 newlines; the canonical FORM of that support is escaping. check_byte_canon is the authority for the
 byte rules; the self-test reconciles this module's forbidden-codepoint set against it and runs every
-emitted vector through check_byte_canon.scan_bytes, so the two cannot drift.
+emitted vector through check_byte_canon.scan_bytes, so the two cannot drift. The en dash (U+2013) and em
+dash (U+2014) escaping is a SEPARATE house-style no-dash guarantee, not part of the byte_canon forbidden
+set, so the emitted bytes are dash-free by construction independent of what byte_canon covers.
 
 Staging contract (OPF-SPEC 14.1, build plan U8): emit_checked() emits, reparses, and proves the result
 model-equivalent to its input before returning it; nothing that does not round-trip can be staged.
@@ -80,6 +88,11 @@ _BIDI = frozenset(chr(c) for c in (0x061C, 0x200E, 0x200F)
                   + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
 _FORBIDDEN_CODEPOINTS = _ZERO_WIDTH | _BIDI
 
+# House-style no-dash guarantee, separate from byte_canon (which does not cover dashes): the en dash
+# (U+2013) and em dash (U+2014) are escaped so they never reach the emitted bytes literally, whatever
+# the input carries, so the emitted document always satisfies the repo's no-dash convention.
+_HOUSE_STYLE_DASHES = frozenset((chr(0x2013), chr(0x2014)))
+
 # The named single-character escapes TOML defines for a basic string; all other required escapes go
 # through \uXXXX. \\ and " must be escaped for the string to close correctly.
 _NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
@@ -92,15 +105,21 @@ _SCALAR_TYPES = (str, bool, int, float,
 def _escape_basic(s):
     """Render `s` as a TOML basic string (with surrounding quotes), escaping every character that must
     not appear literally: the two structural characters (\\ and \"), the C0 controls and DEL and the C1
-    controls, and the byte-canon forbidden codepoints. Everything else, including ordinary printable
-    unicode, is left literal. The result contains no raw CR, no forbidden codepoint, and (because the
-    closing quote follows the content) never leaves a line with trailing whitespace."""
+    controls, and the byte-canon forbidden codepoints. The en dash (U+2013) and em dash (U+2014) are also
+    escaped, so the emitted bytes are dash-free whatever the input carries; that is a house-style no-dash
+    guarantee, separate from byte_canon (which does not cover dashes). Everything else, including ordinary
+    printable unicode, is left literal. A lone surrogate has no UTF-8 encoding, so it is rejected
+    fail-closed (EmitError) rather than returned in a document whose bytes cannot be encoded. The result
+    contains no raw CR, no forbidden codepoint, no dash byte, and (because the closing quote follows the
+    content) never leaves a line with trailing whitespace."""
     out = []
     for ch in s:
         o = ord(ch)
+        if 0xD800 <= o <= 0xDFFF:
+            raise EmitError("string contains a lone surrogate (U+{:04X}) with no UTF-8 encoding".format(o))
         if ch in _NAMED_ESCAPES:
             out.append(_NAMED_ESCAPES[ch])
-        elif o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS:
+        elif o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _HOUSE_STYLE_DASHES:
             out.append("\\u{:04X}".format(o))
         else:
             out.append(ch)
@@ -128,16 +147,36 @@ def _render_scalar(value):
     if isinstance(value, float):
         if not math.isfinite(value):
             raise EmitError("non-finite float ({!r}) has no model-equivalent TOML round trip".format(value))
+        if value == 0.0:
+            value = 0.0  # canonicalize signed zero: -0.0 emits as 0.0 so model-equal floats emit identically
         return repr(value)  # Python float repr always carries a '.' or 'e', so it is a TOML float
     if isinstance(value, str):
         return _escape_basic(value)
     if isinstance(value, datetime.datetime):
+        if value.fold:
+            raise EmitError("a datetime with fold=1 has no TOML round trip (TOML carries no fold flag)")
+        tz = value.tzinfo
+        if tz is not None:
+            offset = value.utcoffset()
+            # A TOML offset datetime carries only a numeric UTC offset: no zone name, no DST rule. Accept
+            # only a plain fixed-offset datetime.timezone whose name is its auto-generated one; a custom
+            # name or a variable/named zone would silently drop on reparse. timezone equality ignores the
+            # name (comparing offset alone), so the rendered name is compared explicitly.
+            if not isinstance(tz, datetime.timezone) or \
+                    tz.tzname(value) != datetime.timezone(offset).tzname(None):
+                raise EmitError("a datetime whose tzinfo is not a plain fixed UTC offset (a named or "
+                                "variable zone) has no TOML round trip")
+            if offset % datetime.timedelta(minutes=1) != datetime.timedelta(0):
+                raise EmitError("a datetime UTC offset that is not a whole number of minutes ({}) is "
+                                "outside TOML offset syntax".format(offset))
         return value.isoformat()
     if isinstance(value, datetime.date):
         return value.isoformat()
     if isinstance(value, datetime.time):
         if value.tzinfo is not None:
             raise EmitError("a TOML local time cannot carry a timezone offset")
+        if value.fold:
+            raise EmitError("a time with fold=1 has no TOML round trip (TOML carries no fold flag)")
         return value.isoformat()
     raise EmitError("value is outside the subset: {}".format(type(value).__name__))
 
@@ -373,6 +412,24 @@ def self_test():
         failures.append("coverage/empty-document: an empty document is not a single newline")
     _byte_canon_clean(emit({}), "coverage/empty-document")
 
+    # House-style no-dash guarantee: an en/em dash in a value is escaped, so the emitted BYTES are
+    # dash-free while the body still round-trips faithfully to the original dash characters.
+    dashes = "en {} em {}".format(chr(0x2013), chr(0x2014))
+    _round_trips({"body": dashes}, "house-style/dashes")
+    dash_text = emit({"body": dashes})
+    if chr(0x2013) in dash_text or chr(0x2014) in dash_text:
+        failures.append("house-style/dashes: an en/em dash reached the emitted bytes literally")
+    if tomllib.loads(dash_text)["body"] != dashes:
+        failures.append("house-style/dashes: the dash body did not round-trip faithfully")
+
+    # Signed-zero canonicalization: the two model-equal float inputs 0.0 and -0.0 emit byte-identically
+    # (-0.0 normalizes to 0.0), and -0.0 still round-trips (it is model-equal to its 0.0 reparse).
+    if emit({"v": -0.0}) != emit({"v": 0.0}):
+        failures.append("signed-zero: -0.0 and 0.0 do not emit byte-identically")
+    if "-0.0" in emit({"v": -0.0}):
+        failures.append("signed-zero: -0.0 emitted a signed-zero literal instead of 0.0")
+    _round_trips({"v": -0.0}, "signed-zero/negative")
+
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
         pass
@@ -389,6 +446,15 @@ def self_test():
         "non-string-key": {1: "x"},
         "nested-non-string-key": {"t": {2: "x"}},
         "tz-aware-time": {"k": datetime.time(9, 0, 0, tzinfo=datetime.timezone.utc)},
+        "lone-surrogate-value": {"k": "a" + chr(0xD800) + "b"},
+        "lone-surrogate-key": {"a" + chr(0xDC00) + "b": "x"},
+        "datetime-fold": {"k": datetime.datetime(2026, 1, 1, 0, 0, 0, fold=1)},
+        "time-fold": {"k": datetime.time(9, 0, 0, fold=1)},
+        "named-offset-tz": {"k": datetime.datetime(
+            2026, 1, 1, 0, 0, 0,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30), "IST"))},
+        "sub-minute-offset": {"k": datetime.datetime(
+            2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=1)))},
         "non-dict-top-level-list": ["not", "a", "table"],
         "non-dict-top-level-scalar": "just a string",
     }
