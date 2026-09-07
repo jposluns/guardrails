@@ -354,7 +354,7 @@ sync target: the target is fetched and the local store compared against it.
   recovery path for a store left ahead by a crash between a local write and its sync-back.
 - **Divergent from the target** (unsynced commits on two systems): the tooling refuses to operate
   and surfaces the state. A divergence HALTS for the human, always: it is never auto-merged and
-  never silently resolved by picking a side, because a textual merge of append-only TOML ledgers
+  never silently resolved by picking a side, because a textual merge of the store's TOML records
   can silently mangle the very records the standard exists to protect.
 - **After any operation that writes,** the store is synced back to its target in the same session,
   so the store is not left intentionally ahead on one system; a crash between the local write and
@@ -515,7 +515,7 @@ keeps every entry and the ledger keeps every release row and every superseded su
 
 Consumption applies only at the changelog's granularity: a range summary supersedes the finer
 summaries within it in the changelog view, exactly as a weekly summary supersedes dailies in a
-digest. It never applies to the worklog. The worklog is the frozen record; the changelog is a
+digest. It never applies to the worklog. The worklog is the durable record; the changelog is a
 re-rollable view over it. Deleting or thinning worklog entries during rollup is nonconformant.
 
 ## 7. Changelog gates: range coverage and freeze
@@ -675,7 +675,7 @@ Baseline types:
 |---|---|---|
 | backlog_item | `open` > `active` > `done` or `dropped`; `open` > `dropped` | Ratified `done` creates the one-to-one `done` receipt. Blocked-ness is never a stored state; it is derived from active blocks at view time. |
 | done | `recorded` | Created terminal, immutable. Links `receipt_of` to its backlog item. |
-| worklog | `recorded` | Append-only ledger row; mutability governed by section 6.2, not by transition. |
+| worklog | `recorded` | Durable operational record; mutability governed by section 6.2, not by transition. |
 | finding | `open` > `fixed`, `routed`, `refuted`, or `accepted` | Severity is graded at or after the fix decision, never before. |
 | pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision carries none of `decision`, `decided_at`, `decided_by`; a decided one carries all. A decided record may be superseded by a new decision linking `supersedes`; exactly one current effective resolution exists per chain. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning is a new record (or maintainer decision) linking it. |
@@ -916,24 +916,25 @@ sync-target agreement (the committed pointer, the manifest's recorded sync targe
 repository's actual remote agree; section 5.6); unmanaged-path containment (section 14.2); and
 path containment. At `required`, an unreadable, unparseable, or unresolvable declared input is a
 failure, never an empty or clean result. Unmanaged-path containment is phased by import state.
-`import_status = "partial"` denotes an in-progress import only: it is set only while an import or
-migration is actively running, MUST transition to `"complete"` when that import finishes, and a
-store with no active import is never `"partial"` (it is `"none"` or `"complete"`). Only during an
-active import (`import_status = "partial"` with an import actually in progress) is an unregistered
-path found at the store location surfaced as a finding rather than a build failure (section 14.2).
-At `required` posture in every other state, including a clean store (`import_status = "none"`) and a
-completed import (`import_status = "complete"`), and at `required` posture whenever no import is
-actively running, an unregistered unmanaged path is a containment-gate failure, fail-closed
-(section 14.2).
+`import_status = "partial"` denotes an in-progress import or migration only: it is set only while an
+import or migration is actively running, MUST transition to `"complete"` when that import or
+migration finishes, and a store with no active import or migration is never `"partial"` (it is
+`"none"` or `"complete"`). Only during an active import or migration (`import_status = "partial"`
+with an import or migration actually in progress) is an unregistered path found at the store location
+surfaced as a finding rather than a build failure (section 14.2). At `required` posture in every
+other state, including a clean store (`import_status = "none"`) and a completed import or migration
+(`import_status = "complete"`), and at `required` posture whenever no import or migration is actively
+running, an unregistered unmanaged path is a containment-gate failure, fail-closed (section 14.2).
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
 operational surface has moved into the store) is a report, never a gate: breadth of adoption is a
 journey, and failing a build over it would train bypasses. It stays report-only at every posture.
 
 Defaults: scaffolding writes `posture = "required"` and `import_status = "none"` (a clean init
-store has no legacy excuse for drift, and with no active import it is never `"partial"`); an import
-run writes `warn` with `import_status = "partial"` only while it is actively running, sets
-`import_status = "complete"` when it finishes, and every report carries `migration_incomplete`
+store has no legacy excuse for drift, and with no active import or migration it is never
+`"partial"`); an import or migration run writes `warn` with `import_status = "partial"` only while
+it is actively running, sets `import_status = "complete"` when it finishes, and every report carries
+`migration_incomplete`
 until fragments and detected pre-existing files are resolved, at which point the adopter flips to
 `required`. Weakening the posture (`required` toward `warn` or `off`)
 is a guardrail-configuration change: it takes effect only through the maintainer's explicit,
@@ -957,7 +958,8 @@ every moved span) and its destination. Validation confirms that every ID exists 
 active or archived location, and coverage gates read active and archive together, so rotation never
 changes any gate's answer. `counters.toml` is untouched by rotation, preserving ID permanence.
 Retention is thereby indefinite by default; an adopter bound by a retention policy applies it as a
-recorded maintainer decision, never as silent deletion.
+recorded maintainer decision governing archival and rotation (aged data moved into the archive,
+preserved byte for byte), never as deletion of a record.
 
 ## 13. Tamper evidence
 
@@ -1030,15 +1032,16 @@ data, the assistant or adopter picks per file, and each pick is recorded with it
 attribution like any other decision.
 
 After adoption, the same detection keeps running, scoped by phase. `import_status = "partial"`
-denotes an in-progress import only: it is set only while an import or migration is actively
-running, MUST transition to `"complete"` when that import finishes, and a store with no active
-import is never `"partial"` (it is `"none"` or `"complete"`). Only while an import is actively
-in progress, with `import_status = "partial"`, is a file that appears in `.working/` that is neither
-OPF-managed nor enumerated as unmanaged surfaced as a finding to triage through the options
-above, never absorbed. In every other state, including a clean store (`import_status = "none"`) and
-a completed import (`import_status = "complete"`), and whenever no import is actively running, at
-steady-state `required` posture an unregistered unmanaged path is a containment-gate failure that
-fails the build closed (the integrity layer of section 11), still never silently absorbed.
+denotes an in-progress import or migration only: it is set only while an import or migration is
+actively running, MUST transition to `"complete"` when that import or migration finishes, and a
+store with no active import or migration is never `"partial"` (it is `"none"` or `"complete"`). Only
+while an import or migration is actively in progress, with `import_status = "partial"`, is a file
+that appears in `.working/` that is neither OPF-managed nor enumerated as unmanaged surfaced as a
+finding to triage through the options above, never absorbed. In every other state, including a clean
+store (`import_status = "none"`) and a completed import or migration (`import_status = "complete"`),
+and whenever no import or migration is actively running, at steady-state `required` posture an
+unregistered unmanaged path is a containment-gate failure that fails the build closed (the integrity
+layer of section 11), still never silently absorbed.
 
 ### 14.3 Migrating an existing release pipeline
 
