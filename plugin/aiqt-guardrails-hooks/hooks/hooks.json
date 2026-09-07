@@ -183,6 +183,21 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "orch_untracked_wait_loop"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "ScheduleWakeup|CronCreate",
         "hooks": [
           {
