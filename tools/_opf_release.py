@@ -347,9 +347,10 @@ def _tile_releases(releases, findings):
 
 def _releases_or_finding(version_data, findings):
     """Extract the [[release]] rows from a parsed version ledger for the fail-closed guard helpers, or
-    append a cannot-evaluate finding and return None when the ledger is not a table or its `release` value
-    is not a list. A guard that cannot read its own input reports that, never a silent empty clean pass
-    (the check-fails-closed-on-unreadable rule)."""
+    append a cannot-evaluate finding and return None when the ledger is not a table, its `release` value is
+    not a list, OR any release ROW is not a table. A guard that cannot read its own input reports that,
+    never a silent empty clean pass, and a malformed row is not silently skipped (the
+    check-fails-closed-on-unreadable rule; M8)."""
     if not isinstance(version_data, dict):
         findings.append("cannot evaluate: version ledger is not a table")
         return None
@@ -357,6 +358,10 @@ def _releases_or_finding(version_data, findings):
     if not isinstance(releases, list):
         findings.append("cannot evaluate: version.toml [[release]] is not an array of tables")
         return None
+    for i, row in enumerate(releases):
+        if not isinstance(row, dict):
+            findings.append("cannot evaluate: release #{} is not a table (spec 6.1)".format(i + 1))
+            return None
     return releases
 
 
@@ -480,11 +485,32 @@ def _parse_covers(token, ledger_versions):
     return ("single", token), None
 
 
+def _covers_range(parsed, ledger_versions):
+    """The (lo_index, hi_index) ledger-order span a parsed covers token spans, or None for `unreleased`.
+    Used to check that a rollup summary COVERS the summary it supersedes (spec 6.4; M10)."""
+    kind, detail = parsed
+    if kind == "single":
+        idx = ledger_versions.index(detail)
+        return (idx, idx)
+    if kind == "range":
+        return detail
+    return None
+
+
 def _validate_summaries(summaries, ledger_versions, findings):
     """Validate the [[summary]] rows structurally (spec 6.1). See the summary-row ambiguity note; the
     tile-the-ledger-exactly and heading-1:1 FACTS gates are U5's."""
     seen_covers = set()
     seen_unreleased = False
+    # Pre-pass: map each well-formed covers token to its parsed (kind, detail), so a superseded row's
+    # superseded_by can be checked to name an EXISTING rollup summary row that covers it (spec 6.1/6.4; M10).
+    covers_index = {}
+    for row in summaries:
+        if not isinstance(row, dict) or "covers" not in row:
+            continue
+        parsed, err = _parse_covers(row.get("covers"), ledger_versions)
+        if err is None:
+            covers_index[row.get("covers")] = parsed
     for i, row in enumerate(summaries):
         where = "summary #{}".format(i + 1)
         if not isinstance(row, dict):
@@ -535,9 +561,31 @@ def _validate_summaries(summaries, ledger_versions, findings):
             if not has_sb:
                 findings.append("{}: a superseded summary must name its superseded_by rollup (spec 6.1)".format(where))
             else:
-                _, err = _parse_covers(row.get("superseded_by"), ledger_versions)
+                sb = row.get("superseded_by")
+                sb_parsed, err = _parse_covers(sb, ledger_versions)
                 if err is not None:
                     findings.append("{}: superseded_by: {}".format(where, err))
+                elif sb == covers:
+                    # A summary cannot supersede itself (spec 6.1/6.4): superseded_by names the rollup that
+                    # REPLACED this row, which is a different row (M10).
+                    findings.append("{}: superseded_by must not name the row itself; a summary cannot "
+                                    "supersede itself (spec 6.1/6.4)".format(where))
+                elif sb not in covers_index:
+                    # superseded_by must name an EXISTING rollup summary row (spec 6.1: "the covers token
+                    # of the rollup summary that replaced this one"), not merely a ledger-valid token (M10).
+                    findings.append("{}: superseded_by {!r} names no existing rollup summary row "
+                                    "(spec 6.1/6.4)".format(where, sb))
+                else:
+                    # The rollup must COVER this summary's range (spec 6.4: a range summary supersedes only
+                    # the summaries within its range).
+                    this_range = _covers_range(covers_index[covers], ledger_versions) \
+                        if covers in covers_index else None
+                    roll_range = _covers_range(sb_parsed, ledger_versions)
+                    if this_range is not None and roll_range is not None and not (
+                            roll_range[0] <= this_range[0] and this_range[1] <= roll_range[1]):
+                        findings.append("{}: superseded_by {!r} does not cover this summary's range; a "
+                                        "rollup supersedes only the summaries within its range "
+                                        "(spec 6.4)".format(where, sb))
         elif has_sb:
             findings.append("{}: superseded_by is present only on a superseded summary (spec 6.1)".format(where))
 
@@ -625,7 +673,8 @@ def _verify_append_only(prior_releases, candidate_releases, findings):
                                 i + 1, prior_row.get("version", "?") if isinstance(prior_row, dict) else "?"))
 
 
-def release_cut(version_data, worklog_data, new_version, date):
+def release_cut(version_data, worklog_data, new_version, date,
+                registered_vendors=frozenset(), registered_kinds=None, archived_entries=None):
     """Freeze the current unreleased worklog tail into a released span keyed to `new_version` (spec 6.1,
     6.2). Returns a CutResult carrying a NEW version.toml value with the release row appended; it is a
     PURE function (workers-produce-inert-data): the worklog is never mutated and nothing is ever deleted.
@@ -648,13 +697,21 @@ def release_cut(version_data, worklog_data, new_version, date):
     Append-only immutability: the returned ledger preserves every pre-existing release row byte-identically
     and appends only the new row (spec 6.1). Standalone validate_version cannot detect a rewritten
     historical row without the prior ledger (that residual belongs to U6 doctor with stored history); the
-    cut, holding both prior and candidate, enforces append-only here."""
+    cut, holding both prior and candidate, enforces append-only here.
+
+    `registered_vendors` and `registered_kinds` are the manifest's registered x-<vendor> extensions and
+    additional worklog change kinds (spec 6.2, 8.7); they are threaded into validate_worklog so a worklog
+    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6).
+    `archived_entries` is an optional iterable of frozen worklog entry tables that a conforming rotation
+    moved to the archive (spec 12); the prior-frozen-span intactness checks run against the MERGED
+    active+archive set so a legal rotation does not over-reject (M7)."""
     vv = validate_version(version_data)
     if vv.status == CANNOT_EVALUATE:
         return CutResult(CANNOT_EVALUATE, ["cannot cut: version.toml does not evaluate"] + vv.findings)
     if vv.status != VALID:
         return CutResult(INVALID, ["cannot cut from an inconsistent ledger"] + vv.findings)
-    wv = validate_worklog(worklog_data)
+    wv = validate_worklog(worklog_data, registered_vendors=registered_vendors,
+                          registered_kinds=registered_kinds)
     if wv.status == CANNOT_EVALUATE:
         return CutResult(CANNOT_EVALUATE, ["cannot cut: worklog.toml does not evaluate"] + wv.findings)
     if wv.status != VALID:
@@ -684,14 +741,30 @@ def release_cut(version_data, worklog_data, new_version, date):
     if id_findings:
         return CutResult(INVALID, ["cannot cut: worklog ids are malformed"] + id_findings)
 
+    # Merge in any frozen entries a conforming rotation moved to the archive (spec 12), so the prior-
+    # frozen-span intactness checks see the MERGED active+archive set: a store that legally rotated a
+    # released span to the archive still holds those entries, so intactness must not be judged against the
+    # active worklog alone (else a legal rotation over-rejects; M7). The tail derivation below still uses
+    # the ACTIVE worklog only, since the unreleased tail never rotates (spec 12).
+    merged_by_id = dict(by_id)
+    if archived_entries is not None:
+        arch_by_id, arch_findings = _entries_by_id({"entry": list(archived_entries)})
+        if arch_findings:
+            return CutResult(INVALID, ["cannot cut: archived worklog ids are malformed"] + arch_findings)
+        for n, e in arch_by_id.items():
+            if n in merged_by_id:
+                return CutResult(INVALID, ["cannot cut: worklog id WL-{} is in BOTH the active worklog and "
+                                           "the archive (rotation is a move; spec 12)".format(n)])
+            merged_by_id[n] = e
+
     # A cut must not derive a new frozen span from a ledger whose PRIOR released spans are no longer
     # intact (spec 6.2/13: a frozen span is immutable). Recompute every prior release's stored coverage
-    # digest against the current worklog, and confirm no frozen id was deleted, failing closed on either
+    # digest against the merged worklog, and confirm no frozen id was deleted, failing closed on either
     # (an edited or deleted frozen entry). check_frozen_coverage also fails closed when a covered entry is
     # missing, so a deleted frozen record is caught here; check_no_deletion names the vanished id too.
-    intact_findings = check_frozen_coverage(version_data, by_id)
+    intact_findings = check_frozen_coverage(version_data, merged_by_id)
     prior_end = released_end(vv.releases)
-    intact_findings += check_no_deletion(range(1, prior_end + 1), list(by_id))
+    intact_findings += check_no_deletion(range(1, prior_end + 1), list(merged_by_id))
     if intact_findings:
         return CutResult(INVALID, ["cannot cut: a prior frozen released span is not intact"] + intact_findings)
 
@@ -796,6 +869,10 @@ def check_no_append_into_released(version_data, candidate_ids):
         n = cid if isinstance(cid, int) and not isinstance(cid, bool) else _wl_num(cid)
         if n is None:
             findings.append("candidate worklog id {!r} is not a well-formed WL-<n> id".format(cid))
+        elif n < 1:
+            # A WL-number is a positive integer (spec 8.2); a non-positive raw int is malformed, not a
+            # released-span member (m3 sibling sweep).
+            findings.append("candidate worklog id {!r} is not a positive WL-<n> id (spec 8.2)".format(cid))
         elif n <= end:
             findings.append("worklog id WL-{} falls in an already-released span (<= released end WL-{}); a "
                             "post-release correction is a NEW entry in the unreleased tail (spec 6.2)".format(n, end))
@@ -814,14 +891,25 @@ def check_no_deletion(old_ids, new_ids):
     return findings
 
 
-def check_ids_partition(active_ids, archive_ids):
+def check_ids_partition(active_ids, archive_ids, expected_ids=None):
     """Rotation is archival MOVEMENT, never duplication or loss (spec 12): every worklog id exists in
-    EXACTLY ONE of the active worklog or the archive. Returns a finding per id present in both."""
+    EXACTLY ONE of the active worklog or the archive. Returns a finding per id present in both, and, when
+    an authoritative `expected_ids` set is given (e.g. 1..high-water), a finding per expected id present in
+    NEITHER location, so a dropped/lost id is reported rather than reading as clean (M9). Without
+    `expected_ids` the guard cannot see a loss (its inputs are the two locations, not the id space it
+    should cover), so the authoritative set is threaded in per guard-input-soundness."""
     findings = []
-    both = set(active_ids) & set(archive_ids)
-    for n in sorted(both):
+    active = set(active_ids)
+    archive = set(archive_ids)
+    for n in sorted(active & archive):
         findings.append("worklog id WL-{} is in BOTH the active worklog and the archive; rotation is a "
                         "move, an id lives in exactly one location (spec 12)".format(n))
+    if expected_ids is not None:
+        present = active | archive
+        for n in sorted(set(expected_ids)):
+            if n not in present:
+                findings.append("worklog id WL-{} is in NEITHER the active worklog nor the archive; "
+                                "rotation is a move, never a loss (spec 12/13)".format(n))
     return findings
 
 
@@ -838,6 +926,10 @@ def check_rotation_only_released(rotated_ids, version_data):
         n = rid if isinstance(rid, int) and not isinstance(rid, bool) else _wl_num(rid)
         if n is None:
             findings.append("rotated worklog id {!r} is not a well-formed WL-<n> id".format(rid))
+        elif n < 1:
+            # A WL-number is a positive integer (spec 8.2); a non-positive raw int (e.g. WL-0) is outside
+            # the id grammar and must not slip the > released-end test (m3).
+            findings.append("rotated worklog id {!r} is not a positive WL-<n> id (spec 8.2)".format(rid))
         elif n > end:
             findings.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
                             "never rotate (spec 12)".format(n, end))
@@ -1061,6 +1153,88 @@ def self_test():
           validate_worklog(wl_custom, registered_kinds={"perf"}).status == VALID)
     check("release-worklog-manifest-kind-unregistered-invalid",
           validate_worklog(wl_custom).status == INVALID)
+
+    # ----- round-2 spec-conformance hardening -------------------------------------------------------
+    # M6: release_cut threads registered kinds/vendors into validate_worklog (a manifest-registered kind or
+    # x-<vendor> on a tail entry validates through the cut; unregistered fails).
+    worklog_perf = {"schema": 1, "entry": [entry(1), entry(2), entry(3, kind="perf"), entry(4)]}
+    check("m6-cut-registered-kind-ok",
+          release_cut(vok, worklog_perf, "1.1.0", "2026-06-15T00:00:00Z",
+                      registered_kinds={"perf"}).status == VALID)
+    check("m6-cut-unregistered-kind-invalid",
+          release_cut(vok, worklog_perf, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
+    worklog_vendor = {"schema": 1, "entry": [entry(1), entry(2), entry(3),
+                                             entry(4, **{"x-aiqt": {"note": "n"}})]}
+    check("m6-cut-registered-vendor-ok",
+          release_cut(vok, worklog_vendor, "1.1.0", "2026-06-15T00:00:00Z",
+                      registered_vendors=frozenset({"x-aiqt"})).status == VALID)
+    check("m6-cut-unregistered-vendor-invalid",
+          release_cut(vok, worklog_vendor, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
+
+    # M7: a conforming rotation (a released span moved to the archive) does not over-reject the cut; the
+    # merged intactness still catches an edited archived entry; a duplicate across active+archive fails.
+    active_after_rot = {"schema": 1, "entry": [entry(3), entry(4)]}   # WL-1,2 rotated to the archive
+    check("m7-cut-with-archived-frozen-ok",
+          release_cut(vok, active_after_rot, "1.1.0", "2026-06-15T00:00:00Z",
+                      archived_entries=[entry(1), entry(2)]).status == VALID)
+    check("m7-cut-without-archive-invalid",
+          release_cut(vok, active_after_rot, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
+    check("m7-cut-archived-edited-invalid",
+          release_cut(vok, active_after_rot, "1.1.0", "2026-06-15T00:00:00Z",
+                      archived_entries=[entry(1, summary="EDITED"), entry(2)]).status == INVALID)
+    check("m7-cut-archive-active-duplicate-invalid",
+          release_cut(vok, {"schema": 1, "entry": [entry(1), entry(3), entry(4)]},
+                      "1.1.0", "2026-06-15T00:00:00Z", archived_entries=[entry(1), entry(2)]).status == INVALID)
+
+    # M8: the frozen-span guards fail closed on a malformed (non-table) release ROW, never silently skip it.
+    check("m8-frozen-coverage-nontable-row-cannot-eval",
+          bool(check_frozen_coverage({"release": [42]}, {})))
+    good_row = {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+                "worklog_span": [], "coverage_digest": coverage_digest([])}
+    check("m8-append-into-released-nontable-row-cannot-eval",
+          bool(check_no_append_into_released({"release": [good_row, 42]}, [3])))
+    check("m8-rotation-only-released-nontable-row-cannot-eval",
+          bool(check_rotation_only_released([3], {"release": [42]})))
+    # control: a well-formed all-table ledger still evaluates cleanly (no over-rejection)
+    check("m8-good-rows-ok", not check_frozen_coverage(frozen_ver, by_id))
+
+    # M9: check_ids_partition detects LOSS given the authoritative expected-id set (1..high-water).
+    check("m9-partition-loss-detected", bool(check_ids_partition([1], [], expected_ids=range(1, 3))))
+    check("m9-partition-no-loss-ok", not check_ids_partition([1, 2], [], expected_ids=range(1, 3)))
+    check("m9-partition-loss-across-active-archive-ok",
+          not check_ids_partition([2], [1], expected_ids=range(1, 3)))
+    check("m9-partition-no-expected-backward-compat", not check_ids_partition([1], []))
+
+    # M10: a superseded summary's superseded_by must name an EXISTING rollup that COVERS it, never itself.
+    D = "sha256:" + "a" * 64
+    EMPTY = coverage_digest([])
+    sup_releases = [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": EMPTY},
+        {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": EMPTY},
+    ]
+    sup_base = {"release": sup_releases, "summary": [
+        {"covers": "unreleased", "status": "working"},
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
+        {"covers": "1.1.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
+        {"covers": "1.0.0..1.1.0", "status": "published", "digest": D},
+    ]}
+    check("m10-valid-supersession-ok", validate_version(sup_base).status == VALID)
+    sup_self = {"release": sup_releases, "summary": [
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"}]}
+    check("m10-self-reference-invalid", validate_version(sup_self).status == INVALID)
+    sup_missing = {"release": sup_releases, "summary": [
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"}]}
+    check("m10-nonexistent-rollup-invalid", validate_version(sup_missing).status == INVALID)
+    sup_notcover = {"release": sup_releases, "summary": [
+        {"covers": "1.1.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"},
+        {"covers": "1.0.0", "status": "published", "digest": D}]}
+    check("m10-rollup-not-covering-invalid", validate_version(sup_notcover).status == INVALID)
+
+    # m3: check_rotation_only_released rejects a non-positive rotated WL-number (WL-0); the sibling
+    # check_no_append_into_released rejects it too.
+    check("m3-rotation-nonpositive-invalid", bool(check_rotation_only_released([0], frozen_ver)))
+    check("m3-rotation-negative-invalid", bool(check_rotation_only_released([-1], frozen_ver)))
+    check("m3-append-nonpositive-invalid", bool(check_no_append_into_released(frozen_ver, [0])))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
