@@ -251,6 +251,19 @@ def _valid_timestamp(value):
     return True
 
 
+def _instant_key(value):
+    """A comparable ordering key for a VALID RFC 3339 UTC timestamp string, or None when it is not one.
+    Every accepted value is a zero UTC offset, so the calendar fields plus any fractional seconds order
+    two instants directly (a string compare is unsafe: `...02Z` and `...02+00:00` are the same instant but
+    differ lexically). Used to check timestamp chronology (MINOR 1)."""
+    m = _TS_RE.match(value) if isinstance(value, str) else None
+    if not m:
+        return None
+    frac = float(m.group(7)) if m.group(7) else 0.0
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            int(m.group(4)), int(m.group(5)), int(m.group(6)), frac)
+
+
 def parse_status(status, spec):
     """Parse a status string against a type's grammar (spec 8.4). Returns ((state, qualifier), None) on
     success, or (None, message) on a malformed or type-illegal status. `qualifier` is None or "proposed",
@@ -628,6 +641,14 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     elif not _valid_timestamp(record.get("updated_at")):
         findings.append("updated_at must be an RFC 3339 UTC timestamp")
 
+    # When both timestamps are present and valid, updated_at (the time of the last transition) cannot
+    # precede created_at (spec 8.3; MINOR 1).
+    if ("created_at" in record and "updated_at" in record
+            and _valid_timestamp(record.get("created_at"))
+            and _valid_timestamp(record.get("updated_at"))
+            and _instant_key(record.get("updated_at")) < _instant_key(record.get("created_at"))):
+        findings.append("updated_at must not precede created_at (spec 8.3)")
+
     if "summary" in record and not isinstance(record.get("summary"), str):
         findings.append("summary must be a string when present")
 
@@ -640,16 +661,21 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
 # --- the transition validator (spec 8.4, 8.5) --------------------------------------------------------
 
-def validate_transition(type_name, from_status, to_status, actor_kind, specs=None):
+def validate_transition(type_name, from_status, to_status, actor_kind, pre_proposal_state=None, specs=None):
     """Validate a status transition against the grammar (spec 8.4, 8.5). Returns a TransitionCheck whose
-    status is VALID (legal), INVALID (illegal), or CANNOT-EVALUATE (the type or a status is unparseable).
+    status is VALID (legal), INVALID (illegal), or CANNOT-EVALUATE (the type or a status is unparseable, or
+    a rejection whose pre-proposal state was not supplied).
 
     The rules:
       - A forward transition from an unqualified working/initial state follows the type's transition
         table. Landing on a TERMINAL state, an assistant/automation actor MUST land `/proposed`; a
         maintainer/importer MUST land unqualified.
-      - From a `state/proposed`, only a maintainer may RATIFY (drop the qualifier, same state) or REJECT
-        (return to a working state); no other move is legal.
+      - From a `state/proposed`, only a maintainer may RATIFY (drop the qualifier, same state) or REJECT.
+        A rejection returns the record to its ACTUAL pre-proposal state, so it is legal iff `to_state ==
+        pre_proposal_state`, `to_qual is None`, `to_state` is a non-terminal (working/initial) state, and
+        the actor is a maintainer. The envelope records no prior state (spec 8.3), so the caller supplies
+        `pre_proposal_state` from the record's history; when it is not supplied the rejection target
+        cannot be verified and the result is CANNOT-EVALUATE, never a permissive VALID (M1).
       - An unqualified TERMINAL state does not transition at all (no resurrection, spec 8.4); a revived
         concern is a new record, and supersession is a link, not a state edit.
     """
@@ -693,20 +719,26 @@ def validate_transition(type_name, from_status, to_status, actor_kind, specs=Non
                                 from_status, to_status))
     elif from_qual == "proposed":
         # From a proposed record only a maintainer rejection back to a non-terminal state is legal (spec
-        # 8.4). The rejection must land on a MATRIX-LEGAL state: one from which the rejected (proposed)
-        # state was itself a legal forward transition, so a rejection cannot bypass the type's matrix (for
-        # example backlog_item done/proposed rejects to `active`, whence `done` is reachable, never to
-        # `open`, whence it is not) (G2).
+        # 8.4). A rejection restores the ACTUAL pre-proposal state, so it must land on exactly that state,
+        # supplied by the caller from the record's history (the envelope carries no prior state, spec 8.3).
+        # The removed matrix-predecessor heuristic (land on any state whence the proposed state was
+        # reachable) let active -> dropped/proposed -> open slip through, an effective active -> open that
+        # is absent from the 8.5 matrix; without the pre-proposal state the target cannot be verified, so
+        # the result is CANNOT-EVALUATE, never a permissive VALID (guard-input-soundness; M1).
         if to_state in spec.terminal or to_qual is not None:
             findings.append("from a '/proposed' record only a maintainer rejection to a working state "
                             "is legal, not {!r} (spec 8.4)".format(to_status))
         elif actor_kind != "maintainer":
             findings.append("only a maintainer may reject a '/proposed' record to a working state "
                             "(spec 8.4)")
-        elif from_state not in spec.transitions.get(to_state, frozenset()):
-            findings.append("a rejection of {!r} must return to a state from which {!r} was a legal "
-                            "transition, not {!r} (a rejection may not bypass the transition matrix, "
-                            "spec 8.4/8.5)".format(from_status, from_state, to_state))
+        elif pre_proposal_state is None:
+            return TransitionCheck(CANNOT_EVALUATE, findings + [
+                "a rejection target cannot be verified without the pre-proposal state; supply it from the "
+                "record's history (spec 8.4)"])
+        elif to_state != pre_proposal_state:
+            findings.append("a rejection must return to the record's actual pre-proposal state {!r}, not "
+                            "{!r} (a rejection may not restore a state the record was never in, spec "
+                            "8.4/8.5)".format(pre_proposal_state, to_state))
     elif from_terminal:
         # An unqualified terminal state never re-enters a working state (spec 8.4): no resurrection.
         findings.append("no resurrection: an unqualified terminal {} state {!r} does not transition; a "
@@ -794,15 +826,44 @@ def high_water(high, ns):
     return high.get(ns, 0)
 
 
-def next_id(high, ns):
+def _validated_counter_map(high, where):
+    """Fail closed (ValueError) on a counters map that is not a mapping of section-8.1 taxonomy namespaces
+    to genuine non-negative ints. next_id and check_monotonic both TRUST the map they are handed, so a
+    corrupt map (a non-taxonomy namespace, or a value that is not a genuine int such as a bool, which is
+    an int subclass with True == 1) is a fail-closed error rather than a silent zero or a bypassed guard
+    (spec 8.2, guard-input-soundness; M7)."""
+    if not isinstance(high, dict):
+        raise ValueError("{}: counters map is not a table (spec 8.2)".format(where))
+    for ns, val in high.items():
+        if ns not in RECORD_NAMESPACES:
+            raise ValueError("{}: namespace {!r} is bound to no record type in the section 8.1 taxonomy "
+                             "(spec 8.1/8.2)".format(where, ns))
+        if type(val) is not int or val < 0:
+            raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {!r} "
+                             "(a bool is not a high-water; spec 8.2)".format(where, ns, val))
+
+
+def next_id(high, ns, known_complete=False):
     """Allocate the next id for a namespace: returns (id_string, new_high_water). The high-water only
     ever increases by one, so an id is never reused (spec 8.2). The caller records new_high_water back to
     counters.toml under the store lock as one atomic claim (spec 8.2, the atomic-claim-from-pool rule).
-    Refuses (ValueError) a namespace bound to no record type in the section 8.1 taxonomy, so an id is
-    never allocated for an out-of-taxonomy namespace like ZZ (spec 8.1/8.2, guard-input-soundness; M5)."""
+
+    Fails closed (ValueError) rather than allocating an unsound id (guard-input-soundness; M7):
+      - `ns` is bound to no record type in the section 8.1 taxonomy (an out-of-taxonomy namespace like ZZ);
+      - the counters map is corrupt (not a table of taxonomy namespaces to genuine non-negative ints);
+      - `ns` has NO recorded high-water AND the map is not known to be complete. Allocating from a missing
+        counter would read its high-water as 0 and could reuse an id that already exists; that is sound
+        only when the map has been proved complete (validate_counters with known_namespaces). The caller
+        asserts that proof with `known_complete=True`; without it, an absent counter is refused."""
     if ns not in RECORD_NAMESPACES:
         raise ValueError("cannot allocate an id for namespace {!r}: it is bound to no record type in the "
                          "section 8.1 taxonomy (spec 8.1/8.2)".format(ns))
+    _validated_counter_map(high, "next_id")
+    if ns not in high and not known_complete:
+        raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
+                         "counters map is not known complete; validate it with validate_counters(..., "
+                         "known_namespaces=...) and pass known_complete=True, so an absent counter cannot "
+                         "read as high-water 0 and reuse an existing id (spec 8.2)".format(ns))
     n = high_water(high, ns) + 1
     return "{}-{}".format(ns, n), n
 
@@ -810,8 +871,24 @@ def next_id(high, ns):
 def check_monotonic(old_high, new_high):
     """Confirm counters only ever advance (spec 8.2: never reset, IDs never reused). Every namespace in
     `old_high` must be present in `new_high` with a value greater than or equal to its old high-water; a
-    regression or a dropped namespace (which would let a later allocation reuse an id) is a finding."""
+    regression or a dropped namespace (which would let a later allocation reuse an id) is a finding. Both
+    maps are validated first: a non-taxonomy namespace or a value that is not a genuine non-negative int
+    (a bool is not, though True == 1) is a fail-closed finding, never a silent pass that lets a corrupt
+    counter read as a valid high-water (guard-input-soundness; M7)."""
     findings = []
+    for label, m in (("old", old_high), ("new", new_high)):
+        if not isinstance(m, dict):
+            findings.append("the {} counters map is not a table (spec 8.2)".format(label))
+            continue
+        for ns, val in m.items():
+            if ns not in RECORD_NAMESPACES:
+                findings.append("{} counters namespace {!r} is bound to no record type in the section 8.1 "
+                                "taxonomy (spec 8.1/8.2)".format(label, ns))
+            if type(val) is not int or val < 0:
+                findings.append("{} counters high-water for {!r} must be a genuine non-negative int, got "
+                                "{!r} (a bool is not a high-water; spec 8.2)".format(label, ns, val))
+    if findings:
+        return findings                  # a corrupt map is not compared for monotonicity (fail-closed)
     for ns, old in old_high.items():
         if ns not in new_high:
             findings.append("namespace {!r} vanished from counters (would allow id reuse; spec 8.2)".format(ns))
@@ -1004,7 +1081,8 @@ def self_test():
     check("txn-ratify-assistant-invalid",
           validate_transition("finding", "fixed/proposed", "fixed", "assistant").status == INVALID)
     check("txn-reject-to-working-legal",
-          validate_transition("finding", "fixed/proposed", "open", "maintainer").status == VALID)
+          validate_transition("finding", "fixed/proposed", "open", "maintainer",
+                              pre_proposal_state="open").status == VALID)
     resurrect = validate_transition("finding", "fixed", "open", "maintainer")
     check("txn-resurrection-invalid", resurrect.status == INVALID)
     check("txn-resurrection-named", any("no resurrection" in f for f in resurrect.findings))
@@ -1025,7 +1103,7 @@ def self_test():
     check("counters-bool-invalid", bool_cf)
     nid, newhw = next_id({"BI": 42}, "BI")
     check("counters-allocate-increments", nid == "BI-43" and newhw == 43)
-    check("counters-allocate-from-empty", next_id({}, "FN") == ("FN-1", 1))
+    check("counters-allocate-from-empty", next_id({}, "FN", known_complete=True) == ("FN-1", 1))
     check("counters-monotonic-ok", not check_monotonic({"BI": 42}, {"BI": 43}))
     check("counters-regression-invalid", check_monotonic({"BI": 42}, {"BI": 41}))
     check("counters-dropped-ns-invalid", check_monotonic({"BI": 42, "FN": 7}, {"BI": 42}))
@@ -1196,7 +1274,28 @@ def self_test():
         check("m5-next-id-nontaxonomy-refused", False)
     except ValueError:
         check("m5-next-id-nontaxonomy-refused", True)
-    check("m5-next-id-taxonomy-ok", next_id({}, "FN") == ("FN-1", 1))
+    check("m5-next-id-taxonomy-ok", next_id({}, "FN", known_complete=True) == ("FN-1", 1))
+
+    # --- M7: next_id and check_monotonic validate their counters-map input (guard-input-soundness) -----
+    # next_id refuses to allocate from a namespace ABSENT from an unvalidated (not-known-complete) map,
+    # where an absent counter would read as high-water 0 and could reuse an id that already exists.
+    try:
+        next_id({"BI": 5}, "FN")
+        check("m7-next-id-missing-ns-refused", False)
+    except ValueError:
+        check("m7-next-id-missing-ns-refused", True)
+    # a known-complete map allocates the first id for a namespace with no high-water yet.
+    check("m7-next-id-known-complete-ok",
+          next_id({"BI": 5}, "FN", known_complete=True) == ("FN-1", 1))
+    # a corrupt map (a bool high-water, though True == 1) fails closed rather than allocating BI-2.
+    try:
+        next_id({"BI": True}, "BI", known_complete=True)
+        check("m7-next-id-corrupt-map-refused", False)
+    except ValueError:
+        check("m7-next-id-corrupt-map-refused", True)
+    # check_monotonic reports a non-genuine-int high-water (True must not pass as 1) and a non-taxonomy ns.
+    check("m7-check-monotonic-bool-value-finding", bool(check_monotonic({"BI": 1}, {"BI": True})))
+    check("m7-check-monotonic-nontaxonomy-finding", bool(check_monotonic({}, {"ZZ": 1})))
 
     # m1: a worklog summary must be a single line.
     check("m1-worklog-multiline-summary-invalid",
@@ -1210,15 +1309,42 @@ def self_test():
           validate_record(envelope("finding", 27, "open",
                                    refs=[{"kind": "path", "locator": "x", "note": "n"}])).status == VALID)
 
-    # G2: a maintainer rejection of a /proposed record must land on a matrix-legal state (done/proposed ->
-    # open is a bypass; -> active is legal; dropped IS reachable from open so that rejection is legal).
-    g2_bypass = validate_transition("backlog_item", "done/proposed", "open", "maintainer")
-    check("g2-reject-bypass-invalid", g2_bypass.status == INVALID)
-    check("g2-reject-bypass-named", any("bypass the transition matrix" in f for f in g2_bypass.findings))
-    check("g2-reject-matrix-legal-ok",
-          validate_transition("backlog_item", "done/proposed", "active", "maintainer").status == VALID)
-    check("g2-reject-dropped-to-open-ok",
-          validate_transition("backlog_item", "dropped/proposed", "open", "maintainer").status == VALID)
+    # M1: a rejection restores the ACTUAL pre-proposal state (spec 8.4), supplied by the caller from the
+    # record's history. The matrix-predecessor heuristic is REMOVED: it blessed active -> dropped/proposed
+    # -> open (an effective active -> open, absent from the 8.5 matrix). dropped/proposed -> open is VALID
+    # only when the record was in `open` before it was proposed, and INVALID when it was in `active` (the
+    # exact codex M1 vector).
+    check("m1-reject-to-pre-proposal-state-ok",
+          validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
+                              pre_proposal_state="open").status == VALID)
+    check("m1-reject-to-wrong-state-invalid",
+          validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
+                              pre_proposal_state="active").status == INVALID)
+    # without the pre-proposal state a rejection target cannot be verified: CANNOT-EVALUATE, never VALID.
+    m1_noprior = validate_transition("backlog_item", "dropped/proposed", "open", "maintainer")
+    check("m1-reject-no-pre-proposal-cannot-eval", m1_noprior.status == CANNOT_EVALUATE)
+    check("m1-reject-no-pre-proposal-named",
+          any("pre-proposal state" in f for f in m1_noprior.findings))
+    # a rejection is still maintainer-only and still cannot land on a terminal or qualified state,
+    # independent of the pre-proposal state (structural, so INVALID even without needing it).
+    check("m1-reject-nonmaintainer-invalid",
+          validate_transition("backlog_item", "dropped/proposed", "open", "assistant",
+                              pre_proposal_state="open").status == INVALID)
+    check("m1-reject-to-terminal-invalid",
+          validate_transition("backlog_item", "done/proposed", "dropped", "maintainer",
+                              pre_proposal_state="active").status == INVALID)
+
+    # MINOR 1: updated_at (the time of the last transition) cannot precede created_at (spec 8.3).
+    check("minor1-updated-before-created-invalid",
+          validate_record(envelope("backlog_item", 40, "open",
+                                   created_at="2026-08-12T09:14:02Z",
+                                   updated_at="2026-08-11T09:14:02Z")).status == INVALID)
+    check("minor1-updated-equals-created-ok",
+          validate_record(envelope("backlog_item", 41, "open", created_at=TS, updated_at=TS)).status == VALID)
+    check("minor1-updated-after-created-ok",
+          validate_record(envelope("backlog_item", 42, "open",
+                                   created_at="2026-08-12T09:14:02Z",
+                                   updated_at="2026-08-13T09:14:02Z")).status == VALID)
 
     # G1 (adjudicated NOT a defect): the spec defines no maintainer "reject a proposed block" transition
     # (rejection returns to a working state, spec 8.4; a block has no working state, spec 8.5). A proposed

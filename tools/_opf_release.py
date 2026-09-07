@@ -61,8 +61,8 @@ following where sections 6 and 7 leave a gap:
     of the UTF-8 bytes. Each entry is serialized recursively with every table's keys in sorted order and
     every array in its given order, so the digest is invariant to reordering the entry array or the keys
     within a table but sensitive to any content change. An unexpected value type (only str / int / bool /
-    list / table are expected in a validated worklog entry) fails the canonicalization CLOSED (ReleaseError),
-    never a silent digest over a lossy serialization. An EMPTY span digests the header alone, a
+    float / list / table are expected in a validated worklog entry) fails the canonicalization CLOSED
+    (ReleaseError), never a silent digest over a lossy serialization. An EMPTY span digests the header alone, a
     well-defined constant (spec 6.1 permits an empty span for a release with no worklog entries; spec 14.3
     pre-migration releases). The finalizer may re-fix the scheme in one place if adopters need another.
   - version.toml / worklog.toml FILE SHAPE is defined here as an optional top-level `schema` int plus the
@@ -100,6 +100,9 @@ from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, _valid_id_shape, _valid_timestamp, SUPPORTED_SCHEMA,
 )
+# U8 supplies the deterministic float SPELLING rule; reuse it so the coverage digest and the emitter agree
+# byte-for-byte on floats (M2), rather than re-deriving the signed-zero / non-finite handling here.
+from _opf_emit import _canonical_float, EmitError  # noqa: E402
 
 
 WL_NAMESPACE = "WL"                       # the worklog type's namespace (spec 8.1)
@@ -229,13 +232,23 @@ def _parse_span(span, findings, where):
 def _canonical(value):
     """A deterministic canonical string for a validated worklog value: tables have their keys in sorted
     order, arrays keep their order, strings are JSON-escaped (a stable, reversible escaping), ints and
-    bools have a fixed spelling. An unexpected type fails CLOSED (ReleaseError) rather than serializing
-    lossily, so the digest can never be computed over a value the canonicalization does not fully cover."""
+    bools have a fixed spelling, and a finite float is spelled with U8's shared float rule (signed zero
+    canonicalized, a non-finite float fails closed) so the digest and the emitter agree byte-for-byte
+    (spec 8.7 permits a finite float in a registered extension; M2). An unexpected type fails CLOSED
+    (ReleaseError) rather than serializing lossily, so the digest can never be computed over a value the
+    canonicalization does not fully cover."""
     # bool is an int subclass; test it first so True/False never spell as 1/0.
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        # A finite float digests cleanly (reusing U8's spelling); a non-finite float has no canonical form
+        # and fails closed, mapped to ReleaseError like every other uncanonicalizable value (M2).
+        try:
+            return _canonical_float(value)
+        except EmitError as exc:
+            raise ReleaseError(str(exc))
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
@@ -245,7 +258,7 @@ def _canonical(value):
             json.dumps(k, ensure_ascii=False) + ":" + _canonical(v)
             for k, v in sorted(value.items())) + "}"
     raise ReleaseError("cannot canonicalize value of type {} (worklog entries carry only str/int/bool/"
-                       "array/table)".format(type(value).__name__))
+                       "float/array/table)".format(type(value).__name__))
 
 
 def coverage_digest(entries):
@@ -350,9 +363,17 @@ def _releases_or_finding(version_data, findings):
     append a cannot-evaluate finding and return None when the ledger is not a table, its `release` value is
     not a list, OR any release ROW is not a table. A guard that cannot read its own input reports that,
     never a silent empty clean pass, and a malformed row is not silently skipped (the
-    check-fails-closed-on-unreadable rule; M8)."""
+    check-fails-closed-on-unreadable rule; M8). A `schema` marker other than the supported version is also
+    a cannot-evaluate: the standalone guards must not parse an unsupported-schema ledger under v{supported}
+    assumptions and read it as clean (M3)."""
     if not isinstance(version_data, dict):
         findings.append("cannot evaluate: version ledger is not a table")
+        return None
+    schema = version_data.get("schema")
+    if schema is not None and (type(schema) is not int or schema != SUPPORTED_SCHEMA):
+        findings.append("cannot evaluate: version.toml schema {!r} is not the supported schema version {} "
+                        "(fail-closed; do not parse under v{} assumptions; M3)".format(
+                            schema, SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
         return None
     releases = version_data.get("release", [])
     if not isinstance(releases, list):
@@ -368,17 +389,21 @@ def _releases_or_finding(version_data, findings):
 def released_end(releases):
     """The highest WL-number covered by any release span (0 when none), computed WITHOUT re-reporting
     tiling findings. Used by the release cut and rotation checks to find the frozen/unreleased boundary.
-    Fails closed (ReleaseError) on a non-list ledger rather than returning a silent 0 that reads as an
-    empty released history (the check-fails-closed-on-unreadable rule)."""
+    Fails closed (ReleaseError) on a non-list ledger, OR on a MALFORMED span, rather than returning a
+    silent under-computed 0 that reads as an empty released history (the check-fails-closed-on-unreadable
+    rule; M3). A malformed span is dropped by no silent path here: it raises, so a guard that composes
+    released_end surfaces the unreadable ledger rather than reading it as clean."""
     if not isinstance(releases, list):
         raise ReleaseError("cannot compute released end: [[release]] is not an array of tables")
     end = 0
     for row in releases:
         if not isinstance(row, dict):
             continue
-        span = row.get("worklog_span")
-        parsed = _parse_span(span, [], "")
-        if parsed and parsed is not True:
+        span_findings = []
+        parsed = _parse_span(row.get("worklog_span"), span_findings, "release")
+        if parsed is False:
+            raise ReleaseError("cannot compute released end: " + "; ".join(span_findings))
+        if parsed:                       # a (start, end) tuple; None (an empty span) contributes nothing
             end = max(end, parsed[1])
     return end
 
@@ -674,19 +699,22 @@ def _verify_append_only(prior_releases, candidate_releases, findings):
 
 
 def release_cut(version_data, worklog_data, new_version, date,
-                registered_vendors=frozenset(), registered_kinds=None, archived_entries=None):
+                registered_vendors=frozenset(), registered_kinds=None):
     """Freeze the current unreleased worklog tail into a released span keyed to `new_version` (spec 6.1,
     6.2). Returns a CutResult carrying a NEW version.toml value with the release row appended; it is a
-    PURE function (workers-produce-inert-data): the worklog is never mutated and nothing is ever deleted.
+    PURE per-ledger function (workers-produce-inert-data): the worklog is never mutated and nothing is ever
+    deleted. It answers only from version.toml + the ACTIVE worklog.toml; whole-store integrity (frozen
+    coverage across active+archive, archive enumeration, no-deletion, partition) belongs to the store-level
+    validator, not the cut (see the fail-closed seam for a rotated store below).
 
     Fails closed (INVALID / CANNOT-EVALUATE, no cut computed) on any inconsistent state:
       - the current ledger or worklog does not validate (an inconsistent state cannot be cut from);
       - `new_version` is not a valid SemVer, is already in the ledger, or is not strictly greater than the
         last release (versions are monotonic, spec 6.1);
-      - a PRIOR released span is no longer intact: a covered frozen entry was edited (its recomputed
-        coverage digest no longer matches the stored one) or a frozen worklog record was deleted. The cut
-        holds both the ledger and the worklog, so it recomputes prior frozen coverage and confirms no
-        frozen id vanished before deriving a new span (spec 6.2/13);
+      - the store is ROTATED (a prior released span's entries are not all present in the active worklog): a
+        pure per-ledger cut cannot verify prior-frozen integrity across the archive, so it returns
+        CANNOT-EVALUATE and directs the caller to the store-level validator rather than silently skipping
+        the check (the fail-closed seam between the units);
       - the unreleased tail is not a contiguous run from released_end+1 to the last worklog id (a gap in
         the worklog would leave a span that cannot tile).
 
@@ -696,15 +724,13 @@ def release_cut(version_data, worklog_data, new_version, date,
 
     Append-only immutability: the returned ledger preserves every pre-existing release row byte-identically
     and appends only the new row (spec 6.1). Standalone validate_version cannot detect a rewritten
-    historical row without the prior ledger (that residual belongs to U6 doctor with stored history); the
-    cut, holding both prior and candidate, enforces append-only here.
+    historical row without the prior ledger (that residual belongs to the store validator / doctor with
+    stored history); the cut, holding both prior and candidate, enforces append-only on its OWN
+    construction here.
 
     `registered_vendors` and `registered_kinds` are the manifest's registered x-<vendor> extensions and
     additional worklog change kinds (spec 6.2, 8.7); they are threaded into validate_worklog so a worklog
-    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6).
-    `archived_entries` is an optional iterable of frozen worklog entry tables that a conforming rotation
-    moved to the archive (spec 12); the prior-frozen-span intactness checks run against the MERGED
-    active+archive set so a legal rotation does not over-reject (M7)."""
+    using a manifest-registered kind or extension validates through the cut, matching validate_worklog (M6)."""
     vv = validate_version(version_data)
     if vv.status == CANNOT_EVALUATE:
         return CutResult(CANNOT_EVALUATE, ["cannot cut: version.toml does not evaluate"] + vv.findings)
@@ -741,34 +767,21 @@ def release_cut(version_data, worklog_data, new_version, date,
     if id_findings:
         return CutResult(INVALID, ["cannot cut: worklog ids are malformed"] + id_findings)
 
-    # Merge in any frozen entries a conforming rotation moved to the archive (spec 12), so the prior-
-    # frozen-span intactness checks see the MERGED active+archive set: a store that legally rotated a
-    # released span to the archive still holds those entries, so intactness must not be judged against the
-    # active worklog alone (else a legal rotation over-rejects; M7). The tail derivation below still uses
-    # the ACTIVE worklog only, since the unreleased tail never rotates (spec 12).
-    merged_by_id = dict(by_id)
-    if archived_entries is not None:
-        arch_by_id, arch_findings = _entries_by_id({"entry": list(archived_entries)})
-        if arch_findings:
-            return CutResult(INVALID, ["cannot cut: archived worklog ids are malformed"] + arch_findings)
-        for n, e in arch_by_id.items():
-            if n in merged_by_id:
-                return CutResult(INVALID, ["cannot cut: worklog id WL-{} is in BOTH the active worklog and "
-                                           "the archive (rotation is a move; spec 12)".format(n)])
-            merged_by_id[n] = e
-
-    # A cut must not derive a new frozen span from a ledger whose PRIOR released spans are no longer
-    # intact (spec 6.2/13: a frozen span is immutable). Recompute every prior release's stored coverage
-    # digest against the merged worklog, and confirm no frozen id was deleted, failing closed on either
-    # (an edited or deleted frozen entry). check_frozen_coverage also fails closed when a covered entry is
-    # missing, so a deleted frozen record is caught here; check_no_deletion names the vanished id too.
-    intact_findings = check_frozen_coverage(version_data, merged_by_id)
+    # Fail-closed seam with the store-level validator: a pure per-ledger cut cannot verify that a prior
+    # released span is still intact once that span has been ROTATED to the archive (it would have to consume
+    # a raw archive iterable, which cannot be told apart from an ad-hoc disappearance). If any id in a prior
+    # released span (1 .. released_end) is not present in the ACTIVE worklog, the store is rotated: return
+    # CANNOT-EVALUATE and direct the caller to the store validator, rather than silently skipping the
+    # prior-frozen check. In a non-rotated store every prior released entry is still in the active worklog,
+    # so the cut may assume prior frozen spans are intact (the store validator certifies them across
+    # active+archive) and proceeds. This is the revert of the M7 archived-entries overreach.
     prior_end = released_end(vv.releases)
-    intact_findings += check_no_deletion(range(1, prior_end + 1), list(merged_by_id))
-    if intact_findings:
-        return CutResult(INVALID, ["cannot cut: a prior frozen released span is not intact"] + intact_findings)
+    if any(n not in by_id for n in range(1, prior_end + 1)):
+        return CutResult(CANNOT_EVALUATE, [
+            "cannot cut: prior frozen integrity of a rotated span must be verified at the store level; "
+            "call validate_store first"])
 
-    end = released_end(vv.releases)
+    end = prior_end
     all_nums = sorted(by_id)
     tail = [n for n in all_nums if n > end]
 
@@ -864,7 +877,11 @@ def check_no_append_into_released(version_data, candidate_ids):
     releases = _releases_or_finding(version_data, findings)
     if releases is None:
         return findings
-    end = released_end(releases)
+    try:
+        end = released_end(releases)
+    except ReleaseError as exc:
+        findings.append("cannot evaluate: {}".format(exc))
+        return findings
     for cid in candidate_ids:
         n = cid if isinstance(cid, int) and not isinstance(cid, bool) else _wl_num(cid)
         if n is None:
@@ -921,7 +938,11 @@ def check_rotation_only_released(rotated_ids, version_data):
     releases = _releases_or_finding(version_data, findings)
     if releases is None:
         return findings
-    end = released_end(releases)
+    try:
+        end = released_end(releases)
+    except ReleaseError as exc:
+        findings.append("cannot evaluate: {}".format(exc))
+        return findings
     for rid in rotated_ids:
         n = rid if isinstance(rid, int) and not isinstance(rid, bool) else _wl_num(rid)
         if n is None:
@@ -1072,12 +1093,39 @@ def self_test():
     check("digest-key-reorder-invariant", coverage_digest([a]) == coverage_digest([a_reordered]))
     # a content change DOES change the digest
     check("digest-content-sensitive", coverage_digest([a]) != coverage_digest([entry(1, summary="CHANGED")]))
-    # canonicalization fails CLOSED on an unexpected value type
+    # canonicalization fails CLOSED on an unexpected value type (None is not a TOML/worklog value)
     try:
-        _canonical({"bad": 1.5})
+        _canonical({"bad": None})
         check("canonical-fails-closed", False)
     except ReleaseError:
         check("canonical-fails-closed", True)
+
+    # --- M2: a FINITE float in a registered extension digests cleanly; a NON-FINITE float fails closed ---
+    # A finite float is spelled with U8's shared rule (digest and emitter agree byte-for-byte, spec 8.7).
+    check("m2-finite-float-canonical-ok", _canonical(1.5) == repr(1.5))
+    check("m2-finite-float-signed-zero-canonical", _canonical(-0.0) == _canonical(0.0))
+    # end-to-end: a worklog entry carrying a finite float in a registered extension cuts VALID (before the
+    # fix _canonical raised on the float and the cut returned CANNOT-EVALUATE).
+    wl_float = {"schema": 1, "entry": [entry(1), entry(2), entry(3),
+                                       entry(4, **{"x-acme": {"score": 1.5}})]}
+    cut_float = release_cut(vok, wl_float, "1.1.0", "2026-06-15T00:00:00Z",
+                            registered_vendors=frozenset({"x-acme"}))
+    check("m2-cut-with-finite-float-ok", cut_float.status == VALID)
+    # a non-finite float has no canonical form and fails closed (ReleaseError), fed to the cut as
+    # CANNOT-EVALUATE via compute_span_digest.
+    nonfinite_failclosed = True
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        try:
+            _canonical(bad)
+            nonfinite_failclosed = False
+        except ReleaseError:
+            pass
+    check("m2-nonfinite-float-failclosed", nonfinite_failclosed)
+    wl_nonfinite = {"schema": 1, "entry": [entry(1), entry(2), entry(3),
+                                           entry(4, **{"x-acme": {"score": float("inf")}})]}
+    check("m2-cut-with-nonfinite-float-cannot-eval",
+          release_cut(vok, wl_nonfinite, "1.1.0", "2026-06-15T00:00:00Z",
+                      registered_vendors=frozenset({"x-acme"})).status == CANNOT_EVALUATE)
 
     # --- rotation is archival movement only ----------------------------------------------------------
     check("rotation-partition-ok", not check_ids_partition([3, 4], [1, 2]))
@@ -1096,19 +1144,26 @@ def self_test():
                       "coverage_digest": coverage_digest([])}],
          "summary": [{"covers": "1.0.0", "status": "published"}]}).status == INVALID)
 
-    # --- B2: a cut must NOT proceed from a ledger whose prior frozen span is no longer intact ----------
-    # A previously-frozen entry (WL-1, covered by 1.0.0) edited after freeze: the cut fails closed.
-    worklog_mut = {"schema": 1, "entry": [entry(1, summary="EDITED after freeze"),
-                                          entry(2), entry(3), entry(4)]}
-    check("cut-prior-frozen-edited-invalid",
-          release_cut(vok, worklog_mut, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
-    # A frozen entry (WL-1) deleted from the worklog: the cut fails closed (missing coverage + deletion).
-    worklog_del = {"schema": 1, "entry": [entry(2), entry(3), entry(4)]}
-    check("cut-prior-frozen-deleted-invalid",
-          release_cut(vok, worklog_del, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
-    # Control: with the prior span intact the same cut still succeeds (the guard does not over-reject).
-    check("cut-prior-frozen-intact-ok",
+    # --- B2 (reverted M7 overreach): release_cut is a PURE per-ledger cut; prior-frozen integrity across
+    # the archive is the store validator's, not the cut's. In a NON-ROTATED store (every prior released
+    # entry still in the active worklog) the cut assumes prior frozen spans intact and proceeds; when the
+    # store is ROTATED (a prior released id absent from the active worklog) the cut returns CANNOT-EVALUATE
+    # and directs the caller to the store validator, rather than silently skipping the check (fail-closed
+    # seam). NOTE: detecting an EDITED (not moved) prior-frozen entry in a non-rotated store now belongs to
+    # the store validator (PASS B), not the cut.
+    check("cut-non-rotated-intact-ok",
           release_cut(vok, worklog, "1.1.0", "2026-06-15T00:00:00Z").status == VALID)
+    # WL-1,2 are the prior released span (1.0.0); a store that rotated them out of the active worklog is
+    # rotated, so the cut cannot verify their frozen integrity alone and fails closed to CANNOT-EVALUATE.
+    active_rotated = {"schema": 1, "entry": [entry(3), entry(4)]}
+    check("cut-rotated-store-cannot-eval",
+          release_cut(vok, active_rotated, "1.1.0", "2026-06-15T00:00:00Z").status == CANNOT_EVALUATE)
+    # a deleted prior-released entry is indistinguishable from a rotation to a per-ledger cut, so it too
+    # fails closed to CANNOT-EVALUATE (never a silent VALID); the store validator separates the two cases
+    # (no-deletion across active+archive; PASS B).
+    worklog_del = {"schema": 1, "entry": [entry(2), entry(3), entry(4)]}
+    check("cut-missing-prior-released-cannot-eval",
+          release_cut(vok, worklog_del, "1.1.0", "2026-06-15T00:00:00Z").status == CANNOT_EVALUATE)
 
     # --- B3: release rows are append-only; a rewritten historical row fails closed --------------------
     prior_rows = list(vok["release"])
@@ -1142,6 +1197,49 @@ def self_test():
     # control: a well-formed ledger still evaluates cleanly (no over-rejection)
     check("frozen-coverage-good-ledger-ok", not check_frozen_coverage(frozen_ver, by_id))
 
+    # --- M3: released_end and the standalone guards fail closed on a MALFORMED SPAN or UNSUPPORTED ------
+    # SCHEMA ledger, never returning a silent under-computed end / [] that reads as an unreadable ledger
+    # being clean (the check-fails-closed-on-unreadable rule).
+    bad_span_releases = [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+                         "worklog_span": ["WL-1", "oops"], "coverage_digest": dig12}]
+    bad_span_ver = {"release": bad_span_releases}
+    try:
+        released_end(bad_span_releases)
+        check("m3-released-end-malformed-span-fails-closed", False)
+    except ReleaseError:
+        check("m3-released-end-malformed-span-fails-closed", True)
+    # append with a lone malformed span: under the bug the end under-computes to 0 and candidate WL-3 reads
+    # as a clean tail id (a FALSE clean); the fix fails closed.
+    check("m3-append-malformed-span-cannot-eval",
+          bool(check_no_append_into_released(bad_span_ver, [3])))
+    # rotation needs a VALID span alongside the malformed one so the bug (end=5, dropping the bad span)
+    # reads rotating WL-3 as clean; the fix fails closed instead of judging against an under-computed end.
+    mixed_span_ver = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
+        {"version": "1.1.0", "date": "2026-06-02T00:00:00Z",
+         "worklog_span": ["WL-6", "oops"], "coverage_digest": dig12}]}
+    check("m3-rotation-malformed-span-cannot-eval",
+          bool(check_rotation_only_released([3], mixed_span_ver)))
+    check("m3-frozen-coverage-malformed-span-cannot-eval",   # control: already caught per-row by _parse_span
+          bool(check_frozen_coverage(bad_span_ver, by_id)))
+    unsupported_schema_ver = {"schema": 999, "release": []}
+    check("m3-frozen-coverage-bad-schema-cannot-eval",
+          bool(check_frozen_coverage(unsupported_schema_ver, {})))
+    check("m3-append-bad-schema-cannot-eval",
+          bool(check_no_append_into_released(unsupported_schema_ver, [3])))
+    # rotation needs a VALID span under the bad schema so that, WITHOUT the schema gate, rotating WL-3
+    # (within WL-1..WL-5) reads as clean; the schema gate fails it closed to cannot-eval instead.
+    bad_schema_span_ver = {"schema": 999, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-5"], "coverage_digest": "sha256:" + "0" * 64}]}
+    check("m3-rotation-bad-schema-cannot-eval",
+          bool(check_rotation_only_released([3], bad_schema_span_ver)))
+    # control: a good ledger still evaluates cleanly (no over-rejection)
+    check("m3-good-ledger-guards-ok",
+          not check_no_append_into_released(frozen_ver, [3, 4])
+          and not check_rotation_only_released([1, 2], frozen_ver))
+
     # --- M8: a schema field other than the supported version fails closed -----------------------------
     check("version-bad-schema-invalid", validate_version({"schema": 999, "release": []}).status == INVALID)
     check("worklog-bad-schema-invalid", validate_worklog({"schema": 999, "entry": []}).status == INVALID)
@@ -1171,20 +1269,11 @@ def self_test():
     check("m6-cut-unregistered-vendor-invalid",
           release_cut(vok, worklog_vendor, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
 
-    # M7: a conforming rotation (a released span moved to the archive) does not over-reject the cut; the
-    # merged intactness still catches an edited archived entry; a duplicate across active+archive fails.
-    active_after_rot = {"schema": 1, "entry": [entry(3), entry(4)]}   # WL-1,2 rotated to the archive
-    check("m7-cut-with-archived-frozen-ok",
-          release_cut(vok, active_after_rot, "1.1.0", "2026-06-15T00:00:00Z",
-                      archived_entries=[entry(1), entry(2)]).status == VALID)
-    check("m7-cut-without-archive-invalid",
-          release_cut(vok, active_after_rot, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
-    check("m7-cut-archived-edited-invalid",
-          release_cut(vok, active_after_rot, "1.1.0", "2026-06-15T00:00:00Z",
-                      archived_entries=[entry(1, summary="EDITED"), entry(2)]).status == INVALID)
-    check("m7-cut-archive-active-duplicate-invalid",
-          release_cut(vok, {"schema": 1, "entry": [entry(1), entry(3), entry(4)]},
-                      "1.1.0", "2026-06-15T00:00:00Z", archived_entries=[entry(1), entry(2)]).status == INVALID)
+    # M7 archived-entries path REVERTED: release_cut no longer accepts a raw archive iterable (a pure
+    # per-ledger cut cannot tell a conforming rotation from an ad-hoc disappearance). A cut against a
+    # rotated store now fails closed to CANNOT-EVALUATE (see the B2 "cut-rotated-store-cannot-eval" leg);
+    # the M6 registered-kinds/vendors threading above STAYS. Store-wide frozen integrity across
+    # active+archive is the store validator's (PASS B).
 
     # M8: the frozen-span guards fail closed on a malformed (non-table) release ROW, never silently skip it.
     check("m8-frozen-coverage-nontable-row-cannot-eval",

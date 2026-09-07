@@ -137,6 +137,19 @@ def _render_key(key):
     return _escape_basic(key)
 
 
+def _canonical_float(value):
+    """The canonical TOML spelling of a float: a non-finite value fails closed (no model-equivalent TOML
+    round trip), signed zero is canonicalized (-0.0 spells as 0.0 so model-equal floats spell identically),
+    and the value is spelled with repr (which always carries a '.' or 'e', so it is a TOML float). Shared
+    with the U3 coverage-digest canonicalization so the emitter and the digest scheme agree byte-for-byte
+    on floats (M2)."""
+    if not math.isfinite(value):
+        raise EmitError("non-finite float ({!r}) has no model-equivalent TOML round trip".format(value))
+    if value == 0.0:
+        value = 0.0  # canonicalize signed zero: -0.0 emits as 0.0 so model-equal floats emit identically
+    return repr(value)
+
+
 def _render_scalar(value):
     """A single scalar or date/time value as its canonical TOML literal. bool is tested before int
     (bool is an int subclass) and datetime before date (datetime is a date subclass)."""
@@ -145,11 +158,7 @@ def _render_scalar(value):
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise EmitError("non-finite float ({!r}) has no model-equivalent TOML round trip".format(value))
-        if value == 0.0:
-            value = 0.0  # canonicalize signed zero: -0.0 emits as 0.0 so model-equal floats emit identically
-        return repr(value)  # Python float repr always carries a '.' or 'e', so it is a TOML float
+        return _canonical_float(value)
     if isinstance(value, str):
         return _escape_basic(value)
     if isinstance(value, datetime.datetime):

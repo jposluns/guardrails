@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "2c329eb00e9dcc2b060e91da9a102177f592e50de84acb0897c6f07d4995f745"
+tree-sha256 = "0e6790fd638d5c6a000c63cb650f4459470e2318535207acf01dcdd665b349b9"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -2476,18 +2476,18 @@ sha256 = "376dd10f129a3ce78e4125444a14bb7774acbdabc300915dbc0eab00d2880ee3"
 
 [[sources]]
 path = "tools/_opf_emit.py"
-bytes = 27884
-sha256 = "8f7af080dd77dc94b4788ba20c8c3263152a1a41ce4723681c176ce0475d22b7"
+bytes = 28310
+sha256 = "3f096a3e2f5c6a1ee47e833d6f715d752e3ecb540755d9e09ca08896d2b6cd13"
 
 [[sources]]
 path = "tools/_opf_release.py"
-bytes = 73634
-sha256 = "96272b2d51d41e18d3b080b3c8e832d4ee0977da94a102129d6c5f70c8bd539a"
+bytes = 79697
+sha256 = "a5649c5d319e88151e235dab7228fe31dd2c0a6e73728afc776d932c84d858a8"
 
 [[sources]]
 path = "tools/_opf_schema.py"
-bytes = 75394
-sha256 = "e7a950805cb5cdad7d7cf44e3c728863aa7bad730a875e74652988ddd33d6b4a"
+bytes = 84212
+sha256 = "257e2da072de9899b4a75f6a2750218d7792a1fc0b1c80bec3aa76bf21a7edf2"
 
 [[sources]]
 path = "tools/_opf_store.py"
