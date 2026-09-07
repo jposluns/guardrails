@@ -346,7 +346,8 @@ sync target: the target is fetched and the local store compared against it.
   auto-merged and never silently resolved by picking a side, because a textual merge of
   append-only TOML ledgers can silently mangle the very records the standard exists to protect.
 - **After any operation that writes,** the store is synced back to its target in the same session,
-  so the store never lingers ahead on one system.
+  so the store is not left intentionally ahead on one system; a crash between the local write and
+  the sync is detected as divergence and reconciled on the next resume, never left standing.
 
 A **single-writer lease** prevents concurrent divergent writes: before mutating the store, a run
 takes the lease (`lease.toml`, present only while held, carrying the holder, the operation, and an
@@ -717,10 +718,10 @@ sync_target = ""               # the store's dedicated sync target (section 5.7)
                                # in-repo default, where the store rides the product repository
 
 [modules]                      # base-level optional capability modules (generic, not AIQT-specific)
-governance = false
+governance = true              # the [profiles.aiqt] profile below requires these three enabled
 delivery_assurance = false
-operational_policy = false
-concurrent_operation = false
+operational_policy = true      # (required by [profiles.aiqt].required_modules)
+concurrent_operation = true    # (required by [profiles.aiqt].required_modules)
 decision_support = false
 
 # --- Profiles: additive requirement bundles, namespaced, ignored by base-only tooling ---
@@ -792,8 +793,7 @@ public targets (`VERSION`, `CHANGELOG.md`) are relative to the product repositor
 
 Storage layout:
 
-The `layout` field (renamed from `layout_profile` to reserve the word "profile" for the
-base/profile mechanism) selects the storage layout only:
+The `layout` field selects the storage layout only:
 
 - **`inline`** (default): records live inline in `<type>.index.toml`; the index and the store
   coincide. One global store lock serializes writers. This is the ordinary single-writer case: a
@@ -832,7 +832,11 @@ profile outside a tool's declared coverage; fail-closed governs a profile inside
 
 A profile's record-level additions ride registered `x-<vendor>` extension tables (section 8.7),
 registered in `[vendors]` so base record validation accepts them as opaque; a profile's store-wide
-requirements live in `[profiles.<name>]`, invisible to base validation. The shipped profile is
+requirements live in `[profiles.<name>]`, invisible to base validation. A profile-aware tool checks
+that each supported profile's `extension_namespace` is registered in `[vendors]`; an unregistered
+profile namespace is a profile-setup failure surfaced to the adopter, because base-only record
+validation would otherwise reject that profile's records under the section 8.7 unregistered-prefix
+rule (fail-closed, never a weakening). The shipped profile is
 `[profiles.aiqt]`, dogfooded by the reference suite; it declares a posture floor, required modules,
 the reference verification floor, and its `x-aiqt` extension namespace. The `[profiles.<name>]`
 namespace and these contract rules are reserved and documented; the profile-authoring interface is
@@ -896,10 +900,11 @@ archive integrity; the tracked-store requirement against the resolved store; poi
 sync-target agreement (the committed pointer, the manifest's recorded sync target, and the store
 repository's actual remote agree; section 5.6); unmanaged-path containment (section 14.2); and
 path containment. At `required`, an unreadable, unparseable, or unresolvable declared input is a
-failure, never an empty or clean result. Unmanaged-path containment is phased: during import or
-migration (`import_status` not `complete`) an unregistered path found at the store location is
-surfaced as a finding to triage under section 14.2, not a build failure; once the store is in
-steady-state `required` posture with import complete, an unregistered unmanaged path is a
+failure, never an empty or clean result. Unmanaged-path containment is phased by import state:
+only while an import is actively in progress (`import_status = "partial"`) is an unregistered path
+found at the store location surfaced as a finding rather than a build failure (section 14.2). At
+`required` posture in every other state, including a clean store (`import_status = "none"`) and a
+completed import (`import_status = "complete"`), an unregistered unmanaged path is a
 containment-gate failure, fail-closed (section 14.2).
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
@@ -1002,12 +1007,13 @@ fragments. The flow is assistant-drivable by construction: the options are prese
 data, the assistant or adopter picks per file, and each pick is recorded with its actor
 attribution like any other decision.
 
-After adoption, the same detection keeps running, scoped by phase. During import or migration,
-while `import_status` is not `complete`, a file that appears in `.working/` that is neither
-OPF-managed nor enumerated as unmanaged is surfaced as a finding to triage through the options
-above, never absorbed. Once the store reaches steady-state `required` posture with import complete,
-an unregistered unmanaged path is a containment-gate failure that fails the build closed (the
-integrity layer of section 11), still never silently absorbed.
+After adoption, the same detection keeps running, scoped by phase. Only while an import is actively
+in progress, with `import_status = "partial"`, is a file that appears in `.working/` that is neither
+OPF-managed nor enumerated as unmanaged surfaced as a finding to triage through the options
+above, never absorbed. In every other state, including a clean store (`import_status = "none"`) and
+a completed import (`import_status = "complete"`), at steady-state `required` posture an unregistered
+unmanaged path is a containment-gate failure that fails the build closed (the integrity layer of
+section 11), still never silently absorbed.
 
 ### 14.3 Migrating an existing release pipeline
 
@@ -1029,8 +1035,10 @@ generically; no pattern names a real repository, host account, or internal syste
 provenance stays inside the adopter's own repositories. Experimental fields ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 
-The base standard names no adopter, operator, or profile by definition. AIQT is one profile,
-`[profiles.aiqt]`, and is cited only as the reference enforcement suite and a consumer. A profile
+The base standard's requirements and a conforming store's data name no adopter, operator, or
+profile by definition. AIQT is the standard's owner, named in its title and brand, which is
+ownership rather than a requirement dependency; AIQT is also one profile, `[profiles.aiqt]`, cited
+only as the reference enforcement suite and a consumer. A profile
 carries an adopter's own additional requirements without the base ever depending on them.
 
 ## 16. Conformance vocabulary and claims
