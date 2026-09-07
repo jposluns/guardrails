@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """Behavioural self-test for the GD-112 orchestrator-integrity handlers in
 .aiqt/core/hooks/scripts/aiqt_hooks.py (the section-e acceptance vectors; authored BEFORE the core,
-test-first). Hermetic: every case runs against throwaway fixtures under a temp dir (its own git repo,
-its own registry, its own enumerator stub, its own state dir), removed in a finally; nothing on the
-host is read or written. Verdicts are judged on the STRUCTURED result each handler returns (the
-(code, stdout_obj, stderr) tuple), never by grepping diagnostic prose.
+test-first). Filesystem-write hermetic in its fixtures: every case runs against throwaway fixtures
+under a per-case temp dir (its own git repo, its own registry, its own enumerator stub, its own
+state dir), removed in a finally, and the fixtures write nowhere else. A DIRECT invocation is NOT
+read-hermetic: the fixtures' git calls still read the ambient per-user git configuration (the
+HOME/XDG surfaces), and the run's own interpreter honours the ambient PYTHON* environment; running
+the suite through tools/check_selftest_execution.py neutralizes both (HOME and XDG_CONFIG_HOME
+pinned, GIT_* and PYTHON* dropped, the child launched -I -B), and the runner's own direct-invocation
+git-config hermeticity is tracked separately (F-249). Verdicts are judged on the STRUCTURED result
+each handler returns (the (code, stdout_obj, stderr) tuple), never by grepping diagnostic prose.
 
-  selftest_orch_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
+  selftest_orch_hooks.py                              exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL
+  selftest_orch_hooks.py --execution-report ABS_PATH  additionally write the executed check ids as a
+                                                      JSON report to ABS_PATH, on pass AND fail
+
+Exit 1 covers assertion failures and an execution-set mismatch against tools/selftest_checks.toml (the
+in-run self-guard; tools/check_selftest_execution.py reconciles the report independently). Exit 2 is a
+harness/setup error: bad argv, a relative report path, a duplicate check id, a failed report write, or
+an unreadable, malformed, or suite-missing expectation manifest.
 """
 import json
 import os
@@ -16,6 +28,10 @@ import tempfile
 import shutil
 import datetime
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    sys.exit("error: selftest_orch_hooks.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
@@ -24,11 +40,45 @@ sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 
 FAILURES = []
+EXECUTED = []        # ordered check ids actually reached this run
+_EXECUTED_SET = set()
+SUITE_ID = "orch-behaviour-selftest"
+CHECKS_MANIFEST = repo_root() / "tools" / "selftest_checks.toml"
 
 
 def check(name, got, want):
+    if name in _EXECUTED_SET:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    _EXECUTED_SET.add(name)
+    EXECUTED.append(name)
     if got != want:
         FAILURES.append("{}: got {!r}, want {!r}".format(name, got, want))
+
+
+def _expected_check_ids():
+    """The registered execution set from the hand-authored expectation manifest, or None on an
+    unreadable, malformed, or suite-missing manifest (the caller fails closed, exit 2). Light
+    validation only; the strict schema gate lives in tools/check_selftest_execution.py."""
+    try:
+        with open(CHECKS_MANIFEST, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
+              file=sys.stderr)
+        return None
+    suites = data.get("suite")
+    for row in (suites if isinstance(suites, list) else []):
+        if isinstance(row, dict) and row.get("id") == SUITE_ID:
+            ids = row.get("expected-check-ids")
+            if isinstance(ids, list) and ids and all(isinstance(i, str) and i for i in ids):
+                return set(ids)
+            print("SELF-TEST HARNESS ERROR: malformed expected-check-ids for suite {!r} in {}".format(
+                SUITE_ID, CHECKS_MANIFEST), file=sys.stderr)
+            return None
+    print("SELF-TEST HARNESS ERROR: no suite {!r} registered in {}".format(SUITE_ID, CHECKS_MANIFEST),
+          file=sys.stderr)
+    return None
 
 
 def _verdict(result):
@@ -83,8 +133,11 @@ class Fixture:
         self.lease.write_text("holder: selftest\n", encoding="utf-8")
         registry = {
             "version": 1,
-            "enumerator": {"argv": [sys.executable, str(stub), str(self.enum_payload),
-                                    str(self.enum_exit)], "timeout": 30},
+            # -I -B on every interpreter grandchild: a direct developer run must not honour an
+            # ambient PYTHONPATH/sitecustomize (the gate launch additionally drops PYTHON* from
+            # the child environment; this is the defence-in-depth layer for a bare invocation).
+            "enumerator": {"argv": [sys.executable, "-I", "-B", str(stub),
+                                    str(self.enum_payload), str(self.enum_exit)], "timeout": 30},
             "record": {"findings": str(self.findings),
                        "pending_decisions": str(self.pending),
                        "handoff": str(self.handoff)},
@@ -152,7 +205,7 @@ def now_iso(hours_ago=0):
     return t.isoformat()
 
 
-def main():
+def main(report_path=None):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-selftest-"))
     except OSError as exc:
@@ -247,15 +300,20 @@ def main():
         # R2/R3: malformed AEI provenance is a cannot-evaluate (FIX 1 DENIES the stop; ignorance
         # refuses the wind-down), never a clean backlog
         nowv = now_iso(0)
-        for label, env in [
-                ("bool-version", '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
-                ("float-version", '{"version": 1.0, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
-                ("unparseable-ts", '{"version": 1, "generated_at_utc": "banana", "source": {"locator":"f"}, "items": []}'),
-                ("future-ts", '{"version": 1, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % now_iso(-48)),
-                ("no-locator", '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
+        for check_id, env in [
+                ("stop/malformed-provenance-bool-version-denies",
+                 '{"version": true, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
+                ("stop/malformed-provenance-float-version-denies",
+                 '{"version": 1.0, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % nowv),
+                ("stop/malformed-provenance-unparseable-ts-denies",
+                 '{"version": 1, "generated_at_utc": "banana", "source": {"locator":"f"}, "items": []}'),
+                ("stop/malformed-provenance-future-ts-denies",
+                 '{"version": 1, "generated_at_utc": "%s", "source": {"locator":"f"}, "items": []}' % now_iso(-48)),
+                ("stop/malformed-provenance-no-locator-denies",
+                 '{"version": 1, "generated_at_utc": "%s", "source": {}, "items": []}' % nowv)]:
             f.enum_payload.write_text(env, encoding="utf-8")
             f.set_turn_state({})
-            check("stop/malformed-provenance-%s-denies" % label, _verdict(stop()), "block2")
+            check(check_id, _verdict(stop()), "block2")
         # a blank-evidence external blocker does not prove a block (R3-CX-M7)
         f.set_items([item("A-be", blocker={"kind": "external", "ref": "ci", "evidence": "   ",
                                            "observed_at_utc": now_iso(1)})])
@@ -496,17 +554,23 @@ def main():
         h = Fixture(tmp, "ask")
         ask = lambda: aiqt_hooks.orch_ask_guard(g_ask)
         # regression vectors imported from the live host hook's self-test
-        for mode_text, want in (("Operating-mode: overnight-unattended\n", "deny"),
-                                ("Operating-mode: unattended (overnight; ipad-origin)\n", "deny"),
-                                ("Operating-mode: daytime-unattended\n", "deny"),
-                                ("Operating-mode: attended-autonomous\n", "allow"),
-                                ("Operating-mode: fully-attended\n", "allow"),
-                                ("", "allow")):  # absent mode line fails open
+        for check_id, mode_text, want in (
+                ("ask/mode-overnight-unattended-denies",
+                 "Operating-mode: overnight-unattended\n", "deny"),
+                ("ask/mode-unattended-parenthetical-denies",
+                 "Operating-mode: unattended (overnight; ipad-origin)\n", "deny"),
+                ("ask/mode-daytime-unattended-denies",
+                 "Operating-mode: daytime-unattended\n", "deny"),
+                ("ask/mode-attended-autonomous-allows",
+                 "Operating-mode: attended-autonomous\n", "allow"),
+                ("ask/mode-fully-attended-allows",
+                 "Operating-mode: fully-attended\n", "allow"),
+                ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
-            check("ask/mode {!r}".format(mode_text.strip()), _verdict(ask()), want)
+            check(check_id, _verdict(ask()), want)
         # unreadable mode record fails open
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
@@ -608,6 +672,130 @@ def main():
             ti.payload("PreToolUse", "Bash",
                        {"command": "long_job &", "run_in_background": False}))), "allow")
 
+        # ---------- component 3b: the untracked wait-loop guard (trkasy, deny) ----------
+        w = Fixture(tmp, "waitloop")
+        # predicate direct checks (three-valued): the four-conjunct truth table.
+        clf = aiqt_hooks._orch_bg_poll_loop
+        BASE = "while true; do gh pr checks 42; sleep 30; done &"
+        check("wl/base-match", clf(BASE), "match")
+        # removing each of the four conjuncts individually -> 'none' (no deny).
+        check("wl/no-detach-none", clf("while true; do gh pr checks 42; sleep 30; done"), "none")
+        check("wl/no-loop-none",   clf("gh pr checks 42; sleep 30 &"), "none")
+        check("wl/no-sleep-none",  clf("while true; do gh pr checks 42; done &"), "none")
+        check("wl/no-probe-none",  clf("while true; do echo working; sleep 30; done &"), "none")
+        # the three DENY fixtures from the brief classify 'match'.
+        check("wl/deny-while-gh", clf("while true; do gh pr checks 42; sleep 30; done &"), "match")
+        check("wl/deny-until-curl-condition",
+              clf("until curl -fsS https://example.invalid/status; do sleep 10; done &"), "match")
+        check("wl/deny-for-actions-runs",
+              clf("for attempt in 1 2 3; do curl -fsS https://example.invalid/actions/runs; "
+                  "sleep 20; done &"), "match")
+        # probe via a --watch token (command word neither gh nor curl in the body position).
+        check("wl/deny-watch-token",
+              clf("while true; do run_check --watch; sleep 5; done &"), "match")
+        # GD-137 PR1 round 2: a nested loop is no longer force-attributed to one canonical shape (that was
+        # the B2-class false positive). Two raw-unquoted headers -> 'indeterminate', deferring to the ASK.
+        check("wl/nested-indeterminate",
+              clf("while outer; do while inner; do gh api x; sleep 1; done; done &"), "indeterminate")
+        # GD-137 PR1 round 2: the codex false-positive BLOCKERs the redesign eliminates. A 'match' on any of
+        # these would strand a session; reverting the matching fix flips each back to a wrong 'match'.
+        # B1a: the bare-& closes a command named 'done' written QUOTED (argv is quote-decoded, so the old
+        # code misread it as the terminator); the final unquoted `done` closes the FOREGROUND loop.
+        check("wl/b1a-quoted-done-none",
+              clf('while false; do gh x; sleep 1; "done" & done'), "none")
+        # B1b: `_command_word` basenamed /tmp/done -> done; the raw-unquoted terminator check rejects it.
+        check("wl/b1b-path-done-none",
+              clf("while false; do gh x; sleep 1; /tmp/done & done"), "none")
+        # B2: the detached inner `for` carries only sleep; the gh probe belongs to the FOREGROUND outer loop.
+        check("wl/b2-inner-detach-indeterminate",
+              clf("while gh pr checks 42; do for n in 1 2; do sleep 1; done & wait; break; done"),
+              "indeterminate")
+        # conditional reserved words / negation in the loop span (were undisclosed false negatives).
+        check("wl/cond-if-then-indeterminate",
+              clf("while true; do if gh api x; then :; fi; sleep 1; done &"), "indeterminate")
+        check("wl/cond-negation-indeterminate",
+              clf("while ! gh pr checks 42; do sleep 5; done &"), "indeterminate")
+        # brace grouping masks the body command word.
+        check("wl/brace-group-indeterminate",
+              clf("while true; do { gh x; sleep 1; }; done &"), "indeterminate")
+        # C-style for (( )) is not subshell grouping, but its '(' separator is caught and now disclosed.
+        check("wl/c-style-for-indeterminate",
+              clf("for ((i=0;i<3;i++)); do gh x; sleep 1; done &"), "indeterminate")
+        # more than one bare-& is not the single canonical shape.
+        check("wl/multi-detach-indeterminate",
+              clf("sleep 1 & while true; do gh x; sleep 1; done &"), "indeterminate")
+        # a redirect on the `done` terminator makes its raw not a bare `done`: 'none', not a wrong match.
+        check("wl/done-redirect-none",
+              clf("while true; do gh x; sleep 1; done >log &"), "none")
+        # run_in_background true with an inner trailing `done &` is still 'match' (predicate ignores rib).
+        check("wl/deny-rib-true-inner-detach", clf(BASE), "match")
+        # NEGATIVE fixtures (this control): every one is 'none'.
+        # each id is an explicit literal so the execution-set reconciler can enumerate it statically.
+        for cid, cmd in [
+            ("wl/allow-none-foreground", "while true; do gh pr checks 42; sleep 30; done"),  # foreground, no detach
+            ("wl/allow-none-bounded-watch", "timeout 180 gh pr checks 42 --watch"),          # bounded foreground watch
+            ("wl/allow-none-bare-sleep", "sleep 30 &"),                                       # bare sleep detach, no loop
+            ("wl/allow-none-parallel-build", "make -j8 &"),                                   # parallel build detach, no loop/probe
+            ("wl/allow-none-quoted-loop-data", "printf '%s\\n' 'while true; do curl x; sleep 1; done &'"),  # loop text is quoted data
+            ("wl/allow-none-no-sleep-probe", "while read -r line; do echo \"$line\"; done < input.txt &"),  # loop, but no sleep/probe
+            ("wl/allow-none-logical-and", "git add . && git commit -m x"),                    # && is not a detach
+            ("wl/allow-none-redirects", "cmd > log 2>&1"),                                    # redirects, no bare &
+            ("wl/allow-none-pipe-amp", "a |& b"),                                             # |& is not a detach
+        ]:
+            check(cid, clf(cmd), "none")
+        # indeterminate cases -> 'indeterminate' here (never this deny), and still reach the truncation
+        # guard's ASK on the same event (the degrade path).
+        HEREDOC = "cat <<EOF > poll.sh\nwhile true; do gh pr checks 42; sleep 30; done &\nEOF\n"
+        UNBAL = "while true; do gh pr checks 42; sleep 30; done ' &"     # unbalanced quote before the &
+        GROUPED = "( while true; do gh pr checks 42; sleep 30; done ) &"  # subshell-grouped detach
+        for cid, cmd in [("wl/indeterminate-heredoc", HEREDOC),
+                         ("wl/indeterminate-unbalanced", UNBAL),
+                         ("wl/indeterminate-grouped", GROUPED)]:
+            check(cid, clf(cmd), "indeterminate")
+        # degrade path: this guard emits nothing (allow) while the truncation guard ASKs on the bare-& detach.
+        wl = lambda cmd, rib=False: aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
+        tg = lambda cmd, rib=False: aiqt_hooks.orch_truncation_guard(
+            w.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
+        for guard_cid, trunc_cid, cmd in [
+                ("wl/degrade-unbalanced-guard-allows", "wl/degrade-unbalanced-trunc-asks", UNBAL),
+                ("wl/degrade-grouped-guard-allows", "wl/degrade-grouped-trunc-asks", GROUPED)]:
+            check(guard_cid, _verdict(wl(cmd)), "allow")
+            check(trunc_cid, _verdict(tg(cmd)), "ask")
+        # handler DENY: the three brief DENY fixtures, plus the first with run_in_background:true.
+        check("wl/handler-deny-while", _verdict(wl("while true; do gh pr checks 42; sleep 30; done &")),
+              "deny")
+        check("wl/handler-deny-until",
+              _verdict(wl("until curl -fsS https://example.invalid/status; do sleep 10; done &")), "deny")
+        check("wl/handler-deny-for",
+              _verdict(wl("for attempt in 1 2 3; do curl -fsS https://example.invalid/actions/runs; "
+                         "sleep 20; done &")), "deny")
+        check("wl/handler-deny-rib-true",
+              _verdict(wl("while true; do gh pr checks 42; sleep 30; done &", rib=True)), "deny")
+        # handler ALLOW: a foreground poll loop (no detach) and a bounded watch acquire no deny here.
+        check("wl/handler-allow-foreground",
+              _verdict(wl("while true; do gh pr checks 42; sleep 30; done")), "allow")
+        check("wl/handler-allow-watch", _verdict(wl("timeout 180 gh pr checks 42 --watch")), "allow")
+        # handler ALLOW on the eliminated false positives: predicate 'none'/'indeterminate' -> emit nothing.
+        check("wl/handler-allow-b1a",
+              _verdict(wl('while false; do gh x; sleep 1; "done" & done')), "allow")
+        check("wl/handler-allow-b1b",
+              _verdict(wl("while false; do gh x; sleep 1; /tmp/done & done")), "allow")
+        check("wl/handler-allow-b2",
+              _verdict(wl("while gh pr checks 42; do for n in 1 2; do sleep 1; done & wait; break; done")),
+              "allow")
+        check("wl/handler-allow-nested",
+              _verdict(wl("while outer; do while inner; do gh api x; sleep 1; done; done &")), "allow")
+        # fail-open: non-Bash tool, non-str command, absent registry -> silent allow even on a match command.
+        check("wl/failopen-nonbash", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Write", {"command": BASE}))), "allow")
+        check("wl/failopen-nonstr", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            w.payload("PreToolUse", "Bash", {"command": 42}))), "allow")
+        wi = Fixture(tmp, "waitloop-inert")
+        (wi.root / ".aiqt" / "orchestration.local.json").unlink()
+        check("wl/failopen-no-registry", _verdict(aiqt_hooks.orch_untracked_wait_loop(
+            wi.payload("PreToolUse", "Bash", {"command": BASE}))), "allow")
+
         # ---------- Surface B: the validation membrane ----------
         import time as _time
         check("vB/exact-int-valid", aiqt_hooks._v_exact_int(3, 0, 9999), 3)
@@ -641,11 +829,13 @@ def main():
         b = Fixture(tmp, "surfb")
         regpath = b.root / ".aiqt" / "orchestration.local.json"
         base_reg = json.loads(regpath.read_text(encoding="utf-8"))
-        for badver in (True, 1.0, "1", 2):
+        for check_id, badver in (("vB/registry-version-bool-true-bad", True),
+                                 ("vB/registry-version-float-one-bad", 1.0),
+                                 ("vB/registry-version-string-one-bad", "1"),
+                                 ("vB/registry-version-int-two-bad", 2)):
             base_reg["version"] = badver
             regpath.write_text(json.dumps(base_reg), encoding="utf-8")
-            check("vB/registry-version-{!r}".format(badver),
-                  aiqt_hooks._orch_registry(str(b.root))[0], "bad")
+            check(check_id, aiqt_hooks._orch_registry(str(b.root))[0], "bad")
         base_reg["version"] = 1
         regpath.write_text(json.dumps(base_reg), encoding="utf-8")
         check("vB/registry-version-ok", aiqt_hooks._orch_registry(str(b.root))[0], "ok")
@@ -805,32 +995,31 @@ def main():
               aiqt_hooks.decide_yield(dict(pw, reentry="none", counter=2))[0], "ALLOW_WITH_FINDINGS")
 
         pwc = aiqt_hooks._orch_phantom_wait_claim
-        POS = [
-            "I'll resume when CI is green.",
-            "This session will continue once the workflow completes.",
-            "We'll pick up after the pipeline build finishes.",
-            "I am awaiting the CI run and will re-enter when it completes.",
-            "I'll land the merge when the job fires.",
-            "This agent will proceed after the scheduled cron runs.",
-        ]
-        NEG = [
-            "I'll resume once you approve.",                       # human-wait object
-            "I'll continue after the CI run once you confirm.",    # human-wait object near verb
-            "I will not wait for CI; continuing now.",             # negation
-            "If the workflow completes I'll resume.",              # conditional ("if")
-            "I'll resume when CI is green, but this must be resumed manually.",  # disclaimer anywhere
-            "Waiting on your review before I continue.",           # human review, no automated noun
-            "I will run the tests now.",                           # no wait marker + no resume verb pairing
-            "```\nI'll resume when CI is green\n```",              # inside a fenced block (stripped)
-            "`I'll resume when CI completes`",                     # inline code span (stripped)
-            "> I'll resume when CI is green",                      # blockquote (stripped)
-            "The build completed successfully.",                   # no subject/marker/verb
-            "",                                                    # empty
-        ]
-        for i, s in enumerate(POS):
-            check("claim/pos-{}".format(i), pwc(s), True)
-        for i, s in enumerate(NEG):
-            check("claim/neg-{}".format(i), pwc(s), False)
+        # phantom-wait claim positives: literal (check_id, text) rows (the execution-set gate resolves
+        # only string-literal or for-loop-literal check ids, never a .format()-composed id).
+        for check_id, s in (
+                ("claim/pos-0", "I'll resume when CI is green."),
+                ("claim/pos-1", "This session will continue once the workflow completes."),
+                ("claim/pos-2", "We'll pick up after the pipeline build finishes."),
+                ("claim/pos-3", "I am awaiting the CI run and will re-enter when it completes."),
+                ("claim/pos-4", "I'll land the merge when the job fires."),
+                ("claim/pos-5", "This agent will proceed after the scheduled cron runs.")):
+            check(check_id, pwc(s), True)
+        # negatives, each with the reason it must NOT read as a phantom-wait claim
+        for check_id, s in (
+                ("claim/neg-0", "I'll resume once you approve."),                      # human-wait object
+                ("claim/neg-1", "I'll continue after the CI run once you confirm."),   # human-wait near verb
+                ("claim/neg-2", "I will not wait for CI; continuing now."),            # negation
+                ("claim/neg-3", "If the workflow completes I'll resume."),             # conditional ("if")
+                ("claim/neg-4", "I'll resume when CI is green, but this must be resumed manually."),  # disclaimer
+                ("claim/neg-5", "Waiting on your review before I continue."),          # human review, no auto noun
+                ("claim/neg-6", "I will run the tests now."),                          # no wait marker + no verb pair
+                ("claim/neg-7", "```\nI'll resume when CI is green\n```"),             # inside a fenced block
+                ("claim/neg-8", "`I'll resume when CI completes`"),                    # inline code span (stripped)
+                ("claim/neg-9", "> I'll resume when CI is green"),                     # blockquote (stripped)
+                ("claim/neg-10", "The build completed successfully."),                 # no subject/marker/verb
+                ("claim/neg-11", "")):                                                 # empty
+            check(check_id, pwc(s), False)
         check("claim/non-str", pwc(None), False)
         check("claim/over-long", pwc("I'll resume when CI is green. " * 20000), False)  # > 200k chars
 
@@ -859,21 +1048,117 @@ def main():
                 return "cannot-evaluate"
             return "none"
 
-        for bgk, bgv in ARRAYS.items():
-            for crk, crv in ARRAYS.items():
-                for ledk, ledv in LEDGERS.items():
-                    rledger.write_text(ledv, encoding="utf-8")
-                    for wkk, wkv in WAKES.items():
-                        ts = {} if wkv is None else {"wake_digests": wkv}
-                        tstate = aiqt_hooks._orch_validate("turn_state", ts)[1]
-                        data = {}
-                        if bgv != "__absent__":
-                            data["background_tasks"] = bgv
-                        if crv != "__absent__":
-                            data["session_crons"] = crv
-                        got = aiqt_hooks._orch_reentry_live(data, str(rl.root), 24, tstate)[0]
-                        check("reentry/{}-{}-{}-{}".format(bgk, crk, ledk, wkk),
-                              got, oracle(bgk, crk, ledk, wkk))
+        # Full {bg} x {crons} x {ledger} x {wake} cross product, flattened to a single loop over
+        # literal (check_id, keys...) rows so every check id is a resolvable string literal (the
+        # execution-set gate refuses a .format()-composed id); values are looked up by key below.
+        for check_id, bgk, crk, ledk, wkk in (
+                ("reentry/absent-absent-live-present", "absent", "absent", "live", "present"),
+                ("reentry/absent-absent-live-absent", "absent", "absent", "live", "absent"),
+                ("reentry/absent-absent-empty-present", "absent", "absent", "empty", "present"),
+                ("reentry/absent-absent-empty-absent", "absent", "absent", "empty", "absent"),
+                ("reentry/absent-absent-unreadable-present", "absent", "absent", "unreadable", "present"),
+                ("reentry/absent-absent-unreadable-absent", "absent", "absent", "unreadable", "absent"),
+                ("reentry/absent-empty-live-present", "absent", "empty", "live", "present"),
+                ("reentry/absent-empty-live-absent", "absent", "empty", "live", "absent"),
+                ("reentry/absent-empty-empty-present", "absent", "empty", "empty", "present"),
+                ("reentry/absent-empty-empty-absent", "absent", "empty", "empty", "absent"),
+                ("reentry/absent-empty-unreadable-present", "absent", "empty", "unreadable", "present"),
+                ("reentry/absent-empty-unreadable-absent", "absent", "empty", "unreadable", "absent"),
+                ("reentry/absent-nonempty-live-present", "absent", "nonempty", "live", "present"),
+                ("reentry/absent-nonempty-live-absent", "absent", "nonempty", "live", "absent"),
+                ("reentry/absent-nonempty-empty-present", "absent", "nonempty", "empty", "present"),
+                ("reentry/absent-nonempty-empty-absent", "absent", "nonempty", "empty", "absent"),
+                ("reentry/absent-nonempty-unreadable-present", "absent", "nonempty", "unreadable", "present"),
+                ("reentry/absent-nonempty-unreadable-absent", "absent", "nonempty", "unreadable", "absent"),
+                ("reentry/absent-nonlist-live-present", "absent", "nonlist", "live", "present"),
+                ("reentry/absent-nonlist-live-absent", "absent", "nonlist", "live", "absent"),
+                ("reentry/absent-nonlist-empty-present", "absent", "nonlist", "empty", "present"),
+                ("reentry/absent-nonlist-empty-absent", "absent", "nonlist", "empty", "absent"),
+                ("reentry/absent-nonlist-unreadable-present", "absent", "nonlist", "unreadable", "present"),
+                ("reentry/absent-nonlist-unreadable-absent", "absent", "nonlist", "unreadable", "absent"),
+                ("reentry/empty-absent-live-present", "empty", "absent", "live", "present"),
+                ("reentry/empty-absent-live-absent", "empty", "absent", "live", "absent"),
+                ("reentry/empty-absent-empty-present", "empty", "absent", "empty", "present"),
+                ("reentry/empty-absent-empty-absent", "empty", "absent", "empty", "absent"),
+                ("reentry/empty-absent-unreadable-present", "empty", "absent", "unreadable", "present"),
+                ("reentry/empty-absent-unreadable-absent", "empty", "absent", "unreadable", "absent"),
+                ("reentry/empty-empty-live-present", "empty", "empty", "live", "present"),
+                ("reentry/empty-empty-live-absent", "empty", "empty", "live", "absent"),
+                ("reentry/empty-empty-empty-present", "empty", "empty", "empty", "present"),
+                ("reentry/empty-empty-empty-absent", "empty", "empty", "empty", "absent"),
+                ("reentry/empty-empty-unreadable-present", "empty", "empty", "unreadable", "present"),
+                ("reentry/empty-empty-unreadable-absent", "empty", "empty", "unreadable", "absent"),
+                ("reentry/empty-nonempty-live-present", "empty", "nonempty", "live", "present"),
+                ("reentry/empty-nonempty-live-absent", "empty", "nonempty", "live", "absent"),
+                ("reentry/empty-nonempty-empty-present", "empty", "nonempty", "empty", "present"),
+                ("reentry/empty-nonempty-empty-absent", "empty", "nonempty", "empty", "absent"),
+                ("reentry/empty-nonempty-unreadable-present", "empty", "nonempty", "unreadable", "present"),
+                ("reentry/empty-nonempty-unreadable-absent", "empty", "nonempty", "unreadable", "absent"),
+                ("reentry/empty-nonlist-live-present", "empty", "nonlist", "live", "present"),
+                ("reentry/empty-nonlist-live-absent", "empty", "nonlist", "live", "absent"),
+                ("reentry/empty-nonlist-empty-present", "empty", "nonlist", "empty", "present"),
+                ("reentry/empty-nonlist-empty-absent", "empty", "nonlist", "empty", "absent"),
+                ("reentry/empty-nonlist-unreadable-present", "empty", "nonlist", "unreadable", "present"),
+                ("reentry/empty-nonlist-unreadable-absent", "empty", "nonlist", "unreadable", "absent"),
+                ("reentry/nonempty-absent-live-present", "nonempty", "absent", "live", "present"),
+                ("reentry/nonempty-absent-live-absent", "nonempty", "absent", "live", "absent"),
+                ("reentry/nonempty-absent-empty-present", "nonempty", "absent", "empty", "present"),
+                ("reentry/nonempty-absent-empty-absent", "nonempty", "absent", "empty", "absent"),
+                ("reentry/nonempty-absent-unreadable-present", "nonempty", "absent", "unreadable", "present"),
+                ("reentry/nonempty-absent-unreadable-absent", "nonempty", "absent", "unreadable", "absent"),
+                ("reentry/nonempty-empty-live-present", "nonempty", "empty", "live", "present"),
+                ("reentry/nonempty-empty-live-absent", "nonempty", "empty", "live", "absent"),
+                ("reentry/nonempty-empty-empty-present", "nonempty", "empty", "empty", "present"),
+                ("reentry/nonempty-empty-empty-absent", "nonempty", "empty", "empty", "absent"),
+                ("reentry/nonempty-empty-unreadable-present", "nonempty", "empty", "unreadable", "present"),
+                ("reentry/nonempty-empty-unreadable-absent", "nonempty", "empty", "unreadable", "absent"),
+                ("reentry/nonempty-nonempty-live-present", "nonempty", "nonempty", "live", "present"),
+                ("reentry/nonempty-nonempty-live-absent", "nonempty", "nonempty", "live", "absent"),
+                ("reentry/nonempty-nonempty-empty-present", "nonempty", "nonempty", "empty", "present"),
+                ("reentry/nonempty-nonempty-empty-absent", "nonempty", "nonempty", "empty", "absent"),
+                ("reentry/nonempty-nonempty-unreadable-present", "nonempty", "nonempty", "unreadable", "present"),
+                ("reentry/nonempty-nonempty-unreadable-absent", "nonempty", "nonempty", "unreadable", "absent"),
+                ("reentry/nonempty-nonlist-live-present", "nonempty", "nonlist", "live", "present"),
+                ("reentry/nonempty-nonlist-live-absent", "nonempty", "nonlist", "live", "absent"),
+                ("reentry/nonempty-nonlist-empty-present", "nonempty", "nonlist", "empty", "present"),
+                ("reentry/nonempty-nonlist-empty-absent", "nonempty", "nonlist", "empty", "absent"),
+                ("reentry/nonempty-nonlist-unreadable-present", "nonempty", "nonlist", "unreadable", "present"),
+                ("reentry/nonempty-nonlist-unreadable-absent", "nonempty", "nonlist", "unreadable", "absent"),
+                ("reentry/nonlist-absent-live-present", "nonlist", "absent", "live", "present"),
+                ("reentry/nonlist-absent-live-absent", "nonlist", "absent", "live", "absent"),
+                ("reentry/nonlist-absent-empty-present", "nonlist", "absent", "empty", "present"),
+                ("reentry/nonlist-absent-empty-absent", "nonlist", "absent", "empty", "absent"),
+                ("reentry/nonlist-absent-unreadable-present", "nonlist", "absent", "unreadable", "present"),
+                ("reentry/nonlist-absent-unreadable-absent", "nonlist", "absent", "unreadable", "absent"),
+                ("reentry/nonlist-empty-live-present", "nonlist", "empty", "live", "present"),
+                ("reentry/nonlist-empty-live-absent", "nonlist", "empty", "live", "absent"),
+                ("reentry/nonlist-empty-empty-present", "nonlist", "empty", "empty", "present"),
+                ("reentry/nonlist-empty-empty-absent", "nonlist", "empty", "empty", "absent"),
+                ("reentry/nonlist-empty-unreadable-present", "nonlist", "empty", "unreadable", "present"),
+                ("reentry/nonlist-empty-unreadable-absent", "nonlist", "empty", "unreadable", "absent"),
+                ("reentry/nonlist-nonempty-live-present", "nonlist", "nonempty", "live", "present"),
+                ("reentry/nonlist-nonempty-live-absent", "nonlist", "nonempty", "live", "absent"),
+                ("reentry/nonlist-nonempty-empty-present", "nonlist", "nonempty", "empty", "present"),
+                ("reentry/nonlist-nonempty-empty-absent", "nonlist", "nonempty", "empty", "absent"),
+                ("reentry/nonlist-nonempty-unreadable-present", "nonlist", "nonempty", "unreadable", "present"),
+                ("reentry/nonlist-nonempty-unreadable-absent", "nonlist", "nonempty", "unreadable", "absent"),
+                ("reentry/nonlist-nonlist-live-present", "nonlist", "nonlist", "live", "present"),
+                ("reentry/nonlist-nonlist-live-absent", "nonlist", "nonlist", "live", "absent"),
+                ("reentry/nonlist-nonlist-empty-present", "nonlist", "nonlist", "empty", "present"),
+                ("reentry/nonlist-nonlist-empty-absent", "nonlist", "nonlist", "empty", "absent"),
+                ("reentry/nonlist-nonlist-unreadable-present", "nonlist", "nonlist", "unreadable", "present"),
+                ("reentry/nonlist-nonlist-unreadable-absent", "nonlist", "nonlist", "unreadable", "absent"),):
+            bgv, crv, ledv, wkv = ARRAYS[bgk], ARRAYS[crk], LEDGERS[ledk], WAKES[wkk]
+            rledger.write_text(ledv, encoding="utf-8")
+            ts = {} if wkv is None else {"wake_digests": wkv}
+            tstate = aiqt_hooks._orch_validate("turn_state", ts)[1]
+            data = {}
+            if bgv != "__absent__":
+                data["background_tasks"] = bgv
+            if crv != "__absent__":
+                data["session_crons"] = crv
+            got = aiqt_hooks._orch_reentry_live(data, str(rl.root), 24, tstate)[0]
+            check(check_id, got, oracle(bgk, crk, ledk, wkk))
 
         e = Fixture(tmp, "phantom-e2e")
         esd = Path(aiqt_hooks._orch_state_dir_for_root(str(e.root)))
@@ -1099,7 +1384,8 @@ def main():
         regtool = str(repo_root() / "tools" / "orch_register.py")
 
         def mr_append(rid, check_ref):
-            subprocess.run([sys.executable, regtool, "append", "--register", str(mr_reg),
+            subprocess.run([sys.executable, "-I", "-B", regtool, "append",
+                            "--register", str(mr_reg),
                             "--id", rid, "--mistake", "premature wind-down claim",
                             "--evidence", "resume-audit finding", "--rule", "cntdef",
                             "--guardrail", "stop-guard hardening", "--klass", "systemic-lapse",
@@ -1109,7 +1395,8 @@ def main():
         mr_append("MR-1", "seed.txt")
         check("lapse/klass-recorded",
               '"class": "systemic-lapse"' in mr_reg.read_text(encoding="utf-8"), True)
-        proj = subprocess.run([sys.executable, regtool, "project", "--register", str(mr_reg)],
+        proj = subprocess.run([sys.executable, "-I", "-B", regtool, "project",
+                               "--register", str(mr_reg)],
                               check=True, capture_output=True, text=True, timeout=30)
         lapse_items = json.loads(proj.stdout)["items"]
         # (a) a lapse row plus one actionable item: still DENY, no bypass of any kind
@@ -1422,12 +1709,42 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    if report_path is not None:
+        try:
+            with open(report_path, "w", encoding="utf-8") as handle:
+                json.dump({"format_version": 1, "suite": SUITE_ID, "check_ids": EXECUTED}, handle)
+                handle.write("\n")
+        except OSError as exc:
+            # A failed report write must not swallow the assertion diagnostics already collected:
+            # surface what the suite found first, then the harness error.
+            if FAILURES:
+                print("SELF-TEST FAIL:")
+                for f_ in FAILURES:
+                    print("  - " + f_)
+            print("SELF-TEST HARNESS ERROR: cannot write execution report {}: {}".format(
+                report_path, exc), file=sys.stderr)
+            return 2
+
+    # In-run execution-set self-guard (defence in depth beside tools/check_selftest_execution.py): the
+    # executed set reconciles against the hand-authored expectation manifest even on a direct developer
+    # run. The report above is written FIRST, so it always reflects what actually executed.
+    expected_ids = _expected_check_ids()
+    if expected_ids is None:
+        return 2
+    for cid in sorted(expected_ids - _EXECUTED_SET):
+        FAILURES.append("execution-set/missing: {}".format(cid))
+    for cid in sorted(_EXECUTED_SET - expected_ids):
+        FAILURES.append("execution-set/extra: {}".format(cid))
+
     if FAILURES:
         print("SELF-TEST FAIL:")
         for f_ in FAILURES:
             print("  - " + f_)
         return 1
-    print("SELF-TEST PASS: the stop guard denies enumerated actionable work and unproven or stale "
+    print("SELF-TEST PASS: {} unique checks executed; execution set reconciled against "
+          "tools/selftest_checks.toml".format(len(EXECUTED)))
+    print("Coverage narrative (human orientation, not evidence): the stop guard denies enumerated "
+          "actionable work and unproven or stale "
           "blockers, allows proven blockers, live tracked tasks, proposed-only backlogs, absent "
           "registry/lease scope, a genuinely operator-owned escape sentinel, and DENIES a BELOW-BOUND "
           "cannot-evaluate (ignorance refuses the wind-down; the operator escape OR the bounded loop-exit "
@@ -1451,5 +1768,17 @@ def main():
     return 0
 
 
+def _parse_argv(argv):
+    """No arguments (unchanged behaviour), or exactly --execution-report ABS_PATH. Anything else,
+    including a relative report path, is usage: exit 2."""
+    if not argv:
+        return None
+    if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
+        return argv[1]
+    print("usage: selftest_orch_hooks.py [--execution-report ABS_PATH] "
+          "(the report path must be absolute)", file=sys.stderr)
+    sys.exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(report_path=_parse_argv(sys.argv[1:])))
