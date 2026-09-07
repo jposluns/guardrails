@@ -531,8 +531,10 @@ A deterministic gate confirms, from `version.toml` and `CHANGELOG.md` alone:
   versions present in the release ledger, with a range denoting a contiguous run in ledger order;
 - those rows tile the ledger exactly: every released version falls in exactly one row's coverage,
   with no gap and no overlap;
-- every such row has exactly one matching entry heading in `CHANGELOG.md`, and every entry heading
-  matches exactly one such row.
+- every such row has exactly one matching release-or-range entry heading in `CHANGELOG.md`, and
+  every release-or-range entry heading matches exactly one such row; the optional `## unreleased`
+  heading, when present, matches instead the `covers = "unreleased"` row (the unreleased worklog
+  tail), so it is neither an unmatched heading nor a second match against a released row.
 
 The check confirms the start and end versions of each declared range against the ledger; it is
 deterministic, and it fails closed on an unreadable or unparseable input.
@@ -1054,8 +1056,11 @@ witnessed release cut.
 
 ## 15. Genericization boundary
 
-Nothing in a conforming store's shipped schemas names a particular adopter, operator, internal
-system, endpoint, tier vocabulary, or command. `actor.kind` carries only the
+Nothing in a conforming store's base-required schema vocabulary names a particular adopter,
+operator, profile, internal system, endpoint, tier vocabulary, or command. A profile schema (for
+example `[profiles.aiqt]`) legitimately names its owner, and a conforming store's own data
+legitimately names an operator via `actor.id`; the neutrality constraint binds the base-required
+vocabulary, not profile schemas or store data. `actor.kind` carries only the
 portable categories; identity detail lives in `actor.id` or extensions. `mode`,
 `tier_assessment`, and `waiver` ship structure only (evidence, assessor, outcome, validity, scope,
 expiry) with adopter-supplied vocabularies. The location patterns of section 5.3 are described

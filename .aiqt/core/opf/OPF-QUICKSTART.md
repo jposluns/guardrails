@@ -72,7 +72,9 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    in their typed files; regenerate views rather than editing them.
 4. At release: record the release and its worklog span in `version.toml`, draft the summary from
    that span, curate it by hand, publish it into `CHANGELOG.md`, and record its freeze digest.
-5. If you later want the store elsewhere: `opf migrate --store <target>`. Nothing else changes.
+5. If you later want the store elsewhere: `opf migrate --store <target>`. The generated public
+   deliverables (`CHANGELOG.md` and `VERSION`) are unchanged; migration re-points the committed
+   pointer, updates the manifest's recorded sync target, and records the move as a worklog entry.
 
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack;
 until then the files are simple enough to keep by hand, and a conformance claim is self-asserted
