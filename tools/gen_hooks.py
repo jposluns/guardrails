@@ -196,33 +196,67 @@ def load_manifest(path):
     return plugin, hooks
 
 
+def _binds_name(target, name):
+    """Whether an assignment or deletion TARGET binds or mutates the module-level `name`: the name itself,
+    an element of a tuple/list unpack, a starred element, or a subscript/attribute whose base is the name
+    (a mutation). A name that appears only inside a subscript's SLICE (d[name] = ..) is NOT a binding of it."""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds_name(el, name) for el in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds_name(target.value, name)
+    if isinstance(target, (ast.Subscript, ast.Attribute)):
+        return isinstance(target.value, ast.Name) and target.value.id == name
+    return False
+
+
 def _module_dict(script_text, dict_name):
     """The single module-level `<dict_name> = { ... }` assignment's ast.Dict node, extracted STATICALLY
     from the parsed script. ast.parse only builds the syntax tree; it does NOT execute or import the
     script, so this honours SECI-config-is-executable (the dispatcher is never run to read its keys).
-    Returns None when the script does not parse, when no module-level assignment of a dict LITERAL to
-    dict_name exists, or when MORE THAN ONE such assignment exists (an ambiguous/duplicate binding), so
-    each of those cases fails closed in the caller (the handler reads as undispatchable). A plain
-    `Name = {...}` (ast.Assign) and an annotated `Name: T = {...}` (ast.AnnAssign) both count; any
-    non-dict value (a call, a comprehension, a name, a merge) does not."""
+
+    Fails closed (returns None, so the caller reads the handler as undispatchable) unless the name is
+    bound EXACTLY ONCE at module level AND that sole binding is a plain `Name = {...}` (ast.Assign) or an
+    annotated `Name: T = {...}` (ast.AnnAssign) of a dict LITERAL. Round 11 (FIX 2): the binding count is
+    taken over EVERY module-level (re)binding of the name BEFORE any value-shape filter, closing the r10
+    fail-open where `HANDLERS = {..}` followed by `HANDLERS = make()` left the runtime dict empty
+    (undispatchable) yet still read the stale literal's keys as dispatchable, because the r10 code filtered
+    for an ast.Dict value FIRST and so counted only the one literal. A binding is any module-level statement
+    that (re)binds or mutates the name: an Assign/AnnAssign target, a tuple/list-unpack element
+    (`HANDLERS, HANDLER_EVENT = ..`; intentionally UNSUPPORTED - a dispatcher is bound once as its own dict
+    literal - so it counts and fails closed), an AugAssign (`HANDLERS += ..`), a subscript/attribute
+    mutation (`HANDLERS[..] = ..`), or a Delete (`del HANDLERS`). More than one such binding, or a single
+    binding whose value is not a dict literal (a call, comprehension, name, or merge), returns None."""
     try:
         tree = ast.parse(script_text)
     except (SyntaxError, ValueError):
         return None
-    found = []
+    bind_count = 0
+    literal = None
     for node in tree.body:  # MODULE LEVEL only: a dict built inside a def/class is not the dispatcher
         if isinstance(node, ast.Assign):
-            targets = node.targets
+            if any(_binds_name(t, dict_name) for t in node.targets):
+                bind_count += 1
+                if isinstance(node.value, ast.Dict) and any(
+                        isinstance(t, ast.Name) and t.id == dict_name for t in node.targets):
+                    literal = node.value
         elif isinstance(node, ast.AnnAssign) and node.target is not None:
-            targets = [node.target]
-        else:
-            continue
-        if any(isinstance(t, ast.Name) and t.id == dict_name for t in targets) \
-                and isinstance(node.value, ast.Dict):
-            found.append(node.value)
-    if len(found) != 1:
-        return None  # missing OR duplicate -> fail closed
-    return found[0]
+            if isinstance(node.target, ast.Name) and node.target.id == dict_name:
+                bind_count += 1
+                if node.value is not None and isinstance(node.value, ast.Dict):
+                    literal = node.value
+            elif _binds_name(node.target, dict_name):  # annotated subscript/attribute mutation
+                bind_count += 1
+        elif isinstance(node, ast.AugAssign):
+            if _binds_name(node.target, dict_name):
+                bind_count += 1
+        elif isinstance(node, ast.Delete):
+            if any(_binds_name(t, dict_name) for t in node.targets):
+                bind_count += 1
+    if bind_count == 1 and literal is not None:
+        return literal
+    return None
 
 
 def _dispatch_keys(script_text, dict_name):
@@ -662,6 +696,39 @@ def self_test_main():
         if run_quiet(phantom, check=False) != 2:
             failures.append("a string-literal decoy embedding a phantom HANDLERS key must fail closed "
                             "(exit 2)")
+
+        # N5 (round 11, FIX 2): a LATER non-dict rebinding of the dispatcher name fails closed. The runtime
+        #     dict is the rebinding's value (empty/undispatchable), but the r10 _module_dict filtered for an
+        #     ast.Dict value BEFORE counting bindings, so it found the sole literal and read its keys as
+        #     dispatchable (fail-OPEN). Counting EVERY binding first fails closed.
+        _rebind = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                   'HANDLERS = make_handlers()\n')
+        if _dispatch_keys(_rebind, "HANDLERS") != set():
+            failures.append("a later non-dict rebinding of HANDLERS must fail closed (empty key set)")
+        _rebind_ev = ('HANDLER_EVENT = {\n    "test_handler": "PreToolUse",\n}\n'
+                      'HANDLER_EVENT = build_events()\n')
+        if _dispatch_event_map(_rebind_ev) != {}:
+            failures.append("a later non-dict rebinding of HANDLER_EVENT must fail closed (empty map)")
+
+        # N6 (round 11, FIX 2): a subscript or augmented MUTATION alongside the literal is a second binding of
+        #     the name, so the dispatcher is no longer a single immutable literal and fails closed.
+        _subscript = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                      'HANDLERS["late"] = late_handler\n')
+        if _dispatch_keys(_subscript, "HANDLERS") != set():
+            failures.append("a subscript mutation of HANDLERS must fail closed (empty key set)")
+        _augmented = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                      'HANDLERS += extra\n')
+        if _dispatch_keys(_augmented, "HANDLERS") != set():
+            failures.append("an augmented rebinding of HANDLERS must fail closed (empty key set)")
+
+        # N7 (round 11, FIX 2): a TUPLE-UNPACK binding (HANDLERS, HANDLER_EVENT = ..) is intentionally
+        #     unsupported (a dispatcher is bound once as its own dict literal). r10 ignored a non-Name target,
+        #     so the accompanying literal still read as dispatchable (fail-OPEN); counting every binding of
+        #     the name fails it closed.
+        _unpack = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                   'HANDLERS, HANDLER_EVENT = _pair()\n')
+        if _dispatch_keys(_unpack, "HANDLERS") != set():
+            failures.append("a tuple-unpack rebinding of HANDLERS (alongside its literal) must fail closed")
 
         # 3. An unknown corpus-id in the manifest fails closed.
         badid = tmp / "badid"

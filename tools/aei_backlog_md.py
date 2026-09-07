@@ -86,13 +86,19 @@ def _strip_invisibles_mapped(line):
     return "".join(kept), offsets
 
 
-def _has_invisible(s):
-    """True when a verdict-bearing ref span carries a zero-width / Unicode format (category Cf) codepoint.
-    The close and blocker ref grammars accept any non-whitespace char, and a zero-width char is
-    non-whitespace, so an invisible could launder a distinct ref into a valid close/blocker (fail-OPEN); a
-    verdict-bearing ref is therefore rejected here (enumeration error, exit 3), while the display-only
-    title keeps its invisibles verbatim (C1). Mirrors the engine _orch_has_invisible."""
-    return any(ch in _ZERO_WIDTH or unicodedata.category(ch) == "Cf" for ch in s)
+def _ref_unsafe(s):
+    """True when a verdict-bearing span is NOT entirely safe graphic-ASCII (every char in U+0021..U+007E).
+    Round 11 (FIX 5): an ASCII-graphic ALLOWLIST replaces the r10 zero-width/Cf DENYLIST and is EXTENDED to
+    the prep_ref and EACH close.paths entry. The close/blocker ref, prep_ref, and paths grammars all match
+    `\\S+` / `[^:]+` (any non-whitespace, non-colon), and a variation selector (U+FE00-FE0F, U+E0100-E01EF),
+    CGJ (U+034F), a Hangul filler, a Braille blank, or any other invisible or non-ASCII char is
+    non-whitespace, so the r10 denylist (category Cf plus a fixed zero-width set) let all of those launder a
+    distinct ref/path into a valid close, blocker, prep, or paths verdict (fail-OPEN). A verdict-bearing span
+    reconciled against the repository or the backlog must be pure graphic-ASCII; anything else is an
+    enumeration error (exit 3). The display-only TITLE is NOT passed through this predicate and keeps its
+    invisibles verbatim (C1). This is separate from _strip_invisibles_mapped, which normalizes only the
+    STRUCTURAL bullet prefix and still uses _ZERO_WIDTH. Mirrors the engine _orch_ref_unsafe."""
+    return not all("\u0021" <= ch <= "\u007e" for ch in s)
 
 
 def parse(text, version=2):
@@ -140,8 +146,8 @@ def parse(text, version=2):
             if cm.group("reason") not in CLOSE_REASONS:
                 errors.append("line {}: unknown close reason {!r}".format(n, cm.group("reason")))
                 continue
-            if _has_invisible(cm.group("ref")):
-                errors.append("line {}: close ref carries a zero-width/format char".format(n))
+            if _ref_unsafe(cm.group("ref")):
+                errors.append("line {}: close ref carries a non graphic-ASCII char".format(n))
                 continue
             close = {"reason": cm.group("reason"), "ref": cm.group("ref")}
             # B3/FIX2/FIX B: an OPTIONAL '::' paths list (repo-relative, comma-separated) binds a `fixed`
@@ -152,6 +158,9 @@ def parse(text, version=2):
             # verdict-bearing path into the close.
             if cm.group("paths"):
                 paths = [p.strip() for p in cm.group("paths").split(",") if p.strip()]
+                if any(_ref_unsafe(p) for p in paths):
+                    errors.append("line {}: close.paths entry carries a non graphic-ASCII char".format(n))
+                    continue
                 if paths:
                     close["paths"] = paths
             rest = rest[:cm.start()].rstrip()
@@ -173,8 +182,8 @@ def parse(text, version=2):
             if bm.group("kind") not in KINDS:
                 errors.append("line {}: unknown blocker kind {!r}".format(n, bm.group("kind")))
                 continue
-            if _has_invisible(bm.group("ref")):
-                errors.append("line {}: blocker ref carries a zero-width/format char".format(n))
+            if _ref_unsafe(bm.group("ref")):
+                errors.append("line {}: blocker ref carries a non graphic-ASCII char".format(n))
                 continue
             blocker = {"kind": bm.group("kind"), "ref": bm.group("ref")}
             om = OBSERVED_RE.search(rest)
@@ -188,6 +197,9 @@ def parse(text, version=2):
             if pm:
                 prep_complete = (pm.group("v") == "complete")
             if prm:
+                if _ref_unsafe(prm.group("r")):
+                    errors.append("line {}: prep_ref carries a non graphic-ASCII char".format(n))
+                    continue
                 prep_ref = prm.group("r")
             rest = rest[:bm.start()].rstrip()
         elif tok == "BLOCKED":
@@ -422,6 +434,27 @@ def self_test():
         ok_fail.append("an invisible-bearing close ref must fail closed (record an error)")
     if not parse("- A-1 [BLOCKED] wait :: blocker:external=ci-\u200b42\n", version=2)[1]:
         ok_fail.append("an invisible-bearing blocker ref must fail closed (record an error)")
+    # r11 FIX 5: the r10 zero-width/Cf DENYLIST is REPLACED by an ASCII-graphic ALLOWLIST, extended to the
+    # prep_ref and EACH close.paths entry, and now catching a VARIATION SELECTOR (U+FE0F) the denylist
+    # missed. Every fixture uses a Python ESCAPE, never a literal invisible byte.
+    if not parse("- A-1 [x] done :: close:no-fix-needed=R\ufe0f1\n", version=2)[1]:
+        ok_fail.append("a VS-bearing close ref must fail closed (allowlist)")
+    if not parse("- A-1 [BLOCKED] wait :: blocker:external=ci\ufe0f42\n", version=2)[1]:
+        ok_fail.append("a VS-bearing blocker ref must fail closed (allowlist)")
+    if not parse("- H-3 [ ] d :: blocker:human-decision=PD :: prep=complete :: prep_ref=plan\ufe0f.md\n",
+                 version=2)[1]:
+        ok_fail.append("a VS-bearing prep_ref must fail closed (allowlist)")
+    if not parse("- H-4 [ ] d :: blocker:human-decision=PD :: prep=complete :: prep_ref=plan\u200b.md\n",
+                 version=2)[1]:
+        ok_fail.append("a ZWSP-bearing prep_ref must fail closed (allowlist)")
+    if not parse("- A-1 [x] done :: close:fixed=abc :: paths=tools/gen_hooks.py\ufe0f\n", version=2)[1]:
+        ok_fail.append("a VS-bearing close.paths entry must fail closed (allowlist)")
+    if not parse("- A-1 [x] done :: close:fixed=abc :: paths=tools/gen_hooks.py\u200b\n", version=2)[1]:
+        ok_fail.append("a ZWSP-bearing close.paths entry must fail closed (allowlist)")
+    _clean = parse("- A-1 [x] done :: close:fixed=commit-abc123 :: paths=tools/gen_hooks.py,a/b.py\n",
+                   version=2)
+    if _clean[1] or _clean[0][0].get("close", {}).get("paths") != ["tools/gen_hooks.py", "a/b.py"]:
+        ok_fail.append("a clean graphic-ASCII close ref+paths must pass (got {})".format(_clean))
     if ok_fail:
         for f in ok_fail:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

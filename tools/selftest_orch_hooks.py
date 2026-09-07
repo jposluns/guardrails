@@ -2131,6 +2131,18 @@ def main(report_path=None):
         check("wait/if-then-sleep-denies", _verdict(waitcall("if true; then sleep 600; fi")), "deny")
         check("wait/for-loop-sleep-denies",
               _verdict(waitcall("for i in 1 2 3; do sleep 10; done")), "deny")
+        # r11 FIX 1: the r10 UNCONDITIONAL body-keyword skip wedged an ordinary command literally named
+        # do/then (a bare, quoted, or path-qualified `do`) - it read `do` as a shell keyword and skipped to
+        # the following sleep. A body keyword is a keyword ONLY when a PRIOR segment opened a compound
+        # (while/until/for/if); a bare `do` with no opener is a COMMAND WORD -> not a wait -> inert allow.
+        check("wait/quoted-do-sleep-inert-allow", _verdict(waitcall("'do' sleep")), "allow")
+        check("wait/path-do-sleep-inert-allow", _verdict(waitcall("dir/do sleep")), "allow")
+        # r11 FIX 1 DISCLOSED RESIDUAL (fail-safe, inert-allow, documented in the docstring + manifest): a
+        # sleep in a while/until loop CONDITION, or behind a command-modifier prefix (command/time/!/env),
+        # is NOT structurally recognized and inert-allows (a missed wait -> allow, never a wedge).
+        check("wait/while-condition-sleep-inert-allow",
+              _verdict(waitcall("while sleep 60; do :; done")), "allow")
+        check("wait/modifier-time-sleep-inert-allow", _verdict(waitcall("time sleep 5")), "allow")
         # wait_tools = [] (an EMPTY list) is fully inert even for a genuine wait command
         _wr_empty = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
         _wr_empty["wait_tools"] = []
@@ -2163,6 +2175,44 @@ def main(report_path=None):
             {"id": "Z-2", "title": "t", "state": "open", "granted": True,
              "blocker": {"kind": "external", "ref": "ci-" + _zwsp + "42"}}]))
         check("enum/invisible-blocker-ref-rejected", _b_items is None and bool(_b_err), True)
+        # ---------- GD-164 r11 FIX 5: allowlist replaces the invisible DENYLIST, extended to prep_ref +
+        #            close.paths, at the engine surface too. codex REFUTED the r10 scope: _orch_has_invisible
+        #            rejected only Cf + a fixed zero-width set, so a VARIATION SELECTOR / CGJ / filler /
+        #            Braille blank laundered a distinct close ref, blocker ref, prep_ref, or close.paths entry
+        #            into a terminal or BLOCKED verdict; prep_ref + close.paths had NO check at all. Every
+        #            verdict-bearing span must be pure graphic-ASCII. Python ESCAPE, no literal invisible byte.
+        _vs = "\ufe0f"   # VARIATION SELECTOR-16, category Mn, NOT Cf: the r10 denylist passed it
+        _v1i, _v1e = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "V-1", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "no-fix-needed", "ref": "R-" + _vs + "1"}}]))
+        check("enum/vs-close-ref-rejected", _v1i is None and bool(_v1e), True)
+        _v2i, _v2e = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "V-2", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "external", "ref": "ci-" + _vs + "42"}}]))
+        check("enum/vs-blocker-ref-rejected", _v2i is None and bool(_v2e), True)
+        _pref = lambda ref: _r10env([
+            {"id": "V-3", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "human-decision", "ref": "PD-9", "prep_complete": True,
+                         "prep_ref": ref}}])
+        _p1i, _p1e = aiqt_hooks.validate_enumeration(_pref("plan" + _vs + ".md"))
+        check("enum/vs-prep-ref-rejected", _p1i is None and bool(_p1e), True)
+        _p2i, _p2e = aiqt_hooks.validate_enumeration(_pref("plan" + _zwsp + ".md"))
+        check("enum/invisible-prep-ref-rejected", _p2i is None and bool(_p2e), True)
+        _cpath = lambda p: _r10env([
+            {"id": "V-4", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "fixed", "ref": "commit-abc", "paths": ["tools/gen_hooks.py", p]}}])
+        _q1i, _q1e = aiqt_hooks.validate_enumeration(_cpath("tools/gen_hooks.py" + _vs))
+        check("enum/vs-close-path-rejected", _q1i is None and bool(_q1e), True)
+        _q2i, _q2e = aiqt_hooks.validate_enumeration(_cpath("tools/gen_hooks.py" + _zwsp))
+        check("enum/invisible-close-path-rejected", _q2i is None and bool(_q2e), True)
+        # clean graphic-ASCII ref/path/prep still VALIDATES: proves the rejections above are caused by the
+        # invisible, not an unrelated envelope defect (no false rejection).
+        _cli, _cle = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "V-5", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "fixed", "ref": "commit-abc123", "paths": ["tools/gen_hooks.py"]}}]))
+        check("enum/clean-graphic-ascii-passes", _cle is None and _cli is not None, True)
+        _cpi, _cpe = aiqt_hooks.validate_enumeration(_pref("plan.md"))
+        check("enum/clean-prep-ref-passes", _cpe is None and _cpi is not None, True)
 
         # ---------- GD-164: surface-N and emission ----------
         s = Fixture(tmp, "surface")

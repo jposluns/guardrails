@@ -134,7 +134,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import unicodedata
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
@@ -5226,18 +5225,19 @@ _ORCH_ATTEST_APPROVED = frozenset(("accepted", "landed"))  # FIX 3: a ref counts
 # only on one of these grounds recorded in the disposition register the guard reads; any other close,
 # or an unverifiable one, classifies actionable or held, never terminal-invisible.
 _ORCH_CLOSE_REASONS = frozenset(("fixed", "no-fix-needed", "not-buildable", "maintainer-deferred"))
-# The zero-width / Cf explicit safety net, mirroring aei_backlog_md._ZERO_WIDTH: a runtime whose Unicode
-# table does not yet class U+180E / U+200C / U+200D as Cf still rejects them in a verdict-bearing ref. The
-# source carries only \u escapes, never a literal zero-width byte.
-_ORCH_ZERO_WIDTH = frozenset("\u200b\u200c\u200d\u2060\u180e\ufeff")
-
-
-def _orch_has_invisible(s):
-    """True when a string carries any zero-width / Unicode format (category Cf) codepoint. A verdict-bearing
-    annotation ref (a close ref, a blocker ref) that carries an invisible could launder a distinct ref into
-    a valid terminal close or a substantiated blocker (fail-OPEN); it is rejected here as it is at the
-    Markdown grammar surface (aei_backlog_md._has_invisible), so both surfaces fail closed."""
-    return any(ch in _ORCH_ZERO_WIDTH or unicodedata.category(ch) == "Cf" for ch in s)
+def _orch_ref_unsafe(s):
+    """True when a verdict-bearing span is NOT entirely safe graphic-ASCII (every char in U+0021..U+007E,
+    i.e. no whitespace, control, invisible, format, variation selector, combining mark, filler, or non-ASCII
+    char). Round 11 (FIX 5): an ASCII-graphic ALLOWLIST replaces the r10 zero-width/Cf DENYLIST, which
+    rejected only category-Cf plus a fixed zero-width set and so let a variation selector (U+FE00-FE0F,
+    U+E0100-E01EF), CGJ (U+034F), a Hangul filler, a Braille blank, or any other non-ASCII codepoint launder
+    a distinct close ref, blocker ref, prep_ref, or close.paths entry into a terminal or BLOCKED verdict
+    (fail-OPEN). Every verdict-bearing span reconciled against the repository (a ref git resolves, a path
+    matched to a changed set) or against the backlog (a prep_ref matched to a pending row) must be pure
+    graphic-ASCII; anything else is a cannot-evaluate rejection at both surfaces (an enumeration error at the
+    parser, a (None, msg) here). The display-only title is NOT passed through this predicate. Mirrors the
+    Markdown grammar surface aei_backlog_md._ref_unsafe, so both surfaces fail closed identically."""
+    return not all("\u0021" <= ch <= "\u007e" for ch in s)
 
 
 def _orch_now():
@@ -5647,8 +5647,8 @@ def validate_enumeration(obj):
                             .format(iid, reason))
                 if not isinstance(cref, str) or not cref.strip():
                     return (None, "closed item {} close has no non-blank ref".format(iid))
-                if _orch_has_invisible(cref):
-                    return (None, "closed item {} close ref carries a zero-width/format char".format(iid))
+                if _orch_ref_unsafe(cref):
+                    return (None, "closed item {} close ref carries a non graphic-ASCII char".format(iid))
                 close = {"reason": reason, "ref": cref}
                 # B3 (optional): a `fixed` close MAY declare the repo-relative paths it fixed, so the
                 # vfxcmt reconciliation binds the cited commit to the item by its changed set. When
@@ -5659,6 +5659,9 @@ def validate_enumeration(obj):
                             or not all(isinstance(p, str) and p.strip() for p in raw_paths):
                         return (None, "closed item {} close.paths is not a non-empty list of non-blank "
                                 "strings".format(iid))
+                    if any(_orch_ref_unsafe(p) for p in raw_paths):
+                        return (None, "closed item {} close.paths entry carries a non graphic-ASCII char"
+                                .format(iid))
                     close["paths"] = [p for p in raw_paths]
             elif raw_close is not None:
                 return (None, "non-closed item {} carries a close object".format(iid))
@@ -5669,8 +5672,8 @@ def validate_enumeration(obj):
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
                 return (None, "item {} has a malformed blocker".format(iid))
-            if _orch_has_invisible(blocker.get("ref")):
-                return (None, "item {} blocker ref carries a zero-width/format char".format(iid))
+            if _orch_ref_unsafe(blocker.get("ref")):
+                return (None, "item {} blocker ref carries a non graphic-ASCII char".format(iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
@@ -5688,6 +5691,9 @@ def validate_enumeration(obj):
                     if not isinstance(pr, str) or not pr.strip():
                         return (None, "human-decision item {} has prep_complete true but no non-blank "
                                 "prep_ref (v2)".format(iid))
+                    if _orch_ref_unsafe(pr):
+                        return (None, "human-decision item {} prep_ref carries a non graphic-ASCII char"
+                                .format(iid))
                     prep_ref = pr
         advance = None
         if version == 2 and raw.get("advance") is not None:
@@ -7113,32 +7119,39 @@ def orch_route_guard(data):
 
 
 _ORCH_WAIT_COMMANDS = frozenset(("sleep", "wait"))
-# Shell loop/conditional body keywords: a segment led by one of these carries its real command after it,
-# so `do sleep 5` / `then sleep 600` reads as a sleep in command position once the keyword is skipped.
 _ORCH_WAIT_BODY_KEYWORDS = frozenset(("do", "then", "else", "elif"))
+# Compound openers: a body keyword (do/then/else/elif) is only a shell keyword INSIDE one of these; a bare or
+# quoted `do` with no opener is a command name, not a keyword (round 11: the r10 unconditional skip wedged an
+# ordinary command whose name is do/then).
+_ORCH_WAIT_COMPOUND_OPENERS = frozenset(("while", "until", "for", "if"))
 
 
 def _orch_command_waits(command):
-    """A1 wait-intent discriminator (round 10): True only for a HIGH-CONFIDENCE Bash wait, judged over the
-    quote/redirect-aware lexer so a quoted or argument `sleep`/`while` never fires. A segment is a wait when
-    its COMMAND WORD (after skipping a single leading loop/conditional body keyword do/then/else/elif) is
-    `sleep` or `wait`. This covers a plain sleep, a bare wait builtin, and a sleep inside a while/until/for
-    loop body or an if/then branch (the body keyword is skipped so the sleep reads in command position); it
-    NEVER fires on a `while`/`sleep` token in ARGUMENT position (echo while sleep, git commit -m while -m
-    sleep), the round-9 over-fire. An unparseable command is NOT recognizably a wait (fail-safe: the caller
-    inert-allows, never wedges). DISCLOSED RESIDUAL: an obfuscated wait (a renamed/aliased detacher; a
-    sleep/loop inside a nested shell string such as bash -c '... sleep ...'; a wait implemented by another
-    program such as python -c 'time.sleep(...)'; a spin loop with no sleep; a stdin-blocking read; or a wait
-    behind an unparseable construct such as a here-string or process substitution, which raises ValueError and
-    is inert-allowed) is not caught here; the shared schedule-denial cap and the stop-guard re-enumeration are
-    the compensating layers."""
+    """A1 wait-intent discriminator (round 11): True only for a HIGH-CONFIDENCE Bash wait, judged over the
+    quote/redirect-aware lexer. A segment is a wait when its COMMAND WORD is `sleep` or `wait`, INCLUDING a
+    sleep/wait inside a while/until/for loop body or an if/then branch (its leading do/then/else/elif body
+    keyword is skipped ONLY when a prior segment opened a compound while/until/for/if, so a bare or quoted
+    command literally named do/then is NOT mistaken for a keyword - the round-10 wedge). It NEVER fires on a
+    while/sleep token in ARGUMENT position (echo while sleep). An unparseable command is NOT recognizably a
+    wait (fail-safe: caller inert-allows, never wedges). DISCLOSED RESIDUAL (fail-safe to inert allow, never a
+    wedge): an obfuscated wait (alias/rename; a sleep/loop in a nested shell string bash -c '... sleep ...'; a
+    wait via another program python -c 'time.sleep(...)'; a no-sleep spin loop; a stdin-blocking read; an
+    unparseable construct such as a here-string or process substitution that raises ValueError); AND a genuine
+    wait the discriminator does not structurally recognize: a sleep in a while/until loop CONDITION (while
+    sleep 60; do :; done), a sleep behind a command-modifier prefix (command/builtin/time/! and nice/nohup/
+    timeout/env wrappers), and a sleep inside a brace or subshell group ({ sleep 5; } / ( sleep 5 )). These
+    are NOT caught (they inert-allow) and are disclosed here; the schedule-denial cap and stop-guard
+    re-enumeration are the compensating layers."""
     try:
         segments = _segments(command)
     except ValueError:
-        return False  # unparseable/unsupported construct: not recognizably a wait -> caller allows
+        return False
+    compound = False
     for argv, _sep in segments:
         cw = _command_word(argv)
-        if cw in _ORCH_WAIT_BODY_KEYWORDS:
+        if cw in _ORCH_WAIT_COMPOUND_OPENERS:
+            compound = True
+        if compound and cw in _ORCH_WAIT_BODY_KEYWORDS:
             idx = _command_word_index(argv)
             if idx is not None:
                 cw = _command_word(argv[idx + 1:])
