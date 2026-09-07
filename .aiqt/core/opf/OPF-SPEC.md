@@ -347,7 +347,7 @@ sync target: the target is fetched and the local store compared against it.
   append-only TOML ledgers can silently mangle the very records the standard exists to protect.
 - **After any operation that writes,** the store is synced back to its target in the same session,
   so the store is not left intentionally ahead on one system; a crash between the local write and
-  the sync is detected as divergence and reconciled on the next resume, never left standing.
+  the sync is detected as an ahead-or-divergent state and reconciled on the next resume, never left standing.
 
 A **single-writer lease** prevents concurrent divergent writes: before mutating the store, a run
 takes the lease (`lease.toml`, present only while held, carrying the holder, the operation, and an
