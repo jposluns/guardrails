@@ -50,7 +50,13 @@ def run_self_tests():
     for label, fn in SELF_TESTS:
         print("== opf self-test: {} ==".format(label))
         code = fn()
-        if code == EXIT_MALFORMED:
+        if code not in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
+            # A helper returning a code outside the agreed {0,1,2} vocabulary is itself a fault: fail
+            # closed (the worst outcome) rather than letting an unrecognized code read as clean.
+            print("opf self-test: {} returned out-of-range code {!r}; failing closed".format(label, code),
+                  file=sys.stderr)
+            worst = EXIT_MALFORMED
+        elif code == EXIT_MALFORMED:
             worst = EXIT_MALFORMED
         elif code == EXIT_FINDING and worst != EXIT_MALFORMED:
             worst = EXIT_FINDING

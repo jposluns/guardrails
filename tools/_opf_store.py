@@ -52,9 +52,15 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
     [archive], [unmanaged], [vendors]) are treated as CLOSED keysets (unknown key is a finding), matching
     the house closed-schema discipline; the spec's manifest is "illustrative (the schema release ... is
     normative)", so a later unit that needs a new manifest key extends the allowed set here in one place.
-  - A mistyped `devprocess` token resolves to CANNOT-EVALUATE only when a POINTER named the store
-    (residual 17's case); with NO pointer, the default-location fallback cannot tell a mistyped token from
-    a fresh un-adopted repo, so it reports NOT-ADOPTED (the `opf init` remedy). Both are documented below.
+  - A mistyped `devprocess` token resolves to CANNOT-EVALUATE at BOTH a POINTER target and the default
+    location (residual 17): a PRESENT `.working/` that carries no valid [devprocess] manifest is a
+    present-but-invalid store, distinguishable from a fresh un-adopted repo (which has NO `.working/` at
+    all) and never treated as absent, so `opf init` cannot overwrite it. Only a genuinely absent
+    `.working/` with no pointer is NOT-ADOPTED (the `opf init` remedy).
+  - A `dir:`/absolute-path pointer TARGET is opened by a component-by-component no-follow walk from the
+    filesystem root, not through `Path.resolve()` (which would canonicalize symlinks away BEFORE the
+    open): a symlinked store root or a symlinked ancestor of a pointer target is refused
+    (CANNOT-EVALUATE), never silently followed off-tree, matching the contained no-follow discipline.
 """
 import operator
 import os
@@ -170,8 +176,39 @@ class ManifestValidation:
 
 def _open_root_fd(root):
     """Open a root directory fd with O_NOFOLLOW, so a symlinked final root component is refused rather
-    than followed off-tree (the migrate.py/pin.py idiom). Raises OSError, mapped by the caller."""
+    than followed off-tree (the migrate.py/pin.py idiom). Raises OSError, mapped by the caller. Used for
+    the PRODUCT root, the operator's trusted --root anchor."""
     return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def _open_dir_nofollow(abspath):
+    """Open an ABSOLUTE directory path as a dir fd by walking each component from the filesystem root with
+    O_DIRECTORY|O_NOFOLLOW, so a symlinked store root OR any symlinked ancestor is refused (ELOOP) rather
+    than silently followed off-tree, matching the contained no-follow discipline (spec 4.5, 17; the
+    symlink-resolution rule). `Path.resolve()` is deliberately NOT used to resolve a pointer target: it
+    canonicalizes symlinks BEFORE the open, so a symlinked target would resolve away and open
+    successfully. Raises OSError, which the caller maps to CANNOT-EVALUATE."""
+    parts = Path(abspath).parts
+    if not parts or parts[0] != os.sep:
+        raise OSError("store root {!r} is not an absolute POSIX path".format(str(abspath)))
+    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)   # the filesystem root itself is never a symlink
+    for comp in parts[1:]:
+        try:
+            nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        finally:
+            os.close(fd)                                    # close the parent whether or not the open raised
+        fd = nfd
+    return fd
+
+
+def _open_store_root_fd(store_root, pointer):
+    """Open a resolved store root as a dir fd. The DEFAULT location IS the product root (the operator's
+    trusted --root anchor), opened final-component no-follow. A POINTER-named target (a `dir:`/absolute
+    path) is opened by the no-follow walk from the filesystem root, so a symlinked store root or a
+    symlinked ancestor is refused rather than followed. Raises OSError, mapped to CANNOT-EVALUATE."""
+    if pointer:
+        return _open_dir_nofollow(store_root)
+    return _open_root_fd(store_root)
 
 
 def _read_toml_contained(root_fd, relpath):
@@ -233,7 +270,9 @@ def _immediate_subdirs(store_root_fd, working_rel):
 def discover_machine_store(store_root_fd, store_root):
     """Locate the single machine store under `.working/`. Returns (status, machine_dir, detail):
       "one"      exactly one immediate `.working/` subdir carries a devprocess manifest (machine_dir set)
-      "zero"     none does, OR `.working/` is absent (no store found at this location)
+      "absent"   `.working/` is absent (no store tree here at all: a genuinely un-adopted location)
+      "present"  `.working/` EXISTS but no immediate subdir carries a valid devprocess manifest (a
+                 present-but-invalid store, never treated as absent, spec residual 17)
       "multiple" more than one does (ambiguous: cannot choose)
     Raises StoreError (cannot-evaluate) on any read error, a non-directory `.working/`, or a refused
     symlink. The scan is EXHAUSTIVE and strict-unique: `toml` is the expected name (its match, when the
@@ -241,7 +280,7 @@ def discover_machine_store(store_root_fd, store_root):
     (spec 4.5, residual 17)."""
     subdirs = _immediate_subdirs(store_root_fd, WORKING_DIRNAME)
     if subdirs is None:
-        return "zero", None, "{}/ is absent".format(WORKING_DIRNAME)
+        return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
     matches = []
     for name in subdirs:
         manifest_rel = "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)
@@ -252,8 +291,8 @@ def discover_machine_store(store_root_fd, store_root):
         if isinstance(base, dict) and base.get("standard") == STANDARD_TOKEN:
             matches.append(name)
     if not matches:
-        return "zero", None, "no {}/*/{} declares standard = {!r}".format(
-            WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
+        return "present", None, "{}/ is present but no {}/*/{} declares standard = {!r}".format(
+            WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
     if len(matches) > 1:
         return "multiple", None, "{} machine stores declare the devprocess token: {}".format(
             len(matches), ", ".join(sorted(matches)))
@@ -313,7 +352,10 @@ def _target_store_root(target, product_root):
     if path.is_absolute():
         return path
     # A relative dir: path roots at the product repository root (the named fixed root for the pointer).
-    return (Path(product_root) / path).resolve()
+    # Joined WITHOUT Path.resolve(): resolve() would canonicalize and FOLLOW symlinks, defeating the
+    # no-follow walk that opens the store root; the walk (_open_dir_nofollow) refuses any symlinked
+    # component of the joined path instead (MAJOR 2).
+    return Path(product_root) / path
 
 
 def _read_pointer_target(product_root_fd, relpath):
@@ -357,7 +399,10 @@ def resolve_store(product_root):
     try:
         try:
             local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL)
-            committed = _read_pointer_target(product_root_fd, POINTER_REL)
+            # The local override wins WHOLESALE (spec 4.3): the committed pointer is consulted only when
+            # no valid override exists, so a malformed committed pointer never fails a resolution the
+            # override already settled (MAJOR 1).
+            committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
         except StoreError as exc:
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
@@ -393,7 +438,9 @@ def _resolve_at(store_root, source, target, pointer):
         return Resolution(CANNOT_EVALUATE, "store root {} is not a directory".format(store_root),
                           target=target, pointer_source=source)
     try:
-        store_root_fd = _open_root_fd(store_root)
+        # A pointer target is opened by the no-follow walk from the filesystem root (a symlinked store
+        # root or ancestor is refused, MAJOR 2); the default location is the trusted product-root anchor.
+        store_root_fd = _open_store_root_fd(store_root, pointer)
     except OSError as exc:
         return Resolution(CANNOT_EVALUATE, "cannot open store root {} ({})".format(store_root, exc),
                           target=target, pointer_source=source)
@@ -413,14 +460,18 @@ def _resolve_at(store_root, source, target, pointer):
     if status == "multiple":
         return Resolution(CANNOT_EVALUATE, detail, store_root=store_root, pointer_source=source,
                           target=target)
-    # "zero": a pointer promised a store that is not there (cannot-evaluate); the default fallback with
-    # no store is simply not-adopted (opf init). A mistyped devprocess token lands here: it is
-    # cannot-evaluate under a pointer (residual 17), and indistinguishable from a fresh repo at the
-    # default, where it is not-adopted.
+    # No single machine store. A POINTER promised a store, so either shape (absent or present-invalid) is
+    # cannot-evaluate. At the DEFAULT location we distinguish (BLOCKER 2, spec residual 17): an absent
+    # `.working/` is a genuinely un-adopted repo (NOT-ADOPTED, opf init is the remedy), while a PRESENT
+    # `.working/` carrying no valid [devprocess] manifest is a present-but-invalid store that must never
+    # read as absent (CANNOT-EVALUATE), or opf init could overwrite it.
     if pointer:
         return Resolution(CANNOT_EVALUATE,
                           "pointer resolves to {} but {}".format(store_root, detail),
                           store_root=store_root, pointer_source=source, target=target)
+    if status == "present":
+        return Resolution(CANNOT_EVALUATE, detail, store_root=store_root, pointer_source=source,
+                          target=target)
     return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
                       store_root=store_root, pointer_source=source)
 
@@ -444,6 +495,10 @@ def _match_base_compat(range_str, version_tuple):
     clauses = range_str.split()
     if not clauses:
         return None, "base_compat is empty"
+    # Validate EVERY clause of the declared range grammar FIRST (MINOR 1): a malformed clause is a
+    # diagnostic error (cannot-evaluate) even when an earlier clause already fails the match, so
+    # ">=2.0.0 garbage" is flagged malformed rather than short-circuiting to a silent (False, None).
+    parsed = []
     for clause in clauses:
         op_fn = operator.eq
         rest = clause
@@ -454,6 +509,8 @@ def _match_base_compat(range_str, version_tuple):
         want = _parse(rest)
         if want is None:
             return None, "malformed base_compat clause {!r}".format(clause)
+        parsed.append((op_fn, want))
+    for op_fn, want in parsed:
         if not op_fn(version_tuple, want):
             return False, None
     return True, None
@@ -524,8 +581,16 @@ def validate_manifest(data, supported_profiles=None):
             unevaluated.append(name)      # a profile this tool does not cover: fail-safe, never a fail
             continue
         prof_major = _profile_major(prof)
-        if prof_major is None or prof_major not in supported_majors:
-            # An unknown or unsupported profile major is ignored for enforcement (spec 9.1), recorded
+        if prof_major is None:
+            # The NAME is supported but its major cannot be determined (a non-dict profile, or a version
+            # that is absent, non-string, or not a bare SemVer): a covered profile we cannot grade is a
+            # FAIL-CLOSED finding (INVALID), never routed to unevaluated, which would skip all its gates
+            # and let the manifest validate VALID (BLOCKER 1, spec 9.1).
+            findings.append("[profiles.{}] is a supported profile but its major cannot be determined "
+                            "(version absent, non-string, or not a bare SemVer); fail-closed".format(name))
+            continue
+        if prof_major not in supported_majors:
+            # A genuinely UNSUPPORTED profile major is ignored for enforcement (spec 9.1), recorded
             # unevaluated rather than failing the base over it.
             unevaluated.append(name)
             continue
@@ -542,6 +607,24 @@ def _validate_top_level(data, findings):
         findings.append("unknown top-level table(s): {}".format(", ".join(sorted(extra))))
 
 
+def _check_enum(table, key, allowed, where, findings):
+    """Type-THEN-membership check for a closed-vocabulary scalar field. A wrong TYPE is a fail-closed
+    finding (MAJOR 3: never a crash on an unhashable value, e.g. a list, reaching a later set/dict/rank
+    test), and a well-typed but out-of-vocabulary value is the ordinary membership finding. Returns the
+    value only when it is a clean, valid member, else None, so callers can rely on any returned value
+    being a scalar string safe for a downstream rank/membership test."""
+    if key not in table:
+        return None
+    value = table.get(key)
+    if not isinstance(value, str):
+        findings.append("{}.{} must be a string, not {}".format(where, key, type(value).__name__))
+        return None
+    if value not in allowed:
+        findings.append("{}.{} {!r} is not one of {}".format(where, key, value, list(allowed)))
+        return None
+    return value
+
+
 def _validate_base(base, findings):
     """Validate the [devprocess] base table; returns the parsed spec_version tuple or None."""
     extra = set(base) - DEVPROCESS_KEYS
@@ -556,13 +639,12 @@ def _validate_base(base, findings):
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
             findings.append("[devprocess].spec_version {!r} is not a bare SemVer".format(sv))
-    if "layout" in base and base.get("layout") not in LAYOUTS:
-        findings.append("[devprocess].layout {!r} is not one of {}".format(base.get("layout"), list(LAYOUTS)))
-    if "posture" in base and base.get("posture") not in POSTURES:
-        findings.append("[devprocess].posture {!r} is not one of {}".format(base.get("posture"), list(POSTURES)))
-    if "import_status" in base and base.get("import_status") not in IMPORT_STATES:
-        findings.append("[devprocess].import_status {!r} is not one of {}".format(
-            base.get("import_status"), list(IMPORT_STATES)))
+    # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
+    # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
+    # in a later rank/membership test.
+    _check_enum(base, "layout", LAYOUTS, "[devprocess]", findings)
+    _check_enum(base, "posture", POSTURES, "[devprocess]", findings)
+    _check_enum(base, "import_status", IMPORT_STATES, "[devprocess]", findings)
     return spec_tuple
 
 
@@ -788,7 +870,8 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
     if floor is not None:
         if floor not in POSTURES:
             findings.append("{}.posture_floor {!r} is not one of {}".format(where, floor, list(POSTURES)))
-        elif base_posture in POSTURE_RANK and POSTURE_RANK[floor] < POSTURE_RANK[base_posture]:
+        elif isinstance(base_posture, str) and base_posture in POSTURE_RANK \
+                and POSTURE_RANK[floor] < POSTURE_RANK[base_posture]:
             findings.append("{}.posture_floor {!r} weakens the base posture {!r}; a profile may only add "
                             "requirements (spec 9.1/11)".format(where, floor, base_posture))
 
@@ -825,7 +908,10 @@ def load_manifest(resolution, supported_profiles=None):
                                   ["store is not resolved ({})".format(resolution.status)])
     manifest_rel = "{}/{}".format(resolution.machine_rel, MANIFEST_NAME)
     try:
-        store_root_fd = _open_root_fd(resolution.store_root)
+        # Reopen the store root the SAME no-follow way it was resolved: a pointer target ("committed" /
+        # "local-override") through the walk that refuses symlinks, the default through the anchor open.
+        store_root_fd = _open_store_root_fd(resolution.store_root,
+                                            resolution.pointer_source != "default")
     except OSError as exc:
         return ManifestValidation(CANNOT_EVALUATE,
                                   ["cannot open store root {} ({})".format(resolution.store_root, exc)])
@@ -908,7 +994,11 @@ def self_test():
             lines += ["", extra_top]
         return "\n".join(lines) + "\n"
 
-    base = Path(tempfile.mkdtemp(prefix="opf-store-selftest-"))
+    # .resolve() the fixture base so the synthetic stores have NO symlinked ancestor: the pointer-target
+    # no-follow walk (MAJOR 2) refuses symlinked ancestors, and a symlinked TMPDIR ancestor would
+    # otherwise perturb the absolute-dir: cases (test hermeticity). The deliberate symlink case builds its
+    # own link under this real base.
+    base = Path(tempfile.mkdtemp(prefix="opf-store-selftest-")).resolve()
     counter = [0]
 
     def build_store(manifest=None, machine_subdirs=None, pointer=None, local_pointer=None,
@@ -963,6 +1053,21 @@ def self_test():
         res = resolve_store(pr3)
         check("override-wins", res.status == RESOLVED and res.pointer_source == "local-override")
 
+        # 2c: a VALID local override still RESOLVES even when the lower-precedence committed pointer is
+        # MALFORMED (MAJOR 1): the committed pointer is consulted only when no valid override exists, so
+        # its malformation never fails a resolution the override already settled. The committed pointer
+        # here has a [store] table with NO target (malformed), which would raise on its own.
+        ovr_store = base / "override-only-store"
+        (ovr_store / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
+        (ovr_store / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).write_text(
+            manifest_text(), encoding="utf-8")
+        pr = build_store(make_working=False,
+                         pointer='[store]\nnot_target = "dir:/whatever"\n',            # malformed: no target
+                         local_pointer='[store]\ntarget = "dir:{}"\n'.format(ovr_store))
+        res = resolve_store(pr)
+        check("override-wins-over-malformed-committed",
+              res.status == RESOLVED and res.pointer_source == "local-override")
+
         # 3: no pointer and no .working -> NOT-ADOPTED.
         root = build_store(make_working=False)
         check("no-store-not-adopted", resolve_store(root).status == NOT_ADOPTED)
@@ -985,9 +1090,12 @@ def self_test():
         pr = build_store(make_working=False, pointer='[store]\ntarget = "dir:{}"\n'.format(typo_store))
         check("typo-token-pointer-cannot-eval", resolve_store(pr).status == CANNOT_EVALUATE)
 
-        # 6b: mistyped token at the DEFAULT (no pointer) -> NOT-ADOPTED (documented distinction).
+        # 6b: mistyped token at the DEFAULT (no pointer) -> CANNOT-EVALUATE (BLOCKER 2, spec residual 17):
+        # a PRESENT `.working/` carrying no valid manifest is a present-but-invalid store, distinguishable
+        # from a fresh un-adopted repo (case 3, which has NO `.working/`) and never treated as absent, so
+        # opf init cannot overwrite it.
         root = build_store(manifest=manifest_text(standard="dev-process"))
-        check("typo-token-default-not-adopted", resolve_store(root).status == NOT_ADOPTED)
+        check("typo-token-default-cannot-eval", resolve_store(root).status == CANNOT_EVALUATE)
 
         # 7: an unresolvable pointer (target dir absent) -> CANNOT-EVALUATE, no default fallback.
         root = build_store(manifest=manifest_text(),      # a valid default store IS present...
@@ -1004,6 +1112,34 @@ def self_test():
         pr = build_store(make_working=False, pointer='[store]\ntarget = "../relative-store"\n')
         check("bare-relative-cannot-eval", resolve_store(pr).status == CANNOT_EVALUATE)
 
+        # 7d: an absolute dir: target with a symlinked ANCESTOR is refused by the no-follow walk (MAJOR 2).
+        # The final component is a real dir, so the old final-only O_NOFOLLOW open would FOLLOW the
+        # symlinked ancestor and return RESOLVED; the component-by-component walk refuses it. The store
+        # behind the symlink IS valid, proving the refusal is the ancestor symlink, not a missing store.
+        anc_real = base / "anc-real-dir"
+        anc_store = anc_real / "store"
+        (anc_store / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
+        (anc_store / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).write_text(
+            manifest_text(), encoding="utf-8")
+        anc_link = base / "anc-link"
+        os.symlink(str(anc_real), str(anc_link))          # anc_link -> anc_real: a symlinked ancestor
+        pr = build_store(make_working=False,
+                         pointer='[store]\ntarget = "dir:{}/store"\n'.format(anc_link))
+        check("symlink-ancestor-refused", resolve_store(pr).status == CANNOT_EVALUATE)
+
+        # 7e: a RELATIVE dir: target that is a symlink is refused (MAJOR 2, ~313): the removed
+        # Path.resolve() would have canonicalized the symlink away and opened the real store behind it
+        # (RESOLVED); the joined path is walked no-follow instead -> CANNOT-EVALUATE. The symlink lives
+        # inside the product root and points at a valid store, so the refusal is the symlink, not absence.
+        relroot = build_store(make_working=False)          # a product root with no store of its own
+        rel_real = relroot / "rel-real-store"
+        (rel_real / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
+        (rel_real / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).write_text(
+            manifest_text(), encoding="utf-8")
+        os.symlink(str(rel_real), str(relroot / "rel-link-store"))   # a symlink inside the product root
+        (relroot / POINTER_REL).write_text('[store]\ntarget = "dir:rel-link-store"\n', encoding="utf-8")
+        check("symlink-relative-dir-refused", resolve_store(relroot).status == CANNOT_EVALUATE)
+
         # 8: malformed base fails closed. A discovered store (token present) whose base violates the
         # schema is INVALID, never VALID.
         bad_base = manifest_text().replace('posture = "required"', 'posture = "loose"')
@@ -1017,10 +1153,16 @@ def self_test():
         check("not-a-table-cannot-eval", validate_manifest([]).status == CANNOT_EVALUATE)
         check("no-base-cannot-eval", validate_manifest({"store": {}}).status == CANNOT_EVALUATE)
 
-        # 8c: an unknown top-level table and an unknown [devprocess] key are findings.
+        # 8c: an unknown top-level table AND an unknown [devprocess] key are each findings. The input adds
+        # BOTH a top-level [bogus] table and an unknown key UNDER [devprocess], so the comment matches what
+        # is actually exercised.
         import tomllib as _t
-        m_extra = _t.loads(manifest_text(extra_top="[bogus]\nx = 1"))
-        check("unknown-top-table-invalid", validate_manifest(m_extra).status == INVALID)
+        m_extra = _t.loads(manifest_text(extra_top="[bogus]\nx = 1").replace(
+            'import_status = "none"', 'import_status = "none"\nmystery_key = 1'))
+        mv_extra = validate_manifest(m_extra)
+        check("unknown-top-table-invalid", mv_extra.status == INVALID)
+        check("unknown-top-table-named", any("bogus" in f for f in mv_extra.findings))
+        check("unknown-devprocess-key-named", any("mystery_key" in f for f in mv_extra.findings))
 
         # 9: a profile is IGNORED by a base-only validator but ENFORCED by a profile-aware one.
         m_aiqt = _t.loads(manifest_text(with_aiqt=True))
@@ -1067,11 +1209,34 @@ def self_test():
         check("base-incompat-invalid", aware.status == INVALID)
         check("base-incompat-named", any("does not admit the base spec_version" in f for f in aware.findings))
 
+        # 10e: a COVERED profile (aiqt is supported) whose version is not a bare SemVer cannot be graded
+        # and is a FAIL-CLOSED finding (INVALID), never silently routed to unevaluated, which would skip
+        # all its gates and validate VALID (BLOCKER 1).
+        m_badver = _t.loads(manifest_text(with_aiqt=True, aiqt_version="not-a-semver"))
+        aware = validate_manifest(m_badver, supported_profiles={"aiqt": {1}})
+        check("covered-profile-bad-version-invalid", aware.status == INVALID)
+        check("covered-profile-bad-version-not-unevaluated", "aiqt" not in aware.unevaluated_profiles)
+        check("covered-profile-bad-version-named",
+              any("aiqt" in f and "major cannot be determined" in f for f in aware.findings))
+
+        # 10f: a wrong-TYPED base field (posture as a LIST) is a fail-closed finding, NEVER a crash, even
+        # with a supported profile whose weakening check reads the base posture through POSTURE_RANK
+        # (MAJOR 3: an unhashable list would otherwise raise TypeError at the dict-membership test).
+        m_badtype = _t.loads(manifest_text(with_aiqt=True).replace(
+            'posture = "required"', 'posture = ["required"]'))
+        aware = validate_manifest(m_badtype, supported_profiles={"aiqt": {1}})
+        check("wrong-typed-posture-invalid", aware.status == INVALID)
+        check("wrong-typed-posture-named", any("posture must be a string" in f for f in aware.findings))
+
         # 11: the base_compat range grammar (defined here).
         check("compat-match", _match_base_compat(">=1.0.0 <2.0.0", (1, 2, 3)) == (True, None))
         check("compat-nomatch", _match_base_compat(">=2.0.0", (1, 0, 0))[0] is False)
         check("compat-malformed", _match_base_compat(">=x.y.z", (1, 0, 0))[0] is None)
         check("compat-exact", _match_base_compat("1.0.0", (1, 0, 0)) == (True, None))
+        # MINOR 1: a malformed clause is flagged EVEN when an earlier clause already fails the match, so
+        # the whole declared range is validated rather than short-circuiting to a silent (False, None).
+        check("compat-malformed-clause-not-masked",
+              _match_base_compat(">=2.0.0 garbage", (1, 0, 0))[0] is None)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
