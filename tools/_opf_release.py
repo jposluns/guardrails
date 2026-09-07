@@ -1,0 +1,924 @@
+#!/usr/bin/env python3
+"""OPF (DevProcess) release triad: version.toml + worklog.toml + span tiling + coverage digests (U3).
+
+Offline, stdlib only, fail-closed. This is the DELICATE release-triad manager the later OPF units
+(changelog gates U5, doctor U6) build on. It validates the two machine ledgers of the release triad and
+implements the RELEASE CUT that freezes the unreleased worklog tail into a released span. It extends the
+conventions of U1 (`_opf_store`: the VALID/INVALID/CANNOT-EVALUATE outcome model, contained fail-closed
+reads) and U2 (`_opf_schema`: the record envelope, the reduced worklog entry, the `<NS>-<n>` id grammar,
+the RFC 3339 UTC timestamp validator) rather than duplicating them; those primitives are imported.
+
+Four things live here, all from OPF-SPEC.md sections 6 and 7 (and the round-8 terminality model of 8.4):
+
+  1. version.toml, THE VERSION AND RELEASE LEDGER (spec 6.1). A `schema` marker plus append-only,
+     immutable `[[release]]` rows (version / date / worklog_span / coverage_digest) and `[[summary]]`
+     rows (covers / status / digest / superseded_by) that back the curated changelog. Release versions
+     are SemVer, unique, and MONOTONIC in row order; spans are CONTIGUOUS and NON-OVERLAPPING in ID
+     order so the released worklog tiles exactly and the unreleased tail is everything after the last
+     span (spec 6.1).
+
+  2. worklog.toml, THE DURABLE OPERATIONAL RECORD (spec 6.2). A `schema` marker plus append-only
+     `[[entry]]` rows, each a reduced-envelope `worklog` record validated through U2's `validate_record`.
+     The worklog is durable and MUTABLE-UNTIL-RELEASE: an unreleased entry (in the tail) is pre-terminal
+     and may be corrected in place; once a release freezes its span the entry is terminal and immutable;
+     no entry is ever deleted (spec 6.2, 8.4, 13).
+
+  3. THE COVERAGE-DIGEST CANONICALIZATION (spec 6.1). Spec 6.1 leaves the exact canonicalization "to the
+     schema release that follows this specification"; THIS unit DEFINES it (scheme `opf-worklog-coverage-v1`,
+     the ambiguity note below): a deterministic digest over the FULL content of the covered worklog
+     entries, taken in ID order, with keys canonically ordered so the digest is reorder-invariant across
+     the entry array and within every table. Freezing a span records this digest; a later edit to a
+     frozen entry, or an append into a released span, changes the recomputed digest and is a gate failure.
+
+  4. THE RELEASE CUT (spec 6.1, 6.2, 8.4, round-8 terminality). Freezing the current unreleased worklog
+     span into a released span keyed to a new version: it computes the tail (`released_end`+1 .. the last
+     worklog id), records a new `[[release]]` row (new version, date, the tail span, the tail's coverage
+     digest), and leaves the store so the new unreleased tail is EMPTY. The cut is a PURE function over
+     inert data (workers-produce-inert-data): it returns a NEW version.toml value and never mutates the
+     worklog or deletes anything. It fails closed on any inconsistent state (a non-monotonic new version,
+     a ledger that does not already tile, a gap in the tail, a duplicate version).
+
+Enforcing the round-8 rules exactly (spec 8.4, 6.2, 12, 13):
+  - An unreleased worklog entry is PRE-TERMINAL and mutable; a released span is FROZEN and immutable and
+    is never rewritten (`check_frozen_coverage`, `check_no_append_into_released`).
+  - NOTHING is ever deleted (`check_no_deletion`): an id present before is present after, in active or
+    archive.
+  - Rotation of released spans is ARCHIVAL MOVEMENT only (`check_ids_partition`,
+    `check_rotation_only_released`): every id exists in exactly one active-or-archive location, and only
+    released, frozen spans may rotate, never the mutable unreleased tail (spec 12).
+
+Every malformed, illegal, or unidentifiable input fails closed to INVALID or CANNOT-EVALUATE, never a
+silent VALID (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule: a present-but-unparseable
+ledger is a refusing failure that names the fault, never silent absence).
+
+Reference-tooling / spec ambiguities recorded for the finalizer (each resolved the strict, fail-closed
+way and named so the choice is reviewable, per disclose-guard-residuals). The spec's own version.toml is
+"illustrative"; this unit is the schema release that follows it for the release triad, and DEFINES the
+following where sections 6 and 7 leave a gap:
+  - THE COVERAGE-DIGEST CANONICALIZATION is defined here as scheme `opf-worklog-coverage-v1`: the literal
+    header line `opf-worklog-coverage-v1`, then, for the covered entries in ascending WL-number order,
+    one canonical serialization per entry, newline-separated; the digest is `sha256:` + the hex SHA-256
+    of the UTF-8 bytes. Each entry is serialized recursively with every table's keys in sorted order and
+    every array in its given order, so the digest is invariant to reordering the entry array or the keys
+    within a table but sensitive to any content change. An unexpected value type (only str / int / bool /
+    list / table are expected in a validated worklog entry) fails the canonicalization CLOSED (ReleaseError),
+    never a silent digest over a lossy serialization. An EMPTY span digests the header alone, a
+    well-defined constant (spec 6.1 permits an empty span for a release with no worklog entries; spec 14.3
+    pre-migration releases). The finalizer may re-fix the scheme in one place if adopters need another.
+  - version.toml / worklog.toml FILE SHAPE is defined here as an optional top-level `schema` int plus the
+    `[[release]]` / `[[summary]]` (version.toml) or `[[entry]]` (worklog.toml) arrays of tables, matching
+    Appendix B/C; unknown top-level keys and unknown row keys are fail-closed findings (closed keyset,
+    spec 8.3 discipline applied to the ledgers). SemVer is validated to SemVer 2.0.0 precedence including
+    pre-release ordering; build metadata is accepted and ignored for precedence, per SemVer 2.0.0.
+  - SPAN TILING is defined here as: the non-empty release spans, taken in release-row order, start at WL-1
+    and each next non-empty span starts at the previous span's end + 1 (contiguous, non-overlapping, in ID
+    order, spec 6.1); an empty span (a release with no new worklog entries, spec 6.1 / 14.3) contributes
+    no coverage and does not advance the tiling cursor, so it may sit anywhere. A gap, an overlap, a
+    non-monotone or malformed span, or a first non-empty span not starting at WL-1 is a fail-closed finding.
+  - SUMMARY-ROW validation here is STRUCTURAL: covers token parses (a version, an `a..b` range over
+    contiguous released versions in ledger order, or `unreleased`) and refers only to ledger versions;
+    status is one of working / published / superseded; `digest` is required and well-formed once published
+    or superseded; `superseded_by` is present exactly when superseded and is itself a well-formed covers
+    token; `unreleased` carries status working. The FACTS gates that tile the ledger exactly and match
+    CHANGELOG.md headings 1:1 (spec 7.1) and recompute freeze digests (spec 7.2) are U5's changelog gates,
+    which build on these carriers; the boundary is called out so U5 does not re-derive it.
+  - THE REQUIRED-BUMP computation (the minimum version bump for a change, spec 6.1) is explicitly OUT OF
+    SCOPE here: spec 6.1 names it "a consumer of the ledger, not part of the base standard's definition".
+    This unit is that ledger; the release-delta consumer is not built here (build-plan U3 does not assign
+    it), and is noted for the finalizer rather than stubbed.
+"""
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# U1 supplies the outcome model; U2 supplies the reduced-worklog record validator, the id-shape helper,
+# and the RFC 3339 UTC timestamp validator. Reuse rather than re-declare (single source of truth).
+from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
+from _opf_schema import (  # noqa: E402
+    validate_record, _valid_id_shape, _valid_timestamp,
+)
+
+
+WL_NAMESPACE = "WL"                       # the worklog type's namespace (spec 8.1)
+
+# version.toml / worklog.toml layout (defined here; see the file-shape ambiguity note).
+VERSION_TOP_KEYS = frozenset({"schema", "release", "summary"})
+WORKLOG_TOP_KEYS = frozenset({"schema", "entry"})
+RELEASE_KEYS = frozenset({"version", "date", "worklog_span", "coverage_digest"})
+SUMMARY_KEYS = frozenset({"covers", "status", "digest", "superseded_by"})
+
+SUMMARY_STATUSES = ("working", "published", "superseded")
+UNRELEASED = "unreleased"                 # the reserved covers token for the working tail (spec 6.1)
+
+# A coverage / freeze digest is `sha256:` + 64 lowercase hex (the form of every spec example, Appendix B).
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+# The canonicalization scheme header (see the coverage-digest ambiguity note). Versioned so a future
+# scheme is distinguishable from this one by construction.
+COVERAGE_SCHEME = "opf-worklog-coverage-v1"
+
+# SemVer 2.0.0 core + optional -prerelease + optional +build (build ignored for precedence).
+_SEMVER_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
+
+
+class ReleaseError(Exception):
+    """A release-triad canonicalization cannot be completed (an unexpected value type in a worklog
+    entry). Callers map it to a CANNOT-EVALUATE / fail-closed outcome, never a silent digest."""
+
+
+# --- small result carriers (the U2 RecordValidation idiom) -------------------------------------------
+
+class VersionValidation:
+    __slots__ = ("status", "findings", "releases", "summaries")
+
+    def __init__(self, status, findings=None, releases=None, summaries=None):
+        self.status = status              # VALID / INVALID / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.releases = releases or []    # the parsed [[release]] rows, in file order
+        self.summaries = summaries or []  # the parsed [[summary]] rows, in file order
+
+
+class WorklogValidation:
+    __slots__ = ("status", "findings", "entry_ids")
+
+    def __init__(self, status, findings=None, entry_ids=None):
+        self.status = status              # VALID / INVALID / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.entry_ids = entry_ids or []  # the WL-numbers of the parsed entries, in file order
+
+
+class CutResult:
+    __slots__ = ("status", "findings", "version_data", "frozen_span", "coverage_digest")
+
+    def __init__(self, status, findings=None, version_data=None, frozen_span=None, coverage_digest=None):
+        self.status = status              # VALID (cut computed) / INVALID / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.version_data = version_data  # the NEW version.toml value with the release row appended
+        self.frozen_span = frozen_span    # the ["WL-a", "WL-b"] span the cut froze, or [] for an empty cut
+        self.coverage_digest = coverage_digest
+
+
+# --- SemVer (spec 6.1: SemVer versions, unique and monotonic) ----------------------------------------
+
+def parse_semver(value):
+    """A SemVer 2.0.0 precedence key for `value`, or None when it is not a valid SemVer string. The key
+    is a tuple comparable so a<b iff a has lower precedence: (major, minor, patch, release_rank,
+    prerelease_key). release_rank is 1 for a version with no prerelease and 0 for a prerelease, so a
+    release outranks any prerelease of the same core; prerelease identifiers compare numeric-before-
+    alphanumeric with numeric parts as ints and a shorter identifier set as lower precedence (SemVer 2.0.0
+    para 11). Build metadata is accepted and ignored for precedence."""
+    if not isinstance(value, str):
+        return None
+    m = _SEMVER_RE.match(value)
+    if not m:
+        return None
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    pre = m.group(4)
+    if pre is None:
+        return (major, minor, patch, 1, ())
+    ids = []
+    for ident in pre.split("."):
+        if ident.isdigit():
+            # A numeric identifier (no leading zero, enforced by the regex) compares as an int, and
+            # numeric identifiers always have lower precedence than alphanumeric ones (0 before 1 below).
+            ids.append((0, int(ident)))
+        else:
+            ids.append((1, ident))
+    return (major, minor, patch, 0, tuple(ids))
+
+
+# --- WL id helpers -----------------------------------------------------------------------------------
+
+def _wl_num(value):
+    """The positive integer n of a well-formed `WL-<n>` id, or None for anything else (a malformed id or
+    a non-worklog namespace)."""
+    shape = _valid_id_shape(value)
+    if shape is None or shape[0] != WL_NAMESPACE:
+        return None
+    return shape[1]
+
+
+def _parse_span(span, findings, where):
+    """Parse a `worklog_span` value into (start, end) WL-numbers, or None for an empty span, appending a
+    finding and returning False for a malformed one. A non-empty span is a two-element array of WL ids
+    with start <= end (spec 6.1)."""
+    if span == []:
+        return None
+    if not isinstance(span, list) or len(span) != 2:
+        findings.append("{}: worklog_span must be a two-element [start, end] array or [] (spec 6.1)".format(where))
+        return False
+    a, b = _wl_num(span[0]), _wl_num(span[1])
+    if a is None or b is None:
+        findings.append("{}: worklog_span entries must be well-formed WL-<n> ids, got {!r}".format(where, span))
+        return False
+    if a > b:
+        findings.append("{}: worklog_span start {} is after end {} (spec 6.1)".format(where, span[0], span[1]))
+        return False
+    return (a, b)
+
+
+# --- coverage-digest canonicalization (spec 6.1; scheme defined here) --------------------------------
+
+def _canonical(value):
+    """A deterministic canonical string for a validated worklog value: tables have their keys in sorted
+    order, arrays keep their order, strings are JSON-escaped (a stable, reversible escaping), ints and
+    bools have a fixed spelling. An unexpected type fails CLOSED (ReleaseError) rather than serializing
+    lossily, so the digest can never be computed over a value the canonicalization does not fully cover."""
+    # bool is an int subclass; test it first so True/False never spell as 1/0.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            json.dumps(k, ensure_ascii=False) + ":" + _canonical(v)
+            for k, v in sorted(value.items())) + "}"
+    raise ReleaseError("cannot canonicalize value of type {} (worklog entries carry only str/int/bool/"
+                       "array/table)".format(type(value).__name__))
+
+
+def coverage_digest(entries):
+    """The coverage digest over an iterable of worklog entry tables (spec 6.1, scheme
+    `opf-worklog-coverage-v1`). Entries are ordered by WL-number ascending here, so the digest is
+    invariant to the order they are passed in (reorder-invariant across the entry array); each entry is
+    canonicalized with sorted keys, so it is also invariant to key order within a table. Returns
+    `sha256:<hex>`. Raises ReleaseError (fail-closed) on an entry that is not a table, lacks a WL id, or
+    carries an uncanonicalizable value."""
+    keyed = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ReleaseError("a worklog entry is not a table")
+        n = _wl_num(entry.get("id"))
+        if n is None:
+            raise ReleaseError("a worklog entry lacks a well-formed WL-<n> id: {!r}".format(entry.get("id")))
+        keyed.append((n, entry))
+    keyed.sort(key=lambda t: t[0])
+    parts = [COVERAGE_SCHEME]
+    parts.extend(_canonical(entry) for _, entry in keyed)
+    payload = "\n".join(parts).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _entries_by_id(worklog_data):
+    """Map WL-number -> entry table for the active worklog entries, or (None, findings) on a malformed
+    worklog. A duplicate WL-number is a finding (spec 8.2: ids are never reused)."""
+    findings = []
+    by_id = {}
+    entries = worklog_data.get("entry", []) if isinstance(worklog_data, dict) else None
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        return None, ["worklog [[entry]] is not an array of tables"]
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            findings.append("worklog entry #{} is not a table".format(i + 1))
+            continue
+        n = _wl_num(entry.get("id"))
+        if n is None:
+            findings.append("worklog entry #{} lacks a well-formed WL-<n> id: {!r}".format(i + 1, entry.get("id")))
+            continue
+        if n in by_id:
+            findings.append("duplicate worklog id WL-{}: ids are never reused (spec 8.2)".format(n))
+            continue
+        by_id[n] = entry
+    return by_id, findings
+
+
+def compute_span_digest(entries_by_id, span):
+    """The coverage digest over the entries a span covers, drawn from an id->entry map. `span` is a
+    parsed (start, end) tuple or None (an empty span). Raises ReleaseError (fail-closed) when a covered
+    id is absent from the map: a span cannot be digested against a worklog missing its entries (the
+    entries may sit in the archive, which the caller must merge in first; spec 12)."""
+    if span is None:
+        return coverage_digest([])
+    start, end = span
+    covered = []
+    for n in range(start, end + 1):
+        entry = entries_by_id.get(n)
+        if entry is None:
+            raise ReleaseError("worklog entry WL-{} covered by a span is absent (merge the archive; "
+                               "spec 12)".format(n))
+        covered.append(entry)
+    return coverage_digest(covered)
+
+
+# --- span tiling (spec 6.1) --------------------------------------------------------------------------
+
+def _tile_releases(releases, findings):
+    """Validate that the non-empty release spans tile the released worklog exactly (contiguous,
+    non-overlapping, in ID order, starting at WL-1) and return the released end WL-number (0 when no span
+    covers anything). Empty spans contribute nothing and do not advance the cursor (spec 6.1 / 14.3).
+    Appends a finding per gap, overlap, malformed span, or wrong start. `releases` is the parsed row list;
+    each row must already carry a `worklog_span` value."""
+    cursor = 0                            # the highest WL-number tiled so far
+    for i, row in enumerate(releases):
+        where = "release #{} ({})".format(i + 1, row.get("version", "?"))
+        parsed = _parse_span(row.get("worklog_span"), findings, where)
+        if parsed is False:
+            continue                      # malformed span already reported; skip the tiling step for it
+        if parsed is None:
+            continue                      # an empty span covers nothing
+        start, end = parsed
+        expected = cursor + 1
+        if start != expected:
+            if start > expected:
+                findings.append("{}: span starts at WL-{} but WL-{} is uncovered (gap; spans must tile, "
+                                "spec 6.1)".format(where, start, expected))
+            else:
+                findings.append("{}: span starts at WL-{}, at or before the covered end WL-{} (overlap; "
+                                "spec 6.1)".format(where, start, cursor))
+            # Advance the cursor to the furthest covered id so a later row is judged against real coverage.
+            cursor = max(cursor, end)
+        else:
+            cursor = end
+    return cursor
+
+
+def released_end(releases):
+    """The highest WL-number covered by any release span (0 when none), computed WITHOUT re-reporting
+    tiling findings. Used by the release cut and rotation checks to find the frozen/unreleased boundary."""
+    end = 0
+    for row in releases:
+        span = row.get("worklog_span")
+        parsed = _parse_span(span, [], "")
+        if parsed and parsed is not True:
+            end = max(end, parsed[1])
+    return end
+
+
+# --- version.toml validation (spec 6.1) --------------------------------------------------------------
+
+def validate_version(data):
+    """Validate a parsed version.toml (spec 6.1). Returns a VersionValidation. CANNOT-EVALUATE when the
+    input is not a table; INVALID when a well-formed table violates the ledger schema; VALID otherwise.
+    Structural only: it validates the release rows (version SemVer + uniqueness + monotonicity, date,
+    span shape + tiling, digest format) and the summary rows (covers token, status, digest presence,
+    superseded_by), but leaves the changelog FACTS gates (tile-the-ledger-exactly, heading 1:1, freeze
+    recompute) to U5 and the coverage-digest recompute to `check_frozen_coverage`."""
+    if not isinstance(data, dict):
+        return VersionValidation(CANNOT_EVALUATE, ["version.toml is not a table"])
+
+    findings = []
+    extra = set(data) - VERSION_TOP_KEYS
+    if extra:
+        findings.append("version.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
+    if "schema" in data and type(data.get("schema")) is not int:
+        findings.append("version.toml schema must be an integer")
+
+    releases = data.get("release", [])
+    if not isinstance(releases, list):
+        return VersionValidation(INVALID, findings + ["[[release]] is not an array of tables"])
+    summaries = data.get("summary", [])
+    if not isinstance(summaries, list):
+        return VersionValidation(INVALID, findings + ["[[summary]] is not an array of tables"])
+
+    ledger_versions = []                  # released version strings, in row order (for covers-token lookup)
+    prev_key = None
+    for i, row in enumerate(releases):
+        where = "release #{}".format(i + 1)
+        if not isinstance(row, dict):
+            findings.append("{} is not a table".format(where))
+            continue
+        row_extra = set(row) - RELEASE_KEYS
+        if row_extra:
+            findings.append("{}: unknown key(s): {}".format(where, ", ".join(sorted(row_extra))))
+        for req in ("version", "date", "worklog_span", "coverage_digest"):
+            if req not in row:
+                findings.append("{}: missing required field: {}".format(where, req))
+
+        version = row.get("version")
+        key = parse_semver(version) if "version" in row else None
+        if "version" in row and key is None:
+            findings.append("{}: version {!r} is not a valid SemVer string (spec 6.1)".format(where, version))
+        elif key is not None:
+            if version in ledger_versions:
+                findings.append("{}: version {!r} is not unique in the ledger (spec 6.1)".format(where, version))
+            elif prev_key is not None and not (prev_key < key):
+                findings.append("{}: version {!r} is not strictly greater than the previous release "
+                                "(versions are monotonic, spec 6.1)".format(where, version))
+            prev_key = key if (prev_key is None or prev_key < key) else prev_key
+        if "version" in row:
+            ledger_versions.append(version)
+
+        if "date" in row and not _valid_timestamp(row.get("date")):
+            findings.append("{}: date must be an RFC 3339 UTC timestamp (spec 6.1)".format(where))
+        if "worklog_span" in row:
+            _parse_span(row.get("worklog_span"), findings, where)
+        if "coverage_digest" in row and not _valid_digest(row.get("coverage_digest")):
+            findings.append("{}: coverage_digest must be 'sha256:<64 hex>' (spec 6.1)".format(where))
+
+    # Spans must tile the released worklog exactly (contiguous, non-overlapping, from WL-1; spec 6.1).
+    _tile_releases([r for r in releases if isinstance(r, dict)], findings)
+
+    _validate_summaries(summaries, ledger_versions, findings)
+
+    return VersionValidation(INVALID if findings else VALID, findings, releases, summaries)
+
+
+def _valid_digest(value):
+    return isinstance(value, str) and _DIGEST_RE.match(value) is not None
+
+
+def _parse_covers(token, ledger_versions):
+    """Resolve a covers token against the ledger versions (in row order). Returns (kind, detail):
+    ("unreleased", None); ("single", version); or ("range", (lo_index, hi_index)). Returns (None, message)
+    when the token is malformed or refers to a version absent from the ledger (spec 6.1, 7.1)."""
+    if not isinstance(token, str) or not token:
+        return None, "covers must be a non-empty string"
+    if token == UNRELEASED:
+        return ("unreleased", None), None
+    if ".." in token:
+        parts = token.split("..")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None, "covers range {!r} must be 'a..b'".format(token)
+        lo, hi = parts
+        if lo not in ledger_versions or hi not in ledger_versions:
+            return None, "covers range {!r} names a version absent from the ledger".format(token)
+        li, hi_i = ledger_versions.index(lo), ledger_versions.index(hi)
+        if li > hi_i:
+            return None, "covers range {!r} is not in ledger order (a after b)".format(token)
+        return ("range", (li, hi_i)), None
+    if token not in ledger_versions:
+        return None, "covers {!r} names a version absent from the ledger".format(token)
+    return ("single", token), None
+
+
+def _validate_summaries(summaries, ledger_versions, findings):
+    """Validate the [[summary]] rows structurally (spec 6.1). See the summary-row ambiguity note; the
+    tile-the-ledger-exactly and heading-1:1 FACTS gates are U5's."""
+    seen_covers = set()
+    seen_unreleased = False
+    for i, row in enumerate(summaries):
+        where = "summary #{}".format(i + 1)
+        if not isinstance(row, dict):
+            findings.append("{} is not a table".format(where))
+            continue
+        row_extra = set(row) - SUMMARY_KEYS
+        if row_extra:
+            findings.append("{}: unknown key(s): {}".format(where, ", ".join(sorted(row_extra))))
+
+        covers = row.get("covers")
+        kind = None
+        if "covers" not in row:
+            findings.append("{}: missing required field: covers".format(where))
+        else:
+            parsed, err = _parse_covers(covers, ledger_versions)
+            if err is not None:
+                findings.append("{}: {}".format(where, err))
+            else:
+                kind = parsed[0]
+                if covers in seen_covers:
+                    findings.append("{}: covers {!r} is duplicated across summary rows".format(where, covers))
+                seen_covers.add(covers)
+                if kind == "unreleased":
+                    if seen_unreleased:
+                        findings.append("{}: more than one 'unreleased' summary row (spec 6.1)".format(where))
+                    seen_unreleased = True
+
+        status = row.get("status")
+        if "status" not in row:
+            findings.append("{}: missing required field: status".format(where))
+        elif status not in SUMMARY_STATUSES:
+            findings.append("{}: status {!r} is not one of {} (spec 6.1)".format(
+                where, status, list(SUMMARY_STATUSES)))
+
+        # digest is required once published or superseded; and never carried by a working row.
+        has_digest = "digest" in row
+        if status in ("published", "superseded"):
+            if not has_digest:
+                findings.append("{}: a {} summary must carry a freeze digest (spec 6.1)".format(where, status))
+            elif not _valid_digest(row.get("digest")):
+                findings.append("{}: digest must be 'sha256:<64 hex>'".format(where))
+        elif has_digest:
+            findings.append("{}: a working summary carries no digest until it is published (spec 6.1)".format(where))
+
+        # superseded_by is present EXACTLY when superseded, and is itself a covers token (the rollup).
+        has_sb = "superseded_by" in row
+        if status == "superseded":
+            if not has_sb:
+                findings.append("{}: a superseded summary must name its superseded_by rollup (spec 6.1)".format(where))
+            else:
+                _, err = _parse_covers(row.get("superseded_by"), ledger_versions)
+                if err is not None:
+                    findings.append("{}: superseded_by: {}".format(where, err))
+        elif has_sb:
+            findings.append("{}: superseded_by is present only on a superseded summary (spec 6.1)".format(where))
+
+        # The unreleased working tail is a working row; it is never published or superseded (spec 6.1).
+        if kind == "unreleased" and status is not None and status != "working":
+            findings.append("{}: the 'unreleased' summary is always working, not {!r} (spec 6.1)".format(
+                where, status))
+
+
+# --- worklog.toml validation (spec 6.2) --------------------------------------------------------------
+
+def validate_worklog(data, registered_vendors=frozenset()):
+    """Validate a parsed worklog.toml (spec 6.2). Returns a WorklogValidation. CANNOT-EVALUATE when the
+    input is not a table; INVALID when a well-formed table has a malformed entry; VALID otherwise. Each
+    `[[entry]]` is validated as a reduced-envelope `worklog` record through U2's `validate_record`; ids
+    are unique WL ids (spec 8.2). The tail-vs-frozen boundary and the coverage-digest recompute are the
+    caller's (release cut / `check_frozen_coverage`), which read the version ledger alongside."""
+    if not isinstance(data, dict):
+        return WorklogValidation(CANNOT_EVALUATE, ["worklog.toml is not a table"])
+
+    findings = []
+    extra = set(data) - WORKLOG_TOP_KEYS
+    if extra:
+        findings.append("worklog.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
+    if "schema" in data and type(data.get("schema")) is not int:
+        findings.append("worklog.toml schema must be an integer")
+
+    entries = data.get("entry", [])
+    if not isinstance(entries, list):
+        return WorklogValidation(INVALID, findings + ["[[entry]] is not an array of tables"])
+
+    entry_ids = []
+    seen = set()
+    for i, entry in enumerate(entries):
+        where = "worklog entry #{}".format(i + 1)
+        rv = validate_record(entry, expected_type="worklog", registered_vendors=registered_vendors)
+        if rv.status != VALID:
+            findings.extend("{}: {}".format(where, f) for f in rv.findings)
+            continue
+        n = _wl_num(entry.get("id"))
+        if n is None:
+            findings.append("{}: id is not a well-formed WL-<n> id".format(where))
+            continue
+        if n in seen:
+            findings.append("{}: duplicate worklog id WL-{} (ids are never reused, spec 8.2)".format(where, n))
+            continue
+        seen.add(n)
+        entry_ids.append(n)
+
+    return WorklogValidation(INVALID if findings else VALID, findings, entry_ids)
+
+
+# --- the release cut (spec 6.1, 6.2, 8.4) ------------------------------------------------------------
+
+def release_cut(version_data, worklog_data, new_version, date):
+    """Freeze the current unreleased worklog tail into a released span keyed to `new_version` (spec 6.1,
+    6.2). Returns a CutResult carrying a NEW version.toml value with the release row appended; it is a
+    PURE function (workers-produce-inert-data): the worklog is never mutated and nothing is ever deleted.
+
+    Fails closed (INVALID / CANNOT-EVALUATE, no cut computed) on any inconsistent state:
+      - the current ledger or worklog does not validate (an inconsistent state cannot be cut from);
+      - `new_version` is not a valid SemVer, is already in the ledger, or is not strictly greater than the
+        last release (versions are monotonic, spec 6.1);
+      - the unreleased tail is not a contiguous run from released_end+1 to the last worklog id (a gap in
+        the worklog would leave a span that cannot tile).
+
+    The new release row covers [released_end+1 .. last worklog id] (or [] when the tail is empty, spec 6.1
+    / 14.3) with the tail's coverage digest. After the cut the new unreleased tail is EMPTY by construction
+    (the new span reaches the last worklog id); the caller may assert this with `tail_ids`."""
+    vv = validate_version(version_data)
+    if vv.status == CANNOT_EVALUATE:
+        return CutResult(CANNOT_EVALUATE, ["cannot cut: version.toml does not evaluate"] + vv.findings)
+    if vv.status != VALID:
+        return CutResult(INVALID, ["cannot cut from an inconsistent ledger"] + vv.findings)
+    wv = validate_worklog(worklog_data)
+    if wv.status == CANNOT_EVALUATE:
+        return CutResult(CANNOT_EVALUATE, ["cannot cut: worklog.toml does not evaluate"] + wv.findings)
+    if wv.status != VALID:
+        return CutResult(INVALID, ["cannot cut from an inconsistent worklog"] + wv.findings)
+
+    findings = []
+    new_key = parse_semver(new_version)
+    if new_key is None:
+        return CutResult(INVALID, ["new version {!r} is not a valid SemVer string (spec 6.1)".format(new_version)])
+    ledger_versions = [r.get("version") for r in vv.releases if isinstance(r, dict)]
+    if new_version in ledger_versions:
+        findings.append("new version {!r} is already in the ledger (spec 6.1)".format(new_version))
+    last_key = None
+    for v in ledger_versions:
+        k = parse_semver(v)
+        if k is not None and (last_key is None or k > last_key):
+            last_key = k
+    if last_key is not None and not (last_key < new_key):
+        findings.append("new version {!r} is not strictly greater than the latest release (monotonic, "
+                        "spec 6.1)".format(new_version))
+    if not _valid_timestamp(date):
+        findings.append("date must be an RFC 3339 UTC timestamp (spec 6.1)")
+    if findings:
+        return CutResult(INVALID, findings)
+
+    by_id, id_findings = _entries_by_id(worklog_data)
+    if id_findings:
+        return CutResult(INVALID, ["cannot cut: worklog ids are malformed"] + id_findings)
+
+    end = released_end(vv.releases)
+    all_nums = sorted(by_id)
+    tail = [n for n in all_nums if n > end]
+
+    if not tail:
+        span_value = []
+        span_parsed = None
+    else:
+        # The tail MUST be the contiguous run end+1 .. max, or a span cannot tile (spec 6.1).
+        expected = list(range(end + 1, tail[-1] + 1))
+        if tail != expected:
+            return CutResult(INVALID, ["cannot cut: the unreleased tail WL-{}..WL-{} is not contiguous "
+                                       "(a gap would break span tiling, spec 6.1)".format(end + 1, tail[-1])])
+        span_value = ["WL-{}".format(tail[0]), "WL-{}".format(tail[-1])]
+        span_parsed = (tail[0], tail[-1])
+
+    try:
+        digest = compute_span_digest(by_id, span_parsed)
+    except ReleaseError as exc:
+        return CutResult(CANNOT_EVALUATE, ["cannot cut: coverage digest failed closed ({})".format(exc)])
+
+    new_row = {
+        "version": new_version,
+        "date": date,
+        "worklog_span": span_value,
+        "coverage_digest": digest,
+    }
+    # Build a NEW version.toml value: append the release row, carry schema and summaries unchanged. The
+    # summary/changelog rollup is a separate curated step (U5); the cut touches the release ledger only.
+    new_version_data = {}
+    if "schema" in version_data:
+        new_version_data["schema"] = version_data["schema"]
+    new_version_data["release"] = list(vv.releases) + [new_row]
+    if "summary" in version_data:
+        new_version_data["summary"] = list(version_data["summary"])
+
+    return CutResult(VALID, [], new_version_data, span_value, digest)
+
+
+def tail_ids(releases, worklog_ids):
+    """The WL-numbers of the unreleased tail: every worklog id greater than the released end. `releases`
+    is the parsed release-row list; `worklog_ids` an iterable of WL-numbers. Used to assert the post-cut
+    empty-tail invariant (spec 6.2: the release cut leaves the new unreleased tail empty)."""
+    end = released_end(releases)
+    return sorted(n for n in worklog_ids if n > end)
+
+
+# --- frozen-span / no-deletion / rotation guards (spec 6.2, 8.4, 12, 13) -----------------------------
+
+def check_frozen_coverage(version_data, entries_by_id):
+    """Confirm every released span's stored coverage_digest still matches the current worklog entries
+    (spec 6.1, 7.2, 13): a frozen span is immutable, so an edit to a covered entry, or an append of a new
+    entry INTO a released span, changes the recomputed digest and is a failure. `entries_by_id` maps
+    WL-number -> entry (active merged with archive; spec 12). Returns a finding per mismatch or per span
+    whose entries are missing (fail-closed). Ignores empty spans' presence of all covered entries but
+    still checks their digest."""
+    findings = []
+    releases = version_data.get("release", []) if isinstance(version_data, dict) else []
+    for i, row in enumerate(releases):
+        if not isinstance(row, dict):
+            continue
+        where = "release #{} ({})".format(i + 1, row.get("version", "?"))
+        span = _parse_span(row.get("worklog_span"), findings, where)
+        if span is False:
+            continue
+        stored = row.get("coverage_digest")
+        try:
+            recomputed = compute_span_digest(entries_by_id, span if span else None)
+        except ReleaseError as exc:
+            findings.append("{}: cannot recompute coverage digest ({})".format(where, exc))
+            continue
+        if stored != recomputed:
+            findings.append("{}: coverage_digest mismatch (a frozen released span was rewritten or an "
+                            "entry it covers was edited; spec 6.2/13)".format(where))
+    return findings
+
+
+def check_no_append_into_released(version_data, candidate_ids):
+    """A new or corrected worklog entry MUST land in the unreleased tail, never inside an already-released
+    span (spec 6.2). Returns a finding per candidate WL-number at or below the released end. `candidate_ids`
+    is an iterable of WL-numbers (a malformed id is a finding)."""
+    findings = []
+    releases = version_data.get("release", []) if isinstance(version_data, dict) else []
+    end = released_end(releases)
+    for cid in candidate_ids:
+        n = cid if isinstance(cid, int) and not isinstance(cid, bool) else _wl_num(cid)
+        if n is None:
+            findings.append("candidate worklog id {!r} is not a well-formed WL-<n> id".format(cid))
+        elif n <= end:
+            findings.append("worklog id WL-{} falls in an already-released span (<= released end WL-{}); a "
+                            "post-release correction is a NEW entry in the unreleased tail (spec 6.2)".format(n, end))
+    return findings
+
+
+def check_no_deletion(old_ids, new_ids):
+    """Nothing is ever deleted (spec 6.2, 13): every WL-number present before must still be present after,
+    in the active worklog OR the archive. `old_ids` / `new_ids` are iterables of WL-numbers (pass the
+    UNION of active and archive ids for `new_ids`). Returns a finding per vanished id."""
+    findings = []
+    now = set(new_ids)
+    for n in sorted(set(old_ids)):
+        if n not in now:
+            findings.append("worklog id WL-{} vanished: no worklog entry is ever deleted (spec 6.2/13)".format(n))
+    return findings
+
+
+def check_ids_partition(active_ids, archive_ids):
+    """Rotation is archival MOVEMENT, never duplication or loss (spec 12): every worklog id exists in
+    EXACTLY ONE of the active worklog or the archive. Returns a finding per id present in both."""
+    findings = []
+    both = set(active_ids) & set(archive_ids)
+    for n in sorted(both):
+        findings.append("worklog id WL-{} is in BOTH the active worklog and the archive; rotation is a "
+                        "move, an id lives in exactly one location (spec 12)".format(n))
+    return findings
+
+
+def check_rotation_only_released(rotated_ids, version_data):
+    """Only released, frozen worklog spans may rotate; the mutable unreleased tail never rotates whatever
+    its age or size (spec 12). Returns a finding per rotated WL-number beyond the released end.
+    `rotated_ids` is an iterable of WL-numbers being moved to the archive."""
+    findings = []
+    releases = version_data.get("release", []) if isinstance(version_data, dict) else []
+    end = released_end(releases)
+    for rid in rotated_ids:
+        n = rid if isinstance(rid, int) and not isinstance(rid, bool) else _wl_num(rid)
+        if n is None:
+            findings.append("rotated worklog id {!r} is not a well-formed WL-<n> id".format(rid))
+        elif n > end:
+            findings.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
+                            "never rotate (spec 12)".format(n, end))
+    return findings
+
+
+# --- self-test ---------------------------------------------------------------------------------------
+
+def self_test():
+    """Release-triad invariants over synthetic version.toml / worklog.toml vectors. Judged on the returned
+    status / finding values, never by grepping output (the isolate-verifiers rule). Returns 0 clean, 1 on
+    a failed check, 2 on a fail-closed error."""
+    failures = []
+    checked = 0
+
+    def check(name, cond):
+        nonlocal checked
+        checked += 1
+        if not cond:
+            failures.append(name)
+
+    def entry(n, kind="added", summary="s", **extra):
+        e = {"id": "WL-{}".format(n), "date": "2026-06-{:02d}T00:00:00Z".format((n % 27) + 1),
+             "actor": {"kind": "maintainer"}, "kind": kind, "summary": summary}
+        e.update(extra)
+        return e
+
+    # --- 1: a VALID version.toml + worklog.toml (the everyday shape, Appendix B/C) --------------------
+    worklog = {"schema": 1, "entry": [entry(1), entry(2), entry(3), entry(4)]}
+    by_id, idf = _entries_by_id(worklog)
+    check("valid-worklog-ids", not idf)
+    wl_ok = validate_worklog(worklog)
+    check("valid-worklog-status", wl_ok.status == VALID)
+    check("valid-worklog-ids-list", wl_ok.entry_ids == [1, 2, 3, 4])
+    dig12 = compute_span_digest(by_id, (1, 2))
+    vok = {
+        "schema": 1,
+        "release": [
+            {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+             "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
+        ],
+        "summary": [
+            {"covers": "unreleased", "status": "working"},
+            {"covers": "1.0.0", "status": "published",
+             "digest": "sha256:" + "a" * 64},
+        ],
+    }
+    vv = validate_version(vok)
+    check("valid-version-status", vv.status == VALID)
+    check("valid-version-releases", len(vv.releases) == 1)
+
+    # --- 2: a NON-MONOTONIC version is rejected -------------------------------------------------------
+    v_nonmono = {"release": [
+        {"version": "2.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
+        {"version": "1.0.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
+    ]}
+    check("non-monotonic-invalid", validate_version(v_nonmono).status == INVALID)
+    # a duplicate version is also a monotonicity/uniqueness failure
+    v_dup = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
+        {"version": "1.0.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
+    ]}
+    check("duplicate-version-invalid", validate_version(v_dup).status == INVALID)
+    # SemVer precedence: a prerelease is lower than its release, and 1.0.0 < 1.0.1 < 1.1.0 < 2.0.0.
+    check("semver-prerelease-below-release", parse_semver("1.0.0-rc.1") < parse_semver("1.0.0"))
+    check("semver-core-order", parse_semver("1.0.0") < parse_semver("1.0.1") < parse_semver("1.1.0") < parse_semver("2.0.0"))
+    check("semver-prerelease-numeric-order", parse_semver("1.0.0-alpha.1") < parse_semver("1.0.0-alpha.2"))
+    check("semver-build-ignored", parse_semver("1.0.0+a") == parse_semver("1.0.0+b"))
+    check("semver-bad-rejected", parse_semver("1.0") is None and parse_semver("01.0.0") is None)
+
+    # --- 3 & 5: a REWRITE / MUTATION of a released (frozen) span is detected --------------------------
+    frozen_ver = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
+    ]}
+    check("frozen-coverage-ok", not check_frozen_coverage(frozen_ver, by_id))
+    mutated = {1: entry(1, summary="EDITED after freeze"), 2: by_id[2]}
+    check("frozen-mutation-detected", bool(check_frozen_coverage(frozen_ver, mutated)))
+    # deletion of a frozen-covered entry is detected too
+    check("deletion-detected", bool(check_no_deletion([1, 2, 3], [1, 3])))
+    check("no-deletion-ok", not check_no_deletion([1, 2, 3], [1, 2, 3, 4]))
+
+    # append INTO a released span rejected; a tail id is fine
+    check("append-into-released-rejected", bool(check_no_append_into_released(frozen_ver, [2])))
+    check("append-into-tail-ok", not check_no_append_into_released(frozen_ver, [3, 4]))
+
+    # --- 4 & 6: a RELEASE CUT freezes the tail, appends the row, empties the new tail -----------------
+    cut = release_cut(vok, worklog, "1.1.0", "2026-06-15T00:00:00Z")
+    check("cut-valid", cut.status == VALID)
+    check("cut-froze-tail", cut.frozen_span == ["WL-3", "WL-4"])
+    check("cut-appended-row", len(cut.version_data["release"]) == 2)
+    check("cut-row-version", cut.version_data["release"][-1]["version"] == "1.1.0")
+    check("cut-digest-matches", cut.coverage_digest == compute_span_digest(by_id, (3, 4)))
+    # 6: after the cut the new unreleased tail is EMPTY (spec 6.2)
+    check("cut-empty-new-tail", tail_ids(cut.version_data["release"], by_id.keys()) == [])
+    # the new ledger tiles and validates cleanly, and its frozen coverage recomputes
+    check("cut-ledger-valid", validate_version(cut.version_data).status == VALID)
+    check("cut-frozen-recompute", not check_frozen_coverage(cut.version_data, by_id))
+
+    # a cut with a NON-MONOTONIC new version fails closed
+    check("cut-non-monotonic-invalid", release_cut(vok, worklog, "0.9.0", "2026-06-15T00:00:00Z").status == INVALID)
+    check("cut-duplicate-version-invalid", release_cut(vok, worklog, "1.0.0", "2026-06-15T00:00:00Z").status == INVALID)
+    # a cut from an inconsistent ledger fails closed (does not compute a cut)
+    check("cut-inconsistent-ledger-invalid", release_cut(v_nonmono, worklog, "3.0.0", "2026-06-15T00:00:00Z").status == INVALID)
+
+    # --- empty-span release: a cut with no new worklog entries yields an empty span -------------------
+    worklog_all = {"entry": [entry(1), entry(2), entry(3), entry(4)]}
+    empty_cut = release_cut(cut.version_data, worklog_all, "1.2.0", "2026-07-01T00:00:00Z")
+    check("empty-cut-valid", empty_cut.status == VALID)
+    check("empty-cut-empty-span", empty_cut.frozen_span == [])
+    check("empty-cut-digest", empty_cut.coverage_digest == coverage_digest([]))
+    empty_ver = {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+                             "worklog_span": [], "coverage_digest": coverage_digest([])}]}
+    check("empty-span-release-valid", validate_version(empty_ver).status == VALID)
+
+    # --- tiling gap / overlap ------------------------------------------------------------------------
+    gap = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
+        {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": ["WL-4", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
+    ]}
+    check("tiling-gap-invalid", validate_version(gap).status == INVALID)
+    overlap = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-3"], "coverage_digest": "sha256:" + "0" * 64},
+        {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": ["WL-3", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
+    ]}
+    check("tiling-overlap-invalid", validate_version(overlap).status == INVALID)
+    not_start_one = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-2", "WL-3"], "coverage_digest": "sha256:" + "0" * 64},
+    ]}
+    check("tiling-not-start-one-invalid", validate_version(not_start_one).status == INVALID)
+
+    # --- canonicalization determinism: reorder-invariant across the array AND within a table ----------
+    a = entry(1, summary="one", links=[{"rel": "resolves", "id": "BI-1"}])
+    b = entry(2, summary="two")
+    # same entries in reverse order -> same digest (entries sorted by WL-number)
+    check("digest-array-reorder-invariant", coverage_digest([a, b]) == coverage_digest([b, a]))
+    # a table with the same key/values in a different insertion order -> same digest (keys sorted)
+    a_reordered = {"summary": "one", "kind": "added", "actor": {"kind": "maintainer"},
+                   "date": a["date"], "id": "WL-1", "links": [{"id": "BI-1", "rel": "resolves"}]}
+    check("digest-key-reorder-invariant", coverage_digest([a]) == coverage_digest([a_reordered]))
+    # a content change DOES change the digest
+    check("digest-content-sensitive", coverage_digest([a]) != coverage_digest([entry(1, summary="CHANGED")]))
+    # canonicalization fails CLOSED on an unexpected value type
+    try:
+        _canonical({"bad": 1.5})
+        check("canonical-fails-closed", False)
+    except ReleaseError:
+        check("canonical-fails-closed", True)
+
+    # --- rotation is archival movement only ----------------------------------------------------------
+    check("rotation-partition-ok", not check_ids_partition([3, 4], [1, 2]))
+    check("rotation-partition-dup-invalid", bool(check_ids_partition([2, 3], [1, 2])))
+    check("rotation-only-released-ok", not check_rotation_only_released([1, 2], frozen_ver))
+    check("rotation-tail-invalid", bool(check_rotation_only_released([3], frozen_ver)))
+
+    # --- worklog / version fail-closed on non-tables --------------------------------------------------
+    check("worklog-not-table-cannot-eval", validate_worklog([]).status == CANNOT_EVALUATE)
+    check("version-not-table-cannot-eval", validate_version([]).status == CANNOT_EVALUATE)
+    check("worklog-bad-entry-invalid", validate_worklog({"entry": [{"id": "WL-1"}]}).status == INVALID)
+    check("summary-covers-unknown-invalid", validate_version(
+        {"release": [], "summary": [{"covers": "9.9.9", "status": "working"}]}).status == INVALID)
+    check("summary-published-needs-digest-invalid", validate_version(
+        {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [],
+                      "coverage_digest": coverage_digest([])}],
+         "summary": [{"covers": "1.0.0", "status": "published"}]}).status == INVALID)
+
+    if failures:
+        print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+        return 1
+    print("OPF-RELEASE SELF-TEST: PASS ({} version.toml, worklog.toml, tiling, digest, and "
+          "release-cut checks)".format(checked))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(self_test())
