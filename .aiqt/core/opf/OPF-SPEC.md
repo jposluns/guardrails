@@ -667,11 +667,14 @@ qualifier ::= "proposed"
   removes the qualifier (ratification) or returns the record to a working state (rejection, with a
   recorded reason). A `/proposed` status is not terminal: gates and completion claims treat the
   record as unfinished, and views surface it as awaiting ratification. The `/proposed` qualifier
-  attaches only to a proposable terminal transition: a decision-class or finding-class record that
-  an assistant or automation proposes for a maintainer's ratification. A recorded factual entry that
-  proposes no decision is exempt: the worklog, whose entries record facts rather than propose
-  decisions, never takes `/proposed`, so an assistant-authored or automation-authored worklog entry
-  (status `recorded`) is a conformant recorded fact rather than an unratified proposal.
+  attaches to any transition an assistant or automation makes that awaits a maintainer's
+  ratification: the assistant or automation terminal transitions above (for example `done/proposed`
+  or `fixed/proposed`), and a proposed `block`, recorded as `active/proposed` (section 8.5), which is
+  a proposal rather than a grant even though `active` is not a terminal state. A recorded factual
+  entry that proposes nothing and awaits no ratification is exempt: the worklog, whose entries record
+  facts rather than propose a transition, never takes `/proposed`, so an assistant-authored or
+  automation-authored worklog entry (status `recorded`) is a conformant recorded fact rather than an
+  unratified proposal.
 - No resurrection: a record in an unqualified terminal state never re-enters a working state. A
   revived concern is a new record linking the old one.
 - Supersession is a link, not a state edit: the superseding record links `supersedes`, and where
