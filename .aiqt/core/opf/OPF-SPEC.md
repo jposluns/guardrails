@@ -1,9 +1,16 @@
-# AIQT OPF: the operational-files standard
+# DevProcess: the operational-files standard
 
-Standard token: `aiqt-opf`. Status: draft (specification only; schemas and the reference tooling,
-the scaffolder `opf init`, the importer `opf import`, the validator `opf doctor`, the renderer
-`opf render`, the relocator `opf migrate`, and the synchronizer `opf sync`, ship in later
-releases). Date: 2026-09-04 (UTC). Part of the AIQT Guardrails pack, CC BY-SA 4.0.
+Formal name: AIQT Development Operational Standard. Public brand: DevProcess
+(devprocess.ai). Base discovery token: `devprocess`. Status: draft (specification only;
+schemas and the reference tooling, the scaffolder `opf init`, the importer `opf import`, the
+validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, and the
+synchronizer `opf sync`, ship in later releases). Date: 2026-09-07 (UTC).
+
+DevProcess is a neutral, self-contained operational-files standard, owned by AIQT and
+published under CC BY-SA 4.0. A project conforms to DevProcess with this specification and
+its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer
+of the standard, not its definition. AIQT-specific requirements are layered as one optional
+profile, `[profiles.aiqt]` (section 9), and a base adopter need not adopt AIQT.
 
 Unless a path is written from `/`, a path under `.working/` in this document is relative to the
 root of the repository that tracks the store (the "store repository"), and every other path (the
@@ -13,8 +20,9 @@ roots coincide under the default configuration (section 4.1).
 ## 1. Purpose and scope
 
 OPF (operational files) standardizes how a project keeps its operational records: the backlog, the
-completion receipts, the worklog, findings, decisions, blocks, handoffs, and references that AIQT's
-records-first discipline requires. It defines one machine-readable store of versioned TOML under
+completion receipts, the worklog, findings, decisions, blocks, handoffs, and references that a
+records-first operational discipline requires (the discipline AIQT's records-first rule is one
+implementation of). It defines one machine-readable store of versioned TOML under
 `.working/toml/`, a set of generated human-readable views above it, and three release artifacts (a
 version ledger, a durable worklog, and a curated public changelog) with the gates that keep all of
 them honest.
@@ -27,8 +35,8 @@ can name, with history and the durable worklog preserved (section 5).
 OPF specifies formats, layout, naming, lifecycle, and enforcement posture, and names the standard
 command vocabulary of the reference tooling (`opf init`, `opf import`, `opf doctor`, `opf render`,
 `opf migrate`, `opf sync`). It does not specify tooling internals; a reference implementation
-follows in later releases of the pack. A project can conform to this specification with
-hand-maintained files and its own checks.
+follows in later releases of the AIQT Guardrails reference suite. A project can conform to this
+specification with hand-maintained files and its own checks.
 
 ## 2. Conformance language
 
@@ -114,7 +122,7 @@ Two roots organize every path in this standard:
 
 When the store has been relocated, the `.working/` tree lives at the store repository root exactly
 as drawn, and the product repository keeps only the pointer and the public deliverables. The
-per-record layout profile (section 9) additionally places one file per record under
+per-record layout (section 9) additionally places one file per record under
 `.working/toml/<type>/`, with each `<type>.index.toml` acting as the registry.
 
 ### 4.3 The pointer
@@ -167,13 +175,16 @@ tooling MUST NOT hardcode it, and MUST locate it by discovery.
 
 Within the resolved store repository, tooling locates the machine store by finding exactly one
 immediate subdirectory of `.working/` containing a `manifest.toml` that declares
-`standard = "aiqt-opf"` in its `[opf]` table, trying `toml` first. Zero matches, or more than one,
+`standard = "devprocess"` in its `[devprocess]` base table, trying `toml` first. Zero matches, or more than one,
 is a cannot-evaluate outcome: the tool reports it and stops; it never guesses, and never treats it
 as an empty or absent store. The pointer names which repository carries the store; the manifest
 discovery observes where, within it, the machine store sits. Because the machine subdirectory is
 observed at each use rather than declared and trusted, renaming it is a directory move with
 nothing to go stale; the pointer, which does declare a location, is validated at every resolution
-and fails closed rather than trusting a stale target (section 4.3).
+and fails closed rather than trusting a stale target (section 4.3). Profiles declared under
+`[profiles.<name>]` are enumerated after the base is validated; a profile a tool does not support
+is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure
+(section 9).
 
 ### 4.6 Casing convention and rationale
 
@@ -268,7 +279,7 @@ operation MUST:
   reconciled (ledgers, indexes, counters, and worklog digests confirmed identical) before the old
   location is removed or archived. The old in-repo `.working/` tree leaves the product repository
   only in the migration change itself, after that verification, and the removal is recorded. An
-  unverified destination never justifies destroying the source: this is the pack's
+  unverified destination never justifies destroying the source: this is the
   verified-restore-path discipline applied to the store itself;
 - record the relocation as a worklog entry naming both the old and the new location.
 
@@ -349,12 +360,15 @@ two systems can both begin; the divergence check above is the overlapping contro
 that collision after the fact, and the two layers together are the guarantee (disclosed in
 section 17).
 
-This contract deliberately dogfoods two shipped AIQT rules, which are its basis: the
-concurrency-lease rule (hold a lease so two runs never act on the same state at once, reconcile it
-on resume or close, never seize it from a live holder) and the reconcile-record-against-reality
-rule (the store is authoritative only while it matches reality, so divergence is detected by
-observation at defined checkpoints and treated as a finding to resolve, never a discrepancy to
-leave standing; a store can never certify itself current merely because nothing updated it).
+This contract states two generic operational requirements inline. First, a **single-writer
+lease**: a run holds a lease so two runs never act on the same store state at once, reconciles it
+on resume or close, and never seizes it from a live holder. Second, **reconcile the record against
+reality**: the store is authoritative only while it matches what is actually in use, so divergence
+is detected by observation at defined checkpoints and treated as a finding to resolve, never a
+discrepancy to leave standing, and a store can never certify itself current merely because nothing
+updated it. AIQT's concurrency-lease and reconcile-record-against-reality rules are the reference
+implementation of these two requirements; the requirements themselves are the standard's and bind
+any conforming adopter.
 
 Scope of the contract by pattern:
 
@@ -397,8 +411,9 @@ tells the story and can always be retold because the facts persist beneath it.
 `.working/toml/version.toml` is the machine ledger of version numbers, release dates, and release
 boundaries. It is the single source for the project's version: the root `VERSION` file is
 deterministically generated from it (the latest release's version, as exact bytes) and drift-gated,
-and an optional human view renders to `.working/VERSION.md`. Release-delta tooling (the check that
-computes the minimum required version bump for a change) anchors here. The ledger is not the
+and an optional human view renders to `.working/VERSION.md`. The reference suite's release-delta
+tooling (the check that computes the minimum required version bump for a change) anchors here; it
+is a consumer of the ledger, not part of the base standard's definition. The ledger is not the
 changelog: it carries numbers, dates, spans, and digests, never release prose.
 
 Each `[[release]]` row records:
@@ -406,7 +421,7 @@ Each `[[release]]` row records:
 - `version`: the SemVer version string, unique in the ledger.
 - `date`: the release date, RFC 3339 UTC, read from the clock at the release event.
 - `worklog_span`: the inclusive, contiguous span of worklog entry IDs the release covers, as a
-  two-element array `["WL-a", "WL-b"]`, or an empty array for a release with no worklog entries.
+  two-element array `["WL-1", "WL-88"]`, or an empty array for a release with no worklog entries.
 - `coverage_digest`: a digest over the canonical serialization of the covered worklog entries, in
   ID order, computed at release cut. The exact canonicalization is fixed by the schema release that
   follows this specification; it MUST be deterministic and cover the entries' full content.
@@ -585,7 +600,7 @@ Notes on the roster:
 
 Record IDs have the form `<NS>-<n>`: the type's two-letter namespace, a hyphen, and a positive
 integer. Namespaces map one-to-one to types. `counters.toml` holds one monotonic high-water value
-per namespace; allocation increments it under the profile's lock as one atomic claim, so no gap
+per namespace; allocation increments it under the store's lock as one atomic claim, so no gap
 between choosing and reserving can double-allocate. Counters are never reset and IDs are never
 reused, even when a record is superseded, refuted, or its work reverted. Rotation, index rewrites,
 and store relocation never touch `counters.toml`.
@@ -687,10 +702,13 @@ inclusion, block actionability, counters, lock ordering, or actor attribution.
 shape (the schema release that follows this specification is normative):
 
 ```toml
-[opf]
-standard = "aiqt-opf"          # discovery marker; exact token required
-spec_version = "1.0.0"         # the pack release whose specification the store conforms to
-layout_profile = "inline"      # "inline" or "per-record"
+# .working/toml/manifest.toml
+# DevProcess (AIQT Development Operational Standard) store manifest and discovery marker.
+
+[devprocess]
+standard = "devprocess"        # discovery token; exact value required
+spec_version = "1.0.0"         # DevProcess base spec version this store conforms to
+layout = "inline"              # storage layout: "inline" or "per-record" (was layout_profile)
 posture = "required"           # "off", "warn", or "required" (section 11)
 import_status = "none"         # "none", "partial", or "complete"
 
@@ -698,12 +716,27 @@ import_status = "none"         # "none", "partial", or "complete"
 sync_target = ""               # the store's dedicated sync target (section 5.7); empty under the
                                # in-repo default, where the store rides the product repository
 
-[modules]
+[modules]                      # base-level optional capability modules (generic, not AIQT-specific)
 governance = false
 delivery_assurance = false
 operational_policy = false
 concurrent_operation = false
 decision_support = false
+
+# --- Profiles: additive requirement bundles, namespaced, ignored by base-only tooling ---
+
+[profiles.aiqt]
+version = "1.0.0"                    # AIQT profile version, independent of spec_version above
+base_compat = ">=1.0.0 <2.0.0"       # base spec_versions this profile applies to
+posture_floor = "required"           # effective posture = strictest(base.posture, this)
+required_modules = ["governance", "operational_policy", "concurrent_operation"]
+verification_floor = "triple-family" # AIQT reference-suite policy; base tools ignore this
+extension_namespace = "x-aiqt"       # record-level namespace this profile owns (section 8.7)
+
+# A second adopter could later add, ignored by everyone who does not support it:
+# [profiles.acme]
+# version = "0.1.0"
+# base_compat = ">=1.0.0 <2.0.0"
 
 [types.backlog_item]
 namespace = "BI"
@@ -749,14 +782,18 @@ target = "CHANGELOG.md"
 period = "year"
 
 [vendors]
-registered = []
+registered = ["x-aiqt"]        # record-level extension namespaces; the aiqt profile owns x-aiqt,
+                               # registered here so base-only record validation accepts x-aiqt fields
 ```
 
 View and deliverable targets under `.working/` are relative to the store repository root; the
 public targets (`VERSION`, `CHANGELOG.md`) are relative to the product repository root
 (section 5.8).
 
-Layout profiles:
+Storage layout:
+
+The `layout` field (renamed from `layout_profile` to reserve the word "profile" for the
+base/profile mechanism) selects the storage layout only:
 
 - **`inline`** (default): records live inline in `<type>.index.toml`; the index and the store
   coincide. One global store lock serializes writers. This is the ordinary single-writer case: a
@@ -766,9 +803,40 @@ Layout profiles:
   multi-record operation takes `(namespace, id)` locks in ascending order. Concurrent writers pay
   the file-count cost only when they have the problem it solves.
 
-Readers always enter at `<type>.index.toml` in either profile. The ledgers are exempt from the
-per-record profile: `version.toml` and `worklog.toml` are always single files, written under the
+Readers always enter at `<type>.index.toml` in either layout. The ledgers are exempt from the
+per-record layout: `version.toml` and `worklog.toml` are always single files, written under the
 store lock (allocation of WL IDs still goes through `counters.toml` atomically).
+
+### 9.1 Base standard and profiles
+
+The manifest declares one **base** standard and zero or more **profiles**.
+
+The base is the `[devprocess]` table: `standard = "devprocess"` (the discovery token, exact value
+required), `spec_version` (the base SemVer this store conforms to), and the base storage and posture
+fields. Base-only tooling reads the base, validates it, and operates on it alone.
+
+A profile is a `[profiles.<name>]` sub-table carrying its own `version` (independent SemVer) and a
+`base_compat` range, plus profile-namespaced requirement fields. **A profile may only add
+requirements; it may never weaken, remove, or override a base requirement.** A profile table holds
+only profile-namespaced keys and cannot write a base field, so a weakening override is impossible by
+construction; where a profile field combines with a base setting it combines toward the stricter
+value, and a profile value that would loosen a base setting is a profile validation failure,
+surfaced, never applied.
+
+Base and profile versions evolve independently. A tool that does not recognize a declared profile,
+or does not support its major version, **ignores it for enforcement** and records it as
+present-but-unevaluated; it never fails base validation over an unknown profile. A tool that does
+support a profile enforces the profile's additional requirements as extra gates and **fails closed**
+on an unreadable, unparseable, or base-incompatible instance of that profile. Fail-safe governs a
+profile outside a tool's declared coverage; fail-closed governs a profile inside it (section 17).
+
+A profile's record-level additions ride registered `x-<vendor>` extension tables (section 8.7),
+registered in `[vendors]` so base record validation accepts them as opaque; a profile's store-wide
+requirements live in `[profiles.<name>]`, invisible to base validation. The shipped profile is
+`[profiles.aiqt]`, dogfooded by the reference suite; it declares a posture floor, required modules,
+the reference verification floor, and its `x-aiqt` extension namespace. The `[profiles.<name>]`
+namespace and these contract rules are reserved and documented; the profile-authoring interface is
+not yet a committed public contract for third-party authors.
 
 ## 10. Views and deliverables
 
@@ -828,7 +896,11 @@ archive integrity; the tracked-store requirement against the resolved store; poi
 sync-target agreement (the committed pointer, the manifest's recorded sync target, and the store
 repository's actual remote agree; section 5.6); unmanaged-path containment (section 14.2); and
 path containment. At `required`, an unreadable, unparseable, or unresolvable declared input is a
-failure, never an empty or clean result.
+failure, never an empty or clean result. Unmanaged-path containment is phased: during import or
+migration (`import_status` not `complete`) an unregistered path found at the store location is
+surfaced as a finding to triage under section 14.2, not a build failure; once the store is in
+steady-state `required` posture with import complete, an unregistered unmanaged path is a
+containment-gate failure, fail-closed (section 14.2).
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
 operational surface has moved into the store) is a report, never a gate: breadth of adoption is a
@@ -840,6 +912,11 @@ import writes `warn` with `import_status = "partial"`, and every report carries
 point the adopter flips to `required`. Weakening the posture (`required` toward `warn` or `off`)
 is a guardrail-configuration change: it takes effect only through the maintainer's explicit,
 recorded authorization, and is never self-applied by the assistant or by tooling.
+
+A profile may raise, never lower, the effective posture: the effective posture is the strictest of
+the base `posture` and every supported profile's `posture_floor`. Weakening the base `posture`
+remains a guardrail-configuration change under the maintainer's recorded authorization; a profile
+floor is additive and cannot substitute for that authorization in the loosening direction.
 
 ## 12. Rotation, archive, and retention
 
@@ -866,8 +943,8 @@ Tamper evidence is layered:
 - **Frozen digests.** Released worklog spans are frozen by `coverage_digest`; published changelog
   entries are frozen by their summary digests. A silent edit to either breaks a recorded digest and
   fails the integrity layer; the only way through is the recorded re-publish flow (section 7.2).
-- **Index reconciliation.** In the per-record profile, index rows carry per-record digests, and
-  reconciliation between the index and record files is bidirectional; in the inline profile, the
+- **Index reconciliation.** In the per-record layout, index rows carry per-record digests, and
+  reconciliation between the index and record files is bidirectional; in the inline layout, the
   index and store coincide and reconciliation runs against the views and ledgers.
 - **Archive enumeration.** `archive.toml` makes every rotation enumerable, so a record cannot
   quietly vanish under the name of rotation.
@@ -925,8 +1002,12 @@ fragments. The flow is assistant-drivable by construction: the options are prese
 data, the assistant or adopter picks per file, and each pick is recorded with its actor
 attribution like any other decision.
 
-After adoption, the same detection keeps running: a file that appears in `.working/` that is
-neither OPF-managed nor enumerated as unmanaged is surfaced as a finding, never absorbed.
+After adoption, the same detection keeps running, scoped by phase. During import or migration,
+while `import_status` is not `complete`, a file that appears in `.working/` that is neither
+OPF-managed nor enumerated as unmanaged is surfaced as a finding to triage through the options
+above, never absorbed. Once the store reaches steady-state `required` posture with import complete,
+an unregistered unmanaged path is a containment-gate failure that fails the build closed (the
+integrity layer of section 11), still never silently absorbed.
 
 ### 14.3 Migrating an existing release pipeline
 
@@ -948,14 +1029,22 @@ generically; no pattern names a real repository, host account, or internal syste
 provenance stays inside the adopter's own repositories. Experimental fields ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 
+The base standard names no adopter, operator, or profile by definition. AIQT is one profile,
+`[profiles.aiqt]`, and is cited only as the reference enforcement suite and a consumer. A profile
+carries an adopter's own additional requirements without the base ever depending on them.
+
 ## 16. Conformance vocabulary and claims
 
-A conformance report speaks in a qualified vocabulary: `conformant_for_declared_scope`,
-`nonconformant`, `indeterminate`, or `migration_incomplete`. Every report names its scope, its
-exclusions, and its cannot-evaluate results. An unqualified claim of "OPF conformant" is never
-emitted, by tooling or by prose: a conformance claim is a completeness claim over a declared set,
-and it enumerates that set. Until validation tooling ships, a conformance claim is self-asserted
-and MUST say so.
+Conformance is reported against the base and, separately, against each declared profile a tool
+evaluated. A report speaks in `conformant_for_declared_scope`, `nonconformant`, `indeterminate`, or
+`migration_incomplete`, each qualified by whether it concerns the DevProcess **base** or a named
+**profile**. Every report names its scope, its exclusions, and its cannot-evaluate results. A
+base-conformant store may declare a profile the reporting tool did not evaluate; the report names
+that profile as unevaluated rather than implying whole-store coverage. An unqualified claim of
+"DevProcess conformant" or "AIQT conformant" is never emitted, by tooling or by prose: a
+conformance claim is a completeness claim over a declared set, and it enumerates that set, including
+which profiles were and were not evaluated. Until validation tooling ships, a conformance claim is
+self-asserted and MUST say so.
 
 ## 17. Residual coverage disclosures
 
@@ -984,6 +1073,15 @@ The gates in this standard are strong where they are strong and say so where the
 - Public deliverables reach the product repository through `opf render` under the product
   repository's normal review flow (section 5.8); the quality of that review flow is the adopter's
   own discipline, which this standard requires to exist but does not itself gate.
+- A base-only tool does not evaluate profiles: a store could satisfy the base and violate a profile
+  it declares, and a base-only tool would not detect it. This is by design (profiles are additive
+  and a base tool is out of their scope), and it is the reason a conformance report always names
+  which profiles it did and did not evaluate. Fail-safe-for-unknown-profiles is scoped to a tool
+  that does not cover the profile; a profile-aware tool fails closed on its own profile.
+- The base discovery token `devprocess` is a single exact string carried in every adopter manifest.
+  A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate
+  (fail-closed), never to a silent empty store. The token is frozen at launch and is not changed
+  thereafter, because changing it would strand every existing adopter's manifest.
 
 ## Appendix A: record envelope example
 
@@ -1069,7 +1167,7 @@ links = ["WL-90"]
 ```markdown
 ## unreleased
 
-- In progress: per-record layout profile documentation.
+- In progress: per-record layout documentation.
 
 ## 1.3.0 (2026-08-30)
 

@@ -1,9 +1,12 @@
-# OPF at a glance
+# DevProcess at a glance
 
-Date: 2026-09-04 (UTC). The two-minute version of the OPF standard; the full specification lives in
-OPF-SPEC.md beside this file.
+Date: 2026-09-07 (UTC). The two-minute version of the DevProcess standard; the full specification
+lives in OPF-SPEC.md beside this file.
 
 ## What it is
+
+DevProcess is a neutral operational-files standard; AIQT layers its own requirements as one optional
+`[profiles.aiqt]` profile, and a project can adopt DevProcess without adopting AIQT.
 
 OPF standardizes a project's operational files: backlog, worklog, findings, decisions, blocks,
 handoffs, references. Machines write versioned TOML in one store; humans read generated views. The
@@ -57,10 +60,11 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 ## Getting started
 
 1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "aiqt-opf"`, plus `counters.toml`, `version.toml`, `worklog.toml`, and
-   the nine baseline `<type>.index.toml` files; specification sections 4 and 9). Anything already
-   sitting in `.working/` is detected and you choose, per file: keep it, import it into the store,
-   or move it; nothing is absorbed or overwritten silently.
+   declaring `standard = "devprocess"` in its `[devprocess]` table, plus `counters.toml`,
+   `version.toml`, `worklog.toml`, and the nine baseline `<type>.index.toml` files; specification
+   sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+   Anything already sitting in `.working/` is detected and you choose, per file: keep it, import it
+   into the store, or move it; nothing is absorbed or overwritten silently.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.
@@ -115,6 +119,13 @@ Additions the decisions imply but do not literally specify, flagged for ratifica
   digest reconciliation before the old location is retired).
 - Integrity-layer roster grew three checks: pointer and sync-target agreement, unmanaged-path
   containment, and the tracked-store check now running against the resolved store.
+
+Superseded by the DevProcess identity fold (this revision):
+
+- The base discovery token `aiqt-opf` is superseded by `devprocess`, and the `[opf]` manifest table
+  by the `[devprocess]` base table.
+- The base storage field `layout_profile` is renamed to `layout`, reserving the word "profile" for
+  the base/profile mechanism (`[profiles.<name>]`).
 
 House-style conformance of both deliverables: no en or em dashes anywhere, Oxford -ize spellings,
 sentence-case headings, paths absolute or resolved against a named fixed root, and no
