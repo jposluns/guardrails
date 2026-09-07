@@ -38,8 +38,16 @@ holds the registry and settings while the pack module sits in a repo subdirector
 root of /opt/guardrails with the pack module under /opt/guardrails/guardrails); such a setup passes
 --root and --pack-root separately.
 
-  orch_guard_doctor.py [ROOT] [--root ROOT] [--pack-root PACK_ROOT] [--json]
+  orch_guard_doctor.py [ROOT] [--root ROOT] [--pack-root PACK_ROOT]
+                       [--stop-handler NAME] [--idle-handler NAME] [--json]
   orch_guard_doctor.py --self-test [--json]
+
+--stop-handler NAME and --idle-handler NAME override the handler tokens check 4 looks for in the live
+hook wiring; both default to the pack handler names (orch_stop_guard and orch_teammate_idle). An adopter
+running a compatible non-pack guard (for example a worker-harness stop-guard that reads the registry and
+honours AEI v1) passes its own handler names to verify that guard's live wiring. Check 4 verifies the
+WIRING of the named handler, not its behavioral contract, which the guard's own self-tests and a live
+observation cover.
 
 ROOT is the repository or store root; when omitted it is discovered from CLAUDE_PROJECT_DIR, then
 from `git rev-parse --show-toplevel` at the current directory, then the current directory itself.
@@ -196,10 +204,13 @@ def _config_candidates(root):
         literal.append(os.path.join(base, ".claude", "settings.json"))
         literal.append(os.path.join(base, ".claude", "settings.local.json"))
     literal.append(os.path.join(home, ".claude", "settings.json"))
+    # glob.escape the literal base directory so a bracket in an adopter path (e.g. project[1]) is
+    # matched literally, not read as a character class; the "**" wildcard is joined unescaped.
     patterns = [
-        os.path.join(root, ".claude", "plugins", "**", "hooks", "hooks.json"),
-        os.path.join(proj, ".claude", "plugins", "**", "hooks", "hooks.json") if proj else None,
-        os.path.join(home, ".claude", "plugins", "**", "hooks", "hooks.json"),
+        os.path.join(glob.escape(root), ".claude", "plugins", "**", "hooks", "hooks.json"),
+        os.path.join(glob.escape(proj), ".claude", "plugins", "**", "hooks", "hooks.json")
+        if proj else None,
+        os.path.join(glob.escape(home), ".claude", "plugins", "**", "hooks", "hooks.json"),
     ]
     patterns = [pat for pat in patterns if pat]
     found = list(literal)
@@ -230,7 +241,10 @@ def _handler_registered(cfg, event, handler):
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        for hk in entry.get("hooks") or []:
+        hks = entry.get("hooks")
+        if not isinstance(hks, list):
+            continue
+        for hk in hks:
             if not isinstance(hk, dict):
                 continue
             args = hk.get("args")
@@ -243,10 +257,13 @@ def _handler_registered(cfg, event, handler):
     return False
 
 
-def check_hooks_registered(root):
+def check_hooks_registered(root, stop_handler=STOP_HANDLER, idle_handler=IDLE_HANDLER):
     """Check 4: the Stop and TeammateIdle guards are registered in the live hook configuration. Fail
     closed: if no candidate configuration file can be read at all, that is a cannot-evaluate (RED),
-    never a silent pass."""
+    never a silent pass. stop_handler/idle_handler default to the pack handler names but can be
+    overridden (via --stop-handler / --idle-handler) so an adopter running a compatible non-pack guard
+    can verify ITS handler's live wiring. This check verifies WIRING of the named handler, not the
+    handler's behavioral contract (which the guard's own self-tests and a live observation cover)."""
     candidates = _config_candidates(root)
     if not candidates:
         return (RED, "no live hook configuration found (no settings.json block and no installed "
@@ -262,9 +279,9 @@ def check_hooks_registered(root):
             unreadable.append("{} ({})".format(path, exc))
             continue
         read_any = True
-        if stop_src is None and _handler_registered(cfg, STOP_EVENT, STOP_HANDLER):
+        if stop_src is None and _handler_registered(cfg, STOP_EVENT, stop_handler):
             stop_src = path
-        if idle_src is None and _handler_registered(cfg, IDLE_EVENT, IDLE_HANDLER):
+        if idle_src is None and _handler_registered(cfg, IDLE_EVENT, idle_handler):
             idle_src = path
     if not read_any:
         return (RED, "every candidate hook configuration was unreadable ({}); cannot confirm the "
@@ -274,9 +291,9 @@ def check_hooks_registered(root):
             _short(root, stop_src), _short(root, idle_src)))
     missing = []
     if not stop_src:
-        missing.append("Stop -> " + STOP_HANDLER)
+        missing.append("Stop -> " + stop_handler)
     if not idle_src:
-        missing.append("TeammateIdle -> " + IDLE_HANDLER)
+        missing.append("TeammateIdle -> " + idle_handler)
     return (RED, "not wired in any live settings.json hook block or installed plugin hooks.json "
                  "(the pack's own source plugin definition does not count): {}".format(
                      ", ".join(missing)))
@@ -294,6 +311,8 @@ def _short(root, path):
 def main(argv):
     explicit = None
     explicit_pack = None
+    stop_handler = STOP_HANDLER
+    idle_handler = IDLE_HANDLER
     want_json = False
     self_test = False
     rest = []
@@ -310,6 +329,14 @@ def main(argv):
         elif arg == "--pack-root":
             i += 1
             explicit_pack = argv[i] if i < len(argv) else None
+        elif arg == "--stop-handler":
+            i += 1
+            if i < len(argv):
+                stop_handler = argv[i]
+        elif arg == "--idle-handler":
+            i += 1
+            if i < len(argv):
+                idle_handler = argv[i]
         elif arg in ("-h", "--help"):
             print(__doc__)
             return 0
@@ -341,7 +368,7 @@ def main(argv):
         verdict, why = check_enumerator(hooks, root, reg)
         results.append(("enumerator", verdict, why))
 
-    verdict, why = check_hooks_registered(root)
+    verdict, why = check_hooks_registered(root, stop_handler, idle_handler)
     results.append(("hooks_registered", verdict, why))
 
     passed = sum(1 for _, v, _ in results if v == GREEN)
@@ -396,6 +423,14 @@ _SETTINGS_WIRED = {"hooks": {
 }}
 _SETTINGS_UNWIRED = {"hooks": {"PreToolUse": [{"hooks": [{"type": "command",
                                                           "command": "echo unrelated"}]}]}}
+# A settings.json wiring a CUSTOM (non-pack) handler on each event, for the --stop-handler /
+# --idle-handler override case. It wires NEITHER pack handler, so it reads check-4 RED by default.
+_SETTINGS_CUSTOM = {"hooks": {
+    "Stop": [{"hooks": [{"type": "command",
+                         "command": "python3 my_guard.py my_stop_guard"}]}],
+    "TeammateIdle": [{"hooks": [{"type": "command",
+                                 "command": "python3 my_guard.py my_idle_guard"}]}],
+}}
 
 
 def _st_write(path, text):
@@ -556,13 +591,16 @@ def _st_enum(root, name, body):
     return path
 
 
-def _st_run(doctor, root, pack_root, env):
+def _st_run(doctor, root, pack_root, env, extra_args=None):
     """Run the doctor as an isolated subprocess against root/pack_root with --json; return the parsed
     result dict. Reading the verdict from the doctor's own JSON output is the observation the self-test
-    rests on, not a re-implementation of the checks."""
+    rests on, not a re-implementation of the checks. extra_args, when given, are appended to the argv
+    so a case can exercise options such as --stop-handler / --idle-handler."""
     cmd = [sys.executable, "-I", "-B", doctor, "--json", "--root", root]
     if pack_root is not None:
         cmd += ["--pack-root", pack_root]
+    if extra_args:
+        cmd += list(extra_args)
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
     try:
         return json.loads(proc.stdout)
@@ -719,6 +757,23 @@ def run_self_test(want_json):
                "registry={} mode={} enumerator={}".format(
                    _st_verdict(r, "registry"), _st_verdict(r, "mode"),
                    _st_verdict(r, "enumerator")))
+
+        # 11. Custom handler override: a settings.json wiring CUSTOM (non-pack) handler names. WITH the
+        #     override check-4 is GREEN; WITHOUT it (default pack names) the same config reads RED,
+        #     proving --stop-handler / --idle-handler retarget the wiring check.
+        custom_live = live_root("custom-wired", wired=True)
+        _st_write(os.path.join(custom_live, ".claude", "settings.json"),
+                  json.dumps(_SETTINGS_CUSTOM))
+        r = _st_run(doctor, custom_live, None, env,
+                    extra_args=["--stop-handler", "my_stop_guard",
+                                "--idle-handler", "my_idle_guard"])
+        override_green = _st_verdict(r, "hooks_registered") == GREEN
+        r2 = _st_run(doctor, custom_live, None, env)
+        default_red = _st_verdict(r2, "hooks_registered") == RED
+        record("custom handler override -> check-4 GREEN with override, RED without",
+               override_green and default_red,
+               "override={} default={}".format(
+                   _st_verdict(r, "hooks_registered"), _st_verdict(r2, "hooks_registered")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
