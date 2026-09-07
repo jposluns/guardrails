@@ -35,7 +35,7 @@ and check 3 runs the enumerator there. The PACK root (--pack-root) is where the 
 from the PACK root, never from the LIVE root. --pack-root defaults to --root, so an adopter whose home
 and repo are the same directory is unaffected. Some orchestrators live-root at a home directory that
 holds the registry and settings while the pack module sits in a repo subdirectory (for example a live
-root of /opt/guardrails with the pack module under /opt/guardrails/guardrails); such a setup passes
+root of /srv/project with the pack module under /srv/project/pack); such a setup passes
 --root and --pack-root separately.
 
   orch_guard_doctor.py [ROOT] [--root ROOT] [--pack-root PACK_ROOT]
@@ -51,13 +51,20 @@ observation cover.
 
 ROOT is the repository or store root; when omitted it is discovered from CLAUDE_PROJECT_DIR, then
 from `git rev-parse --show-toplevel` at the current directory, then the current directory itself.
---self-test builds synthetic fixtures in a temp directory, asserts the doctor's own verdicts against
-them (all-GREEN, each isolated RED, and the home-vs-repo split), prints a PASS/FAIL summary, and
-returns 0 only when every case holds.
+--self-test builds synthetic fixtures in a temp directory and asserts the doctor's own verdicts against
+them: an all-GREEN pass; an isolated RED for each check (a missing or malformed registry, an
+out-of-scope mode or lease, a failing enumerator, and absent hook wiring); lease-scoped activation
+(a live non-holder lease with no mode) reported live; a live holder-scoped lease reported not-live for
+this doctor (it fires only for its holding session); a partial or incompatible pack module reported as
+a cannot-evaluate RED with valid --json rather than a crash; a hook entry that only names the handler in
+a comment or an echo reported not-wired; a relocated CLAUDE_CONFIG_DIR whose config is wired reported
+wired; the home-vs-repo split; and the handler-name overrides. It prints a PASS/FAIL summary whose
+pass and fail counts report how many cases ran, and returns 0 only when every case holds.
 """
 import glob
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -75,6 +82,12 @@ IDLE_EVENT = "TeammateIdle"
 # The shipped hook module, relative to the repository root.
 HOOK_MODULE_REL = os.path.join(".aiqt", "core", "hooks", "scripts")
 HOOK_MODULE_NAME = "aiqt_hooks"
+
+# The loader functions the doctor calls on the imported hook module. A module that imports cleanly but
+# lacks any of these (realistic under --pack-root version skew) is an incompatible pack, not a healthy
+# one: it is failed to a cannot-evaluate RED rather than left to raise an uncaught AttributeError.
+REQUIRED_HOOK_ATTRS = ("_orch_registry", "_orch_mode", "_orch_scope_live", "_orch_enumerate",
+                       "_orch_path")
 
 
 def discover_root(explicit):
@@ -121,10 +134,18 @@ def load_hook_module(pack_root):
     sys.path.insert(0, script_dir)
     try:
         import aiqt_hooks  # noqa: E402
-        return (aiqt_hooks, None)
     except Exception as exc:  # a broken or partial module is a cannot-evaluate, not a pass
         return (None, "the hook module under the pack root {} failed to import ({})".format(
             pack_root, exc))
+    # A module that imports but lacks the loader functions the doctor calls is an incompatible pack
+    # version, not a healthy one. Verify the required attributes are present before any check calls one,
+    # so a version-skewed module fails to the same cannot-evaluate RED the absent/broken-import paths
+    # produce (with valid --json), never an uncaught AttributeError mid-check.
+    missing = [name for name in REQUIRED_HOOK_ATTRS if not hasattr(aiqt_hooks, name)]
+    if missing:
+        return (None, "the hook module under the pack root {} is missing required loader function(s) "
+                      "({}); it is an incompatible pack version".format(pack_root, ", ".join(missing)))
+    return (aiqt_hooks, None)
 
 
 def _pack_module_hint(pack_root):
@@ -154,24 +175,62 @@ def check_registry(hooks, root):
     return (RED, "registry present but not schema-valid: {}".format(reg), None)
 
 
+def _holder_lease_live_for_holder(hooks, reg, root):
+    """True when the declared lease is holder-scoped AND currently live for its recorded holder. This
+    delegates the liveness, freshness, and holder-token logic to the guard's own predicate rather than
+    re-implementing any of it: it reads the lease file only to recover a candidate session id (the file's
+    own content), then asks _orch_scope_live whether that id holds a live lease. Used solely to sharpen
+    the disclosure when the doctor's non-holder view is not-live; the verdict itself stays delegated. Any
+    read failure or a non-live result is False, so this can only add disclosure, never manufacture one."""
+    lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
+    if not (lease and lease.get("holder_is_session_id")):
+        return False
+    path = hooks._orch_path(root, lease.get("path"))
+    if not path:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            held = fh.read().strip()
+    except OSError:
+        return False
+    if not held:
+        return False
+    return bool(hooks._orch_scope_live(reg, root, held))
+
+
 def check_mode(hooks, root, reg):
-    """Check 2: the mode record is readable and its Operating-mode value parses, so the backlog guard
-    is in scope. A declared mode record that carries no readable Operating-mode line is RED. Where no
-    mode record is declared, scope must instead come from a live lease; that is confirmed via the
-    guard's own scope predicate, and its absence is RED."""
+    """Check 2: the backlog guard is in scope on this repository. The scope verdict DELEGATES to the
+    guard's own predicate (_orch_scope_live, the single source of truth) rather than re-implementing a
+    mode-only check, so a live-but-unheld holder lease that vetoes the guard is reflected as not-live and
+    a merely-readable mode record cannot report GREEN on its own. The doctor carries no holder session id,
+    so it evaluates the coarse, non-holder view: _orch_scope_live(reg, root) with no session id. That view
+    is live when a live non-holder lease or a parsing mode record puts the guard in scope for any
+    co-located session, and not-live when only a holder-scoped lease is live (the guard then fires solely
+    for its holding session, which this doctor cannot confirm it is). The evaluation context is disclosed
+    per the disclose-guard-residuals discipline; a holder-only activation is reported live-only-for-the-
+    holder, never a blanket GREEN, and any not-live view is RED."""
     if reg is None:
-        return (RED, "no readable registry, so the mode record cannot be resolved")
-    mode_decl = reg.get("mode") if isinstance(reg.get("mode"), dict) else None
+        return (RED, "no readable registry, so scope cannot be resolved")
+    live = hooks._orch_scope_live(reg, root)
     mode_value = hooks._orch_mode(reg, root)
-    if mode_decl and mode_decl.get("path"):
+    if live:
         if mode_value:
-            return (GREEN, "mode record readable; Operating-mode parses to {!r}".format(mode_value))
-        return (RED, "declared mode record is unreadable or carries no Operating-mode line")
-    # No mode record declared: the guard engages only if scope is live another way (a live lease).
-    if hooks._orch_scope_live(reg, root):
-        return (GREEN, "no mode record declared, but scope is live via the declared lease")
-    return (RED, "no mode record declared and no live lease; the backlog guard is out of scope, so "
-                 "it will not engage on this repository")
+            return (GREEN, "scope is live for a non-holder caller; Operating-mode parses to {!r} "
+                           "(evaluated for the repo-coarse, non-holder view)".format(mode_value))
+        return (GREEN, "scope is live for a non-holder caller via the declared lease (evaluated for "
+                       "the repo-coarse, non-holder view; no mode record declared)")
+    # Not live for a non-holder caller. Distinguish a live holder-scoped lease (the guard fires only
+    # for its holder) from a genuine absence of scope, so the RED reason discloses which it is.
+    if _holder_lease_live_for_holder(hooks, reg, root):
+        detail = ("the declared lease is holder-scoped and live: the guard fires only for its holding "
+                  "session, and this doctor carries no session id, so activation is live-only-for-the-"
+                  "holder and not confirmable here")
+        if mode_value:
+            detail += " (a mode record parses to {!r}, but the live holder lease vetoes the " \
+                      "non-holder scope)".format(mode_value)
+        return (RED, detail)
+    return (RED, "no live scope for a non-holder caller: no mode record parses and no live non-holder "
+                 "lease; the backlog guard is out of scope, so it will not engage on this repository")
 
 
 def check_enumerator(hooks, root, reg):
@@ -190,29 +249,36 @@ def check_enumerator(hooks, root, reg):
 
 
 def _config_candidates(root):
-    """Candidate live-configuration files: settings.json blocks and INSTALLED plugin hooks.json files
-    (a .claude/plugins tree under root, $CLAUDE_PROJECT_DIR, or $HOME). The pack's own source plugin
-    definition (root/plugin/*/hooks/hooks.json) is deliberately excluded: it ships in every checkout
-    and describes the plugin, it does not register it in the live session. Deduplicated by real path;
-    only existing files are returned."""
+    """Candidate live-configuration files: settings.json blocks and INSTALLED plugin hooks.json files.
+    The .claude config directories searched are the project- and root-scoped root/.claude and
+    $CLAUDE_PROJECT_DIR/.claude, and the user-level config directory. The user-level directory is the
+    default $HOME/.claude, PLUS $CLAUDE_CONFIG_DIR when set: that environment variable relocates the
+    Claude Code config directory wholesale, so its files sit directly under it (no further .claude/), and
+    a guard genuinely wired through a relocated config would otherwise be missed. Both are honoured so the
+    default locations are never dropped. The pack's own source plugin definition
+    (root/plugin/*/hooks/hooks.json) is deliberately excluded: it ships in every checkout and describes
+    the plugin, it does not register it in the live session. Deduplicated by real path; only existing
+    files are returned."""
     home = os.path.expanduser("~")
     proj = os.environ.get("CLAUDE_PROJECT_DIR")
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    # The .claude config directories to search. root/proj carry a .claude subdir; the user-level dirs
+    # are config directories in their own right (the default ~/.claude and any CLAUDE_CONFIG_DIR).
+    config_dirs = []
+    for base in (root, proj):
+        if base:
+            config_dirs.append(os.path.join(base, ".claude"))
+    config_dirs.append(os.path.join(home, ".claude"))
+    if cfg_dir:
+        config_dirs.append(cfg_dir)
     literal = []
-    for base in (root, proj, home):
-        if not base:
-            continue
-        literal.append(os.path.join(base, ".claude", "settings.json"))
-        literal.append(os.path.join(base, ".claude", "settings.local.json"))
-    literal.append(os.path.join(home, ".claude", "settings.json"))
+    for cdir in config_dirs:
+        literal.append(os.path.join(cdir, "settings.json"))
+        literal.append(os.path.join(cdir, "settings.local.json"))
     # glob.escape the literal base directory so a bracket in an adopter path (e.g. project[1]) is
     # matched literally, not read as a character class; the "**" wildcard is joined unescaped.
-    patterns = [
-        os.path.join(glob.escape(root), ".claude", "plugins", "**", "hooks", "hooks.json"),
-        os.path.join(glob.escape(proj), ".claude", "plugins", "**", "hooks", "hooks.json")
-        if proj else None,
-        os.path.join(glob.escape(home), ".claude", "plugins", "**", "hooks", "hooks.json"),
-    ]
-    patterns = [pat for pat in patterns if pat]
+    patterns = [os.path.join(glob.escape(cdir), "plugins", "**", "hooks", "hooks.json")
+                for cdir in config_dirs]
     found = list(literal)
     for pat in patterns:
         found.extend(glob.glob(pat, recursive=True))
@@ -226,6 +292,88 @@ def _config_candidates(root):
         seen.add(real)
         out.append(path)
     return out
+
+
+# Program basenames that execute a following script or subcommand argument, and script extensions that
+# mark a program as an executable script. Used to decide whether a handler token in a command string is
+# an actual invocation of the guard rather than a bare mention (in an echo, a comment, or other text).
+_INTERPRETERS = frozenset((
+    "python", "python2", "python3", "sh", "bash", "dash", "zsh", "ksh",
+    "node", "nodejs", "ruby", "perl", "php",
+))
+_SCRIPT_EXTS = frozenset((".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".rb", ".pl", ".php"))
+
+
+def _is_assignment(tok):
+    """True for a leading shell VAR=value assignment (e.g. FOO=bar), which precedes the real program."""
+    if "=" not in tok:
+        return False
+    name = tok.split("=", 1)[0]
+    return bool(name) and name.isidentifier()
+
+
+def _is_interpreter_or_script(program):
+    """True when program is an interpreter (python3, bash, node, ...) or an executable script path
+    (a basename ending in a known script extension), i.e. something that runs a following script or
+    subcommand argument."""
+    base = os.path.basename(program).lower()
+    if base in _INTERPRETERS or base.startswith("python"):
+        return True
+    return os.path.splitext(base)[1] in _SCRIPT_EXTS
+
+
+def _program_is_handler(program, handler):
+    """True when program itself is the named handler being executed: its basename equals the handler,
+    with or without a script extension (so orch_stop_guard and orch_stop_guard.py both count)."""
+    base = os.path.basename(program)
+    if base == handler:
+        return True
+    root, ext = os.path.splitext(base)
+    return ext in _SCRIPT_EXTS and root == handler
+
+
+def _segment_invokes_handler(seg, handler):
+    """True when one command segment (already split on shell separators) would RUN the handler: the
+    handler is the executed program itself, or it is a whole-token argument to an interpreter or script
+    that executes it. Leading env-var assignments and an 'env' prefix are skipped to find the program."""
+    i = 0
+    while i < len(seg) and (seg[i] == "env" or _is_assignment(seg[i])):
+        i += 1
+    if i >= len(seg):
+        return False
+    program, prog_args = seg[i], seg[i + 1:]
+    if _program_is_handler(program, handler):
+        return True
+    if _is_interpreter_or_script(program):
+        return any(arg == handler for arg in prog_args)
+    return False
+
+
+def _command_invokes_handler(cmd, handler):
+    """True when the shell command in cmd would actually RUN the named handler, not merely mention it.
+    The handler must appear either as the executed program itself or as a whole-token argument to an
+    interpreter or script that executes it; a bare mention in a comment, an echo, or another
+    non-executing command reads False, so command='echo orch_stop_guard disabled' is not wiring. This is
+    a best-effort parse over an open shell grammar (the disclose-guard-residuals discipline): a command
+    it cannot tokenize, or an obfuscated or deeply nested invocation it cannot resolve, fails closed to
+    False rather than a permissive substring pass. It never widens coverage beyond the old substring
+    test; it only removes that test's false positives."""
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = "#"
+        tokens = list(lex)
+    except ValueError:
+        return False
+    segment, separators = [], (";", "&&", "||", "|", "&", "|&", "(", ")")
+    for tok in tokens:
+        if tok in separators:
+            if segment and _segment_invokes_handler(segment, handler):
+                return True
+            segment = []
+        else:
+            segment.append(tok)
+    return bool(segment) and _segment_invokes_handler(segment, handler)
 
 
 def _handler_registered(cfg, event, handler):
@@ -252,7 +400,7 @@ def _handler_registered(cfg, event, handler):
                     isinstance(a, str) and a == handler for a in args):
                 return True
             cmd = hk.get("command")
-            if isinstance(cmd, str) and handler in cmd:
+            if isinstance(cmd, str) and _command_invokes_handler(cmd, handler):
                 return True
     return False
 
@@ -431,6 +579,15 @@ _SETTINGS_CUSTOM = {"hooks": {
     "TeammateIdle": [{"hooks": [{"type": "command",
                                  "command": "python3 my_guard.py my_idle_guard"}]}],
 }}
+# A settings.json that only MENTIONS the handler tokens without invoking them: one in an echo, one in a
+# shell comment. Neither runs the guard, so both must read check-4 RED (the old substring test read them
+# GREEN). This is the finding-3 (wiring-fidelity) fixture.
+_SETTINGS_MENTION_ONLY = {"hooks": {
+    "Stop": [{"hooks": [{"type": "command",
+                         "command": "echo orch_stop_guard disabled"}]}],
+    "TeammateIdle": [{"hooks": [{"type": "command",
+                                 "command": "# wire orch_teammate_idle here later"}]}],
+}}
 
 
 def _st_write(path, text):
@@ -449,11 +606,15 @@ def _st_locate_real_module():
 
 
 def _st_stub_module_text():
-    """A minimal stub exposing the loader names the doctor calls, faithful enough for the self-test
-    (used only when the real module cannot be located). It mirrors the real contracts: a version-1
-    registry, an Operating-mode line, a live-lease-or-mode scope predicate, and an AEI v1 enumerator."""
+    """A minimal stub exposing the loader names the doctor calls, faithful to the real contracts for the
+    self-test (used only when the real module cannot be located). It mirrors them: a version-1 registry,
+    an Operating-mode line, an AEI v1 enumerator, and a scope predicate that reproduces the real lease +
+    holder + freshness logic (a live non-holder lease is live; a live holder-scoped lease is live only
+    for a caller whose session id it names, else it vetoes without falling through to the mode check) so
+    the lease legs are genuinely exercised whichever module the self-test runs against."""
     return (
         "import json, os, re, subprocess, datetime\n"
+        "_ORCH_CLOCK_SKEW = 300\n"
         "_FILES = ('.aiqt/orchestration.local.json', '.aiqt/orchestration.json')\n"
         "_MODE_RE = re.compile(r'^Operating-mode:\\s*(.+?)\\s*$', re.MULTILINE)\n"
         "_STATES = frozenset(('open', 'closed', 'proposed'))\n"
@@ -503,7 +664,39 @@ def _st_stub_module_text():
         "        return None\n"
         "    mm = _MODE_RE.search(text)\n"
         "    return mm.group(1).lower() if mm else None\n"
+        "def _orch_path(root, value):\n"
+        "    return _path(root, value)\n"
+        "def _orch_token_present(needle, hay):\n"
+        "    if not needle or not hay:\n"
+        "        return False\n"
+        "    return re.search(r'(?<![A-Za-z0-9_-])' + re.escape(needle) + r'(?![A-Za-z0-9_-])', "
+        "hay) is not None\n"
         "def _orch_scope_live(reg, root, session_id=None):\n"
+        "    lease = reg.get('lease') if isinstance(reg.get('lease'), dict) else None\n"
+        "    if lease:\n"
+        "        p = _path(root, lease.get('path'))\n"
+        "        if p:\n"
+        "            try:\n"
+        "                st = os.stat(p)\n"
+        "                fresh = True\n"
+        "                ma = lease.get('max_age_hours')\n"
+        "                if isinstance(ma, (int, float)) and ma > 0:\n"
+        "                    age = _now().timestamp() - st.st_mtime\n"
+        "                    fresh = -_ORCH_CLOCK_SKEW <= age <= ma * 3600\n"
+        "                if st.st_size > 0 and fresh:\n"
+        "                    if lease.get('holder_is_session_id'):\n"
+        "                        if not (isinstance(session_id, str) and session_id):\n"
+        "                            return False\n"
+        "                        try:\n"
+        "                            with open(p, encoding='utf-8', errors='replace') as fh:\n"
+        "                                held = fh.read()\n"
+        "                        except OSError:\n"
+        "                            return False\n"
+        "                        return _orch_token_present(session_id, held)\n"
+        "                    return True\n"
+        "            except OSError:\n"
+        "                if lease.get('holder_is_session_id'):\n"
+        "                    return False\n"
         "    return _orch_mode(reg, root) is not None\n"
         "def validate_enumeration(obj):\n"
         "    if not isinstance(obj, dict):\n"
@@ -573,14 +766,26 @@ def _st_place_module(pack_root, real_module):
         _st_write(dest, _st_stub_module_text())
 
 
-def _st_registry(root, mode_path=None, enum_script=None):
-    """Write a version-1 registry at root, optionally declaring a mode record path and an enumerator
-    argv that runs the given script with the current interpreter."""
+def _st_place_partial_module(pack_root):
+    """Place a pack module that IMPORTS cleanly but lacks the loader functions the doctor calls (a
+    realistic --pack-root version skew). Used to prove the doctor fails such a module to a cannot-evaluate
+    RED with valid --json rather than an uncaught AttributeError."""
+    dest = os.path.join(pack_root, HOOK_MODULE_REL, HOOK_MODULE_NAME + ".py")
+    _st_write(dest, "# an incompatible pack module: imports cleanly, lacks the loader functions\n"
+                    "SCHEMA_VERSION = 1\n")
+
+
+def _st_registry(root, mode_path=None, enum_script=None, lease=None):
+    """Write a version-1 registry at root, optionally declaring a mode record path, an enumerator argv
+    that runs the given script with the current interpreter, and a lease declaration (a dict placed
+    verbatim under reg['lease'])."""
     reg = {"version": 1}
     if mode_path is not None:
         reg["mode"] = {"path": mode_path}
     if enum_script is not None:
         reg["enumerator"] = {"argv": [sys.executable, enum_script]}
+    if lease is not None:
+        reg["lease"] = lease
     _st_write(os.path.join(root, ".aiqt", "orchestration.local.json"), json.dumps(reg))
 
 
@@ -617,6 +822,14 @@ def _st_verdict(data, name):
     return None
 
 
+def _st_reason(data, name):
+    """The reason text of a named check from a doctor result dict, or '' when absent."""
+    for c in data.get("checks", []):
+        if c.get("name") == name:
+            return c.get("reason") or ""
+    return ""
+
+
 def run_self_test(want_json):
     """Build synthetic fixtures and assert the doctor's verdicts. Returns 0 only when every case holds.
     Each case runs the doctor as an isolated subprocess under a hermetic environment (a private HOME and
@@ -646,9 +859,11 @@ def run_self_test(want_json):
         os.makedirs(pack_empty, exist_ok=True)
 
         def live_root(name, wired=True, registry=True, malformed_registry=False,
-                      mode="good", enum="ok", with_module=True, source_plugin=False):
+                      mode="good", enum="ok", with_module=True, source_plugin=False,
+                      lease="none"):
             """Build a live root fixture and return its path. mode: good|empty|none; enum: ok|exit|
-            invalid|none."""
+            invalid|none; lease: none|live-nonholder|live-holder (a fresh, non-empty lease file, holder-
+            scoped for live-holder)."""
             root = os.path.join(tmp, name)
             os.makedirs(root, exist_ok=True)
             if with_module:
@@ -663,6 +878,14 @@ def run_self_test(want_json):
                 mp = os.path.join(root, "state", "mode.md")
                 _st_write(mp, "")  # exists but carries no Operating-mode line
                 mode_path = mp
+            # lease record
+            lease_decl = None
+            if lease in ("live-nonholder", "live-holder"):
+                lp = os.path.join(root, "state", "lease.json")
+                _st_write(lp, "orchestrator-session-abc123\n")  # present, non-empty, fresh mtime
+                lease_decl = {"path": lp, "max_age_hours": 24}
+                if lease == "live-holder":
+                    lease_decl["holder_is_session_id"] = True
             # enumerator
             enum_script = None
             if enum == "ok":
@@ -675,7 +898,7 @@ def run_self_test(want_json):
                 _st_write(os.path.join(root, ".aiqt", "orchestration.local.json"),
                           json.dumps({"version": 2}))  # present but not version-1
             elif registry:
-                _st_registry(root, mode_path=mode_path, enum_script=enum_script)
+                _st_registry(root, mode_path=mode_path, enum_script=enum_script, lease=lease_decl)
             if wired:
                 _st_write(os.path.join(root, ".claude", "settings.json"),
                           json.dumps(_SETTINGS_WIRED))
@@ -774,6 +997,64 @@ def run_self_test(want_json):
                override_green and default_red,
                "override={} default={}".format(
                    _st_verdict(r, "hooks_registered"), _st_verdict(r2, "hooks_registered")))
+
+        # 12. Lease-scoped GREEN: a live non-holder lease and NO mode record -> scope live via the lease.
+        r = _st_run(doctor, live_root("lease-nonholder", mode="none", lease="live-nonholder"),
+                    None, env)
+        record("live non-holder lease, no mode -> mode GREEN",
+               _st_verdict(r, "registry") == GREEN and _st_verdict(r, "mode") == GREEN,
+               "registry={} mode={}".format(_st_verdict(r, "registry"), _st_verdict(r, "mode")))
+
+        # 13. Holder-lease-live-but-not-held -> not-live (the finding-2 fail-open fix). A mode record
+        #     parses AND a holder-scoped lease is live; the guard fires only for its holder, so the
+        #     doctor (no session id) must NOT report GREEN off the readable mode record. The delegated
+        #     _orch_scope_live vetoes, so mode reads RED and the reason discloses the holder scoping.
+        r = _st_run(doctor, live_root("holder-veto", mode="good", lease="live-holder"), None, env)
+        record("live holder lease vetoes readable mode -> mode RED (live-only-for-the-holder)",
+               _st_verdict(r, "mode") == RED and "holder" in _st_reason(r, "mode"),
+               "mode={} reason={!r}".format(_st_verdict(r, "mode"), _st_reason(r, "mode")))
+
+        # 14. No mode and no lease -> scope RED (the guard is out of scope; it will not engage).
+        r = _st_run(doctor, live_root("no-scope", mode="none", lease="none"), None, env)
+        record("no mode record and no lease -> mode RED",
+               _st_verdict(r, "mode") == RED,
+               "mode={} reason={!r}".format(_st_verdict(r, "mode"), _st_reason(r, "mode")))
+
+        # 15. Partial/incompatible pack module (imports but lacks the loaders) -> checks 1-3 cannot-
+        #     evaluate RED with VALID --json, never an uncaught AttributeError / empty stdout.
+        pack_partial = os.path.join(tmp, "pack-partial")
+        _st_place_partial_module(pack_partial)
+        r = _st_run(doctor, live_root("partial-live", with_module=False), pack_partial, env)
+        record("partial pack module -> checks 1-3 RED with valid --json",
+               r.get("result") != "PARSE-ERROR" and _st_verdict(r, "registry") == RED
+               and _st_verdict(r, "mode") == RED and _st_verdict(r, "enumerator") == RED,
+               "result={} registry={} mode={} enumerator={}".format(
+                   r.get("result"), _st_verdict(r, "registry"), _st_verdict(r, "mode"),
+                   _st_verdict(r, "enumerator")))
+
+        # 16. Wiring entry that only MENTIONS the handler (an echo and a comment) -> hooks_registered RED
+        #     (the old substring test read this GREEN; the invocation check must reject a bare mention).
+        mention_live = live_root("mention-only", wired=True)
+        _st_write(os.path.join(mention_live, ".claude", "settings.json"),
+                  json.dumps(_SETTINGS_MENTION_ONLY))
+        r = _st_run(doctor, mention_live, None, env)
+        record("handler only mentioned in echo/comment -> hooks_registered RED",
+               _st_verdict(r, "hooks_registered") == RED,
+               "hooks_registered={}".format(_st_verdict(r, "hooks_registered")))
+
+        # 17. CLAUDE_CONFIG_DIR-relocated config that IS wired -> hooks_registered GREEN. The root's own
+        #     .claude/settings.json is UNWIRED; the wiring lives only under a relocated config dir named
+        #     by CLAUDE_CONFIG_DIR, which the doctor must honour (without dropping the defaults).
+        relocated_live = live_root("relocated-config", wired=False)
+        cfg_dir = os.path.join(tmp, "relocated-claude-config")
+        _st_write(os.path.join(cfg_dir, "settings.json"), json.dumps(_SETTINGS_WIRED))
+        env_cfg = dict(env)
+        env_cfg["CLAUDE_CONFIG_DIR"] = cfg_dir
+        r = _st_run(doctor, relocated_live, None, env_cfg)
+        record("CLAUDE_CONFIG_DIR relocated config, wired -> hooks_registered GREEN",
+               _st_verdict(r, "hooks_registered") == GREEN,
+               "hooks_registered={} reason={!r}".format(
+                   _st_verdict(r, "hooks_registered"), _st_reason(r, "hooks_registered")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
