@@ -982,6 +982,7 @@ class _MechHtmlParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.blocks = []
         self._stack = []  # open nodes within the current block ([] when outside any details.more block)
+        self.stray_details_closes = 0  # unbalanced </details> a browser treats as a premature/extra close (F-356)
 
     def handle_starttag(self, tag, attrs):
         keys = [k for k, _v in attrs]
@@ -1007,6 +1008,8 @@ class _MechHtmlParser(HTMLParser):
 
     def handle_endtag(self, tag):
         if not self._stack:
+            if tag == "details":  # a </details> with no open root: premature/extra close, content escapes to page level (F-356)
+                self.stray_details_closes += 1
             return
         for i in range(len(self._stack) - 1, -1, -1):
             if self._stack[i]["tag"] == tag:
@@ -1200,6 +1203,9 @@ def _reverse_leg(md_text, html_text, sources):
         return findings
     if parser._stack:  # a browser EOF-closes an unclosed <details.more>; it never reached parser.blocks (F-354)
         findings.append("reverse(html): unclosed mechanism <details> root at EOF (never terminated)")
+    if parser.stray_details_closes:  # a premature/extra </details> closes a block early; content escapes it (F-356)
+        findings.append("reverse(html): {} stray </details> close(s) (premature/unbalanced)".format(
+            parser.stray_details_closes))
     counts = {}
     for block in parser.blocks:
         ref, block_findings = _validate_mech_html(block, expected)
@@ -2693,6 +2699,13 @@ def _page_bound_source_self_test():
             "</main>", '<details class="more" title="guarantees secure output"><summary><code>gate:decoy</code></summary>\n</main>', 1)
         if not _reverse_leg(md_text, _unclosed, pbs):
             failures.append("COMPLETENESS(reverse): an EOF-unclosed mechanism <details> root must be caught (FIX F, r20)")
+        # r21 (F-356): a premature/extra </details> closes a mechanism block early, letting stray content render at
+        # page level (a browser keeps the boundary at the first matching </details>). The unbalanced close must be
+        # flagged so the reverse-leg completeness property is self-contained, not reliant on the forward VisibleText leg.
+        _premature = html_page.replace(
+            "</main>", '</details><li>Guarantees: <code>everything</code></li>\n</main>', 1)
+        if not _reverse_leg(md_text, _premature, pbs):
+            failures.append("COMPLETENESS(reverse): a premature/extra </details> close must be caught (FIX F, r21)")
 
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
