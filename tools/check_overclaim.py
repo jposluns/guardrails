@@ -1013,6 +1013,21 @@ class _MechHtmlParser(HTMLParser):
         # a stray end tag with no open match: well-formed generated HTML never reaches here; ignore it
 
 
+def _mech_node_attrs(node, keys, classes, findings, where):
+    """Reverse-leg attribute guard (FIX F, round 18): assert a whitelisted mechanism node carries ONLY the
+    attribute keys in `keys` and, where it has a class, ONLY the class tokens in `classes`. render_html emits a
+    FIXED attribute set per node (gen_enforcement_register.render_html), so any extra attribute (a title, an
+    added data-*, a style) or extra class token is an un-enumerated channel a completeness overclaim could
+    ride, invisible to the field-multiset check (the li text is unchanged) and to Collector 1's VisibleText
+    scan (which strips attributes), so any key or token outside its expected set is a finding. `classes` is
+    None for a node the grammar gives no class, so a class attribute there is caught as an unexpected key."""
+    for extra in sorted(set(node["attrs"]) - set(keys)):
+        findings.append("reverse(html): <{}> carries unexpected attribute {!r}".format(where, extra))
+    if classes is not None:
+        for tok in sorted(set(node["attrs"].get("class", "").split()) - set(classes)):
+            findings.append("reverse(html): <{}> carries unexpected class token {!r}".format(where, tok))
+
+
 def _validate_mech_html(block, expected):
     """Validate one mechanism <details class="more"> mini-DOM node against the EXACT grammar render_html emits,
     returning (ref, findings). The block MUST be exactly:
@@ -1023,9 +1038,13 @@ def _validate_mech_html(block, expected):
         </div></details>
     Any raw (non-whitespace) text outside the code/li/label/residue text nodes, any unexpected element, a
     residual-label <p> whose text is not exactly the heading, or a data-mech that disagrees with the summary
-    ref is a finding; the <li> metadata multiset must equal expected[ref] (FIX F, round 17)."""
+    ref is a finding; the <li> metadata multiset must equal expected[ref] (FIX F, round 17). Each node also
+    carries ONLY the attribute keys and class tokens render_html emits for it (per _mech_node_attrs): an extra
+    attribute or class token is a finding, so an overclaim injected as an attribute cannot ride an
+    un-enumerated HTML channel the field-multiset and VisibleText legs both miss (FIX F, round 18)."""
     F = []
     blank = lambda s: s.strip() == ""
+    _mech_node_attrs(block, ("class", "id"), ("more",), F, "details.more")
     ref = None
     if not blank(block["text"]):
         F.append("reverse(html): raw text directly inside a mechanism <details>")
@@ -1035,17 +1054,20 @@ def _validate_mech_html(block, expected):
     summary = next((c for c in kids if c["tag"] == "summary"), None)
     inner = next((c for c in kids if c["tag"] == "div"), None)
     if summary is not None:
+        _mech_node_attrs(summary, (), None, F, "summary")
         if not blank(summary["text"]):
             F.append("reverse(html): raw text inside <summary>")
         scode = summary["children"]
         if [c["tag"] for c in scode] != ["code"]:
             F.append("reverse(html): <summary> children are {} not [code]".format([c["tag"] for c in scode]))
         else:
+            _mech_node_attrs(scode[0], (), None, F, "summary><code")
             if scode[0]["children"]:
                 F.append("reverse(html): <summary><code> has child elements")
             ref = scode[0]["text"].strip()
     exp_fields = expected.get(ref, [])
     if inner is not None:
+        _mech_node_attrs(inner, ("class",), ("inner",), F, "div.inner")
         if "inner" not in inner["attrs"].get("class", "").split():
             F.append("reverse(html): the mechanism <div> is not class 'inner'")
         if not blank(inner["text"]):
@@ -1058,6 +1080,7 @@ def _validate_mech_html(block, expected):
         p = next((c for c in ikids if c["tag"] == "p"), None)
         bq = next((c for c in ikids if c["tag"] == "blockquote"), None)
         if ul is not None:
+            _mech_node_attrs(ul, (), None, F, "ul")
             if not blank(ul["text"]):  # catches <ul>Kind: gate</ul>
                 F.append("reverse(html): raw text directly inside <ul>")
             observed = []
@@ -1065,17 +1088,20 @@ def _validate_mech_html(block, expected):
                 if li["tag"] != "li":
                     F.append("reverse(html): <ul> child is <{}> not <li>".format(li["tag"]))
                     continue
+                _mech_node_attrs(li, (), None, F, "li")
                 lcode = li["children"]
                 if [c["tag"] for c in lcode] != ["code"]:
                     F.append("reverse(html): <li> children are {} not [code]".format([c["tag"] for c in lcode]))
                     continue
                 if lcode[0]["children"]:
                     F.append("reverse(html): <li><code> has child elements")
+                _mech_node_attrs(lcode[0], (), None, F, "li><code")
                 observed.append((li["text"].replace(":", "").strip(), lcode[0]["text"].strip()))
             if sorted(observed) != sorted(exp_fields):
                 F.append("reverse(html): mechanism {} renders fields {} but enumerates {}".format(
                     ref, sorted(observed), sorted(exp_fields)))
         if p is not None:
+            _mech_node_attrs(p, ("class",), ("ledger-residual-label",), F, "p.ledger-residual-label")
             if "ledger-residual-label" not in p["attrs"].get("class", "").split():
                 F.append("reverse(html): the residual-label <p> is not class 'ledger-residual-label'")
             if p["children"]:
@@ -1084,6 +1110,7 @@ def _validate_mech_html(block, expected):
                 F.append("reverse(html): residual-label <p> text {!r} is not the residual heading".format(
                     p["text"].strip()))
         if bq is not None:
+            _mech_node_attrs(bq, ("class", "data-mech"), ("ledger-residual",), F, "blockquote.ledger-residual")
             if "ledger-residual" not in bq["attrs"].get("class", "").split():
                 F.append("reverse(html): the residual <blockquote> is not class 'ledger-residual'")
             if bq["children"]:  # the residue is escaped text: a real child element is an injection
@@ -1098,8 +1125,9 @@ def _reverse_leg(md_text, html_text, sources):
     """Reverse completeness leg (FIX 5, round 16): every mechanism metadata FIELD a render VIEW emits must be
     an ENUMERATED page_content_strings value at its own mechanism. BOTH views are parsed with structural
     grammars (the Markdown field lines, bullet OR non-bullet, in the region before the residual heading; the
-    HTML <li> fields inside each mechanism <details>, plus a structural check for any EXTRA content element in
-    the block). The observed (label, value) multiset per mechanism must equal the enumerated one, and any extra
+    HTML <li> fields inside each mechanism <details>, plus a structural check for any EXTRA content element,
+    attribute key, or class token in the block). The observed (label, value) multiset per mechanism must equal
+    the enumerated one, and any extra
     HTML channel FAILS, so an un-enumerated field added to render_md (a non-bullet `Kind: gate`) OR to
     render_html (`<p>Kind: gate</p>`) is caught in EITHER view - the round-12/round-15 gaps the old label-only,
     Markdown-only scan missed (non-bullet, HTML-only, post-residual, and duplicate channels)."""
@@ -2602,6 +2630,26 @@ def _page_bound_source_self_test():
         _dup_page = html_page[:_b1] + "\n" + _dup + html_page[_b1:]
         if not _reverse_leg(md_text, _dup_page, pbs):
             failures.append("COMPLETENESS(reverse): a duplicate mechanism block (same ref) must be caught (FIX F)")
+        # (n5c-html-attr) FIX F (round 18): the html reverse leg now validates that each whitelisted mechanism
+        # node carries ONLY the attribute keys and class tokens render_html emits for it. An overclaim injected
+        # as an ATTRIBUTE (a <li title=...>, an extra data-*, an extra class token) leaves the <li> text and the
+        # field multiset unchanged, so the r17 structural leg passed it, and Collector 1's VisibleText scan
+        # strips attributes, so the forward leg misses it too: the attribute channel is the last un-enumerated
+        # HTML surface. Each injection lands on a REAL mechanism node of the full 54-block build (the 14-space
+        # mechanism <li>, the first .more details root, the first ledger-residual blockquote) and must be caught
+        # by the SAME _reverse_leg on real render bytes. The n5b clean assertion above already re-confirms the
+        # attribute allowlist does NOT over-fire (0 reverse findings over the real 54 blocks).
+        _li_title = html_page.replace(
+            "              <li>", '              <li title="Guarantees secure output">', 1)
+        if not _reverse_leg(md_text, _li_title, pbs):
+            failures.append("COMPLETENESS(reverse): a title attribute on a mechanism <li> must be caught (FIX F)")
+        _bq_data = html_page.replace(
+            "data-mech=", 'data-guarantee="secure output" data-mech=', 1)
+        if not _reverse_leg(md_text, _bq_data, pbs):
+            failures.append("COMPLETENESS(reverse): an extra data-* on the residual <blockquote> must be caught (FIX F)")
+        _cls_tok = html_page.replace('class="more"', 'class="more secure-by-default"', 1)
+        if not _reverse_leg(md_text, _cls_tok, pbs):
+            failures.append("COMPLETENESS(reverse): an extra class token on a mechanism node must be caught (FIX F)")
 
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
