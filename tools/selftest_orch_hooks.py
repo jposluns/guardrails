@@ -937,6 +937,24 @@ def main(report_path=None):
         check("stamp/human-input-stamped", bool(st.get("last_human_input_utc")), True)
         check("stamp/counters-reset", st.get("stop_denials", 0), 0)
 
+        # GD-137 PR2: timer-origination against a STRUCTURED record classifies the returning prompt as
+        # timer-originated (warn with the timer context), consumes exactly one record, and PRESERVES the
+        # loop-guard counter (a genuine wake return must not reset it). A legacy bare string still matches.
+        import hashlib as _hl_ps
+        _wp = "wake prompt text"
+        _wdig = _hl_ps.sha256(_wp.encode("utf-8")).hexdigest()
+        r.set_turn_state({"stop_denials": 2, "wake_digests": [
+            {"digest": _wdig, "created_utc": now_iso(0), "expiry_utc": now_iso(-1), "confirmed": True}]})
+        _pw = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit", extra={"prompt": _wp}))
+        check("stamp/timer-originated-warns", _verdict(_pw), "warn")
+        _ts_after = r.turn_state()
+        check("stamp/timer-consumes-record", _ts_after.get("wake_digests"), [])
+        check("stamp/timer-preserves-counter", _ts_after.get("stop_denials"), 2)
+        r.set_turn_state({"wake_digests": [_wdig]})
+        check("stamp/legacy-digest-timer-originated",
+              _verdict(aiqt_hooks.orch_prompt_stamp(
+                  r.payload("UserPromptSubmit", extra={"prompt": _wp}))), "warn")
+
         # ---------- pure-core spot checks (decide_yield directly) ----------
         base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
                 "enum_status": "ok", "enum_detail": "", "actionable": [], "waiting": [],
@@ -1033,7 +1051,11 @@ def main(report_path=None):
         # array states: absent (contributes nothing), empty list, non-empty list, non-list (cannot-eval)
         ARRAYS = {"absent": "__absent__", "empty": [], "nonempty": [{"id": "x"}], "nonlist": "oops"}
         LEDGERS = {"live": LIVE_ROW, "empty": "", "unreadable": "null\n{broken\n"}
-        WAKES = {"present": ["deadbeef"], "absent": None}   # None -> key omitted from turn-state
+        # "present" is a CONFIRMED, unexpired STRUCTURED record (live); a bare/expired/unconfirmed record
+        # no longer counts (covered by the dedicated wake-scorer unit block and the e2e legs below).
+        WAKES = {"present": [{"digest": "deadbeef", "created_utc": now_iso(0),
+                             "expiry_utc": now_iso(-1), "confirmed": True}],
+                 "absent": None}   # None -> key omitted from turn-state
 
         def contrib_array(state):
             return "live" if state == "nonempty" else ("cannot" if state == "nonlist" else "none")
@@ -1160,6 +1182,68 @@ def main(report_path=None):
             got = aiqt_hooks._orch_reentry_live(data, str(rl.root), 24, tstate)[0]
             check(check_id, got, oracle(bgk, crk, ledk, wkk))
 
+        # ---------- GD-137 PR2: wake-lifecycle unit checks (reconcile, scorer, window, schema) ----------
+        _now = datetime.datetime.now(datetime.timezone.utc)
+
+        def _rec(dg, exp_hours, confirmed=True):
+            return {"digest": dg, "created_utc": now_iso(1),
+                    "expiry_utc": (_now + datetime.timedelta(hours=exp_hours)).isoformat(),
+                    "confirmed": confirmed}
+
+        # _orch_reconcile_wakes: DROP only confirmed+past-expiry; KEEP in-flight, legacy, unconfirmed,
+        # and malformed (unparseable-expiry) records.
+        recs = [_rec("a", -1), _rec("b", 5), "legacy", _rec("c", -1, confirmed=False),
+                {"digest": "d", "confirmed": True, "expiry_utc": "not-a-date"}, {"no": "digest"}]
+        kept, expired = aiqt_hooks._orch_reconcile_wakes(recs, _now)
+        check("wake/reconcile-expired-count", expired, 1)
+        check("wake/reconcile-keeps-inflight",
+              any(isinstance(x, dict) and x.get("digest") == "b" for x in kept), True)
+        check("wake/reconcile-keeps-legacy", "legacy" in kept, True)
+        check("wake/reconcile-keeps-unconfirmed",
+              any(isinstance(x, dict) and x.get("digest") == "c" for x in kept), True)
+        check("wake/reconcile-keeps-unparseable-expiry",
+              any(isinstance(x, dict) and x.get("digest") == "d" for x in kept), True)
+        check("wake/reconcile-nonlist-empty", aiqt_hooks._orch_reconcile_wakes("oops", _now), ([], 0))
+
+        # _orch_wake_live_state: live ONLY for confirmed+unexpired; malformed -> cannot-evaluate.
+        check("wake/scorer-live", aiqt_hooks._orch_wake_live_state([_rec("a", 5)], _now)[0], "live")
+        check("wake/scorer-expired-none", aiqt_hooks._orch_wake_live_state([_rec("a", -1)], _now)[0], "none")
+        check("wake/scorer-unconfirmed-none",
+              aiqt_hooks._orch_wake_live_state([_rec("a", 5, confirmed=False)], _now)[0], "none")
+        check("wake/scorer-legacy-none", aiqt_hooks._orch_wake_live_state(["deadbeef"], _now)[0], "none")
+        check("wake/scorer-empty-none", aiqt_hooks._orch_wake_live_state([], _now)[0], "none")
+        check("wake/scorer-nonstring-expiry-cannot",
+              aiqt_hooks._orch_wake_live_state(
+                  [{"digest": "a", "confirmed": True, "expiry_utc": 5}], _now)[0], "cannot-evaluate")
+        check("wake/scorer-unparseable-expiry-cannot",
+              aiqt_hooks._orch_wake_live_state(
+                  [{"digest": "a", "confirmed": True, "expiry_utc": "nope"}], _now)[0], "cannot-evaluate")
+        check("wake/scorer-nondict-nonstr-cannot",
+              aiqt_hooks._orch_wake_live_state([123], _now)[0], "cannot-evaluate")
+        check("wake/scorer-live-wins-over-cannot",
+              aiqt_hooks._orch_wake_live_state([_rec("a", 5), 123], _now)[0], "live")
+
+        # _orch_wake_window_hours: measured minutes -> tight window; not_before -> measured; else horizon.
+        check("wake/window-minutes-measured",
+              round(aiqt_hooks._orch_wake_window_hours({}, "recheck in 30 minutes", 24), 3), 1.5)
+        check("wake/window-fallback-horizon",
+              aiqt_hooks._orch_wake_window_hours({}, "no duration here", 24), 24.0)
+        check("wake/window-clamped",
+              aiqt_hooks._orch_wake_window_hours({}, "no duration", 1e9),
+              float(aiqt_hooks._ORCH_MAX_HORIZON_HOURS))
+        _nb = (_now + datetime.timedelta(hours=3)).isoformat()
+        check("wake/window-not-before",
+              aiqt_hooks._orch_wake_window_hours({"not_before": _nb}, "x", 24) >= 4.0, True)
+
+        # _schema_turn_state migration: dict + legacy records preserved; non-list -> None; absent -> [].
+        sm = aiqt_hooks._orch_validate(
+            "turn_state", {"wake_digests": [_rec("a", 5), "legacy"]})[1]["wake_digests"]
+        check("wake/schema-keeps-dicts-and-strings", (len(sm), "legacy" in sm), (2, True))
+        check("wake/schema-nonlist-none",
+              aiqt_hooks._orch_validate("turn_state", {"wake_digests": "oops"})[1]["wake_digests"], None)
+        check("wake/schema-absent-empty",
+              aiqt_hooks._orch_validate("turn_state", {})[1]["wake_digests"], [])
+
         e = Fixture(tmp, "phantom-e2e")
         esd = Path(aiqt_hooks._orch_state_dir_for_root(str(e.root)))
         esd.mkdir(parents=True, exist_ok=True)
@@ -1185,9 +1269,42 @@ def main(report_path=None):
         eledger.write_text(json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-1",
                                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
         check("e2e/claim-live-ledger-allows", _verdict(estop(CLAIM)), "allow")
-        # claim + live via registered wake -> inert ALLOW
-        e.set_turn_state({"wake_digests": ["deadbeef"]}); eledger.unlink(missing_ok=True)
+        # claim + live via a wake registered through the PostToolUse SUCCESS path -> inert ALLOW. This
+        # replaces the old bare-digest seed: a genuine, confirmed, unexpired wake is a real wait.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        ewake = lambda ti, resp: aiqt_hooks.orch_wake_register(
+            e.payload("PostToolUse", "ScheduleWakeup", ti, extra={"tool_response": resp}))
+        check("e2e/wake-register-persists",
+              _verdict(ewake({"prompt": "recheck CI in 30 minutes"}, {"ok": True})), "allow")
         check("e2e/claim-live-wake-allows", _verdict(estop(CLAIM)), "allow")
+
+        # THE CODEX VECTOR (the discriminating flip): a ScheduleWakeup ALLOWED at PreToolUse whose
+        # PostToolUse registrar never runs (the tool failed/canceled after the allow) leaves NO live
+        # token, so the later phantom claim is DENIED. Pre-fix (PreToolUse registration) this left a live
+        # digest and wrongly ALLOWED the phantom wait.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        esched = lambda ti: aiqt_hooks.orch_yield_tool(e.payload("PreToolUse", "ScheduleWakeup", ti))
+        check("e2e/allowed-schedule-registers-nothing", _verdict(esched({"prompt": "recheck later"})), "allow")
+        check("e2e/allowed-schedule-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-allowed-then-failed-denies", _verdict(estop(CLAIM)), "block2")
+
+        # a CONFIRMED but EXPIRED wake record no longer counts -> the phantom claim is DENIED
+        e.set_turn_state({"wake_digests": [{"digest": "deadbeef", "created_utc": now_iso(2),
+                                            "expiry_utc": now_iso(1), "confirmed": True}]})
+        eledger.unlink(missing_ok=True)
+        check("e2e/phantom-expired-wake-denies", _verdict(estop(CLAIM)), "block2")
+
+        # an error tool_response registers NOTHING -> a later phantom claim is DENIED
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/error-response-registers-nothing",
+              _verdict(ewake({"prompt": "recheck CI"}, {"is_error": True})), "allow")
+        check("e2e/error-response-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-error-response-denies", _verdict(estop(CLAIM)), "block2")
+
+        # a LEGACY bare-string digest (pre-migration shape) no longer protects a phantom wait -> DENIED
+        e.set_turn_state({"wake_digests": ["deadbeef"]}); eledger.unlink(missing_ok=True)
+        check("e2e/legacy-bare-digest-denies", _verdict(estop(CLAIM)), "block2")
+
         # claim + cannot-evaluate (unreadable ledger) -> DENY variant
         e.set_turn_state({})
         eledger.write_text("null\n{broken\n", encoding="utf-8")
