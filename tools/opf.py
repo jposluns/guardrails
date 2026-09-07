@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest base/profile schema
+import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -63,6 +64,7 @@ def _aggregator_self_test():
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 SELF_TESTS = (
     ("opf-store", _opf_store.self_test),
+    ("opf-schema", _opf_schema.self_test),
     ("opf-aggregator", _aggregator_self_test),
 )
 
