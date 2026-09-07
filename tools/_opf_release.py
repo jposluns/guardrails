@@ -98,7 +98,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # and the RFC 3339 UTC timestamp validator. Reuse rather than re-declare (single source of truth).
 from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
 from _opf_schema import (  # noqa: E402
-    validate_record, _valid_id_shape, _valid_timestamp,
+    validate_record, _valid_id_shape, _valid_timestamp, SUPPORTED_SCHEMA,
 )
 
 
@@ -345,11 +345,32 @@ def _tile_releases(releases, findings):
     return cursor
 
 
+def _releases_or_finding(version_data, findings):
+    """Extract the [[release]] rows from a parsed version ledger for the fail-closed guard helpers, or
+    append a cannot-evaluate finding and return None when the ledger is not a table or its `release` value
+    is not a list. A guard that cannot read its own input reports that, never a silent empty clean pass
+    (the check-fails-closed-on-unreadable rule)."""
+    if not isinstance(version_data, dict):
+        findings.append("cannot evaluate: version ledger is not a table")
+        return None
+    releases = version_data.get("release", [])
+    if not isinstance(releases, list):
+        findings.append("cannot evaluate: version.toml [[release]] is not an array of tables")
+        return None
+    return releases
+
+
 def released_end(releases):
     """The highest WL-number covered by any release span (0 when none), computed WITHOUT re-reporting
-    tiling findings. Used by the release cut and rotation checks to find the frozen/unreleased boundary."""
+    tiling findings. Used by the release cut and rotation checks to find the frozen/unreleased boundary.
+    Fails closed (ReleaseError) on a non-list ledger rather than returning a silent 0 that reads as an
+    empty released history (the check-fails-closed-on-unreadable rule)."""
+    if not isinstance(releases, list):
+        raise ReleaseError("cannot compute released end: [[release]] is not an array of tables")
     end = 0
     for row in releases:
+        if not isinstance(row, dict):
+            continue
         span = row.get("worklog_span")
         parsed = _parse_span(span, [], "")
         if parsed and parsed is not True:
@@ -373,8 +394,13 @@ def validate_version(data):
     extra = set(data) - VERSION_TOP_KEYS
     if extra:
         findings.append("version.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
-    if "schema" in data and type(data.get("schema")) is not int:
-        findings.append("version.toml schema must be an integer")
+    if "schema" in data:
+        if type(data.get("schema")) is not int:
+            findings.append("version.toml schema must be an integer")
+        elif data.get("schema") != SUPPORTED_SCHEMA:
+            findings.append("version.toml schema {} is not the supported schema version {} (fail-closed; "
+                            "do not parse under v{} assumptions)".format(
+                                data.get("schema"), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     releases = data.get("release", [])
     if not isinstance(releases, list):
@@ -523,12 +549,14 @@ def _validate_summaries(summaries, ledger_versions, findings):
 
 # --- worklog.toml validation (spec 6.2) --------------------------------------------------------------
 
-def validate_worklog(data, registered_vendors=frozenset()):
+def validate_worklog(data, registered_vendors=frozenset(), registered_kinds=None):
     """Validate a parsed worklog.toml (spec 6.2). Returns a WorklogValidation. CANNOT-EVALUATE when the
     input is not a table; INVALID when a well-formed table has a malformed entry; VALID otherwise. Each
     `[[entry]]` is validated as a reduced-envelope `worklog` record through U2's `validate_record`; ids
-    are unique WL ids (spec 8.2). The tail-vs-frozen boundary and the coverage-digest recompute are the
-    caller's (release cut / `check_frozen_coverage`), which read the version ledger alongside."""
+    are unique WL ids (spec 8.2). `registered_kinds` is the manifest's additional worklog change kinds
+    (spec 6.2), threaded to `validate_record`; the built-in kinds remain the default when None. The
+    tail-vs-frozen boundary and the coverage-digest recompute are the caller's (release cut /
+    `check_frozen_coverage`), which read the version ledger alongside."""
     if not isinstance(data, dict):
         return WorklogValidation(CANNOT_EVALUATE, ["worklog.toml is not a table"])
 
@@ -536,8 +564,13 @@ def validate_worklog(data, registered_vendors=frozenset()):
     extra = set(data) - WORKLOG_TOP_KEYS
     if extra:
         findings.append("worklog.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
-    if "schema" in data and type(data.get("schema")) is not int:
-        findings.append("worklog.toml schema must be an integer")
+    if "schema" in data:
+        if type(data.get("schema")) is not int:
+            findings.append("worklog.toml schema must be an integer")
+        elif data.get("schema") != SUPPORTED_SCHEMA:
+            findings.append("worklog.toml schema {} is not the supported schema version {} (fail-closed; "
+                            "do not parse under v{} assumptions)".format(
+                                data.get("schema"), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     entries = data.get("entry", [])
     if not isinstance(entries, list):
@@ -547,7 +580,8 @@ def validate_worklog(data, registered_vendors=frozenset()):
     seen = set()
     for i, entry in enumerate(entries):
         where = "worklog entry #{}".format(i + 1)
-        rv = validate_record(entry, expected_type="worklog", registered_vendors=registered_vendors)
+        rv = validate_record(entry, expected_type="worklog", registered_vendors=registered_vendors,
+                             registered_kinds=registered_kinds)
         if rv.status != VALID:
             findings.extend("{}: {}".format(where, f) for f in rv.findings)
             continue
@@ -566,6 +600,31 @@ def validate_worklog(data, registered_vendors=frozenset()):
 
 # --- the release cut (spec 6.1, 6.2, 8.4) ------------------------------------------------------------
 
+def _verify_append_only(prior_releases, candidate_releases, findings):
+    """Confirm `candidate_releases` extends `prior_releases` by APPEND ONLY: every pre-existing row is
+    byte-identical (compared at the canonical-byte level, so key order does not matter) and the candidate
+    adds rows only at the end (spec 6.1: release rows are append-only and immutable). Appends a finding
+    per rewritten historical row and per row that vanished or shrank the ledger. Used by the release cut,
+    which holds both the prior and the candidate ledger; a standalone validate_version cannot detect a
+    rewritten historical row without the prior (that is U6 doctor's job with stored history)."""
+    if len(candidate_releases) < len(prior_releases):
+        findings.append("the candidate ledger has fewer release rows than the prior ({} < {}); release "
+                        "rows are append-only (spec 6.1)".format(len(candidate_releases), len(prior_releases)))
+    for i, prior_row in enumerate(prior_releases):
+        if i >= len(candidate_releases):
+            break                          # already reported as a shrink above
+        try:
+            same = _canonical(prior_row) == _canonical(candidate_releases[i])
+        except ReleaseError as exc:
+            findings.append("release #{}: cannot canonicalize a release row to check immutability "
+                            "({})".format(i + 1, exc))
+            continue
+        if not same:
+            findings.append("release #{} ({}) was rewritten; a pre-existing release row is immutable and "
+                            "may only be appended after (spec 6.1)".format(
+                                i + 1, prior_row.get("version", "?") if isinstance(prior_row, dict) else "?"))
+
+
 def release_cut(version_data, worklog_data, new_version, date):
     """Freeze the current unreleased worklog tail into a released span keyed to `new_version` (spec 6.1,
     6.2). Returns a CutResult carrying a NEW version.toml value with the release row appended; it is a
@@ -575,12 +634,21 @@ def release_cut(version_data, worklog_data, new_version, date):
       - the current ledger or worklog does not validate (an inconsistent state cannot be cut from);
       - `new_version` is not a valid SemVer, is already in the ledger, or is not strictly greater than the
         last release (versions are monotonic, spec 6.1);
+      - a PRIOR released span is no longer intact: a covered frozen entry was edited (its recomputed
+        coverage digest no longer matches the stored one) or a frozen worklog record was deleted. The cut
+        holds both the ledger and the worklog, so it recomputes prior frozen coverage and confirms no
+        frozen id vanished before deriving a new span (spec 6.2/13);
       - the unreleased tail is not a contiguous run from released_end+1 to the last worklog id (a gap in
         the worklog would leave a span that cannot tile).
 
     The new release row covers [released_end+1 .. last worklog id] (or [] when the tail is empty, spec 6.1
     / 14.3) with the tail's coverage digest. After the cut the new unreleased tail is EMPTY by construction
-    (the new span reaches the last worklog id); the caller may assert this with `tail_ids`."""
+    (the new span reaches the last worklog id); the caller may assert this with `tail_ids`.
+
+    Append-only immutability: the returned ledger preserves every pre-existing release row byte-identically
+    and appends only the new row (spec 6.1). Standalone validate_version cannot detect a rewritten
+    historical row without the prior ledger (that residual belongs to U6 doctor with stored history); the
+    cut, holding both prior and candidate, enforces append-only here."""
     vv = validate_version(version_data)
     if vv.status == CANNOT_EVALUATE:
         return CutResult(CANNOT_EVALUATE, ["cannot cut: version.toml does not evaluate"] + vv.findings)
@@ -615,6 +683,17 @@ def release_cut(version_data, worklog_data, new_version, date):
     by_id, id_findings = _entries_by_id(worklog_data)
     if id_findings:
         return CutResult(INVALID, ["cannot cut: worklog ids are malformed"] + id_findings)
+
+    # A cut must not derive a new frozen span from a ledger whose PRIOR released spans are no longer
+    # intact (spec 6.2/13: a frozen span is immutable). Recompute every prior release's stored coverage
+    # digest against the current worklog, and confirm no frozen id was deleted, failing closed on either
+    # (an edited or deleted frozen entry). check_frozen_coverage also fails closed when a covered entry is
+    # missing, so a deleted frozen record is caught here; check_no_deletion names the vanished id too.
+    intact_findings = check_frozen_coverage(version_data, by_id)
+    prior_end = released_end(vv.releases)
+    intact_findings += check_no_deletion(range(1, prior_end + 1), list(by_id))
+    if intact_findings:
+        return CutResult(INVALID, ["cannot cut: a prior frozen released span is not intact"] + intact_findings)
 
     end = released_end(vv.releases)
     all_nums = sorted(by_id)
@@ -652,6 +731,15 @@ def release_cut(version_data, worklog_data, new_version, date):
     if "summary" in version_data:
         new_version_data["summary"] = list(version_data["summary"])
 
+    # Append-only immutability: every pre-existing release row must be byte-identical in the output, only
+    # the new row appended. This guards the cut's own construction against ever rewriting history (spec
+    # 6.1). Standalone validate_version cannot catch a rewritten historical row without the prior ledger
+    # (that belongs to U6 doctor with stored history); the cut, holding both, enforces it here.
+    append_findings = []
+    _verify_append_only(list(vv.releases), new_version_data["release"], append_findings)
+    if append_findings:
+        return CutResult(INVALID, ["cannot cut: release rows must be append-only"] + append_findings)
+
     return CutResult(VALID, [], new_version_data, span_value, digest)
 
 
@@ -673,7 +761,9 @@ def check_frozen_coverage(version_data, entries_by_id):
     whose entries are missing (fail-closed). Ignores empty spans' presence of all covered entries but
     still checks their digest."""
     findings = []
-    releases = version_data.get("release", []) if isinstance(version_data, dict) else []
+    releases = _releases_or_finding(version_data, findings)
+    if releases is None:
+        return findings
     for i, row in enumerate(releases):
         if not isinstance(row, dict):
             continue
@@ -698,7 +788,9 @@ def check_no_append_into_released(version_data, candidate_ids):
     span (spec 6.2). Returns a finding per candidate WL-number at or below the released end. `candidate_ids`
     is an iterable of WL-numbers (a malformed id is a finding)."""
     findings = []
-    releases = version_data.get("release", []) if isinstance(version_data, dict) else []
+    releases = _releases_or_finding(version_data, findings)
+    if releases is None:
+        return findings
     end = released_end(releases)
     for cid in candidate_ids:
         n = cid if isinstance(cid, int) and not isinstance(cid, bool) else _wl_num(cid)
@@ -738,7 +830,9 @@ def check_rotation_only_released(rotated_ids, version_data):
     its age or size (spec 12). Returns a finding per rotated WL-number beyond the released end.
     `rotated_ids` is an iterable of WL-numbers being moved to the archive."""
     findings = []
-    releases = version_data.get("release", []) if isinstance(version_data, dict) else []
+    releases = _releases_or_finding(version_data, findings)
+    if releases is None:
+        return findings
     end = released_end(releases)
     for rid in rotated_ids:
         n = rid if isinstance(rid, int) and not isinstance(rid, bool) else _wl_num(rid)
@@ -909,6 +1003,64 @@ def self_test():
         {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [],
                       "coverage_digest": coverage_digest([])}],
          "summary": [{"covers": "1.0.0", "status": "published"}]}).status == INVALID)
+
+    # --- B2: a cut must NOT proceed from a ledger whose prior frozen span is no longer intact ----------
+    # A previously-frozen entry (WL-1, covered by 1.0.0) edited after freeze: the cut fails closed.
+    worklog_mut = {"schema": 1, "entry": [entry(1, summary="EDITED after freeze"),
+                                          entry(2), entry(3), entry(4)]}
+    check("cut-prior-frozen-edited-invalid",
+          release_cut(vok, worklog_mut, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
+    # A frozen entry (WL-1) deleted from the worklog: the cut fails closed (missing coverage + deletion).
+    worklog_del = {"schema": 1, "entry": [entry(2), entry(3), entry(4)]}
+    check("cut-prior-frozen-deleted-invalid",
+          release_cut(vok, worklog_del, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
+    # Control: with the prior span intact the same cut still succeeds (the guard does not over-reject).
+    check("cut-prior-frozen-intact-ok",
+          release_cut(vok, worklog, "1.1.0", "2026-06-15T00:00:00Z").status == VALID)
+
+    # --- B3: release rows are append-only; a rewritten historical row fails closed --------------------
+    prior_rows = list(vok["release"])
+    new_row_ok = {"version": "1.1.0", "date": "2026-06-15T00:00:00Z",
+                  "worklog_span": ["WL-3", "WL-4"], "coverage_digest": compute_span_digest(by_id, (3, 4))}
+    af_clean = []
+    _verify_append_only(prior_rows, prior_rows + [new_row_ok], af_clean)
+    check("append-only-clean-ok", not af_clean)
+    rewritten = [dict(prior_rows[0], worklog_span=["WL-1", "WL-3"])]   # historical 1.0.0 span rewritten
+    af_rewrite = []
+    _verify_append_only(prior_rows, rewritten + [new_row_ok], af_rewrite)
+    check("append-only-rewrite-detected", bool(af_rewrite))
+    af_shrink = []
+    _verify_append_only(prior_rows, [], af_shrink)                     # ledger shrank (row dropped)
+    check("append-only-shrink-detected", bool(af_shrink))
+    # the real cut's output is append-only over the prior ledger
+    af_cut = []
+    _verify_append_only(prior_rows, cut.version_data["release"], af_cut)
+    check("cut-output-append-only", not af_cut)
+
+    # --- M7: the guard helpers fail closed on an unreadable-shaped version ledger ---------------------
+    check("frozen-coverage-nonlist-ledger-cannot-eval", bool(check_frozen_coverage([], {})))
+    check("frozen-coverage-release-not-list-cannot-eval", bool(check_frozen_coverage({"release": "x"}, {})))
+    check("append-into-released-nondict-ledger-cannot-eval", bool(check_no_append_into_released(42, [3])))
+    check("rotation-only-released-nondict-ledger-cannot-eval", bool(check_rotation_only_released([3], [])))
+    try:
+        released_end("not-a-list")
+        check("released-end-nonlist-fails-closed", False)
+    except ReleaseError:
+        check("released-end-nonlist-fails-closed", True)
+    # control: a well-formed ledger still evaluates cleanly (no over-rejection)
+    check("frozen-coverage-good-ledger-ok", not check_frozen_coverage(frozen_ver, by_id))
+
+    # --- M8: a schema field other than the supported version fails closed -----------------------------
+    check("version-bad-schema-invalid", validate_version({"schema": 999, "release": []}).status == INVALID)
+    check("worklog-bad-schema-invalid", validate_worklog({"schema": 999, "entry": []}).status == INVALID)
+    check("version-good-schema-ok", validate_version({"schema": 1, "release": []}).status == VALID)
+
+    # --- M4: a manifest-registered worklog kind validates through validate_worklog --------------------
+    wl_custom = {"entry": [entry(1, kind="perf")]}
+    check("release-worklog-manifest-kind-ok",
+          validate_worklog(wl_custom, registered_kinds={"perf"}).status == VALID)
+    check("release-worklog-manifest-kind-unregistered-invalid",
+          validate_worklog(wl_custom).status == INVALID)
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

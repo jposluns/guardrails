@@ -44,10 +44,14 @@ Reference-tooling / spec ambiguities recorded for the finalizer (each resolved h
 fail-closed way and named so the choice is reviewable, per disclose-guard-residuals). The spec's own
 manifest is "illustrative (the schema release that follows this specification is normative)", so this
 unit is that schema release for the record model and DEFINES the following where section 8 leaves a gap:
-  - TIMESTAMPS are validated as RFC 3339 UTC STRINGS with a `Z` offset (the exact form of every spec
-    example: Appendix A/B/C), optional fractional seconds, calendar-validated. A native TOML datetime
-    (an UNQUOTED value tomllib parses to datetime) and a non-`Z` offset (e.g. `+00:00`) are REJECTED as
-    a wrong type / non-canonical, fail-closed; the finalizer may widen if adopters need the native form.
+  - TIMESTAMPS are validated as RFC 3339 UTC STRINGS, optional fractional seconds, calendar-validated.
+    The spec requires "RFC 3339 UTC" (spec 8.3, 6.1), and RFC 3339 expresses UTC either as the `Z`
+    offset (the form of every spec example, Appendix A/B/C) OR as the `+00:00` numeric offset; BOTH are
+    accepted, since `2026-06-14T00:00:00+00:00` is a valid RFC 3339 UTC instant that a Z-only check would
+    wrongly reject. Any OTHER numeric offset (e.g. `+05:30`, or `-00:00` which RFC 3339 marks as an
+    unknown local offset) is not UTC and is rejected, fail-closed. A native TOML datetime (an UNQUOTED
+    value tomllib parses to datetime) is also REJECTED as a wrong type; the finalizer may widen if
+    adopters need the native form.
   - PER-TYPE FIELD NAMES the spec describes but does not spell: `block.scopes` (spec 8.5 "scopes an
     enumerated list of record IDs"), `autonomous_decision.classification` and `.action` (spec 8.5 "the
     classification basis, the action, links"), and the worklog `detail` field (spec 6.2 "optional
@@ -76,8 +80,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # U1 supplies the outcome model, the section-8.1 type->namespace taxonomy, and the namespace/x-vendor
 # shape helpers; reuse them rather than re-declaring (match-surrounding-code, single source of truth).
 from _opf_store import (  # noqa: E402
-    VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES,
+    VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
+)
+
+# The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
+# `schema = 1`). A ledger carrying any other schema is fail-closed, never parsed under v1 assumptions.
+SUPPORTED_SCHEMA = 1
+
+# Every namespace bound to a real record type in the section 8.1 taxonomy: the baseline types, the
+# module-tier types (namespace is the first element of the (namespace, module) pair), and the importer-
+# only quarantine type. A `links` id may point at ANY record type, so its namespace must be one of
+# these; a namespace bound to no type (e.g. ZZ, the reserved-excluded `transaction`/TX, the unassigned
+# CL) is not a real record-type namespace (spec 8.1, 8.2 one-to-one binding).
+RECORD_NAMESPACES = (
+    frozenset(BASELINE_TYPES.values())
+    | frozenset(ns for ns, _module in MODULE_TYPES.values())
+    | frozenset(IMPORTER_TYPES.values())
 )
 
 
@@ -93,7 +112,9 @@ LINK_RELS = ("supersedes", "resolves", "remediates", "receipt_of", "corrects", "
 # The closed reference-capture kinds (spec 8.6).
 REF_KINDS = ("path", "url", "doc")
 
-# The worklog change-kind vocabulary (spec 6.2); a manifest MAY register additional kinds, passed in.
+# The worklog change-kind vocabulary (spec 6.2). A manifest MAY register additional kinds; callers pass
+# them via the `registered_kinds` argument of validate_record/validate_worklog, and the effective set is
+# these built-ins UNION the registered kinds (these remain the default when none are supplied).
 WORKLOG_KINDS = ("added", "changed", "fixed", "removed", "security", "docs", "infra")
 
 ACTOR_KEYS = frozenset({"kind", "id"})
@@ -110,8 +131,10 @@ WORKLOG_KEYS = frozenset({"id", "type", "date", "actor", "kind", "summary", "det
 
 # `<NS>-<n>`: two uppercase letters, a hyphen, a positive integer with no leading zero (spec 8.2).
 _ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)$")
-# RFC 3339 UTC with a Z offset and optional fractional seconds (see the timestamp ambiguity note above).
-_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$")
+# RFC 3339 UTC with optional fractional seconds. UTC is expressible as `Z` OR the `+00:00` offset (both
+# denote a zero offset); both are accepted, any other numeric offset (e.g. +05:30) is not UTC and is
+# rejected (see the timestamp ambiguity note above).
+_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|\+00:00)$")
 
 # counters.toml layout (defined here; see the ambiguity note).
 COUNTERS_TOP_KEYS = frozenset({"schema", "counters"})
@@ -149,8 +172,10 @@ BASELINE_SPECS = {
         transitions={"open": {"active", "dropped"}, "active": {"done", "dropped"}},
         proposable={"done", "dropped"}),
     "done": TypeSpec(
+        # A created-terminal factual receipt that awaits no ratification, so `recorded` is NOT proposable
+        # (spec 8.4: such a record carries no `/proposed` qualifier), mirroring worklog.
         "done", initial="recorded", working=set(), terminal={"recorded"},
-        transitions={}, proposable={"recorded"}),
+        transitions={}, proposable=set()),
     "worklog": TypeSpec(
         "worklog", initial="recorded", working=set(), terminal={"recorded"},
         transitions={}, proposable=set(), extra_keys={"date", "kind", "detail"}, reduced=True),
@@ -164,8 +189,10 @@ BASELINE_SPECS = {
         transitions={"open": {"decided", "withdrawn"}},
         proposable={"decided", "withdrawn"}, extra_keys={"decision", "decided_at", "decided_by"}),
     "autonomous_decision": TypeSpec(
+        # A created-terminal ACT record that awaits no ratification, so `recorded` is NOT proposable
+        # (spec 8.4), mirroring worklog.
         "autonomous_decision", initial="recorded", working=set(), terminal={"recorded"},
-        transitions={}, proposable={"recorded"}, extra_keys={"classification", "action"}),
+        transitions={}, proposable=set(), extra_keys={"classification", "action"}),
     "block": TypeSpec(
         # The one type whose non-terminal initial state is proposable: an assistant/automation block is
         # `active/proposed`, a proposal a maintainer ratifies to `active` (spec 8.5).
@@ -176,8 +203,10 @@ BASELINE_SPECS = {
         "handoff", initial="current", working=set(), terminal={"superseded"},
         transitions={"current": {"superseded"}}, proposable={"superseded"}),
     "reference": TypeSpec(
+        # A created-terminal captured reference that awaits no ratification, so `recorded` is NOT
+        # proposable (spec 8.4), mirroring worklog.
         "reference", initial="recorded", working=set(), terminal={"recorded"},
-        transitions={}, proposable={"recorded"}),
+        transitions={}, proposable=set()),
 }
 
 
@@ -204,8 +233,9 @@ class TransitionCheck:
 # --- shared field validators -------------------------------------------------------------------------
 
 def _valid_timestamp(value):
-    """True when value is an RFC 3339 UTC string with a Z offset that is a real calendar instant (see
-    the timestamp ambiguity note). A native TOML datetime or a non-Z offset is rejected."""
+    """True when value is an RFC 3339 UTC string (a `Z` or `+00:00` zero offset) that is a real calendar
+    instant (see the timestamp ambiguity note). A native TOML datetime or a non-UTC numeric offset is
+    rejected."""
     if not isinstance(value, str):
         return False
     m = _TS_RE.match(value)
@@ -294,8 +324,14 @@ def _validate_links(record, findings):
         if link.get("rel") not in LINK_RELS:
             findings.append("{}.rel {!r} is not one of {} (spec 8.6)".format(
                 where, link.get("rel"), list(LINK_RELS)))
-        if _valid_id_shape(link.get("id")) is None:
+        shape = _valid_id_shape(link.get("id"))
+        if shape is None:
             findings.append("{}.id {!r} is not a well-formed <NS>-<n> id".format(where, link.get("id")))
+        elif shape[0] not in RECORD_NAMESPACES:
+            # A well-formed id whose namespace maps to no record type (e.g. ZZ-1) cannot point at any
+            # record: reconcile against the section 8.1 taxonomy, not just the <NS>-<n> shape (spec 8.1/8.2).
+            findings.append("{}.id {!r} uses namespace {!r} that is bound to no record type in the "
+                            "section 8.1 taxonomy (spec 8.1/8.2)".format(where, link.get("id"), shape[0]))
 
 
 def _validate_refs(record, findings):
@@ -390,17 +426,56 @@ def _validate_type_specific(record, spec, findings):
             for s in scopes:
                 if _valid_id_shape(s) is None:
                     findings.append("block.scopes entry {!r} is not a well-formed <NS>-<n> id".format(s))
+        # A block created by an assistant or automation actor is a PROPOSAL, recorded `active/proposed`,
+        # never a bare `active` grant (spec 8.4/8.5); a maintainer-created block may be unqualified. This
+        # is a creation-time rule on the record snapshot (the actor named on the record is its creator).
+        actor = record.get("actor")
+        akind = actor.get("kind") if isinstance(actor, dict) else None
+        if akind in PROPOSER_KINDS and record.get("status") == "active":
+            findings.append("a block created by an {} actor must be 'active/proposed', not a bare "
+                            "'active' grant (spec 8.4/8.5)".format(akind))
+
+    elif spec.name == "done":
+        # A done record is a one-to-one completion receipt: it MUST link `receipt_of` to its backlog item
+        # (spec 8.5). A standalone receipt with no such link is legal only for IMPORTED history (spec 8.1),
+        # so an importer-created done may omit it; any other actor may not.
+        links = record.get("links")
+        has_receipt = isinstance(links, list) and any(
+            isinstance(l, dict) and l.get("rel") == "receipt_of" for l in links)
+        actor = record.get("actor")
+        is_importer = isinstance(actor, dict) and actor.get("kind") == "importer"
+        if not has_receipt and not is_importer:
+            findings.append("a done record must carry a receipt_of link to its backlog item; a standalone "
+                            "receipt is legal only for imported history (spec 8.1/8.5)")
 
     elif spec.name == "autonomous_decision":
-        # The classification basis and the action (spec 8.5; field names defined here). Optional strings.
+        # An immutable ACT record MUST carry its classification basis AND its action (spec 8.5); both are
+        # required non-empty strings (field names defined here).
         for k in ("classification", "action"):
-            if k in record and (not isinstance(record.get(k), str) or not record.get(k)):
-                findings.append("autonomous_decision.{} must be a non-empty string when present".format(k))
+            if k not in record:
+                findings.append("an autonomous_decision must carry a non-empty {} (spec 8.5)".format(k))
+            elif not isinstance(record.get(k), str) or not record.get(k):
+                findings.append("autonomous_decision.{} must be a non-empty string".format(k))
+
+    elif spec.name == "reference":
+        # A reference record IS a captured reference: it carries at least one ref, each a COMPLETE
+        # {kind, locator, note} (spec 8.6 reference shape). Unlike the generally-optional envelope ref
+        # note, note is REQUIRED on a reference record's refs.
+        refs = record.get("refs")
+        if not isinstance(refs, list) or not refs:
+            findings.append("a reference must carry at least one {kind, locator, note} ref (spec 8.6)")
+        else:
+            for i, ref in enumerate(refs):
+                if isinstance(ref, dict) and "note" not in ref:
+                    findings.append("refs[{}] on a reference must carry a note (spec 8.6 reference "
+                                    "shape)".format(i))
 
 
-def _validate_worklog(record, spec, registered_vendors, findings):
+def _validate_worklog(record, spec, registered_vendors, findings, registered_kinds=None):
     """The reduced worklog envelope (spec 8.3, 6.2): id, date, actor, kind, summary required; type
-    (optional, must be `worklog`), detail, links, refs optional; NO status/title/created_at/updated_at."""
+    (optional, must be `worklog`), detail, links, refs optional; NO status/title/created_at/updated_at.
+    `registered_kinds` is the manifest's additional change kinds (spec 6.2); the accepted set is the
+    built-in WORKLOG_KINDS UNION those, so the built-ins remain the default when none are supplied."""
     _check_keyset(record, WORKLOG_KEYS, registered_vendors, findings)
     if "type" in record and record.get("type") != "worklog":
         findings.append("a worklog entry's type, when present, must be 'worklog'")
@@ -408,11 +483,14 @@ def _validate_worklog(record, spec, registered_vendors, findings):
         findings.append("missing required field: date")
     elif not _valid_timestamp(record.get("date")):
         findings.append("date must be an RFC 3339 UTC timestamp")
+    allowed_kinds = set(WORKLOG_KINDS)
+    if registered_kinds:
+        allowed_kinds |= set(registered_kinds)
     if "kind" not in record:
         findings.append("missing required field: kind")
-    elif record.get("kind") not in WORKLOG_KINDS:
+    elif record.get("kind") not in allowed_kinds:
         findings.append("worklog kind {!r} is not one of {} (spec 6.2)".format(
-            record.get("kind"), list(WORKLOG_KINDS)))
+            record.get("kind"), sorted(allowed_kinds)))
     if "summary" not in record or not isinstance(record.get("summary"), str) or not record.get("summary"):
         findings.append("a worklog entry must carry a non-empty one-line summary (spec 6.2)")
     if "detail" in record and not isinstance(record.get("detail"), str):
@@ -421,7 +499,8 @@ def _validate_worklog(record, spec, registered_vendors, findings):
 
 # --- the record validator (spec 8.3) -----------------------------------------------------------------
 
-def validate_record(record, expected_type=None, specs=None, registered_vendors=frozenset()):
+def validate_record(record, expected_type=None, specs=None, registered_vendors=frozenset(),
+                    registered_kinds=None):
     """Validate one parsed record against its baseline type schema. Returns a RecordValidation.
 
     The type is taken from the record's `type` field, or, for a typeless worklog entry (Appendix C omits
@@ -429,6 +508,8 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     finding (spec 8.3 "type must match the file the record lives in"). `specs` defaults to the nine
     baseline types (U2M passes an extended roster). `registered_vendors` is the manifest's registered
     `x-<vendor>` set (U1's [vendors].registered) against which extension tables are checked.
+    `registered_kinds` is the manifest's additional worklog change kinds (spec 6.2); the built-in
+    WORKLOG_KINDS remain the accepted default when it is None.
 
     Outcome: CANNOT-EVALUATE when the input is not a table or its type cannot be identified; INVALID when
     an identified record violates its schema; VALID otherwise."""
@@ -464,7 +545,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
                         "(one-to-one binding, spec 8.2)".format(shape[0], spec.namespace, rtype))
 
     if spec.reduced:
-        _validate_worklog(record, spec, registered_vendors, findings)
+        _validate_worklog(record, spec, registered_vendors, findings, registered_kinds)
         _validate_actor(record, findings)
         _validate_links(record, findings)
         _validate_refs(record, findings)
@@ -483,7 +564,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     title = record.get("title")
     if "title" not in record:
         findings.append("missing required field: title")
-    elif not isinstance(title, str) or not title or "\n" in title:
+    elif not isinstance(title, str) or not title or "\n" in title or "\r" in title:
         findings.append("title must be a non-empty single line")
 
     actor_kind = _validate_actor(record, findings)
@@ -607,10 +688,20 @@ def validate_counters(data, known_namespaces=None):
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
-    if "schema" in data and not (type(data.get("schema")) is int):
-        findings.append("counters.toml schema must be an integer")
+    if "schema" in data:
+        if type(data.get("schema")) is not int:
+            findings.append("counters.toml schema must be an integer")
+        elif data.get("schema") != SUPPORTED_SCHEMA:
+            findings.append("counters.toml schema {} is not the supported schema version {} (fail-closed; "
+                            "do not parse under v{} assumptions)".format(
+                                data.get("schema"), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
     counters = data.get("counters")
     if counters is None:
+        # An absent [counters] table is a finding when namespaces are known to require a high-water each
+        # (spec 8.2: one monotonic high-water per namespace); with no known namespaces it is simply empty.
+        if known_namespaces:
+            findings.append("counters.toml has no [counters] table but known namespace(s) {} each require "
+                            "a high-water (spec 8.2)".format(sorted(known_namespaces)))
         return high_water, findings
     if not isinstance(counters, dict):
         findings.append("[counters] is not a table")
@@ -626,6 +717,13 @@ def validate_counters(data, known_namespaces=None):
             findings.append("[counters].{} must be a non-negative integer high-water mark".format(ns))
             continue
         high_water[ns] = val
+    # Completeness: every known namespace must carry a high-water (spec 8.2, one per namespace); a known
+    # namespace absent from [counters] is a MISSING finding, not only an unexpected one reported above.
+    if known_namespaces is not None:
+        for ns in sorted(known_namespaces):
+            if ns not in high_water:
+                findings.append("[counters] is missing a high-water for known namespace {!r} "
+                                "(spec 8.2)".format(ns))
     return high_water, findings
 
 
@@ -871,6 +969,102 @@ def self_test():
     check("not-a-table-cannot-eval", validate_record([]).status == CANNOT_EVALUATE)
     check("no-type-no-expected-cannot-eval", validate_record({"id": "BI-1"}).status == CANNOT_EVALUATE)
     check("unsupported-type-invalid", validate_record({"type": "artifact", "id": "AR-1"}).status == INVALID)
+
+    # 12 (M1): a created-terminal factual/ACT/reference record is NOT proposable; `recorded/proposed`
+    # fails closed (mirrors worklog). Each vector is otherwise valid so the qualifier is the sole fault.
+    check("done-proposed-invalid",
+          validate_record(envelope("done", 6, "recorded/proposed",
+                                   links=[{"rel": "receipt_of", "id": "BI-1"}])).status == INVALID)
+    check("ad-proposed-invalid",
+          validate_record(envelope("autonomous_decision", 6, "recorded/proposed",
+                                   actor={"kind": "assistant"}, classification="ACT",
+                                   action="merged")).status == INVALID)
+    check("reference-proposed-invalid",
+          validate_record(envelope("reference", 6, "recorded/proposed",
+                                   refs=[{"kind": "doc", "locator": "x", "note": "y"}])).status == INVALID)
+
+    # 13 (M2): an assistant/automation block must be `active/proposed`, never a bare `active` grant; a
+    # maintainer block may be unqualified.
+    check("assistant-block-bare-active-invalid",
+          validate_record(envelope("block", 5, "active", actor={"kind": "assistant"},
+                                   scopes=["BI-1"])).status == INVALID)
+    check("assistant-block-active-proposed-ok",
+          validate_record(envelope("block", 6, "active/proposed", actor={"kind": "automation"},
+                                   scopes=["BI-1"])).status == VALID)
+    check("maintainer-block-bare-active-ok",
+          validate_record(envelope("block", 7, "active", scopes=["BI-1"])).status == VALID)
+
+    # 14 (M5): a done receipt MUST link receipt_of (import history exempt); an autonomous_decision MUST
+    # carry classification AND action.
+    check("done-missing-receipt-invalid",
+          validate_record(envelope("done", 7, "recorded")).status == INVALID)
+    imp_done = {k: v for k, v in envelope("done", 8, "recorded").items()}
+    imp_done["actor"] = {"kind": "importer"}
+    check("done-importer-standalone-ok", validate_record(imp_done).status == VALID)
+    check("ad-empty-payload-invalid",
+          validate_record(envelope("autonomous_decision", 7, "recorded",
+                                   actor={"kind": "assistant"})).status == INVALID)
+
+    # 15 (M6): a link id namespace must map to a real record type; ZZ-1 (no type) fails, a module-tier
+    # namespace (AR) passes. The generic <NS>-<n> shape check still stands (bad-link-shape above).
+    check("link-unknown-namespace-invalid",
+          validate_record(envelope("finding", 12, "open",
+                                   links=[{"rel": "relates", "id": "ZZ-1"}])).status == INVALID)
+    check("link-module-namespace-ok",
+          validate_record(envelope("finding", 13, "open",
+                                   links=[{"rel": "relates", "id": "AR-1"}])).status == VALID)
+
+    # 16 (m1): a reference record requires each ref to carry a note; a missing note or no refs fails.
+    check("reference-missing-note-invalid",
+          validate_record(envelope("reference", 7, "recorded",
+                                   refs=[{"kind": "doc", "locator": "x"}])).status == INVALID)
+    check("reference-no-refs-invalid",
+          validate_record(envelope("reference", 8, "recorded")).status == INVALID)
+
+    # 17 (m2): a carriage return in a one-line title fails closed (not only a newline).
+    check("title-carriage-return-invalid",
+          validate_record(envelope("finding", 14, "open", title="line1\rline2")).status == INVALID)
+    check("title-crlf-invalid",
+          validate_record(envelope("finding", 15, "open", title="line1\r\nline2")).status == INVALID)
+
+    # 18 (m3): RFC 3339 UTC accepts both `Z` and `+00:00`; any other numeric offset and a naive value
+    # are rejected. A record carrying a `+00:00` timestamp validates VALID.
+    check("timestamp-z-ok", _valid_timestamp("2026-08-12T09:14:02Z"))
+    check("timestamp-plus-zero-utc-ok", _valid_timestamp("2026-08-12T09:14:02+00:00"))
+    check("timestamp-fractional-plus-zero-ok", _valid_timestamp("2026-08-12T09:14:02.5+00:00"))
+    check("timestamp-nonzero-offset-rejected", not _valid_timestamp("2026-08-12T09:14:02+05:30"))
+    check("timestamp-minus-zero-rejected", not _valid_timestamp("2026-08-12T09:14:02-00:00"))
+    check("timestamp-naive-rejected", not _valid_timestamp("2026-08-12T09:14:02"))
+    check("record-plus-zero-timestamp-ok",
+          validate_record(envelope("finding", 16, "open", created_at="2026-08-12T09:14:02+00:00",
+                                   updated_at="2026-08-12T09:14:02+00:00")).status == VALID)
+
+    # 19 (M4): a manifest-registered additional worklog kind validates VALID when registered, INVALID
+    # when not; the built-in kinds remain the default.
+    check("worklog-manifest-kind-ok",
+          validate_record(dict(wl, kind="perf"), expected_type="worklog",
+                          registered_kinds={"perf"}).status == VALID)
+    check("worklog-manifest-kind-unregistered-invalid",
+          validate_record(dict(wl, kind="perf"), expected_type="worklog").status == INVALID)
+    check("worklog-builtin-kind-still-ok",
+          validate_record(dict(wl, kind="fixed"), expected_type="worklog").status == VALID)
+
+    # 20 (M3): counter completeness. An absent [counters] with known namespaces is a finding; a known
+    # namespace with no high-water is a MISSING finding; a complete table is clean.
+    _, m3a = validate_counters({"schema": 1}, known_namespaces={"BI"})
+    check("counters-absent-table-with-known-ns-invalid", bool(m3a))
+    _, m3b = validate_counters({"counters": {"BI": 5}}, known_namespaces={"BI", "FN"})
+    check("counters-missing-known-ns-invalid", any("missing a high-water" in f for f in m3b))
+    _, m3c = validate_counters({"counters": {"BI": 5, "FN": 2}}, known_namespaces={"BI", "FN"})
+    check("counters-complete-known-ns-ok", not m3c)
+    _, m3d = validate_counters({}, known_namespaces=None)   # no known ns: an empty file is not a finding
+    check("counters-empty-no-known-ns-ok", not m3d)
+
+    # 21 (M8): a schema field other than the supported version fails closed, not parsed under v1.
+    _, m8a = validate_counters({"schema": 999, "counters": {}})
+    check("counters-bad-schema-invalid", any("supported schema version" in f for f in m8a))
+    _, m8b = validate_counters({"schema": 1, "counters": {}})
+    check("counters-good-schema-ok", not m8b)
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
