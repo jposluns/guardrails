@@ -2120,6 +2120,17 @@ def main(report_path=None):
         check("wait/genuine-poll-loop-denies",
               _verdict(waitcall("while true; do sleep 5; done")), "deny")
         check("wait/bare-wait-builtin-denies", _verdict(waitcall("wait")), "deny")
+        # r10 FIX 1: the discriminator judges the COMMAND WORD over the lexer, so a while/sleep token in
+        # ARGUMENT position is NOT a wait (the r9 token-correlation over-fire), while a sleep inside an
+        # if/then branch or a for-loop body IS a wait (the r9 body-keyword miss). Actionable item present.
+        check("wait/arg-while-sleep-inert-allow", _verdict(waitcall("echo while sleep")), "allow")
+        check("wait/arg-commit-while-sleep-inert-allow",
+              _verdict(waitcall("git commit -m while -m sleep")), "allow")
+        check("wait/arg-grep-pipe-while-sleep-inert-allow",
+              _verdict(waitcall("grep -rn sleep . | grep -i while")), "allow")
+        check("wait/if-then-sleep-denies", _verdict(waitcall("if true; then sleep 600; fi")), "deny")
+        check("wait/for-loop-sleep-denies",
+              _verdict(waitcall("for i in 1 2 3; do sleep 10; done")), "deny")
         # wait_tools = [] (an EMPTY list) is fully inert even for a genuine wait command
         _wr_empty = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
         _wr_empty["wait_tools"] = []
@@ -2133,6 +2144,25 @@ def main(report_path=None):
         w.set_items([item("WA-9")], version=2)
         w.set_turn_state({})
         check("wait/no-wait-tools-inert", _verdict(waitcall("x")), "allow")
+
+        # ---------- GD-164 r10 FIX 5(b): validate_enumeration rejects an invisible verdict-bearing ref ---
+        # A Cf/zero-width char inside a CLOSE or BLOCKER ref is non-whitespace, so the enumerator ref
+        # grammar accepted it, laundering a distinct ref into a valid terminal close / substantiated blocker
+        # (fail-OPEN). The engine validator rejects it too (defence in depth: an alternate enumerator could
+        # emit such JSON directly). Python ESCAPE, no literal invisible byte.
+        _zwsp = "\u200b"
+        _r10now = now_iso(0)
+        _r10env = lambda its: {"version": 2, "generated_at_utc": _r10now,
+                               "source": {"locator": "fixture", "revision": "sha256:x",
+                                          "observed_at_utc": _r10now}, "items": its}
+        _c_items, _c_err = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "Z-1", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "no-fix-needed", "ref": "R-" + _zwsp + "1"}}]))
+        check("enum/invisible-close-ref-rejected", _c_items is None and bool(_c_err), True)
+        _b_items, _b_err = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "Z-2", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "external", "ref": "ci-" + _zwsp + "42"}}]))
+        check("enum/invisible-blocker-ref-rejected", _b_items is None and bool(_b_err), True)
 
         # ---------- GD-164: surface-N and emission ----------
         s = Fixture(tmp, "surface")

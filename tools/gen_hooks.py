@@ -22,6 +22,7 @@ control.
   gen_hooks.py --check     fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_hooks.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
 """
+import ast
 import json
 import os
 import re
@@ -195,41 +196,72 @@ def load_manifest(path):
     return plugin, hooks
 
 
-def _strip_dispatch_comments(body):
-    """Drop a trailing '# ...' comment from each line of a dispatcher-dict body. In HANDLERS /
-    HANDLER_EVENT the keys are handler identifiers and the values are the PRETOOL identifier or an
-    event-name string literal, none of which can contain a '#', so a '#' in this body is always a
-    comment. Cutting each line at its first '#' drops a COMMENTED-OUT pseudo-entry (A2): a commented
-    '# "x": x,' otherwise matched the key regex and read as a live, dispatchable handler though main()
-    would reject the mode at runtime."""
-    return "\n".join(line.split("#", 1)[0] for line in body.splitlines())
+def _module_dict(script_text, dict_name):
+    """The single module-level `<dict_name> = { ... }` assignment's ast.Dict node, extracted STATICALLY
+    from the parsed script. ast.parse only builds the syntax tree; it does NOT execute or import the
+    script, so this honours SECI-config-is-executable (the dispatcher is never run to read its keys).
+    Returns None when the script does not parse, when no module-level assignment of a dict LITERAL to
+    dict_name exists, or when MORE THAN ONE such assignment exists (an ambiguous/duplicate binding), so
+    each of those cases fails closed in the caller (the handler reads as undispatchable). A plain
+    `Name = {...}` (ast.Assign) and an annotated `Name: T = {...}` (ast.AnnAssign) both count; any
+    non-dict value (a call, a comprehension, a name, a merge) does not."""
+    try:
+        tree = ast.parse(script_text)
+    except (SyntaxError, ValueError):
+        return None
+    found = []
+    for node in tree.body:  # MODULE LEVEL only: a dict built inside a def/class is not the dispatcher
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.target is not None:
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == dict_name for t in targets) \
+                and isinstance(node.value, ast.Dict):
+            found.append(node.value)
+    if len(found) != 1:
+        return None  # missing OR duplicate -> fail closed
+    return found[0]
 
 
 def _dispatch_keys(script_text, dict_name):
-    """The handler keys registered in a dispatcher dict literal (HANDLERS / HANDLER_EVENT) in the source
-    script. A dict that cannot be located yields the empty set, which fails the membership check closed
-    (the declared handler then reads as undispatchable), per check-fails-closed-on-unreadable. Comments
-    are stripped first so a commented-out entry contributes no key (A2)."""
-    m = re.search(r"^{}\s*=\s*\{{(.*?)^\}}".format(re.escape(dict_name)), script_text, re.M | re.S)
-    if not m:
+    """The handler keys registered in a dispatcher dict literal (HANDLERS / HANDLER_EVENT), extracted
+    STRUCTURALLY from the parsed AST rather than by regex, so a string-literal VALUE that merely LOOKS
+    like a `"name": name,` entry can never contribute a phantom key (round 10: a regex over raw text read
+    such a phantom and let cross_check accept a manifest handler the runtime HANDLERS lacks, fail-OPEN). A
+    dict that cannot be located, is duplicated, or carries ANY non-string-literal key (a computed key or a
+    `**` spread, whose key node is not a str Constant) yields the empty set, failing the membership check
+    closed per check-fails-closed-on-unreadable. ast.parse is a static parse; it does not run the
+    script."""
+    node = _module_dict(script_text, dict_name)
+    if node is None:
         return set()
-    return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:', _strip_dispatch_comments(m.group(1))))
+    keys = set()
+    for k in node.keys:
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return set()  # a non-string-literal key / ** spread: ambiguous dict form, fail whole closed
+        keys.add(k.value)
+    return keys
 
 
 def _dispatch_event_map(script_text):
     """Map handler name -> the event STRING its HANDLER_EVENT entry resolves to, for the value-equality
-    half of the dispatchability gate (A2). Key-membership alone let a PreToolUse hook be registered under
-    the wrong event (e.g. PostToolUse), routing to a mis-triggered control. A value is either the bare
-    PRETOOL identifier (-> 'PreToolUse') or an event-name string literal; a value in neither form is
-    absent from the map, so the caller's equality check fails closed. Comments are stripped first."""
-    m = re.search(r"^HANDLER_EVENT\s*=\s*\{(.*?)^\}", script_text, re.M | re.S)
-    if not m:
+    half of the dispatchability gate (A2), extracted STRUCTURALLY. A value is either the bare PRETOOL Name
+    (-> 'PreToolUse') or a string literal (-> its value); a value in neither form contributes no mapping,
+    so the caller's equality check fails closed. A non-string-literal key or an ambiguous dict form yields
+    the empty map (fail closed). ast.parse does not execute the script."""
+    node = _module_dict(script_text, "HANDLER_EVENT")
+    if node is None:
         return {}
-    body = _strip_dispatch_comments(m.group(1))
     mapping = {}
-    for handler, value in re.findall(
-            r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*(PRETOOL|"[A-Za-z]+")', body):
-        mapping[handler] = "PreToolUse" if value == "PRETOOL" else value.strip('"')
+    for k, v in zip(node.keys, node.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return {}
+        if isinstance(v, ast.Name) and v.id == "PRETOOL":
+            mapping[k.value] = "PreToolUse"
+        elif isinstance(v, ast.Constant) and isinstance(v.value, str):
+            mapping[k.value] = v.value
     return mapping
 
 
@@ -603,6 +635,32 @@ def self_test_main():
                                          '"test_handler": "PostToolUse",'), encoding="utf-8")
         if run_quiet(wrongevent, check=False) != 2:
             failures.append("a HANDLER_EVENT value disagreeing with the manifest event must fail closed "
+                            "(exit 2)")
+
+        # N4 (round 10): a dict VALUE that is a STRING LITERAL resembling a '"name": name,' entry must NOT
+        #     contribute a PHANTOM key. The round-9 regex _dispatch_keys scanned raw text and extracted
+        #     "test_handler" from inside the string value below (fail-OPEN: cross_check then accepted a
+        #     manifest handler the runtime HANDLERS lacks). ast.parse reads dict KEY NODES structurally and
+        #     does NOT execute the script, so a string-literal value contributes no key.
+        _decoy = 'HANDLERS = {\n    "decoy": ' + repr('"test_handler": test_handler,') + ',\n}\n'
+        if "test_handler" in _dispatch_keys(_decoy, "HANDLERS"):
+            failures.append("a string-literal dict VALUE must not contribute a phantom HANDLERS key")
+        if _dispatch_keys(_decoy, "HANDLERS") != {"decoy"}:
+            failures.append("ast _dispatch_keys must extract only the real string-literal key 'decoy'")
+
+        # N4b (round 10): the SAME decoy in a BUILT tree fails closed end-to-end. The fixture's real
+        #     HANDLERS entry is replaced by the decoy, so test_handler is genuinely undispatchable and
+        #     cross_check must exit 2 (the regex read the phantom key and let it pass, exit 0).
+        phantom = tmp / "phantom"
+        phantom.mkdir()
+        _build_tree(phantom)
+        _ppath = phantom / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _ptext = _ppath.read_text(encoding="utf-8")
+        _ppath.write_text(_ptext.replace(
+            '"test_handler": test_handler,',
+            '"decoy": ' + repr('"test_handler": test_handler,') + ','), encoding="utf-8")
+        if run_quiet(phantom, check=False) != 2:
+            failures.append("a string-literal decoy embedding a phantom HANDLERS key must fail closed "
                             "(exit 2)")
 
         # 3. An unknown corpus-id in the manifest fails closed.

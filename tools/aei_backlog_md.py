@@ -86,6 +86,15 @@ def _strip_invisibles_mapped(line):
     return "".join(kept), offsets
 
 
+def _has_invisible(s):
+    """True when a verdict-bearing ref span carries a zero-width / Unicode format (category Cf) codepoint.
+    The close and blocker ref grammars accept any non-whitespace char, and a zero-width char is
+    non-whitespace, so an invisible could launder a distinct ref into a valid close/blocker (fail-OPEN); a
+    verdict-bearing ref is therefore rejected here (enumeration error, exit 3), while the display-only
+    title keeps its invisibles verbatim (C1). Mirrors the engine _orch_has_invisible."""
+    return any(ch in _ZERO_WIDTH or unicodedata.category(ch) == "Cf" for ch in s)
+
+
 def parse(text, version=2):
     """(items, errors). Errors are strings; any error means the enumeration must not be emitted. Under
     version 2 the close/prep annotations are strict; under version 1 they are ignored and the v1 item
@@ -114,7 +123,11 @@ def parse(text, version=2):
         # blocker annotation makes that annotation fail its grammar (fail-closed, exit 3), never a silent
         # laundering into validity (grdinp).
         lead = len(stripped_full) - len(stripped_full.lstrip())
-        rest = line[offsets[lead + m.start("rest")]:].rstrip()
+        # C1 + r10 FIX 5(a): derive the title start from the END of the structural separator (the last
+        # whitespace of `- <ID> [tok] `), one past it in the ORIGINAL line, so any invisible between the
+        # checkbox and the first VISIBLE title char is RETAINED verbatim. Mapping via m.start("rest")
+        # pointed at the first RETAINED char, dropping a stripped title-leading invisible.
+        rest = line[offsets[lead + m.start("rest") - 1] + 1:].rstrip()
         if iid in seen:
             errors.append("line {}: duplicate id {}".format(n, iid))
             continue
@@ -126,6 +139,9 @@ def parse(text, version=2):
         if cm:
             if cm.group("reason") not in CLOSE_REASONS:
                 errors.append("line {}: unknown close reason {!r}".format(n, cm.group("reason")))
+                continue
+            if _has_invisible(cm.group("ref")):
+                errors.append("line {}: close ref carries a zero-width/format char".format(n))
                 continue
             close = {"reason": cm.group("reason"), "ref": cm.group("ref")}
             # B3/FIX2/FIX B: an OPTIONAL '::' paths list (repo-relative, comma-separated) binds a `fixed`
@@ -156,6 +172,9 @@ def parse(text, version=2):
         if bm:
             if bm.group("kind") not in KINDS:
                 errors.append("line {}: unknown blocker kind {!r}".format(n, bm.group("kind")))
+                continue
+            if _has_invisible(bm.group("ref")):
+                errors.append("line {}: blocker ref carries a zero-width/format char".format(n))
                 continue
             blocker = {"kind": bm.group("kind"), "ref": bm.group("ref")}
             om = OBSERVED_RE.search(rest)
@@ -391,6 +410,18 @@ def self_test():
         if i["id"] == "A-2"), {})
     if good_place.get("close", {}).get("paths") != ["tools/z.py"]:
         ok_fail.append("a correctly-placed close paths must parse close.paths (got {})".format(good_place))
+    # r10 FIX 5(a): a title-LEADING invisible is now RETAINED verbatim (the r9 offset pointed at the first
+    # RETAINED char, dropping a stripped invisible at the title boundary). Python ESCAPE, no literal char.
+    _tl = next((i for i in parse("- A-1 [ ] \u200dtitle\n", version=2)[0] if i["id"] == "A-1"), {})
+    if _tl.get("title") != "\u200dtitle":
+        ok_fail.append("a title-leading invisible must be retained verbatim (got {!r})"
+                       .format(_tl.get("title")))
+    # r10 FIX 5(b): a Cf/zero-width char in a verdict-bearing CLOSE or BLOCKER ref FAILS CLOSED (an error
+    # is recorded; main() exits 3), never laundered into a valid close/blocker.
+    if not parse("- A-1 [x] done :: close:no-fix-needed=R-\u200b1\n", version=2)[1]:
+        ok_fail.append("an invisible-bearing close ref must fail closed (record an error)")
+    if not parse("- A-1 [BLOCKED] wait :: blocker:external=ci-\u200b42\n", version=2)[1]:
+        ok_fail.append("an invisible-bearing blocker ref must fail closed (record an error)")
     if ok_fail:
         for f in ok_fail:
             print("SELF-TEST FAIL: " + f, file=sys.stderr)

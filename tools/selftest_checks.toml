@@ -366,7 +366,15 @@ expected-check-ids = [
   "wait/genuine-sleep-denies",
   "wait/genuine-poll-loop-denies",
   "wait/bare-wait-builtin-denies",
+  "wait/arg-while-sleep-inert-allow",
+  "wait/arg-commit-while-sleep-inert-allow",
+  "wait/arg-grep-pipe-while-sleep-inert-allow",
+  "wait/if-then-sleep-denies",
+  "wait/for-loop-sleep-denies",
   "wait/empty-wait-tools-inert",
+  # ---------- GD-164 r10 FIX 5(b): validate_enumeration invisible-ref rejection ----------
+  "enum/invisible-close-ref-rejected",
+  "enum/invisible-blocker-ref-rejected",
   # ---------- GD-164: surface-N and emission ----------
   "surface/liveness-row-untruncated",
   "surface/liveness-row-digest",

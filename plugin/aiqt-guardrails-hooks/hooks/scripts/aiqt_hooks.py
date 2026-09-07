@@ -134,6 +134,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
@@ -5225,6 +5226,18 @@ _ORCH_ATTEST_APPROVED = frozenset(("accepted", "landed"))  # FIX 3: a ref counts
 # only on one of these grounds recorded in the disposition register the guard reads; any other close,
 # or an unverifiable one, classifies actionable or held, never terminal-invisible.
 _ORCH_CLOSE_REASONS = frozenset(("fixed", "no-fix-needed", "not-buildable", "maintainer-deferred"))
+# The zero-width / Cf explicit safety net, mirroring aei_backlog_md._ZERO_WIDTH: a runtime whose Unicode
+# table does not yet class U+180E / U+200C / U+200D as Cf still rejects them in a verdict-bearing ref. The
+# source carries only \u escapes, never a literal zero-width byte.
+_ORCH_ZERO_WIDTH = frozenset("\u200b\u200c\u200d\u2060\u180e\ufeff")
+
+
+def _orch_has_invisible(s):
+    """True when a string carries any zero-width / Unicode format (category Cf) codepoint. A verdict-bearing
+    annotation ref (a close ref, a blocker ref) that carries an invisible could launder a distinct ref into
+    a valid terminal close or a substantiated blocker (fail-OPEN); it is rejected here as it is at the
+    Markdown grammar surface (aei_backlog_md._has_invisible), so both surfaces fail closed."""
+    return any(ch in _ORCH_ZERO_WIDTH or unicodedata.category(ch) == "Cf" for ch in s)
 
 
 def _orch_now():
@@ -5634,6 +5647,8 @@ def validate_enumeration(obj):
                             .format(iid, reason))
                 if not isinstance(cref, str) or not cref.strip():
                     return (None, "closed item {} close has no non-blank ref".format(iid))
+                if _orch_has_invisible(cref):
+                    return (None, "closed item {} close ref carries a zero-width/format char".format(iid))
                 close = {"reason": reason, "ref": cref}
                 # B3 (optional): a `fixed` close MAY declare the repo-relative paths it fixed, so the
                 # vfxcmt reconciliation binds the cited commit to the item by its changed set. When
@@ -5654,6 +5669,8 @@ def validate_enumeration(obj):
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
                 return (None, "item {} has a malformed blocker".format(iid))
+            if _orch_has_invisible(blocker.get("ref")):
+                return (None, "item {} blocker ref carries a zero-width/format char".format(iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
@@ -7096,37 +7113,38 @@ def orch_route_guard(data):
 
 
 _ORCH_WAIT_COMMANDS = frozenset(("sleep", "wait"))
-# A poll/busy-wait loop: a while/until whose body sleeps. `for` and other loop forms, and a spin loop
-# with no sleep, are the disclosed residual (see orch_wait_guard).
-_ORCH_WAIT_LOOP_KEYWORDS = frozenset(("while", "until"))
+# Shell loop/conditional body keywords: a segment led by one of these carries its real command after it,
+# so `do sleep 5` / `then sleep 600` reads as a sleep in command position once the keyword is skipped.
+_ORCH_WAIT_BODY_KEYWORDS = frozenset(("do", "then", "else", "elif"))
 
 
 def _orch_command_waits(command):
-    """A1 wait-intent discriminator: True only for a HIGH-CONFIDENCE Bash wait, judged over the
-    quote/redirect-aware lexer (never the raw string), so a quoted or argument `sleep` (echo sleep,
-    grep sleep) does not fire. A wait is a segment whose COMMAND WORD is `sleep`/`wait`, or a
-    while/until loop keyword co-occurring with a `sleep` token (a poll loop). An unparseable command is
-    NOT recognizably a wait (fail-safe: the caller inert-allows, never wedges). DISCLOSED RESIDUAL: an
-    obfuscated wait (a renamed/aliased detacher, a sleep/loop inside a nested shell string such as
-    bash -c '... sleep ...', a wait implemented by another program such as python -c 'time.sleep(...)',
-    a for-loop sleep, a no-sleep spin loop, or a stdin-blocking `read` - excluded to avoid mistaking
-    `read var < file` for a wait) is not caught here; the shared schedule-denial cap and the stop-guard
-    re-enumeration are the compensating layers."""
+    """A1 wait-intent discriminator (round 10): True only for a HIGH-CONFIDENCE Bash wait, judged over the
+    quote/redirect-aware lexer so a quoted or argument `sleep`/`while` never fires. A segment is a wait when
+    its COMMAND WORD (after skipping a single leading loop/conditional body keyword do/then/else/elif) is
+    `sleep` or `wait`. This covers a plain sleep, a bare wait builtin, and a sleep inside a while/until/for
+    loop body or an if/then branch (the body keyword is skipped so the sleep reads in command position); it
+    NEVER fires on a `while`/`sleep` token in ARGUMENT position (echo while sleep, git commit -m while -m
+    sleep), the round-9 over-fire. An unparseable command is NOT recognizably a wait (fail-safe: the caller
+    inert-allows, never wedges). DISCLOSED RESIDUAL: an obfuscated wait (a renamed/aliased detacher; a
+    sleep/loop inside a nested shell string such as bash -c '... sleep ...'; a wait implemented by another
+    program such as python -c 'time.sleep(...)'; a spin loop with no sleep; a stdin-blocking read; or a wait
+    behind an unparseable construct such as a here-string or process substitution, which raises ValueError and
+    is inert-allowed) is not caught here; the shared schedule-denial cap and the stop-guard re-enumeration are
+    the compensating layers."""
     try:
         segments = _segments(command)
     except ValueError:
         return False  # unparseable/unsupported construct: not recognizably a wait -> caller allows
-    loop_kw = sleep_present = False
     for argv, _sep in segments:
         cw = _command_word(argv)
+        if cw in _ORCH_WAIT_BODY_KEYWORDS:
+            idx = _command_word_index(argv)
+            if idx is not None:
+                cw = _command_word(argv[idx + 1:])
         if cw in _ORCH_WAIT_COMMANDS:
-            return True                                   # a sleep/wait in command position
-        toks = set(argv)
-        if cw in _ORCH_WAIT_LOOP_KEYWORDS or (_ORCH_WAIT_LOOP_KEYWORDS & toks):
-            loop_kw = True
-        if "sleep" in toks:
-            sleep_present = True
-    return loop_kw and sleep_present                      # a while/until poll loop that sleeps
+            return True
+    return False
 
 
 def orch_wait_guard(data):
