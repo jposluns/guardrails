@@ -61,8 +61,9 @@ reason, MAY is genuinely optional. Statements without these keywords are descrip
 - **Determinism where claimed.** Anything called a deterministic render is byte-reproducible from
   its sources. Anything curated by a human is labelled as curated and is gated on its facts, not
   its bytes.
-- **Generic by construction.** Nothing in the standard names a particular adopter, operator, tool
-  vendor, or internal system.
+- **Generic by construction.** The base requirements, and the data of a conforming store, name no
+  particular adopter, operator, or profile; the standard's own ownership and its reference profile
+  are named as such, never as a requirement dependency (section 15).
 
 ## 4. Store resolution: roots, pointer, discovery, and naming
 
@@ -341,13 +342,21 @@ sync target: the target is fetched and the local store compared against it.
   fast-forward pull to current (`opf sync`), which the tooling MAY offer and perform as its own
   surfaced step, then re-run the operation; the pull is never folded silently into another
   operation.
-- **Ahead of, or divergent from, the target** (unsynced commits on two systems): the tooling
-  refuses to operate and surfaces the state. A divergence HALTS for the human, always: it is never
-  auto-merged and never silently resolved by picking a side, because a textual merge of
-  append-only TOML ledgers can silently mangle the very records the standard exists to protect.
+- **Ahead of the target** (local commits not yet pushed, the lease still held by the resuming
+  holder, and no divergent remote side): the tooling refuses to operate until the store is
+  reconciled, and reconciliation is an authorized push of the pending local commits. The holder
+  confirms and pushes them as its own surfaced step, never folded silently into another operation;
+  the push is safe precisely because there is no divergent side that a push could lose. This is the
+  recovery path for a store left ahead by a crash between a local write and its sync-back.
+- **Divergent from the target** (unsynced commits on two systems): the tooling refuses to operate
+  and surfaces the state. A divergence HALTS for the human, always: it is never auto-merged and
+  never silently resolved by picking a side, because a textual merge of append-only TOML ledgers
+  can silently mangle the very records the standard exists to protect.
 - **After any operation that writes,** the store is synced back to its target in the same session,
   so the store is not left intentionally ahead on one system; a crash between the local write and
-  the sync is detected as an ahead-or-divergent state and reconciled on the next resume, never left standing.
+  the sync is detected on the next resume as an ahead-only or a divergent state and reconciled by
+  the matching path above (an authorized ahead-only push by the lease holder, or a human-resolved
+  halt on divergence), never left standing.
 
 A **single-writer lease** prevents concurrent divergent writes: before mutating the store, a run
 takes the lease (`lease.toml`, present only while held, carrying the holder, the operation, and an
@@ -390,7 +399,7 @@ Scope of the contract by pattern:
 Generated public deliverables always live in the product repository: the root `CHANGELOG.md`, the
 root `VERSION`, and any future public view. This holds identically whether the store is in-repo, a
 private companion, local-only, or anywhere else; a reader of the product repository sees the same
-files with the same bytes whatever the topology, and nothing about the product repository's
+generated public deliverables, byte for byte, whatever the topology, and nothing about the product repository's
 surface reveals or depends on where the store lives. Only the maintainer's systems need resolve a
 private store; for everyone else the pointer is an inert file and the public deliverables are the
 whole story.
@@ -450,11 +459,12 @@ Summary rows hold digests and ranges only, never prose. Prose lives in exactly o
 `.working/toml/worklog.toml` is the detailed operational record: one entry per change, appended as
 the work happens. It generates the deterministic view `.working/WORKLOG.md`.
 
-The worklog is durable and append-only. Entries are never consumed, rolled away, or deleted; every
-fact ever recorded stays in the worklog (or its archive, section 12) forever, and survives store
-relocation byte for byte (section 5.4). This durability is what makes the changelog safely
-re-rollable: a summary can be re-worded or re-rolled at any depth because the detail it summarizes
-is never lost.
+The worklog is durable and mutable-until-release, never deleted. An unreleased entry MAY be
+corrected in place through ordinary review; once a release freezes its span the entry is immutable;
+and no entry is ever consumed, rolled away, or deleted. Every fact ever recorded stays in the
+worklog (or its archive, section 12), and survives store relocation byte for byte (section 5.4).
+This durability is what makes the changelog safely re-rollable: a summary can be re-worded or
+re-rolled at any depth because the detail it summarizes is never lost.
 
 Each `[[entry]]` row is a worklog record (type `worklog`, namespace `WL`, section 8) carrying its
 ID, timestamp, actor, a change kind (`added`, `changed`, `fixed`, `removed`, `security`, `docs`, or
@@ -524,9 +534,9 @@ deterministic, and it fails closed on an unreadable or unparseable input.
 
 ### 7.2 Freeze and re-publish
 
-Freeze the detail, not the summary. The worklog is the frozen append-only record; the changelog is
-free to be re-worded, because editing a summary's prose can never change the facts, which persist
-in the worklog.
+Freeze the detail, not the summary. The worklog is the durable record of facts, frozen once its
+spans are released; the changelog is free to be re-worded, because editing a summary's prose can
+never change the facts, which persist in the worklog.
 
 - A `working` summary (unpublished, including the unreleased section) is edited with no ceremony.
 - Publishing a summary computes its freeze digest (the exact bytes of its `CHANGELOG.md` entry,
@@ -900,21 +910,27 @@ archive integrity; the tracked-store requirement against the resolved store; poi
 sync-target agreement (the committed pointer, the manifest's recorded sync target, and the store
 repository's actual remote agree; section 5.6); unmanaged-path containment (section 14.2); and
 path containment. At `required`, an unreadable, unparseable, or unresolvable declared input is a
-failure, never an empty or clean result. Unmanaged-path containment is phased by import state:
-only while an import is actively in progress (`import_status = "partial"`) is an unregistered path
-found at the store location surfaced as a finding rather than a build failure (section 14.2). At
-`required` posture in every other state, including a clean store (`import_status = "none"`) and a
-completed import (`import_status = "complete"`), an unregistered unmanaged path is a
-containment-gate failure, fail-closed (section 14.2).
+failure, never an empty or clean result. Unmanaged-path containment is phased by import state.
+`import_status = "partial"` denotes an in-progress import only: it is set only while an import or
+migration is actively running, MUST transition to `"complete"` when that import finishes, and a
+store with no active import is never `"partial"` (it is `"none"` or `"complete"`). Only during an
+active import (`import_status = "partial"` with an import actually in progress) is an unregistered
+path found at the store location surfaced as a finding rather than a build failure (section 14.2).
+At `required` posture in every other state, including a clean store (`import_status = "none"`) and a
+completed import (`import_status = "complete"`), and at `required` posture whenever no import is
+actively running, an unregistered unmanaged path is a containment-gate failure, fail-closed
+(section 14.2).
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
 operational surface has moved into the store) is a report, never a gate: breadth of adoption is a
 journey, and failing a build over it would train bypasses. It stays report-only at every posture.
 
-Defaults: scaffolding writes `posture = "required"` (a clean store has no legacy excuse for drift);
-import writes `warn` with `import_status = "partial"`, and every report carries
-`migration_incomplete` until fragments and detected pre-existing files are resolved, at which
-point the adopter flips to `required`. Weakening the posture (`required` toward `warn` or `off`)
+Defaults: scaffolding writes `posture = "required"` and `import_status = "none"` (a clean init
+store has no legacy excuse for drift, and with no active import it is never `"partial"`); an import
+run writes `warn` with `import_status = "partial"` only while it is actively running, sets
+`import_status = "complete"` when it finishes, and every report carries `migration_incomplete`
+until fragments and detected pre-existing files are resolved, at which point the adopter flips to
+`required`. Weakening the posture (`required` toward `warn` or `off`)
 is a guardrail-configuration change: it takes effect only through the maintainer's explicit,
 recorded authorization, and is never self-applied by the assistant or by tooling.
 
@@ -1007,13 +1023,16 @@ fragments. The flow is assistant-drivable by construction: the options are prese
 data, the assistant or adopter picks per file, and each pick is recorded with its actor
 attribution like any other decision.
 
-After adoption, the same detection keeps running, scoped by phase. Only while an import is actively
+After adoption, the same detection keeps running, scoped by phase. `import_status = "partial"`
+denotes an in-progress import only: it is set only while an import or migration is actively
+running, MUST transition to `"complete"` when that import finishes, and a store with no active
+import is never `"partial"` (it is `"none"` or `"complete"`). Only while an import is actively
 in progress, with `import_status = "partial"`, is a file that appears in `.working/` that is neither
 OPF-managed nor enumerated as unmanaged surfaced as a finding to triage through the options
 above, never absorbed. In every other state, including a clean store (`import_status = "none"`) and
-a completed import (`import_status = "complete"`), at steady-state `required` posture an unregistered
-unmanaged path is a containment-gate failure that fails the build closed (the integrity layer of
-section 11), still never silently absorbed.
+a completed import (`import_status = "complete"`), and whenever no import is actively running, at
+steady-state `required` posture an unregistered unmanaged path is a containment-gate failure that
+fails the build closed (the integrity layer of section 11), still never silently absorbed.
 
 ### 14.3 Migrating an existing release pipeline
 
@@ -1026,8 +1045,8 @@ witnessed release cut.
 
 ## 15. Genericization boundary
 
-Nothing in a conforming store's shipped schemas, or in this standard, names a particular adopter,
-operator, internal system, endpoint, tier vocabulary, or command. `actor.kind` carries only the
+Nothing in a conforming store's shipped schemas names a particular adopter, operator, internal
+system, endpoint, tier vocabulary, or command. `actor.kind` carries only the
 portable categories; identity detail lives in `actor.id` or extensions. `mode`,
 `tier_assessment`, and `waiver` ship structure only (evidence, assessor, outcome, validity, scope,
 expiry) with adopter-supplied vocabularies. The location patterns of section 5.3 are described
@@ -1099,7 +1118,7 @@ Synthetic data throughout; no real project, person, or record.
 [[record]]
 id = "FN-7"
 type = "finding"
-status = "fixed"
+status = "fixed/proposed"
 title = "Generated view drifted from its source index"
 created_at = "2026-08-12T09:14:02Z"
 updated_at = "2026-08-12T11:40:55Z"
@@ -1133,17 +1152,18 @@ status = "working"
 
 [[summary]]
 covers = "1.3.0"
-status = "published"
+status = "superseded"
 digest = "sha256:a3f5c1de9b6a44708d622de1f9f26bbee2ccc0be9cbb1c19b599162eeb0ed4f1"
+superseded_by = "1.2.3..1.3.0"
 
 [[summary]]
 covers = "1.2.3"
 status = "superseded"
 digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-superseded_by = "1.0.0..1.2.3"
+superseded_by = "1.2.3..1.3.0"
 
 [[summary]]
-covers = "1.0.0..1.2.3"
+covers = "1.2.3..1.3.0"
 status = "published"
 digest = "sha256:60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
 ```
@@ -1159,7 +1179,7 @@ date = "2026-08-29T16:22:41Z"
 actor = { kind = "maintainer" }
 kind = "fixed"
 summary = "Close the view generator's stale-output gap on renamed types"
-links = ["BI-42", "FN-7"]
+links = [ { rel = "resolves", id = "BI-42" }, { rel = "remediates", id = "FN-7" } ]
 
 [[entry]]
 id = "WL-132"
@@ -1167,7 +1187,7 @@ date = "2026-09-02T10:05:19Z"
 actor = { kind = "assistant" }
 kind = "docs"
 summary = "Correct the block-join description in the composed-view docs (corrects WL-90)"
-links = ["WL-90"]
+links = [ { rel = "corrects", id = "WL-90" } ]
 ```
 
 ## Appendix D: CHANGELOG.md entry examples

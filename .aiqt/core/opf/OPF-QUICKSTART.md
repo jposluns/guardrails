@@ -16,8 +16,9 @@ store is the source of truth; nothing hand-edits a generated file.
 
 - **`version.toml`**: the machine ledger of versions, dates, and release boundaries. It generates
   the root `VERSION` file. Numbers and digests only, never prose.
-- **`worklog.toml`**: the detailed record, one entry per change, append-only forever. Entries are
-  never rolled away or deleted; it generates `.working/WORKLOG.md`, and it survives every store
+- **`worklog.toml`**: the detailed record, one entry per change, mutable-until-release and never
+  deleted. An unreleased entry may be corrected in place; a released entry is immutable; entries
+  are never rolled away or deleted. It generates `.working/WORKLOG.md`, and it survives every store
   move byte for byte.
 - **`CHANGELOG.md`** (product repo root): the public story. Machine-drafted, human-curated
   summaries of the worklog, each declaring the version range it covers
@@ -61,7 +62,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
    declaring `standard = "devprocess"` in its `[devprocess]` table, plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the nine baseline `<type>.index.toml` files; specification
+   `version.toml`, `worklog.toml`, and the eight baseline `<type>.index.toml` files (worklog is the
+   exempt ledger listed above, not an index); specification
    sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` is detected and you choose, per file: keep it, import it
    into the store, or move it; nothing is absorbed or overwritten silently.
