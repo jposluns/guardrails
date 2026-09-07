@@ -984,11 +984,14 @@ class _MechHtmlParser(HTMLParser):
         self._stack = []  # open nodes within the current block ([] when outside any details.more block)
 
     def handle_starttag(self, tag, attrs):
-        if not self._stack and not (tag == "details" and "more" in dict(attrs).get("class", "").split()):
-            return  # outside any mechanism block
         keys = [k for k, _v in attrs]
         dups = sorted({k for k in keys if keys.count(k) > 1})
-        node = {"tag": tag, "attrs": dict(attrs), "dup_attrs": dups, "children": [], "text": ""}
+        first = {}
+        for k, v in attrs:
+            first.setdefault(k, v)  # a browser keeps the FIRST occurrence of a duplicated attribute (F-353)
+        if not self._stack and not (tag == "details" and "more" in first.get("class", "").split()):
+            return  # outside any mechanism block
+        node = {"tag": tag, "attrs": first, "dup_attrs": dups, "children": [], "text": ""}
         if self._stack:
             self._stack[-1]["children"].append(node)
         self._stack.append(node)
@@ -1195,6 +1198,8 @@ def _reverse_leg(md_text, html_text, sources):
     except (ValueError, AssertionError) as exc:
         findings.append("reverse(html): could not parse the register HTML ({})".format(exc))
         return findings
+    if parser._stack:  # a browser EOF-closes an unclosed <details.more>; it never reached parser.blocks (F-354)
+        findings.append("reverse(html): unclosed mechanism <details> root at EOF (never terminated)")
     counts = {}
     for block in parser.blocks:
         ref, block_findings = _validate_mech_html(block, expected)
@@ -2647,10 +2652,11 @@ def _page_bound_source_self_test():
         # as an ATTRIBUTE (a <li title=...>, an extra data-*, an extra class token) leaves the <li> text and the
         # field multiset unchanged, so the r17 structural leg passed it, and Collector 1's VisibleText scan
         # strips attributes, so the forward leg misses it too: the attribute channel is the last un-enumerated
-        # HTML surface. Each injection lands on a REAL mechanism node of the full 54-block build (the 14-space
+        # HTML surface. Each injection lands on a REAL mechanism node of the built register fixture (the 14-space
         # mechanism <li>, the first .more details root, the first ledger-residual blockquote) and must be caught
         # by the SAME _reverse_leg on real render bytes. The n5b clean assertion above already re-confirms the
-        # attribute allowlist does NOT over-fire (0 reverse findings over the real 54 blocks).
+        # attribute allowlist does NOT over-fire (0 reverse findings over the fixture's mechanism blocks); the
+        # shipped 54-block page is bound separately by the enforcement-register-drift byte-pin.
         _li_title = html_page.replace(
             "              <li>", '              <li title="Guarantees secure output">', 1)
         if not _reverse_leg(md_text, _li_title, pbs):
@@ -2670,6 +2676,23 @@ def _page_bound_source_self_test():
         _id_val = html_page.replace('id="mechanism-', 'id="OVERCLAIM mechanism-', 1)
         if not _reverse_leg(md_text, _id_val, pbs):
             failures.append("COMPLETENESS(reverse): an overclaim in a mechanism <details> id must be caught (FIX F, r19)")
+        # r20 (F-353): a decoy-LAST duplicate class must not let a details.more root evade admission. A browser
+        # keeps the FIRST class ("more ..."), rendering the block; the old last-wins dict() saw "decoy", dropped the
+        # root, and never ran the dup/attribute checks. Inject a duplicate of the first block (originals all stay, so
+        # no absence-catch masks it) whose root carries a payload-first, decoy-last class.
+        _r0 = html_page.index('<details class="more"')
+        _r1 = html_page.index("</details>", _r0) + len("</details>")
+        _decoy = html_page[_r0:_r1].replace(
+            '<details class="more"', '<details class="more guarantees-secure-output" class="decoy"', 1)
+        _dup_admit = html_page.replace("</main>", _decoy + "\n</main>", 1)
+        if not _reverse_leg(md_text, _dup_admit, pbs):
+            failures.append("COMPLETENESS(reverse): a decoy-last duplicate class must not evade root admission (FIX F, r20)")
+        # r20 (F-354): an EOF-unclosed mechanism <details> root (a browser tree-builder still renders it) must be
+        # caught by the post-close open-stack check, not silently dropped because it never hit an end tag.
+        _unclosed = html_page.replace(
+            "</main>", '<details class="more" title="guarantees secure output"><summary><code>gate:decoy</code></summary>\n</main>', 1)
+        if not _reverse_leg(md_text, _unclosed, pbs):
+            failures.append("COMPLETENESS(reverse): an EOF-unclosed mechanism <details> root must be caught (FIX F, r20)")
 
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
