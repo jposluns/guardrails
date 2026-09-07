@@ -13,6 +13,8 @@
 .aiqt/core/hooks/scripts/aiqt_hooks.py text eol=lf
 .aiqt/core/id-history.toml text eol=lf
 .aiqt/core/migration/crosswalk-schema.toml text eol=lf
+.aiqt/core/opf/OPF-QUICKSTART.md text eol=lf
+.aiqt/core/opf/OPF-SPEC.md text eol=lf
 .aiqt/core/order.toml text eol=lf
 .aiqt/core/ownership.toml text eol=lf
 .aiqt/core/references.toml text eol=lf

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "2c9906c3c6525e4e1841ae52405133c56aadb60f311866660a66856d36b855dc"
+tree-sha256 = "af51ec669d06a57250c06a07feb0776cd1ce291d237bc7a6cc88dc7bdc651dce"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -73,6 +73,16 @@ sha256 = "5a3ea361d5d765e6ea0c6197ea4e9102e439b168a759041aa07e44dd52a24b2c"
 path = ".aiqt/core/migration/crosswalk-schema.toml"
 bytes = 2403
 sha256 = "e1391be5a8cf1d83c17171f576f923ad662b4d1842dcb89771c2a7f517a5c2c7"
+
+[[sources]]
+path = ".aiqt/core/opf/OPF-QUICKSTART.md"
+bytes = 8473
+sha256 = "dc68d43dbf4a9b3b5e1c2593d761e0d7f89be181e7f7d52f7f956736ca1fda44"
+
+[[sources]]
+path = ".aiqt/core/opf/OPF-SPEC.md"
+bytes = 75880
+sha256 = "a4e9b049908a8744ca92282c458d174c50bd3408ea44ed68d4dba57a39fd1191"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
@@ -2101,8 +2111,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 34188
-sha256 = "bbbfc413398775087deef0a45d2d3bf1d390ec633a771b7d24de038836d7089d"
+bytes = 34272
+sha256 = "4aba2f35d3a807a3126acd83e6a0a2431d82dc40c04881eacb42b8c142249537"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
