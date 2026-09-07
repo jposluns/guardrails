@@ -226,7 +226,9 @@ Exit 0 clean, 1 on any finding, 2 on a read error (unreadable/absent required su
 import base64
 import binascii
 import json
+import os
 import re
+import stat
 import sys
 import unicodedata
 from html.parser import HTMLParser
@@ -968,20 +970,191 @@ def _md_mech_scope(md_text, ref):
     return "\n".join(lines[start:end])
 
 
+# A mechanism metadata field line in the rendered Markdown, BULLET or NON-BULLET, so a render that emits a
+# field without the '- ' prefix is still extracted and compared (FIX 5, round 16). The label is letters,
+# digits and spaces (the _MECH_FIELDS labels); the value is the remainder, its wrapping backticks stripped.
+_MD_FIELD_RE = re.compile(r"^(?:- )?([A-Za-z][A-Za-z0-9 ]*): (.+)$")
+
+
+class _MechHtmlParser(HTMLParser):
+    """Structural extractor for the register's mechanism <details> blocks (reverse leg, FIX 5 round 16). Per
+    mechanism it records the (label, value) pairs rendered as <li>Label: <code>value</code></li> inside the
+    block's <ul>, and FLAGS any other content-bearing element inside the block's <div class="inner"> besides
+    that <ul>, the <p class="ledger-residual-label"> heading, and the <blockquote class="ledger-residual">
+    residue, so a NEW render channel (e.g. an injected <p>Kind: gate</p>) is caught even though it is not an
+    <li> field. The mechanism ref is the <summary><code> text."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks = []
+        self._cur = None
+        self._in_summary = False
+        self._in_code = False
+        self._in_inner = False
+        self._in_li = False
+        self._li_label = []
+        self._li_value = []
+        self._ref = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        cls = a.get("class", "")
+        if tag == "details" and "more" in cls.split():
+            self._cur = {"ref": "", "pairs": [], "extra": []}
+            self._in_inner = False
+            return
+        if self._cur is None:
+            return
+        if tag == "summary":
+            self._in_summary = True
+        elif tag == "div" and "inner" in cls.split():
+            self._in_inner = True
+        elif tag == "code":
+            self._in_code = True
+            if self._in_li:
+                self._li_value = []
+        elif self._in_inner:
+            if tag == "li":
+                self._in_li = True
+                self._li_label = []
+                self._li_value = []
+            elif tag == "ul":
+                pass
+            elif tag == "p" and cls == "ledger-residual-label":
+                pass
+            elif tag == "blockquote" and "ledger-residual" in cls.split():
+                pass
+            else:
+                self._cur["extra"].append(tag)
+
+    def handle_data(self, data):
+        if self._cur is None:
+            return
+        if self._in_summary and self._in_code:
+            self._ref.append(data)
+        elif self._in_li:
+            (self._li_value if self._in_code else self._li_label).append(data)
+
+    def handle_endtag(self, tag):
+        if self._cur is None:
+            return
+        if tag == "code":
+            self._in_code = False
+        elif tag == "summary":
+            self._cur["ref"] = "".join(self._ref).strip()
+            self._ref = []
+            self._in_summary = False
+        elif tag == "li" and self._in_li:
+            self._cur["pairs"].append(("".join(self._li_label).replace(":", "").strip(),
+                                       "".join(self._li_value).strip()))
+            self._in_li = False
+        elif tag == "details":
+            self.blocks.append(self._cur)
+            self._cur = None
+            self._in_inner = False
+
+
+def _reverse_leg(md_text, html_text, sources):
+    """Reverse completeness leg (FIX 5, round 16): every mechanism metadata FIELD a render VIEW emits must be
+    an ENUMERATED page_content_strings value at its own mechanism. BOTH views are parsed with structural
+    grammars (the Markdown field lines, bullet OR non-bullet, in the region before the residual heading; the
+    HTML <li> fields inside each mechanism <details>, plus a structural check for any EXTRA content element in
+    the block). The observed (label, value) multiset per mechanism must equal the enumerated one, and any extra
+    HTML channel FAILS, so an un-enumerated field added to render_md (a non-bullet `Kind: gate`) OR to
+    render_html (`<p>Kind: gate</p>`) is caught in EITHER view - the round-12/round-15 gaps the old label-only,
+    Markdown-only scan missed (non-bullet, HTML-only, post-residual, and duplicate channels)."""
+    findings = []
+    expected = {}
+    for channel, key, raw in sources:
+        label = _MECH_LABELS.get(channel)
+        if label is not None:
+            expected.setdefault(key, []).append((label, raw))
+    refs = sorted(expected)
+    for ref in refs:
+        scope = _md_mech_scope(md_text, ref)
+        if scope is None:
+            findings.append("reverse(md): mechanism block {} is absent".format(ref))
+            continue
+        head = scope.split("\n{}:".format(gen_enforcement_register.RESIDUAL_HEADING))[0]
+        observed = []
+        for line in head.split("\n"):
+            m = _MD_FIELD_RE.match(line)
+            if m:
+                observed.append((m.group(1).strip(), m.group(2).strip("`").strip()))
+        if sorted(observed) != sorted(expected[ref]):
+            findings.append("reverse(md): mechanism {} renders fields {} but enumerates {}".format(
+                ref, sorted(observed), sorted(expected[ref])))
+    parser = _MechHtmlParser()
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except (ValueError, AssertionError) as exc:
+        findings.append("reverse(html): could not parse the register HTML ({})".format(exc))
+        return findings
+    seen = set()
+    for block in parser.blocks:
+        ref = block["ref"]
+        seen.add(ref)
+        exp = expected.get(ref)
+        if exp is None:
+            findings.append("reverse(html): mechanism block {!r} is not enumerated".format(ref))
+            continue
+        if block["extra"]:
+            findings.append("reverse(html): mechanism {} renders extra content channel(s) {}".format(
+                ref, sorted(set(block["extra"]))))
+        if sorted(block["pairs"]) != sorted(exp):
+            findings.append("reverse(html): mechanism {} renders fields {} but enumerates {}".format(
+                ref, sorted(block["pairs"]), sorted(exp)))
+    for ref in refs:
+        if ref not in seen:
+            findings.append("reverse(html): mechanism block {} is absent".format(ref))
+    return findings
+
+
+def _md_row_cells(line):
+    """The table cells of a Markdown row emitted by render_md (`| c0 | c1 | ... |`). _md_cell escapes an
+    interior '|' as an escaped pipe and a backslash as a doubled backslash, so no unescaped ' | ' occurs
+    inside a cell and splitting the row body on ' | ' recovers the exact emitted cells (FIX 4, round 16).
+    Returns None for a line that is not a bordered table row."""
+    body = line.strip()
+    if not (body.startswith("| ") and body.endswith(" |")):
+        return None
+    return body[2:-2].split(" | ")
+
+
+def _md_rule_row(md_text, cid):
+    """The exact 4-cell Rules-table row whose Corpus ID cell is the code-styled `cid`, or None. Anchoring on
+    the Corpus ID cell (not a substring anywhere on the page) is what makes a value that appears only in a
+    sibling cell, a shadow row, or outside the table fail the location check (FIX 4, round 16)."""
+    anchor = "`{}`".format(cid)
+    for line in md_text.split("\n"):
+        cells = _md_row_cells(line)
+        if cells is not None and len(cells) == 4 and cells[1] == anchor:
+            return cells
+    return None
+
+
 def _md_field_rendered(md_text, channel, key, raw):
     """(rendered, location_label) for one page-bound (channel, key, raw): whether the field renders at ITS OWN
-    expected Markdown location, not merely somewhere in the aggregate. Row channels (title, corpus-id,
-    description) bind to the Rules-table row keyed by the corpus id; mechanism channels (mech-id, the metadata
-    fields, residue) bind to the mechanism block keyed by the reference. Escaping mirrors the generator
-    (_md_cell for the table cells, the mechanism's own fence for the residue), so the check reads the exact
-    bytes the generator emits at that spot (FIX 5, round 15)."""
+    expected Markdown location by EXACT value equality, not by mere substring presence somewhere in scope. Row
+    channels (title, corpus-id, description) bind to the EXACT Rules-table row keyed by the corpus id and
+    compare the specific CELL for equality; mechanism channels (mech-id, the metadata fields, residue) bind to
+    the mechanism block keyed by the reference, the metadata fields comparing the EXACT `- Label:` LINE in the
+    region BEFORE the residual heading, and the residue comparing the fence content. Escaping mirrors the
+    generator (_md_cell for the cells, the mechanism's own fence for the residue), so the check reads the exact
+    bytes the generator emits at that spot. Substring matching was UNSOUND (FIX 4, round 16): a shadow field on
+    the same line, a value only in a sibling cell, a metadata value only in the residue, or a description
+    outside its own row all satisfied the old `in scope` / `in md_text` test while the real field was wrong or
+    absent."""
     cell = gen_enforcement_register._md_cell
-    if channel == "corpus-id":
-        return ("| `{}` |".format(key) in md_text, "the Corpus ID cell of row {}".format(key))
-    if channel == "title":
-        return ("| {} | `{}` |".format(cell(raw), key) in md_text, "the Rule cell of row {}".format(key))
-    if channel == "description":
-        return ("`{}` | Pending | {} |".format(key, cell(raw)) in md_text,
+    if channel in ("corpus-id", "title", "description"):
+        cells = _md_rule_row(md_text, key)
+        if channel == "corpus-id":
+            return (cells is not None, "the Corpus ID cell of row {}".format(key))
+        if cells is None:
+            return (False, "the Rules row for {}".format(key))
+        if channel == "title":
+            return (cells[0] == cell(raw), "the Rule cell of row {}".format(key))
+        return (cells[2] == "Pending" and cells[3] == cell(raw),
                 "the How cell of pending row {}".format(key))
     scope = _md_mech_scope(md_text, key)
     if scope is None:
@@ -994,7 +1167,9 @@ def _md_field_rendered(md_text, channel, key, raw):
     label = _MECH_LABELS.get(channel)
     if label is None:
         return (False, "an unmapped channel {!r}".format(channel))
-    return ("- {}: `{}`".format(label, raw) in scope, "the {} field of {}".format(label, key))
+    head = scope.split("\n{}:".format(gen_enforcement_register.RESIDUAL_HEADING))[0]
+    return ("- {}: `{}`".format(label, raw) in head.split("\n"),
+            "the {} field of {}".format(label, key))
 
 
 def _first_invisible(text):
@@ -1279,6 +1454,11 @@ def _decode_data_url(url, media_types, sink):
     except (binascii.Error, ValueError, UnicodeError) as exc:
         raise _FailClosed("register data: {} {} is undecodable ({})".format(
             sink, _bounded_label(url), exc))
+    # Redundant defence-in-depth (FIX 6, round 16): base64 decode yields ~3/4 of the payload and percent
+    # decode never expands UTF-8 byte length (%HH -> 1 byte, literals 1:1), so decoded_bytes <= payload_bytes
+    # and the payload byte-bound above always trips first. This overlapping layer is kept (cheap, and it would
+    # catch a future decode path that COULD expand the body); the domination invariant is machine-checked in
+    # the self-test (q2b) so this stays honestly redundant rather than dead.
     if len(decoded.encode("utf-8")) > _DATA_URL_MAX_BYTES:
         raise _FailClosed("register data: {} {} decodes past the {}-byte bound".format(
             sink, _bounded_label(url), _DATA_URL_MAX_BYTES))
@@ -1299,23 +1479,64 @@ def _decode_data_script(url):
     return _decode_data_url(url, _JS_DATA_MEDIA, "script")
 
 
-def _read_bounded(path, label):
-    """Read a required same-origin text file, FAIL-CLOSED (_FailClosed) past _ASSET_MAX_BYTES BEFORE the whole
-    file is loaded into memory: stat the size first, so an oversized same-origin asset cannot be read whole
-    before the bound is enforced (FIX r15 2b, SECA). `label` names the offending surface WITHOUT echoing its
-    contents. An absent, unreadable, or non-UTF-8 file is fail-closed, never a silent skip
-    (check-fails-closed-on-unreadable)."""
+def _read_regular_bounded(path, label, limit):
+    """Open `path` ONCE with no-follow semantics, confirm the OPENED descriptor is a REGULAR file, and read at
+    most limit+1 bytes FROM THAT DESCRIPTOR, so the ceiling is enforced BY CONSTRUCTION on the object actually
+    opened, never on a name stat()'d in a separate call (FIX 1, GER-1 round 16). Returns the raw bytes; the
+    caller decodes. Closes the round-15 check-then-open TOCTOU: the old code did path.stat() then a SEPARATE
+    read, so a symlink asset to /dev/zero or /proc/self/maps (st_size 0 yet streaming unbounded, or non-empty)
+    bypassed the pre-read ceiling, and the manifest symlink-rejection runs AFTER overclaim in run_all_checks.sh
+    so it could not save this leg. O_NOFOLLOW rejects a symlink final component (ELOOP), the fstat rejects a
+    non-regular object (device, fifo, directory), and the limit+1 read bounds even a regular file whose reported
+    size lies. `label` is routed through _bounded_label and a failure reports only the exception TYPE and errno,
+    never str(exc) (which carries the full pathname, so a 100,000-char asset NAME made stat() raise ENAMETOOLONG
+    and the old handler interpolated a ~200k-char message) (FIX 3). A symlink, non-regular file, or over-limit
+    read is _FailClosed (SECA, check-fails-closed-on-unreadable)."""
+    safe = _bounded_label(label)
     try:
-        size = path.stat().st_size
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
     except OSError as exc:
-        raise _FailClosed("register {} is absent or unreadable ({})".format(label, exc))
-    if size > _ASSET_MAX_BYTES:
-        raise _FailClosed("register {} is {} bytes, over the {}-byte pre-read ceiling".format(
-            label, size, _ASSET_MAX_BYTES))
+        raise _FailClosed("register {} is absent, a symlink, or unreadable ({} errno={})".format(
+            safe, type(exc).__name__, getattr(exc, "errno", None)))
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise _FailClosed("register {} is absent or unreadable ({})".format(label, exc))
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise _FailClosed("register {} could not be fstat'd ({} errno={})".format(
+                safe, type(exc).__name__, getattr(exc, "errno", None)))
+        if not stat.S_ISREG(st.st_mode):
+            raise _FailClosed("register {} is not a regular file".format(safe))
+        chunks, remaining = [], limit + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(fd, remaining)
+            except OSError as exc:
+                raise _FailClosed("register {} could not be read ({} errno={})".format(
+                    safe, type(exc).__name__, getattr(exc, "errno", None)))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > limit:
+        raise _FailClosed("register {} exceeds the {}-byte pre-read ceiling".format(safe, limit))
+    return data
+
+
+def _read_bounded(path, label):
+    """Read a required same-origin text file as UTF-8, FAIL-CLOSED (_FailClosed) on a symlink, a non-regular
+    file, an over-_ASSET_MAX_BYTES body, or non-UTF-8 content, enforcing the ceiling BY CONSTRUCTION on the
+    opened descriptor before the body is decoded (FIX 1/3, GER-1 round 16; supersedes the r15 stat-then-read
+    ceiling). `label` names the offending surface without echoing its contents (_bounded_label). An absent,
+    unreadable, or non-UTF-8 file is fail-closed, never a silent skip (check-fails-closed-on-unreadable)."""
+    data = _read_regular_bounded(path, label, _ASSET_MAX_BYTES)
+    try:
+        return data.decode("utf-8")
+    except UnicodeError as exc:
+        raise _FailClosed("register {} is not valid UTF-8 ({})".format(
+            _bounded_label(label), type(exc).__name__))
 
 
 def _scan_css_imports(root, importer_rel, css, findings, attr_index=None, visited=None):
@@ -1468,10 +1689,16 @@ class _FailClosed(Exception):
 
 
 def _scan_surface(path, rel, site, findings):
-    """Read a required non-HTML surface as UTF-8 and scan it. A UTF-8 decode failure is a FINDING (the
-    surface exists but is unreadable as text); any other OSError propagates for the caller to fail closed."""
+    """Read a required non-HTML surface and scan it. Descriptor-bound (FIX 2, GER-1 round 16): open once with
+    no-follow, require a regular file, and cap the read at _ASSET_MAX_BYTES on the OPENED descriptor, so a
+    roster or registered-output surface (e.g. the textual gensrc target site/downloads/aiqt-instructions.txt,
+    referenced as a script asset) can no longer be loaded whole before any bound applies. 4 MiB is the same
+    ceiling the asset closure uses; the largest real registered output is ~0.5 MiB, so it clears the bound ~8x
+    over. A symlink, non-regular file, or over-ceiling surface is _FailClosed (via _read_regular_bounded); a
+    UTF-8 decode failure stays a FINDING (the surface exists but is unreadable as text)."""
+    data = _read_regular_bounded(path, str(rel), _ASSET_MAX_BYTES)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = data.decode("utf-8")
     except UnicodeDecodeError:
         findings.append("{}: could not read as UTF-8".format(rel))
         return
@@ -1495,12 +1722,13 @@ def _collect(root, registry, binary_set):
     for f in sorted(walk_files(site, suffixes={".html"})):
         rel = f.relative_to(root)
         scanned.add(f.resolve())
-        size = f.stat().st_size
-        if size > _ASSET_MAX_BYTES:
-            raise _FailClosed("site page {} is {} bytes, over the {}-byte pre-read ceiling".format(
-                rel, size, _ASSET_MAX_BYTES))
+        # Descriptor-bound read (FIX 1, round 16): open once with no-follow, require a regular file, and cap at
+        # the pre-read ceiling on the OPENED descriptor, so a symlinked site page (to a device or an oversized
+        # file) cannot bypass the ceiling via the old check-then-open stat. A non-UTF-8 body stays a FINDING
+        # (the page exists but is unreadable as text), not a fail-closed skip.
+        raw_bytes = _read_regular_bounded(f, "site page {}".format(rel), _ASSET_MAX_BYTES)
         try:
-            raw = f.read_text(encoding="utf-8")
+            raw = raw_bytes.decode("utf-8")
         except UnicodeDecodeError:
             findings.append("{}: could not read as UTF-8".format(rel))
             continue
@@ -1884,6 +2112,20 @@ def _collector_self_test():
         if not any("bad.txt: could not read as UTF-8" in x for x in f):
             failures.append("COLLECTOR: an invalid-UTF-8 registered output should be a finding")
 
+        # (f2) FIX 2 (round 16): an OVER-CEILING registered textual output fails closed BEFORE it is read
+        # whole. _scan_surface is now descriptor-bound: open once, require a regular file, cap the read at
+        # _ASSET_MAX_BYTES on the opened descriptor. A sparse file over the ceiling is all-NUL (valid UTF-8),
+        # so under the OLD path.read_text() it would read whole and scan clean (no finding, no exception).
+        # MUTATION: reverting _scan_surface to path.read_text() makes this return normally -> the test fails.
+        r = _make_root("oversize-output")
+        with (r / "big.txt").open("wb") as fh:
+            fh.truncate(_ASSET_MAX_BYTES + 1)
+        try:
+            _collect(r, [{"target": "big.txt", "kind": "file"}], set())
+            failures.append("COLLECTOR: an over-ceiling registered output must fail closed (FIX 2, round 16)")
+        except _FailClosed:
+            pass
+
         # (g) a binary target is skipped (not read, not a finding), even with non-UTF-8 bytes.
         r = _make_root("binary")
         (r / "blob.bin").write_bytes(b"\xff\xfe tamper-evident \x80")
@@ -2031,7 +2273,7 @@ def _page_bound_source_self_test():
         # location (the Rules row for its corpus id, or the mechanism block for its reference), not merely
         # somewhere in the aggregate. The old aggregate `raw in md_text` was UNSOUND: a dropped one-character
         # value passed on an unrelated occurrence elsewhere on the page.
-        md_text, _html_page = gen_enforcement_register.build_views(tree)
+        md_text, html_page = gen_enforcement_register.build_views(tree)
         for channel, key, raw in _page_bound_sources(tree):
             rendered, loc = _md_field_rendered(md_text, channel, key, raw)
             if not rendered:
@@ -2045,6 +2287,26 @@ def _page_bound_source_self_test():
         if decoy_rendered:
             failures.append("COMPLETENESS(forward): a value present only OUTSIDE its own block must not "
                             "satisfy the location check (FIX 5)")
+        # (n3c) FIX 4 (round 16): the forward leg compares EXACT field values, not substrings. Each shape
+        # below made the old `in scope`/`in md_text` test pass while the real field was wrong or absent; each
+        # must now report NOT rendered. MUTATION: reverting _md_field_rendered to substring membership makes
+        # every one of these pass -> these assertions fail.
+        RH = "\n{}:".format(gen_enforcement_register.RESIDUAL_HEADING)
+        shadow = ("### `gate:gate-alpha`\n\n- Class: `wrong`; shadow - Class: `a`\n"
+                  + RH + "\n")
+        if _md_field_rendered(shadow, "class", "gate:gate-alpha", "a")[0]:
+            failures.append("COMPLETENESS(forward): a same-line shadow substring must not satisfy a field (FIX 4)")
+        resonly = ("### `gate:gate-alpha`\n\n- Class: `wrong`\n" + RH
+                   + "\n\n```\nsee - Class: `a` here\n```\n")
+        if _md_field_rendered(resonly, "class", "gate:gate-alpha", "a")[0]:
+            failures.append("COMPLETENESS(forward): a metadata value only in the residue must not satisfy it (FIX 4)")
+        sibling = "| Some rule | `zz:other` | Pending | `zz:target` |\n"
+        if _md_field_rendered(sibling, "corpus-id", "zz:target", "zz:target")[0]:
+            failures.append("COMPLETENESS(forward): a corpus id only in a sibling cell must not satisfy it (FIX 4)")
+        outside = ("| A rule | `zz:pend` | Pending | real desc |\n"
+                   "stray `zz:pend` | Pending | my special description text |\n")
+        if _md_field_rendered(outside, "description", "zz:pend", "my special description text")[0]:
+            failures.append("COMPLETENESS(forward): a description outside its own row must not satisfy it (FIX 4)")
 
         # (n5a) FIX 5 BIDIRECTIONAL completeness. n3 above is the FORWARD leg (every enumerated string is
         # emitted). This is the REVERSE leg: a corpus/ledger source field added to the RENDER without adding
@@ -2078,36 +2340,28 @@ def _page_bound_source_self_test():
             failures.append("COMPLETENESS(reverse): a leaked un-enumerated slug marker must be detected "
                             "(FIX 5)")
 
-        # (n5b) FIX 5 REVERSE, FIELD-TAGGED over the mechanism block. n5a above is the row-scope canary (a
-        # non-content frontmatter field must not leak into a rule row). This is the mechanism-scope converse:
-        # each enforced mechanism block renders EXACTLY the enumerated metadata field labels (_MECH_FIELDS) as
-        # `- Label:` lines and no more, so a NEW render channel (a source field emitted into the block without
-        # being added to page_content_strings) adds a `- Label:` line whose label is not enumerated and is
-        # caught here, for ANY mechanism field, not only the slug. The label scan is bounded to the region
-        # BEFORE the residual heading, so a residue whose text happens to contain a `- x:` line is not
-        # miscounted. MUTATION: render_md emitting an extra `- <field>:` line makes observed != expected.
-        expected_labels = {label for label, _key in gen_enforcement_register._MECH_FIELDS}
-        residual_marker = "\n{}:".format(gen_enforcement_register.RESIDUAL_HEADING)
-        field_line = re.compile(r"^- ([^:]+): ")
-        enforced_refs = sorted({k for ch, k, _r in _page_bound_sources(tree) if ch == "mech-id"})
-        for ref in enforced_refs:
-            scope = _md_mech_scope(md_text, ref)
-            if scope is None:
-                failures.append("COMPLETENESS(reverse): mechanism block {} is absent (FIX 5)".format(ref))
-                continue
-            head_region = scope.split(residual_marker)[0]
-            observed = {m.group(1) for m in (field_line.match(ln) for ln in head_region.split("\n")) if m}
-            if observed != expected_labels:
-                failures.append("COMPLETENESS(reverse): mechanism {} renders field labels {} but "
-                                "page_content_strings enumerates {} (FIX 5)".format(
-                                    ref, sorted(observed), sorted(expected_labels)))
-        # (n5c) the label detector is load-bearing: an extra un-enumerated field line MUST be detected. This
-        # witnesses the mutation in n5b (a render that gains a `- Slug:` line) without patching render_md.
-        leaked = "- Platform: `a`\n- Default: `a`\n- Entry point: `a`\n- Class: `a`\n- Slug: `zzleak`"
-        leaked_labels = {m.group(1) for m in (field_line.match(ln) for ln in leaked.split("\n")) if m}
-        if leaked_labels == expected_labels:
-            failures.append("COMPLETENESS(reverse): an extra un-enumerated mechanism field line must be "
-                            "detected (FIX 5)")
+        # (n5b) FIX 5 REVERSE, STRUCTURAL over BOTH views (round 16). n5a is the row-scope canary; this is the
+        # mechanism-scope converse and now covers BOTH rendered views, non-bullet channels, and any extra HTML
+        # element, closing the round-15 gaps (the old scan read only Markdown `- Label:` bullets). _reverse_leg
+        # parses render_md AND render_html structurally and fails if EITHER view emits a mechanism field the
+        # enumerator does not carry. On the conformant fixture it is clean.
+        pbs = _page_bound_sources(tree)
+        if _reverse_leg(md_text, html_page, pbs):
+            failures.append("COMPLETENESS(reverse): conformant fixture must have no reverse-leg findings (FIX 5)")
+        # (n5b-md) MUTATION through the REAL reverse-leg path: simulate render_md gaining an UNENUMERATED
+        # NON-BULLET `Kind: gate` field in a real mechanism block, and require the SAME _reverse_leg to catch
+        # it. Unlike the r15 n5c, this drives the real parse+compare on real render output, not a hard-coded
+        # string. The injection lands just before the first residual heading, inside a mechanism's field region.
+        rh = "\n{}:".format(gen_enforcement_register.RESIDUAL_HEADING)
+        mut_md = md_text.replace(rh, "\nKind: gate" + rh, 1)
+        if not _reverse_leg(mut_md, html_page, pbs):
+            failures.append("COMPLETENESS(reverse): a non-bullet render_md field must be caught (FIX 5)")
+        # (n5b-html) the render_html converse: an UNENUMERATED `<p>Kind: gate</p>` channel inside a mechanism
+        # block must be caught by the SAME _reverse_leg via the HTML structural parse.
+        bq = '<blockquote class="ledger-residual"'
+        mut_html = html_page.replace(bq, '<p>Kind: gate</p>\n            ' + bq, 1)
+        if not _reverse_leg(md_text, mut_html, pbs):
+            failures.append("COMPLETENESS(reverse): an extra render_html <p> channel must be caught (FIX 5)")
 
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
@@ -2413,13 +2667,31 @@ def _asset_closure_self_test():
             failures.append("BOUND: _normalize_css must bound UTF-8 BYTES, not character count (r15 2a)")
         except _FailClosed:
             pass
-        # (q2) FIX r15 2a: the data: PAYLOAD bound counts UTF-8 bytes. A raw-emoji payload is < 1 MiB chars
-        # but > 1 MiB bytes. MUTATION: len(payload) char count lets it through to the decode path.
+        # (q2) FIX 6 (round 16): the data: PAYLOAD byte-bound is ISOLATED by a PERCENT-ENCODED payload whose
+        # ENCODED size exceeds 1 MiB while its DECODED size stays well under it ("%20" x 400000 = 1.2 MiB
+        # payload bytes -> 400 KB decoded). It trips ONLY the payload bound. MUTATION: reverting the payload
+        # byte-bound lets the 1.2 MiB payload reach decode, where 400 KB passes clean -> q2 no longer fails
+        # closed -> the test fails. (q4 still covers the raw-emoji byte-vs-char payload path.)
         try:
-            _decode_data_css("data:text/css," + chr(0x1F600) * ((1 << 18) + 1))
-            failures.append("BOUND: the data: payload bound must count UTF-8 bytes (r15 2a)")
+            _decode_data_css("data:text/css," + "%20" * 400000)
+            failures.append("BOUND: the data: payload byte-bound must trip on a >1 MiB percent payload (FIX 6)")
         except _FailClosed:
             pass
+        # (q2b) FIX 6: the decoded-body byte-bound is REDUNDANT defence-in-depth - neither base64 (decoded is
+        # 3/4 of the payload) nor percent-decoding (each %HH -> 1 byte, literals 1:1) EXPANDS the UTF-8 byte
+        # length, so decoded_bytes <= payload_bytes and the payload bound always dominates. Rather than a false
+        # "isolating mutation" (impossible for a redundant check), this asserts the DOMINATION INVARIANT over
+        # both encodings, so the redundancy is machine-checked. If a future decode path could expand the body,
+        # this fails and the decoded bound stops being redundant.
+        for payload, is_b64 in (("%20" * 100, False), ("%E2%9C%93" * 100, False),
+                                (base64.b64encode(b"x" * 3000).decode("ascii"), True)):
+            if is_b64:
+                dbytes = len(base64.b64decode(payload, validate=True))
+            else:
+                dbytes = len(unquote(payload, errors="strict").encode("utf-8"))
+            if dbytes > len(payload.encode("utf-8")):
+                failures.append("BOUND: decoded body must not exceed payload bytes; the decoded-body bound is "
+                                "redundant defence-in-depth only (FIX 6)")
         # (q3) FIX r15 2a: the data: HEADER (pre-comma metadata) is now bounded. MUTATION: no header bound
         # lets an unbounded header through (media not in scope -> silent None), never failing closed.
         try:
@@ -2451,6 +2723,35 @@ def _asset_closure_self_test():
             failures.append("BOUND: an oversized same-origin asset must fail closed before a full read (r15 2b)")
         except _FailClosed:
             pass
+        # (q6) FIX 1 (round 16): a symlinked asset to a DEVICE fails closed via O_NOFOLLOW, and a NON-REGULAR
+        # target fails closed via fstat. The old stat-then-read saw st_size 0 for /dev/zero and streamed it
+        # unbounded. MUTATION: reverting to path.stat()+path.read_text() reads /dev/zero unbounded (hang/OOM)
+        # or bypasses the ceiling -> this test no longer fails closed.
+        r = tmp / "symlink-asset"
+        (r / "site").mkdir(parents=True)
+        (r / HTML_REL).write_text(
+            '<html><head><script src="/dev.js"></script></head><body>ok</body></html>', encoding="utf-8")
+        try:
+            os.symlink("/dev/zero", r / "site" / "dev.js")
+            try:
+                _scan_asset_closure(r)
+                failures.append("BOUND: a symlinked device asset must fail closed (FIX 1, round 16)")
+            except _FailClosed:
+                pass
+        except OSError:
+            pass  # a platform that cannot create the symlink cannot exercise this vector
+        # (q7) FIX 3 (round 16): an oversized asset NAME (ENAMETOOLONG-shaped) produces a BOUNDED failure
+        # message that neither interpolates the whole label nor echoes str(exc) (which carries the full
+        # pathname). _read_regular_bounded routes the label through _bounded_label and reports only the
+        # exception TYPE and errno. MUTATION: reverting to "{}".format(label)/str(exc) makes the message
+        # ~200k chars and the long name appears in it -> this test fails.
+        longname = "z" * 100000
+        try:
+            _read_bounded(tmp / (longname + ".css"), "asset site/{}".format(longname))
+            failures.append("BOUND: an oversized asset name must fail closed (FIX 3, round 16)")
+        except _FailClosed as exc:
+            if len(str(exc)) > 4096 or longname[:200] in str(exc):
+                failures.append("BOUND: a fail-closed asset-name message must be bounded, not echo the name (FIX 3)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
