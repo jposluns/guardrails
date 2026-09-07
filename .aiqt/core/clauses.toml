@@ -167,7 +167,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 15
 canonical-text = "Never claim completion without evidence."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.2"
@@ -176,7 +176,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.3"
@@ -185,7 +185,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.4"
@@ -194,7 +194,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.5"
@@ -203,7 +203,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 15
 end-line = 17
 canonical-text = "Before \"done\", \"fixed\", \"green\", or \"verified\": re-read the files\nin scope, quote the lines that support the claim, search for contradictions, and state every remaining\nunverified item."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.6"
@@ -212,7 +212,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 17
 end-line = 19
 canonical-text = "A success, health, or backup marker is evidence only when it rests on the expected payload\nbeing actually present and well-formed; the marker's existence, freshness, or age is not itself that\nevidence, so check the content it stands for rather than the marker."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.7"
@@ -221,7 +221,7 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 19
 end-line = 20
 canonical-text = "do not\nend a turn asserting work is proceeding unless it is."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "evgcmp.8"
@@ -230,7 +230,61 @@ source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
 start-line = 22
 end-line = 26
 canonical-text = "A machine-checkable status or completion assertion over a named set, such as all N gates being green at a\nrevision or a coverage figure, is emitted from an observation that ran that exact set, never narrated\nalongside the checks. For a claim about the current or working state, that observation follows the last\nwrite to any of the set's inputs, and a later write to such an input invalidates the claim; a claim bound to\nan immutable revision remains evidence about that revision."
-source-digest = "0bba458ed34e1dfac36d3841871ed72119a6cb42d39f943d733365a32cd77d0e"
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.9"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 28
+end-line = 29
+canonical-text = "A fix claim scoped to a defect class, not merely the cited instance, is complete only when it\nalso accounts for every sibling instance of that class."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.10"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 29
+end-line = 32
+canonical-text = "Such a claim carries either a recorded,\nre-runnable completeness probe (a class-wide search whose current run shows no remaining\ninstance) or a named exemption from a closed vocabulary accounting for every instance\ndeliberately left unfixed."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.11"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 32
+end-line = 37
+canonical-text = "The probe's defining token or pattern is author-declared, because\nderiving the class automatically from the finding's own wording cannot decide what else belongs\nto it, so the person who fixes the cited instance names the class and records the probe\nstanding for it; author-declaration is not licence to under-scope, so the probe is derived from\nand validated against the authoritative source that defines the class, per the\nguard-input-soundness principle, never an ad-hoc pattern a surviving sibling can fall outside."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.12"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 38
+end-line = 40
+canonical-text = "An independent verifier first confirms the probe is adequate against that authoritative source,\nthen reproduces it rather than re-judging relatedness from its own reading of the finding, and\ntreats a live result exceeding the recorded one as a fresh, unaddressed finding."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.13"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 40
+end-line = 43
+canonical-text = "Fixing only\nthe cited instance while a sibling of the same class survives unaddressed is an incomplete fix,\nthe completeness-claim-enumerates-its-set discipline applied to a defect class standing in for\nthe registry that class otherwise lacks."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
+
+[[clause]]
+clause-id = "evgcmp.14"
+corpus-id = "evgcmp"
+source-path = ".aiqt/core/rules/accur-evidence-grounded-completion.md"
+start-line = 45
+end-line = 51
+canonical-text = "After an edit applied by a script, a bulk operation, or a subagent, the claim that it landed rests on\nre-reading the resulting source and confirming the intended change is present in it, never on the applier's\nown stdout, exit code, or narration of what it did. A successful process, a narrated or reported\nreplacement, a zero-match conditional skip, or an exception raised before the write can each report success\nwhile leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.\nThis is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,\nnot the applier's report, is the observation completion rests on."
+source-digest = "ef70b589312b5b37a02920f9f79e107265b806659c95e9ce529c931c26266161"
 
 [[clause]]
 clause-id = "grdinp.1"
@@ -545,7 +599,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "81030e1a67152ffbaf7f9d28ca73f6739d0f5a4c06344f3c1f4a594a304fc149"
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -554,7 +608,88 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "81030e1a67152ffbaf7f9d28ca73f6739d0f5a4c06344f3c1f4a594a304fc149"
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.3"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.4"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.5"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.6"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.7"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.8"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.9"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.10"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
+
+[[clause]]
+clause-id = "vfxcmt.11"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 15
+end-line = 15
+canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
+source-digest = "63e7417e1e0ea72fced7086898e2e459b933fdfe6fd364d00be009f73a07de50"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -698,7 +833,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 18
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.2"
@@ -707,7 +842,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 18
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.3"
@@ -716,7 +851,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 19
 end-line = 20
 canonical-text = "A failing gate is signal;\nunderstand why it failed before considering any override."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.4"
@@ -725,7 +860,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.5"
@@ -734,7 +869,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.6"
@@ -743,7 +878,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.7"
@@ -752,7 +887,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 24
 end-line = 26
 canonical-text = "A gate verdict is trusted only when it is read from the gate's own unmasked termination status, or from\na structured terminal result bound to the exact revision under gate; a downstream pipeline's status, a\ntruncated delivery, a textual success token, or a result for a different revision is not that verdict."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gatdis.8"
@@ -761,7 +896,52 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 26
 end-line = 29
 canonical-text = "A\npending, missing, ambiguous, malformed, unknown, or unreadable result is unverified, never a pass, and the\ngated action stays a separate step, withheld until terminal success is observed, so a check folded into the\nsame unverified apply or merge does not establish the checkpoint."
-source-digest = "09b351c8c276f73b07fffaca5b19fbb113c2bf2572bea51668998f6a7c52249a"
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+
+[[clause]]
+clause-id = "gatdis.9"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 31
+end-line = 36
+canonical-text = "When a command's own termination status is the evidence a verdict rests on, that status is taken only from a\nconstruct that faithfully propagates the gating command's own exit, never from one that can report success\nwhile the gate failed; sequencing that preserves the gate's failure, such as a short-circuit that runs the\nnext command only on the gate's success or an explicit re-raise of the gate's saved exit, is not this\nhazard, so the test is whether the construct's terminal status still reflects the gate's, not merely whether\nanother command follows it."
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+
+[[clause]]
+clause-id = "gatdis.10"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 36
+end-line = 40
+canonical-text = "An always-succeeding trailer appended after the gate, a `true`, a `:`, a\nstatus-printing echo of the prior exit, or any other no-op whose own success overwrites the gate's exit,\nmakes the compound report the trailer's status, not the gate's, so a failing gate reads as a pass; a printed\ncopy of the exit is output, not the verdict, and such a status-masking trailer is never appended to a\ncommand whose exit is relied on."
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+
+[[clause]]
+clause-id = "gatdis.11"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 40
+end-line = 43
+canonical-text = "The exit of a launcher, dispatcher, wrapper, or detached background task\ncarries the gate's verdict only where it demonstrably propagates the gate's own exit; a carrier that reports\nits own success regardless of what the gate returned yields the vehicle's status, not the verdict, which is\nthen read from the gate's own result instead."
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+
+[[clause]]
+clause-id = "gatdis.12"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 45
+end-line = 48
+canonical-text = "An event-triggered gate is relied on only after its trigger's preconditions are confirmed against\nauthoritative state: a pipeline triggered by a change request needs an open change request for the exact\nrevision and intended base before any run can exist, so where the precondition is unmet the absence of a\nreported failure is a missing result, never a pass."
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+
+[[clause]]
+clause-id = "gatdis.13"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 48
+end-line = 50
+canonical-text = "A pushed revision, an acknowledged dispatch, or an\nelapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate\nbefore anything is read from its outcome."
+source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
 
 [[clause]]
 clause-id = "gensrc.1"
@@ -1742,7 +1922,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 13
 end-line = 16
 canonical-text = "A verifier's output counts as a verdict only when the verifier actually delivered one. Completeness is\njudged by a single criterion: the delivery carries the positive evidence of a finished verdict that the\nverification agreed on in advance, whether that agreed evidence is a completion marker the verifier emits,\nthe explicit verdict the verification asked for, or both."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.2"
@@ -1751,7 +1931,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 16
 end-line = 18
 canonical-text = "A delivery that lacks that agreed evidence, or\nthat is truncated, empty, or errored, is treated as no verdict, never as a pass, a vote, or a finding-free\nresult."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.3"
@@ -1760,7 +1940,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 21
 end-line = 23
 canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.4"
@@ -1769,7 +1949,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 21
 end-line = 23
 canonical-text = "Completeness is never inferred from the length or volume of the output or from the mere absence of\na reported problem, because a run cut off before it reached its verdict is indistinguishable from a clean\none when judged by silence or size."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.5"
@@ -1778,7 +1958,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.6"
@@ -1787,7 +1967,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.7"
@@ -1796,7 +1976,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 23
 end-line = 25
 canonical-text = "A delivery that fails this test is re-dispatched and contributes\nnothing; it does not by itself justify reducing the verifier panel, since one failed delivery is not\nevidence that a verifier family is unavailable."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.8"
@@ -1805,7 +1985,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 25
 end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.9"
@@ -1814,7 +1994,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 25
 end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.10"
@@ -1823,7 +2003,7 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 25
 end-line = 27
 canonical-text = "A required family is dropped from the panel only when it\nis genuinely unreachable, on the terms the verifier-diversity rule sets, and that reduction is recorded\nand re-run when the family returns."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdlv.11"
@@ -1832,7 +2012,16 @@ source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
 start-line = 19
 end-line = 20
 canonical-text = "A capture piped through a truncating sink is a degraded delivery, not a verdict, even when its retained\nprefix appears complete."
-source-digest = "04097787f7e6f38fc359ac8fcdce292e5d81be92947187d650d884b17f7d4fe3"
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
+
+[[clause]]
+clause-id = "vrfdlv.12"
+corpus-id = "vrfdlv"
+source-path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
+start-line = 28
+end-line = 35
+canonical-text = "The same fail-closed posture applies when the verifier itself cannot read or access a required input it was\nmeant to cover: it does not emit a permissive verdict over the gap. It emits UNVERIFIABLE, the\ncannot-evaluate outcome guard-input-soundness names, identifying the input it could not read; this is a\nterminal fail-closed result, not the transient degraded delivery above that a re-dispatch can cure, so it\nis treated as not-passed and resolved by fixing the input, never a clean, passing, or finding-free verdict.\nA clean verdict asserted over an input the verifier never actually read is the same false-clean this rule\nalready guards against, applied to the unreadable-required-input case, meeting the fail-closed posture\ncheck-fails-closed-on-unreadable requires of a gate that cannot read its own input."
+source-digest = "15ff53ab46dba0a9908e39613b07ed56020b9340ac2f8c1c12fdc91220cab0b1"
 
 [[clause]]
 clause-id = "vrfdiv.1"
@@ -4695,7 +4884,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 14
 end-line = 19
 canonical-text = "The default at every point is to continue the work: the assistant carries out the next queued or\nplanned item rather than ending its turn to seek permission for work it is already authorized to do.\nStanding authorization is not re-sought each turn; an authorized next step is executed, not\nre-offered, and a turn does not end by proposing a course and waiting for a go on work already\ncovered by that authorization. A question raised for a genuine decision does not halt other queued\nwork that can proceed independently of its answer."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.2"
@@ -4704,7 +4893,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 21
 end-line = 26
 canonical-text = "The failure this guards against is the manufactured stop: with authorized work still open and every\ngate green, the assistant does not talk itself into winding down on a reason that only sounds like\nprudence, a long or heavy session, having done a lot, being deep into the run, a milestone reached,\nwork that feels best done fresh later, or a large series, migration, or audit lying ahead. None of\nthese is a signal; each is the assistant's own felt state or the mere shape of the work, dressed as\na considered call, and acting on it stops productive work that no observable problem asked to stop."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.3"
@@ -4713,7 +4902,7 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 28
 end-line = 37
 canonical-text = "A wind-down, or a turn handed back to the human, happens only on a named, externally-observable\ntrigger: the task is complete; a human has explicitly stopped, paused, or changed the mode; a hard\nexternal block leaves no other queued work able to proceed, which is tool-verified whole-set\nexhaustion, the backlog enumerated item by item with each remaining item shown to carry the observed,\nterminal condition that blocks it; the next action meets the human-oversight threshold and lacks the\nauthorization that threshold requires, or that authorization is in doubt; a decision reserved to a\nhuman, not covered by standing authorization and determining the next action, must be answered\nfirst; or a validation finding reveals a process-integrity or systemic lapse, of which a concrete,\nquotable self-inconsistency is one instance. These triggers are not mutually exclusive; a single\nsituation may satisfy more than one, and any one of them suffices."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.4"
@@ -4722,25 +4911,25 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 43
 end-line = 49
 canonical-text = "This rule never narrows the oversight threshold; it defers to it. The distinction is what a finding\nreveals, not the instrument that surfaced it: a failing check, gate, or audit whose finding is an\nordinary defect is fixed in place while the run continues and is not a wind-down signal, while the\nsame check, gate, or audit is a wind-down trigger when its finding reveals a process-integrity or\nsystemic lapse. A self-reported claim that the actionable items are exhausted is a set-completeness\nclaim that licenses less work, so it is enumerated from the authoritative backlog rather than\nasserted, and the default under partial evidence is to continue on the highest-priority open item."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.5"
 corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
-start-line = 82
-end-line = 91
+start-line = 107
+end-line = 116
 canonical-text = "Elapsed run length, session depth, the number of compaction events, accumulated progress or a\nreached milestone, and the anticipated size of the work still ahead, whether observed, measured, or\nestimated, are not members of that set, so none of them, alone or combined, is a wind-down trigger;\nlarge work is done unit by unit with independent verification sustaining quality, and its size is a\nreason to keep going. Felt degradation or context-heaviness is not a trigger either, being\nun-observable. Where a harness exposes a measured context or token budget, imminent truncation is an\nexternally-observable boundary, but it is not one of the triggers above and licenses no\nassistant-initiated wind-down: it is handled as non-completion, the assistant continuing until the\nharness acts and never reporting a truncated turn as completion, rather than a felt state read as\nfatigue."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.6"
 corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
-start-line = 92
-end-line = 98
+start-line = 117
+end-line = 123
 canonical-text = "A project may set a minimum-effort floor below which a discretionary wind-down is not even proposed,\nbut such a floor is a minimum, never a ceiling that authorizes a stop, and a caught-and-fixed issue\nis normal operation, not a stop: the unit in hand is finished, the issue fixed, and the run\ncontinues. A need for fresh or uncluttered context is a continuation mechanism, not a trigger: where\nan isolated-context worker or sub-agent is available and its use is authorized, the assistant\ndelegates that work, stays live to collect and integrate the result, and continues rather than\nending the run; where no such authorized mechanism exists, it continues within its own context."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.7"
@@ -4749,16 +4938,35 @@ source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 38
 end-line = 42
 canonical-text = "A systemic-lapse trigger licenses only a recorded wind-down: the lapse is recorded as a fact the\nmoment it is confirmed, the work is parked behind the human decision it now awaits or exits through\nthe project's bounded, recorded exit, and the maintainer's later confirmation or refutation settles\nit. A lapse the assistant itself asserts never converts into a self-granted clean close of open\nwork; a clean close past open work belongs to the operator alone."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
 
 [[clause]]
 clause-id = "cntdef.8"
 corpus-id = "cntdef"
 source-path = ".aiqt/core/rules/trust-continue-by-default.md"
 start-line = 51
-end-line = 80
-canonical-text = "A blocking condition that licenses a wind-down is granted, externally observable, and terminal\n(no sanctioned path remains while the condition holds), never self-authored. A hard external\nblock, or a reserved decision that must be answered first,\ncounts only when the condition that blocks the item is granted by an authority other than the\nassistant and is observable in the authoritative record: a granted status, a failing check, an\nunavailable source, or an operator decision genuinely still pending in the decision record.\nObservability is necessary, not sufficient: a condition is terminal for an item only when, while\nthe condition holds, the item can proceed by no sanctioned path, not by a reduced floor on the\nterms the governing verification discipline sets, not by advancing the build and holding only the\nstep that needs the affected resource, and not by an alternative sanctioned route for that step. A\nrecoverable degradation of a resource the work would draw on, such as a tool, worker pool,\nverifier family, model, or service that is temporarily unavailable, limited, empty, or\nrate-limited, is externally observable yet not terminal while any such path keeps the item\nactionable: it gates only the downstream verification, integration, or promotion step that\nconsumes the resource, and the current build proceeds and holds for that step; the hold is never a\nlicence to take the gated step on the reduced or missing signal beyond what the governing\ndisciplines sanction. Such a degradation counts toward exhaustion only for an item with no step\nleft that can proceed while the condition holds, every sanctioned path completed or observed\nclosed, and the enumeration records that state for the item. A \"blocked\", \"held\", or \"needs a go\"\nthat the assistant authored about its own work is a proposal, not a grant, and does not gate a\nstop; nor does reclassifying work the operating mode already authorizes, such as already-decided\nqueued backlog, as newly needing a fresh authorization. A self-authored demotion of decided work\nto \"proposed\" or \"not granted\" is likewise a proposal, not a grant, and licenses no wind-down. The\nrequirement for express authorization gates a plan-initiating new unit of work; it is never\nrepurposed as a blocker to manufacture a stop over work already decided. The check that reads\nexhaustion reads that authoritative grant source, not the assistant's narration of it or a bare\nstatus marker, and it validates its own input, so a blocker it cannot confirm to be real, granted,\nand terminal resolves to continue, never to a stop; a stop whose claimed exhaustion rests on any\nnon-terminal condition is denied as a manufactured stop, however observable that condition is.\nIgnorance refuses the wind-down."
-source-digest = "4605bb1a2899291766344e2bd065333ed7d350fa86dca61a37b5660ccf0b82c4"
+end-line = 88
+canonical-text = "A blocking condition that licenses a wind-down is granted, externally observable, and terminal\n(no sanctioned path remains while the condition holds), never self-authored. A hard external\nblock, or a reserved decision that must be answered first,\ncounts only when the condition that blocks the item is granted by an authority other than the\nassistant and is observable in the authoritative record: a granted status, a failing check, an\nunavailable source, or an operator decision genuinely still pending in the decision record.\nObservability is necessary, not sufficient: a condition is terminal for an item only when, while\nthe condition holds, the item can proceed by no sanctioned path, not by a reduced floor on the\nterms the governing verification discipline sets, not by advancing the build and holding only the\nstep that needs the affected resource, and not by an alternative sanctioned route for that step. A\nrecoverable degradation of a resource the work would draw on, such as a tool, worker pool,\nverifier family, model, or service that is temporarily unavailable, limited, empty, or\nrate-limited, is externally observable yet not terminal while any such path keeps the item\nactionable: it gates only the downstream verification, integration, or promotion step that\nconsumes the resource, and the current build proceeds and holds for that step; the hold is never a\nlicence to take the gated step on the reduced or missing signal beyond what the governing\ndisciplines sanction. Such a degradation counts toward exhaustion only for an item with no step\nleft that can proceed while the condition holds, every sanctioned path completed or observed\nclosed, and the enumeration records that state for the item. A \"blocked\", \"held\", or \"needs a go\"\nthat the assistant authored about its own work is a proposal, not a grant, and does not gate a\nstop; nor does reclassifying work the operating mode already authorizes, such as already-decided\nqueued backlog, as newly needing a fresh authorization. A self-authored demotion of decided work\nto \"proposed\" or \"not granted\" is likewise a proposal, not a grant, and licenses no wind-down.\nMoving an open item to held or blocked is itself the maintainer's decision, never the\nassistant's, and the grant is proven by provenance: it counts only when it is recorded in an\nartefact the maintainer controls and the assistant cannot write, because a grant the assistant\ncould have authored is indistinguishable from its own proposal. Where the host provides no such\nartefact, accepting a weaker proof surface is an explicit, recorded maintainer acceptance, never\nthe assistant's default. Until the grant exists the item remains actionable, and the assistant\nstill advances it as far as its standing authorization allows, holding only the step that\ngenuinely needs the decision: a pending hold proposal parks a step, never the item, and proposing\na hold is never a licence to idle on the work it names. The requirement for express authorization\ngates a plan-initiating new unit of work; it is never repurposed as a blocker to manufacture a\nstop over work already decided. The check that reads exhaustion reads that authoritative grant\nsource, not the assistant's narration of it or a bare status marker, and it validates its own\ninput, so a blocker it cannot confirm to be real, granted, and terminal resolves to continue,\nnever to a stop; a stop whose claimed exhaustion rests on any non-terminal condition is denied as\na manufactured stop, however observable that condition is. Ignorance refuses the wind-down."
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
+
+[[clause]]
+clause-id = "cntdef.9"
+corpus-id = "cntdef"
+source-path = ".aiqt/core/rules/trust-continue-by-default.md"
+start-line = 90
+end-line = 97
+canonical-text = "Neither an item's value nor its delicacy reclassifies it. A granted open item the assistant\nassesses as low-value is still done: value orders the queue among advanceable work, placing the\nitem behind higher-value open work, but it never reorders the fixing of something found wrong,\nwhich is done first the moment it is found, and it never converts the item to not actionable; the\nsmallness of what remains is no stop excuse. An item judged delicate or correctness-critical is\ndone under the strongest verification tier the governing verification discipline provides, that\nverification begun if it has not started, never deferred as too delicate: delicacy raises the bar\nthe work must pass, it never removes the work."
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
+
+[[clause]]
+clause-id = "cntdef.10"
+corpus-id = "cntdef"
+source-path = ".aiqt/core/rules/trust-continue-by-default.md"
+start-line = 99
+end-line = 105
+canonical-text = "A scheduled poll, keep-alive, or other fired timer is not activity. A recurrence that does not\nitself advance a backlog item, such as a mail check or a status poll, is neither work in progress\nnor a blocker, however recently or often it fires, and neither its existence nor its firing\nlicenses an idle, a wake, or a stop while any actionable item remains; waiting on its next firing\nis idleness, whatever schedule dresses it. A tracked task substantiates a blocker only when the\ntask it names is one whose completion advances the blocked item, so pointing an item at a\nkeep-alive or polling task records no blocker at all."
+source-digest = "7b8b07efdd4a13e18c140e625820a0b893c804f9e9a6931df747c3fd4662703b"
+
 [[clause]]
 clause-id = "setcmp.8"
 corpus-id = "setcmp"

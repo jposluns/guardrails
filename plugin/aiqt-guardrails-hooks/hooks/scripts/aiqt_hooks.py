@@ -3213,6 +3213,24 @@ _RAW_PUSH_DELETE_RE = re.compile(
     r"(?i)--de[a-z-]*|--pru[a-z-]*|(?:^|[\s'\"])-[A-Za-z0-9]*d[A-Za-z0-9]*|(?:^|[\s'\"]):(?:refs/heads/|heads/)?(?:"
     + "|".join(sorted(_PROTECTED)) + r")\b")
 _RAW_PROTECTED_RE = re.compile(r"(?i)\b(?:" + "|".join(sorted(_PROTECTED)) + r")\b")
+# GD-146: the raw-fallback parity for a command-local mirror configuration the parsed path cannot reach
+# (a wrapped or unparseable 'git -c remote.<name>.mirror=true push' / '--config-env=remote.<name>.mirror
+# =ENV push'). Anchored to the OPTION token ('-c' then whitespace and/or a shell quote, or '--config-env'
+# then '='/whitespace and an optional shell quote) introducing 'remote.<something>.mirror', so a QUOTED
+# argument ("-c 'remote.origin.mirror=true'", "--config-env 'remote.origin.mirror=MFLAG'") fires like the
+# unquoted form, while a push-option value ('-o remote.origin.mirror=true') and prose do not. It matches
+# only the COMMON quoted-argument forms above: a quote or backslash that FRAGMENTS the option token, the
+# key, or the value (-'c', \-c, remote.origin.'mirror'=true which git 2.53 still reconstructs to
+# mirror=true, or a split value) is NOT matched. Arbitrary shell fragmentation of an unparseable or
+# wrapper-prefixed command cannot be robustly matched by a regex (only a shell parser could, which the
+# pack deliberately avoids), so this is an inherent lexical-scan boundary, the same class as the disclosed
+# wrapper/alias/fragmented-command-word residuals; it is DISCLOSED, not chased with more regex variants.
+# The PARSED path is complete for parseable commands (the tokenizer normalizes quotes) and network-side
+# branch protection remains the backstop. It parses NO value: a falsy value over-asks on this path
+# (accepted, documented), mirroring the raw scan's over-matching posture.
+_RAW_PUSH_MIRRORCFG_RE = re.compile(
+    r"(?i)(?:^|[\s'\"])-c[\s'\"]+remote\.[^\s=]+\.mirror"
+    r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 
 def _head_branch(repo):
@@ -3341,6 +3359,94 @@ def _wildcard_hits_branches(dst):
             or not prefix.startswith("refs/"))
 
 
+# GD-146: a command-local `remote.<name>.mirror=true` configuration reproduces --mirror's force-and-delete
+# sweep with no bulk flag in the judged push args, so it is read on the parsed path. The falsy set is git's
+# documented boolean-false spellings plus empty; ANYTHING else fires (fail-safe): a documented truthy
+# spelling, a bare key (git boolean true), or a value git would reject as a non-boolean (git dies on it
+# before pushing, so firing there is a harmless safe-direction over-ask). Only a provably-falsy value stands
+# the guard down, so an unknown future spelling or a mis-split value can never slip to a silent allow.
+_MIRROR_FALSY = frozenset(("", "false", "no", "off", "0"))
+
+def _mirror_falsy(value):
+    """True when a `-c` value is PROVABLY falsy (git's false spellings plus empty), case-insensitive and
+    without stripping, so the guard stands down; a bare key (value None) is git boolean true and is NOT
+    falsy. Everything else returns False (fires), the fail-safe direction."""
+    if value is None:
+        return False  # a bare `-c remote.<name>.mirror` key is git boolean true: it fires
+    return value.lower() in _MIRROR_FALSY
+
+def _mirror_key_norm(key):
+    """The normalized identity of a git config key when it names remote.<name>.mirror, else None. Matched
+    by startswith('remote.')/endswith('.mirror') on the CASE-FOLDED key with a NONEMPTY middle, so a
+    dotted remote name (remote.a.b.mirror) matches and remote..mirror never does (no naive three-way
+    split). git treats the section and trailing key case-insensitively but the subsection (remote name)
+    case-sensitively, so the normalized identity lowercases the fixed remote./.mirror frame and preserves
+    the middle VERBATIM; last-value-wins keys on the same remote collapse to one identity, distinct remote
+    names stay distinct."""
+    low = key.lower()
+    if not (low.startswith("remote.") and low.endswith(".mirror")):
+        return None
+    middle = key[len("remote."):len(key) - len(".mirror")]
+    if not middle:
+        return None  # remote..mirror: an empty remote name never fires
+    return "remote." + middle + ".mirror"
+
+def _push_mirror_config(tokens):
+    """(state, key, value): scan the PRE-SUBCOMMAND global-option region for a command-local mirror
+    configuration and return ('on', firing key, its value or None for a bare key), ('unknown', the
+    --config-env key whose value this guard cannot read, None), or (None, None, None). Walks the same
+    eight-line global-option region as _git_subcommand/_git_sub_and_args (start after the command word,
+    stop at the first non-'-' token, a separated _GIT_ARG_OPTS member skips two tokens and any other
+    option one), reading the assignment carried by each `-c` (separated only; git 2.53 rejects the
+    attached -c<key>=<value> form and a top-level --config, so neither is parsed) and each --config-env
+    (separated or attached). A separated `-c` value is split at its first '=' into (key, value), value
+    absent (bare key, git boolean true) when no '=' is present. DIRECT `-c` assignments to the same
+    normalized key apply LAST-VALUE-WINS, as git applies command-line config in order (witnessed on git
+    2.53.0); a falsy assignment to one remote's key never cancels a truthy one on another's. A
+    --config-env naming a mirror key forces the result to 'unknown' for that key regardless of the order
+    of direct assignments to it, because the environment value is unreadable (a cannot-evaluate routes to
+    the safe outcome, ASK) and the relative precedence of -c and --config-env was not witnessed, so an
+    unwitnessed cross-mechanism ordering is not modelled (a deliberate safe-direction over-ask). 'on'
+    (any direct key's final state is not provably falsy) outranks 'unknown' for the wording when both
+    apply; both dispositions ASK. This is redirect-independent and reads no git config offline: it judges
+    only what the command string spells."""
+    i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
+    n = len(tokens)
+    direct = {}  # normalized key -> (fires: bool, original key, value or None); last direct assignment wins
+    env = {}     # normalized key -> original key, named via --config-env (forces 'unknown')
+    while i < n:
+        token = tokens[i]
+        if not token.startswith("-"):
+            break  # the subcommand: the global-option region ends here
+        if "=" not in token and token in _GIT_ARG_OPTS:
+            value = tokens[i + 1] if i + 1 < n else None  # a trailing bare -c/--config-env has none
+            if token == "-c" and value is not None:
+                key, sep, val = value.partition("=")
+                norm = _mirror_key_norm(key)
+                if norm is not None:
+                    val = val if sep else None  # no '=' present: a bare key (git boolean true)
+                    direct[norm] = (not _mirror_falsy(val), key, val)
+            elif token == "--config-env" and value is not None:
+                key = value.partition("=")[0]  # separated form: KEY=ENVVAR
+                norm = _mirror_key_norm(key)
+                if norm is not None:
+                    env[norm] = key
+            i += 2
+            continue
+        if token.startswith("--config-env="):  # attached form: --config-env=KEY=ENVVAR
+            key = token[len("--config-env="):].partition("=")[0]
+            norm = _mirror_key_norm(key)
+            if norm is not None:
+                env[norm] = key
+        i += 1
+    for _norm, (fires, key, value) in direct.items():
+        if fires:
+            return ("on", key, value)  # dict preserves order: the first firing key names the ASK
+    if env:
+        return ("unknown", next(iter(env.values())), None)
+    return (None, None, None)
+
+
 def _push_protected(tokens, args, cwd):
     """Classify one git push segment against the protected set: ('deny', detail, act_noun), where
     act_noun names the denied act for the banner ('force-push' or 'branch deletion'); ('ask', detail,
@@ -3434,11 +3540,35 @@ def _push_protected(tokens, args, cwd):
         return ("ask", "pushes the matching refspec ':' ('+:' is its forced form), a matching-refspec "
                        "push of every branch existing on both ends, which this guard cannot prove "
                        "misses the protected branches", None)
+    # --mirror OR a command-local mirror configuration (GD-146: '-c remote.<name>.mirror=true push', or
+    # the same key through --config-env, both PRE-subcommand) is the same runtime act, so both ASK with the
+    # same disposition. This joins the existing flag clause AFTER the named-protected force/delete DENY
+    # loops (so a truthy mirror config with a '+main:main' or ':main' refspec still DENIES) and BEFORE the
+    # early returns below (which would otherwise silent-allow 'push origin'/'push origin main' under the
+    # config). Only the separated '-c <key>[=<value>]' and both --config-env spellings in the command
+    # string are read; git 2.53 rejects a top-level '--config' and an attached '-c<key>=<value>', so
+    # neither is parsed. A non-boolean direct value over-asks harmlessly (git dies on the bad boolean
+    # before pushing), and the --config-env ASK is a deliberate over-ask on a value this guard cannot read.
+    mirror_state, mc_key, mc_val = _push_mirror_config(tokens)
     if mirror:
         return ("ask", "is a --mirror push, which force-updates every matching remote ref and DELETES "
                        "every remote ref (branch, tag, note) absent locally; on a shared remote this "
                        "removes branches, protected or not, and can cause potentially irreversible "
                        "loss, and this guard cannot prove it misses the protected branches", None)
+    if mirror_state == "on":
+        shown = "{}={}".format(mc_key, mc_val) if mc_val is not None else mc_key
+        return ("ask", "sets the command-local configuration '{}' (a bare '{}' is boolean true), which "
+                       "makes the push behave exactly like --mirror: it force-updates every matching "
+                       "remote ref and DELETES every remote ref (branch, tag, note) absent locally; on a "
+                       "shared remote this removes branches, protected or not, and can cause potentially "
+                       "irreversible loss, and this guard cannot prove it misses the protected branches"
+                       .format(shown, mc_key), None)
+    if mirror_state == "unknown":
+        return ("ask", "names the command-local configuration '{}' through --config-env, whose value "
+                       "lives in an environment variable this guard cannot read, so it cannot prove "
+                       "mirror mode is off; a mirror push force-updates every matching remote ref and "
+                       "DELETES every remote ref absent locally, and this guard cannot prove it misses "
+                       "the protected branches".format(mc_key), None)
     if force and sweep_all:
         return ("ask", "force-pushes --all/--branches, a sweep that includes any protected branch",
                 None)
@@ -3465,10 +3595,13 @@ def _push_protected(tokens, args, cwd):
     # HEAD/@). Resolve it via the read-only HEAD probe, only when the repository view is provable; the
     # push.default=matching configured-state residual (which could force every matching branch) is
     # disclosed, not modelled; likewise a bare 'git push --prune <remote>' whose deletion is driven
-    # by a configured remote.<name>.push refspec, and a configured mirror mode (remote.<name>.mirror
-    # =true in git config, or a command-local 'git -c remote.<name>.mirror=true push'), which
-    # reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard reads
-    # no git config offline, so these are disclosed residuals, not modelled (GD-145). A '--repo=<remote>'
+    # by a configured remote.<name>.push refspec, and a PERSISTED mirror mode (remote.<name>.mirror
+    # =true in repository, worktree, global, or system git config, or the GIT_CONFIG_* env protocol),
+    # which reproduce the force-and-delete sweep with no bulk flag in the judged push args: the guard
+    # reads no git config offline, so these are disclosed residuals, not modelled (GD-145). The
+    # COMMAND-LOCAL mirror configuration ('git -c remote.<name>.mirror=true push', or the key through
+    # --config-env) IS now modelled at the mirror clause above (GD-146), since it lives in the command
+    # string the guard can read. A '--repo=<remote>'
     # option does not displace the positional repository operand: git gives the command-line positional
     # precedence (git-push(1)), so operands[0] stays the repository and the guard's slice is correct; a
     # '--repo' form carrying a refspec-shaped positional is rejected by git as an unknown repository
@@ -3530,7 +3663,8 @@ def _protected_line_fallback(command):
     deletion. It OVER-MATCHES by design (a keyword in prose or an unrelated '+' or '-d' token asks),
     the documented posture of the sibling fallbacks (_diff_source_fallback, _git_discard_fallback)."""
     if _RAW_PUSH_RE.search(command) and (_RAW_PUSH_FORCE_RE.search(command)
-                                         or _RAW_PUSH_DELETE_RE.search(command)):
+                                         or _RAW_PUSH_DELETE_RE.search(command)
+                                         or _RAW_PUSH_MIRRORCFG_RE.search(command)):
         named = " a protected branch" if _RAW_PROTECTED_RE.search(command) else " a target this guard cannot read"
         return _ask(
             "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
@@ -6457,6 +6591,222 @@ def orch_truncation_guard(data):
         "AIQT guardrail: asked on a background dispatch whose full-output capture it does not parse.")
 
 
+_ORCH_LOOP_HEADERS = frozenset(("for", "while", "until"))
+# A single leading loop reserved word is stripped to reach a construct segment's simple command: `do sleep`
+# -> `sleep`, `until curl` -> `curl`. `done` is NOT stripped (it closes the loop, never prefixes a command).
+_ORCH_LOOP_BODY_KEYWORDS = frozenset(("for", "while", "until", "do"))
+_ORCH_POLL_PROBE_CMDS = frozenset(("gh", "curl"))
+
+# Reserved words that make a loop span un-attributable to the single canonical poll shape: a conditional
+# reserved word or a '!' negation, and brace grouping. Any of these appearing raw-unquoted in the loop span
+# routes to 'indeterminate' (defer to the ASK) rather than a match the walk cannot soundly justify.
+_ORCH_POLL_FORBIDDEN = frozenset((
+    "if", "then", "elif", "else", "fi", "case", "esac", "!", "{", "}"))
+
+
+def _orch_poll_body_argv(argv):
+    """The effective simple-command argv of a loop-construct segment, a single leading loop reserved word
+    (for/while/until/do) removed, so the do-segment `["do", "sleep", "10"]` resolves to command word
+    `sleep` and the until-header `["until", "curl", ...]` resolves to `curl`. `done` is left in place."""
+    if argv and argv[0] in _ORCH_LOOP_BODY_KEYWORDS:
+        return argv[1:]
+    return argv
+
+
+def _orch_token_actions_runs(token):
+    """True when the token carries an `actions/runs` path component pair (a GitHub Actions run probe), as
+    a bare `repos/o/r/actions/runs/1` or inside a URL. Bounded by `/` so `xactions/runsy` does not match."""
+    parts = token.split("/")
+    return any(parts[k] == "actions" and parts[k + 1] == "runs" for k in range(len(parts) - 1))
+
+
+def _orch_raw_unquoted_words(raw):
+    """The list, in order, of the FULLY-UNQUOTED, unescaped words in a single segment's raw source. A
+    segment carries no unquoted separator (a separator ends the segment), so this scans words only, reusing
+    the shared _read_word reader (which decides quoting from raw positions and raises on an unbalanced
+    quote). A word is reported ONLY when its raw slice equals its decoded text, i.e. it carried NO quote or
+    escape anywhere: argv_opaque does not flag plain quoting, so this raw-slice comparison is the sole sound
+    signal that a token was written bare. A '#' at a word boundary begins a comment (the rest is not command
+    text); a redirect operator and its one following target word are skipped so a target is not counted as a
+    word. Returns [] on any scan error, which the caller treats as 'no reserved word here', the safe
+    direction (the whole command already lexed cleanly before this is reached, so a valid segment does not
+    error)."""
+    words = []
+    n = len(raw)
+    i = 0
+    try:
+        while i < n:
+            c = raw[i]
+            if c in " \t":
+                i += 1
+                continue
+            if c == "#":
+                break                       # word-boundary comment: the rest is not command text
+            if c in _METACHARS:
+                # within a segment the only metacharacter is a redirect operator ('<'/'>', or '&>' the
+                # lexer left in raw); skip the operator and one following target word so neither pollutes
+                # the word list. A separator metacharacter never appears here (it would end the segment).
+                _op, _kind, oplen = _match_operator(raw, i, n)
+                i += oplen
+                while i < n and raw[i] in " \t":
+                    i += 1
+                if i < n and raw[i] not in _METACHARS and raw[i] != "#":
+                    _t, _o, started, _d, _lt, i = _read_word(raw, i, n)
+                    if not started:
+                        break
+                continue
+            text, _o, started, _d, _lt, j = _read_word(raw, i, n)
+            if not started:
+                break
+            if raw[i:j] == text:            # no quote or escape anywhere in the word: written bare
+                words.append(text)
+            i = j
+    except ValueError:
+        return []
+    return words
+
+
+def _orch_body_cmd(seg):
+    """(word, unquoted) for a loop segment's effective command word: basenamed, with a single leading loop
+    reserved word (do/for/while/until) stripped as _orch_poll_body_argv does and a leading env-assignment
+    prefix skipped, paired with whether that command-word TOKEN was written UNQUOTED in the raw source.
+    Soundness of the sleep/probe conjuncts rests on this being the command WORD (an argument that merely
+    spells 'sleep'/'gh' is not the command word, so it never fabricates a match); the raw-unquoted gate only
+    tightens it further. ('', False) when the segment resolves to no command word."""
+    argv = _orch_poll_body_argv(seg.argv)
+    if not argv:
+        return "", False
+    idx = _command_word_index(argv)
+    if idx >= len(argv):
+        return "", False
+    token = argv[idx]
+    return token.rsplit("/", 1)[-1], token in _orch_raw_unquoted_words(seg.raw)
+
+
+def _orch_poll_loop_at(segments, done_idx):
+    """Judge the single loop that the clean bare-`&` `done` terminator at done_idx closes, the caller having
+    already established that done_idx is that terminator (its raw is an unquoted `done`), is the sole bare-`&`
+    detach, and is the command's final operator. Returns 'match' ONLY for an UNAMBIGUOUS single for/while/
+    until loop whose body carries a raw-unquoted `sleep` command word and whose construct carries a status
+    probe; 'indeterminate' for any structure this segment walk cannot soundly attribute to that ONE loop (a
+    nested or extra loop keyword, a conditional reserved word, or brace grouping); and 'none' for a clean
+    single loop that simply lacks the sleep or the probe. Loop keywords are counted from the RAW-UNQUOTED
+    tokens, never a basenamed or quoted spelling, so an inner header that shares a segment with the outer
+    `do` (e.g. `["do","for",...]`) is still counted and forces 'indeterminate' rather than borrowing the
+    outer loop's probe."""
+    words_by_seg = [_orch_raw_unquoted_words(segments[k].raw) for k in range(done_idx + 1)]
+    n_header = sum(w in _ORCH_LOOP_HEADERS for words in words_by_seg for w in words)
+    n_do = sum(w == "do" for words in words_by_seg for w in words)
+    n_done = sum(w == "done" for words in words_by_seg for w in words)
+    if not (n_header == 1 and n_do == 1 and n_done == 1):
+        return "indeterminate"              # nested/extra loop keyword, or a keyword the walk cannot place
+    header_idx = do_idx = None
+    for k, words in enumerate(words_by_seg):
+        if words and words[0] in _ORCH_LOOP_HEADERS:
+            header_idx = k
+        elif words and words[0] == "do":
+            do_idx = k
+    if header_idx is None or do_idx is None or not (header_idx < do_idx < done_idx):
+        return "indeterminate"              # the one header/do is not in command position, or out of order
+    for k in range(header_idx, done_idx + 1):
+        if any(w in _ORCH_POLL_FORBIDDEN for w in words_by_seg[k]):
+            return "indeterminate"          # a conditional reserved word or brace group in the loop span
+    has_sleep = False
+    for k in range(do_idx, done_idx + 1):
+        word, unq = _orch_body_cmd(segments[k])
+        if word == "sleep" and unq:
+            has_sleep = True
+            break
+    has_probe = False
+    for k in range(header_idx, done_idx + 1):
+        word, unq = _orch_body_cmd(segments[k])
+        if word in _ORCH_POLL_PROBE_CMDS and unq:
+            has_probe = True
+            break
+        if any(tok == "--watch" or _orch_token_actions_runs(tok) for tok in segments[k].argv):
+            has_probe = True
+            break
+    return "match" if (has_sleep and has_probe) else "none"
+
+
+def _orch_bg_poll_loop(command):
+    """THREE-VALUED classifier over the raw Bash command. 'match' ONLY for the UNAMBIGUOUS canonical shape:
+    a SINGLE for/while/until loop closed by a bare-`&` `done` that is the command's FINAL operator, whose
+    body carries a raw-unquoted `sleep` command word and whose construct carries a status probe (a raw-
+    unquoted `gh`/`curl` command word, a `--watch` token, or an `actions/runs` path token; the probe set is a
+    disclosed heuristic, not exhaustive). 'none' on a full parse that is simply not that shape and carries no
+    ambiguity to defer: no bare `&`; a bare `&` that does not close a raw-unquoted `done` terminator; or a
+    clean single loop that lacks the sleep or the probe. 'indeterminate' whenever the structure cannot be
+    soundly attributed to one canonical loop, so the guard defers to the ASK rather than risk a false deny:
+    an unparseable construct, subshell or C-style `(( ))` grouping, more than one bare `&`, a command
+    trailing the bare-`&` `done`, a nested or extra loop keyword, a conditional reserved word, or brace
+    grouping.
+
+    Reserved words (for/while/until/do/done) are recognized ONLY as the EXACT raw-unquoted token, never a
+    basename or a quoted spelling: because `_command_word` basenames and argv is quote-decoded, a bare `&`
+    closing a command whose name was written quoted, or a path such as `/tmp/done`, is NOT read as the loop
+    terminator (it classifies 'none'), and an inner loop header sharing a segment with the outer `do` is
+    still counted (forcing 'indeterminate').
+
+    The conservative posture is deliberate for a BLOCK guard: a false 'match' strands a session, whereas a
+    'none'/'indeterminate' emits nothing and defers to orch_truncation_guard's generic bare-`&` ASK on the
+    same event. Residuals are disclosed in the manifest."""
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return "indeterminate"              # heredoc/process-sub/unbalanced-quote/NUL/malformed-redirect
+    if any(seg.sep_after in ("(", ")") for seg in segments):
+        return "indeterminate"              # subshell or C-style for (( )) grouping: cannot attribute
+    bare_amps = [i for i, seg in enumerate(segments) if seg.sep_after == "&"]
+    if not bare_amps:
+        return "none"                       # no bare-`&` detach at all
+    if len(bare_amps) > 1:
+        return "indeterminate"              # more than one detach: not the single canonical shape
+    amp_idx = bare_amps[0]
+    if segments[amp_idx].raw.strip() != "done":
+        return "none"                       # the bare-`&` does not close a raw-unquoted `done` terminator
+    if any(segments[k].argv for k in range(amp_idx + 1, len(segments))):
+        return "indeterminate"              # a command trails the bare-`&` `done`: not the canonical shape
+    return _orch_poll_loop_at(segments, amp_idx)
+
+
+def orch_untracked_wait_loop(data):
+    """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
+    detached child is not a harness-tracked task, so its completion cannot notify this session and the result
+    is stranded while the session goes dark waiting on it. Registry-gated exactly like orch_truncation_guard
+    (inert with no orchestration registry present) but NOT lease-gated: a bounded worker building a
+    fire-and-forget poll is equally wrong. Fail-open (silent allow) on a non-Bash or absent tool, an absent
+    registry, or a non-string/empty command; a NUL, heredoc, unbalanced quote, or subshell-grouped detach
+    classifies 'indeterminate' and emits nothing, deferring to the generic bare-`&` ASK of the truncation
+    guard. Only a positive 'match' DENIES. This is a deny-side companion to that ASK-side guard, defence in
+    depth on the same event: the ASK catches a generic detach, this DENIES the specific untracked poll loop."""
+    if data.get("tool_name") != "Bash":
+        return _allow()
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, _reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()                     # genuinely no orchestration registry: inert, as the sibling is
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command:
+        return _allow()                     # unreadable/empty command: out of scope, fail-open
+    if _orch_bg_poll_loop(command) == "match":
+        return _deny(
+            "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
+            "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
+            "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
+            "the session goes dark waiting on it. Remove the trailing '&' and take ONE of these exits: (1) "
+            "submit the same loop as a tracked background dispatch (run_in_background: true) and collect its "
+            "completion; (2) run a bounded foreground watch and act on the observed result (for example: "
+            "timeout <seconds> gh pr checks <ref> --watch); (3) schedule a tracked wake that re-invokes this "
+            "session to re-check.",
+            "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
+            "session. Use run_in_background, a bounded foreground watch, or a tracked wake.")
+    return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
+
+
 def orch_dispatch_ledger(data):
     """trkasy/recfst, PostToolUse (recorder, never blocks): append launch rows for background Bash and
     registry-declared dispatch tools, completion rows for TaskOutput reads. A failed write SURFACES
@@ -7588,6 +7938,7 @@ HANDLERS = {
     "orch_yield_tool": orch_yield_tool,
     "orch_ask_guard": orch_ask_guard,
     "orch_truncation_guard": orch_truncation_guard,
+    "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
@@ -7621,6 +7972,7 @@ HANDLER_EVENT = {
     "orch_yield_tool": PRETOOL,
     "orch_ask_guard": PRETOOL,
     "orch_truncation_guard": PRETOOL,
+    "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
