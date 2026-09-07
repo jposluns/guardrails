@@ -986,7 +986,9 @@ class _MechHtmlParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if not self._stack and not (tag == "details" and "more" in dict(attrs).get("class", "").split()):
             return  # outside any mechanism block
-        node = {"tag": tag, "attrs": dict(attrs), "children": [], "text": ""}
+        keys = [k for k, _v in attrs]
+        dups = sorted({k for k in keys if keys.count(k) > 1})
+        node = {"tag": tag, "attrs": dict(attrs), "dup_attrs": dups, "children": [], "text": ""}
         if self._stack:
             self._stack[-1]["children"].append(node)
         self._stack.append(node)
@@ -1026,6 +1028,8 @@ def _mech_node_attrs(node, keys, classes, findings, where):
     if classes is not None:
         for tok in sorted(set(node["attrs"].get("class", "").split()) - set(classes)):
             findings.append("reverse(html): <{}> carries unexpected class token {!r}".format(where, tok))
+    for dup in node.get("dup_attrs", ()):
+        findings.append("reverse(html): <{}> carries duplicate attribute {!r}".format(where, dup))
 
 
 def _validate_mech_html(block, expected):
@@ -1040,8 +1044,11 @@ def _validate_mech_html(block, expected):
     residual-label <p> whose text is not exactly the heading, or a data-mech that disagrees with the summary
     ref is a finding; the <li> metadata multiset must equal expected[ref] (FIX F, round 17). Each node also
     carries ONLY the attribute keys and class tokens render_html emits for it (per _mech_node_attrs): an extra
-    attribute or class token is a finding, so an overclaim injected as an attribute cannot ride an
-    un-enumerated HTML channel the field-multiset and VisibleText legs both miss (FIX F, round 18)."""
+    attribute, class token, duplicate attribute key, or a <details> id that disagrees with the ref is a
+    finding, so an overclaim injected as an attribute cannot ride an un-enumerated HTML channel the
+    field-multiset and VisibleText legs both miss (FIX F, rounds 18-19). This reverse leg is a self-test
+    completeness property over render_html's output, not the production overclaim scan (main runs only the
+    page-bound and asset-closure legs); the shipped page is separately byte-pinned by enforcement-register-drift."""
     F = []
     blank = lambda s: s.strip() == ""
     _mech_node_attrs(block, ("class", "id"), ("more",), F, "details.more")
@@ -1066,6 +1073,11 @@ def _validate_mech_html(block, expected):
                 F.append("reverse(html): <summary><code> has child elements")
             ref = scode[0]["text"].strip()
     exp_fields = expected.get(ref, [])
+    if ref is not None:  # tie the block id to the ref, as data-mech is tied below (FIX F, round 19)
+        expected_id = "mechanism-" + ref.replace(":", "-")
+        if block["attrs"].get("id") != expected_id:
+            F.append("reverse(html): <details.more> id {!r} does not match expected {!r}".format(
+                block["attrs"].get("id"), expected_id))
     if inner is not None:
         _mech_node_attrs(inner, ("class",), ("inner",), F, "div.inner")
         if "inner" not in inner["attrs"].get("class", "").split():
@@ -2650,6 +2662,14 @@ def _page_bound_source_self_test():
         _cls_tok = html_page.replace('class="more"', 'class="more secure-by-default"', 1)
         if not _reverse_leg(md_text, _cls_tok, pbs):
             failures.append("COMPLETENESS(reverse): an extra class token on a mechanism node must be caught (FIX F)")
+        # r19: a payload-first DUPLICATE class attribute (dict(attrs) keeps the last, a browser DOM the first)
+        # must be caught by the duplicate-key flag, and an overclaim in the <details> id VALUE by the id tie.
+        _dup_cls = html_page.replace('class="more"', 'class="more guarantees-everything" class="more"', 1)
+        if not _reverse_leg(md_text, _dup_cls, pbs):
+            failures.append("COMPLETENESS(reverse): a payload-first duplicate class attribute must be caught (FIX F, r19)")
+        _id_val = html_page.replace('id="mechanism-', 'id="OVERCLAIM mechanism-', 1)
+        if not _reverse_leg(md_text, _id_val, pbs):
+            failures.append("COMPLETENESS(reverse): an overclaim in a mechanism <details> id must be caught (FIX F, r19)")
 
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
