@@ -107,6 +107,46 @@ IMPORT_STATES = ("none", "partial", "complete")
 KNOWN_MODULES = ("governance", "delivery_assurance", "operational_policy",
                  "concurrent_operation", "decision_support")
 
+# Section 8.1 record-model type taxonomy (the single source-of-truth type-name -> namespace binding).
+# A declared [types.<name>] is valid only when <name> is a known type carrying its NORMATIVE namespace;
+# a module-tier type is valid only when its module is enabled in [modules]; the reserved-excluded type
+# `transaction` is never valid; the namespace `CL` is reserved UNASSIGNED (no type). Kept here as one
+# place so a later spec-schema release extends the roster in a single location.
+BASELINE_TYPES = {
+    "backlog_item": "BI",
+    "done": "DN",
+    "worklog": "WL",
+    "finding": "FN",
+    "pending_decision": "PD",
+    "autonomous_decision": "AD",
+    "block": "BL",
+    "handoff": "HO",
+    "reference": "RF",
+}
+# Module-tier types: type name -> (normative namespace, the module that must be enabled in [modules]).
+MODULE_TYPES = {
+    "maintainer_action": ("MA", "governance"),
+    "maintainer_decision": ("MD", "governance"),
+    "artifact": ("AR", "delivery_assurance"),
+    "gate_run": ("GR", "delivery_assurance"),
+    "release": ("RL", "delivery_assurance"),
+    "waiver": ("WV", "delivery_assurance"),
+    "mode": ("MO", "operational_policy"),
+    "tier_assessment": ("TA", "operational_policy"),
+    "session_lease": ("SL", "concurrent_operation"),
+    "preference_pattern": ("PP", "decision_support"),
+}
+# Importer-only quarantine type: a known, namespace-bound type gated by no module toggle (created only
+# by an importer, never scaffolded, spec 8.1).
+IMPORTER_TYPES = {
+    "legacy_fragment": "LF",
+}
+# Reserved and EXCLUDED from the adopter standard: name and namespace reserved, never a valid declared
+# type (spec 8.1); `transaction` may enter later only as a versioned module.
+RESERVED_EXCLUDED_TYPES = {
+    "transaction": "TX",
+}
+
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
 DEVPROCESS_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
 STORE_KEYS = frozenset({"sync_target"})
@@ -388,6 +428,14 @@ def resolve_store(product_root):
         return Resolution(CANNOT_EVALUATE, "product root does not exist: {}".format(product_root))
     if not product_root.is_dir():
         return Resolution(CANNOT_EVALUATE, "product root is not a directory: {}".format(product_root))
+    # Resolve the product root to an ABSOLUTE path in the security-sensitive components WITHOUT following
+    # symlinks: os.path.abspath joins with the cwd and normalizes lexically, it does NOT canonicalize
+    # symlinks (unlike Path.resolve()), so a relative --root (e.g. `.`) resolves identically to the same
+    # root passed absolutely while the pointer-target no-follow walk still refuses symlinked components.
+    # A relative dir: target joined to a relative product root would otherwise be rejected downstream by
+    # _open_dir_nofollow as not absolute, so a valid relative --root refused a valid companion store
+    # (MAJOR 2).
+    product_root = Path(os.path.abspath(product_root))
     if not _containment.probe():
         # A store read touches adopter-controlled paths; without the race-free primitive a read cannot be
         # done safely, so resolution fails closed rather than resolving over an unguarded name (spec 17).
@@ -560,7 +608,7 @@ def validate_manifest(data, supported_profiles=None):
     _validate_store_section(data.get("store"), findings)
     modules_enabled = _validate_modules(data.get("modules"), findings)
     registered_vendors = _validate_vendors(data.get("vendors"), findings)
-    _validate_types(data.get("types"), findings)
+    _validate_types(data.get("types"), modules_enabled, findings)
     _validate_providers(data.get("providers"), findings)
     _validate_views(data.get("views"), findings)
     _validate_deliverables(data.get("deliverables"), findings)
@@ -708,7 +756,31 @@ def _validate_vendors(vendors, findings):
     return registered
 
 
-def _validate_types(types, findings):
+def _normative_namespace(name, modules_enabled, where, findings):
+    """The normative section-8.1 namespace for a declared type name. Returns the namespace when the name
+    is a valid declarable type using it, else appends a finding and returns None: an UNKNOWN name, the
+    reserved-EXCLUDED `transaction`, or a MODULE-tier type whose module is not enabled in [modules]. This
+    is the real section-8 taxonomy enforcement (not merely a two-letter shape + local-uniqueness check)."""
+    if name in BASELINE_TYPES:
+        return BASELINE_TYPES[name]
+    if name in IMPORTER_TYPES:
+        return IMPORTER_TYPES[name]
+    if name in MODULE_TYPES:
+        normative_ns, module = MODULE_TYPES[name]
+        if module not in modules_enabled:
+            findings.append("{} declares module type {!r} but its module {!r} is not enabled in "
+                            "[modules] (spec 8.1)".format(where, name, module))
+            return None
+        return normative_ns
+    if name in RESERVED_EXCLUDED_TYPES:
+        findings.append("{} type {!r} is reserved and excluded from the adopter standard "
+                        "(spec 8.1)".format(where, name))
+        return None
+    findings.append("{} is not a known record type (spec 8.1)".format(where))
+    return None
+
+
+def _validate_types(types, modules_enabled, findings):
     if types is None:
         return
     if not isinstance(types, dict):
@@ -727,6 +799,13 @@ def _validate_types(types, findings):
         if not _valid_namespace(ns):
             findings.append("{}.namespace {!r} is not a two-letter uppercase namespace".format(where, ns))
             continue
+        # Section 8.1 taxonomy: the type name must be a known baseline, importer, or enabled-module type,
+        # and it MUST carry that type's normative namespace (a known type with the wrong namespace is a
+        # finding, as is an unknown or reserved-excluded name).
+        normative_ns = _normative_namespace(name, modules_enabled, where, findings)
+        if normative_ns is not None and ns != normative_ns:
+            findings.append("{}.namespace {!r} is not the normative namespace {!r} bound to type {!r} "
+                            "(spec 8.1)".format(where, ns, normative_ns, name))
         if ns in seen_ns:
             findings.append("namespace {!r} is bound to more than one type ({} and {}); the binding is "
                             "one-to-one (spec 8.2)".format(ns, seen_ns[ns], name))
@@ -1237,6 +1316,68 @@ def self_test():
         # the whole declared range is validated rather than short-circuiting to a silent (False, None).
         check("compat-malformed-clause-not-masked",
               _match_base_compat(">=2.0.0 garbage", (1, 0, 0))[0] is None)
+
+        # 12: the section-8.1 record-model type taxonomy is ENFORCED (MAJOR 1), not merely a two-letter
+        # shape + local-uniqueness check. An UNKNOWN type name is a finding.
+        m_unknown = _t.loads(manifest_text(extra_top='[types.foobar]\nnamespace = "ZZ"'))
+        mv_unknown = validate_manifest(m_unknown)
+        check("taxonomy-unknown-type-invalid", mv_unknown.status == INVALID)
+        check("taxonomy-unknown-type-named",
+              any("foobar" in f and "not a known record type" in f for f in mv_unknown.findings))
+
+        # 12b: a KNOWN type carrying the WRONG namespace is a finding (finding's normative ns is FN).
+        m_wrongns = _t.loads(manifest_text(extra_top='[types.finding]\nnamespace = "ZZ"'))
+        mv_wrongns = validate_manifest(m_wrongns)
+        check("taxonomy-wrong-namespace-invalid", mv_wrongns.status == INVALID)
+        check("taxonomy-wrong-namespace-named",
+              any("not the normative namespace" in f and "finding" in f for f in mv_wrongns.findings))
+
+        # 12c: the reserved-EXCLUDED type `transaction` (namespace TX) is never valid, even with its own
+        # reserved namespace.
+        m_txn = _t.loads(manifest_text(extra_top='[types.transaction]\nnamespace = "TX"'))
+        mv_txn = validate_manifest(m_txn)
+        check("taxonomy-reserved-transaction-invalid", mv_txn.status == INVALID)
+        check("taxonomy-reserved-transaction-named",
+              any("transaction" in f and "reserved and excluded" in f for f in mv_txn.findings))
+
+        # 12d: a KNOWN baseline type carrying its NORMATIVE namespace is VALID (finding -> FN).
+        m_goodtype = _t.loads(manifest_text(extra_top='[types.finding]\nnamespace = "FN"'))
+        mv_goodtype = validate_manifest(m_goodtype)
+        check("taxonomy-correct-binding-valid", mv_goodtype.status == VALID and not mv_goodtype.findings)
+
+        # 12e: a MODULE-tier type is valid ONLY when its module is enabled. `artifact` (AR) belongs to
+        # delivery_assurance, which manifest_text leaves OFF: declaring it is a finding...
+        m_modoff = _t.loads(manifest_text(extra_top='[types.artifact]\nnamespace = "AR"'))
+        mv_modoff = validate_manifest(m_modoff)
+        check("taxonomy-module-type-disabled-invalid", mv_modoff.status == INVALID)
+        check("taxonomy-module-type-disabled-named",
+              any("artifact" in f and "not enabled in [modules]" in f for f in mv_modoff.findings))
+        # ... and VALID once delivery_assurance is enabled.
+        m_modon = _t.loads(manifest_text(extra_top='[types.artifact]\nnamespace = "AR"').replace(
+            "concurrent_operation = true", "concurrent_operation = true\ndelivery_assurance = true"))
+        mv_modon = validate_manifest(m_modon)
+        check("taxonomy-module-type-enabled-valid", mv_modon.status == VALID and not mv_modon.findings)
+
+        # 13: a RELATIVE product --root resolves IDENTICALLY to the same root passed absolutely (MAJOR 2).
+        # Before the fix, a relative dir: companion joined to a relative product root produced a relative
+        # store root that _open_dir_nofollow rejected as not absolute (CANNOT-EVALUATE); os.path.abspath
+        # anchors it to the cwd without following symlinks, so the relative root now resolves.
+        rel_prod = build_store(make_working=False)
+        rel_comp = rel_prod / "rel-companion"
+        (rel_comp / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
+        (rel_comp / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).write_text(
+            manifest_text(), encoding="utf-8")
+        (rel_prod / POINTER_REL).write_text('[store]\ntarget = "dir:rel-companion"\n', encoding="utf-8")
+        abs_res = resolve_store(rel_prod)
+        check("relative-root-abs-baseline", abs_res.status == RESOLVED)
+        prev_cwd = os.getcwd()
+        try:
+            os.chdir(str(base))
+            rel_res = resolve_store(Path(rel_prod.name))       # a cwd-relative product root
+        finally:
+            os.chdir(prev_cwd)
+        check("relative-root-resolves", rel_res.status == RESOLVED)
+        check("relative-root-matches-abs", rel_res.store_root == abs_res.store_root)
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

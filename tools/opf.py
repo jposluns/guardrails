@@ -32,27 +32,57 @@ EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_MALFORMED = 2
 
+def _aggregator_self_test():
+    """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
+    OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
+    admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
+    0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
+    the store legs did not, letting a helper returning False produce an aggregate exit 0."""
+    ok = True
+    # A helper returning False (bool, == 0) must NOT aggregate to clean.
+    if run_self_tests((("synthetic-false", lambda: False),)) == EXIT_OK:
+        ok = False
+    # A helper returning 0.0 (float, == 0) must NOT aggregate to clean.
+    if run_self_tests((("synthetic-zero-float", lambda: 0.0),)) == EXIT_OK:
+        ok = False
+    # An out-of-range int (3) must NOT aggregate to clean.
+    if run_self_tests((("synthetic-three", lambda: 3),)) == EXIT_OK:
+        ok = False
+    # A genuine clean int (0) still aggregates to clean: the check does not over-reject.
+    if run_self_tests((("synthetic-zero", lambda: 0),)) != EXIT_OK:
+        ok = False
+    if not ok:
+        print("opf aggregator self-test: FAIL (fail-closed vocabulary check admitted a bad return)",
+              file=sys.stderr)
+        return EXIT_FINDING
+    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns)")
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 SELF_TESTS = (
     ("opf-store", _opf_store.self_test),
+    ("opf-aggregator", _aggregator_self_test),
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync")
 
 
-def run_self_tests():
+def run_self_tests(tests=SELF_TESTS):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
     is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
     the whole leg, never masked by a later clean one."""
     worst = EXIT_OK
-    for label, fn in SELF_TESTS:
+    for label, fn in tests:
         print("== opf self-test: {} ==".format(label))
         code = fn()
-        if code not in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED):
-            # A helper returning a code outside the agreed {0,1,2} vocabulary is itself a fault: fail
-            # closed (the worst outcome) rather than letting an unrecognized code read as clean.
+        if not (type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)):
+            # A helper whose return is not an int of exactly {0,1,2} is itself a fault: fail closed (the
+            # worst outcome) rather than letting an unrecognized code read as clean. `type(code) is int`
+            # deliberately EXCLUDES bool (a subclass of int, where False == 0 and True == 1) and float
+            # (0.0 == 0), so a helper returning False or 0.0 can never be admitted as a clean pass.
             print("opf self-test: {} returned out-of-range code {!r}; failing closed".format(label, code),
                   file=sys.stderr)
             worst = EXIT_MALFORMED
