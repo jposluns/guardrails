@@ -48,22 +48,26 @@ reason, MAY is genuinely optional. Statements without these keywords are descrip
 
 - **Records first.** The store is the source of truth. A decision, finding, or completion that is
   not recorded did not happen. Human-readable surfaces are derived, never authoritative.
-- **Facts are append-only; views are re-rollable.** Detailed records are never consumed, rewritten,
+- **Facts are durable; views are re-rollable.** Detailed records are never consumed, rewritten,
   or deleted once frozen. Summaries and views over them may be regenerated, re-rolled, and
   re-worded at any time, because the facts beneath them persist intact.
 - **Machine writes, human reads.** Sources are machine-shaped TOML; deliverables are generated,
   prominent, human-readable documents. Nobody hand-edits a generated file.
 - **Location is configuration.** The store's location is a migratable setting, not a mode or an
-  architectural commitment. Wherever the store lives, the public face of the product repository is
-  identical, and moving the store is a first-class, history-preserving operation.
+  architectural commitment. Wherever the store lives, the generated public deliverables
+  (`CHANGELOG.md`, `VERSION`, and any future public view) are byte-for-byte identical; only the
+  committed pointer (`.opf.toml`) changes with the topology. Moving the store is a first-class,
+  history-preserving operation.
 - **Fail closed.** A gate that cannot read, parse, or resolve an input it is meant to cover reports
   failure or cannot-evaluate, never a clean pass.
 - **Determinism where claimed.** Anything called a deterministic render is byte-reproducible from
   its sources. Anything curated by a human is labelled as curated and is gated on its facts, not
   its bytes.
-- **Generic by construction.** The base requirements, and the data of a conforming store, name no
-  particular adopter, operator, or profile; the standard's own ownership and its reference profile
-  are named as such, never as a requirement dependency (section 15).
+- **Generic by construction.** The base-required schema vocabulary (the standard's own required
+  field names and structure) names no particular adopter, operator, or profile; a conforming store's
+  own data may name an operator via `actor.id` or a profile via a `[profiles.<name>]` table the
+  adopter chose. The standard's own ownership and its reference profile are named as such, never as a
+  requirement dependency (section 15).
 
 ## 4. Store resolution: roots, pointer, discovery, and naming
 
@@ -231,8 +235,8 @@ wants a private process opts into it by relocating the store, not by weakening t
 
 From the default, the store can migrate anywhere (section 5.4). The patterns in section 5.3 are
 just configurations of the same machinery: nothing in the store's format, gates, IDs, or views
-changes when it moves, and the product repository's public face is identical wherever the store
-lives (section 5.8).
+changes when it moves, and the product repository's generated public deliverables are identical
+wherever the store lives (section 5.8).
 
 ### 5.3 Location patterns
 
@@ -268,7 +272,7 @@ operation MUST:
   recorded, intended target, never inherited from ambient state, and a store is never pushed to an
   unexpected place;
 - preserve the store's git history into the destination repository through a history-preserving
-  extraction, and preserve the durable append-only worklog and its archive byte for byte: a
+  extraction, and preserve the durable worklog and its archive byte for byte: a
   relocation that flattens history into a single import commit, or that loses or rewrites any
   worklog entry, is nonconformant;
 - keep the generated public deliverables in the product repository: `CHANGELOG.md` and `VERSION`
@@ -394,15 +398,16 @@ Scope of the contract by pattern:
   still guards concurrent runs on the one system, and durability is the adopter's recorded backup
   responsibility (section 5.3).
 
-### 5.8 The public face is identical across topologies
+### 5.8 The public deliverables are identical across topologies
 
 Generated public deliverables always live in the product repository: the root `CHANGELOG.md`, the
 root `VERSION`, and any future public view. This holds identically whether the store is in-repo, a
 private companion, local-only, or anywhere else; a reader of the product repository sees the same
-generated public deliverables, byte for byte, whatever the topology, and nothing about the product repository's
-surface reveals or depends on where the store lives. Only the maintainer's systems need resolve a
-private store; for everyone else the pointer is an inert file and the public deliverables are the
-whole story.
+generated public deliverables, byte for byte, whatever the topology. The committed pointer
+(`.opf.toml`) is the one part of the surface that does change with the topology: it names where the
+store lives (for example `dir:.` for an in-repo store, or a companion target), so it necessarily
+differs between topologies. Only the maintainer's systems need resolve a private store; for everyone
+else the pointer is an inert file and the public deliverables are the whole story.
 
 Publication is stage-then-promote: `opf render` writes into the product repository only bytes that
 have passed the store's gates, and those bytes land through the product repository's normal
@@ -412,7 +417,7 @@ repository is the promotion step, and it never promotes anything the gates have 
 ## 6. The release triad: version.toml, worklog.toml, and CHANGELOG.md
 
 Three artifacts, deliberately separated so the version anchor, the detailed record, and the public
-story cannot tangle: a machine ledger of releases, an append-only worklog of changes, and a curated
+story cannot tangle: a machine ledger of releases, a durable worklog of changes, and a curated
 summary for the public. The ledger anchors versioning; the worklog holds every fact; the changelog
 tells the story and can always be retold because the facts persist beneath it.
 
@@ -970,7 +975,8 @@ Tamper evidence is layered:
 - **Archive enumeration.** `archive.toml` makes every rotation enumerable, so a record cannot
   quietly vanish under the name of rotation.
 
-Records are append-only or supersession-marked; nothing leaves the store except by enumeration.
+Records are never deleted: an unreleased entry may be corrected in place, and a frozen or released
+record is immutable or supersession-marked; nothing leaves the store except by enumeration.
 
 ## 14. Import, pre-existing files, and legacy migration (outline)
 
@@ -1054,8 +1060,9 @@ generically; no pattern names a real repository, host account, or internal syste
 provenance stays inside the adopter's own repositories. Experimental fields ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 
-The base standard's requirements and a conforming store's data name no adopter, operator, or
-profile by definition. AIQT is the standard's owner, named in its title and brand, which is
+The base standard's required schema vocabulary names no adopter, operator, or profile by
+definition; a conforming store's own data legitimately may (an operator via `actor.id`, a profile
+via a `[profiles.<name>]` table the adopter chose). AIQT is the standard's owner, named in its title and brand, which is
 ownership rather than a requirement dependency; AIQT is also one profile, `[profiles.aiqt]`, cited
 only as the reference enforcement suite and a consumer. A profile
 carries an adopter's own additional requirements without the base ever depending on them.
@@ -1080,8 +1087,9 @@ The gates in this standard are strong where they are strong and say so where the
 - The freeze gate proves a published summary's bytes changed only through recorded re-publication;
   it cannot prove the prose is accurate or complete. Human curation (section 7.3) is that control.
 - Range coverage proves every release is summarized exactly once; it cannot judge summary quality.
-- Append-only enforcement on the unreleased worklog tail rests on review and version-control
-  history; machine freezing begins at release cut.
+- The unreleased worklog tail is mutable until release: an entry there MAY be corrected in place, a
+  guarantee that rests on review and version-control history rather than machine enforcement; machine
+  freezing and immutability begin at release cut.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.
@@ -1197,15 +1205,12 @@ links = [ { rel = "corrects", id = "WL-90" } ]
 
 - In progress: per-record layout documentation.
 
-## 1.3.0 (2026-08-30)
+## 1.2.3..1.3.0 (2026-06-14 to 2026-08-30)
 
-Hardened the view pipeline: renamed types can no longer leave a stale generated
-view behind, and composed views now surface records awaiting ratification.
-
-## 1.0.0..1.2.3 (2026-01-10 to 2026-06-14)
-
-Initial public line: the typed store, the nine baseline record types, deterministic
-views with a drift gate, and the first import tooling.
+The baseline store through the view-pipeline hardening: the typed store, the nine
+baseline record types, deterministic views with a drift gate, and the first import
+tooling; then renamed types can no longer leave a stale generated view behind, and
+composed views now surface records awaiting ratification.
 ```
 
 ---

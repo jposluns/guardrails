@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "925813711f510cdc7d819580558bc623aa26a38c72bc18f04989959e91922d7f"
+tree-sha256 = "b1e2cbaa6e3ecbc723cdaf2f2c557e05ef599517a64d2e7b6546d3f5ca809066"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
@@ -81,8 +81,8 @@ sha256 = "98975379849ac430bd4af492345938850783fa2fdf469ac182eb0b63ff64a720"
 
 [[sources]]
 path = ".aiqt/core/opf/OPF-SPEC.md"
-bytes = 71631
-sha256 = "aee906e38122a706ac9eb891b5d394ab2bfd5d5d529625b1f189ffb7d2f3407a"
+bytes = 72402
+sha256 = "a65639167ca9e6821e5fdd0e11409795590959c78c4414454d3a32e36d866647"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
