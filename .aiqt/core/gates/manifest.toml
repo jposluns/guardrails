@@ -451,6 +451,15 @@ class = "a"
 residue = "It exercises the shared render/reconcile driver (tools/opf_render.py) end to end: per-target ordering on a degraded input (an earlier target's drift line and write precede a later target's materialization failure, under both --check and write, for a missing and a markerless block page), a schema error on a later target aborting before an earlier target is reconciled, a one-shot iterator target being reconciled rather than silently skipped, and an empty target set failing closed. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative scenarios with exact stdout/exit-code matches, not the driver's whole input space, and it does not re-verify the healthy byte-identical generation the drift gates own."
 
 [[gate]]
+id = "opf-tooling-selftest"
+script = "tools/opf.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the OPF core-tooling dispatcher (tools/opf.py --self-test) end to end: it runs every registered helper self-test in order (the store, schema, and release helpers over synthetic stores) and the aggregator's own fail-closed return-vocabulary guard, under which a helper returning a bool, a float, or an out-of-range int fails the aggregate closed rather than reading as clean, and the worst outcome wins so one degraded helper is never masked by a later clean one. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact exit-code matches, not each helper's whole input space; it does not exercise the store verbs (init, import, doctor, render, migrate, sync), which are recognized names that fail closed as not-yet-implemented until their unit lands; and it runs over synthetic stores rather than a real adopter --root, so it does not verify behaviour against a live product repository."
+
+[[gate]]
 id = "aiqt-corpus-selftest"
 script = "tools/selftest_aiqt_corpus.py"
 rules = []
