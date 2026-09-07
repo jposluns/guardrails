@@ -647,7 +647,10 @@ An importer MAY omit `created_at` where the source genuinely does not record it;
 recorded as unknown via the import provenance reference, never guessed.
 
 The worklog entry uses a reduced envelope (`id`, `date`, `actor`, `kind`, `summary`, optional
-detail, `links`, `refs`); its status is fixed (section 8.5).
+detail, `links`, `refs`); its status is fixed (section 8.5). The worklog records facts, not
+proposable decisions, so its entries never take the `/proposed` qualifier whatever the actor: an
+assistant-authored or automation-authored worklog entry is a conformant recorded fact needing no
+ratification (section 8.4).
 
 ### 8.4 The status grammar
 
@@ -663,11 +666,23 @@ qualifier ::= "proposed"
   with the `/proposed` qualifier (for example `done/proposed`). Only a maintainer transition
   removes the qualifier (ratification) or returns the record to a working state (rejection, with a
   recorded reason). A `/proposed` status is not terminal: gates and completion claims treat the
-  record as unfinished, and views surface it as awaiting ratification.
+  record as unfinished, and views surface it as awaiting ratification. The `/proposed` qualifier
+  attaches only to a proposable terminal transition: a decision-class or finding-class record that
+  an assistant or automation proposes for a maintainer's ratification. A recorded factual entry that
+  proposes no decision is exempt: the worklog, whose entries record facts rather than propose
+  decisions, never takes `/proposed`, so an assistant-authored or automation-authored worklog entry
+  (status `recorded`) is a conformant recorded fact rather than an unratified proposal.
 - No resurrection: a record in an unqualified terminal state never re-enters a working state. A
   revived concern is a new record linking the old one.
 - Supersession is a link, not a state edit: the superseding record links `supersedes`, and where
   the type records it, the superseded record's terminal state reflects it.
+- The worklog is a special case of these rules, with terminality keyed to release rather than to a
+  state transition (section 6.2). It declares the single state `recorded`: while an entry sits in
+  the unreleased tail its `recorded` status is pre-terminal and mutable-until-release, and once a
+  release freezes its span the entry's `recorded` status is terminal and immutable. The
+  released-frozen span is therefore the worklog's terminal state that satisfies the
+  one-or-more-terminal-states requirement above, while correcting an unreleased entry in place is an
+  ordinary pre-terminal edit, not a resurrection of a terminal record.
 
 ### 8.5 Transition rules
 
@@ -677,7 +692,7 @@ Baseline types:
 |---|---|---|
 | backlog_item | `open` > `active` > `done` or `dropped`; `open` > `dropped` | Ratified `done` creates the one-to-one `done` receipt. Blocked-ness is never a stored state; it is derived from active blocks at view time. |
 | done | `recorded` | Created terminal, immutable. Links `receipt_of` to its backlog item. |
-| worklog | `recorded` | Durable operational record; mutability governed by section 6.2, not by transition. |
+| worklog | `recorded` | Durable operational record with release-keyed terminality: the unreleased tail is pre-terminal and mutable, a released-frozen span is terminal and immutable (sections 6.2 and 8.4). Takes no `/proposed` qualifier whatever the actor. Mutability governed by section 6.2, not by transition. |
 | finding | `open` > `fixed`, `routed`, `refuted`, or `accepted` | Severity is graded at or after the fix decision, never before. |
 | pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision carries none of `decision`, `decided_at`, `decided_by`; a decided one carries all. A decided record may be superseded by a new decision linking `supersedes`; exactly one current effective resolution exists per chain. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning is a new record (or maintainer decision) linking it. |
@@ -950,10 +965,13 @@ floor is additive and cannot substitute for that authorization in the loosening 
 ## 12. Rotation, archive, and retention
 
 Rotation is relocation, never deletion, and never ID reuse. Records in unqualified terminal states,
-and worklog entries in released spans, MAY rotate to `.working/toml/archive/<YYYY>/` (calendar-year
-buckets) on manifest-declared age or size thresholds. Open records, active blocks, unresolved
-decisions, unresolved fragments, unexpired waivers, the current handoff, and the unreleased worklog
-tail never rotate.
+other than worklog records, MAY rotate to `.working/toml/archive/<YYYY>/` (calendar-year buckets) on
+manifest-declared age or size thresholds. Worklog records are excluded from that generic
+terminal-record permission and rotate solely under the release-based rule: only released, frozen
+worklog spans MAY rotate, and the unreleased `recorded` tail never rotates whatever its age or size,
+because it is pre-terminal and mutable-until-release (sections 6.2 and 8.4). Open records, active
+blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current handoff, and the
+unreleased worklog tail never rotate.
 
 Each rotation writes the year's `archive.toml`, enumerating every moved ID (and, for the worklog,
 every moved span) and its destination. Validation confirms that every ID exists in exactly one
@@ -980,7 +998,10 @@ Tamper evidence is layered:
   quietly vanish under the name of rotation.
 
 Records are never deleted: an unreleased entry may be corrected in place, and a frozen or released
-record is immutable or supersession-marked; nothing leaves the store except by enumeration.
+record is immutable or supersession-marked. Nothing ever leaves the store. A record moves only by
+rotation, an archival relocation within the store that `archive.toml` enumerates (section 12), which
+preserves the record byte for byte and keeps every ID resolvable in its active or archived location.
+That enumeration records the movement; it never authorizes a departure from the store or a deletion.
 
 ## 14. Import, pre-existing files, and legacy migration (outline)
 
