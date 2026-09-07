@@ -19,7 +19,11 @@ SCANNED SURFACES (the declared set, resolved from the repo root):
   - tools/run_all_checks.sh (required),
   - every regular *.yml/*.yaml under .github/workflows/ (required directory),
   - .claude/settings.json and .claude/settings.local.json (optional; a truly-absent file is a clean
-    skip, but a present-but-unusable one, including a dangling symlink, is a cannot-evaluate).
+    skip, but a present-but-unusable one, including a dangling symlink, is a cannot-evaluate),
+  - the QA-suite Python sources tools/_qa_adapter.py, tools/audit_reference.py, and
+    tools/check_internal_names.py (required), scanned for a sys.path insertion at index 0 that would
+    re-add the script directory AHEAD of the stdlib and re-enable the sibling-shadow class under -I; their
+    sanctioned sibling-import form is sys.path.append.
 
 LAUNCHER PREDICATE. In a scanned command, a leading ``env`` and any ``VAR=val`` assignments are skipped;
 the command word's basename must then match ``^python(3(\\.\\d+)?)?$`` to be a launcher (a non-python
@@ -46,8 +50,10 @@ Diagnostics are deterministic, sorted by relative path then line then location.
 DISCLOSED RESIDUAL (this gate does not catch): wrapper or indirect launchers (``bash -c "python3 ..."``,
 a ``.sh`` re-launcher), ``$PYTHON`` and shell aliases or functions, a dynamically assembled argv, the
 programmatic ``subprocess`` children in the tools and the ``regenerate`` strings in .aiqt/gensrc.json
-(a separate follow-up), a script that mutates its own ``sys.path`` at runtime (which ``-I`` cannot
-prevent), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
+(a separate follow-up), a runtime ``sys.path`` mutation OTHER than a literal index-0 insertion in the
+three enumerated QA-suite sources (a ``sys.path[0:0]`` slice, a computed index, a runtime-assembled
+insertion, or one in another source is not caught, and even for those three ``-I`` cannot prevent a
+runtime mutation the source performs), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces,
 YAML or shell constructs beyond the supported line grammar, and the PATH provenance of ``python3``
 itself. A ``python3 tools/*.py`` token embedded in a quoted argument or a heredoc may be miscounted,
 mirroring the roster-scan limit the enforceability ledger discloses.
@@ -95,6 +101,16 @@ RUN_ALL_REL = "tools/run_all_checks.sh"
 WORKFLOWS_REL = ".github/workflows"
 OPTIONAL_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")
 REQUIRED_FORM = "-I (or the full -P -E -s) before the script"
+
+# The QA-suite Python sources whose sibling-import posture this gate keeps isolated. Each imports a sibling
+# module (the QA adapter, the shared tree walk, the leak gate) and MUST do so with sys.path.append, never a
+# sys.path insertion at index 0: under `python3 -I` an index-0 insertion re-adds the script's own directory
+# AHEAD of the stdlib, so a sibling json.py/hashlib.py (raise SystemExit(0)) can shadow a stdlib import and
+# silently neuter the self-test. These sources are REQUIRED (a missing one is a cannot-evaluate).
+PYSOURCE_ISOLATION_REL = ("tools/_qa_adapter.py", "tools/audit_reference.py", "tools/check_internal_names.py")
+# A sys.path insertion at index 0 (`sys.path.insert(0, ...)`, also spelled with whitespace); the sanctioned
+# form for the sources above is sys.path.append, which preserves stdlib precedence.
+SYS_PATH_FRONT_INSERT_RE = re.compile(r"sys\.path\.insert\(\s*0\b")
 
 PY_WORD_RE = re.compile(r"^python(3(\.\d+)?)?$")     # a whole token that is a python interpreter name
 PY_TOKEN_RE = re.compile(r"\bpython3?\b")            # a python word anywhere in a line (a fast pre-filter)
@@ -549,12 +565,36 @@ def _scan_workflows(root, errors, failures):
             _check_shell_line(rel, lineno, line, errors, failures)
 
 
+def _scan_pysource_isolation(root, errors, failures):
+    """Scan the QA-suite Python sources for a sys.path insertion at index 0 that would place the script's
+    own directory AHEAD of the stdlib on sys.path. Under `python3 -I` such a reinsertion re-enables the
+    sibling-shadow class this gate exists to prevent: a sibling json.py/hashlib.py beside the script can
+    then shadow a stdlib import and silently neuter the control. The sanctioned form for these sources is
+    sys.path.append (stdlib precedence preserved). Each source is REQUIRED and read fail-closed; a
+    reintroduced index-0 insertion is a non-isolated finding. RESIDUAL: this is a line-lexical scan
+    (mirroring the roster-scan limit) that strips a trailing/whole-line shell-style `#` note is NOT used
+    here (Python comments are stripped by cutting at the first `#`), so an index-0 insertion spelled
+    differently (a sys.path[0:0] slice or a computed index), one assembled at runtime, or one hidden inside
+    a string literal or a heredoc is outside it."""
+    for rel in PYSOURCE_ISOLATION_REL:
+        text = _read_required_text(root, rel, errors)
+        if text is None:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            code = line.split("#", 1)[0]  # drop a Python comment so a phrase in a comment is not flagged
+            if SYS_PATH_FRONT_INSERT_RE.search(code):
+                failures.append((rel, lineno, "", "a sys.path insertion at index 0 reintroduces the script "
+                                 "directory ahead of the stdlib (a sibling-shadow risk under -I); use "
+                                 "sys.path.append"))
+
+
 def scan(root):
     """Scan every declared surface under root; return (errors, failures) as sorted diagnostic tuples."""
     errors, failures = [], []
     _scan_json_file(root, HOOKS_JSON_REL, errors, failures)
     _scan_shell_file(root, RUN_ALL_REL, errors, failures)
     _scan_workflows(root, errors, failures)
+    _scan_pysource_isolation(root, errors, failures)
     for rel in OPTIONAL_SETTINGS:
         # Optional: a TRULY-ABSENT settings file (no filesystem entry at all) is the only clean
         # absence; a PRESENT-but-unusable one (a dangling symlink, or an unreadable, non-regular,
@@ -681,12 +721,16 @@ def _hooks_json(args):
 
 def _build(base, hooks_args=("-I", SCRIPT, "h_one"),
            run_all=_ISO_RUN_ALL, workflow=_ISO_WORKFLOW):
-    """A fully-isolated synthetic tree: the plugin hooks.json, run_all_checks.sh, and one workflow."""
+    """A fully-isolated synthetic tree: the plugin hooks.json, run_all_checks.sh, one workflow, and clean
+    stubs for the three REQUIRED QA-suite Python sources so the pysource-isolation scan finds them present
+    and clean (a case that needs an index-0 insertion overwrites a stub)."""
     hooks_path = base / HOOKS_JSON_REL
     hooks_path.parent.mkdir(parents=True)
     hooks_path.write_text(_hooks_json(list(hooks_args)), encoding="utf-8")
     (base / "tools").mkdir(parents=True)
     (base / RUN_ALL_REL).write_text(run_all, encoding="utf-8")
+    for rel in PYSOURCE_ISOLATION_REL:
+        (base / rel).write_text("# qa-suite source stub (launcher-isolation coverage)\n", encoding="utf-8")
     wf = base / ".github" / "workflows"
     wf.mkdir(parents=True)
     (wf / "quality.yml").write_text(workflow, encoding="utf-8")
@@ -1058,6 +1102,32 @@ def self_test_main():
                     failures.append("real bash should resolve the obfuscated name {} to 'python3' "
                                     "(got rc={}, out={!r})".format(label, proc.returncode, proc.stdout))
 
+        # 33. DISCRIMINATING (finding-6: the QA-suite Python sources are scanned for a reintroduced sys.path
+        #     insertion at index 0). A covered source that reinserts the script dir ahead of the stdlib is a
+        #     non-isolated FINDING (exit 1); the sanctioned sys.path.append form is clean (exit 0); a MISSING
+        #     covered source fails closed (exit 2, a required input). Removing _scan_pysource_isolation lets
+        #     the reintroduction pass (exit 0), failing the first case.
+        insert_tree = _build(tmp / "pysource-insert")
+        (insert_tree / "tools" / "audit_reference.py").write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent))\nimport _qa_adapter\n",
+            encoding="utf-8")
+        if run_quiet(insert_tree) != 1:
+            failures.append("a QA source reintroducing a sys.path index-0 insertion expected exit 1 "
+                            "(finding-6)")
+        append_tree = _build(tmp / "pysource-append")
+        (append_tree / "tools" / "audit_reference.py").write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "sys.path.append(str(Path(__file__).resolve().parent))\nimport _qa_adapter\n", encoding="utf-8")
+        if run_quiet(append_tree) != 0:
+            failures.append("a QA source using the sanctioned sys.path.append form expected exit 0 "
+                            "(finding-6)")
+        missing_tree = _build(tmp / "pysource-missing")
+        (missing_tree / "tools" / "check_internal_names.py").unlink()
+        if run_quiet(missing_tree) != 2:
+            failures.append("a missing required QA-suite Python source expected exit 2 (fail-closed, "
+                            "finding-6)")
+
         # 10. The gate REFUSES (exit 2) when its own interpreter is not isolated (a real subprocess: no
         #     -I, so the bootstrap self-guard fires before any scan or sibling import).
         refuse = subprocess.run([sys.executable, str(Path(__file__).resolve())], capture_output=True,
@@ -1093,7 +1163,10 @@ def self_test_main():
           "launcher) while a genuine `&&`/background `&` still splits, matching real bash; a quote/"
           "escape-obfuscated launcher NAME (`pyt\\hon3`, `pyt\"hon\"3`, `py'thon'3`) that bash resolves "
           "to a real interpreter is caught on a run_all_checks.sh line and in a settings.json shell-"
-          "string (exit 1) with its isolated form passing (exit 0), confirmed against real bash; and "
+          "string (exit 1) with its isolated form passing (exit 0), confirmed against real bash; a "
+          "QA-suite Python source that reintroduces a sys.path index-0 insertion is a finding (exit 1) "
+          "while the sanctioned sys.path.append form is clean (exit 0) and a missing required QA source "
+          "fails closed (exit 2); and "
           "the gate refuses to run non-isolated (exit 2)" + note)
     return 0
 
