@@ -663,7 +663,9 @@ qualifier ::= "proposed"
 - Each type declares a closed state set: one initial state, zero or more working states, and one or
   more terminal states.
 - A terminal transition performed by an actor whose `kind` is `assistant` or `automation` lands
-  with the `/proposed` qualifier (for example `done/proposed`). Only a maintainer transition
+  with the `/proposed` qualifier (for example `done/proposed`); creating a record directly in a
+  terminal factual or ACT state that awaits no ratification, such as an `autonomous_decision` or a
+  `reference`, is not such a transition and carries no qualifier. Only a maintainer transition
   removes the qualifier (ratification) or returns the record to a working state (rejection, with a
   recorded reason). A `/proposed` status is not terminal: gates and completion claims treat the
   record as unfinished, and views surface it as awaiting ratification. The `/proposed` qualifier
