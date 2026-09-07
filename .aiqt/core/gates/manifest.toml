@@ -451,6 +451,15 @@ class = "a"
 residue = "It exercises the shared render/reconcile driver (tools/opf_render.py) end to end: per-target ordering on a degraded input (an earlier target's drift line and write precede a later target's materialization failure, under both --check and write, for a missing and a markerless block page), a schema error on a later target aborting before an earlier target is reconciled, a one-shot iterator target being reconciled rather than silently skipped, and an empty target set failing closed. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative scenarios with exact stdout/exit-code matches, not the driver's whole input space, and it does not re-verify the healthy byte-identical generation the drift gates own."
 
 [[gate]]
+id = "aiqt-corpus-selftest"
+script = "tools/selftest_aiqt_corpus.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the generic corpus-tool core (tools/aiqt_corpus.py) end to end: the discovery/targeting helpers (suffix and exempt-dir/exempt-file filtering, dedup-and-order iteration, the scan-root allow-list walker), the text/markdown primitives (table-row splitting, separator detection, multi-backtick code-span stripping, fence detection and non-code-line iteration over fenced/tilde/unterminated blocks), the ISO-date parser and month arithmetic (month-end clamp, leap February, year roll), the field-agnostic metadata parser (head-window bound, first-occurrence-wins, trailing-backslash strip, tolerated annotations), head_version field-name precedence, the whitespace-preserving git helper and git_show present/absent, and the genericity invariants the module exists to hold (the exempt-dir default carries only universal VCS/build directories, the scan-root walker refuses a module-level repo root, and __all__ is pinned to the exact public surface). It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. Every fixture is synthetic and assembled in a tempdir and the git helpers run against a throwaway repository; it asserts representative scenarios with exact expected values, not the module's whole input space."
+
+[[gate]]
 id = "gensrc-failclose"
 script = "tools/check_gensrc_failclose.py"
 rules = ["gensrc"]
