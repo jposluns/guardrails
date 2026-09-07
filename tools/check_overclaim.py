@@ -883,16 +883,22 @@ def scan(text, site=True):
 # string or a static marketing string in that closure would render or ship marketing no page scan catches,
 # so the closure is scanned here for the marketing patterns AND for CSS content: string injection. Round 13
 # extracts the page with a REAL HTML PARSER (_AssetClosureParser), so unquoted and HTML-entity-encoded tag
-# attributes are read by construction (closing the round-12 quoted-only-regex bypasses), and closes the
-# static CSS/HTML injection surface by construction: a CSS normalizer (_normalize_css) strips comments and
-# decodes identifier escapes before content:/@import detection; adjacent content: strings are concatenated
-# and CSS-escape-decoded; a content: attr(NAME) is resolved across page elements; the FULL same-origin CSS
-# @import graph is followed (visited-set bounded so a cycle terminates); and a data: stylesheet OR a data:
-# script body (base64 or percent-encoded, size-bounded, fail-closed) is decoded and scanned. Only three
-# vectors stay OUT of a static gate's reach and are DISCLOSED on _scan_asset_closure, not pretended closed:
-# runtime-JS DOM construction of text, an encoded payload buried in an arbitrary JS string whose location
-# and encoding are not statically declared (distinct from a decoded data: URL), and a genuinely off-site
-# (cross-origin) asset a static gate does not fetch.
+# attributes are read by construction (closing the round-12 quoted-only-regex bypasses). This chrome scan is
+# a BEST-EFFORT overlapping layer, NOT a by-construction closure of CSS/HTML injection: a CSS normalizer
+# (_normalize_css) strips comments and decodes identifier escapes before content:/@import detection; adjacent
+# content: strings are concatenated and CSS-escape-decoded; a content: attr(NAME) is resolved across page
+# elements; the same-origin CSS @import graph is followed (visited-set bounded so a cycle terminates); and a
+# data: stylesheet OR a data: script body (base64 or percent-encoded, size-bounded in encoded UTF-8 bytes,
+# fail-closed) is decoded and scanned. The shared chrome is hand-authored and version-controlled, NOT
+# generated from the ledger, so its integrity rests on code review plus the file-content gates (byte-canon,
+# dash, leaks), with this scan as one more layer over them. Known static vectors it does NOT catch are
+# DISCLOSED, not pretended closed: a content: value whose interior ';' or '}' truncates the extractor; a
+# content: value assembled through a var() custom-property indirection; generated content via content:
+# open-quote or content: url(data:image/svg); an escaped ')' inside an @import url(...) target; a stylesheet
+# gated only by a .css filename rather than the HTML stylesheet sink; and nested HTML in an <iframe srcdoc>.
+# Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
+# encoding are not statically declared, and a genuinely off-site (cross-origin) asset a static gate does not
+# fetch are out of static reach as well.
 # A CSS content: DECLARATION (the PROPERTY, not the 'content' suffix of justify-content / align-content: the
 # (?<![\w-]) lookbehind refuses a preceding word char or hyphen), and its value up to the ; or } that ends it.
 _CSS_CONTENT_RE = re.compile(r"(?<![\w-])content\s*:\s*([^;}]*)", re.IGNORECASE)
@@ -936,6 +942,59 @@ def _page_bound_sources(root):
     each pending rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
     malformed or unreadable input, which the caller maps to a fail-closed exit 2."""
     return gen_enforcement_register.page_content_strings(root)
+
+
+# The Markdown render location each page-bound channel is EXPECTED to occupy, keyed by the field's OWN row
+# (its corpus id) or its OWN mechanism block (its reference). Checking that a value merely appears SOMEWHERE
+# in the aggregate Markdown is UNSOUND: a dropped one-character class value "a" passes on an unrelated "a"
+# elsewhere. Each field is bound to its own location instead (FIX 5, GER-1 round 15). The label map is
+# single-sourced from the generator's _MECH_FIELDS, so a new metadata field flows here automatically.
+_MECH_LABELS = {key: label for label, key in gen_enforcement_register._MECH_FIELDS}
+
+
+def _md_mech_scope(md_text, ref):
+    """The Markdown mechanism block for `ref`: from its '### `ref`' heading to the next mechanism heading (or
+    end of file), or None if the heading is absent. Scopes a mechanism field check to that mechanism's OWN
+    block, so a value present only in a DIFFERENT block cannot satisfy it (FIX 5)."""
+    heading = "### `{}`".format(ref)
+    lines = md_text.split("\n")
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        return None
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith("### `"):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def _md_field_rendered(md_text, channel, key, raw):
+    """(rendered, location_label) for one page-bound (channel, key, raw): whether the field renders at ITS OWN
+    expected Markdown location, not merely somewhere in the aggregate. Row channels (title, corpus-id,
+    description) bind to the Rules-table row keyed by the corpus id; mechanism channels (mech-id, the metadata
+    fields, residue) bind to the mechanism block keyed by the reference. Escaping mirrors the generator
+    (_md_cell for the table cells, the mechanism's own fence for the residue), so the check reads the exact
+    bytes the generator emits at that spot (FIX 5, round 15)."""
+    cell = gen_enforcement_register._md_cell
+    if channel == "corpus-id":
+        return ("| `{}` |".format(key) in md_text, "the Corpus ID cell of row {}".format(key))
+    if channel == "title":
+        return ("| {} | `{}` |".format(cell(raw), key) in md_text, "the Rule cell of row {}".format(key))
+    if channel == "description":
+        return ("`{}` | Pending | {} |".format(key, cell(raw)) in md_text,
+                "the How cell of pending row {}".format(key))
+    scope = _md_mech_scope(md_text, key)
+    if scope is None:
+        return (False, "the mechanism block for {}".format(key))
+    if channel == "mech-id":
+        return (True, "the mechanism heading for {}".format(key))
+    if channel == "residue":
+        return (gen_enforcement_register._md_mechanism_fence(md_text, key) == raw,
+                "the residue fence for {}".format(key))
+    label = _MECH_LABELS.get(channel)
+    if label is None:
+        return (False, "an unmapped channel {!r}".format(channel))
+    return ("- {}: `{}`".format(label, raw) in scope, "the {} field of {}".format(label, key))
 
 
 def _first_invisible(text):
@@ -1068,7 +1127,7 @@ def _normalize_css(css):
     always outside-a-string when it reaches, escape decoding can only ADD a spurious scan (the safe,
     over-approximating direction: an escaped-quote ident becomes a scannable pseudo-string), never DROP a
     real rendered string. Bounded fail-closed at _CSS_MAX_BYTES (SECA)."""
-    if len(css) > _CSS_MAX_BYTES:
+    if len(css.encode("utf-8")) > _CSS_MAX_BYTES:
         raise _FailClosed("CSS sheet exceeds the {}-byte normalize bound".format(_CSS_MAX_BYTES))
     out = []
     i, n, quote = 0, len(css), None
@@ -1162,15 +1221,27 @@ def _closure_local_asset(url, base_dir=""):
     if norm in (".", ""):
         return None
     if norm == ".." or norm.startswith("../"):
-        raise _FailClosed("register asset reference {!r} escapes site/ after normalization".format(url))
+        raise _FailClosed("register asset reference {} escapes site/ after normalization".format(
+            _bounded_label(url)))
     return norm
 
 
 _DATA_URL_MAX_BYTES = 1 << 20  # 1 MiB ceiling on a data: URL payload AND its decoded body (SECA, FIX 4)
+_ASSET_MAX_BYTES = 4 << 20     # pre-read ceiling on a same-origin asset/page BEFORE it is loaded whole (SECA, r15)
 _CSS_DATA_MEDIA = ("", "text/css")
 _JS_DATA_MEDIA = ("", "text/javascript", "application/javascript", "application/ecmascript",
                   "text/ecmascript", "text/jscript", "text/plain")
 _STRAY_PCT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")  # a '%' not starting a valid %HH escape
+
+
+def _bounded_label(text, limit=80):
+    """A short, SAFE label for an offending url/payload in a fail-closed message: a repr-escaped prefix plus
+    the total UTF-8 byte length, so a multi-megabyte payload never produces a multi-megabyte exception that
+    main() would print (SECA bounded failure). Identifies the source without echoing it whole (FIX r15 1c)."""
+    nbytes = len(text.encode("utf-8"))
+    head = text[:limit]
+    suffix = "..." if len(text) > limit else ""
+    return "{!r}{} ({} bytes)".format(head, suffix, nbytes)
 
 
 def _decode_data_url(url, media_types, sink):
@@ -1185,10 +1256,14 @@ def _decode_data_url(url, media_types, sink):
     rest = url[5:] if url[:5].lower() == "data:" else url
     header, sep, payload = rest.partition(",")
     if not sep:
-        raise _FailClosed("register data: {} {!r} has no comma-separated payload".format(sink, url))
-    if len(payload) > _DATA_URL_MAX_BYTES:
-        raise _FailClosed("register data: {} {!r} payload exceeds the {}-byte bound".format(
-            sink, url, _DATA_URL_MAX_BYTES))
+        raise _FailClosed("register data: {} {} has no comma-separated payload".format(
+            sink, _bounded_label(url)))
+    if len(header.encode("utf-8")) > _DATA_URL_MAX_BYTES:
+        raise _FailClosed("register data: {} header exceeds the {}-byte bound".format(
+            sink, _DATA_URL_MAX_BYTES))
+    if len(payload.encode("utf-8")) > _DATA_URL_MAX_BYTES:
+        raise _FailClosed("register data: {} {} payload exceeds the {}-byte bound".format(
+            sink, _bounded_label(url), _DATA_URL_MAX_BYTES))
     params = header.split(";")
     media = params[0].strip().lower()
     is_base64 = len(params) > 1 and params[-1].strip().lower() == "base64"
@@ -1202,10 +1277,11 @@ def _decode_data_url(url, media_types, sink):
                 raise ValueError("malformed percent escape")
             decoded = unquote(payload, errors="strict")
     except (binascii.Error, ValueError, UnicodeError) as exc:
-        raise _FailClosed("register data: {} {!r} is undecodable ({})".format(sink, url, exc))
-    if len(decoded) > _DATA_URL_MAX_BYTES:
-        raise _FailClosed("register data: {} {!r} decodes past the {}-byte bound".format(
-            sink, url, _DATA_URL_MAX_BYTES))
+        raise _FailClosed("register data: {} {} is undecodable ({})".format(
+            sink, _bounded_label(url), exc))
+    if len(decoded.encode("utf-8")) > _DATA_URL_MAX_BYTES:
+        raise _FailClosed("register data: {} {} decodes past the {}-byte bound".format(
+            sink, _bounded_label(url), _DATA_URL_MAX_BYTES))
     return decoded
 
 
@@ -1221,6 +1297,25 @@ def _decode_data_script(url):
     scanned to the same raw-string standard as an inline or linked script; the RUNTIME DOM effect stays the
     disclosed residual. Bounded and fail-closed (see _decode_data_url)."""
     return _decode_data_url(url, _JS_DATA_MEDIA, "script")
+
+
+def _read_bounded(path, label):
+    """Read a required same-origin text file, FAIL-CLOSED (_FailClosed) past _ASSET_MAX_BYTES BEFORE the whole
+    file is loaded into memory: stat the size first, so an oversized same-origin asset cannot be read whole
+    before the bound is enforced (FIX r15 2b, SECA). `label` names the offending surface WITHOUT echoing its
+    contents. An absent, unreadable, or non-UTF-8 file is fail-closed, never a silent skip
+    (check-fails-closed-on-unreadable)."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise _FailClosed("register {} is absent or unreadable ({})".format(label, exc))
+    if size > _ASSET_MAX_BYTES:
+        raise _FailClosed("register {} is {} bytes, over the {}-byte pre-read ceiling".format(
+            label, size, _ASSET_MAX_BYTES))
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise _FailClosed("register {} is absent or unreadable ({})".format(label, exc))
 
 
 def _scan_css_imports(root, importer_rel, css, findings, attr_index=None, visited=None):
@@ -1262,11 +1357,7 @@ def _scan_css_imports(root, importer_rel, css, findings, attr_index=None, visite
                 continue
             visited.add(irel)
             ipath = root / "site" / irel
-            try:
-                itext = ipath.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
-                raise _FailClosed(
-                    "register @import asset site/{} is absent or unreadable ({})".format(irel, exc))
+            itext = _read_bounded(ipath, "@import asset site/{}".format(irel))
             iwhere = "site/{} (via @import from {})".format(irel, cur_rel or "data:")
             for name, snip in scan(itext, site=True):
                 findings.append("{}: overclaim [{}] -> {}".format(iwhere, name, snip))
@@ -1277,35 +1368,37 @@ def _scan_css_imports(root, importer_rel, css, findings, attr_index=None, visite
 
 def _scan_asset_closure(root):
     """Scan the enforcement register page's STATIC asset closure for marketing overclaims, BEST-EFFORT
-    defence-in-depth (round 13 maximal static closure). The page is parsed with a REAL HTML PARSER
-    (_AssetClosureParser), so unquoted and HTML-entity-encoded tag attributes are read by construction
-    (closing the round-12 quoted-only-regex bypasses). Scanned: the page's own inline <style>/<script>
-    bodies and every inline style="..." attribute (which the visible-text collector drops), plus the
-    same-origin CSS/JS the page links.
+    defence-in-depth. The page is parsed with a REAL HTML PARSER (_AssetClosureParser), so unquoted and
+    HTML-entity-encoded tag attributes are read by construction (closing the round-12 quoted-only-regex
+    bypasses). Scanned: the page's own inline <style>/<script> bodies and every inline style="..." attribute
+    (which the visible-text collector drops), plus the same-origin CSS/JS the page links.
 
-    The STATIC CSS/HTML injection surface is closed BY CONSTRUCTION. A CSS NORMALIZER (_normalize_css)
-    strips comments and decodes identifier escapes before content:/@import detection, so a comment mid-token
-    or an escaped `content`/`@import` keyword cannot hide a declaration; a content: value's adjacent string
-    literals are CSS-escape-decoded and CONCATENATED before the scan (multi-string); a content: attr(NAME)
-    is resolved by scanning the NAME attribute across page elements; the FULL same-origin @import graph is
-    followed (visited-set bounded so a cycle terminates); and a data: stylesheet OR a data: script body
-    (base64 or percent-encoded, size-bounded) is decoded and scanned. A referenced same-origin asset that
-    cannot be read, an asset URL that escapes site/, or a data: body that cannot be soundly decoded, is a
-    fail-closed error (_FailClosed -> exit 2), never a silent skip (check-fails-closed-on-unreadable).
+    This chrome scan is a BEST-EFFORT overlapping layer, NOT a by-construction closure of CSS/HTML injection.
+    A CSS NORMALIZER (_normalize_css) strips comments and decodes identifier escapes before content:/@import
+    detection, so a comment mid-token or an escaped `content`/`@import` keyword cannot hide THOSE forms; a
+    content: value's adjacent string literals are CSS-escape-decoded and CONCATENATED before the scan
+    (multi-string); a content: attr(NAME) is resolved by scanning the NAME attribute across page elements;
+    the same-origin @import graph is followed (visited-set bounded so a cycle terminates); and a data:
+    stylesheet OR a data: script body (base64 or percent-encoded, size-bounded in ENCODED UTF-8 bytes) is
+    decoded and scanned. A referenced same-origin asset that cannot be read, an asset URL that escapes site/,
+    an asset over the pre-read ceiling, or a data: body that cannot be soundly decoded, is a fail-closed
+    error (_FailClosed -> exit 2), never a silent skip (check-fails-closed-on-unreadable).
 
-    DISCLOSED IRREDUCIBLE RESIDUAL (honest, not pretended closed): this is a STATIC scan over the
-    hand-authored, version-controlled SHARED chrome, whose integrity rests on code review plus the
-    file-content gates, with this scan as an overlapping best-effort layer. Only three vectors remain out of
-    a static gate's reach and are DISCLOSED: runtime-JS DOM construction of marketing text (theme.js building
-    strings at run time); an ENCODED payload buried in an ARBITRARY JS string, where which bytes to decode
-    are not statically declared (the unbounded runtime boundary, distinct from a data: URL, which IS decoded);
-    and a genuinely off-site (cross-origin) asset a static gate does not fetch."""
+    DISCLOSED RESIDUAL (honest, not pretended closed): the shared chrome is hand-authored and
+    version-controlled, NOT generated from the ledger, so its integrity rests on code review plus the
+    file-content gates (byte-canon, dash, leaks), with this scan as one overlapping layer over them. Known
+    STATIC vectors this scan does NOT catch are DISCLOSED here, not claimed closed: (1) a content: string
+    with an interior ';' or '}' that truncates the extractor; (2) a content: value assembled through a var()
+    custom-property indirection; (3) generated content via content: open-quote or content: url(data:image/svg);
+    (4) an escaped ')' inside an @import url(evil\\).css) target; (5) a stylesheet gated only by a .css
+    filename rather than the HTML stylesheet sink; and (6) nested HTML in an <iframe srcdoc>. Also out of
+    static reach: runtime-JS DOM construction of marketing text (theme.js building strings at run time); an
+    ENCODED payload buried in an ARBITRARY JS string whose location and encoding are not statically declared
+    (distinct from a data: URL, which IS decoded); and a genuinely off-site (cross-origin) asset a static
+    gate does not fetch."""
     findings = []
     page_path = root / HTML_REL
-    try:
-        page = page_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise _FailClosed("register page {} is unreadable ({})".format(HTML_REL, exc))
+    page = _read_bounded(page_path, "page {}".format(HTML_REL))
     parser = _AssetClosureParser()
     try:
         parser.feed(page)
@@ -1360,10 +1453,7 @@ def _scan_asset_closure(root):
     # (d) each resolved same-origin asset: whole-text scan (raw) + content: injection + @import graph.
     for rel in sorted(assets):
         asset_path = root / "site" / rel
-        try:
-            text = asset_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise _FailClosed("register asset site/{} is absent or unreadable ({})".format(rel, exc))
+        text = _read_bounded(asset_path, "asset site/{}".format(rel))
         where = "site/{}".format(rel)
         for name, snip in scan(text, site=True):
             findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
@@ -1405,6 +1495,10 @@ def _collect(root, registry, binary_set):
     for f in sorted(walk_files(site, suffixes={".html"})):
         rel = f.relative_to(root)
         scanned.add(f.resolve())
+        size = f.stat().st_size
+        if size > _ASSET_MAX_BYTES:
+            raise _FailClosed("site page {} is {} bytes, over the {}-byte pre-read ceiling".format(
+                rel, size, _ASSET_MAX_BYTES))
         try:
             raw = f.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -1933,15 +2027,26 @@ def _page_bound_source_self_test():
             if needed not in channels:
                 failures.append("COMPLETENESS: page_content_strings must emit the {!r} channel (FIX 1)"
                                 .format(needed))
-        # (n3) every enumerated raw string is emitted verbatim by the generator (bind the set to the page).
-        # The Markdown view carries every channel's raw bytes un-escaped, so a phantom channel would fail.
+        # (n3) FIX 5 FORWARD, PER-FIELD LOCATION. Every enumerated string must render at ITS OWN expected
+        # location (the Rules row for its corpus id, or the mechanism block for its reference), not merely
+        # somewhere in the aggregate. The old aggregate `raw in md_text` was UNSOUND: a dropped one-character
+        # value passed on an unrelated occurrence elsewhere on the page.
         md_text, _html_page = gen_enforcement_register.build_views(tree)
         for channel, key, raw in _page_bound_sources(tree):
-            if raw not in md_text:
-                failures.append("COMPLETENESS: {} source [{}] {!r} is not emitted verbatim on the page"
-                                .format(channel, key, raw))
+            rendered, loc = _md_field_rendered(md_text, channel, key, raw)
+            if not rendered:
+                failures.append("COMPLETENESS(forward): {} source [{}] {!r} is not rendered at {} (FIX 5)"
+                                .format(channel, key, raw, loc))
+        # (n3b) the forward leg is LOCATION-BOUND, not aggregate membership. MUTATION: reverting to
+        # `raw in md_text` makes this decoy pass, because the decoy value sits in a SEPARATE block, not in
+        # gate:gate-alpha's own block.
+        decoy_md = md_text + "\n### `zz:decoy`\n\n- Class: `zzdecoyvalue`\n"
+        decoy_rendered, _decoy_loc = _md_field_rendered(decoy_md, "class", "gate:gate-alpha", "zzdecoyvalue")
+        if decoy_rendered:
+            failures.append("COMPLETENESS(forward): a value present only OUTSIDE its own block must not "
+                            "satisfy the location check (FIX 5)")
 
-        # (n5) FIX 5 BIDIRECTIONAL completeness. n3 above is the FORWARD leg (every enumerated string is
+        # (n5a) FIX 5 BIDIRECTIONAL completeness. n3 above is the FORWARD leg (every enumerated string is
         # emitted). This is the REVERSE leg: a corpus/ledger source field added to the RENDER without adding
         # it to page_content_strings must FAIL (the round-12 regression where render began emitting
         # fm['slug'], which the enumerator did not know about, and the forward-only test still passed). The
@@ -1972,6 +2077,37 @@ def _page_bound_source_self_test():
         if not _unenumerated(page_v + "\n            <td><code>" + SLUG_MARK + "</code></td>"):
             failures.append("COMPLETENESS(reverse): a leaked un-enumerated slug marker must be detected "
                             "(FIX 5)")
+
+        # (n5b) FIX 5 REVERSE, FIELD-TAGGED over the mechanism block. n5a above is the row-scope canary (a
+        # non-content frontmatter field must not leak into a rule row). This is the mechanism-scope converse:
+        # each enforced mechanism block renders EXACTLY the enumerated metadata field labels (_MECH_FIELDS) as
+        # `- Label:` lines and no more, so a NEW render channel (a source field emitted into the block without
+        # being added to page_content_strings) adds a `- Label:` line whose label is not enumerated and is
+        # caught here, for ANY mechanism field, not only the slug. The label scan is bounded to the region
+        # BEFORE the residual heading, so a residue whose text happens to contain a `- x:` line is not
+        # miscounted. MUTATION: render_md emitting an extra `- <field>:` line makes observed != expected.
+        expected_labels = {label for label, _key in gen_enforcement_register._MECH_FIELDS}
+        residual_marker = "\n{}:".format(gen_enforcement_register.RESIDUAL_HEADING)
+        field_line = re.compile(r"^- ([^:]+): ")
+        enforced_refs = sorted({k for ch, k, _r in _page_bound_sources(tree) if ch == "mech-id"})
+        for ref in enforced_refs:
+            scope = _md_mech_scope(md_text, ref)
+            if scope is None:
+                failures.append("COMPLETENESS(reverse): mechanism block {} is absent (FIX 5)".format(ref))
+                continue
+            head_region = scope.split(residual_marker)[0]
+            observed = {m.group(1) for m in (field_line.match(ln) for ln in head_region.split("\n")) if m}
+            if observed != expected_labels:
+                failures.append("COMPLETENESS(reverse): mechanism {} renders field labels {} but "
+                                "page_content_strings enumerates {} (FIX 5)".format(
+                                    ref, sorted(observed), sorted(expected_labels)))
+        # (n5c) the label detector is load-bearing: an extra un-enumerated field line MUST be detected. This
+        # witnesses the mutation in n5b (a render that gains a `- Slug:` line) without patching render_md.
+        leaked = "- Platform: `a`\n- Default: `a`\n- Entry point: `a`\n- Class: `a`\n- Slug: `zzleak`"
+        leaked_labels = {m.group(1) for m in (field_line.match(ln) for ln in leaked.split("\n")) if m}
+        if leaked_labels == expected_labels:
+            failures.append("COMPLETENESS(reverse): an extra un-enumerated mechanism field line must be "
+                            "detected (FIX 5)")
 
         def inject_and_scan(name, rel_path, needle, replacement):
             sub = gen_enforcement_register._build(tmp / name)
@@ -2266,6 +2402,53 @@ def _asset_closure_self_test():
         try:
             _scan_asset_closure(build("data-oversize", page, {}))
             failures.append("ASSET: an oversized data: sheet payload must fail closed (FIX 4, SECA)")
+        except _FailClosed:
+            pass
+        # (q1) FIX r15 2a: _normalize_css bounds ENCODED UTF-8 BYTES, not character count. ~262k 4-byte emoji
+        # = ~1.05 MiB bytes but < 1 MiB CHARS, so the old len(css) char check would pass. MUTATION: reverting
+        # to len(css) makes this return normally instead of failing closed.
+        big_css = chr(0x1F600) * ((1 << 18) + 1)
+        try:
+            _normalize_css(big_css)
+            failures.append("BOUND: _normalize_css must bound UTF-8 BYTES, not character count (r15 2a)")
+        except _FailClosed:
+            pass
+        # (q2) FIX r15 2a: the data: PAYLOAD bound counts UTF-8 bytes. A raw-emoji payload is < 1 MiB chars
+        # but > 1 MiB bytes. MUTATION: len(payload) char count lets it through to the decode path.
+        try:
+            _decode_data_css("data:text/css," + chr(0x1F600) * ((1 << 18) + 1))
+            failures.append("BOUND: the data: payload bound must count UTF-8 bytes (r15 2a)")
+        except _FailClosed:
+            pass
+        # (q3) FIX r15 2a: the data: HEADER (pre-comma metadata) is now bounded. MUTATION: no header bound
+        # lets an unbounded header through (media not in scope -> silent None), never failing closed.
+        try:
+            _decode_data_css("data:" + "x" * ((1 << 20) + 5) + ",body")
+            failures.append("BOUND: the data: header must be bounded (r15 2a)")
+        except _FailClosed:
+            pass
+        # (q4) FIX r15 1c: an oversized/undecodable data: failure message is BOUNDED, never echoing the whole
+        # payload. MUTATION: reverting _bounded_label(url) to {!r}.format(url) makes the message megabyte-scale.
+        big_payload = chr(0x1F600) * ((1 << 18) + 1)
+        try:
+            _decode_data_css("data:text/css," + big_payload)
+            failures.append("BOUND: an oversized data: payload must fail closed (r15 1c)")
+        except _FailClosed as exc:
+            if len(str(exc)) > 4096 or big_payload[:200] in str(exc):
+                failures.append("BOUND: a fail-closed data: message must be bounded, not echo the payload (r15 1c)")
+        # (q5) FIX r15 2b: an oversized same-origin asset fails closed BEFORE a full read. A sparse .js file
+        # over the pre-read ceiling is used (a .js has no downstream size bound, so without the pre-read stat
+        # ceiling it would read whole and scan clean). MUTATION: dropping the stat ceiling reads the whole file
+        # and returns no finding (no exception) -> this test fails.
+        r = tmp / "oversize-asset"
+        (r / "site").mkdir(parents=True)
+        (r / HTML_REL).write_text(
+            '<html><head><script src="/big.js"></script></head><body>ok</body></html>', encoding="utf-8")
+        with (r / "site" / "big.js").open("wb") as fh:
+            fh.truncate(_ASSET_MAX_BYTES + 1)
+        try:
+            _scan_asset_closure(r)
+            failures.append("BOUND: an oversized same-origin asset must fail closed before a full read (r15 2b)")
         except _FailClosed:
             pass
     finally:
