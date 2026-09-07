@@ -159,13 +159,16 @@ def _render_scalar(value):
         if tz is not None:
             offset = value.utcoffset()
             # A TOML offset datetime carries only a numeric UTC offset: no zone name, no DST rule. Accept
-            # only a plain fixed-offset datetime.timezone whose name is its auto-generated one; a custom
-            # name or a variable/named zone would silently drop on reparse. timezone equality ignores the
-            # name (comparing offset alone), so the rendered name is compared explicitly.
-            if not isinstance(tz, datetime.timezone) or \
-                    tz.tzname(value) != datetime.timezone(offset).tzname(None):
-                raise EmitError("a datetime whose tzinfo is not a plain fixed UTC offset (a named or "
-                                "variable zone) has no TOML round trip")
+            # ONLY a plain datetime.timezone constructed WITHOUT a name; anything else (a custom name, even
+            # one that matches the auto-generated "UTC+HH:MM" string, a variable/named zone, or a timezone
+            # subclass) drops constructor state that would silently vanish on reparse. Both timezone
+            # equality and datetime equality ignore the tzinfo name, so the name can be caught neither by
+            # comparing offsets nor by the round-trip proof; reconstruct the canonical unnamed instance for
+            # this offset and require the input to render identically to it, which exposes a custom name
+            # (it appears in the repr) that an == comparison would miss.
+            if type(tz) is not datetime.timezone or repr(tz) != repr(datetime.timezone(offset)):
+                raise EmitError("a datetime whose tzinfo is not a plain unnamed fixed UTC offset (a named "
+                                "or variable zone) has no TOML round trip")
             if offset % datetime.timedelta(minutes=1) != datetime.timedelta(0):
                 raise EmitError("a datetime UTC offset that is not a whole number of minutes ({}) is "
                                 "outside TOML offset syntax".format(offset))
@@ -453,6 +456,12 @@ def self_test():
         "named-offset-tz": {"k": datetime.datetime(
             2026, 1, 1, 0, 0, 0,
             tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30), "IST"))},
+        # A NAMED fixed offset whose name equals the canonical "UTC+HH:MM" string is still rejected: the
+        # name is explicit constructor state that reparse loses, and both timezone == and datetime == ignore
+        # it, so only the emit-time name check catches it (the "IST" case above covers a noncanonical name).
+        "canonical-named-offset-tz": {"k": datetime.datetime(
+            2026, 1, 1, 0, 0, 0,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=1), "UTC+01:00"))},
         "sub-minute-offset": {"k": datetime.datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=1)))},
         "non-dict-top-level-list": ["not", "a", "table"],
