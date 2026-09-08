@@ -148,6 +148,11 @@ TOTAL_TIMEOUT = 1800  # seconds backstop for the whole sweep; exceeding it is ca
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
 _now = time.monotonic  # module-level indirection so the self-test can inject a monotonic clock (deadline)
 _mkdtemp = tempfile.mkdtemp  # module-level indirection so the self-test can inject a sandbox-setup failure
+# Spliced into EVERY template git command (init/add/commit/ls-files/gc): no detached auto-gc/maintenance
+# may churn template/.git while a per-call copytree reads it (F-367). An explicit `git gc` is foreground,
+# but auto-gc/auto-maintenance that commit/gc trigger detaches by default (gc.autoDetach) and would race
+# the per-call copytree of the template; these overrides neutralize that ambient state (test-hermeticity).
+_TEMPLATE_GIT_NO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
 
 
 class _ContainmentError(Exception):
@@ -268,7 +273,10 @@ def _materialize_git(template, real_root):
     (for example gen_manifest.py, whose `git ls-files` enumerates the tracked surface) runs its baseline
     --check under the sweep. Identity is pinned per-call with -c (never user config), the template dir is
     forced empty so no user hooks load, and the environment is sanitized (ambient GIT_* stripped,
-    global/system config sent to os.devnull).
+    global/system config sent to os.devnull). Every template git command also carries
+    _TEMPLATE_GIT_NO_MAINTENANCE so no detached auto-gc/auto-maintenance run can churn template/.git after
+    this returns and race a per-call copytree of the template (F-367): a hermeticity hardening only, it
+    changes nothing the gate certifies.
 
     The template's PATH SET is EXACTLY real_root's tracked set, so a git-reading generator sees the same
     tracked surface the release-side --check saw (an on-disk but untracked build output stays untracked in
@@ -287,10 +295,14 @@ def _materialize_git(template, real_root):
     env = _sanitized_env({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
 
     def git(cwd, *args):
+        # _TEMPLATE_GIT_NO_MAINTENANCE keeps EVERY template git command from detaching a background auto-gc
+        # or auto-maintenance run that would repack/prune template/.git after this returns and race the
+        # per-call copytree of the template (F-367). It hardens hermeticity only; it changes nothing the
+        # gate certifies about a generator's --check.
         return subprocess.run(
             ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
              "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
-             "-c", "init.defaultBranch=main", *args],
+             "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *args],
             capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
 
     if git(template, "init", "-q", "--template=").returncode != 0:
@@ -330,8 +342,11 @@ def _materialize_git(template, real_root):
         raise OSError("the materialized template index does not equal real_root's tracked set "
                       "({} member(s) missing, e.g. {}); fail-closed".format(len(missing), missing[:3]))
     # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
-    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). A
-    # gc failure is non-fatal: the repo still works with loose objects, only slower.
+    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
+    # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE (carried by git() above) stops both this gc
+    # and the earlier commit from detaching a background auto-gc/auto-maintenance run that would keep
+    # repacking/pruning template/.git and race the per-call copytree (F-367). A gc failure is non-fatal:
+    # the repo still works with loose objects, only slower.
     git(template, "gc", "--quiet")
 
 
@@ -1407,6 +1422,61 @@ def self_test_main():
         if sweep_quiet(mism) != 2:
             failures.append("tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
                             "template index must equal real_root's tracked set)")
+
+        # (r) F-367: every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
+        #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
+        #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
+        #     template git invocations are CAPTURED during a REAL _materialize_git run over a small fixture
+        #     repo by wrapping the module's subprocess.run, then every template git command (init, add,
+        #     commit, ls-files, gc) is
+        #     asserted to carry all three flags. The discriminating flip is removing
+        #     _TEMPLATE_GIT_NO_MAINTENANCE from the git() helper: the captured argv would then lack the flags
+        #     and this assertion would fail.
+        f367 = _build_repo(tmp / "no-maintenance", {"goodfile": _GOODFILE})
+        f367_template = tmp / "no-maintenance-template"
+        shutil.copytree(f367, f367_template, symlinks=False, ignore=_copy_ignore)
+        captured = []
+        saved_subprocess_run = subprocess.run
+
+        def _recording_run(cmd, *a, **kw):
+            captured.append(list(cmd))  # record argv, then delegate to the real subprocess.run
+            return saved_subprocess_run(cmd, *a, **kw)
+
+        template_str = str(f367_template)
+        try:
+            subprocess.run = _recording_run
+            _materialize_git(f367_template, f367)
+        finally:
+            subprocess.run = saved_subprocess_run
+
+        def _top_c_values(cmd):
+            # The `-c key=value` top-level options git carries before its subcommand, plus that subcommand.
+            vals, i = [], 3  # past `git -C <template>`
+            while i + 1 < len(cmd) and cmd[i] == "-c":
+                vals.append(cmd[i + 1])
+                i += 2
+            return vals, (cmd[i] if i < len(cmd) else None)
+
+        # Validate EVERY captured template git call (not just the first per subcommand), and reconcile the
+        # observed subcommand set against the exact expected multiset, so the "every template git command"
+        # claim is substantiated rather than asserted: a flag withheld on ls-files (the readback), on any
+        # single subcommand, or on a non-first occurrence is caught (codex/gemini round-2 findings).
+        template_calls = []  # (subcommand, its -c values) for EVERY template git call captured
+        for cmd in captured:
+            if len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "-C" and cmd[2] == template_str:
+                cvals, sub = _top_c_values(cmd)
+                template_calls.append((sub, cvals))
+        expected_subs = {"init", "add", "commit", "ls-files", "gc"}
+        seen_subs = {sub for sub, _ in template_calls}
+        missing_subs = expected_subs - seen_subs
+        if missing_subs:
+            failures.append("F-367 no-maintenance flags: expected a template `git` call for each of {}, "
+                            "none captured for {}".format(sorted(expected_subs), sorted(missing_subs)))
+        for sub, cvals in template_calls:
+            for flag in ("gc.auto=0", "gc.autoDetach=false", "maintenance.auto=false"):
+                if flag not in cvals:
+                    failures.append("F-367 no-maintenance flags: template `git {}` call is missing -c {} "
+                                    "(git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)".format(sub, flag))
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1441,7 +1511,10 @@ def self_test_main():
           "git-reading generator passes (exit 0) because the D6 template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
           "executed by the probe (no outside write) thanks to -c core.fsmonitor=false; and a forced probe "
-          "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback")
+          "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
+          "every template git command carries the F-367 no-maintenance flags (gc.auto=0, gc.autoDetach="
+          "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
+          "copytree of the template")
     return 0
 
 
