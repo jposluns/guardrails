@@ -1817,6 +1817,42 @@ canonical-text = "Every substantive change is verified before it integrates by a
 source-digest = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 
 [[clause]]
+clause-id = "kltwat.1"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 13
+end-line = 14
+canonical-text = "A wrapper that bounds a command's runtime is set longer than any wait, retry, or queue the command\nitself is configured to perform, plus the work the command must then do once that wait resolves."
+source-digest = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+
+[[clause]]
+clause-id = "kltwat.2"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 17
+end-line = 18
+canonical-text = "Before wrapping a command in a timeout, establish what wait the command\ngrants itself and size the bound above it"
+source-digest = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+
+[[clause]]
+clause-id = "kltwat.3"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 18
+end-line = 20
+canonical-text = "before concluding that a contended resource is starving\na caller, establish that the caller actually outlived its own configured wait rather than being killed\nunder it."
+source-digest = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+
+[[clause]]
+clause-id = "kltwat.4"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 22
+end-line = 23
+canonical-text = "the override is\nconfirmed to land where the callee reads it rather than assumed to have carried across."
+source-digest = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+
+[[clause]]
 clause-id = "lvw001.1"
 corpus-id = "lvw001"
 source-path = ".aiqt/core/rules/quali-lightweight-verifier-workers.md"

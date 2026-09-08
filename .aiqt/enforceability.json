@@ -723,6 +723,14 @@
       "status": "hook-linked"
     },
     {
+      "corpus-id": "kltwat",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "liccmp",
       "family": "aiqt",
       "gates": [],

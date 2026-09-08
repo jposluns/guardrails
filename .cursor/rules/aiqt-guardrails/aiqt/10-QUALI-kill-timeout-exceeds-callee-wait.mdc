@@ -1,0 +1,21 @@
+---
+alwaysApply: true
+---
+
+# A kill timeout outlives the wait it bounds
+
+A wrapper that bounds a command's runtime is set longer than any wait, retry, or queue the command
+itself is configured to perform, plus the work the command must then do once that wait resolves. A
+kill timeout shorter than the callee's own configured wait guarantees the callee is destroyed while it
+is still behaving correctly, and the destruction is then misreported as a failure of the callee or of
+whatever it was waiting on. Before wrapping a command in a timeout, establish what wait the command
+grants itself and size the bound above it; and before concluding that a contended resource is starving
+a caller, establish that the caller actually outlived its own configured wait rather than being killed
+under it. An environment override meant to grant a longer wait can be silently stripped when it crosses
+a privilege boundary, for instance when it is placed on the wrong side of a privilege-elevation
+command, so the intended wait never reaches the callee and its default applies unseen; the override is
+confirmed to land where the callee reads it rather than assumed to have carried across. This is the
+companion of the bounded-consumption rule: that rule sets a ceiling so a runaway cannot exhaust
+resources, while this one keeps the ceiling from being set below the callee's own configured floor, the
+wait it was granted, so a command that is waiting correctly is not destroyed and then misread as the
+failure it was tolerating.

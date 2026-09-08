@@ -54,6 +54,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [A verification finding is fixed, not argued away](rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md)
 - [Goal fidelity across a long trajectory](rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md)
 - [High-assurance verification](rules/aiqt/10-QUALI-high-assurance-verification.md)
+- [A kill timeout outlives the wait it bounds](rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md)
 - [Isolate verifiers and judge by their result signal](rules/aiqt/10-QUALI-lightweight-verifier-workers.md)
 - [Match the surrounding code](rules/aiqt/10-QUALI-match-surrounding-code.md)
 - [Minimize external dependencies in favour of standard libraries](rules/aiqt/10-QUALI-minimize-dependencies.md)
