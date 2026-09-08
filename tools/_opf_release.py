@@ -1164,8 +1164,10 @@ def self_test():
     # entry still in the active worklog) the cut assumes prior frozen spans intact and proceeds; when the
     # store is ROTATED (a prior released id absent from the active worklog) the cut returns CANNOT-EVALUATE
     # and directs the caller to the store validator, rather than silently skipping the check (fail-closed
-    # seam). NOTE: detecting an EDITED (not moved) prior-frozen entry in a non-rotated store now belongs to
-    # the store validator (PASS B), not the cut.
+    # seam). NOTE: detecting an EDITED (not moved) prior-frozen entry in a NON-ROTATED store is enforced by
+    # the cut ITSELF (FIX 1 below): it recomputes frozen coverage over the spans it can see and returns
+    # INVALID. Only the ROTATED/DELETED case (a prior released id absent from the active worklog, where an
+    # edit cannot be told from a move) is deferred to the store validator (PASS B).
     check("cut-non-rotated-intact-ok",
           release_cut(vok, worklog, "1.1.0", "2026-06-15T00:00:00Z").status == VALID)
     # FIX 1: a NON-ROTATED store whose already-frozen WL-1 was EDITED after freeze must NOT cut VALID. The
@@ -1274,7 +1276,7 @@ def self_test():
     # --- M4: a manifest-registered worklog kind validates through validate_worklog --------------------
     wl_custom = {"entry": [entry(1, kind="perf")]}
     check("release-worklog-manifest-kind-ok",
-          validate_worklog(wl_custom, registered_kinds={"perf"}).status == VALID)
+          validate_worklog(wl_custom, registered_kinds=["perf"]).status == VALID)
     check("release-worklog-manifest-kind-unregistered-invalid",
           validate_worklog(wl_custom).status == INVALID)
 
@@ -1284,7 +1286,7 @@ def self_test():
     worklog_perf = {"schema": 1, "entry": [entry(1), entry(2), entry(3, kind="perf"), entry(4)]}
     check("m6-cut-registered-kind-ok",
           release_cut(vok, worklog_perf, "1.1.0", "2026-06-15T00:00:00Z",
-                      registered_kinds={"perf"}).status == VALID)
+                      registered_kinds=["perf"]).status == VALID)
     check("m6-cut-unregistered-kind-invalid",
           release_cut(vok, worklog_perf, "1.1.0", "2026-06-15T00:00:00Z").status == INVALID)
     worklog_vendor = {"schema": 1, "entry": [entry(1), entry(2), entry(3),

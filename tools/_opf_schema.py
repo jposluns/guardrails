@@ -543,7 +543,17 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
         findings.append("date must be an RFC 3339 UTC timestamp")
     allowed_kinds = set(WORKLOG_KINDS)
     if registered_kinds:
-        allowed_kinds |= set(registered_kinds)
+        # `registered_kinds` is a manifest-supplied control (spec 6.2). It MUST be a list/tuple of
+        # strings. A bare string would splat into its characters under set() (so kind="p" from "perf"
+        # would wrongly validate: a fail-open), and a non-string element (e.g. a list-of-list [["perf"]])
+        # is unhashable and would raise on set(): validate by type first and fail CLOSED to the built-in
+        # WORKLOG_KINDS only, appending a clean finding, never iterating a string into characters and
+        # never crashing (guard-input-soundness; spec 6.2).
+        if isinstance(registered_kinds, (list, tuple)) and all(
+                isinstance(k, str) for k in registered_kinds):
+            allowed_kinds |= set(registered_kinds)
+        else:
+            findings.append("registered worklog kinds must be a list of strings")
     if "kind" not in record:
         findings.append("missing required field: kind")
     elif not isinstance(record.get("kind"), str):
@@ -707,12 +717,21 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
     """
     if specs is None:
         specs = BASELINE_SPECS
+    if not isinstance(type_name, str):
+        # A non-string type_name (e.g. a TOML-valid list/dict) is unhashable and would raise on the
+        # specs.get() dict lookup below: guard by type first and fail closed with a clean finding, never
+        # a TypeError (guard-input-soundness; spec 8.1).
+        return TransitionCheck(CANNOT_EVALUATE, ["record type must be a string"])
     spec = specs.get(type_name)
     if spec is None:
         return TransitionCheck(CANNOT_EVALUATE, ["{!r} is not a supported record type".format(type_name)])
 
     findings = []
-    if actor_kind not in ACTOR_KINDS:
+    # A non-string actor_kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the
+    # PROPOSER_KINDS frozenset membership below (line ~782): guard by type first here so that membership
+    # is never reached with a non-str, and fail closed with a clean finding (guard-input-soundness; the
+    # ACTOR_KINDS tuple compares element-wise and so does not raise, but PROPOSER_KINDS is a frozenset).
+    if not isinstance(actor_kind, str) or actor_kind not in ACTOR_KINDS:
         findings.append("actor kind {!r} is not one of {}".format(actor_kind, list(ACTOR_KINDS)))
 
     fparsed, ferr = parse_status(from_status, spec)
@@ -779,7 +798,7 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
             findings.append("illegal transition {!r} to {!r} for a {} (spec 8.5)".format(
                 from_state, to_state, spec.name))
         elif to_state in spec.terminal:
-            if actor_kind in PROPOSER_KINDS:
+            if isinstance(actor_kind, str) and actor_kind in PROPOSER_KINDS:
                 if to_qual != "proposed":
                     findings.append("a terminal transition by an {} actor must land '/proposed', not "
                                     "{!r} (spec 8.4)".format(actor_kind, to_status))
@@ -963,6 +982,13 @@ def check_unique_ids(ids):
     findings = []
     seen = set()
     for rid in ids:
+        # A non-string / malformed id (e.g. a TOML-valid list) is unhashable and would raise on the set
+        # membership below: guard by shape first and fail closed with a clean finding, never a TypeError
+        # (guard-input-soundness; spec 8.2). Uniqueness cannot be judged for a malformed id, so it is
+        # surfaced and not added to `seen`.
+        if _valid_id_shape(rid) is None:
+            findings.append("malformed id {!r}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(rid))
+            continue
         if rid in seen:
             findings.append("duplicate id {!r}: IDs are never reused (spec 8.2)".format(rid))
         else:
@@ -1024,11 +1050,15 @@ def self_test():
                                                 expected_type="worklog").status == INVALID)
     check("worklog-status-key-rejected",   # status is not in the reduced envelope (closed keyset)
           validate_record(dict(wl, status="recorded"), expected_type="worklog").status == INVALID)
-    # FIX 3: a TOML-valid but non-string (unhashable list/dict) value at a set-membership site yields a
-    # clean INVALID finding, never a TypeError crash. Class-scanned membership sites: worklog kind,
-    # actor.kind, link.rel, ref.kind, and the block actor-kind (akind) proposal-qualifier check. If the
-    # guard were absent any of these would raise, aborting self_test with a fail-closed exit rather than
-    # returning INVALID.
+    # FIX 3 / R3: a TOML-valid but non-string (unhashable list/dict), or a string-that-should-be-a-list, at
+    # a set/frozenset/dict-membership or set()-construction site yields a clean INVALID / CANNOT-EVALUATE
+    # finding, never a TypeError crash and never a fail-open. Every record-field or manifest-control site
+    # in this module that feeds such a test is guarded and exercised: the validate_record-reachable sites
+    # covered by FIX 3 here (worklog kind, actor.kind, link.rel, ref.kind, and the block actor-kind (akind)
+    # proposal-qualifier check), and the R3 additions covered by their own vectors below (validate_transition
+    # type_name and actor_kind; check_unique_ids rid; and the _validate_worklog registered_kinds control).
+    # If the guard were absent any of these would raise, aborting self_test with a fail-closed exit rather
+    # than returning a structured finding.
     check("fix3-worklog-kind-list-clean-invalid",
           validate_record(dict(wl, kind=["fixed"]), expected_type="worklog").status == INVALID)
     check("fix3-actor-kind-list-clean-invalid",
@@ -1162,6 +1192,19 @@ def self_test():
           validate_transition("nope", "open", "active", "maintainer").status == CANNOT_EVALUATE)
     check("txn-unparseable-status-cannot-eval",
           validate_transition("finding", "bogus", "fixed", "maintainer").status == CANNOT_EVALUATE)
+    # R3 FIX A (guard-input-soundness): a non-string type_name (a TOML-valid list/dict) is unhashable and
+    # would raise on the specs.get() dict lookup; it now fails closed to CANNOT-EVALUATE with no exception.
+    # A non-string actor_kind (a list) is unhashable and would raise on the PROPOSER_KINDS frozenset
+    # membership at a terminal transition; it now records the invalid-actor finding and cuts INVALID with
+    # no exception. Both repros must complete cleanly (never a TypeError).
+    txn_a_listtype = validate_transition([], "a", "b", "maintainer")
+    check("r3a-list-type-name-cannot-eval", txn_a_listtype.status == CANNOT_EVALUATE)
+    check("r3a-list-type-name-named",
+          any("record type must be a string" in f for f in txn_a_listtype.findings))
+    txn_a_listactor = validate_transition("backlog_item", "active", "done/proposed", ["assistant"])
+    check("r3a-list-actor-kind-invalid", txn_a_listactor.status == INVALID)
+    check("r3a-list-actor-kind-named",
+          any("actor kind" in f for f in txn_a_listactor.findings))
 
     # 10: counters. Schema, monotonic allocation, no reset, ids-within-high-water, uniqueness.
     hw, cfindings = validate_counters({"schema": 1, "counters": {"BI": 42, "FN": 7, "WL": 131}})
@@ -1188,6 +1231,11 @@ def self_test():
     check("fix2-high-water-valid-ok", not check_ids_within_counters(["BI-1"], {"BI": 5}))
     check("ids-unique-ok", not check_unique_ids(["BI-1", "BI-2", "FN-1"]))
     check("ids-duplicate-invalid", check_unique_ids(["BI-1", "BI-1"]))
+    # R3 FIX C (guard-input-soundness): a non-string / malformed id (a TOML-valid list) is unhashable and
+    # would raise on the `rid in seen` set membership; it now surfaces a "malformed id" finding and is not
+    # added to `seen`, never a TypeError.
+    ids_malformed = check_unique_ids([["BI-1"]])
+    check("r3c-malformed-id-flagged", any("malformed id" in f for f in ids_malformed))
 
     # 11: non-table / unidentifiable inputs are CANNOT-EVALUATE, never a silent pass.
     check("not-a-table-cannot-eval", validate_record([]).status == CANNOT_EVALUATE)
@@ -1268,11 +1316,27 @@ def self_test():
     # when not; the built-in kinds remain the default.
     check("worklog-manifest-kind-ok",
           validate_record(dict(wl, kind="perf"), expected_type="worklog",
-                          registered_kinds={"perf"}).status == VALID)
+                          registered_kinds=["perf"]).status == VALID)
     check("worklog-manifest-kind-unregistered-invalid",
           validate_record(dict(wl, kind="perf"), expected_type="worklog").status == INVALID)
     check("worklog-builtin-kind-still-ok",
           validate_record(dict(wl, kind="fixed"), expected_type="worklog").status == VALID)
+    # R3 FIX B (guard-input-soundness): `registered_kinds` is a manifest control that MUST be a list of
+    # strings. A bare STRING would splat into its characters under set() (a fail-open: kind="p" from
+    # "perf" would wrongly validate); a list-of-list ([["perf"]]) is unhashable and would raise. Both now
+    # fail closed to the built-in WORKLOG_KINDS with a clean finding, never a fail-open and never a crash;
+    # a genuine list-of-strings still registers its kinds.
+    b_failopen = validate_record(dict(wl, kind="p"), expected_type="worklog", registered_kinds="perf")
+    check("r3b-string-kinds-no-failopen", b_failopen.status == INVALID)
+    check("r3b-string-kinds-named",
+          any("registered worklog kinds must be a list of strings" in f for f in b_failopen.findings))
+    b_listoflist = validate_record(dict(wl, kind="fixed"), expected_type="worklog",
+                                   registered_kinds=[["perf"]])
+    check("r3b-listoflist-kinds-finding-no-crash",
+          any("registered worklog kinds must be a list of strings" in f for f in b_listoflist.findings))
+    check("r3b-legit-list-kinds-still-ok",
+          validate_record(dict(wl, kind="perf"), expected_type="worklog",
+                          registered_kinds=["perf"]).status == VALID)
 
     # 20 (M3): counter completeness. An absent [counters] with known namespaces is a finding; a known
     # namespace with no high-water is a MISSING finding; a complete table is clean.
