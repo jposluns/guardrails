@@ -82,6 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
+    _str_token_set, _is_str_token_control, _is_item_collection,
 )
 
 # The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
@@ -542,13 +543,16 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
     elif not _valid_timestamp(record.get("date")):
         findings.append("date must be an RFC 3339 UTC timestamp")
     allowed_kinds = set(WORKLOG_KINDS)
-    if registered_kinds:
+    if registered_kinds is not None:
         # `registered_kinds` is a manifest-supplied control (spec 6.2). It MUST be a list/tuple of
         # strings. A bare string would splat into its characters under set() (so kind="p" from "perf"
         # would wrongly validate: a fail-open), and a non-string element (e.g. a list-of-list [["perf"]])
         # is unhashable and would raise on set(): validate by type first and fail CLOSED to the built-in
         # WORKLOG_KINDS only, appending a clean finding, never iterating a string into characters and
-        # never crashing (guard-input-soundness; spec 6.2).
+        # never crashing (guard-input-soundness; spec 6.2). The presence test is `is not None`, NOT
+        # truthiness: a falsey-but-malformed control ("", {}, 0, False) is a wrong-shape control that is
+        # REJECTED with a finding, never silently accepted as "no additional kinds" (M-round3). A genuinely
+        # empty list/tuple is well-formed and adds no kinds without a finding.
         if isinstance(registered_kinds, (list, tuple)) and all(
                 isinstance(k, str) for k in registered_kinds):
             allowed_kinds |= set(registered_kinds)
@@ -591,8 +595,22 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     an identified record violates its schema; VALID otherwise."""
     if specs is None:
         specs = BASELINE_SPECS
+    elif not isinstance(specs, dict):
+        # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
+        # closed rather than allocate against an unreadable roster (guard-input-soundness; spec 8.3).
+        return RecordValidation(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
     if not isinstance(record, dict):
         return RecordValidation(CANNOT_EVALUATE, ["record is not a table"])
+    if expected_type is not None and not isinstance(expected_type, str):
+        # expected_type names the type the record must match; a non-string (e.g. a list) is unhashable
+        # and would crash on specs.get(expected_type), or later become `rtype` and crash on specs.get(rtype).
+        # Guard by type first and fail closed, never a TypeError (guard-input-soundness; spec 8.3).
+        return RecordValidation(CANNOT_EVALUATE, ["expected_type must be a string or None (fail-closed)"])
+    # registered_vendors is the manifest's registered x-<vendor> allow-set. Normalize it to an
+    # exact-token frozenset at the boundary so _check_keyset's `key not in registered_vendors` is always
+    # an exact-token membership over a set, never a SUBSTRING match against a bare string (a fail-open
+    # that admitted an unregistered x- extension) and never a crash on a non-collection (spec 8.7; M-round3).
+    registered_vendors = _str_token_set(registered_vendors)
 
     findings = []
     tval = record.get("type")
@@ -717,6 +735,10 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
     """
     if specs is None:
         specs = BASELINE_SPECS
+    elif not isinstance(specs, dict):
+        # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
+        # closed rather than evaluate a transition against an unreadable roster (guard-input-soundness).
+        return TransitionCheck(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
     if not isinstance(type_name, str):
         # A non-string type_name (e.g. a TOML-valid list/dict) is unhashable and would raise on the
         # specs.get() dict lookup below: guard by type first and fail closed with a clean finding, never
@@ -821,6 +843,15 @@ def validate_counters(data, known_namespaces=None):
     high_water = {}
     if not isinstance(data, dict):
         return high_water, ["counters.toml is not a table"]
+    # known_namespaces is a control naming the namespaces that MUST each carry a high-water. None means
+    # NO restriction (fail-safe). Any malformed shape (a bare string, whose `ns not in known_namespaces`
+    # would SUBSTRING-match and whose sorted() would splat into characters, or a non-string element) is
+    # rejected with a finding and treated as an EMPTY known set: every declared namespace is then flagged
+    # unknown, strictly MORE findings than the permissive no-restriction default, so a malformed control
+    # never reads as more permissive than an omitted one (guard-input-soundness; spec 8.2).
+    if known_namespaces is not None and not _is_str_token_control(known_namespaces):
+        findings.append("known_namespaces must be a collection of namespace strings (fail-closed)")
+        known_namespaces = frozenset()
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
@@ -871,7 +902,11 @@ def validate_counters(data, known_namespaces=None):
 
 
 def high_water(high, ns):
-    """The current high-water for a namespace, 0 when it has allocated nothing yet."""
+    """The current high-water for a namespace, 0 when it has allocated nothing yet. Fails closed
+    (ValueError) on a counters map that is not a table, rather than reading a malformed map as
+    high-water 0 (which could let an existing id be reused; guard-input-soundness, spec 8.2)."""
+    if not isinstance(high, dict):
+        raise ValueError("counters map is not a table (spec 8.2)")
     return high.get(ns, 0)
 
 
@@ -904,7 +939,10 @@ def next_id(high, ns, known_complete=False):
         counter would read its high-water as 0 and could reuse an id that already exists; that is sound
         only when the map has been proved complete (validate_counters with known_namespaces). The caller
         asserts that proof with `known_complete=True`; without it, an absent counter is refused."""
-    if ns not in RECORD_NAMESPACES:
+    if not isinstance(ns, str) or ns not in RECORD_NAMESPACES:
+        # Guard by type first: a non-string ns (e.g. a list) is unhashable and would crash on the
+        # RECORD_NAMESPACES frozenset membership; it is also bound to no record type. Fail closed either
+        # way, never a TypeError (guard-input-soundness; spec 8.1/8.2).
         raise ValueError("cannot allocate an id for namespace {!r}: it is bound to no record type in the "
                          "section 8.1 taxonomy (spec 8.1/8.2)".format(ns))
     _validated_counter_map(high, "next_id")
@@ -952,6 +990,15 @@ def check_ids_within_counters(ids, high):
     the high-water means the counter never reserved it, the reuse hazard the atomic claim prevents. `ids`
     is an iterable of id strings; a malformed id, or an unknown namespace, is itself a finding."""
     findings = []
+    if not isinstance(high, dict):
+        # `high` is a control (the counters map). A non-table (e.g. a bare string) would SUBSTRING-match
+        # `ns not in high` and then crash on high[ns]: fail closed, certifying no id against an unreadable
+        # map, rather than a TypeError or a silent pass (guard-input-soundness; spec 8.2).
+        return ["counters map is not a table, so no id can be certified within it (spec 8.2)"]
+    if not _is_item_collection(ids):
+        # A non-iterable would crash the `for`; a bare string would splat into characters. Fail closed.
+        return ["id-collection must be an iterable of id strings, not {} (spec 8.2)".format(
+            type(ids).__name__)]
     for rid in ids:
         shape = _valid_id_shape(rid)
         if shape is None:
@@ -980,6 +1027,11 @@ def check_unique_ids(ids):
     """Confirm no id is reused across a set of records (spec 8.2: IDs are never reused). Returns a finding
     per duplicated id."""
     findings = []
+    if not _is_item_collection(ids):
+        # A non-iterable would crash the `for`; a bare string would splat into characters. Fail closed
+        # with a finding rather than a TypeError or a splat (guard-input-soundness; spec 8.2).
+        return ["id-collection must be an iterable of id strings, not {} (spec 8.2)".format(
+            type(ids).__name__)]
     seen = set()
     for rid in ids:
         # A non-string / malformed id (e.g. a TOML-valid list) is unhashable and would raise on the set

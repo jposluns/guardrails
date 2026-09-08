@@ -62,6 +62,7 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
     open): a symlinked store root or a symlinked ancestor of a pointer target is refused
     (CANNOT-EVALUATE), never silently followed off-tree, matching the contained no-follow discipline.
 """
+import collections.abc
 import operator
 import os
 import stat
@@ -579,6 +580,53 @@ def _valid_extension_namespace(value):
         and vendor[0] != "-" and vendor[-1] != "-"
 
 
+# --- shared boundary type-guards (guard-input-soundness) ---------------------------------------------
+# A CONTROL input (a caller-supplied allow-set, roster, namespace set, id collection, or counters map)
+# that flows into a set()/frozenset() construction, an `x in <set|frozenset|dict>` membership, or a dict
+# key lookup is validated at the boundary by these helpers, uniformly across the three OPF tooling
+# modules, so a non-str / non-hashable / wrong-shape control fails CLOSED (a structured finding or a
+# controlled refusal) rather than crashing with a TypeError/AttributeError or silently disabling a check
+# (a bare string splatting into characters, a substring match, or a silent skip). Well-formed inputs are
+# unchanged; only malformed shapes are newly rejected. These are the single, auditable place the pattern
+# lives, so no site re-implements an ad-hoc inline guard.
+
+def _require_mapping(value):
+    """(value, True) when value is a dict, else ({}, False). A non-mapping control is malformed: the
+    caller surfaces a finding and treats the empty mapping fail-closed, never a `.get`/`[]` crash."""
+    if isinstance(value, dict):
+        return value, True
+    return {}, False
+
+
+def _is_str_token_control(value):
+    """True when value is a well-formed set-of-exact-string-tokens control: a concrete set/frozenset/
+    list/tuple whose every element is a str. A bare string is NOT one (set() would splat it into
+    characters and membership would substring-match); None is NOT one (a caller for which 'absent' is
+    legitimate tests `value is None` FIRST). Used to reject a malformed token control before a membership
+    test reaches it."""
+    return (isinstance(value, (set, frozenset, list, tuple))
+            and all(isinstance(x, str) for x in value))
+
+
+def _str_token_set(value):
+    """Normalize a set-of-exact-string-tokens control to a frozenset of its string members, FAIL-CLOSED:
+    a well-formed control (see _is_str_token_control) yields exactly those tokens; any malformed shape (a
+    bare string, a non-string element, a mapping, a scalar, None) yields the EMPTY frozenset, so
+    exact-token membership admits NOTHING rather than splatting, substring-matching, or crashing."""
+    return frozenset(value) if _is_str_token_control(value) else frozenset()
+
+
+def _is_item_collection(value):
+    """True when value is a non-string, non-mapping iterable safe to iterate and materialize (a list,
+    tuple, set, frozenset, range, or a dict keys/values view). A bare string/bytes is excluded (it must
+    not iterate into characters), and a mapping and a scalar are excluded. Guards the CONTAINER of an
+    id/record collection so a non-iterable never crashes a `for` and a string never splats; the ELEMENTS
+    remain the caller's to validate."""
+    return (isinstance(value, collections.abc.Iterable)
+            and not isinstance(value, (str, bytes, bytearray))
+            and not isinstance(value, collections.abc.Mapping))
+
+
 def validate_manifest(data, supported_profiles=None):
     """Validate a parsed manifest against the base schema and, for each SUPPORTED profile, the profile
     schema. Returns a ManifestValidation.
@@ -593,7 +641,29 @@ def validate_manifest(data, supported_profiles=None):
     Outcome: CANNOT-EVALUATE when the manifest is not a table or its `[devprocess]` base is absent or
     does not declare the devprocess token (it is not identifiably a devprocess store); INVALID when it
     is a devprocess store that violates the schema; VALID otherwise."""
-    supported_profiles = supported_profiles or {}
+    # supported_profiles is the caller's profile-enforcement control: a mapping {profile_name(str) ->
+    # iterable of supported MAJOR ints}. None means BASE-ONLY (fail-safe). Any OTHER malformed shape (a
+    # string, a bare list, a non-mapping, a non-string profile name, or a majors value that is not a
+    # collection of genuine ints) is treated as UNPARSEABLE and fails CLOSED to CANNOT-EVALUATE, never
+    # normalized to {} and read as a permissive base-only VALID: a malformed control must not silently
+    # DISABLE profile enforcement (spec 9.1, guard-input-soundness). set(...) at the enforcement loop
+    # below is then always over a validated list of ints (never a splatted string or an unhashable list).
+    if supported_profiles is None:
+        supported_profiles = {}
+    supported_profiles, sp_ok = _require_mapping(supported_profiles)
+    if not sp_ok:
+        return ManifestValidation(CANNOT_EVALUATE,
+                                  ["supported_profiles must be a mapping of profile name to a list of "
+                                   "supported major versions; an unparseable profile-enforcement control "
+                                   "fails closed and never silently disables enforcement (spec 9.1)"])
+    for _pname, _majors in supported_profiles.items():
+        if not isinstance(_pname, str) or not (
+                _is_item_collection(_majors)
+                and all(isinstance(m, int) and not isinstance(m, bool) for m in _majors)):
+            return ManifestValidation(CANNOT_EVALUATE,
+                                      ["supported_profiles entry {!r} is malformed: each profile name "
+                                       "(a string) maps to a list of integer major versions (fail-closed; "
+                                       "spec 9.1)".format(_pname)])
     if not isinstance(data, dict):
         return ManifestValidation(CANNOT_EVALUATE, ["manifest is not a table"])
     base = data.get("devprocess")

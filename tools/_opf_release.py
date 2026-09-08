@@ -96,7 +96,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # U1 supplies the outcome model; U2 supplies the reduced-worklog record validator, the id-shape helper,
 # and the RFC 3339 UTC timestamp validator. Reuse rather than re-declare (single source of truth).
-from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
+from _opf_store import VALID, INVALID, CANNOT_EVALUATE, _is_item_collection  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, _valid_id_shape, _valid_timestamp, SUPPORTED_SCHEMA,
 )
@@ -208,6 +208,27 @@ def _wl_num(value):
     return shape[1]
 
 
+def _wl_id_set(values, where, findings):
+    """Normalize an id-collection CONTROL to a set of its WL-numbers, FAIL-CLOSED (guard-input-soundness;
+    spec 8.2). A bare string, a mapping, a scalar, or None is a malformed collection: a finding and an
+    EMPTY set, never a string splatting into characters and never a `for`-crash on a non-iterable. A
+    non-WL-number element (a list/dict, a bool, a non-positive int, or a malformed id) is a per-element
+    finding, skipped, so set() never raises on an unhashable element and a malformed member never
+    clean-passes. Mirrors the int-or-_wl_num element idiom the standalone worklog guards already use."""
+    if not _is_item_collection(values):
+        findings.append("{}: must be an iterable of WL-numbers, not {}".format(
+            where, type(values).__name__))
+        return set()
+    out = set()
+    for v in values:
+        n = v if isinstance(v, int) and not isinstance(v, bool) else _wl_num(v)
+        if n is None or n < 1:
+            findings.append("{}: entry {!r} is not a well-formed WL-<n> id (spec 8.2)".format(where, v))
+            continue
+        out.add(n)
+    return out
+
+
 def _parse_span(span, findings, where):
     """Parse a `worklog_span` value into (start, end) WL-numbers, or None for an empty span, appending a
     finding and returning False for a malformed one. A non-empty span is a two-element array of WL ids
@@ -268,6 +289,11 @@ def coverage_digest(entries):
     canonicalized with sorted keys, so it is also invariant to key order within a table. Returns
     `sha256:<hex>`. Raises ReleaseError (fail-closed) on an entry that is not a table, lacks a WL id, or
     carries an uncanonicalizable value."""
+    if not _is_item_collection(entries):
+        # `entries` is a control; a non-iterable would crash the `for` and a bare string would splat into
+        # characters. Fail closed (ReleaseError) rather than a TypeError (guard-input-soundness; spec 6.1).
+        raise ReleaseError("worklog entries must be an iterable of tables, not {}".format(
+            type(entries).__name__))
     keyed = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -315,6 +341,17 @@ def compute_span_digest(entries_by_id, span):
     entries may sit in the archive, which the caller must merge in first; spec 12)."""
     if span is None:
         return coverage_digest([])
+    if not isinstance(entries_by_id, dict):
+        # `entries_by_id` is a control (the id->entry map); a non-table would crash on .get(n). Fail
+        # closed (ReleaseError) rather than an AttributeError (guard-input-soundness; spec 12).
+        raise ReleaseError("cannot digest a span: the id->entry map is not a table, got {}".format(
+            type(entries_by_id).__name__))
+    if not (isinstance(span, (tuple, list)) and len(span) == 2
+            and all(isinstance(x, int) and not isinstance(x, bool) for x in span)):
+        # `span` is a (start, end) pair of WL-numbers or None (guarded above). A non-pair would crash on
+        # the unpacking or on range(); fail closed (ReleaseError) rather than a TypeError (spec 6.1).
+        raise ReleaseError("cannot digest a span: span must be a (start, end) pair of WL-numbers or "
+                           "None, got {!r}".format(span))
     start, end = span
     covered = []
     for n in range(start, end + 1):
@@ -849,7 +886,18 @@ def tail_ids(releases, worklog_ids):
     is the parsed release-row list; `worklog_ids` an iterable of WL-numbers. Used to assert the post-cut
     empty-tail invariant (spec 6.2: the release cut leaves the new unreleased tail empty)."""
     end = released_end(releases)
-    return sorted(n for n in worklog_ids if n > end)
+    if not _is_item_collection(worklog_ids):
+        # worklog_ids is a control; a non-iterable would crash and a bare string would compare
+        # character-vs-int. Fail closed (ReleaseError) rather than a TypeError (guard-input-soundness).
+        raise ReleaseError("cannot compute the tail: worklog ids must be an iterable of WL-numbers, not "
+                           "{}".format(type(worklog_ids).__name__))
+    tail = []
+    for n in worklog_ids:
+        if not (isinstance(n, int) and not isinstance(n, bool)):
+            raise ReleaseError("cannot compute the tail: worklog id {!r} is not a WL-number".format(n))
+        if n > end:
+            tail.append(n)
+    return sorted(tail)
 
 
 # --- frozen-span / no-deletion / rotation guards (spec 6.2, 8.4, 12, 13) -----------------------------
@@ -892,6 +940,12 @@ def check_no_append_into_released(version_data, candidate_ids):
     releases = _releases_or_finding(version_data, findings)
     if releases is None:
         return findings
+    if not _is_item_collection(candidate_ids):
+        # A non-iterable would crash the `for`; a bare string would splat into characters. Fail closed
+        # with a finding rather than a TypeError or a splat (guard-input-soundness; spec 6.2).
+        findings.append("candidate id-collection must be an iterable of WL-numbers, not {} (spec 6.2)".format(
+            type(candidate_ids).__name__))
+        return findings
     try:
         end = released_end(releases)
     except ReleaseError as exc:
@@ -916,8 +970,9 @@ def check_no_deletion(old_ids, new_ids):
     in the active worklog OR the archive. `old_ids` / `new_ids` are iterables of WL-numbers (pass the
     UNION of active and archive ids for `new_ids`). Returns a finding per vanished id."""
     findings = []
-    now = set(new_ids)
-    for n in sorted(set(old_ids)):
+    now = _wl_id_set(new_ids, "check_no_deletion new id-collection", findings)
+    old = _wl_id_set(old_ids, "check_no_deletion old id-collection", findings)
+    for n in sorted(old):
         if n not in now:
             findings.append("worklog id WL-{} vanished: no worklog entry is ever deleted (spec 6.2/13)".format(n))
     return findings
@@ -931,14 +986,15 @@ def check_ids_partition(active_ids, archive_ids, expected_ids=None):
     `expected_ids` the guard cannot see a loss (its inputs are the two locations, not the id space it
     should cover), so the authoritative set is threaded in per guard-input-soundness."""
     findings = []
-    active = set(active_ids)
-    archive = set(archive_ids)
+    active = _wl_id_set(active_ids, "check_ids_partition active id-collection", findings)
+    archive = _wl_id_set(archive_ids, "check_ids_partition archive id-collection", findings)
     for n in sorted(active & archive):
         findings.append("worklog id WL-{} is in BOTH the active worklog and the archive; rotation is a "
                         "move, an id lives in exactly one location (spec 12)".format(n))
     if expected_ids is not None:
+        expected = _wl_id_set(expected_ids, "check_ids_partition expected id-collection", findings)
         present = active | archive
-        for n in sorted(set(expected_ids)):
+        for n in sorted(expected):
             if n not in present:
                 findings.append("worklog id WL-{} is in NEITHER the active worklog nor the archive; "
                                 "rotation is a move, never a loss (spec 12/13)".format(n))
@@ -952,6 +1008,12 @@ def check_rotation_only_released(rotated_ids, version_data):
     findings = []
     releases = _releases_or_finding(version_data, findings)
     if releases is None:
+        return findings
+    if not _is_item_collection(rotated_ids):
+        # A non-iterable would crash the `for`; a bare string would splat into characters. Fail closed
+        # with a finding rather than a TypeError or a splat (guard-input-soundness; spec 12).
+        findings.append("rotated id-collection must be an iterable of WL-numbers, not {} (spec 12)".format(
+            type(rotated_ids).__name__))
         return findings
     try:
         end = released_end(releases)
