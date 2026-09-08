@@ -1222,6 +1222,12 @@ def main(report_path=None):
               aiqt_hooks._orch_wake_live_state([123], _now)[0], "cannot-evaluate")
         check("wake/scorer-live-wins-over-cannot",
               aiqt_hooks._orch_wake_live_state([_rec("a", 5), 123], _now)[0], "live")
+        # FIX 3: a CONFIRMED record missing digest/created_utc is cannot-evaluate, never live.
+        check("wake/scorer-fieldless-confirmed-cannot",
+              aiqt_hooks._orch_wake_live_state(
+                  [{"confirmed": True,
+                    "expiry_utc": (_now + datetime.timedelta(hours=5)).isoformat()}], _now)[0],
+              "cannot-evaluate")
 
         # _orch_wake_window_hours: measured minutes -> tight window; not_before -> measured; else horizon.
         check("wake/window-minutes-measured",
@@ -1234,6 +1240,10 @@ def main(report_path=None):
         _nb = (_now + datetime.timedelta(hours=3)).isoformat()
         check("wake/window-not-before",
               aiqt_hooks._orch_wake_window_hours({"not_before": _nb}, "x", 24) >= 4.0, True)
+        # FIX 4: delaySeconds is a preferred MEASURED source -> a tight grace window, not the 24h fallback.
+        _dw = aiqt_hooks._orch_wake_window_hours({"delaySeconds": 600}, "no minutes here", 24)
+        check("wake/window-delayseconds-measured", round(_dw, 4), round(600 / 3600.0 + 1.0, 4))
+        check("wake/window-delayseconds-not-fallback", _dw < 24.0, True)
 
         # _schema_turn_state migration: dict + legacy records preserved; non-list -> None; absent -> [].
         sm = aiqt_hooks._orch_validate(
@@ -1269,13 +1279,16 @@ def main(report_path=None):
         eledger.write_text(json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-1",
                                        "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
         check("e2e/claim-live-ledger-allows", _verdict(estop(CLAIM)), "allow")
-        # claim + live via a wake registered through the PostToolUse SUCCESS path -> inert ALLOW. This
-        # replaces the old bare-digest seed: a genuine, confirmed, unexpired wake is a real wait.
+        # claim + live via a wake registered through the PostToolUse path with a POSITIVELY-CONFIRMED
+        # real future schedule -> inert ALLOW. This replaces the old bare-digest seed: a genuine,
+        # confirmed, unexpired wake is a real wait. SCHED is the runtime's success-with-a-timer shape
+        # (a positive future scheduledFor); FIX 1 registers only on this, never on mere firing.
+        SCHED = {"scheduledFor": 9999999999, "clampedDelaySeconds": 1800, "wasClamped": False}
         e.set_turn_state({}); eledger.unlink(missing_ok=True)
         ewake = lambda ti, resp: aiqt_hooks.orch_wake_register(
             e.payload("PostToolUse", "ScheduleWakeup", ti, extra={"tool_response": resp}))
         check("e2e/wake-register-persists",
-              _verdict(ewake({"prompt": "recheck CI in 30 minutes"}, {"ok": True})), "allow")
+              _verdict(ewake({"prompt": "recheck CI in 30 minutes"}, SCHED)), "allow")
         check("e2e/claim-live-wake-allows", _verdict(estop(CLAIM)), "allow")
 
         # THE CODEX VECTOR (the discriminating flip): a ScheduleWakeup ALLOWED at PreToolUse whose
@@ -1312,6 +1325,64 @@ def main(report_path=None):
         check("e2e/claim-cannot-eval-denies", code, 2)
         check("e2e/cannot-eval-names-source", "unreadable" in (err or "").lower(), True)
         eledger.unlink(missing_ok=True)
+
+        # ---------- GD-137 PR2 FIX 1: positive schedule confirmation ----------
+        # A gate-off success (scheduledFor:0) registers NO live wake -> phantom DENIED. Without FIX 1
+        # this non-error response registered and wrongly ALLOWED the phantom wait (the discriminating flip).
+        GATEOFF = {"scheduledFor": 0, "clampedDelaySeconds": 0, "wasClamped": False}
+        STOPRESP = {"scheduledFor": 0, "clampedDelaySeconds": 0, "stopped": True, "cancelledWakeups": []}
+        eprompt = lambda p: aiqt_hooks.orch_prompt_stamp(e.payload("UserPromptSubmit", extra={"prompt": p}))
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/gateoff-response-registers-nothing",
+              _verdict(ewake({"prompt": "recheck CI"}, GATEOFF)), "allow")
+        check("e2e/gateoff-response-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-gateoff-denies", _verdict(estop(CLAIM)), "block2")
+        # A stop:true success (scheduledFor:0, stopped:true) likewise registers nothing -> DENIED.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/stop-response-registers-nothing",
+              _verdict(ewake({"prompt": "recheck CI"}, STOPRESP)), "allow")
+        check("e2e/stop-response-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-stop-response-denies", _verdict(estop(CLAIM)), "block2")
+        # A REAL positive schedule DOES register; the claim is inert-allowed and the returning matching
+        # prompt is stamped timer-originated (a warn, not a plain allow).
+        WPROMPT = "recheck CI in 30 minutes"
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/positive-schedule-registers",
+              _verdict(ewake({"prompt": WPROMPT}, SCHED)), "allow")
+        check("e2e/positive-schedule-persists-wake", bool(e.turn_state().get("wake_digests")), True)
+        check("e2e/positive-schedule-claim-allows", _verdict(estop(CLAIM)), "allow")
+        check("e2e/positive-schedule-returning-prompt-stamped", _verdict(eprompt(WPROMPT)), "warn")
+
+        # ---------- GD-137 PR2 FIX 2a: stop:true retires this root's confirmed records ----------
+        # A successful stop:true call clears pending confirmed wakes -> a later phantom claim is DENIED.
+        # Without the fix the record persists and wrongly ALLOWS.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/stoptrue-register-persists-first",
+              _verdict(ewake({"prompt": WPROMPT}, SCHED)), "allow")
+        check("e2e/stoptrue-has-live-wake", bool(e.turn_state().get("wake_digests")), True)
+        check("e2e/stoptrue-retires-confirmed",
+              _verdict(ewake({"stop": True}, STOPRESP)), "allow")
+        check("e2e/stoptrue-cleared-wakes", e.turn_state().get("wake_digests"), [])
+        check("e2e/phantom-after-stoptrue-denies", _verdict(estop(CLAIM)), "block2")
+
+        # ---------- GD-137 PR2 FIX 2b: a new confirmed wake supersedes the prior one ----------
+        # Registering wake B after wake A leaves only B live (the runtime replaces pending dynamic wakes);
+        # A's returning prompt no longer finds a live wake (stamped genuine), B's does (timer-originated).
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        APROMPT, BPROMPT = "recheck A in 20 minutes", "recheck B in 40 minutes"
+        ewake({"prompt": APROMPT}, SCHED)
+        ewake({"prompt": BPROMPT}, SCHED)
+        check("e2e/supersede-only-one-record", len(e.turn_state().get("wake_digests")), 1)
+        check("e2e/supersede-A-prompt-not-timer", _verdict(eprompt(APROMPT)), "allow")
+        check("e2e/supersede-B-prompt-is-timer", _verdict(eprompt(BPROMPT)), "warn")
+
+        # ---------- GD-137 PR2 FIX 3: a fieldless confirmed record is cannot-evaluate, not live ----------
+        # {confirmed:true, expiry_utc:<far future>} with NO digest/created_utc scores cannot-evaluate ->
+        # the stop is DENIED. Without FIX 3 it scored live and wrongly ALLOWED.
+        e.set_turn_state({"wake_digests": [{"confirmed": True,
+              "expiry_utc": (_now + datetime.timedelta(hours=100)).isoformat()}]})
+        eledger.unlink(missing_ok=True)
+        check("e2e/phantom-fieldless-confirmed-denies", _verdict(estop(CLAIM)), "block2")
 
         # stop_hook_active True + counter 0 + claim + aggregate none MUST deny (E2: loop_signal is
         # diagnostic; before E2 the top-of-decide_yield relief allowed-with-findings on the signal alone).

@@ -5702,6 +5702,13 @@ def _orch_wake_digest_of(entry):
     return None
 
 
+def _orch_is_confirmed_wake(entry):
+    """Whether a wake_digests entry is a CONFIRMED STRUCTURED record (a dict with confirmed is True).
+    A legacy bare string, a non-dict, and an unconfirmed dict are NOT: they contribute nothing to
+    liveness and are preserved across a supersession (FIX 2b) or a stop-cancellation (FIX 2a)."""
+    return isinstance(entry, dict) and entry.get("confirmed") is True
+
+
 def _orch_wake_has_digest(records, digest):
     """Whether any wake_digests entry matches digest (a structured record OR a legacy bare string).
     Deliberately EXPIRY-BLIND: timer-origination is only about counter preservation, so a returning
@@ -5743,14 +5750,19 @@ def _orch_reconcile_wakes(records, now):
 
 def _orch_wake_live_state(records, now):
     """Score a wake_digests list for re-entry liveness. Returns ("live"|"none"|"cannot-evaluate", detail).
-    A wake is LIVE iff some entry is a dict with confirmed is True, a parseable expiry_utc, and now NOT
-    past expiry_utc + skew (a genuine, confirmed, unexpired wake). An expired confirmed record, an
-    unconfirmed record, and a legacy BARE string each contribute NOTHING (no proof of a live wake: the
-    security-correct direction for an actor-writable field, the inverse of the old bare-presence trust).
-    cannot-evaluate iff an entry is a dict that is confirmed but whose expiry_utc is missing, non-string,
-    or unparseable, or an entry is neither a dict nor a string (a malformed control is never read as a
-    clean 'no wake', matching the ledger idiom). Aggregate: any live wins; else any cannot-evaluate wins;
-    else none."""
+    A wake is LIVE only when an entry is a FULLY-VALID structured record (FIX 3): a dict with confirmed
+    is True AND a non-empty str digest AND a parseable created_utc AND a parseable expiry_utc AND
+    created_utc <= expiry_utc (skew-tolerant) AND a bounded lifetime (expiry_utc - created_utc <=
+    _ORCH_MAX_HORIZON_HOURS plus skew) AND now NOT past expiry_utc + skew (a genuine, confirmed,
+    unexpired wake). An expired confirmed record, an unconfirmed record, and a legacy BARE string each
+    contribute NOTHING (no proof of a live wake: the security-correct direction for an actor-writable
+    field, the inverse of the old bare-presence trust). cannot-evaluate iff a CONFIRMED record is missing
+    or has an invalid field (digest absent/empty, created_utc or expiry_utc missing/non-string/
+    unparseable, an inverted created>expiry, or an over-horizon lifetime), or an entry is neither a dict
+    nor a string (a malformed control is never read as a clean 'no wake', matching the ledger idiom). ANY
+    missing/invalid field on a confirmed record is thus cannot, never silently ignored and never live, so
+    a bare {confirmed:true, expiry_utc:"9999..."} with no digest/created_utc can no longer score live.
+    Aggregate: any live wins; else any cannot-evaluate wins; else none."""
     live, cannot = 0, 0
     for e in records:
         if isinstance(e, str):
@@ -5760,16 +5772,21 @@ def _orch_wake_live_state(records, now):
             continue
         if e.get("confirmed") is not True:
             continue  # unconfirmed: no proof of a live wake, contributes nothing
-        exp_raw = e.get("expiry_utc")
-        if not isinstance(exp_raw, str):
-            cannot += 1  # confirmed but no usable expiry string: malformed control
+        # A CONFIRMED record must be FULLY VALID to count live; ANY missing/invalid field is a malformed
+        # control (cannot-evaluate), never silently ignored and never live (FIX 3).
+        digest = e.get("digest")
+        created = _orch_parse_utc(e.get("created_utc")) if isinstance(e.get("created_utc"), str) else None
+        exp = _orch_parse_utc(e.get("expiry_utc")) if isinstance(e.get("expiry_utc"), str) else None
+        if not (isinstance(digest, str) and digest) or created is None or exp is None:
+            cannot += 1  # confirmed but missing/unparseable digest, created_utc, or expiry_utc
             continue
-        exp = _orch_parse_utc(exp_raw)
-        if exp is None:
-            cannot += 1  # confirmed but unparseable expiry: malformed control
+        horizon = _ORCH_MAX_HORIZON_HOURS * 3600 + _ORCH_CLOCK_SKEW
+        if (created - exp).total_seconds() > _ORCH_CLOCK_SKEW \
+                or (exp - created).total_seconds() > horizon:
+            cannot += 1  # inverted (created past expiry) or over-horizon lifetime: a malformed control
             continue
         if (now - exp).total_seconds() <= _ORCH_CLOCK_SKEW:
-            live += 1  # confirmed and not past expiry + skew: a genuine live wake
+            live += 1  # fully-valid, confirmed, and not past expiry + skew: a genuine live wake
         # else: confirmed but expired -> contributes nothing
     if live:
         return ("live", "{} confirmed unexpired wake(s)".format(live))
@@ -6561,18 +6578,24 @@ def orch_teammate_idle(data):
 
 def _orch_wake_window_hours(tool_input, prompt, fallback_hours):
     """The expiry window in hours for a wake record (SECA resource-bound). Prefer a MEASURED duration
-    when the call states one: a not_before ISO timestamp on tool_input, or a parseable minutes figure in
-    the prompt text (reusing _ORCH_QUIET_CLAIM_RE; estsep: a measured figure beats none). Grace is folded
-    in as max(2*duration, duration + 1h) so a short delay still gets ample slack. Otherwise the bounded
-    staleness horizon (fallback_hours). Always clamped to (0, _ORCH_MAX_HORIZON_HOURS], so the record is
-    guaranteed to self-expire within a finite, skew-tolerant window even when no duration is stated."""
+    when the call states one: ScheduleWakeup's own delaySeconds on tool_input (the primary tool states
+    its harness-clamped delay there, <=3600s), a not_before ISO timestamp on tool_input, or a parseable
+    minutes figure in the prompt text (reusing _ORCH_QUIET_CLAIM_RE; estsep: a measured figure beats
+    none). Grace is folded in as max(2*duration, duration + 1h) so a short delay still gets ample slack.
+    Otherwise the bounded staleness horizon (fallback_hours). Always clamped to (0,
+    _ORCH_MAX_HORIZON_HOURS], so the record is guaranteed to self-expire within a finite, skew-tolerant
+    window even when no duration is stated."""
     duration_h = None
     ti = tool_input if isinstance(tool_input, dict) else {}
-    nb = _orch_parse_utc(ti.get("not_before")) if isinstance(ti.get("not_before"), str) else None
-    if nb is not None:
-        secs = (nb - _orch_now()).total_seconds()
-        if secs > 0:
-            duration_h = secs / 3600.0
+    ds = ti.get("delaySeconds")
+    if isinstance(ds, (int, float)) and not isinstance(ds, bool) and ds > 0:
+        duration_h = ds / 3600.0  # the primary tool states its (harness-clamped) delay here
+    if duration_h is None:
+        nb = _orch_parse_utc(ti.get("not_before")) if isinstance(ti.get("not_before"), str) else None
+        if nb is not None:
+            secs = (nb - _orch_now()).total_seconds()
+            if secs > 0:
+                duration_h = secs / 3600.0
     if duration_h is None and isinstance(prompt, str):
         m = _ORCH_QUIET_CLAIM_RE.search(prompt)
         if m:
@@ -6598,8 +6621,11 @@ def _orch_register_wake(root, ts, prompt, tool_input=None, fallback_hours=24):
     matching key orch_prompt_stamp consumes). Registration is on ScheduleWakeup SUCCESS only (the
     PostToolUse path), never at PreToolUse-allow time, so an allowed-then-failed schedule leaves no live
     token. Returns True on a successful persist. Legacy bare strings already in the list are preserved
-    (migration): a list is a multiset, two identical wakes register two records, each consumed once
-    (CX-M6). The window self-expires the record within a bounded, skew-tolerant horizon."""
+    (migration). REPLACEMENT semantics (FIX 2b, superseding the old CX-M6 multiset rule where two
+    identical wakes registered two records): a new confirmed record SUPERSEDES prior confirmed structured
+    records for this root, because the runtime replaces pending dynamic wakes, so a stale prior confirmed
+    record would be a dead record (exactly the dead-record bug); only the latest confirmed wake is kept
+    live. The window self-expires the record within a bounded, skew-tolerant horizon."""
     if not isinstance(prompt, str) or not prompt:
         return False
     now = _orch_now()
@@ -6611,7 +6637,10 @@ def _orch_register_wake(root, ts, prompt, tool_input=None, fallback_hours=24):
     state = dict(ts or {})
     wd = state.get("wake_digests")
     wd = list(wd) if isinstance(wd, list) else []
-    wd.append(record)  # a multiset: two identical wakes register two records, each consumed once (CX-M6)
+    # Supersede prior CONFIRMED records for this root before appending the new one (the runtime replaces
+    # pending dynamic wakes); legacy bare strings are preserved as-is (migration).
+    wd = [e for e in wd if not _orch_is_confirmed_wake(e)]
+    wd.append(record)
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
     return _orch_save_turn_state(root, state)
 
@@ -7186,15 +7215,38 @@ def _orch_response_is_error(response):
     return isinstance(status, str) and status.strip().lower() == "error"
 
 
+def _orch_response_scheduled(response):
+    """Positive proof that a ScheduleWakeup tool_response carries a REAL future schedule, the only basis
+    on which a wake is registered (FIX 1). PostToolUse firing (and non-error) does NOT prove a timer
+    exists: a gate-off or stop:true call is a SUCCESS that returns scheduledFor:0 and NO timer. True ONLY
+    when response is a dict carrying a positive numeric scheduledFor (accepted at the top level OR nested
+    under a 'data' key, to be robust to either delivery shape) AND is not a stop (stopped is not True at
+    the top level or nested under 'data'). Positive means an int/float (never a bool) strictly > 0.
+    Anything else (scheduledFor absent/0/non-numeric, stopped true, or response not a dict) is NOT
+    positively confirmed and registers nothing, so a phantom claim finds no live wake and is denied."""
+    if not isinstance(response, dict):
+        return False
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    if response.get("stopped") is True or data.get("stopped") is True:
+        return False
+    for src in (response, data):
+        sf = src.get("scheduledFor")
+        if isinstance(sf, (int, float)) and not isinstance(sf, bool) and sf > 0:
+            return True
+    return False
+
+
 def orch_wake_register(data):
-    """trkasy/tstamp, PostToolUse over the scheduling tools (recorder, never blocks): on a SUCCESSFUL
-    ScheduleWakeup/CronCreate, register a CONFIRMED, self-expiring structured wake record so the
-    phantom-wait liveness check has authoritative evidence of a genuine pending wake, and the returning
-    UserPromptSubmit is classified timer-originated. PostToolUse fires only on tool SUCCESS (a
-    failed/canceled call fires PostToolUseFailure, NOT PostToolUse, doc-confirmed), so firing is treated
-    as AUTHORITATIVE success; the tool_response error-shape check is an opportunistic tightening, not a
-    dependency. Registry- and lease-scoped exactly like orch_dispatch_ledger; a failed persist surfaces
-    as a non-blocking systemMessage (nocncl)."""
+    """trkasy/tstamp, PostToolUse over the scheduling tools (recorder, never blocks): on a
+    ScheduleWakeup/CronCreate that POSITIVELY confirms a real future schedule, register a CONFIRMED,
+    self-expiring structured wake record so the phantom-wait liveness check has authoritative evidence of
+    a genuine pending wake, and the returning UserPromptSubmit is classified timer-originated.
+    Registration requires a positively-confirmed real future schedule (a positive scheduledFor and not
+    stopped, per _orch_response_scheduled), NOT mere success: PostToolUse fires on SUCCESS, but a gate-off
+    or stop:true call is a success that returns scheduledFor:0 with NO timer, so firing alone does not
+    prove a live wake (FIX 1). The tool_response error-shape check remains as defense in depth. A stop:true
+    call retires this root's pending confirmed records (FIX 2a). Registry- and lease-scoped exactly like
+    orch_dispatch_ledger; a failed persist surfaces as a non-blocking systemMessage (nocncl)."""
     root = _orch_root(data)
     if root is None:
         return _allow()
@@ -7209,15 +7261,35 @@ def orch_wake_register(data):
         return _allow()  # inside the matcher but outside the registry roster: out of scope
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     if tool_input.get("stop") is True:
+        # A stop=true call ENDS the loop and cancels pending dynamic wakes (the runtime's
+        # cancelledWakeups), so retire this root's pending CONFIRMED wake records (FIX 2a). Clearing
+        # FAILS SAFE: a later phantom claim then finds no live wake -> DENIED -> the orchestrator
+        # continues. Runs whether or not a prompt is present (a stop:true has no prompt); legacy bare
+        # strings are preserved as-is (they already contribute nothing to liveness).
+        state = dict(_orch_turn_state(root) or {})
+        wd = state.get("wake_digests")
+        wd = list(wd) if isinstance(wd, list) else []
+        state["wake_digests"] = [e for e in wd if not _orch_is_confirmed_wake(e)]
+        if not _orch_save_turn_state(root, state):
+            return (0, {"systemMessage": "AIQT guardrail: the wake-register write failed; a scheduled "
+                                         "wake may be invisible to the phantom-wait liveness check."}, None)
         return _allow()  # a stop=true call ends the loop; it is not a schedule_idle wake to register
     prompt = tool_input.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         return _allow()  # no prompt to match a returning UserPromptSubmit against
     if _orch_response_is_error(data.get("tool_response")):
-        # Opportunistic tightening: skip registration on a recognizable error tool_response. Not
-        # load-bearing (the shape is unproven); the expiry window backstops a mis-read either way.
+        # Defense in depth: skip registration on a recognizable error tool_response. Not load-bearing
+        # (the shape is unproven); the positive-confirmation gate below and the expiry window backstop it.
         _orch_guard_event(root, "wake-register", "skip",
                           "tool_response carries a recognizable error signal; no wake registered")
+        return _allow()
+    if not _orch_response_scheduled(data.get("tool_response")):
+        # Positive-confirmation gate (FIX 1): PostToolUse firing does NOT prove a timer exists. A
+        # gate-off or stop:true success returns scheduledFor:0 with no timer; register nothing unless a
+        # real future schedule is positively confirmed, so a phantom claim finds no live wake and is
+        # DENIED (the fail-safe direction). This closes the scheduledFor:0 (gate-off / stop) hole.
+        _orch_guard_event(root, "wake-register", "skip",
+                          "no positive schedule confirmation in tool_response; not a live wake")
         return _allow()
     task_hours = _orch_validate("staleness", reg.get("staleness"))[1]["task_hours"]
     ts = _orch_turn_state(root)
