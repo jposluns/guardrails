@@ -140,7 +140,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 13
 end-line = 14
 canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
-source-digest = "00e7a494e6d3fbb5394c910e269c5422a9aa31e2f246432f02e39c38d629fc44"
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
 
 [[clause]]
 clause-id = "cntprd.2"
@@ -149,16 +149,16 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 14
 end-line = 16
 canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
-source-digest = "00e7a494e6d3fbb5394c910e269c5422a9aa31e2f246432f02e39c38d629fc44"
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
 
 [[clause]]
 clause-id = "cntprd.3"
 corpus-id = "cntprd"
 source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 18
-end-line = 22
-canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and to a basis that lets a later statement reconcile it rather than silently\nre-derive a different figure and disagree: an authoritative snapshot or revision of the source, the\nidentifiers the reading returned where that set is complete and its retention is permitted, or an\nexplicit note that the figure cannot be reconciled and must be re-measured under the same predicate."
-source-digest = "00e7a494e6d3fbb5394c910e269c5422a9aa31e2f246432f02e39c38d629fc44"
+end-line = 24
+canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and, where a reconcilable basis is available and its retention permitted, to\nthat basis, an authoritative snapshot or revision of the source or the identifiers the reading returned\nwhere that set is complete, so a later statement reconciles against the recorded figure rather than\nsilently re-deriving a different one; where no such basis is available, the statement records that the\nfigure cannot be reconciled and is re-measured under the same predicate rather than carried forward as\nthough it were."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
 
 [[clause]]
 clause-id = "dscres.1"

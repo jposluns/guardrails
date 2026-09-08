@@ -63,10 +63,12 @@ thing produced by different predicates are different figures, and they are never
 compared as though they measured one quantity, or carried forward as a single number. The same nominal
 population admitted under a structural definition and under a behavioural one, for instance, yields two
 figures, not one figure measured twice. A count reused across statements is pinned to the recorded
-predicate that produced it and to a basis that lets a later statement reconcile it rather than silently
-re-derive a different figure and disagree: an authoritative snapshot or revision of the source, the
-identifiers the reading returned where that set is complete and its retention is permitted, or an
-explicit note that the figure cannot be reconciled and must be re-measured under the same predicate.
+predicate that produced it and, where a reconcilable basis is available and its retention permitted, to
+that basis, an authoritative snapshot or revision of the source or the identifiers the reading returned
+where that set is complete, so a later statement reconciles against the recorded figure rather than
+silently re-deriving a different one; where no such basis is available, the statement records that the
+figure cannot be reconciled and is re-measured under the same predicate rather than carried forward as
+though it were.
 
 This is the companion of the measured-and-estimated-figures-stay-separate rule, on an orthogonal axis:
 that rule keeps a figure's grade, whether it was measured or estimated, attached to it, while this one
