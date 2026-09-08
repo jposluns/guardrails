@@ -140,7 +140,7 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 13
 end-line = 14
 canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
-source-digest = "362c43a93835cdfd39c772b72b2984f2cd7193147bc81bcded00e4a4d7d28b7f"
+source-digest = "00e7a494e6d3fbb5394c910e269c5422a9aa31e2f246432f02e39c38d629fc44"
 
 [[clause]]
 clause-id = "cntprd.2"
@@ -149,16 +149,16 @@ source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 14
 end-line = 16
 canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
-source-digest = "362c43a93835cdfd39c772b72b2984f2cd7193147bc81bcded00e4a4d7d28b7f"
+source-digest = "00e7a494e6d3fbb5394c910e269c5422a9aa31e2f246432f02e39c38d629fc44"
 
 [[clause]]
 clause-id = "cntprd.3"
 corpus-id = "cntprd"
 source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
 start-line = 18
-end-line = 21
-canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it, and, where the underlying data is live and can move between readings, to the\nidentifiers that reading returned, so a later statement reconciles against the recorded figure rather\nthan silently re-deriving a different one and disagreeing with it."
-source-digest = "362c43a93835cdfd39c772b72b2984f2cd7193147bc81bcded00e4a4d7d28b7f"
+end-line = 22
+canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and to a basis that lets a later statement reconcile it rather than silently\nre-derive a different figure and disagree: an authoritative snapshot or revision of the source, the\nidentifiers the reading returned where that set is complete and its retention is permitted, or an\nexplicit note that the figure cannot be reconciled and must be re-measured under the same predicate."
+source-digest = "00e7a494e6d3fbb5394c910e269c5422a9aa31e2f246432f02e39c38d629fc44"
 
 [[clause]]
 clause-id = "dscres.1"
