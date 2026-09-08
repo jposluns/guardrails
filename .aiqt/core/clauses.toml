@@ -5029,3 +5029,48 @@ start-line = 20
 end-line = 22
 canonical-text = "Where a change genuinely cannot wait, it is made on a\nseparate revision and the in-flight review is left undisturbed, to be re-dispatched against the new\nstate once that change has settled."
 source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "negtxt.1"
+corpus-id = "negtxt"
+source-path = ".aiqt/core/rules/quali-negative-text-assertion-is-scoped.md"
+start-line = 13
+end-line = 15
+canonical-text = "A check that asserts a string is absent from an artefact is scoped to the context where the string's\npresence would be a defect, a particular line, block, function, or field, and is never run against the\nwhole artefact."
+source-digest = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
+
+[[clause]]
+clause-id = "negtxt.2"
+corpus-id = "negtxt"
+source-path = ".aiqt/core/rules/quali-negative-text-assertion-is-scoped.md"
+start-line = 15
+end-line = 19
+canonical-text = "Documentation and code that correct an error routinely quote that error in order to warn\nagainst it, and a comment recording what a value used to be is the clearest form of this, so a\nwhole-artefact absence check fires on the correction itself. An author who meets that false positive is\ntrained to weaken the check or to delete the explanation that tripped it, and both leave the artefact\nworse."
+source-digest = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
+
+[[clause]]
+clause-id = "negtxt.3"
+corpus-id = "negtxt"
+source-path = ".aiqt/core/rules/quali-negative-text-assertion-is-scoped.md"
+start-line = 19
+end-line = 20
+canonical-text = "Assert the positive claim the check is really making, or scope the negative one to the place where\nthe string's presence would genuinely be a defect."
+source-digest = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
+
+[[clause]]
+clause-id = "negtxt.4"
+corpus-id = "negtxt"
+source-path = ".aiqt/core/rules/quali-negative-text-assertion-is-scoped.md"
+start-line = 22
+end-line = 25
+canonical-text = "This is the negative counterpart of the caution that a text or wording match establishes presence, not\ntruth: a positive match proves the searched text is present without proving that what it asserts holds,\nwhile a negative match over the same corrective text misfires, reporting a defect where the quotation is\ndoing its job."
+source-digest = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
+
+[[clause]]
+clause-id = "negtxt.5"
+corpus-id = "negtxt"
+source-path = ".aiqt/core/rules/quali-negative-text-assertion-is-scoped.md"
+start-line = 25
+end-line = 28
+canonical-text = "It is distinct from a guard that under-catches and must disclose the residual it misses,\nsince this guard over-catches with a false positive on the correction, and from whether a check runs at\nall or returns the same verdict in every environment, which govern a check's execution rather than the\nscope of what it asserts."
+source-digest = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"

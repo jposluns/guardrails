@@ -1,0 +1,28 @@
+---
+corpus-id: negtxt
+origin: pack
+family: aiqt
+tier: 10
+facet: QUALI
+secondary: [ACCUR]
+slug: negative-text-assertion-is-scoped
+---
+
+# A negative text assertion is scoped to where the string would be a defect
+
+A check that asserts a string is absent from an artefact is scoped to the context where the string's
+presence would be a defect, a particular line, block, function, or field, and is never run against the
+whole artefact. Documentation and code that correct an error routinely quote that error in order to warn
+against it, and a comment recording what a value used to be is the clearest form of this, so a
+whole-artefact absence check fires on the correction itself. An author who meets that false positive is
+trained to weaken the check or to delete the explanation that tripped it, and both leave the artefact
+worse. Assert the positive claim the check is really making, or scope the negative one to the place where
+the string's presence would genuinely be a defect.
+
+This is the negative counterpart of the caution that a text or wording match establishes presence, not
+truth: a positive match proves the searched text is present without proving that what it asserts holds,
+while a negative match over the same corrective text misfires, reporting a defect where the quotation is
+doing its job. It is distinct from a guard that under-catches and must disclose the residual it misses,
+since this guard over-catches with a false positive on the correction, and from whether a check runs at
+all or returns the same verdict in every environment, which govern a check's execution rather than the
+scope of what it asserts.

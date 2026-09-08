@@ -73,6 +73,7 @@
 .aiqt/core/rules/quali-lightweight-verifier-workers.md text eol=lf
 .aiqt/core/rules/quali-match-surrounding-code.md text eol=lf
 .aiqt/core/rules/quali-minimize-dependencies.md text eol=lf
+.aiqt/core/rules/quali-negative-text-assertion-is-scoped.md text eol=lf
 .aiqt/core/rules/quali-self-guardrail-from-error.md text eol=lf
 .aiqt/core/rules/quali-smallest-correct-change.md text eol=lf
 .aiqt/core/rules/quali-surface-counterproductive-instructions.md text eol=lf
@@ -224,6 +225,7 @@
 .claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md text eol=lf
 .claude/rules/aiqt/10-QUALI-match-surrounding-code.md text eol=lf
 .claude/rules/aiqt/10-QUALI-minimize-dependencies.md text eol=lf
+.claude/rules/aiqt/10-QUALI-negative-text-assertion-is-scoped.md text eol=lf
 .claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md text eol=lf
 .claude/rules/aiqt/10-QUALI-smallest-correct-change.md text eol=lf
 .claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md text eol=lf
@@ -350,6 +352,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-lightweight-verifier-workers.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-match-surrounding-code.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-minimize-dependencies.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-negative-text-assertion-is-scoped.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-self-guardrail-from-error.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-smallest-correct-change.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-surface-counterproductive-instructions.mdc text eol=lf

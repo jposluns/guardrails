@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "a710f7ca321cb1defead516310b64b55fe767075761fc301b07f4e4ab82890b0"
+tree-sha256 = "f2a36a2a71f06e7d0d263e2dc67c95cea1b29da9ea832881c1f04532bf7b691f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -26,13 +26,13 @@ sha256 = "99ce8ef683462539c3f27f96ca29a1f0ac890605906306f00de6f08dae2c9234"
 
 [[sources]]
 path = ".aiqt/core/applies.toml"
-bytes = 4386
-sha256 = "9c8acf00a1e70761cf29f8afa575da01cc5862c3f21217be4effda2aacbd04ed"
+bytes = 4411
+sha256 = "b3488170b681dcdee3cc69d1437b5d8d54562b9fec9e772a5f4f1e990507679f"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 262312
-sha256 = "6b2984796646f13b7dd386eec59551f3a70166818e8b77a38069571b74586556"
+bytes = 265061
+sha256 = "33cd316b9a7ba5e6f86addf06ca861283664d54d1f1271c366f8140192419625"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -76,8 +76,8 @@ sha256 = "908bd914305b92fb5055cb68e3af09661ea184e874426c67e42485f5a6dd3fd1"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 33339
-sha256 = "a9ac301bd19d633cb4ba5ca54cef52cadde3365b73c9838dbffa0bd7b5d68cd2"
+bytes = 33631
+sha256 = "2140166a418d5bc0026f4d1559f9e3b7944de6b708f830d303424a1b2e14cb3a"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -373,6 +373,11 @@ sha256 = "a5efa2d1c098f87119de27b85a57ba6dd72185a1f08acbbab4b8ff738363193c"
 path = ".aiqt/core/rules/quali-minimize-dependencies.md"
 bytes = 695
 sha256 = "52847a4bb4339269f413a5a857dc0d36206240a119c02fa43201c7682ae15fdb"
+
+[[sources]]
+path = ".aiqt/core/rules/quali-negative-text-assertion-is-scoped.md"
+bytes = 1628
+sha256 = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-self-guardrail-from-error.md"
@@ -756,8 +761,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 251161
-sha256 = "85bcf68f26be73be2c1c7f2d015e0b52c14ae538280c88344d098832396d2b38"
+bytes = 251373
+sha256 = "5b6cfb63c0bab3e1bb0de6956eb2626dc098e7c748e48e610c84979db09cb8a5"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -866,8 +871,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
-bytes = 11708
-sha256 = "1d1c1928f29f09d975114b2fda1dc9cf668834a7091d6be84bbba04580a603f6"
+bytes = 11844
+sha256 = "8e1dee0976db35ee1c95b48a65baf290dfca8a45ec6d9e5e89794b5474c6b477"
 
 [[sources]]
 path = ".claude/rules/README.md"
@@ -1113,6 +1118,11 @@ sha256 = "a5efa2d1c098f87119de27b85a57ba6dd72185a1f08acbbab4b8ff738363193c"
 path = ".claude/rules/aiqt/10-QUALI-minimize-dependencies.md"
 bytes = 695
 sha256 = "52847a4bb4339269f413a5a857dc0d36206240a119c02fa43201c7682ae15fdb"
+
+[[sources]]
+path = ".claude/rules/aiqt/10-QUALI-negative-text-assertion-is-scoped.md"
+bytes = 1628
+sha256 = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md"
@@ -1745,6 +1755,11 @@ bytes = 572
 sha256 = "2e962b4acc1a6c8c2d201bd64ec8e6a8742fc9c3907bd63039401a9f6d7d1872"
 
 [[sources]]
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-negative-text-assertion-is-scoped.mdc"
+bytes = 1521
+sha256 = "d888c1568c7cac9adc6cb8961c6f2b3c24a5c5f7c4bc579d9e2add3dfcf9923f"
+
+[[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-self-guardrail-from-error.mdc"
 bytes = 408
 sha256 = "e322a9173a09d49372470d230a56100adfa9160ec61077354ecc903bd16f16ef"
@@ -2136,18 +2151,18 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 34744
-sha256 = "cdf8dc97b7579ba1f5c588ead3a0e6cb5e3ab552d3977b77d8e39752c1b36ba8"
+bytes = 34987
+sha256 = "9adbdb0444cdf7a2a396d258522a44db5433ac744a3cac170240ccc9deabc58c"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 92964
-sha256 = "57db348a39d976a9daef0ab8405bf94cb8941852e113b4c011d9c4fb23965762"
+bytes = 94460
+sha256 = "9fe6346236c43fe7495de9a9fcadf8d4d4424e5855b7269aa52ac3d8223d42e8"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 92953
-sha256 = "fc843eeaf80725f6a6b410f1309b9e78d9ec09213582d0e8954843252dda52c9"
+bytes = 94449
+sha256 = "2d1032d4d680280ab312e29672ea9ff2f484c86df0cdd664a06560b9811c18d7"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2161,8 +2176,8 @@ sha256 = "440b3f6c3a2ef516bdf433bff591c15c7d56c639f627363de6f9cff7c2591781"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 92960
-sha256 = "07c7474e1d39bb171cae71adf77e7b71517dd99cb2bdb7b46f8052c9af227470"
+bytes = 94456
+sha256 = "c89f6ac05958d730c2b81160bfb246ea4215f2388d475b7cb477f5e571765123"
 
 [[sources]]
 path = "LICENSE"
@@ -2933,7 +2948,7 @@ sha256 = "19c856b071edac70fbcf21cab4ae52d9fdc41d7f51fe17eba53cf935d22f4f87"
 artifact-id = "claude:.claude/RULES-INDEX.md"
 path = ".claude/RULES-INDEX.md"
 kind = "file"
-sha256 = "1d1c1928f29f09d975114b2fda1dc9cf668834a7091d6be84bbba04580a603f6"
+sha256 = "8e1dee0976db35ee1c95b48a65baf290dfca8a45ec6d9e5e89794b5474c6b477"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/00-project-integrity.md"
@@ -3222,6 +3237,12 @@ artifact-id = "rules:.claude/rules/aiqt/10-QUALI-minimize-dependencies.md"
 path = ".claude/rules/aiqt/10-QUALI-minimize-dependencies.md"
 kind = "file"
 sha256 = "52847a4bb4339269f413a5a857dc0d36206240a119c02fa43201c7682ae15fdb"
+
+[[artifacts]]
+artifact-id = "rules:.claude/rules/aiqt/10-QUALI-negative-text-assertion-is-scoped.md"
+path = ".claude/rules/aiqt/10-QUALI-negative-text-assertion-is-scoped.md"
+kind = "file"
+sha256 = "1954f4bf0bcaea230ef2d63ac9bc8f4060929140d8280a1fb78786190f11d00b"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md"
@@ -3980,6 +4001,12 @@ kind = "file"
 sha256 = "2e962b4acc1a6c8c2d201bd64ec8e6a8742fc9c3907bd63039401a9f6d7d1872"
 
 [[artifacts]]
+artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-negative-text-assertion-is-scoped.mdc"
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-negative-text-assertion-is-scoped.mdc"
+kind = "file"
+sha256 = "d888c1568c7cac9adc6cb8961c6f2b3c24a5c5f7c4bc579d9e2add3dfcf9923f"
+
+[[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-self-guardrail-from-error.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-self-guardrail-from-error.mdc"
 kind = "file"
@@ -4451,13 +4478,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "57db348a39d976a9daef0ab8405bf94cb8941852e113b4c011d9c4fb23965762"
+sha256 = "9fe6346236c43fe7495de9a9fcadf8d4d4424e5855b7269aa52ac3d8223d42e8"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "fc843eeaf80725f6a6b410f1309b9e78d9ec09213582d0e8954843252dda52c9"
+sha256 = "2d1032d4d680280ab312e29672ea9ff2f484c86df0cdd664a06560b9811c18d7"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -4470,7 +4497,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "07c7474e1d39bb171cae71adf77e7b71517dd99cb2bdb7b46f8052c9af227470"
+sha256 = "c89f6ac05958d730c2b81160bfb246ea4215f2388d475b7cb477f5e571765123"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

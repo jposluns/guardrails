@@ -56,6 +56,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Isolate verifiers and judge by their result signal](rules/aiqt/10-QUALI-lightweight-verifier-workers.md)
 - [Match the surrounding code](rules/aiqt/10-QUALI-match-surrounding-code.md)
 - [Minimize external dependencies in favour of standard libraries](rules/aiqt/10-QUALI-minimize-dependencies.md)
+- [A negative text assertion is scoped to where the string would be a defect](rules/aiqt/10-QUALI-negative-text-assertion-is-scoped.md)
 - [Propose a guardrail when an error reveals a gap](rules/aiqt/10-QUALI-self-guardrail-from-error.md)
 - [Prefer the smallest correct change](rules/aiqt/10-QUALI-smallest-correct-change.md)
 - [Surface a counterproductive instruction before executing it](rules/aiqt/10-QUALI-surface-counterproductive-instructions.md)
