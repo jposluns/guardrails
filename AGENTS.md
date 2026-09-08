@@ -128,6 +128,17 @@ relies on it. A guard whose own logic is correct still answers about the wrong t
 it was handed cannot answer for the current one, so a parameter that cannot be derived or confirmed is a
 cannot-evaluate, not a clean pass.
 
+A document's own wording is itself such an input when a check verifies a fact by matching it. The wording
+establishes only that the text is present, never that what it asserts is true, so a suite of such presence or
+wording checks passing is not evidence the document is correct. Where a document asserts a fact about the
+system it governs, an owning account, a path, a schedule, or an interface, that fact is verified against an
+authority the document's author does not control, the live system or a second in-tree artefact whose purpose
+is to state that same fact, rather than against the document's own words. A membership question over a range
+or interval is likewise answered by a membership test, whether a value falls within the interval, not by
+matching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a
+literal-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one
+lying between its endpoints and written nowhere as a literal token.
+
 ## Measured and estimated figures stay separate
 
 A figure obtained by measurement or instrumentation is not summed, averaged, or otherwise blended with an
