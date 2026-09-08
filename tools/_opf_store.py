@@ -629,6 +629,44 @@ def _sorted_key_names(keys):
     return sorted(str(k) for k in keys)
 
 
+def _safe_display(value):
+    """Render a value for a FINDING MESSAGE (or a controlled-refusal message) without tripping CPython's
+    integer-string-conversion limit. tomllib parses a hexadecimal, octal, or binary integer literal
+    (0x.../0o.../0b...) into an arbitrarily-large Python int with NO digit limit (the limit applies to
+    base-10 only), so a value read from a parsed manifest, counters, or version file can be an oversized
+    int whose repr() (or the repr() of a container holding one) raises ValueError; a message that formats
+    such a value with {!r}/{}/str()/repr() would then crash with an uncontrolled ValueError. This returns
+    repr(value) for every value whose repr is well-formed, byte for byte, so a small or normal value
+    renders exactly as it did before; only for a value whose repr trips the limit does it return a
+    deterministic, bounded marker, so the message is produced rather than crashing (fail-closed;
+    guard-input-soundness). It is the shared message-rendering guard for the finding-message idiom across
+    the three OPF pass-A validators (store, schema, release). Like _sorted_key_names it is for MESSAGE
+    rendering ONLY; it is deliberately NOT used on the byte-stable coverage digest, where an oversized int
+    fails closed with a ReleaseError instead (a marker in the digest would change the bytes; spec 6.1)."""
+    try:
+        return repr(value)
+    except ValueError:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return "<oversized-int: {} bits>".format(value.bit_length())
+        return "<oversized-value>"
+
+
+def _safe_str(value):
+    """The str()-style companion of _safe_display, for a finding-message position that renders a value with
+    {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
+    (<version>)` label, for instance. Returns str(value) for every value whose str is well-formed, byte for
+    byte, so a normal string or int renders exactly as it did before; only a value whose str trips the
+    base-10 integer-string-conversion limit (an oversized non-decimal int parsed from TOML, or a container
+    holding one) returns the same bounded marker _safe_display uses (fail-closed). It is for MESSAGE
+    rendering only, never the byte-stable coverage digest."""
+    try:
+        return str(value)
+    except ValueError:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return "<oversized-int: {} bits>".format(value.bit_length())
+        return "<oversized-value>"
+
+
 def _is_item_collection(value):
     """True when value is a non-string, non-mapping iterable safe to iterate and materialize (a list,
     tuple, set, frozenset, range, or a dict keys/values view). A bare string/bytes is excluded (it must
@@ -779,7 +817,7 @@ def _validate_base(base, findings):
     if "spec_version" in base:
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
-            findings.append("[devprocess].spec_version {!r} is not a bare SemVer".format(sv))
+            findings.append("[devprocess].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
     # in a later rank/membership test.
@@ -923,7 +961,8 @@ def _validate_types(types, modules_enabled, findings):
             findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         ns = tbl.get("namespace")
         if not _valid_namespace(ns):
-            findings.append("{}.namespace {!r} is not a two-letter uppercase namespace".format(where, ns))
+            findings.append("{}.namespace {} is not a two-letter uppercase namespace".format(
+                where, _safe_display(ns)))
             continue
         # Section 8.1 taxonomy: the type name must be a known baseline, importer, or enabled-module type,
         # and it MUST carry that type's normative namespace (a known type with the wrong namespace is a
@@ -976,7 +1015,8 @@ def _validate_views(views, findings):
         if extra:
             findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if tbl.get("kind") not in VIEW_KINDS:
-            findings.append("{}.kind {!r} is not one of {}".format(where, tbl.get("kind"), list(VIEW_KINDS)))
+            findings.append("{}.kind {} is not one of {}".format(
+                where, _safe_display(tbl.get("kind")), list(VIEW_KINDS)))
         sources = tbl.get("sources")
         if not isinstance(sources, list) or not sources or not all(isinstance(s, str) and s for s in sources):
             findings.append("{}.sources must be a non-empty list of strings".format(where))
@@ -1003,8 +1043,8 @@ def _validate_deliverables(deliverables, findings):
         if extra:
             findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if tbl.get("kind") not in DELIVERABLE_KINDS:
-            findings.append("{}.kind {!r} is not one of {}".format(
-                where, tbl.get("kind"), list(DELIVERABLE_KINDS)))
+            findings.append("{}.kind {} is not one of {}".format(
+                where, _safe_display(tbl.get("kind")), list(DELIVERABLE_KINDS)))
         tgt = tbl.get("target")
         if not isinstance(tgt, str) or not tgt:
             findings.append("{}.target must be a non-empty string".format(where))
@@ -1023,8 +1063,8 @@ def _validate_archive(archive, findings):
     if extra:
         findings.append("[archive] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     if "period" in archive and archive.get("period") not in ARCHIVE_PERIODS:
-        findings.append("[archive].period {!r} is not one of {}".format(
-            archive.get("period"), list(ARCHIVE_PERIODS)))
+        findings.append("[archive].period {} is not one of {}".format(
+            _safe_display(archive.get("period")), list(ARCHIVE_PERIODS)))
 
 
 def _validate_unmanaged(unmanaged, findings):
@@ -1080,7 +1120,7 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
     else:
         ok, err = _match_base_compat(compat, spec_tuple)
         if err is not None:
-            findings.append("{}.base_compat {!r}: {}".format(where, compat, err))
+            findings.append("{}.base_compat {}: {}".format(where, _safe_display(compat), err))
         elif not ok:
             findings.append("{}.base_compat {!r} does not admit the base spec_version".format(where, compat))
 
@@ -1089,7 +1129,8 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
     floor = prof.get("posture_floor")
     if floor is not None:
         if floor not in POSTURES:
-            findings.append("{}.posture_floor {!r} is not one of {}".format(where, floor, list(POSTURES)))
+            findings.append("{}.posture_floor {} is not one of {}".format(
+                where, _safe_display(floor), list(POSTURES)))
         elif isinstance(base_posture, str) and base_posture in POSTURE_RANK \
                 and POSTURE_RANK[floor] < POSTURE_RANK[base_posture]:
             findings.append("{}.posture_floor {!r} weakens the base posture {!r}; a profile may only add "
@@ -1111,7 +1152,8 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
     ns = prof.get("extension_namespace")
     if ns is not None:
         if not _valid_extension_namespace(ns):
-            findings.append("{}.extension_namespace {!r} is not a valid x-<vendor> namespace".format(where, ns))
+            findings.append("{}.extension_namespace {} is not a valid x-<vendor> namespace".format(
+                where, _safe_display(ns)))
         elif ns not in registered_vendors:
             findings.append("{}.extension_namespace {!r} is not registered in [vendors].registered "
                             "(base-only record validation would reject the profile's records)".format(where, ns))

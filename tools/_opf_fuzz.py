@@ -137,16 +137,22 @@ def _deep_nest(n):
 # and nested position the harness visits, and it maps to a controlled ReleaseError only at the digest path
 # (elsewhere it is an ordinary dict).
 #
-# The OVERSIZED INT (FIX 1) is deliberately NOT in this general matrix. It maps cleanly to a controlled
-# refusal (ReleaseError / EmitError) only on the CANONICALIZATION / EMIT path, where _canonical / _render_
-# scalar do str(int); that is the class FIX 1 closes, and it is exercised by value at the digest-path
-# positions the round-8 by-value probes below cover (a worklog field value, a nested extension table, and
-# the span-digest path). Sprayed at an arbitrary CONTROL parameter (e.g. a status or version string) an
-# oversized int instead reaches a validator's FINDING-MESSAGE formatting ("{!r}".format(value)), which is a
-# SEPARATE and far broader int-repr crash class spanning the whole corpus, unreachable from parsed TOML and
-# NOT in this round's scope; injecting the oversized int only at digest-path positions keeps the harness's
-# assertions matched to the classes this round actually closes. That broader message-format residual is
-# disclosed in the report (disclose-guard-residuals) rather than silently asserted or concealed.
+# The OVERSIZED INT is deliberately NOT in this general matrix. It maps cleanly to a controlled refusal
+# (ReleaseError / EmitError) only on the CANONICALIZATION / EMIT path, where _canonical / _render_scalar do
+# str(int); that is the class FIX 1 closes, and it is exercised by value at the digest-path positions the
+# round-8 by-value probes below cover (a worklog field value, a nested extension table, and the span-digest
+# path). Injected at a FIELD of an otherwise-valid record/manifest/counters/version/worklog, an oversized
+# int instead reaches a validator's FINDING-MESSAGE formatting ("{!r}".format(value)): a distinct int-repr
+# crash class the round-8 note disclosed as a residual and wrongly believed unreachable from parsed TOML.
+# It IS reachable: CPython's integer-string-conversion limit is BASE-10 ONLY, so tomllib parses a
+# hexadecimal, octal, or binary literal (0x.../0o.../0b...) into an arbitrarily-large int with no digit
+# limit, which a finding message then str()/repr()s and crashes. The round-9 FIELD-INJECTION sweep below
+# closes that class by construction across the three modules: it injects an oversized int (built via a
+# non-decimal path, so it is a genuine arbitrarily-large int) into every finding-message-producing field
+# position and asserts each validator yields a structured outcome, never an uncontrolled ValueError. The
+# oversized int stays OUT of the general matrix here because a top-level spray bails at the outer structural
+# guard and never reaches a nested field render; the targeted field-injection sweep is what exercises those
+# sites. The general-matrix disclosure above and the round-9 sweep below together retire the residual.
 ADVERSARIAL = (
     ("none", lambda: None),
     ("empty-string", lambda: ""),
@@ -726,6 +732,142 @@ def run():
     probe("fix1-2-shallow-entry-digests-clean",
           isinstance(_opf_release.coverage_digest([_worklog_entry(1)]), str))
 
+    # --- round-9 FIELD-INJECTION sweep: the finding-message oversized-int crash class -------------------
+    # An oversized int built via a NON-DECIMAL path (int("f"*4000, 16) is a genuine 16000-bit int, exactly
+    # what tomllib yields from a hex literal); str()/repr() of it, or of a container holding it, raises
+    # ValueError under CPython's BASE-10 integer-string-conversion limit. Injected at a FIELD of an
+    # otherwise-valid record/manifest/counters/version/worklog, it reaches each validator's finding-message
+    # formatting. Every status/findings validator MUST render it into a structured outcome, NEVER raise
+    # (the pre-round-9 code raises an uncontrolled ValueError here); the digest/allocation OPERATIONS must
+    # refuse only via their documented controlled exception with a well-formed message. Each case is a clean
+    # fail-to-pass over the pre-fix code. The oversized int is fed BOTH bare and inside a container (a list
+    # and an inline table), because a container-valued field reaches the "wrong type, got {!r}" render whose
+    # repr recurses into the oversized int.
+    MSG_INT = int("f" * 4000, 16)              # a genuine 16000-bit int, as a hex TOML literal yields
+    MSG_LIST = [MSG_INT]                       # a container whose repr() recurses into the oversized int
+    MSG_TABLE = {"n": MSG_INT}                 # an inline-table carrying the oversized int
+
+    def _msg_ok(label, mode, thunk):
+        """A finding-MESSAGE validator (status/findings mode) must render an oversized parsed value into a
+        well-formed outcome without raising AT ALL. Judged on the returned status/findings VALUE and on the
+        raised exception TYPE, never by grepping output (the isolate-verifiers rule)."""
+        nonlocal cases, assertions
+        cases += 1
+        assertions += 1
+        try:
+            result = thunk()
+        except Exception as exc:  # noqa: BLE001  a status/findings validator must never raise on this input
+            fail("field-inject {}: raised {} ({}); a finding message must render an oversized parsed value, "
+                 "not crash".format(label, type(exc).__name__, exc))
+            return
+        if mode == "status":
+            if not (hasattr(result, "status") and result.status in STATUSES):
+                fail("field-inject {}: result is not a status object in {} (got {!r})".format(
+                    label, sorted(STATUSES), result))
+        else:  # findings: a list, or a (map, findings) tuple
+            findings_list = result[-1] if isinstance(result, tuple) else result
+            if not isinstance(findings_list, list):
+                fail("field-inject {}: findings-mode result is not a list (got {!r})".format(label, result))
+
+    def _rec(**over):
+        return _full_record(**over)
+
+    # STATUS / FINDINGS validators: an oversized parsed field value renders to a structured outcome.
+    status_findings_cases = [
+        # _opf_store.validate_manifest sub-tables (bare int AND container).
+        ("manifest.spec_version-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "devprocess": {**VALID_MANIFEST["devprocess"], "spec_version": MSG_INT}})),
+        ("manifest.spec_version-list", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "devprocess": {**VALID_MANIFEST["devprocess"], "spec_version": MSG_LIST}})),
+        ("manifest.types.namespace-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "types": {"backlog_item": {"namespace": MSG_INT}}})),
+        ("manifest.views.kind-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "views": {"v": {"kind": MSG_INT, "sources": ["worklog"], "target": "V.md"}}})),
+        ("manifest.deliverables.kind-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "deliverables": {"d": {"kind": MSG_INT, "target": "D.md"}}})),
+        ("manifest.archive.period-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "archive": {"period": MSG_INT}})),
+        # supported [profiles.aiqt] fields: base_compat, posture_floor, extension_namespace.
+        ("manifest.profile.base_compat-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "profiles": {"aiqt": {"version": "1.0.0", "base_compat": MSG_INT,
+             "posture_floor": "required", "extension_namespace": "x-aiqt"}}}, supported_profiles={"aiqt": [1]})),
+        ("manifest.profile.posture_floor-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "profiles": {"aiqt": {"version": "1.0.0", "base_compat": ">=1.0.0 <2.0.0",
+             "posture_floor": MSG_INT, "extension_namespace": "x-aiqt"}}}, supported_profiles={"aiqt": [1]})),
+        ("manifest.profile.extension_namespace-int", "status", lambda: _opf_store.validate_manifest(
+            {**VALID_MANIFEST, "profiles": {"aiqt": {"version": "1.0.0", "base_compat": ">=1.0.0 <2.0.0",
+             "posture_floor": "required", "extension_namespace": MSG_INT}}}, supported_profiles={"aiqt": [1]})),
+        # _opf_schema.validate_record: id, a link id, a block's scopes entry.
+        ("record.id-int", "status", lambda: _opf_schema.validate_record(
+            _rec(id=MSG_INT), expected_type="backlog_item")),
+        ("record.link.id-int", "status", lambda: _opf_schema.validate_record(
+            _rec(links=[{"rel": "relates", "id": MSG_INT}]), expected_type="backlog_item")),
+        ("record.block.scopes-int", "status", lambda: _opf_schema.validate_record(
+            _rec(type="block", status="active", scopes=[MSG_INT]), expected_type="block")),
+        # _opf_schema.validate_transition: actor_kind (rendered before the status parse).
+        ("transition.actor_kind-int", "status", lambda: _opf_schema.validate_transition(
+            type_name="backlog_item", from_status="open", to_status="active", actor_kind=MSG_INT)),
+        # _opf_schema.validate_counters / check_monotonic / check_ids_within_counters (findings mode).
+        ("counters.schema-int", "findings", lambda: _opf_schema.validate_counters(
+            {"schema": MSG_INT, "counters": {}})),
+        ("check_monotonic.regress-int", "findings", lambda: _opf_schema.check_monotonic(
+            {"BI": MSG_INT}, {"BI": 0})),
+        ("check_monotonic.badval-list", "findings", lambda: _opf_schema.check_monotonic(
+            {"BI": MSG_LIST}, {"BI": 0})),
+        ("within_counters.hv-list", "findings", lambda: _opf_schema.check_ids_within_counters(
+            ["BI-1"], {"BI": MSG_LIST})),
+        # _opf_release.validate_version / validate_worklog / release_cut (status mode).
+        ("version.release.version-int", "status", lambda: _opf_release.validate_version(
+            {"schema": 1, "release": [{"version": MSG_INT, "date": TS, "worklog_span": [],
+             "coverage_digest": "sha256:" + "0" * 64}]})),
+        ("version.schema-int", "status", lambda: _opf_release.validate_version({"schema": MSG_INT})),
+        ("worklog.schema-int", "status", lambda: _opf_release.validate_worklog({"schema": MSG_INT})),
+        ("worklog.entry.id-int", "status", lambda: _opf_release.validate_worklog(
+            {"schema": 1, "entry": [{"id": MSG_INT, "date": TS, "actor": {"kind": "maintainer"},
+             "kind": "added", "summary": "s"}]})),
+        ("version.span.entries-list", "status", lambda: _opf_release.validate_version(
+            {"schema": 1, "release": [{"version": "1.0.0", "date": TS, "worklog_span": [MSG_INT, 1],
+             "coverage_digest": "sha256:" + "0" * 64}]})),
+        ("release_cut.new_version-int", "status", lambda: _opf_release.release_cut(
+            dict(vok), dict(worklog), new_version=MSG_INT, date=TS)),
+    ]
+    for label, mode, thunk in status_findings_cases:
+        _msg_ok(label, mode, thunk)
+
+    # OPERATION paths: the digest and the id-allocation refuse only via their documented controlled
+    # exception, and building that exception's own message must not itself crash on the oversized value.
+    # coverage_digest over an entry whose id is an oversized int hits the malformed-id message (distinct
+    # from the FIX-1 canonicalization path); it must be a ReleaseError, never the pre-fix ValueError.
+    cases += 1
+    probe("field-inject digest.entry-id-int-ReleaseError",
+          _raises_release_error(lambda: _opf_release.coverage_digest(
+              [{"id": MSG_INT, "date": TS, "actor": {"kind": "maintainer"}, "kind": "added", "summary": "s"}])))
+    # next_id over a counters map whose value is a container holding an oversized int: the controlled
+    # ValueError refusal must carry a rendered message, not crash while building it. Pre-fix the repr of the
+    # container recurses into the oversized int and raises the CPython-limit ValueError instead; assert the
+    # raised message is the module's own and does not carry the limit text (an exception-object assertion,
+    # not output-grepping).
+    cases += 1
+    assertions += 1
+    try:
+        _opf_schema.next_id({"BI": MSG_LIST}, "BI")
+        fail("field-inject next_id.counter-list: returned without refusing an unreadable counters map")
+    except ValueError as exc:
+        if "integer string conversion" in str(exc) or "Exceeds the limit" in str(exc):
+            fail("field-inject next_id.counter-list: the refusal message itself crashed on the oversized "
+                 "int ({})".format(exc))
+    except Exception as exc:  # noqa: BLE001
+        fail("field-inject next_id.counter-list: raised {} ({}); expected a controlled ValueError".format(
+            type(exc).__name__, exc))
+
+    # END-TO-END from tomllib: prove the oversized int flows from a real hex TOML literal through the
+    # validator to a structured outcome (the two confirmed round-9 sites, driven from parsed bytes).
+    _hx = "0x" + "f" * 4000
+    _msg_ok("e2e.manifest-hex-spec_version", "status", lambda: _opf_store.validate_manifest(
+        tomllib.loads('[devprocess]\nstandard = "devprocess"\nspec_version = ' + _hx + "\n")))
+    _msg_ok("e2e.check_monotonic-hex-highwater", "findings", lambda: _opf_schema.check_monotonic(
+        tomllib.loads("BI = " + _hx + "\n"), {"BI": 0}))
+
     # --- coverage-instrumentation assertions (round 7): every production site was actually reached -------
     sys.settrace(None)      # stop tracing before the verdict; self_test's finally is the backstop
     skn_sites = _skn_call_sites()
@@ -754,9 +896,10 @@ def run():
             print("  ... and {} more".format(len(failures) - 60))
         return 1
     print("OPF-FUZZ SELF-TEST: PASS ({} adversarial cases over {} public functions; {} assertions: no "
-          "uncontrolled crash, well-formed outcome, no fail-open, and the by-value oversized-int / "
-          "deep-nested shapes fail closed at the digest path; coverage: {}/{} _sorted_key_names call "
-          "sites reached)".format(
+          "uncontrolled crash, well-formed outcome, no fail-open, the by-value oversized-int / deep-nested "
+          "shapes fail closed at the digest path, and an oversized parsed int (hex/octal/binary) renders to "
+          "a structured finding at every finding-message site rather than crashing; coverage: {}/{} "
+          "_sorted_key_names call sites reached)".format(
               cases, len(targets), assertions, skn_reached, len(skn_sites)))
     return 0
 

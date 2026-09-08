@@ -82,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
-    _str_token_set, _is_str_token_control, _is_item_collection, _sorted_key_names,
+    _str_token_set, _is_str_token_control, _is_item_collection, _sorted_key_names, _safe_display,
 )
 
 # The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
@@ -364,7 +364,8 @@ def _validate_links(record, findings):
                 where, link.get("rel"), list(LINK_RELS)))
         shape = _valid_id_shape(link.get("id"))
         if shape is None:
-            findings.append("{}.id {!r} is not a well-formed <NS>-<n> id".format(where, link.get("id")))
+            findings.append("{}.id {} is not a well-formed <NS>-<n> id".format(
+                where, _safe_display(link.get("id"))))
         elif shape[0] not in RECORD_NAMESPACES:
             # A well-formed id whose namespace maps to no record type (e.g. ZZ-1) cannot point at any
             # record: reconcile against the section 8.1 taxonomy, not just the <NS>-<n> shape (spec 8.1/8.2).
@@ -472,7 +473,8 @@ def _validate_type_specific(record, spec, findings):
             for s in scopes:
                 sshape = _valid_id_shape(s)
                 if sshape is None:
-                    findings.append("block.scopes entry {!r} is not a well-formed <NS>-<n> id".format(s))
+                    findings.append("block.scopes entry {} is not a well-formed <NS>-<n> id".format(
+                        _safe_display(s)))
                 elif sshape[0] not in RECORD_NAMESPACES:
                     # A scoped id must name a real record type in the section 8.1 taxonomy (spec 8.1/8.2);
                     # a namespace bound to no type (e.g. ZZ) scopes nothing (M3).
@@ -662,7 +664,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     rid = record.get("id")
     shape = _valid_id_shape(rid)
     if shape is None:
-        findings.append("id {!r} is not a well-formed <NS>-<n> id (spec 8.2)".format(rid))
+        findings.append("id {} is not a well-formed <NS>-<n> id (spec 8.2)".format(_safe_display(rid)))
     elif shape[0] != spec.namespace:
         findings.append("id namespace {!r} is not the {!r} namespace bound to type {!r} "
                         "(one-to-one binding, spec 8.2)".format(shape[0], spec.namespace, rtype))
@@ -774,7 +776,7 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
     # is never reached with a non-str, and fail closed with a clean finding (guard-input-soundness; the
     # ACTOR_KINDS tuple compares element-wise and so does not raise, but PROPOSER_KINDS is a frozenset).
     if not isinstance(actor_kind, str) or actor_kind not in ACTOR_KINDS:
-        findings.append("actor kind {!r} is not one of {}".format(actor_kind, list(ACTOR_KINDS)))
+        findings.append("actor kind {} is not one of {}".format(_safe_display(actor_kind), list(ACTOR_KINDS)))
 
     fparsed, ferr = parse_status(from_status, spec)
     tparsed, terr = parse_status(to_status, spec)
@@ -882,7 +884,7 @@ def validate_counters(data, known_namespaces=None):
         elif data.get("schema") != SUPPORTED_SCHEMA:
             findings.append("counters.toml schema {} is not the supported schema version {} (fail-closed; "
                             "do not parse under v{} assumptions)".format(
-                                data.get("schema"), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
     counters = data.get("counters")
     if counters is None:
         # An absent [counters] table is a finding when namespaces are known to require a high-water each
@@ -949,8 +951,8 @@ def _validated_counter_map(high, where):
             raise ValueError("{}: namespace {!r} is bound to no record type in the section 8.1 taxonomy "
                              "(spec 8.1/8.2)".format(where, ns))
         if type(val) is not int or val < 0:
-            raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {!r} "
-                             "(a bool is not a high-water; spec 8.2)".format(where, ns, val))
+            raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {} "
+                             "(a bool is not a high-water; spec 8.2)".format(where, ns, _safe_display(val)))
 
 
 def next_id(high, ns, known_complete=False):
@@ -1006,7 +1008,7 @@ def check_monotonic(old_high, new_high):
                                 "taxonomy (spec 8.1/8.2)".format(label, ns))
             if type(val) is not int or val < 0:
                 findings.append("{} counters high-water for {!r} must be a genuine non-negative int, got "
-                                "{!r} (a bool is not a high-water; spec 8.2)".format(label, ns, val))
+                                "{} (a bool is not a high-water; spec 8.2)".format(label, ns, _safe_display(val)))
     if findings:
         return findings                  # a corrupt map is not compared for monotonicity (fail-closed)
     for ns, old in old_high.items():
@@ -1014,7 +1016,7 @@ def check_monotonic(old_high, new_high):
             findings.append("namespace {!r} vanished from counters (would allow id reuse; spec 8.2)".format(ns))
         elif new_high[ns] < old:
             findings.append("namespace {!r} high-water regressed {} to {} (counters never reset; "
-                            "spec 8.2)".format(ns, old, new_high[ns]))
+                            "spec 8.2)".format(ns, _safe_display(old), _safe_display(new_high[ns])))
     return findings
 
 
@@ -1047,12 +1049,12 @@ def check_ids_within_counters(ids, high):
         # silently accept True/1.5, or reject against a negative). type(hv) is not int rejects bool, whose
         # type is bool not int (spec 8.2).
         if type(hv) is not int or hv < 0:
-            findings.append("namespace {!r} high-water {!r} is not a non-negative integer (spec 8.2)".format(
-                ns, hv))
+            findings.append("namespace {!r} high-water {} is not a non-negative integer (spec 8.2)".format(
+                ns, _safe_display(hv)))
             continue
         if n > hv:
             findings.append("id {!r} exceeds the {} high-water {} (unreserved id; spec 8.2)".format(
-                rid, ns, hv))
+                rid, ns, _safe_display(hv)))
     return findings
 
 

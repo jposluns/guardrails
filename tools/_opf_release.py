@@ -96,7 +96,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # U1 supplies the outcome model; U2 supplies the reduced-worklog record validator, the id-shape helper,
 # and the RFC 3339 UTC timestamp validator. Reuse rather than re-declare (single source of truth).
-from _opf_store import VALID, INVALID, CANNOT_EVALUATE, _is_item_collection, _sorted_key_names  # noqa: E402
+from _opf_store import (  # noqa: E402
+    VALID, INVALID, CANNOT_EVALUATE, _is_item_collection, _sorted_key_names, _safe_display, _safe_str,
+)
 from _opf_schema import (  # noqa: E402
     validate_record, _valid_id_shape, _valid_timestamp, SUPPORTED_SCHEMA,
 )
@@ -253,7 +255,8 @@ def _parse_span(span, findings, where):
         return False
     a, b = _wl_num(span[0]), _wl_num(span[1])
     if a is None or b is None:
-        findings.append("{}: worklog_span entries must be well-formed WL-<n> ids, got {!r}".format(where, span))
+        findings.append("{}: worklog_span entries must be well-formed WL-<n> ids, got {}".format(
+            where, _safe_display(span)))
         return False
     if a > b:
         findings.append("{}: worklog_span start {} is after end {} (spec 6.1)".format(where, span[0], span[1]))
@@ -285,13 +288,13 @@ def _canonical(value, _depth=0):
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
-        # FIX 1 (defence-in-depth for a currently-unreachable-from-TOML input): CPython raises ValueError
-        # on str() of an int whose decimal length exceeds the interpreter's integer-string-conversion
-        # limit (4300 digits by default). Such an int cannot arrive via tomllib (it rejects an over-limit
-        # int literal at parse), so this is unreachable from parsed TOML; the guard is here so the
-        # fail-closed posture never rests on tomllib's limit. An oversized int maps to the module's
-        # controlled ReleaseError, never an uncontrolled ValueError. A normal-magnitude int spells
-        # byte-identically, so the digest is preserved for every real input.
+        # FIX 1: CPython raises ValueError on str() of an int whose BASE-10 length exceeds the
+        # interpreter's integer-string-conversion limit (4300 digits by default). The limit applies to
+        # base-10 only, so tomllib parses a hexadecimal, octal, or binary integer literal (0x.../0o.../
+        # 0b...) into an arbitrarily-large int with NO digit limit: such a value IS reachable from parsed
+        # TOML (a worklog field carrying an oversized non-decimal int), and this guard maps it to the
+        # module's controlled ReleaseError, never an uncontrolled ValueError. A normal-magnitude int
+        # spells byte-identically, so the digest is preserved for every real input.
         try:
             return str(value)
         except ValueError as exc:
@@ -344,7 +347,8 @@ def coverage_digest(entries):
             raise ReleaseError("a worklog entry is not a table")
         n = _wl_num(entry.get("id"))
         if n is None:
-            raise ReleaseError("a worklog entry lacks a well-formed WL-<n> id: {!r}".format(entry.get("id")))
+            raise ReleaseError("a worklog entry lacks a well-formed WL-<n> id: {}".format(
+                _safe_display(entry.get("id"))))
         keyed.append((n, entry))
     keyed.sort(key=lambda t: t[0])
     parts = [COVERAGE_SCHEME]
@@ -369,7 +373,8 @@ def _entries_by_id(worklog_data):
             continue
         n = _wl_num(entry.get("id"))
         if n is None:
-            findings.append("worklog entry #{} lacks a well-formed WL-<n> id: {!r}".format(i + 1, entry.get("id")))
+            findings.append("worklog entry #{} lacks a well-formed WL-<n> id: {}".format(
+                i + 1, _safe_display(entry.get("id"))))
             continue
         if n in by_id:
             findings.append("duplicate worklog id WL-{}: ids are never reused (spec 8.2)".format(n))
@@ -417,7 +422,7 @@ def _tile_releases(releases, findings):
     each row must already carry a `worklog_span` value."""
     cursor = 0                            # the highest WL-number tiled so far
     for i, row in enumerate(releases):
-        where = "release #{} ({})".format(i + 1, row.get("version", "?"))
+        where = "release #{} ({})".format(i + 1, _safe_str(row.get("version", "?")))
         parsed = _parse_span(row.get("worklog_span"), findings, where)
         if parsed is False:
             continue                      # malformed span already reported; skip the tiling step for it
@@ -452,9 +457,9 @@ def _releases_or_finding(version_data, findings):
         return None
     schema = version_data.get("schema")
     if schema is not None and (type(schema) is not int or schema != SUPPORTED_SCHEMA):
-        findings.append("cannot evaluate: version.toml schema {!r} is not the supported schema version {} "
+        findings.append("cannot evaluate: version.toml schema {} is not the supported schema version {} "
                         "(fail-closed; do not parse under v{} assumptions; M3)".format(
-                            schema, SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+                            _safe_display(schema), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
         return None
     releases = version_data.get("release", [])
     if not isinstance(releases, list):
@@ -516,7 +521,7 @@ def validate_version(data):
         elif data.get("schema") != SUPPORTED_SCHEMA:
             findings.append("version.toml schema {} is not the supported schema version {} (fail-closed; "
                             "do not parse under v{} assumptions)".format(
-                                data.get("schema"), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     releases = data.get("release", [])
     if not isinstance(releases, list):
@@ -542,7 +547,8 @@ def validate_version(data):
         version = row.get("version")
         key = parse_semver(version) if "version" in row else None
         if "version" in row and key is None:
-            findings.append("{}: version {!r} is not a valid SemVer string (spec 6.1)".format(where, version))
+            findings.append("{}: version {} is not a valid SemVer string (spec 6.1)".format(
+                where, _safe_display(version)))
         elif key is not None:
             if version in ledger_versions:
                 findings.append("{}: version {!r} is not unique in the ledger (spec 6.1)".format(where, version))
@@ -730,7 +736,7 @@ def validate_worklog(data, registered_vendors=frozenset(), registered_kinds=None
         elif data.get("schema") != SUPPORTED_SCHEMA:
             findings.append("worklog.toml schema {} is not the supported schema version {} (fail-closed; "
                             "do not parse under v{} assumptions)".format(
-                                data.get("schema"), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     entries = data.get("entry", [])
     if not isinstance(entries, list):
@@ -782,7 +788,8 @@ def _verify_append_only(prior_releases, candidate_releases, findings):
         if not same:
             findings.append("release #{} ({}) was rewritten; a pre-existing release row is immutable and "
                             "may only be appended after (spec 6.1)".format(
-                                i + 1, prior_row.get("version", "?") if isinstance(prior_row, dict) else "?"))
+                                i + 1, _safe_str(prior_row.get("version", "?")) if isinstance(prior_row, dict)
+                                else "?"))
 
 
 def release_cut(version_data, worklog_data, new_version, date,
@@ -839,7 +846,8 @@ def release_cut(version_data, worklog_data, new_version, date,
     findings = []
     new_key = parse_semver(new_version)
     if new_key is None:
-        return CutResult(INVALID, ["new version {!r} is not a valid SemVer string (spec 6.1)".format(new_version)])
+        return CutResult(INVALID, ["new version {} is not a valid SemVer string (spec 6.1)".format(
+            _safe_display(new_version))])
     ledger_versions = [r.get("version") for r in vv.releases if isinstance(r, dict)]
     if new_version in ledger_versions:
         findings.append("new version {!r} is already in the ledger (spec 6.1)".format(new_version))
@@ -966,7 +974,7 @@ def check_frozen_coverage(version_data, entries_by_id):
     for i, row in enumerate(releases):
         if not isinstance(row, dict):
             continue
-        where = "release #{} ({})".format(i + 1, row.get("version", "?"))
+        where = "release #{} ({})".format(i + 1, _safe_str(row.get("version", "?")))
         span = _parse_span(row.get("worklog_span"), findings, where)
         if span is False:
             continue
