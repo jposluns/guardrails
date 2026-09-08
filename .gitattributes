@@ -71,6 +71,7 @@
 .aiqt/core/rules/quali-findings-are-fixed-not-argued.md text eol=lf
 .aiqt/core/rules/quali-goal-fidelity-across-trajectory.md text eol=lf
 .aiqt/core/rules/quali-high-assurance-verification.md text eol=lf
+.aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md text eol=lf
 .aiqt/core/rules/quali-lightweight-verifier-workers.md text eol=lf
 .aiqt/core/rules/quali-match-surrounding-code.md text eol=lf
 .aiqt/core/rules/quali-minimize-dependencies.md text eol=lf
@@ -223,6 +224,7 @@
 .claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md text eol=lf
 .claude/rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md text eol=lf
 .claude/rules/aiqt/10-QUALI-high-assurance-verification.md text eol=lf
+.claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md text eol=lf
 .claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md text eol=lf
 .claude/rules/aiqt/10-QUALI-match-surrounding-code.md text eol=lf
 .claude/rules/aiqt/10-QUALI-minimize-dependencies.md text eol=lf
@@ -350,6 +352,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-findings-are-fixed-not-argued.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-goal-fidelity-across-trajectory.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-high-assurance-verification.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-lightweight-verifier-workers.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-match-surrounding-code.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-minimize-dependencies.mdc text eol=lf
