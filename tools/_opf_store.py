@@ -656,14 +656,24 @@ def validate_manifest(data, supported_profiles=None):
                                   ["supported_profiles must be a mapping of profile name to a list of "
                                    "supported major versions; an unparseable profile-enforcement control "
                                    "fails closed and never silently disables enforcement (spec 9.1)"])
+    # MATERIALIZE each majors value to a concrete list ONCE at this boundary. A value may be a one-shot
+    # iterator (a generator or iter([...])): it is a valid item collection but is EXHAUSTED by the
+    # element-validation below, and the enforcement loop further down consumes the value a SECOND time
+    # (set(...) at ~line 697). An un-materialized iterator therefore reads as EMPTY at enforcement, silently
+    # dropping a supported profile to "unevaluated" and letting a weakening profile validate VALID: a
+    # fail-open (spec 9.1, guard-input-soundness). Capturing it here and using the SAME list for both
+    # validation and enforcement consumes each value exactly once, so enforcement still fires.
+    materialized_profiles = {}
     for _pname, _majors in supported_profiles.items():
-        if not isinstance(_pname, str) or not (
-                _is_item_collection(_majors)
-                and all(isinstance(m, int) and not isinstance(m, bool) for m in _majors)):
+        _mats = list(_majors) if _is_item_collection(_majors) else None
+        if not isinstance(_pname, str) or _mats is None or not all(
+                isinstance(m, int) and not isinstance(m, bool) for m in _mats):
             return ManifestValidation(CANNOT_EVALUATE,
                                       ["supported_profiles entry {!r} is malformed: each profile name "
                                        "(a string) maps to a list of integer major versions (fail-closed; "
                                        "spec 9.1)".format(_pname)])
+        materialized_profiles[_pname] = _mats
+    supported_profiles = materialized_profiles
     if not isinstance(data, dict):
         return ManifestValidation(CANNOT_EVALUATE, ["manifest is not a table"])
     base = data.get("devprocess")

@@ -460,7 +460,8 @@ def validate_version(data):
     findings = []
     extra = set(data) - VERSION_TOP_KEYS
     if extra:
-        findings.append("version.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("version.toml unknown top-level key(s): {}".format(
+            ", ".join(sorted(str(k) for k in extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("version.toml schema must be an integer")
@@ -673,7 +674,8 @@ def validate_worklog(data, registered_vendors=frozenset(), registered_kinds=None
     findings = []
     extra = set(data) - WORKLOG_TOP_KEYS
     if extra:
-        findings.append("worklog.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("worklog.toml unknown top-level key(s): {}".format(
+            ", ".join(sorted(str(k) for k in extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("worklog.toml schema must be an integer")

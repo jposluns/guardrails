@@ -41,21 +41,26 @@ CONTROLLED = (ReleaseError, StoreError, ValueError)
 
 TS = "2026-08-12T09:14:02Z"
 
-# The adversarial matrix fed to each control/record parameter (the task's eight shapes, plus a bare
-# string standing in where a COLLECTION is expected and a falsey collection): None; an empty string; a
-# non-str scalar as int / float / bool; a list; a dict; a list-of-list (UNHASHABLE elements, the set()
-# crash vector); a bare string that would splat into characters; and a falsey collection.
+# The adversarial matrix fed to each control/record parameter. Each entry is (label, factory): the factory
+# is a ZERO-ARG callable producing a FRESH value per case, so a single-use value (the one-shot iterator) is
+# never shared and exhausted across cases. Twelve shapes: None; an empty string; a non-str scalar as
+# int / float / bool; a list; a dict; a list-of-list (UNHASHABLE elements, the set() crash vector); a bare
+# string that would splat into characters; a falsey collection; a ONE-SHOT ITERATOR (exhausted if consumed
+# twice, the supported_profiles double-consume vector); and a MIXED-TYPE-KEY dict (the sorted() over
+# heterogeneous keys crash vector).
 ADVERSARIAL = (
-    ("none", None),
-    ("empty-string", ""),
-    ("int", 7),
-    ("float", 1.5),
-    ("bool", True),
-    ("list", [1, 2]),
-    ("dict", {"a": 1}),
-    ("list-of-list", [[1]]),        # unhashable elements: the set()/frozenset() crash vector
-    ("bare-string", "WL-1"),        # a bare string where a collection is expected (the splat vector)
-    ("falsey-collection", []),      # a falsey collection (must not read as "absent / no restriction")
+    ("none", lambda: None),
+    ("empty-string", lambda: ""),
+    ("int", lambda: 7),
+    ("float", lambda: 1.5),
+    ("bool", lambda: True),
+    ("list", lambda: [1, 2]),
+    ("dict", lambda: {"a": 1}),
+    ("list-of-list", lambda: [[1]]),        # unhashable elements: the set()/frozenset() crash vector
+    ("bare-string", lambda: "WL-1"),        # a bare string where a collection is expected (the splat vector)
+    ("falsey-collection", lambda: []),      # a falsey collection (must not read as "absent / no restriction")
+    ("one-shot-iterator", lambda: iter([1])),          # a single-use iterator (double-consume vector)
+    ("mixed-type-key-dict", lambda: {1: "a", "b": 2}),  # heterogeneous keys (the sorted() crash vector)
 )
 
 
@@ -125,10 +130,11 @@ def run():
     # --- the enumerated targets: (name, fn, mode, benign kwargs, control params to fuzz) -------------
     # mode: "status" (returns an object with .status; must NEVER raise), "findings" (returns a findings
     # list, or a (map, findings) tuple; must NEVER raise), "op" (an operation that may refuse only via a
-    # CONTROLLED exception). Every control/record parameter that flows into a set()/frozenset(),
-    # a membership test, or a dict key lookup is listed; a single lookup KEY that is not a set-membership
-    # control (e.g. high_water's ns) is not fuzzed here and is guarded at the security-relevant allocator
-    # (next_id, whose ns IS fuzzed).
+    # CONTROLLED exception). EVERY control/record parameter is listed, including the enumeration-gap
+    # parameters round 4 missed: validate_transition's pre_proposal_state and reason (the rejection-path
+    # controls), parse_status's spec (the type-spec object), high_water's ns (a dict-key lookup), and
+    # next_id's known_complete (the bool proof flag), each of which must be no-crash and (where it gates
+    # enforcement) no-fail-open under the matrix.
     targets = [
         # _opf_store
         ("validate_manifest", _opf_store.validate_manifest, "status",
@@ -141,19 +147,21 @@ def run():
          {"record": _full_record(), "expected_type": "backlog_item", "specs": None,
           "registered_vendors": frozenset(), "registered_kinds": None},
          ["record", "expected_type", "specs", "registered_vendors", "registered_kinds"]),
+        # A REJECTION baseline (assistant proposed done, maintainer rejects back to the pre-proposal state),
+        # so pre_proposal_state and reason are LIVE-READ and their adversarial matrix is meaningful.
         ("validate_transition", _opf_schema.validate_transition, "status",
-         {"type_name": "block", "from_status": "active/proposed", "to_status": "active",
-          "actor_kind": "maintainer", "specs": None},
-         ["type_name", "from_status", "to_status", "actor_kind", "specs"]),
+         {"type_name": "backlog_item", "from_status": "done/proposed", "to_status": "active",
+          "actor_kind": "maintainer", "pre_proposal_state": "active", "reason": "rejected", "specs": None},
+         ["type_name", "from_status", "to_status", "actor_kind", "pre_proposal_state", "reason", "specs"]),
         ("validate_counters", _opf_schema.validate_counters, "findings",
          {"data": {"counters": {"BI": 5}}, "known_namespaces": None},
          ["data", "known_namespaces"]),
         ("parse_status", _opf_schema.parse_status, "op",
-         {"status": "open", "spec": _opf_schema.BASELINE_SPECS["backlog_item"]}, ["status"]),
+         {"status": "open", "spec": _opf_schema.BASELINE_SPECS["backlog_item"]}, ["status", "spec"]),
         ("high_water", _opf_schema.high_water, "op",
-         {"high": {"BI": 5}, "ns": "BI"}, ["high"]),
+         {"high": {"BI": 5}, "ns": "BI"}, ["high", "ns"]),
         ("next_id", _opf_schema.next_id, "op",
-         {"high": {"BI": 5}, "ns": "BI", "known_complete": True}, ["high", "ns"]),
+         {"high": {"BI": 5}, "ns": "BI", "known_complete": True}, ["high", "ns", "known_complete"]),
         ("check_monotonic", _opf_schema.check_monotonic, "findings",
          {"old_high": {"BI": 1}, "new_high": {"BI": 2}}, ["old_high", "new_high"]),
         ("check_ids_within_counters", _opf_schema.check_ids_within_counters, "findings",
@@ -198,10 +206,10 @@ def run():
     # --- the general no-crash / well-formed-outcome sweep --------------------------------------------
     for name, fn, mode, benign, controls in targets:
         for control in controls:
-            for alabel, aval in ADVERSARIAL:
+            for alabel, afactory in ADVERSARIAL:
                 cases += 1
                 kwargs = dict(benign)
-                kwargs[control] = aval
+                kwargs[control] = afactory()   # a FRESH value per case (a one-shot iterator is never shared)
                 where = "{}[{}={}]".format(name, control, alabel)
                 assertions += 1                    # (a) no-uncontrolled-crash assertion
                 try:
@@ -253,6 +261,12 @@ def run():
     for mal in ("aiqt", ["aiqt"], {"aiqt": "1"}, {"aiqt": [[1]]}, {7: [1]}, {"aiqt": True}, [], "", 7):
         m = _opf_store.validate_manifest(WEAKENING_MANIFEST, supported_profiles=mal)
         probe("supported_profiles-malformed({!r})-not-VALID".format(mal), m.status != VALID)
+    # A ONE-SHOT ITERATOR majors value must be MATERIALIZED once and still ENFORCE the weakening (never
+    # silently dropped to "unevaluated" by a second consumption): it must catch the weakening exactly as a
+    # concrete list [1] does, INVALID, never VALID (the round-4 fail-open regression, spec 9.1).
+    for factory in (lambda: iter([1]), lambda: (x for x in [1])):
+        m = _opf_store.validate_manifest(WEAKENING_MANIFEST, supported_profiles={"aiqt": factory()})
+        probe("supported_profiles-oneshot-iterator-weakening-INVALID", m.status == INVALID)
 
     # FO3 registered_kinds: a malformed control must never admit a kind the built-in set rejects, whether
     # by splat (kind "p" against set("perf")) or otherwise.
@@ -304,6 +318,30 @@ def run():
     for mal in ("", 7, [1, 2], "backlog_item"):
         probe("specs-malformed({!r})-not-VALID".format(mal),
               _opf_schema.validate_record(_full_record(), specs=mal).status != VALID)
+
+    # FO9 next_id.known_complete: known_complete is a genuine-bool PROOF flag, not a truthiness test. Its
+    # empty/false/omitted baseline REFUSES allocating from a namespace with no recorded high-water (an
+    # absent counter reading as 0 could reuse an existing id, spec 8.2). A non-bool (e.g. the truthy string
+    # "false", or 1) must never be MORE permissive than that baseline: it must refuse, not allocate.
+    def _refuses(callable_):
+        try:
+            callable_()
+        except ValueError:
+            return True                      # the documented fail-closed refusal
+        except Exception:                    # noqa: BLE001  any other outcome is not the refusal we want
+            return False
+        return False                         # a non-exception return means it ALLOCATED (fail-open)
+
+    probe("next_id-known_complete-omitted-refuses-absent",
+          _refuses(lambda: _opf_schema.next_id({}, "BI")))
+    probe("next_id-known_complete-False-refuses-absent",
+          _refuses(lambda: _opf_schema.next_id({}, "BI", known_complete=False)))
+    for mal in ("false", "true", "False", 1, 0, 1.5, [1], {"x": 1}, [], "", None):
+        probe("next_id-known_complete-nonbool({!r})-refuses".format(mal),
+              _refuses(lambda mal=mal: _opf_schema.next_id({}, "BI", known_complete=mal)))
+    # genuine True still allocates: the fix closes the fail-open without breaking the enforcement path.
+    probe("next_id-known_complete-True-still-allocates",
+          _opf_schema.next_id({}, "BI", known_complete=True) == ("BI-1", 1))
 
     # --- verdict -------------------------------------------------------------------------------------
     if failures:

@@ -271,6 +271,11 @@ def parse_status(status, spec):
     and "proposed" is legal only on a state the type marks proposable."""
     if not isinstance(status, str) or not status:
         return None, "status must be a non-empty string"
+    if not isinstance(spec, TypeSpec):
+        # `spec` is the type's grammar object; a missing or non-TypeSpec spec (e.g. None) would crash on
+        # `spec.states` below. Fail closed with a clean message rather than an AttributeError
+        # (guard-input-soundness; spec 8.4).
+        return None, "status cannot be parsed: no valid type spec supplied (fail-closed)"
     parts = status.split("/")
     if len(parts) == 1:
         state, qual = parts[0], None
@@ -637,7 +642,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     spec = specs.get(rtype)
     if spec is None:
         return RecordValidation(INVALID, ["{!r} is not a supported record type (baseline: {})".format(
-            rtype, sorted(specs))], rtype=rtype)
+            rtype, sorted(specs, key=repr))], rtype=rtype)
 
     rid = record.get("id")
     shape = _valid_id_shape(rid)
@@ -854,7 +859,8 @@ def validate_counters(data, known_namespaces=None):
         known_namespaces = frozenset()
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
-        findings.append("counters.toml unknown top-level key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("counters.toml unknown top-level key(s): {}".format(
+            ", ".join(sorted(str(k) for k in extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("counters.toml schema must be an integer")
@@ -907,6 +913,11 @@ def high_water(high, ns):
     high-water 0 (which could let an existing id be reused; guard-input-soundness, spec 8.2)."""
     if not isinstance(high, dict):
         raise ValueError("counters map is not a table (spec 8.2)")
+    if not isinstance(ns, str):
+        # ns is the namespace key; a non-string (e.g. an unhashable list) would crash on the dict lookup
+        # below. next_id already guards ns, but guard it here too so the shipped helper is robust
+        # standalone, failing closed rather than a TypeError (guard-input-soundness; spec 8.2).
+        raise ValueError("namespace must be a string (spec 8.2)")
     return high.get(ns, 0)
 
 
@@ -945,6 +956,13 @@ def next_id(high, ns, known_complete=False):
         # way, never a TypeError (guard-input-soundness; spec 8.1/8.2).
         raise ValueError("cannot allocate an id for namespace {!r}: it is bound to no record type in the "
                          "section 8.1 taxonomy (spec 8.1/8.2)".format(ns))
+    if not isinstance(known_complete, bool):
+        # known_complete is a genuine-bool PROOF flag, not a truthiness test: a non-bool (e.g. the truthy
+        # string "false", or 1) must NOT be read as True and allow allocation from a counters map that is
+        # not actually known complete, which could reuse an existing id. Fail closed (spec 8.2,
+        # guard-input-soundness).
+        raise ValueError("cannot allocate an id: known_complete must be a genuine bool proof flag, got "
+                         "{!r}; a non-bool must not be read as True (spec 8.2)".format(known_complete))
     _validated_counter_map(high, "next_id")
     if ns not in high and not known_complete:
         raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
