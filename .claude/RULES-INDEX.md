@@ -8,6 +8,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Claims about the work rest on observation](rules/aiqt/10-ACCUR-claims-rest-on-observation.md)
 - [A completeness claim enumerates its set](rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md)
 - [Corroborate external claims](rules/aiqt/10-ACCUR-corroborate-external-claims.md)
+- [A count carries its predicate](rules/aiqt/10-ACCUR-count-carries-its-predicate.md)
 - [Disclose a guard's residual coverage](rules/aiqt/10-ACCUR-disclose-guard-residuals.md)
 - [Evidence-grounded completion](rules/aiqt/10-ACCUR-evidence-grounded-completion.md)
 - [A guard is only as good as its input](rules/aiqt/10-ACCUR-guard-input-soundness.md)

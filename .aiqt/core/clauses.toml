@@ -134,6 +134,33 @@ canonical-text = "The weaker the source, the more corroboration a load-bearing c
 source-digest = "14ecc6a4fa419a3b0b8223c9442b0f9c5ab7c32adeaa4e4a2b1fec1cf26b1fb9"
 
 [[clause]]
+clause-id = "cntprd.1"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 13
+end-line = 14
+canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+
+[[clause]]
+clause-id = "cntprd.2"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 14
+end-line = 16
+canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+
+[[clause]]
+clause-id = "cntprd.3"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 18
+end-line = 24
+canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and, where a reconcilable basis is available and its retention permitted, to\nthat basis, an authoritative snapshot or revision of the source or the identifiers the reading returned\nwhere that set is complete, so a later statement reconciles against the recorded figure rather than\nsilently re-deriving a different one; where no such basis is available, the statement records that the\nfigure cannot be reconciled and is re-measured under the same predicate rather than carried forward as\nthough it were."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+
+[[clause]]
 clause-id = "dscres.1"
 corpus-id = "dscres"
 source-path = ".aiqt/core/rules/accur-disclose-guard-residuals.md"
