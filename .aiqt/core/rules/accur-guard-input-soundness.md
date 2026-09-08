@@ -44,3 +44,13 @@ or interval is likewise answered by a membership test, whether a value falls wit
 matching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a
 literal-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one
 lying between its endpoints and written nowhere as a literal token.
+
+A negative check that asserts a string is absent is only as sound as its input in the same way: run against
+a whole artefact it cannot tell an operative occurrence from the same string quoted in a correction that
+warns against it, or recorded as what a value used to be, so it fires on the correction and trains its
+author to weaken the check or delete the explanation. It is therefore scoped to the narrowest locus where
+the string's presence would be a defect; a whole-artefact scope is right only where every occurrence is a
+defect, such as a leaked secret, an invalid byte, or a forbidden character with no legitimate quotation.
+Where the string legitimately appears elsewhere, the invariant is asserted against the parsed or semantic
+state, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact
+string scan.
