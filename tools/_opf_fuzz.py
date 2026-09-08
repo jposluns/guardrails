@@ -5,7 +5,11 @@ This harness is the MECHANICAL PROOF that the "membership / type-guard" defect c
 construction across _opf_store, _opf_schema, and _opf_release, not one site at a time. Three prior
 rounds of manual class-scans each declared the class closed and were each disproved by a new site; this
 leg ends that whack-a-mole by ENUMERATING every public validator/operation that takes a control or record
-input and feeding a MATRIX of adversarial values to each such parameter, asserting for every combination:
+input and feeding a MATRIX of adversarial values to each such parameter, BOTH as the whole top-level
+parameter AND (the round-6 nested-injection sweep) injected into a NESTED position inside an otherwise-valid
+record, manifest, or worklog entry, so a malformed shape reaches the nested table validators (actor / links
+/ refs / the manifest sub-tables) and the coverage-digest recursion rather than bailing at the outer
+structural guard. It asserts for every combination:
 
   (a) NO UNCONTROLLED exception is raised. A validator/finding-check must not raise AT ALL; an operation
       may only refuse through its OWN documented fail-closed exception (ReleaseError / StoreError /
@@ -233,6 +237,106 @@ def run():
                     if not isinstance(findings, list):
                         fail("{}: findings-mode result is not a list (got {!r})".format(where, result))
                 # mode == "op": any non-exception return is a well-formed outcome.
+
+    # --- the NESTED-injection sweep (round 6: the round-5 structural blind spot) ----------------------
+    # The general sweep above feeds each adversarial value ONLY as the WHOLE top-level parameter, so a
+    # flat malformed dict bails at the outer structural check (`isinstance(data, dict)` /
+    # `isinstance(links, list)`) and NEVER reaches the NESTED table validators (_validate_actor /
+    # _validate_links / _validate_refs and the manifest sub-table validators), nor _canonical's recursion
+    # into a registered-extension table. That is exactly why round 5 missed the nested mixed-type-key
+    # sorted() crash. This sweep injects each adversarial shape into a NESTED position inside an
+    # OTHERWISE-VALID base object, so the mixed-type-key dict (and the unhashable list-of-list) reach the
+    # nested sorted()/set() sites and the digest recursion. Same contract as above: (a) no uncontrolled
+    # crash (a status/findings function must never raise; an op may refuse ONLY via a CONTROLLED
+    # exception), and (b) a well-formed outcome. This block CRASHES on the un-round-6 code (a nested
+    # mixed-type-key dict reaches a bare sorted() over heterogeneous keys) and passes after the PART-A fix.
+    def _mrec(**over):
+        return {"record": _full_record(**over), "expected_type": "backlog_item"}
+
+    def _mman(**over):
+        return {"data": {**VALID_MANIFEST, **over}, "supported_profiles": None}
+
+    nested_targets = [
+        # validate_record's nested table validators. `links`/`refs` are injected both as the WHOLE array
+        # value AND as a single ELEMENT inside an otherwise-valid one-element array: the element form is
+        # the one that reaches _validate_links/_validate_refs's per-entry sorted(extra) over a mixed-key
+        # link/ref table (the whole-value form hits the outer array type-guard, which is also exercised).
+        ("validate_record.actor", _opf_schema.validate_record, "status", lambda a: _mrec(actor=a)),
+        ("validate_record.links", _opf_schema.validate_record, "status", lambda a: _mrec(links=a)),
+        ("validate_record.links[0]", _opf_schema.validate_record, "status", lambda a: _mrec(links=[a])),
+        ("validate_record.refs", _opf_schema.validate_record, "status", lambda a: _mrec(refs=a)),
+        ("validate_record.refs[0]", _opf_schema.validate_record, "status", lambda a: _mrec(refs=[a])),
+        # validate_manifest's sub-table validators, each reached because VALID_MANIFEST is identifiably a
+        # devprocess store (its [devprocess] carries the standard token), so every sub-validator runs. A
+        # mixed-type-key dict injected as a sub-table reaches that validator's sorted(extra) over the
+        # table's surplus keys.
+        ("validate_manifest.store", _opf_store.validate_manifest, "status", lambda a: _mman(store=a)),
+        ("validate_manifest.modules", _opf_store.validate_manifest, "status", lambda a: _mman(modules=a)),
+        ("validate_manifest.vendors", _opf_store.validate_manifest, "status", lambda a: _mman(vendors=a)),
+        ("validate_manifest.types", _opf_store.validate_manifest, "status", lambda a: _mman(types=a)),
+        ("validate_manifest.providers", _opf_store.validate_manifest, "status",
+         lambda a: _mman(providers=a)),
+        ("validate_manifest.views", _opf_store.validate_manifest, "status", lambda a: _mman(views=a)),
+        ("validate_manifest.deliverables", _opf_store.validate_manifest, "status",
+         lambda a: _mman(deliverables=a)),
+        ("validate_manifest.archive", _opf_store.validate_manifest, "status", lambda a: _mman(archive=a)),
+        ("validate_manifest.unmanaged", _opf_store.validate_manifest, "status",
+         lambda a: _mman(unmanaged=a)),
+        ("validate_manifest.profiles.p", _opf_store.validate_manifest, "status",
+         lambda a: _mman(profiles={"p": a})),
+        # The DIGEST path: a registered-extension table carrying heterogeneous keys, nested inside an
+        # otherwise-valid worklog entry, must not crash _canonical's recursion; the digest operations may
+        # refuse ONLY via ReleaseError. This is the coverage_digest / compute_span_digest reach that the
+        # top-level sweep could not exercise (the top-level entries list is not itself the extension table).
+        ("coverage_digest.x-ext", _opf_release.coverage_digest, "op",
+         lambda a: {"entries": [_worklog_entry(1, **{"x-aiqt": a})]}),
+        ("compute_span_digest.x-ext", _opf_release.compute_span_digest, "op",
+         lambda a: {"entries_by_id": {1: _worklog_entry(1, **{"x-aiqt": a})}, "span": (1, 1)}),
+    ]
+    for name, fn, mode, builder in nested_targets:
+        for alabel, afactory in ADVERSARIAL:
+            cases += 1
+            kwargs = builder(afactory())
+            where = "nested {}[{}]".format(name, alabel)
+            assertions += 1                    # (a) no-uncontrolled-crash assertion
+            try:
+                result = fn(**kwargs)
+            except CONTROLLED as exc:
+                if mode != "op":
+                    fail("{}: a {} raised {} ({}); a {}-mode function must never raise".format(
+                        where, mode, type(exc).__name__, exc, mode))
+                continue                       # a controlled refusal by an operation: fail-closed, OK
+            except Exception as exc:           # noqa: BLE001  any other type is an uncontrolled crash
+                fail("{}: UNCONTROLLED {} raised ({}) -- a nested membership/type-guard crash".format(
+                    where, type(exc).__name__, exc))
+                continue
+            assertions += 1                    # (b) well-formed-outcome assertion
+            if mode == "status":
+                if not (hasattr(result, "status") and result.status in STATUSES):
+                    fail("{}: status-mode result is not a status object in {} (got {!r})".format(
+                        where, sorted(STATUSES), result))
+            elif mode == "findings":
+                findings = result[-1] if isinstance(result, tuple) else result
+                if not isinstance(findings, list):
+                    fail("{}: findings-mode result is not a list (got {!r})".format(where, result))
+            # mode == "op": any non-exception return is a well-formed outcome.
+
+    # A dedicated [devprocess] case: _validate_base's sorted(extra) is reached only when the base table
+    # KEEPS its standard discovery token (a bare replacement of [devprocess] loses the token and short-
+    # circuits to CANNOT-EVALUATE before _validate_base runs). So inject a NON-STRING surplus key into an
+    # otherwise-valid base: on the un-round-6 code its sorted(extra) over {1, str} crashes; after the fix
+    # it is a clean status object (the surplus key becomes an ordinary unknown-key finding).
+    cases += 1
+    assertions += 1
+    _dp_mixed = {**VALID_MANIFEST["devprocess"], 1: "surplus"}
+    try:
+        _r = _opf_store.validate_manifest({**VALID_MANIFEST, "devprocess": _dp_mixed})
+        if not (hasattr(_r, "status") and _r.status in STATUSES):
+            fail("nested validate_manifest.devprocess[mixed-extra-key]: not a status object (got {!r})"
+                 .format(_r))
+    except Exception as exc:  # noqa: BLE001
+        fail("nested validate_manifest.devprocess[mixed-extra-key]: UNCONTROLLED {} raised ({}) -- a "
+             "nested membership/type-guard crash".format(type(exc).__name__, exc))
 
     # --- the targeted FAIL-OPEN probes (assertion c) -------------------------------------------------
     # Each probe pairs a malformed control against the empty/omitted baseline and asserts the malformed

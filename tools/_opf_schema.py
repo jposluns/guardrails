@@ -82,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
-    _str_token_set, _is_str_token_control, _is_item_collection,
+    _str_token_set, _is_str_token_control, _is_item_collection, _sorted_key_names,
 )
 
 # The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
@@ -315,7 +315,7 @@ def _validate_actor(record, findings):
         return None
     extra = set(actor) - ACTOR_KEYS
     if extra:
-        findings.append("actor unknown key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("actor unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     kind = actor.get("kind")
     if not isinstance(kind, str):
         # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the tuple
@@ -346,7 +346,7 @@ def _validate_links(record, findings):
             continue
         extra = set(link) - LINK_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if not isinstance(link.get("rel"), str):
             # A non-string rel (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
@@ -380,7 +380,7 @@ def _validate_refs(record, findings):
             continue
         extra = set(ref) - REF_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if not isinstance(ref.get("kind"), str):
             # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
@@ -860,7 +860,7 @@ def validate_counters(data, known_namespaces=None):
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(
-            ", ".join(sorted(str(k) for k in extra))))
+            ", ".join(_sorted_key_names(extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("counters.toml schema must be an integer")

@@ -96,7 +96,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # U1 supplies the outcome model; U2 supplies the reduced-worklog record validator, the id-shape helper,
 # and the RFC 3339 UTC timestamp validator. Reuse rather than re-declare (single source of truth).
-from _opf_store import VALID, INVALID, CANNOT_EVALUATE, _is_item_collection  # noqa: E402
+from _opf_store import VALID, INVALID, CANNOT_EVALUATE, _is_item_collection, _sorted_key_names  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, _valid_id_shape, _valid_timestamp, SUPPORTED_SCHEMA,
 )
@@ -275,6 +275,17 @@ def _canonical(value):
     if isinstance(value, list):
         return "[" + ",".join(_canonical(v) for v in value) + "]"
     if isinstance(value, dict):
+        # Keys are ordered so the digest is invariant to table key-order. A parsed-TOML table always
+        # has str keys, so this orders cleanly; a hand-constructed table with a non-str key (the only
+        # way a non-str key can arrive, since tomllib keys are always strings) cannot be ordered against
+        # a str key and would crash sorted() on a type mismatch, so it fails CLOSED with a ReleaseError.
+        # We REJECT rather than str-coerce the key: coercing would silently change the digest bytes for a
+        # non-str key, whereas rejecting keeps the digest BYTE-IDENTICAL for every real all-str-key table
+        # and turns the uncanonicalizable table into a controlled refusal (guard-input-soundness; M2).
+        for k in value:
+            if not isinstance(k, str):
+                raise ReleaseError("cannot canonicalize a table with a non-string key {!r} (type {}); a "
+                                   "worklog entry table has string keys only".format(k, type(k).__name__))
         return "{" + ",".join(
             json.dumps(k, ensure_ascii=False) + ":" + _canonical(v)
             for k, v in sorted(value.items())) + "}"
@@ -461,7 +472,7 @@ def validate_version(data):
     extra = set(data) - VERSION_TOP_KEYS
     if extra:
         findings.append("version.toml unknown top-level key(s): {}".format(
-            ", ".join(sorted(str(k) for k in extra))))
+            ", ".join(_sorted_key_names(extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("version.toml schema must be an integer")
@@ -486,7 +497,7 @@ def validate_version(data):
             continue
         row_extra = set(row) - RELEASE_KEYS
         if row_extra:
-            findings.append("{}: unknown key(s): {}".format(where, ", ".join(sorted(row_extra))))
+            findings.append("{}: unknown key(s): {}".format(where, ", ".join(_sorted_key_names(row_extra))))
         for req in ("version", "date", "worklog_span", "coverage_digest"):
             if req not in row:
                 findings.append("{}: missing required field: {}".format(where, req))
@@ -581,7 +592,7 @@ def _validate_summaries(summaries, ledger_versions, findings):
             continue
         row_extra = set(row) - SUMMARY_KEYS
         if row_extra:
-            findings.append("{}: unknown key(s): {}".format(where, ", ".join(sorted(row_extra))))
+            findings.append("{}: unknown key(s): {}".format(where, ", ".join(_sorted_key_names(row_extra))))
 
         covers = row.get("covers")
         kind = None
@@ -675,7 +686,7 @@ def validate_worklog(data, registered_vendors=frozenset(), registered_kinds=None
     extra = set(data) - WORKLOG_TOP_KEYS
     if extra:
         findings.append("worklog.toml unknown top-level key(s): {}".format(
-            ", ".join(sorted(str(k) for k in extra))))
+            ", ".join(_sorted_key_names(extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("worklog.toml schema must be an integer")

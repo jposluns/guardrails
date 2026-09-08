@@ -616,6 +616,19 @@ def _str_token_set(value):
     return frozenset(value) if _is_str_token_control(value) else frozenset()
 
 
+def _sorted_key_names(keys):
+    """Order an iterable of keys for a FINDING MESSAGE as a sorted list of strings. Every element is
+    str-coerced BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-constructed table
+    with mixed int/str keys) can neither crash sorted() on an int-vs-str type mismatch nor break the
+    later ", ".join, which is always over strings. This is the shared total-sort for the unknown-key
+    finding-message idiom (formerly a bare sorted over the surplus-key set) across the three OPF pass-A
+    validators (schema, store, release). It
+    is for ERROR-MESSAGE ORDERING ONLY; it is deliberately NOT used on the byte-stable coverage digest,
+    where a non-str key fails closed with a ReleaseError instead (str-coercing a digest key would change
+    the digest, so the digest path rejects rather than coerces)."""
+    return sorted(str(k) for k in keys)
+
+
 def _is_item_collection(value):
     """True when value is a non-string, non-mapping iterable safe to iterate and materialize (a list,
     tuple, set, frozenset, range, or a dict keys/values view). A bare string/bytes is excluded (it must
@@ -732,7 +745,7 @@ def validate_manifest(data, supported_profiles=None):
 def _validate_top_level(data, findings):
     extra = set(data) - TOP_LEVEL_TABLES
     if extra:
-        findings.append("unknown top-level table(s): {}".format(", ".join(sorted(extra))))
+        findings.append("unknown top-level table(s): {}".format(", ".join(_sorted_key_names(extra))))
 
 
 def _check_enum(table, key, allowed, where, findings):
@@ -757,7 +770,7 @@ def _validate_base(base, findings):
     """Validate the [devprocess] base table; returns the parsed spec_version tuple or None."""
     extra = set(base) - DEVPROCESS_KEYS
     if extra:
-        findings.append("[devprocess] unknown key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("[devprocess] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     missing = [k for k in DEVPROCESS_KEYS if k not in base]
     if missing:
         findings.append("[devprocess] missing required key(s): {}".format(", ".join(sorted(missing))))
@@ -784,7 +797,7 @@ def _validate_store_section(store, findings):
         return
     extra = set(store) - STORE_KEYS
     if extra:
-        findings.append("[store] unknown key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("[store] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     if "sync_target" in store and not isinstance(store.get("sync_target"), str):
         findings.append("[store].sync_target must be a string (empty under the in-repo default)")
 
@@ -800,7 +813,7 @@ def _validate_modules(modules, findings):
     extra = set(modules) - set(KNOWN_MODULES)
     if extra:
         findings.append("[modules] unknown module(s): {} (known: {})".format(
-            ", ".join(sorted(extra)), ", ".join(KNOWN_MODULES)))
+            ", ".join(_sorted_key_names(extra)), ", ".join(KNOWN_MODULES)))
     for name, value in modules.items():
         if name not in KNOWN_MODULES:
             continue
@@ -821,7 +834,7 @@ def _validate_vendors(vendors, findings):
         return registered
     extra = set(vendors) - VENDORS_KEYS
     if extra:
-        findings.append("[vendors] unknown key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("[vendors] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     reg = vendors.get("registered")
     if reg is None:
         return registered
@@ -907,7 +920,7 @@ def _validate_types(types, modules_enabled, findings):
             continue
         extra = set(tbl) - TYPE_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         ns = tbl.get("namespace")
         if not _valid_namespace(ns):
             findings.append("{}.namespace {!r} is not a two-letter uppercase namespace".format(where, ns))
@@ -939,7 +952,7 @@ def _validate_providers(providers, findings):
             continue
         extra = set(tbl) - PROVIDER_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if not isinstance(tbl.get("handler"), str) or not tbl.get("handler"):
             findings.append("{}.handler must be a non-empty string".format(where))
         roles = tbl.get("roles")
@@ -961,7 +974,7 @@ def _validate_views(views, findings):
             continue
         extra = set(tbl) - VIEW_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if tbl.get("kind") not in VIEW_KINDS:
             findings.append("{}.kind {!r} is not one of {}".format(where, tbl.get("kind"), list(VIEW_KINDS)))
         sources = tbl.get("sources")
@@ -988,7 +1001,7 @@ def _validate_deliverables(deliverables, findings):
             continue
         extra = set(tbl) - DELIVERABLE_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
         if tbl.get("kind") not in DELIVERABLE_KINDS:
             findings.append("{}.kind {!r} is not one of {}".format(
                 where, tbl.get("kind"), list(DELIVERABLE_KINDS)))
@@ -1008,7 +1021,7 @@ def _validate_archive(archive, findings):
         return
     extra = set(archive) - ARCHIVE_KEYS
     if extra:
-        findings.append("[archive] unknown key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("[archive] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     if "period" in archive and archive.get("period") not in ARCHIVE_PERIODS:
         findings.append("[archive].period {!r} is not one of {}".format(
             archive.get("period"), list(ARCHIVE_PERIODS)))
@@ -1022,7 +1035,7 @@ def _validate_unmanaged(unmanaged, findings):
         return
     extra = set(unmanaged) - UNMANAGED_KEYS
     if extra:
-        findings.append("[unmanaged] unknown key(s): {}".format(", ".join(sorted(extra))))
+        findings.append("[unmanaged] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     paths = unmanaged.get("paths")
     if paths is not None and (not isinstance(paths, list) or not all(isinstance(p, str) for p in paths)):
         findings.append("[unmanaged].paths must be a list of strings")
@@ -1055,7 +1068,7 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
         return
     extra = set(prof) - PROFILE_KEYS - PROFILE_OPTIONAL_EXTRA
     if extra:
-        findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
+        findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
 
     # base_compat vs the base spec_version: an out-of-range instance is base-incompatible, fail-closed.
     compat = prof.get("base_compat")
