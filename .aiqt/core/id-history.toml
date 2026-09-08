@@ -71,22 +71,6 @@ id = "corrob.2"
 born-release = "1.1.0"
 
 [[born]]
-id = "cntprd"
-born-release = "1.1.0"
-
-[[born]]
-id = "cntprd.1"
-born-release = "1.1.0"
-
-[[born]]
-id = "cntprd.2"
-born-release = "1.1.0"
-
-[[born]]
-id = "cntprd.3"
-born-release = "1.1.0"
-
-[[born]]
 id = "dscres"
 born-release = "1.1.0"
 
@@ -2760,4 +2744,20 @@ born-release = "1.1.0"
 
 [[born]]
 id = "grdinp.11"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntprd"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntprd.1"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntprd.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "cntprd.3"
 born-release = "1.1.0"
