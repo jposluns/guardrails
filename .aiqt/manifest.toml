@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "82932625dea29c62f99ba7bf83ec1250836a9ebc33763ebc917e1e11d6ab7f26"
+tree-sha256 = "bccedf6d769cbf5272c0d7bd65091904bff50b000c14421c6300860c83710420"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -26,13 +26,13 @@ sha256 = "99ce8ef683462539c3f27f96ca29a1f0ac890605906306f00de6f08dae2c9234"
 
 [[sources]]
 path = ".aiqt/core/applies.toml"
-bytes = 4450
-sha256 = "99f5f16b8ce95a635f877d1d2228ed930eb20a63b1f41f20d226ccd3f5d4cb5f"
+bytes = 4467
+sha256 = "9e8706ba3f24dc78a2e97b7169212060dee33da880fff7b2b3066b57887b8d21"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 266717
-sha256 = "1294fdad656da0ffe3793761d286aa06ae3ff8b8cb715161c55e3ab02f8dd2d7"
+bytes = 267339
+sha256 = "4e891e76518e9877c108dd86262ad542b2d446f8c0d894b524131883e1da85b1"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -76,8 +76,8 @@ sha256 = "908bd914305b92fb5055cb68e3af09661ea184e874426c67e42485f5a6dd3fd1"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 33876
-sha256 = "52d824f7d6a822581e85015d5f959f1cb5b7bfef1c3f1e55cd316548bbeb22b6"
+bytes = 33925
+sha256 = "319cfdc28f0503cadf6a2916ffb2aae6c1427546fa06629736fd4da6cc56c33b"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -366,8 +366,8 @@ sha256 = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
-bytes = 1619
-sha256 = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+bytes = 1938
+sha256 = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-lightweight-verifier-workers.md"
@@ -1116,8 +1116,8 @@ sha256 = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
-bytes = 1619
-sha256 = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+bytes = 1938
+sha256 = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
@@ -1756,8 +1756,8 @@ sha256 = "b83fc8fb2e04501a60bd5ff5983f98128028245bfb54f0f68d0dd3acb7ec6a1d"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc"
-bytes = 1513
-sha256 = "c03fed8a88b70e8c34c6fa0f70d9638334934d146832559a103644ed6ebf4bc7"
+bytes = 1832
+sha256 = "24f0023729ba111d758defe7086ebd3b78f7173c2eda9f22a4cf31430b5fe951"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-lightweight-verifier-workers.mdc"
@@ -2171,13 +2171,13 @@ sha256 = "1cb26a2e5940677fe74e110c71ef1cc8beffde6c9b642d67869de81887aa67a4"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 97103
-sha256 = "4dc483f4e52a615135ab5f88b67f3ebf877ff01859e358bcc809a286880cf226"
+bytes = 97422
+sha256 = "5169d8ba3094abaee56dc1558c0cb86d176c739c38a478df6914f55dc6ee2fc4"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 97092
-sha256 = "69bccf1e43c843da5d9e817a26d96ec9f325867c58ff70cc283a0dcc4fb0d9c0"
+bytes = 97411
+sha256 = "391bb4ef77626082a3aa95eb8d6ac848d572f18910f553e7247c2b8759208f3d"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2191,8 +2191,8 @@ sha256 = "440b3f6c3a2ef516bdf433bff591c15c7d56c639f627363de6f9cff7c2591781"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 97099
-sha256 = "2dcb01b5db69cd5b336f3627c5e2a910a5a3276bc04c1f9d9766dac51169a52a"
+bytes = 97418
+sha256 = "fff5edf8c9a02dce1faeb353ab28f17f6b22922315685f51101205d17b5a1d74"
 
 [[sources]]
 path = "LICENSE"
@@ -3245,7 +3245,7 @@ sha256 = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
 path = ".claude/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
 kind = "file"
-sha256 = "f76af5d52116072f3ecd01835d22730aad03000ab04af0e283c51acdd10b3366"
+sha256 = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
@@ -4013,7 +4013,7 @@ sha256 = "b83fc8fb2e04501a60bd5ff5983f98128028245bfb54f0f68d0dd3acb7ec6a1d"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.mdc"
 kind = "file"
-sha256 = "c03fed8a88b70e8c34c6fa0f70d9638334934d146832559a103644ed6ebf4bc7"
+sha256 = "24f0023729ba111d758defe7086ebd3b78f7173c2eda9f22a4cf31430b5fe951"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-lightweight-verifier-workers.mdc"
@@ -4505,13 +4505,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "4dc483f4e52a615135ab5f88b67f3ebf877ff01859e358bcc809a286880cf226"
+sha256 = "5169d8ba3094abaee56dc1558c0cb86d176c739c38a478df6914f55dc6ee2fc4"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "69bccf1e43c843da5d9e817a26d96ec9f325867c58ff70cc283a0dcc4fb0d9c0"
+sha256 = "391bb4ef77626082a3aa95eb8d6ac848d572f18910f553e7247c2b8759208f3d"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -4524,7 +4524,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "2dcb01b5db69cd5b336f3627c5e2a910a5a3276bc04c1f9d9766dac51169a52a"
+sha256 = "fff5edf8c9a02dce1faeb353ab28f17f6b22922315685f51101205d17b5a1d74"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
