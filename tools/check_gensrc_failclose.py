@@ -1427,7 +1427,8 @@ def self_test_main():
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
         #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
         #     template git invocations are CAPTURED during a REAL _materialize_git run over a small fixture
-        #     repo by wrapping the module's subprocess.run, then every init/add/commit/gc template call is
+        #     repo by wrapping the module's subprocess.run, then every template git command (init, add,
+        #     commit, ls-files, gc) is
         #     asserted to carry all three flags. The discriminating flip is removing
         #     _TEMPLATE_GIT_NO_MAINTENANCE from the git() helper: the captured argv would then lack the flags
         #     and this assertion would fail.
@@ -1456,17 +1457,22 @@ def self_test_main():
                 i += 2
             return vals, (cmd[i] if i < len(cmd) else None)
 
-        template_calls = {}  # subcommand -> its -c values (first template call of each subcommand)
+        # Validate EVERY captured template git call (not just the first per subcommand), and reconcile the
+        # observed subcommand set against the exact expected multiset, so the "every template git command"
+        # claim is substantiated rather than asserted: a flag withheld on ls-files (the readback), on any
+        # single subcommand, or on a non-first occurrence is caught (codex/gemini round-2 findings).
+        template_calls = []  # (subcommand, its -c values) for EVERY template git call captured
         for cmd in captured:
             if len(cmd) >= 3 and cmd[0] == "git" and cmd[1] == "-C" and cmd[2] == template_str:
                 cvals, sub = _top_c_values(cmd)
-                template_calls.setdefault(sub, cvals)
-        for sub in ("init", "add", "commit", "gc"):
-            cvals = template_calls.get(sub)
-            if cvals is None:
-                failures.append("F-367 no-maintenance flags: expected a template `git {}` call, none "
-                                "captured".format(sub))
-                continue
+                template_calls.append((sub, cvals))
+        expected_subs = {"init", "add", "commit", "ls-files", "gc"}
+        seen_subs = {sub for sub, _ in template_calls}
+        missing_subs = expected_subs - seen_subs
+        if missing_subs:
+            failures.append("F-367 no-maintenance flags: expected a template `git` call for each of {}, "
+                            "none captured for {}".format(sorted(expected_subs), sorted(missing_subs)))
+        for sub, cvals in template_calls:
             for flag in ("gc.auto=0", "gc.autoDetach=false", "maintenance.auto=false"):
                 if flag not in cvals:
                     failures.append("F-367 no-maintenance flags: template `git {}` call is missing -c {} "
