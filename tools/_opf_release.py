@@ -182,19 +182,25 @@ def parse_semver(value):
     m = _SEMVER_RE.match(value)
     if not m:
         return None
-    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    pre = m.group(4)
-    if pre is None:
-        return (major, minor, patch, 1, ())
-    ids = []
-    for ident in pre.split("."):
-        if ident.isdigit():
-            # A numeric identifier (no leading zero, enforced by the regex) compares as an int, and
-            # numeric identifiers always have lower precedence than alphanumeric ones (0 before 1 below).
-            ids.append((0, int(ident)))
-        else:
-            ids.append((1, ident))
-    return (major, minor, patch, 0, tuple(ids))
+    try:
+        major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))  # opf-fuzz:int-guard
+        pre = m.group(4)
+        if pre is None:
+            return (major, minor, patch, 1, ())
+        ids = []
+        for ident in pre.split("."):
+            if ident.isdigit():
+                # A numeric identifier (no leading zero, enforced by the regex) compares as an int, and
+                # numeric identifiers always have lower precedence than alphanumeric ones (0 before 1 below).
+                ids.append((0, int(ident)))  # opf-fuzz:int-guard (numeric prerelease identifier)
+            else:
+                ids.append((1, ident))
+        return (major, minor, patch, 0, tuple(ids))
+    except ValueError:
+        # An oversized numeric core or numeric prerelease identifier (CPython refuses int() on a string of
+        # more than 4300 digits) is a MALFORMED SemVer, not an uncontrolled crash: return None like any
+        # non-SemVer input (guard-input-soundness; mirrors check_clauses.split_clause_id's ordinal guard).
+        return None
 
 
 # --- WL id helpers -----------------------------------------------------------------------------------
@@ -446,7 +452,11 @@ def released_end(releases):
     end = 0
     for row in releases:
         if not isinstance(row, dict):
-            continue
+            # A non-table release row is an unreadable ledger element, not an empty span: fail CLOSED
+            # (ReleaseError) rather than silently skipping it and under-computing the released end to 0,
+            # which would read an unreadable history as "nothing released" (the check-fails-closed-on-
+            # unreadable rule; spec 6.1). Matches the sibling check_no_append_into_released's refusal.
+            raise ReleaseError("cannot compute released end: a release row is not a table (spec 6.1)")
         span_findings = []
         parsed = _parse_span(row.get("worklog_span"), span_findings, "release")
         if parsed is False:

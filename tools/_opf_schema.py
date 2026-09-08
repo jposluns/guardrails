@@ -296,11 +296,19 @@ def parse_status(status, spec):
 
 
 def _valid_id_shape(value):
-    """The (namespace, number) of a well-formed `<NS>-<n>` id, or None."""
+    """The (namespace, number) of a well-formed `<NS>-<n>` id, or None. An oversized numeric suffix
+    (CPython refuses int() on a string of more than 4300 digits, a ValueError) is treated as MALFORMED
+    input (None), never an uncontrolled crash: mirrors check_clauses.split_clause_id's >4300-digit
+    ordinal guard (guard-input-soundness; the caller then reports the id as not well-formed)."""
     if not isinstance(value, str):
         return None
     m = _ID_RE.match(value)
-    return (m.group(1), int(m.group(2))) if m else None
+    if not m:
+        return None
+    try:
+        return (m.group(1), int(m.group(2)))  # opf-fuzz:int-guard (oversized numeric suffix -> None)
+    except ValueError:
+        return None
 
 
 def _validate_actor(record, findings):
@@ -604,6 +612,13 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
         # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
         # closed rather than allocate against an unreadable roster (guard-input-soundness; spec 8.3).
         return RecordValidation(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
+    elif not all(isinstance(s, TypeSpec) for s in specs.values()):
+        # Each roster VALUE is a TypeSpec; a non-TypeSpec value (e.g. a hand-constructed {name: 7}) would
+        # crash on `espec.reduced` / `spec.namespace` / `spec.reduced` below. Fail closed with a clean
+        # cannot-evaluate rather than an AttributeError (guard-input-soundness; spec 8.1/8.4). parse_status
+        # already guards its own spec, so validate_transition is unaffected; this closes validate_record's
+        # direct attribute access.
+        return RecordValidation(CANNOT_EVALUATE, ["specs roster has a non-TypeSpec value (fail-closed)"])
     if not isinstance(record, dict):
         return RecordValidation(CANNOT_EVALUATE, ["record is not a table"])
     if expected_type is not None and not isinstance(expected_type, str):

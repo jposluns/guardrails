@@ -28,6 +28,7 @@ Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judg
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
 import sys
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,6 +45,56 @@ STATUSES = frozenset({VALID, INVALID, CANNOT_EVALUATE})
 CONTROLLED = (ReleaseError, StoreError, ValueError)
 
 TS = "2026-08-12T09:14:02Z"
+
+# --- coverage instrumentation (round 7) ----------------------------------------------------------------
+# A closed-by-construction proof is only real if every production site it claims to cover is actually
+# EXERCISED by a case; an un-reached site would let a future regression there escape unproven (round 6
+# found 8 of the 20 _sorted_key_names sites were never reached because the nested sweep replaced the PARENT
+# tables, so the deeper child-table sorts never ran). We derive the authoritative site set by SCANNING the
+# three module SOURCES (the guard-input-soundness authoritative-index approach, never a hand-maintained
+# list that can silently drift), and record which source lines actually EXECUTE via a line tracer, then
+# assert the scanned sites are a subset of the executed lines. A future un-exercised site FAILS the proof.
+_TARGET_FILES = frozenset({"_opf_store.py", "_opf_schema.py", "_opf_release.py"})
+_MODULE_PATHS = {Path(m.__file__).name: Path(m.__file__)
+                 for m in (_opf_store, _opf_schema, _opf_release)}
+_INT_GUARD_MARKER = "opf-fuzz:int-guard"     # author-declared marker on each guarded int() site in source
+
+
+def _scan_sites(predicate):
+    """The set of (filename, lineno) across the three target module sources whose line satisfies
+    `predicate(line)`. The source itself is the authoritative index of the sites (never a hand list)."""
+    sites = set()
+    for name, path in _MODULE_PATHS.items():
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if predicate(line):
+                sites.add((name, i))
+    return sites
+
+
+def _skn_call_sites():
+    # A _sorted_key_names CALL site: the token followed by '(', excluding its own `def` line (and the
+    # bare-name import lines, which carry no '(').
+    return _scan_sites(lambda ln: "_sorted_key_names(" in ln and not ln.lstrip().startswith("def "))
+
+
+def _int_guard_sites():
+    # Every guarded int() site (CLASS 2) carries the author-declared marker comment in source.
+    return _scan_sites(lambda ln: _INT_GUARD_MARKER in ln)
+
+
+def _make_tracer(executed):
+    """A sys.settrace pair that records every executed (filename, lineno) in the three target modules into
+    `executed`. Judged by executed LINES, never by grepping output (the isolate-verifiers rule)."""
+    def _line_tracer(frame, event, arg):
+        if event == "line":
+            executed.add((Path(frame.f_code.co_filename).name, frame.f_lineno))
+        return _line_tracer
+
+    def _call_tracer(frame, event, arg):
+        if event == "call" and Path(frame.f_code.co_filename).name in _TARGET_FILES:
+            return _line_tracer
+        return None
+    return _call_tracer
 
 # The adversarial matrix fed to each control/record parameter. Each entry is (label, factory): the factory
 # is a ZERO-ARG callable producing a FRESH value per case, so a single-use value (the one-shot iterator) is
@@ -121,6 +172,12 @@ def run():
 
     def fail(reason):
         failures.append(reason)
+
+    # Record executed source lines in the three target modules for the whole run, so the coverage
+    # assertions below can prove every production _sorted_key_names / guarded-int() site was reached.
+    # Disabled again before the verdict; self_test's finally is the backstop that always removes it.
+    executed = set()
+    sys.settrace(_make_tracer(executed))
 
     # --- benign, genuinely-valid fixtures for the release triad --------------------------------------
     worklog = {"schema": 1, "entry": [_worklog_entry(1), _worklog_entry(2),
@@ -338,6 +395,71 @@ def run():
         fail("nested validate_manifest.devprocess[mixed-extra-key]: UNCONTROLLED {} raised ({}) -- a "
              "nested membership/type-guard crash".format(type(exc).__name__, exc))
 
+    # --- the CHILD-DEPTH key-injection sweep (round 7: the round-6 parent-replacement blind spot) ------
+    # The round-6 nested sweep replaced each PARENT table with an adversarial value, so a child table was
+    # never itself a dict CARRYING a surplus key: 8 of the 20 _sorted_key_names sites (the deeper
+    # [types.<name>] / [providers.<name>] / [views.<name>] / [deliverables.<name>] / supported
+    # [profiles.<name>] sorts, and the release-row / summary-row / manifest-top-level sorts) never ran, so
+    # the round-6 heterogeneous-key fix was never PROVEN at those depths. This sweep injects an adversarial
+    # HETEROGENEOUS SURPLUS-KEY SET (a non-string key beside a string one: the exact sorted()-over-mixed-
+    # keys crash vector) into an otherwise-present child table or row, so every remaining site fires.
+    # Contract as before: (a) no uncontrolled crash and (b) a well-formed status. _sorted_key_names
+    # str-coerces every key, so a mixed-key surplus set must sort cleanly. The coverage assertion at the end
+    # confirms ALL 20 sites are now reached; a future un-exercised site fails the proof.
+    HETERO_EXTRA = {97: "x", "zzz-extra-key": 1}      # a non-string + string surplus key set (mixed sort)
+    child_cases = [
+        # manifest top-level extras (_opf_store._validate_top_level): a heterogeneous top-level surplus key.
+        ("manifest.top-level-extras",
+         lambda: _opf_store.validate_manifest({**VALID_MANIFEST, **{98: {}, "zzz-top-table": {}}})),
+        # [types.<name>] child-table extras.
+        ("manifest.types.<name>-extras",
+         lambda: _opf_store.validate_manifest(
+             {**VALID_MANIFEST, "types": {"backlog_item": {"namespace": "BI", **HETERO_EXTRA}}})),
+        # [providers.<name>] child-table extras (a present [providers] table with a mixed-key child).
+        ("manifest.providers.<name>-extras",
+         lambda: _opf_store.validate_manifest(
+             {**VALID_MANIFEST, "providers": {"prov": dict(HETERO_EXTRA)}})),
+        # [views.<name>] child-table extras.
+        ("manifest.views.<name>-extras",
+         lambda: _opf_store.validate_manifest({**VALID_MANIFEST, "views": {"v": dict(HETERO_EXTRA)}})),
+        # [deliverables.<name>] child-table extras.
+        ("manifest.deliverables.<name>-extras",
+         lambda: _opf_store.validate_manifest(
+             {**VALID_MANIFEST, "deliverables": {"d": dict(HETERO_EXTRA)}})),
+        # supported [profiles.<name>] extras: a SUPPORTED profile (non-None supported_profiles, matching
+        # major) with a mixed-key surplus set, so _validate_supported_profile's sort actually runs.
+        ("manifest.profiles.<name>-extras-supported",
+         lambda: _opf_store.validate_manifest(
+             {**VALID_MANIFEST, "profiles": {"aiqt": {"version": "1.0.0", "base_compat": ">=1.0.0 <2.0.0",
+              "posture_floor": "required", "extension_namespace": "x-aiqt", **HETERO_EXTRA}}},
+             supported_profiles={"aiqt": [1]})),
+        # release-row extras (_opf_release.validate_version): a well-formed release row + a mixed surplus key.
+        ("version.release-row-extras",
+         lambda: _opf_release.validate_version(
+             {"schema": 1, "release": [{"version": "1.0.0", "date": TS, "worklog_span": ["WL-1", "WL-2"],
+              "coverage_digest": dig12, **HETERO_EXTRA}]})),
+        # summary-row extras (_opf_release._validate_summaries): a summary row + a mixed surplus key.
+        ("version.summary-row-extras",
+         lambda: _opf_release.validate_version(
+             {"schema": 1,
+              "release": [{"version": "1.0.0", "date": TS, "worklog_span": ["WL-1", "WL-2"],
+                           "coverage_digest": dig12}],
+              "summary": [{"covers": "unreleased", **HETERO_EXTRA}]})),
+    ]
+    for label, builder in child_cases:
+        cases += 1
+        assertions += 1                    # (a) no-uncontrolled-crash assertion
+        try:
+            result = builder()
+        except Exception as exc:           # noqa: BLE001
+            fail("child-depth {}: UNCONTROLLED {} raised ({}) -- a nested heterogeneous-key sort "
+                 "crash".format(label, type(exc).__name__, exc))
+            continue
+        assertions += 1                    # (b) well-formed-outcome assertion
+        if not (hasattr(result, "status") and result.status in STATUSES):
+            fail("child-depth {}: result is not a status object in {} (got {!r})".format(
+                label, sorted(STATUSES), result))
+
     # --- the targeted FAIL-OPEN probes (assertion c) -------------------------------------------------
     # Each probe pairs a malformed control against the empty/omitted baseline and asserts the malformed
     # call is never MORE PERMISSIVE. Malformed shapes deliberately include the substring vector (a bare
@@ -447,6 +569,104 @@ def run():
     probe("next_id-known_complete-True-still-allocates",
           _opf_schema.next_id({}, "BI", known_complete=True) == ("BI-1", 1))
 
+    # --- round-7 NEW value-shape probes: CLASS 1 (malformed row), 2 (oversized int), 3 (non-TypeSpec) ---
+    # Each shape is REACHABLE from parsed TOML or a hand-built Python control and was a round-6 escape.
+    # Each MUST fail on the un-round-7 code (a silent fail-open, or an uncontrolled ValueError/AttributeError)
+    # and pass after the fix, so the harness is a genuine fail-to-pass proof of the three defect classes.
+    def _fails_closed(callable_):
+        """True iff the callable REFUSES via a CONTROLLED fail-closed exception; False on a silent return
+        (a fail-open) or an uncontrolled crash."""
+        try:
+            callable_()
+        except CONTROLLED:
+            return True
+        except Exception:  # noqa: BLE001  an uncontrolled crash is not a clean fail-closed refusal
+            return False
+        return False        # a non-exception return is a silent fail-open
+
+    def _returns_no_raise(name, callable_, ok):
+        """Assert `callable_` RETURNS (never raises: its contract is a clean value) a value satisfying `ok`.
+        ANY exception is a failure; before the round-7 fix the guarded int() / attribute access raises here."""
+        nonlocal assertions
+        assertions += 1
+        try:
+            val = callable_()
+        except Exception as exc:  # noqa: BLE001
+            fail("{}: raised {} ({}); its contract is a clean return, never a crash".format(
+                name, type(exc).__name__, exc))
+            return
+        if not ok(val):
+            fail("{}: unexpected return {!r}".format(name, val))
+
+    # CLASS 1: a MALFORMED (non-table) release ROW is reachable from valid TOML (`release = [42]`). The pure
+    # operations released_end/tail_ids must FAIL CLOSED (ReleaseError), never silently return an
+    # under-computed 0 / an unchanged passthrough that reads an unreadable ledger as "no released span".
+    bad_ledger = tomllib.loads("release = [42]\n")["release"]     # == [42]: a non-table release element
+    probe("released_end-malformed-row-fails-closed",
+          _fails_closed(lambda: _opf_release.released_end(bad_ledger)))
+    probe("tail_ids-malformed-row-fails-closed",
+          _fails_closed(lambda: _opf_release.tail_ids(bad_ledger, [1, 2])))
+    # the sibling that ALREADY fails closed still reports the malformed row, so the module is consistent:
+    probe("no-append-malformed-row-cannot-eval",
+          bool(_opf_release.check_no_append_into_released({"release": [42]}, [3])))
+
+    # CLASS 2: an OVERSIZED numeric string (CPython refuses int() beyond 4300 digits) is reachable as an id
+    # numeric suffix or a SemVer field: a clean finding / None, never an uncontrolled ValueError crash.
+    big = "9" * 4301
+    _returns_no_raise("valid_id_shape-oversized-None",
+                      lambda: _opf_schema._valid_id_shape("BI-" + big), lambda v: v is None)
+    _returns_no_raise("parse_semver-oversized-core-None",
+                      lambda: _opf_release.parse_semver(big + ".0.0"), lambda v: v is None)
+    _returns_no_raise("parse_semver-oversized-prerelease-None",
+                      lambda: _opf_release.parse_semver("1.0.0-" + big), lambda v: v is None)
+    _returns_no_raise("validate_record-oversized-id-INVALID",
+                      lambda: _opf_schema.validate_record(_full_record(id="BI-" + big),
+                                                          expected_type="backlog_item"),
+                      lambda r: hasattr(r, "status") and r.status == INVALID)
+    _returns_no_raise("validate_version-oversized-version-INVALID",
+                      lambda: _opf_release.validate_version(
+                          {"schema": 1, "release": [{"version": big + ".0.0", "date": TS,
+                           "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64}]}),
+                      lambda r: hasattr(r, "status") and r.status == INVALID)
+
+    # CLASS 3: a specs roster whose VALUE is not a TypeSpec (a hand-built Python control) must be a clean
+    # CANNOT-EVALUATE, never an AttributeError on spec.namespace (typed record) or espec.reduced (reduced).
+    _returns_no_raise("validate_record-nonTypeSpec-spec-cannot-eval",
+                      lambda: _opf_schema.validate_record(_full_record(), specs={"backlog_item": 7}),
+                      lambda r: hasattr(r, "status") and r.status == CANNOT_EVALUATE)
+    _returns_no_raise("validate_record-nonTypeSpec-espec-cannot-eval",
+                      lambda: _opf_schema.validate_record(_worklog_record(), expected_type="backlog_item",
+                                                          specs={"backlog_item": 7}),
+                      lambda r: hasattr(r, "status") and r.status == CANNOT_EVALUATE)
+
+    # --- coverage-instrumentation assertions (round 7): every production site was actually reached -------
+    sys.settrace(None)      # stop tracing before the verdict; self_test's finally is the backstop
+    skn_sites = _skn_call_sites()
+    int_sites = _int_guard_sites()
+    # The scan must not vacuously pass by finding nothing: the corpus carries 20 _sorted_key_names call
+    # sites and 3 guarded int() sites today, so a count below those means the authoritative-index scan
+    # itself has drifted or broken (guard-input-soundness applied to the coverage input).
+    assertions += 1
+    if len(skn_sites) < 20:
+        fail("coverage scan found only {} _sorted_key_names call site(s) (expected >= 20): the "
+             "authoritative-index scan under-counts".format(len(skn_sites)))
+    assertions += 1
+    if len(int_sites) < 3:
+        fail("coverage scan found only {} guarded int() site(s) (expected >= 3): the marker scan "
+             "under-counts".format(len(int_sites)))
+    skn_missed = sorted(skn_sites - executed)
+    int_missed = sorted(int_sites - executed)
+    assertions += 1
+    if skn_missed:
+        fail("coverage: {} of {} _sorted_key_names call site(s) never exercised by any case: {}".format(
+            len(skn_missed), len(skn_sites), skn_missed))
+    assertions += 1
+    if int_missed:
+        fail("coverage: {} of {} guarded int() site(s) never exercised by any case: {}".format(
+            len(int_missed), len(int_sites), int_missed))
+    skn_reached = len(skn_sites) - len(skn_missed)
+    int_reached = len(int_sites) - len(int_missed)
+
     # --- verdict -------------------------------------------------------------------------------------
     if failures:
         print("OPF-FUZZ SELF-TEST: FAIL ({} of {} assertions failed over {} adversarial cases)".format(
@@ -457,8 +677,9 @@ def run():
             print("  ... and {} more".format(len(failures) - 60))
         return 1
     print("OPF-FUZZ SELF-TEST: PASS ({} adversarial cases over {} public functions; {} assertions: "
-          "no uncontrolled crash, well-formed outcome, and no fail-open)".format(
-              cases, len(targets), assertions))
+          "no uncontrolled crash, well-formed outcome, and no fail-open; coverage: {}/{} _sorted_key_names "
+          "call sites and {}/{} guarded int() sites reached)".format(
+              cases, len(targets), assertions, skn_reached, len(skn_sites), int_reached, len(int_sites)))
     return 0
 
 
@@ -470,6 +691,8 @@ def self_test():
         print("OPF-FUZZ SELF-TEST ERROR: {} ({}); fail-closed".format(type(exc).__name__, exc),
               file=sys.stderr)
         return 2
+    finally:
+        sys.settrace(None)    # backstop: never leave the line tracer installed for later self-test legs
 
 
 if __name__ == "__main__":
