@@ -293,7 +293,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.2"
@@ -302,7 +302,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.3"
@@ -311,7 +311,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.4"
@@ -320,7 +320,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.5"
@@ -329,7 +329,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.6"
@@ -338,7 +338,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.7"
@@ -347,7 +347,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 30
 end-line = 33
 canonical-text = "A value hardcoded into a reusable command, or carried over from the source the\ncommand was copied or templated from, is not evidence of the target the command now runs against: it is\nderived from the authoritative source at the point of use, or validated against it, before the guard\nrelies on it."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.8"
@@ -355,17 +355,17 @@ corpus-id = "grdinp"
 source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 39
 end-line = 42
-canonical-text = "Where a document asserts a fact about the system it governs,\nan owning account, a path, a schedule, or an interface, that fact is verified against an authority the\ndocument's author does not control, the live system or a second in-tree artefact whose purpose is to state\nthat same fact, rather than against the document's own words."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+canonical-text = "Where a document asserts a fact about the\nsystem it governs, an owning account, a path, a schedule, or an interface, that fact is verified against an\nauthority the document's author does not control, the live system or a second in-tree artefact whose purpose\nis to state that same fact, rather than against the document's own words."
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "grdinp.9"
 corpus-id = "grdinp"
 source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 42
-end-line = 45
-canonical-text = "A membership question over a range or interval\nis likewise answered by a membership test, whether a value falls within the interval, not by matching the\nliteral endpoint tokens: a range expressed by its endpoints is not the set of its members, so a literal-token\nscan is a proxy that structurally cannot see a member expressed only as an endpoint."
-source-digest = "70e59db89e1a7a05b6b537753a2c39a22b2400a971ec79cbcee0acbd078e6151"
+end-line = 46
+canonical-text = "A membership question over a range\nor interval is likewise answered by a membership test, whether a value falls within the interval, not by\nmatching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a\nliteral-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one\nlying between its endpoints and written nowhere as a literal token."
+source-digest = "37654cb01f61a7b7124a6c6786f37fa931f223ca8593e21f8e7571980e5a06cf"
 
 [[clause]]
 clause-id = "estsep.1"
