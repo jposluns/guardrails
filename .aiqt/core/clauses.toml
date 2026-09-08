@@ -4975,3 +4975,39 @@ start-line = 27
 end-line = 31
 canonical-text = "so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
 source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+
+[[clause]]
+clause-id = "rvwpin.1"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 13
+end-line = 14
+canonical-text = "Once a review, verification, or adversarial check has been dispatched against a named artefact or\nrevision, that artefact is not modified until the review returns or is abandoned."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "rvwpin.2"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 14
+end-line = 17
+canonical-text = "A reviewer's findings\nare meaningful only against the state it observed: a target that moves under it invalidates its line\nreferences, forces it to re-derive the ground truth mid-review, and makes its report impossible to\nreconcile against other reviewers of the same nominal revision."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "rvwpin.3"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 17
+end-line = 20
+canonical-text = "The target this holds stable is the\nmutable one the review named, a working tree, the tip of a branch, or a file under examination, which is\ndistinct from committing an artefact to an immutable object identity before the review reads it and from\nthe inertness of the reviewer's own output."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "rvwpin.4"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 20
+end-line = 22
+canonical-text = "Where a change genuinely cannot wait, it is made on a\nseparate revision and the in-flight review is left undisturbed, to be re-dispatched against the new\nstate once that change has settled."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"

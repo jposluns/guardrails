@@ -53,6 +53,7 @@
 .aiqt/core/rules/integ-protected-branch-integrity.md text eol=lf
 .aiqt/core/rules/integ-required-step-remains-required.md text eol=lf
 .aiqt/core/rules/integ-rerun-pass-is-still-failure.md text eol=lf
+.aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md text eol=lf
 .aiqt/core/rules/integ-safe-retries.md text eol=lf
 .aiqt/core/rules/integ-separate-task-changes.md text eol=lf
 .aiqt/core/rules/integ-stage-then-promote-on-green.md text eol=lf
@@ -205,6 +206,7 @@
 .claude/rules/aiqt/10-INTEG-protected-branch-integrity.md text eol=lf
 .claude/rules/aiqt/10-INTEG-required-step-remains-required.md text eol=lf
 .claude/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md text eol=lf
+.claude/rules/aiqt/10-INTEG-review-in-flight-pins-its-artefact.md text eol=lf
 .claude/rules/aiqt/10-INTEG-safe-retries.md text eol=lf
 .claude/rules/aiqt/10-INTEG-separate-task-changes.md text eol=lf
 .claude/rules/aiqt/10-INTEG-stage-then-promote-on-green.md text eol=lf
@@ -330,6 +332,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-protected-branch-integrity.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-required-step-remains-required.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-rerun-pass-is-still-failure.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-review-in-flight-pins-its-artefact.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-safe-retries.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-separate-task-changes.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-stage-then-promote-on-green.mdc text eol=lf
