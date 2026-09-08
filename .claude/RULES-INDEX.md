@@ -36,6 +36,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Protected-branch integrity](rules/aiqt/10-INTEG-protected-branch-integrity.md)
 - [A required step remains required under friction](rules/aiqt/10-INTEG-required-step-remains-required.md)
 - [A rerun pass does not erase an earlier failure](rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md)
+- [A review in flight pins its artefact](rules/aiqt/10-INTEG-review-in-flight-pins-its-artefact.md)
 - [Make retries safe to repeat](rules/aiqt/10-INTEG-safe-retries.md)
 - [Separate task changes from pre-existing work](rules/aiqt/10-INTEG-separate-task-changes.md)
 - [Stage artefacts and promote only on green](rules/aiqt/10-INTEG-stage-then-promote-on-green.md)

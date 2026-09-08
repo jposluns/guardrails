@@ -984,6 +984,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "rvwpin",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "secagt",
       "family": "security",
       "gates": [],
