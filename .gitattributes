@@ -26,6 +26,7 @@
 .aiqt/core/rules/accur-claims-rest-on-observation.md text eol=lf
 .aiqt/core/rules/accur-completeness-claim-enumerates-set.md text eol=lf
 .aiqt/core/rules/accur-corroborate-external-claims.md text eol=lf
+.aiqt/core/rules/accur-count-carries-its-predicate.md text eol=lf
 .aiqt/core/rules/accur-disclose-guard-residuals.md text eol=lf
 .aiqt/core/rules/accur-evidence-grounded-completion.md text eol=lf
 .aiqt/core/rules/accur-guard-input-soundness.md text eol=lf
@@ -180,6 +181,7 @@
 .claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md text eol=lf
+.claude/rules/aiqt/10-ACCUR-count-carries-its-predicate.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-disclose-guard-residuals.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-evidence-grounded-completion.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-guard-input-soundness.md text eol=lf
@@ -306,6 +308,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-claims-rest-on-observation.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-corroborate-external-claims.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-count-carries-its-predicate.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-disclose-guard-residuals.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-evidence-grounded-completion.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc text eol=lf

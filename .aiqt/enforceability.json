@@ -308,6 +308,14 @@
       "status": "hook-linked"
     },
     {
+      "corpus-id": "cntprd",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/accur-count-carries-its-predicate.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "corrob",
       "family": "aiqt",
       "gates": [],
