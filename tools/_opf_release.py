@@ -123,6 +123,13 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # scheme is distinguishable from this one by construction.
 COVERAGE_SCHEME = "opf-worklog-coverage-v1"
 
+# The maximum table/array nesting depth _canonical will recurse through (defence-in-depth; see FIX 2 in
+# _canonical). A real worklog entry nests only a handful of levels (an extension table, a links/refs
+# array of tables), so this bound is generous by orders of magnitude, yet it sits far below the
+# interpreter's default recursion limit so a controlled ReleaseError always fires before an uncontrolled
+# RecursionError. It changes no output for any real (shallow) input.
+_MAX_CANONICAL_DEPTH = 100
+
 # SemVer 2.0.0 core + optional -prerelease + optional +build (build ignored for precedence).
 _SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -183,7 +190,7 @@ def parse_semver(value):
     if not m:
         return None
     try:
-        major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))  # opf-fuzz:int-guard
+        major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
         pre = m.group(4)
         if pre is None:
             return (major, minor, patch, 1, ())
@@ -192,7 +199,7 @@ def parse_semver(value):
             if ident.isdigit():
                 # A numeric identifier (no leading zero, enforced by the regex) compares as an int, and
                 # numeric identifiers always have lower precedence than alphanumeric ones (0 before 1 below).
-                ids.append((0, int(ident)))  # opf-fuzz:int-guard (numeric prerelease identifier)
+                ids.append((0, int(ident)))  # a numeric prerelease identifier (oversized -> ValueError below)
             else:
                 ids.append((1, ident))
         return (major, minor, patch, 0, tuple(ids))
@@ -256,19 +263,39 @@ def _parse_span(span, findings, where):
 
 # --- coverage-digest canonicalization (spec 6.1; scheme defined here) --------------------------------
 
-def _canonical(value):
+def _canonical(value, _depth=0):
     """A deterministic canonical string for a validated worklog value: tables have their keys in sorted
     order, arrays keep their order, strings are JSON-escaped (a stable, reversible escaping), ints and
     bools have a fixed spelling, and a finite float is spelled with U8's shared float rule (signed zero
     canonicalized, a non-finite float fails closed) so the digest and the emitter agree byte-for-byte
     (spec 8.7 permits a finite float in a registered extension; M2). An unexpected type fails CLOSED
     (ReleaseError) rather than serializing lossily, so the digest can never be computed over a value the
-    canonicalization does not fully cover."""
+    canonicalization does not fully cover. `_depth` is the recursion level, bounded by FIX 2 below."""
+    # FIX 2 (defence-in-depth for a currently-unreachable-from-TOML input): a Python structure nested
+    # deeper than _MAX_CANONICAL_DEPTH would recurse until the interpreter raises an uncontrolled
+    # RecursionError. Such depth cannot arrive via tomllib (its own parser recursion guard fires first at
+    # every recursion limit), so this is unreachable from parsed TOML; the bound is here so the
+    # fail-closed posture never rests on tomllib's limit. Over-depth maps to the module's controlled
+    # ReleaseError, never a RecursionError. The bound is far above any real worklog nesting, so it changes
+    # no output for a real (shallow) input.
+    if _depth > _MAX_CANONICAL_DEPTH:
+        raise ReleaseError("cannot canonicalize a worklog value nested deeper than {} levels (a real "
+                           "worklog entry nests only a handful of levels)".format(_MAX_CANONICAL_DEPTH))
     # bool is an int subclass; test it first so True/False never spell as 1/0.
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
-        return str(value)
+        # FIX 1 (defence-in-depth for a currently-unreachable-from-TOML input): CPython raises ValueError
+        # on str() of an int whose decimal length exceeds the interpreter's integer-string-conversion
+        # limit (4300 digits by default). Such an int cannot arrive via tomllib (it rejects an over-limit
+        # int literal at parse), so this is unreachable from parsed TOML; the guard is here so the
+        # fail-closed posture never rests on tomllib's limit. An oversized int maps to the module's
+        # controlled ReleaseError, never an uncontrolled ValueError. A normal-magnitude int spells
+        # byte-identically, so the digest is preserved for every real input.
+        try:
+            return str(value)
+        except ValueError as exc:
+            raise ReleaseError("cannot canonicalize an oversized integer ({})".format(exc))
     if isinstance(value, float):
         # A finite float digests cleanly (reusing U8's spelling); a non-finite float has no canonical form
         # and fails closed, mapped to ReleaseError like every other uncanonicalizable value (M2).
@@ -279,7 +306,7 @@ def _canonical(value):
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
-        return "[" + ",".join(_canonical(v) for v in value) + "]"
+        return "[" + ",".join(_canonical(v, _depth + 1) for v in value) + "]"
     if isinstance(value, dict):
         # Keys are ordered so the digest is invariant to table key-order. A parsed-TOML table always
         # has str keys, so this orders cleanly; a hand-constructed table with a non-str key (the only
@@ -293,7 +320,7 @@ def _canonical(value):
                 raise ReleaseError("cannot canonicalize a table with a non-string key {!r} (type {}); a "
                                    "worklog entry table has string keys only".format(k, type(k).__name__))
         return "{" + ",".join(
-            json.dumps(k, ensure_ascii=False) + ":" + _canonical(v)
+            json.dumps(k, ensure_ascii=False) + ":" + _canonical(v, _depth + 1)
             for k, v in sorted(value.items())) + "}"
     raise ReleaseError("cannot canonicalize value of type {} (worklog entries carry only str/int/bool/"
                        "float/array/table)".format(type(value).__name__))

@@ -306,7 +306,7 @@ def _valid_id_shape(value):
     if not m:
         return None
     try:
-        return (m.group(1), int(m.group(2)))  # opf-fuzz:int-guard (oversized numeric suffix -> None)
+        return (m.group(1), int(m.group(2)))  # an oversized numeric suffix raises ValueError -> None below
     except ValueError:
         return None
 

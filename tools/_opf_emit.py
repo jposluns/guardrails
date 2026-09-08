@@ -156,7 +156,17 @@ def _render_scalar(value):
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
-        return str(value)
+        # Defence-in-depth for a currently-unreachable-from-TOML input: CPython raises ValueError on
+        # str() of an int whose decimal length exceeds the interpreter's integer-string-conversion limit
+        # (4300 digits by default). Such an int cannot arrive via tomllib (it rejects an over-limit int
+        # literal at parse), so this is unreachable from parsed TOML; the guard is here so the emitter's
+        # fail-closed posture never rests on tomllib's limit. An oversized int maps to the module's
+        # controlled EmitError, never an uncontrolled ValueError. A normal-magnitude int spells
+        # byte-identically, so emitted output is preserved for every real input.
+        try:
+            return str(value)
+        except ValueError as exc:
+            raise EmitError("integer is too large to render ({})".format(exc))
     if isinstance(value, float):
         return _canonical_float(value)
     if isinstance(value, str):
@@ -453,6 +463,12 @@ def self_test():
         "float-nan": {"k": float("nan")},
         "float-inf": {"k": float("inf")},
         "float-neg-inf": {"k": float("-inf")},
+        # An OVERSIZED int (built arithmetically; int("9"*4301) cannot be used because CPython refuses
+        # int() on an over-limit numeric string). str() of it raises ValueError on default CPython, so the
+        # emitter must reject it fail-closed (EmitError), never let an uncontrolled ValueError escape. This
+        # is defence-in-depth for a currently-unreachable-from-TOML input (FIX 1); it fails on the pre-fix
+        # code (a bare ValueError) and passes after.
+        "oversized-int": {"k": 10 ** 4301},
         "nested-array": {"k": [[1, 2], [3, 4]]},
         "array-tables-and-scalars": {"k": [{"a": 1}, 2]},
         "non-string-key": {1: "x"},
