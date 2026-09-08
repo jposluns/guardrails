@@ -780,11 +780,44 @@ def _normative_namespace(name, modules_enabled, where, findings):
     return None
 
 
+def _is_contained_relpath(p):
+    """True when `p` is a ROOT-RELATIVE path that does not escape the root, checked PURELY LEXICALLY (the
+    filesystem is never touched): view/deliverable targets and unmanaged paths are root-relative and
+    contained (spec 5.8/14.2). Rejects an absolute path (a leading '/'), a Windows drive or UNC/backslash
+    path, and any '..' traversal that resolves at or above the root."""
+    if not isinstance(p, str) or not p:
+        return False
+    if p.startswith("/"):
+        return False
+    if "\\" in p or (len(p) >= 2 and p[1] == ":"):
+        return False
+    depth = 0
+    for comp in p.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            depth -= 1
+            if depth < 0:
+                return False
+        else:
+            depth += 1
+    return True
+
+
 def _validate_types(types, modules_enabled, findings):
-    if types is None:
-        return
-    if not isinstance(types, dict):
+    if types is not None and not isinstance(types, dict):
         findings.append("[types] is not a table")
+        return
+    # Spec 9 (line 782): the manifest registers one [types.<name>] table per enabled type. Baseline types
+    # are always enabled, so an ABSENT or EMPTY [types] table registers none of the store's enabled types
+    # and fails closed to INVALID. (Per-enabled-type completeness across the whole enabled set is a
+    # store-level doctor cross-check, pass B, not this per-manifest schema pass.)
+    enabled_types = set(BASELINE_TYPES) | {t for t, (_ns, module) in MODULE_TYPES.items()
+                                           if module in modules_enabled}
+    if not types:
+        if enabled_types:
+            findings.append("[types] must register at least one enabled type ([types.<name>] per enabled "
+                            "type, spec 9); none are registered")
         return
     seen_ns = {}
     for name, tbl in types.items():
@@ -854,8 +887,12 @@ def _validate_views(views, findings):
         sources = tbl.get("sources")
         if not isinstance(sources, list) or not sources or not all(isinstance(s, str) and s for s in sources):
             findings.append("{}.sources must be a non-empty list of strings".format(where))
-        if not isinstance(tbl.get("target"), str) or not tbl.get("target"):
+        tgt = tbl.get("target")
+        if not isinstance(tgt, str) or not tgt:
             findings.append("{}.target must be a non-empty string".format(where))
+        elif not _is_contained_relpath(tgt):
+            findings.append("{}.target {!r} must be a root-relative path that does not escape the root "
+                            "(no absolute path, no '..' escape; spec 5.8/14.2)".format(where, tgt))
 
 
 def _validate_deliverables(deliverables, findings):
@@ -875,8 +912,12 @@ def _validate_deliverables(deliverables, findings):
         if tbl.get("kind") not in DELIVERABLE_KINDS:
             findings.append("{}.kind {!r} is not one of {}".format(
                 where, tbl.get("kind"), list(DELIVERABLE_KINDS)))
-        if not isinstance(tbl.get("target"), str) or not tbl.get("target"):
+        tgt = tbl.get("target")
+        if not isinstance(tgt, str) or not tgt:
             findings.append("{}.target must be a non-empty string".format(where))
+        elif not _is_contained_relpath(tgt):
+            findings.append("{}.target {!r} must be a root-relative path that does not escape the root "
+                            "(no absolute path, no '..' escape; spec 5.8/14.2)".format(where, tgt))
 
 
 def _validate_archive(archive, findings):
@@ -905,6 +946,13 @@ def _validate_unmanaged(unmanaged, findings):
     paths = unmanaged.get("paths")
     if paths is not None and (not isinstance(paths, list) or not all(isinstance(p, str) for p in paths)):
         findings.append("[unmanaged].paths must be a list of strings")
+    elif isinstance(paths, list):
+        # An enumerated unmanaged path is root-relative and contained (spec 14.2 unmanaged-path
+        # containment); an absolute path or a '..' escape is rejected, fail-closed.
+        for p in paths:
+            if isinstance(p, str) and not _is_contained_relpath(p):
+                findings.append("[unmanaged].paths entry {!r} must be a root-relative path that does not "
+                                "escape the root (no absolute path, no '..' escape; spec 14.2)".format(p))
 
 
 def _profile_major(prof):
@@ -1357,6 +1405,36 @@ def self_test():
             "concurrent_operation = true", "concurrent_operation = true\ndelivery_assurance = true"))
         mv_modon = validate_manifest(m_modon)
         check("taxonomy-module-type-enabled-valid", mv_modon.status == VALID and not mv_modon.findings)
+
+        # FIX 4(a): an ABSENT [types] table registers none of the store's enabled types and is INVALID
+        # (spec 9/782, one [types.<name>] per enabled type). manifest_text always carries [types] so
+        # remove it to isolate the case.
+        m_notypes = _t.loads(manifest_text())
+        m_notypes.pop("types", None)
+        mv_notypes = validate_manifest(m_notypes)
+        check("fix4a-types-absent-invalid", mv_notypes.status == INVALID)
+        check("fix4a-types-absent-named",
+              any("must register at least one enabled type" in f for f in mv_notypes.findings))
+
+        # FIX 4(b): view/deliverable targets and unmanaged paths are ROOT-RELATIVE and CONTAINED
+        # (spec 5.8/14.2). A '..' escape, an absolute target, and an escaping unmanaged path are each
+        # INVALID; a normal root-relative set is VALID.
+        _view = '[views."X.md"]\nkind = "deterministic"\nsources = ["worklog"]\ntarget = {!r}'.format
+        m_view_escape = _t.loads(manifest_text(extra_top=_view("../../outside")))
+        check("fix4b-view-target-escape-invalid", validate_manifest(m_view_escape).status == INVALID)
+        m_view_abs = _t.loads(manifest_text(extra_top=_view("/etc/passwd")))
+        check("fix4b-view-target-absolute-invalid", validate_manifest(m_view_abs).status == INVALID)
+        m_deliv_escape = _t.loads(manifest_text(
+            extra_top='[deliverables."CHANGELOG.md"]\nkind = "curated"\ntarget = "../../outside"'))
+        check("fix4b-deliverable-target-escape-invalid",
+              validate_manifest(m_deliv_escape).status == INVALID)
+        m_unmanaged_escape = _t.loads(manifest_text(extra_top='[unmanaged]\npaths = ["../outside"]'))
+        check("fix4b-unmanaged-path-escape-invalid",
+              validate_manifest(m_unmanaged_escape).status == INVALID)
+        m_paths_ok = _t.loads(manifest_text(
+            extra_top=_view(".working/X.md") + '\n\n[unmanaged]\npaths = ["README.md", "docs/legacy.md"]'))
+        mv_paths_ok = validate_manifest(m_paths_ok)
+        check("fix4b-contained-paths-valid", mv_paths_ok.status == VALID and not mv_paths_ok.findings)
 
         # 13: a RELATIVE product --root resolves IDENTICALLY to the same root passed absolutely (MAJOR 2).
         # Before the fix, a relative dir: companion joined to a relative product root produced a relative

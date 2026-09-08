@@ -311,7 +311,12 @@ def _validate_actor(record, findings):
     if extra:
         findings.append("actor unknown key(s): {}".format(", ".join(sorted(extra))))
     kind = actor.get("kind")
-    if kind not in ACTOR_KINDS:
+    if not isinstance(kind, str):
+        # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the tuple
+        # membership below: guard by type first and fail closed with a clean finding (spec 8.3).
+        findings.append("actor.kind must be a string")
+        kind = None
+    elif kind not in ACTOR_KINDS:
         findings.append("actor.kind {!r} is not one of {}".format(kind, list(ACTOR_KINDS)))
         kind = None
     if "id" in actor and (not isinstance(actor.get("id"), str) or not actor.get("id")):
@@ -336,7 +341,11 @@ def _validate_links(record, findings):
         extra = set(link) - LINK_KEYS
         if extra:
             findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
-        if link.get("rel") not in LINK_RELS:
+        if not isinstance(link.get("rel"), str):
+            # A non-string rel (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
+            # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
+            findings.append("{}.rel must be a string".format(where))
+        elif link.get("rel") not in LINK_RELS:
             findings.append("{}.rel {!r} is not one of {} (spec 8.6)".format(
                 where, link.get("rel"), list(LINK_RELS)))
         shape = _valid_id_shape(link.get("id"))
@@ -366,7 +375,11 @@ def _validate_refs(record, findings):
         extra = set(ref) - REF_KEYS
         if extra:
             findings.append("{} unknown key(s): {}".format(where, ", ".join(sorted(extra))))
-        if ref.get("kind") not in REF_KINDS:
+        if not isinstance(ref.get("kind"), str):
+            # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
+            # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
+            findings.append("{}.kind must be a string".format(where))
+        elif ref.get("kind") not in REF_KINDS:
             findings.append("{}.kind {!r} is not one of {} (spec 8.6)".format(
                 where, ref.get("kind"), list(REF_KINDS)))
         if not isinstance(ref.get("locator"), str) or not ref.get("locator"):
@@ -457,6 +470,11 @@ def _validate_type_specific(record, spec, findings):
         # automation carry the proposal qualifier) (M2).
         actor = record.get("actor")
         akind = actor.get("kind") if isinstance(actor, dict) else None
+        # akind may be a TOML-valid non-string (list/dict) which is unhashable and would raise on the
+        # membership tests below; guard by type first (a non-string actor kind is flagged by
+        # _validate_actor). Only a string kind is compared against the proposer/maintainer sets.
+        if not isinstance(akind, str):
+            akind = None
         if akind in PROPOSER_KINDS and record.get("status") == "active":
             findings.append("a block created by an {} actor must be 'active/proposed', not a bare "
                             "'active' grant (spec 8.4/8.5)".format(akind))
@@ -528,6 +546,10 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
         allowed_kinds |= set(registered_kinds)
     if "kind" not in record:
         findings.append("missing required field: kind")
+    elif not isinstance(record.get("kind"), str):
+        # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
+        # membership below: guard by type first and fail closed with a clean finding (spec 6.2).
+        findings.append("worklog kind must be a string")
     elif record.get("kind") not in allowed_kinds:
         findings.append("worklog kind {!r} is not one of {} (spec 6.2)".format(
             record.get("kind"), sorted(allowed_kinds)))
@@ -661,7 +683,8 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
 # --- the transition validator (spec 8.4, 8.5) --------------------------------------------------------
 
-def validate_transition(type_name, from_status, to_status, actor_kind, pre_proposal_state=None, specs=None):
+def validate_transition(type_name, from_status, to_status, actor_kind, pre_proposal_state=None,
+                        reason=None, specs=None):
     """Validate a status transition against the grammar (spec 8.4, 8.5). Returns a TransitionCheck whose
     status is VALID (legal), INVALID (illegal), or CANNOT-EVALUATE (the type or a status is unparseable, or
     a rejection whose pre-proposal state was not supplied).
@@ -672,10 +695,13 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
         maintainer/importer MUST land unqualified.
       - From a `state/proposed`, only a maintainer may RATIFY (drop the qualifier, same state) or REJECT.
         A rejection returns the record to its ACTUAL pre-proposal state, so it is legal iff `to_state ==
-        pre_proposal_state`, `to_qual is None`, `to_state` is a non-terminal (working/initial) state, and
-        the actor is a maintainer. The envelope records no prior state (spec 8.3), so the caller supplies
-        `pre_proposal_state` from the record's history; when it is not supplied the rejection target
-        cannot be verified and the result is CANNOT-EVALUATE, never a permissive VALID (M1).
+        pre_proposal_state`, `to_qual is None`, `to_state` is a non-terminal (working/initial) state, the
+        actor is a maintainer, AND a recorded rejection `reason` is supplied (spec 8.4: a rejection
+        returns the record to a working state "with a recorded reason"). The envelope records no prior
+        state (spec 8.3), so the caller supplies `pre_proposal_state` and `reason` from the record's
+        history; when the pre-proposal state is not supplied the rejection target cannot be verified and
+        the result is CANNOT-EVALUATE, never a permissive VALID (M1); a rejection with no recorded reason
+        is INVALID.
       - An unqualified TERMINAL state does not transition at all (no resurrection, spec 8.4); a revived
         concern is a new record, and supersession is a link, not a state edit.
     """
@@ -739,6 +765,10 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
             findings.append("a rejection must return to the record's actual pre-proposal state {!r}, not "
                             "{!r} (a rejection may not restore a state the record was never in, spec "
                             "8.4/8.5)".format(pre_proposal_state, to_state))
+        elif not (isinstance(reason, str) and reason.strip()):
+            # Spec 8.4: a rejection returns the record to a working state "with a recorded reason". An
+            # otherwise-legal rejection carrying no recorded reason is INVALID (fail-closed).
+            findings.append("a rejection transition must carry a recorded reason (spec 8.4)")
     elif from_terminal:
         # An unqualified terminal state never re-enters a working state (spec 8.4): no resurrection.
         findings.append("no resurrection: an unqualified terminal {} state {!r} does not transition; a "
@@ -911,9 +941,19 @@ def check_ids_within_counters(ids, high):
         ns, n = shape
         if ns not in high:
             findings.append("id {!r} uses namespace {!r} that counters.toml does not track".format(rid, ns))
-        elif n > high[ns]:
+            continue
+        hv = high[ns]
+        # A malformed high-water fails CLOSED: a bool (True == 1), a float, or a negative int is not a
+        # genuine non-negative high-water, so do NOT certify the id against it (the comparison would
+        # silently accept True/1.5, or reject against a negative). type(hv) is not int rejects bool, whose
+        # type is bool not int (spec 8.2).
+        if type(hv) is not int or hv < 0:
+            findings.append("namespace {!r} high-water {!r} is not a non-negative integer (spec 8.2)".format(
+                ns, hv))
+            continue
+        if n > hv:
             findings.append("id {!r} exceeds the {} high-water {} (unreserved id; spec 8.2)".format(
-                rid, ns, high[ns]))
+                rid, ns, hv))
     return findings
 
 
@@ -984,6 +1024,24 @@ def self_test():
                                                 expected_type="worklog").status == INVALID)
     check("worklog-status-key-rejected",   # status is not in the reduced envelope (closed keyset)
           validate_record(dict(wl, status="recorded"), expected_type="worklog").status == INVALID)
+    # FIX 3: a TOML-valid but non-string (unhashable list/dict) value at a set-membership site yields a
+    # clean INVALID finding, never a TypeError crash. Class-scanned membership sites: worklog kind,
+    # actor.kind, link.rel, ref.kind, and the block actor-kind (akind) proposal-qualifier check. If the
+    # guard were absent any of these would raise, aborting self_test with a fail-closed exit rather than
+    # returning INVALID.
+    check("fix3-worklog-kind-list-clean-invalid",
+          validate_record(dict(wl, kind=["fixed"]), expected_type="worklog").status == INVALID)
+    check("fix3-actor-kind-list-clean-invalid",
+          validate_record(dict(wl, actor={"kind": ["maintainer"]}), expected_type="worklog").status == INVALID)
+    check("fix3-link-rel-list-clean-invalid",
+          validate_record(dict(wl, links=[{"rel": ["resolves"], "id": "BI-42"}]),
+                          expected_type="worklog").status == INVALID)
+    check("fix3-ref-kind-list-clean-invalid",
+          validate_record(dict(wl, refs=[{"kind": ["doc"], "locator": "x", "note": "n"}]),
+                          expected_type="worklog").status == INVALID)
+    check("fix3-block-akind-list-clean-invalid",
+          validate_record(envelope("block", 77, "active", actor={"kind": ["assistant"]},
+                                    scopes=["BI-1"])).status == INVALID)
 
     # 2: a valid vendor extension passes only when registered; unregistered and malformed prefixes fail.
     rec_x = envelope("finding", 8, "open")
@@ -1082,7 +1140,18 @@ def self_test():
           validate_transition("finding", "fixed/proposed", "fixed", "assistant").status == INVALID)
     check("txn-reject-to-working-legal",
           validate_transition("finding", "fixed/proposed", "open", "maintainer",
-                              pre_proposal_state="open").status == VALID)
+                              pre_proposal_state="open", reason="fix did not hold").status == VALID)
+    # FIX 5 (spec 8.4): a rejection returns the record to a working state WITH A RECORDED REASON. An
+    # otherwise-legal maintainer rejection carrying no reason is INVALID; the same rejection with a
+    # recorded reason is VALID.
+    txn_reject_noreason = validate_transition("finding", "fixed/proposed", "open", "maintainer",
+                                              pre_proposal_state="open")
+    check("fix5-reject-no-reason-invalid", txn_reject_noreason.status == INVALID)
+    check("fix5-reject-no-reason-named",
+          any("recorded reason" in f for f in txn_reject_noreason.findings))
+    check("fix5-reject-with-reason-valid",
+          validate_transition("finding", "fixed/proposed", "open", "maintainer",
+                              pre_proposal_state="open", reason="fix did not hold").status == VALID)
     resurrect = validate_transition("finding", "fixed", "open", "maintainer")
     check("txn-resurrection-invalid", resurrect.status == INVALID)
     check("txn-resurrection-named", any("no resurrection" in f for f in resurrect.findings))
@@ -1110,6 +1179,13 @@ def self_test():
     check("counters-id-within-hw-ok", not check_ids_within_counters(["BI-1", "BI-42"], {"BI": 42}))
     check("counters-id-exceeds-hw-invalid", check_ids_within_counters(["BI-43"], {"BI": 42}))
     check("counters-unknown-ns-invalid", check_ids_within_counters(["ZZ-1"], {"BI": 42}))
+    # FIX 2: a malformed high-water fails CLOSED (the id is never silently certified). A bool (True == 1),
+    # a float, and a negative int are each flagged for BI-1 rather than accepted; a genuine non-negative
+    # int still behaves as before.
+    check("fix2-high-water-bool-flagged", bool(check_ids_within_counters(["BI-1"], {"BI": True})))
+    check("fix2-high-water-float-flagged", bool(check_ids_within_counters(["BI-1"], {"BI": 1.5})))
+    check("fix2-high-water-negative-flagged", bool(check_ids_within_counters(["BI-1"], {"BI": -1})))
+    check("fix2-high-water-valid-ok", not check_ids_within_counters(["BI-1"], {"BI": 5}))
     check("ids-unique-ok", not check_unique_ids(["BI-1", "BI-2", "FN-1"]))
     check("ids-duplicate-invalid", check_unique_ids(["BI-1", "BI-1"]))
 
@@ -1316,7 +1392,7 @@ def self_test():
     # exact codex M1 vector).
     check("m1-reject-to-pre-proposal-state-ok",
           validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
-                              pre_proposal_state="open").status == VALID)
+                              pre_proposal_state="open", reason="withdrawn on review").status == VALID)
     check("m1-reject-to-wrong-state-invalid",
           validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
                               pre_proposal_state="active").status == INVALID)

@@ -703,9 +703,12 @@ def release_cut(version_data, worklog_data, new_version, date,
     """Freeze the current unreleased worklog tail into a released span keyed to `new_version` (spec 6.1,
     6.2). Returns a CutResult carrying a NEW version.toml value with the release row appended; it is a
     PURE per-ledger function (workers-produce-inert-data): the worklog is never mutated and nothing is ever
-    deleted. It answers only from version.toml + the ACTIVE worklog.toml; whole-store integrity (frozen
-    coverage across active+archive, archive enumeration, no-deletion, partition) belongs to the store-level
-    validator, not the cut (see the fail-closed seam for a rotated store below).
+    deleted. It answers only from version.toml + the ACTIVE worklog.toml. As defense-in-depth it enforces
+    frozen coverage over the released spans it can see (the non-rotated case, every prior released entry
+    still in the active worklog), failing closed to INVALID on a mutated frozen span; whole-store integrity
+    for the ROTATED/archive case (frozen coverage across active+archive, archive enumeration, no-deletion,
+    partition) is deferred to the store-level validator, not the cut (see the fail-closed seam for a rotated
+    store below).
 
     Fails closed (INVALID / CANNOT-EVALUATE, no cut computed) on any inconsistent state:
       - the current ledger or worklog does not validate (an inconsistent state cannot be cut from);
@@ -715,6 +718,9 @@ def release_cut(version_data, worklog_data, new_version, date,
         pure per-ledger cut cannot verify prior-frozen integrity across the archive, so it returns
         CANNOT-EVALUATE and directs the caller to the store-level validator rather than silently skipping
         the check (the fail-closed seam between the units);
+      - a prior frozen released span the cut CAN see (non-rotated) was mutated: a covered entry's edit
+        changes the recomputed coverage digest, so the cut returns INVALID rather than certifying a cut
+        over a rewritten frozen span (defense-in-depth, spec 6.2/13);
       - the unreleased tail is not a contiguous run from released_end+1 to the last worklog id (a gap in
         the worklog would leave a span that cannot tile).
 
@@ -780,6 +786,15 @@ def release_cut(version_data, worklog_data, new_version, date,
         return CutResult(CANNOT_EVALUATE, [
             "cannot cut: prior frozen integrity of a rotated span must be verified at the store level; "
             "call validate_store first"])
+
+    # Defense-in-depth, fail-closed: over the spans this pure per-ledger cut CAN see (the non-rotated case
+    # reached here, where every prior released entry is still present in the active worklog) enforce frozen
+    # coverage now, so a cut can never certify VALID over a MUTATED already-frozen released span. A digest
+    # mismatch on a prior span means a frozen-covered entry was edited: fail closed to INVALID. The
+    # rotated/archive case is deferred above to the store-level validator (validate_store), unchanged.
+    frozen_findings = check_frozen_coverage(version_data, by_id)
+    if frozen_findings:
+        return CutResult(INVALID, ["cannot cut: a frozen released span was mutated"] + frozen_findings)
 
     end = prior_end
     all_nums = sorted(by_id)
@@ -1153,6 +1168,17 @@ def self_test():
     # the store validator (PASS B), not the cut.
     check("cut-non-rotated-intact-ok",
           release_cut(vok, worklog, "1.1.0", "2026-06-15T00:00:00Z").status == VALID)
+    # FIX 1: a NON-ROTATED store whose already-frozen WL-1 was EDITED after freeze must NOT cut VALID. The
+    # 1.0.0 span covers WL-1..WL-2 with dig12 (the original content); editing WL-1 changes its recomputed
+    # coverage digest, so the cut now enforces frozen coverage over the spans it can see and returns
+    # INVALID (before the fix it certified VALID, deferring the check to a store validator that does not
+    # yet exist).
+    wl_frozen_edited = {"schema": 1, "entry": [entry(1, summary="EDITED after freeze"),
+                                               entry(2), entry(3), entry(4)]}
+    cut_frozen_edited = release_cut(vok, wl_frozen_edited, "1.1.0", "2026-06-15T00:00:00Z")
+    check("cut-frozen-mutation-invalid", cut_frozen_edited.status == INVALID)
+    check("cut-frozen-mutation-named",
+          any("frozen released span was mutated" in f for f in cut_frozen_edited.findings))
     # WL-1,2 are the prior released span (1.0.0); a store that rotated them out of the active worklog is
     # rotated, so the cut cannot verify their frozen integrity alone and fails closed to CANNOT-EVALUATE.
     active_rotated = {"schema": 1, "entry": [entry(3), entry(4)]}
