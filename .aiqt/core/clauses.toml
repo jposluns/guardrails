@@ -134,6 +134,33 @@ canonical-text = "The weaker the source, the more corroboration a load-bearing c
 source-digest = "14ecc6a4fa419a3b0b8223c9442b0f9c5ab7c32adeaa4e4a2b1fec1cf26b1fb9"
 
 [[clause]]
+clause-id = "cntprd.1"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 13
+end-line = 14
+canonical-text = "A reported count, size, or population is meaningful only together with the predicate that selected it:\nwhat was counted, over what set, under what filter, and as of when."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+
+[[clause]]
+clause-id = "cntprd.2"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 14
+end-line = 16
+canonical-text = "Two counts of nominally the same\nthing produced by different predicates are different figures, and they are never quoted interchangeably,\ncompared as though they measured one quantity, or carried forward as a single number."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+
+[[clause]]
+clause-id = "cntprd.3"
+corpus-id = "cntprd"
+source-path = ".aiqt/core/rules/accur-count-carries-its-predicate.md"
+start-line = 18
+end-line = 24
+canonical-text = "A count reused across statements is pinned to the recorded\npredicate that produced it and, where a reconcilable basis is available and its retention permitted, to\nthat basis, an authoritative snapshot or revision of the source or the identifiers the reading returned\nwhere that set is complete, so a later statement reconciles against the recorded figure rather than\nsilently re-deriving a different one; where no such basis is available, the statement records that the\nfigure cannot be reconciled and is re-measured under the same predicate rather than carried forward as\nthough it were."
+source-digest = "b6b2317eccf36a090fa45ead79253aef1d4a53da999681873f0a201a4bb60d8f"
+
+[[clause]]
 clause-id = "dscres.1"
 corpus-id = "dscres"
 source-path = ".aiqt/core/rules/accur-disclose-guard-residuals.md"
@@ -293,7 +320,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "grdinp.2"
@@ -302,7 +329,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 15
 end-line = 17
 canonical-text = "Ask\nof every consequential guard not whether the value is correct but whether the source can, even in principle,\nanswer what is being asked; when it cannot, change the input rather than harden the check."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "grdinp.3"
@@ -311,7 +338,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "grdinp.4"
@@ -320,7 +347,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 17
 end-line = 22
 canonical-text = "A value the guard\nis handed rather than measures, a caller-supplied count, size, or work-list, or the guard's own denylist,\nthreshold, or configuration, is itself such an input: validate a passed premise against the real source or\nauthoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather\nthan running the guard\nmis-sized or disabled."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "grdinp.5"
@@ -329,7 +356,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "grdinp.6"
@@ -338,7 +365,7 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 22
 end-line = 26
 canonical-text = "When the source cannot answer, the guard treats that as a distinct cannot-evaluate\ncase rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third\nstate, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and\na consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a\nverdict the guard never reached."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "grdinp.7"
@@ -347,7 +374,43 @@ source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
 start-line = 30
 end-line = 33
 canonical-text = "A value hardcoded into a reusable command, or carried over from the source the\ncommand was copied or templated from, is not evidence of the target the command now runs against: it is\nderived from the authoritative source at the point of use, or validated against it, before the guard\nrelies on it."
-source-digest = "7d7a311dfef1381af5ed707af0ee03c53737082c07e401f86a811b9c7ecd138d"
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
+
+[[clause]]
+clause-id = "grdinp.8"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 39
+end-line = 42
+canonical-text = "Where a document asserts a fact about the\nsystem it governs, an owning account, a path, a schedule, or an interface, that fact is verified against an\nauthority the document's author does not control, the live system or a second in-tree artefact whose purpose\nis to state that same fact, rather than against the document's own words."
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
+
+[[clause]]
+clause-id = "grdinp.9"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 42
+end-line = 46
+canonical-text = "A membership question over a range\nor interval is likewise answered by a membership test, whether a value falls within the interval, not by\nmatching the literal endpoint tokens: a range expressed by its endpoints is not the set of its members, so a\nliteral-token scan is a proxy that structurally cannot see a member the range includes only implicitly, one\nlying between its endpoints and written nowhere as a literal token."
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
+
+[[clause]]
+clause-id = "grdinp.10"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 51
+end-line = 53
+canonical-text = "It is therefore scoped to the narrowest locus where\nthe string's presence would be a defect; a whole-artefact scope is right only where every occurrence is a\ndefect, such as a leaked secret, an invalid byte, or a forbidden character with no legitimate quotation."
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
+
+[[clause]]
+clause-id = "grdinp.11"
+corpus-id = "grdinp"
+source-path = ".aiqt/core/rules/accur-guard-input-soundness.md"
+start-line = 54
+end-line = 56
+canonical-text = "Where the string legitimately appears elsewhere, the invariant is asserted against the parsed or semantic\nstate, or the negative predicate is scoped to the defect locus, rather than run as a naive whole-artefact\nstring scan."
+source-digest = "8d21a518820de1d4b7f64f6551150a3eb020c9a40a2abc8bd7583a296b33549c"
 
 [[clause]]
 clause-id = "estsep.1"
@@ -1752,6 +1815,51 @@ start-line = 18
 end-line = 19
 canonical-text = "Every substantive change is verified before it integrates by an independent adversarial pass, briefed to\nrefute rather than confirm."
 source-digest = "5f97f7ebd69a8b825747c384fbc0ac5717a3ccfecb86641c672b93afb32b96fa"
+
+[[clause]]
+clause-id = "kltwat.1"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 13
+end-line = 15
+canonical-text = "When a wrapper is meant to let a command finish its own work, the runtime bound it imposes is set above\nthe command's intended end-to-end execution budget: its sequential waits, its retries and their backoff,\nany queue residence, and the follow-on work that runs once those resolve, plus a margin."
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+
+[[clause]]
+clause-id = "kltwat.2"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 17
+end-line = 18
+canonical-text = "Before wrapping a command\nin a timeout meant to let it complete, establish the budget the command grants itself and size the bound above it"
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+
+[[clause]]
+clause-id = "kltwat.3"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 18
+end-line = 20
+canonical-text = "before\nconcluding that a contended resource is starving a caller, establish that the caller actually outlived\nits own configured budget rather than being killed under it."
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+
+[[clause]]
+clause-id = "kltwat.4"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 25
+end-line = 26
+canonical-text = "the override is confirmed\nto land where the callee reads it rather than assumed to have carried across."
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
+
+[[clause]]
+clause-id = "kltwat.5"
+corpus-id = "kltwat"
+source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
+start-line = 20
+end-line = 23
+canonical-text = "A deliberately shorter deadline is\nlegitimate where cutting the work short is the explicit intent, such as a latency limit or a fast-fail\nprobe, provided the termination is attributed to that deadline rather than reported as a failure of the\ncallee."
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
 clause-id = "lvw001.1"
@@ -4975,3 +5083,39 @@ start-line = 27
 end-line = 31
 canonical-text = "so the claim cannot rest on an unshown assertion that work is blocked. The recorded condition blocks the\nitem only when it leaves the item no step that can proceed while the condition holds, every sanctioned\npath completed or observed closed; a condition that gates only a later step of the item, or that degrades\na resource only that later step consumes, shows that step held, not the item blocked, while a step can\nstill proceed or a sanctioned path is not yet completed or observed closed."
 source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
+
+[[clause]]
+clause-id = "rvwpin.1"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 13
+end-line = 14
+canonical-text = "Once a review, verification, or adversarial check has been dispatched against a named artefact or\nrevision, that artefact is not modified until the review returns or is abandoned."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "rvwpin.2"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 14
+end-line = 17
+canonical-text = "A reviewer's findings\nare meaningful only against the state it observed: a target that moves under it invalidates its line\nreferences, forces it to re-derive the ground truth mid-review, and makes its report impossible to\nreconcile against other reviewers of the same nominal revision."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "rvwpin.3"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 17
+end-line = 20
+canonical-text = "The target this holds stable is the\nmutable one the review named, a working tree, the tip of a branch, or a file under examination, which is\ndistinct from committing an artefact to an immutable object identity before the review reads it and from\nthe inertness of the reviewer's own output."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "rvwpin.4"
+corpus-id = "rvwpin"
+source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"
+start-line = 20
+end-line = 22
+canonical-text = "Where a change genuinely cannot wait, it is made on a\nseparate revision and the in-flight review is left undisturbed, to be re-dispatched against the new\nstate once that change has settled."
+source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
