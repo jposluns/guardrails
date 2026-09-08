@@ -1823,7 +1823,7 @@ source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
 start-line = 13
 end-line = 15
 canonical-text = "When a wrapper is meant to let a command finish its own work, the runtime bound it imposes is set above\nthe command's intended end-to-end execution budget: its sequential waits, its retries and their backoff,\nany queue residence, and the follow-on work that runs once those resolve, plus a margin."
-source-digest = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
 clause-id = "kltwat.2"
@@ -1831,8 +1831,8 @@ corpus-id = "kltwat"
 source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
 start-line = 17
 end-line = 18
-canonical-text = "Before wrapping a command\nin a timeout, establish the budget the command grants itself and size the bound above it"
-source-digest = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
+canonical-text = "Before wrapping a command\nin a timeout meant to let it complete, establish the budget the command grants itself and size the bound above it"
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
 clause-id = "kltwat.3"
@@ -1841,25 +1841,25 @@ source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
 start-line = 18
 end-line = 20
 canonical-text = "before\nconcluding that a contended resource is starving a caller, establish that the caller actually outlived\nits own configured budget rather than being killed under it."
-source-digest = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
 clause-id = "kltwat.4"
 corpus-id = "kltwat"
 source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
-start-line = 20
-end-line = 23
-canonical-text = "A deliberately shorter deadline is\nlegitimate where cutting the work short is the explicit intent, such as a latency limit or a fast-fail\nprobe, provided the termination is attributed to that deadline rather than reported as a failure of the\ncallee."
-source-digest = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
+start-line = 25
+end-line = 26
+canonical-text = "the override is confirmed\nto land where the callee reads it rather than assumed to have carried across."
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
 clause-id = "kltwat.5"
 corpus-id = "kltwat"
 source-path = ".aiqt/core/rules/quali-kill-timeout-exceeds-callee-wait.md"
-start-line = 25
-end-line = 26
-canonical-text = "the override is confirmed\nto land where the callee reads it rather than assumed to have carried across."
-source-digest = "831098d48697fcf56a30efb3f8f97eeeecad32886ab737bc3630194d34cd89a2"
+start-line = 20
+end-line = 23
+canonical-text = "A deliberately shorter deadline is\nlegitimate where cutting the work short is the explicit intent, such as a latency limit or a fast-fail\nprobe, provided the termination is attributed to that deadline rather than reported as a failure of the\ncallee."
+source-digest = "f0aad39bcc86943d8173636c4630cd081d388e063228ce682cb52f8dd0e2bb6c"
 
 [[clause]]
 clause-id = "lvw001.1"

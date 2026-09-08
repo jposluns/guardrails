@@ -9,7 +9,7 @@ the command's intended end-to-end execution budget: its sequential waits, its re
 any queue residence, and the follow-on work that runs once those resolve, plus a margin. A bound set
 below that budget can terminate a callee that is still behaving correctly, and the termination can then
 be misdiagnosed as a failure of the callee or of whatever it was waiting on. Before wrapping a command
-in a timeout, establish the budget the command grants itself and size the bound above it; and before
+in a timeout meant to let it complete, establish the budget the command grants itself and size the bound above it; and before
 concluding that a contended resource is starving a caller, establish that the caller actually outlived
 its own configured budget rather than being killed under it. A deliberately shorter deadline is
 legitimate where cutting the work short is the explicit intent, such as a latency limit or a fast-fail
