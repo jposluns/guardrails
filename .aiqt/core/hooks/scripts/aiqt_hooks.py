@@ -18,13 +18,15 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
-Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
-as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
+Contract (doc-confirmed 2026-08-17, re-confirmed 2026-09-04 against code.claude.com/docs/en/hooks):
+the hook payload arrives as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
 {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"|"deny",
 "permissionDecisionReason": "..."}}; an allow decision is expressed as NO output (exit 0 silent), so
 the user's own permission flow is never bypassed, and a deny decision blocks the tool. exit 2 is a
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
-as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
+as last_assistant_message. stop_hook_active/background_tasks/session_crons present as of Claude Code
+v2.1.196+ (re-confirmed 2026-09-04); stop_hook_active carries an 8-consecutive-block harness
+override, but the guard-owned stop_denials bound (2) is stricter and governs.
 
 Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
 deliberate boundary posture is stated next), gensrc_guard (a second stated exception, below), and
@@ -108,8 +110,8 @@ read-only and offline; it never mutates the repo.
 Stop layer is a DELIBERATE exception, non-blocking by design (GD-24 tri-family QA, 2026-08-17,
 flagged for Architect review): it SURFACES a diff wall with a strong systemMessage and exits 0 (WARN),
 it does NOT hard-block. The wall has already rendered by Stop time, so blocking cannot unsend it; and
-because there is no stop_hook_active field and no documented built-in loop bound, a hard exit-2 Stop
-block could re-fire on the forced continuation and wedge the session. The hard PREVENTION for console
+because a hard exit-2 Stop block re-fires on the forced continuation until the harness's stop_hook_active
+override relents (after 8 consecutive blocks, v2.1.196+), it could wedge the session. The hard PREVENTION for console
 diffs lives in the PreToolUse diff_source layer at the command source; the Stop layer only surfaces.
 
 This is enforced at the DISPATCHER, not left to the handler alone: main() reads each handler's event
@@ -773,7 +775,7 @@ def detect_diff_wall(text):
 def diff_wall_stop(data):
     """cnsdif (trust/no-console-diff-dumps), Stop: SURFACE (non-blocking WARN) a final response that is
     a raw diff wall. This layer never blocks; see the module docstring's design note (the wall has
-    already rendered, and a hard Stop block could wedge the session with no documented loop bound). It
+    already rendered, and a hard Stop block re-fires until the harness's stop_hook_active override relents after 8 blocks (v2.1.196+)). It
     surfaces via systemMessage on exit 0; the PreToolUse diff_source layer is the hard prevention."""
     if data.get("hook_event_name") not in STOP_EVENTS:
         # Even a mis-wired event only WARNS here: the diff-wall Stop layer is warn-only end to end (the
@@ -5689,6 +5691,167 @@ def _orch_live_ledger_ids(root, task_hours):
     return (live, readable, detail)
 
 
+def _orch_wake_digest_of(entry):
+    """The matching digest of a wake_digests entry: entry['digest'] for a structured dict record, the
+    string itself for a legacy bare digest, else None (a malformed entry has no matchable digest)."""
+    if isinstance(entry, dict):
+        d = entry.get("digest")
+        return d if isinstance(d, str) and d else None
+    if isinstance(entry, str) and entry:
+        return entry
+    return None
+
+
+def _orch_is_confirmed_wake(entry):
+    """Whether a wake_digests entry is a CONFIRMED STRUCTURED record (a dict with confirmed is True).
+    A legacy bare string, a non-dict, and an unconfirmed dict are NOT: they contribute nothing to
+    liveness and are preserved across a supersession (FIX 2b) or a stop-cancellation (FIX 2a)."""
+    return isinstance(entry, dict) and entry.get("confirmed") is True
+
+
+def _orch_wake_has_digest(records, digest):
+    """Whether any wake_digests entry matches digest (a structured record OR a legacy bare string).
+    Deliberately EXPIRY-BLIND: timer-origination is only about counter preservation, so a returning
+    wake still classifies timer-originated even if its record has aged past its liveness window."""
+    return any(_orch_wake_digest_of(e) == digest for e in records if _orch_wake_digest_of(e))
+
+
+def _orch_wake_consume(records, digest):
+    """Remove EXACTLY ONE entry whose digest matches (a structured record or a legacy bare string), so a
+    second identical wake is still recognized once (CX-M6/CX-M7). Order-preserving."""
+    out, removed = [], False
+    for e in records:
+        if not removed and _orch_wake_digest_of(e) == digest:
+            removed = True
+            continue
+        out.append(e)
+    return out
+
+
+def _orch_reconcile_wakes(records, now):
+    """Bounded (O(n<=64)) expiry sweep for wake_digests. Returns (kept, expired_count). DROP a record
+    only when it is a dict, confirmed is True, carries a PARSEABLE expiry_utc, and now is STRICTLY past
+    expiry_utc + skew (a provably-retired wake). KEEP everything else: an unexpired confirmed record, an
+    unconfirmed record, a legacy bare string, and any malformed/unclassifiable entry. Reconciliation
+    removes only what it can positively prove is past-expiry, so it never races or discards an
+    unevaluable record; the liveness rule scores what is kept, this only retires proven-dead records."""
+    if not isinstance(records, list):
+        return ([], 0)
+    kept, expired = [], 0
+    for e in records:
+        if isinstance(e, dict) and e.get("confirmed") is True:
+            exp = _orch_parse_utc(e.get("expiry_utc")) if isinstance(e.get("expiry_utc"), str) else None
+            if exp is not None and (now - exp).total_seconds() > _ORCH_CLOCK_SKEW:
+                expired += 1
+                continue
+        kept.append(e)
+    return (kept, expired)
+
+
+def _orch_wake_live_state(records, now):
+    """Score a wake_digests list for re-entry liveness. Returns ("live"|"none"|"cannot-evaluate", detail).
+    A wake is LIVE only when an entry is a FULLY-VALID structured record (FIX 3): a dict with confirmed
+    is True AND a non-empty str digest AND a parseable created_utc AND a parseable expiry_utc AND
+    created_utc <= expiry_utc (skew-tolerant) AND a bounded lifetime (expiry_utc - created_utc <=
+    _ORCH_MAX_HORIZON_HOURS plus skew) AND now NOT past expiry_utc + skew (a genuine, confirmed,
+    unexpired wake). An expired confirmed record, an unconfirmed record, and a legacy BARE string each
+    contribute NOTHING (no proof of a live wake: the security-correct direction for an actor-writable
+    field, the inverse of the old bare-presence trust). cannot-evaluate iff a CONFIRMED record is missing
+    or has an invalid field (digest absent/empty, created_utc or expiry_utc missing/non-string/
+    unparseable, an inverted created>expiry, or an over-horizon lifetime), or an entry is neither a dict
+    nor a string (a malformed control is never read as a clean 'no wake', matching the ledger idiom). ANY
+    missing/invalid field on a confirmed record is thus cannot, never silently ignored and never live, so
+    a bare {confirmed:true, expiry_utc:"9999..."} with no digest/created_utc can no longer score live.
+    Aggregate: any live wins; else any cannot-evaluate wins; else none."""
+    live, cannot = 0, 0
+    for e in records:
+        if isinstance(e, str):
+            continue  # legacy bare digest: no evidence, contributes nothing
+        if not isinstance(e, dict):
+            cannot += 1  # a non-str/non-dict entry is a malformed control
+            continue
+        if e.get("confirmed") is not True:
+            continue  # unconfirmed: no proof of a live wake, contributes nothing
+        # A CONFIRMED record must be FULLY VALID to count live; ANY missing/invalid field is a malformed
+        # control (cannot-evaluate), never silently ignored and never live (FIX 3).
+        digest = e.get("digest")
+        created = _orch_parse_utc(e.get("created_utc")) if isinstance(e.get("created_utc"), str) else None
+        exp = _orch_parse_utc(e.get("expiry_utc")) if isinstance(e.get("expiry_utc"), str) else None
+        if not (isinstance(digest, str) and digest) or created is None or exp is None:
+            cannot += 1  # confirmed but missing/unparseable digest, created_utc, or expiry_utc
+            continue
+        horizon = _ORCH_MAX_HORIZON_HOURS * 3600 + _ORCH_CLOCK_SKEW
+        if (created - exp).total_seconds() > _ORCH_CLOCK_SKEW \
+                or (exp - created).total_seconds() > horizon:
+            cannot += 1  # inverted (created past expiry) or over-horizon lifetime: a malformed control
+            continue
+        if (now - exp).total_seconds() <= _ORCH_CLOCK_SKEW:
+            live += 1  # fully-valid, confirmed, and not past expiry + skew: a genuine live wake
+        # else: confirmed but expired -> contributes nothing
+    if live:
+        return ("live", "{} confirmed unexpired wake(s)".format(live))
+    if cannot:
+        return ("cannot-evaluate", "{} malformed wake record(s)".format(cannot))
+    return ("none", "no confirmed unexpired wake")
+
+
+def _orch_reentry_live(data, root, task_hours, tstate):
+    """GD-137 Layer A liveness: is a LIVE mechanism poised to re-enter this session after a stop? Returns
+    ("live"|"none"|"cannot-evaluate", detail). Four contract-agnostic sources:
+      (a) data["background_tasks"], (b) data["session_crons"]: a Stop-payload array the current harness
+          MAY expose (present as of Claude Code v2.1.196+). When PRESENT and non-empty it is the
+          authoritative pending-wake signal (categorical); ABSENT contributes nothing (the design does not
+          depend on it existing, so it is feature-detected by presence); a non-empty LIST is live (entries
+          are NOT schema-validated, fail open toward suppression per the plan); an empty list contributes
+          nothing; present-but-not-a-list is cannot-evaluate (a malformed control is never a clean "no
+          tasks").
+      (c) the guard-owned dispatch ledger (_orch_live_ledger_ids), the AUTHORITATIVE fallback read whether
+          or not the arrays exist: a non-empty live set is live; readable False is cannot-evaluate; a
+          readable empty set (an absent ledger reads empty, not unreadable) contributes nothing.
+      (d) tstate wake_digests (a registered timer wake): live ONLY for a CONFIRMED, unexpired, structured
+          record (created on ScheduleWakeup SUCCESS at PostToolUse, carrying created/expiry timestamps);
+          an expired, unconfirmed, or legacy-bare record contributes nothing (so an allowed-then-failed
+          schedule cannot manufacture a live wait); a malformed record, or a present-but-not-a-list value,
+          is cannot-evaluate. Scored by _orch_wake_live_state against the reconciled view.
+    Aggregate (fail open toward suppression): ANY live wins; else ANY cannot-evaluate wins; else none."""
+    live, cannot = [], []
+
+    def _array(key):
+        if key not in data:
+            return  # absent contributes nothing; the design never depends on the array existing
+        val = data.get(key)
+        if isinstance(val, list):
+            if val:
+                live.append("data.{} ({} entr{})".format(
+                    key, len(val), "y" if len(val) == 1 else "ies"))
+        else:
+            cannot.append("data.{} is present but not a list".format(key))
+
+    _array("background_tasks")
+    _array("session_crons")
+    live_ids, ledger_readable, ledger_detail = _orch_live_ledger_ids(root, task_hours)
+    if live_ids:
+        live.append("{} live dispatched task(s)".format(len(live_ids)))
+    elif not ledger_readable:
+        cannot.append("dispatch ledger unreadable"
+                      + (": " + ledger_detail if ledger_detail else ""))
+    wd = tstate.get("wake_digests") if isinstance(tstate, dict) else None
+    if isinstance(wd, list):
+        wstate, wdetail = _orch_wake_live_state(wd, _orch_now())
+        if wstate == "live":
+            live.append(wdetail)
+        elif wstate == "cannot-evaluate":
+            cannot.append(wdetail)
+        # "none": a confirmed live wake is absent; contributes nothing (never suppresses the phantom deny)
+    else:
+        cannot.append("wake_digests unreadable or malformed")
+    if live:
+        return ("live", "; ".join(live))
+    if cannot:
+        return ("cannot-evaluate", "; ".join(cannot))
+    return ("none", "no background task, scheduled cron, live dispatched task, or pending wake")
+
+
 def _orch_pending_haystack(reg, root):
     """The human-decision proof surface: the DECLARED pending-decisions record ONLY. The machine-written
     pending-asks keys are NOT decision rows and are excluded (an ask key session::tool_use could otherwise
@@ -5839,7 +6002,8 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
 
 def decide_yield(ctx):
     """The PURE decision core. ctx keys: kind, escape, loop_signal, counter, enum_status, enum_detail,
-    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged.
+    actionable, waiting, blocked, cannot_evaluate, proposed, wake_named, schedule_denials, basis_unchanged,
+    phantom_claim, reentry, reentry_detail.
     Returns (verdict, reason, disposition) with verdict ALLOW | ALLOW_WITH_FINDINGS | DENY."""
     kind = ctx["kind"]
     disposition = ([("blocked", i, c, p) for i, c, p in ctx["blocked"]]
@@ -5849,7 +6013,7 @@ def decide_yield(ctx):
                    + [("proposed", i, "", "") for i in ctx["proposed"]])
     if ctx["escape"]:
         return ("ALLOW", "operator escape artefact present (logged)", disposition)
-    if kind != "schedule_idle" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]):
+    if kind != "schedule_idle" and ctx["counter"] >= _ORCH_LOOP_BOUND:
         return ("ALLOW_WITH_FINDINGS",
                 "loop bound reached after {} denial(s); yielding with the unresolved items as "
                 "findings rather than re-firing".format(ctx["counter"]), disposition)
@@ -5903,6 +6067,32 @@ def decide_yield(ctx):
                     "unconfirmable blocker cannot license a stop (ignorance refuses the wind-down). "
                     "Fix the source; the operator-owned escape sentinel is the release for a genuine "
                     "block.".format(len(ctx.get("cannot_evaluate", []))), disposition)
+        # GD-137 Layer A (cntdef/trkasy/clmobs): a phantom wait is a stop whose final message CLAIMS this
+        # session is waiting on an automated event to resume it, evaluated only on the stop path (a
+        # schedule_idle has already proved its wake) and only once the backlog is otherwise clean (no
+        # actionable, no cannot-evaluate item). A claim with a LIVE re-entry source is a genuine wait
+        # (inert, falls through to the clean ALLOW); a claim with NO live source is the phantom the
+        # continue-by-default rule forbids (DENY, counted against the shared stop_denials bound); a claim
+        # whose liveness cannot be read is ignorance, which refuses the wind-down (DENY variant naming the
+        # unreadable source). loop_signal (stop_hook_active) does NOT relieve this: the guard-owned bound
+        # governs (E2/D4), so a phantom wait raised after another hook's block is still denied below bound.
+        if kind == "stop" and ctx.get("phantom_claim"):
+            if ctx.get("reentry") == "none":
+                return ("DENY",
+                        "cntdef/trkasy: the final message claims this session is waiting on an automated "
+                        "event to resume it, but no live re-entry mechanism exists (no tracked background "
+                        "task, no scheduled cron, no live dispatched task, no pending wake): the wait is "
+                        "phantom and would wedge the session on a resume that never fires. Continue the "
+                        "highest-priority open item, or record a proven blocker; a claimed wait is not one "
+                        "(clmobs). The operator-owned escape sentinel releases a genuine stop.", disposition)
+            if ctx.get("reentry") == "cannot-evaluate":
+                return ("DENY",
+                        "cntdef/trkasy: the final message claims an automated-event wait, but the liveness "
+                        "of the re-entry mechanism cannot be read ({}); an unconfirmable wait cannot license "
+                        "a stop (ignorance refuses the wind-down, clmobs). Fix the source, or continue the "
+                        "highest-priority open item; the operator-owned escape sentinel is the release for a "
+                        "genuine block.".format(ctx.get("reentry_detail") or "source unreadable"),
+                        disposition)
         return ("ALLOW", "no actionable item remains; the disposition table is the enumeration",
                 disposition)
     if kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP \
@@ -5966,16 +6156,22 @@ def _schema_turn_state(raw):
     present and valid, and None when present-but-malformed OR the whole turn-state is unreadable (raw is
     not a dict). The CALLER maps None to the fail-safe direction (stop -> the loop bound, so a malformed
     or unreadable counter never licenses unbounded denies; schedule -> 0, so it never buys cap relief).
-    schedule_basis is a string or None."""
+    schedule_basis is a string or None. wake_digests is the list when present and a list, [] when absent
+    (no pending wake), and None when present-but-not-a-list or the whole turn-state is unreadable (a
+    malformed control the reentry-liveness reader maps to cannot-evaluate, never to 'no pending wake')."""
     if not isinstance(raw, dict):
-        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None})
+        return ("ok", {"stop_denials": None, "schedule_denials": None, "schedule_basis": None,
+                       "wake_digests": None})
 
     def _count(key):
         return 0 if key not in raw else _v_exact_int(raw[key], 0, _ORCH_COUNTER_MAX)
     basis = raw.get("schedule_basis")
+    wd = raw.get("wake_digests")
     return ("ok", {"stop_denials": _count("stop_denials"),
                    "schedule_denials": _count("schedule_denials"),
-                   "schedule_basis": basis if isinstance(basis, str) else None})
+                   "schedule_basis": basis if isinstance(basis, str) else None,
+                   "wake_digests": (wd if isinstance(wd, list)
+                                    else ([] if "wake_digests" not in raw else None))})
 
 
 _ORCH_SCHEMAS = {"staleness": _schema_staleness, "turn_state": _schema_turn_state}
@@ -5989,7 +6185,67 @@ def _orch_token_present(needle, hay):
     return re.search(r"(?<![A-Za-z0-9_-]){}(?![A-Za-z0-9_-])".format(re.escape(needle)), hay) is not None
 
 
+def _orch_phantom_wait_claim(message):
+    """GD-137 Layer A (clmobs/cntdef/trkasy): does the final assistant message CLAIM this session is
+    waiting on an AUTOMATED event to resume it? Precision-first bool: a UNIT (split on newline and . ! ? ;)
+    is a claim only when it carries ALL five required signals (a first-person subject, a future/wait marker,
+    a resume/wait verb, and an automated-event noun) AND none of the exclusions (a human-wait object or a
+    negation/conditional in the unit, or an express manual-resume disclaimer ANYWHERE in the message).
+    Returns False on any non-str or over-long input. Fenced code blocks, inline code spans, and blockquote
+    lines are stripped before analysis. Paraphrase, non-English, novel vocabulary, and non-Markdown quoting
+    are DISCLOSED false negatives (dscres); Layers B/C are the overlap cover."""
+    if not isinstance(message, str) or len(message) > _ORCH_CLAIM_MAX_CHARS:
+        return False
+    text = _PW_FENCE.sub(" ", message)          # complete fenced blocks only (an unclosed fence stays)
+    text = _PW_INLINE.sub(" ", text)            # inline code spans
+    text = _PW_BLOCKQUOTE.sub(" ", text)        # blockquote lines (line-oriented; before whitespace collapse)
+    text = text.casefold().translate(_PW_APOS)
+    if _PW_DISCLAIM.search(text):
+        return False                            # an express manual-resume disclaimer suppresses every unit
+    for raw_unit in _PW_UNIT_SPLIT.split(text):
+        unit = _PW_WS.sub(" ", raw_unit).strip()
+        if not unit:
+            continue
+        if not (_PW_SUBJECT.search(unit) and _PW_MARKER.search(unit)
+                and _PW_VERB.search(unit) and _PW_EVENT.search(unit)):
+            continue
+        if _PW_HUMAN.search(unit) or _PW_NEG.search(unit):
+            continue
+        return True
+    return False
+
+
 _ORCH_CHECKPOINT_MAX = 4096  # ids the C.3 checkpoint retains; a bound-forced drop is logged, never silent
+
+
+_ORCH_CLAIM_MAX_CHARS = 200000   # SECA bound: an over-long final message is not scanned (no claim)
+
+# GD-137 Layer A: the phantom-wait claim detector's five REQUIRED signals and three EXCLUSIONS. Matching is
+# PRECISION-FIRST: paraphrase, non-English, novel vocabulary, and non-Markdown quoting are DISCLOSED false
+# NEGATIVES (dscres), never false positives; Layers B/C are the overlap cover. Verbs and event nouns match
+# common inflections so an -ing/-s/-ed form of a listed stem still counts.
+_PW_SUBJECT = re.compile(r"\bi\b|\bi'll\b|\bwe\b|\bthis session\b|\bthis agent\b")
+_PW_MARKER = re.compile(r"\bwill\b|'ll\b|\bawaiting\b|\bwaiting\b|\bresuming\b|\bwatching\b|\bmonitoring\b")
+_PW_VERB = re.compile(
+    r"\bresum(?:e|es|ing)\b|\bcontinu(?:e|es|ing)\b|\breturn(?:s|ing)?\b|\bre-?enter(?:s|ing)?\b"
+    r"|\bproceed(?:s|ing)?\b|\bmerg(?:e|es|ing)\b|\bpick(?:s|ing)?\s+up\b|\bland(?:s|ing)?\b"
+    r"|\bawait(?:s|ing)?\b|\bwait(?:s|ing)?\b|\bwatch(?:es|ing)?\b|\bmonitor(?:s|ing)?\b")
+_PW_EVENT = re.compile(
+    r"\bci\b|\bchecks?\b|\bworkflows?\b|\bpipelines?\b|\bbuilds?\b|\bjobs?\b|\bruns?\b|\btasks?\b"
+    r"|\bnotifications?\b|\bmonitors?\b|\bwatch(?:es)?\b|\bcrons?\b|\bschedules?\b|\btimers?\b"
+    r"|\bgreen\b|\bfire(?:s|d)?\b|\bcomplete(?:s|d)?\b|\bcompletion\b")
+_PW_HUMAN = re.compile(
+    r"\byou\b|\byour\b|\bhuman\b|\bmaintainer\b|\boperator\b|\breview|\bapprov|\bconfirm"
+    r"|\bdecision\b|let me know")
+_PW_NEG = re.compile(r"\bnot\b|n't\b|\bno\b|\bnever\b|\bif\b|\bwould\b|\bcannot\b|\bunless\b")
+_PW_DISCLAIM = re.compile(
+    r"no automatic|must be resumed|please message|please prompt|requires a human|\bmanually\b")
+_PW_FENCE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+_PW_INLINE = re.compile(r"`[^`]*`")
+_PW_BLOCKQUOTE = re.compile(r"(?m)^\s*>.*$")
+_PW_UNIT_SPLIT = re.compile(r"[\n.!?;]+")
+_PW_WS = re.compile(r"\s+")
+_PW_APOS = {0x2018: 0x27, 0x2019: 0x27, 0x02BC: 0x27}   # curly/modifier apostrophes -> straight '
 
 
 def _orch_checkpoint_union(root, payload, record=True):
@@ -6138,14 +6394,41 @@ def _orch_build_ctx(reg, root, kind, data, wake_text=None, record_checkpoint=Tru
                          for i, _c, p in rechecked)
     basis_unchanged = tstate["schedule_basis"] == basis
     escape_active, escape_spoof = _orch_escape_active(reg, root)
+    # GD-137 Layer A: the phantom-wait claim + its re-entry liveness. The claim is cheap and computed
+    # unconditionally; the liveness read (ledger + arrays + wakes) runs ONLY when a claim is present, so a
+    # non-claiming stop stays byte-identical to prior behaviour. decide_yield consults these keys only for
+    # kind == "stop", after its actionable/cannot-evaluate checks.
+    phantom_claim = _orch_phantom_wait_claim(data.get("last_assistant_message"))
+    reentry, reentry_detail = ("none", "")
+    if phantom_claim:
+        # Cadence point 1: reconcile (expire) stale wake records on the IN-MEMORY view BEFORE liveness is
+        # read, so a stale confirmed digest cannot manufacture liveness at the moment it matters. The
+        # liveness predicate re-checks expiry regardless, so this changes no verdict; it only cleans up.
+        # Persist is BEST-EFFORT from the raw turn-state (never the validated view, which nulls a
+        # malformed counter): the decision uses the reconciled in-memory view whether or not the persist
+        # succeeds, so a read-only state dir can never wedge a stop.
+        wd = tstate.get("wake_digests") if isinstance(tstate, dict) else None
+        if isinstance(wd, list):
+            kept, expired = _orch_reconcile_wakes(wd, _orch_now())
+            if expired:
+                tstate = dict(tstate)
+                tstate["wake_digests"] = kept
+                # A list wake_digests in the validated view means the raw ts is a readable dict; mutate it
+                # in place so the returned ts carries the reconciled list and a later _orch_record_denial
+                # persists it consistently (rather than writing back the stale, un-reconciled records).
+                if isinstance(ts, dict):
+                    ts["wake_digests"] = kept
+                    _orch_save_turn_state(root, ts)
+        reentry, reentry_detail = _orch_reentry_live(data, root, task_hours, tstate)
     ctx = {"kind": kind, "escape": escape_active, "escape_spoof": escape_spoof,
-           "loop_signal": data.get("stop_hook_active") is True,  # strict bool; a "false" string is not a signal
+           "loop_signal": data.get("stop_hook_active") is True,  # D4/E2: DIAGNOSTIC only, never relieves the bound
            "counter": counter, "enum_status": status, "enum_detail": enum_detail,
            "actionable": classes["actionable"], "waiting": classes["waiting"],
            "blocked": classes["blocked"], "cannot_evaluate": classes["cannot_evaluate"],
            "proposed": classes["proposed"],
            "wake_named": wake_named, "schedule_denials": schedule_denials,
-           "basis_unchanged": basis_unchanged}
+           "basis_unchanged": basis_unchanged,
+           "phantom_claim": phantom_claim, "reentry": reentry, "reentry_detail": reentry_detail}
     return ctx, (ts if isinstance(ts, dict) else None), basis
 
 
@@ -6247,6 +6530,12 @@ def _orch_stop_family(data, event_name, kind):
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
+    if ctx["loop_signal"]:
+        # D4/E2: stop_hook_active is DIAGNOSTIC only now. The harness carries an 8-consecutive-block
+        # override on this flag, but the guard-owned stop_denials bound (2) is stricter and governs, so it
+        # is recorded for observability and never consulted by the verdict.
+        _orch_guard_event(root, event_name, "loop_signal_diagnostic",
+                          "stop_hook_active true at counter {}".format(ctx["counter"]))
     if verdict == "DENY":
         if not _orch_record_denial(root, ts, kind, basis):
             warn = ("the denial counter could not be persisted, so the loop bound cannot advance; "
@@ -6260,7 +6549,7 @@ def _orch_stop_family(data, event_name, kind):
     _orch_guard_event(root, event_name, verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         extra = ""
-        if (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]) \
+        if ctx["counter"] >= _ORCH_LOOP_BOUND \
                 and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
             # C.4: the bound released this exit past open work; mark it forced_unresolved for the
             # next resume audit's triage. The fail-open verdict itself is unchanged.
@@ -6287,20 +6576,73 @@ def orch_teammate_idle(data):
     return _orch_stop_family(data, "TeammateIdle", "stop_idle" if False else "stop")
 
 
-def _orch_register_wake(root, ts, prompt):
-    """Record the sha256 of an ALLOWED wake's prompt into turn-state wake_digests (bounded), so the
-    returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp and does not reset
-    the loop-guard counters or stamp a false genuine-human-input time (G1: the classifier was dead
-    because nothing ever wrote wake_digests)."""
+def _orch_wake_window_hours(tool_input, prompt, fallback_hours):
+    """The expiry window in hours for a wake record (SECA resource-bound). Prefer a MEASURED duration
+    when the call states one: ScheduleWakeup's own delaySeconds on tool_input (the primary tool states
+    its harness-clamped delay there, <=3600s), a not_before ISO timestamp on tool_input, or a parseable
+    minutes figure in the prompt text (reusing _ORCH_QUIET_CLAIM_RE; estsep: a measured figure beats
+    none). Grace is folded in as max(2*duration, duration + 1h) so a short delay still gets ample slack.
+    Otherwise the bounded staleness horizon (fallback_hours). Always clamped to (0,
+    _ORCH_MAX_HORIZON_HOURS], so the record is guaranteed to self-expire within a finite, skew-tolerant
+    window even when no duration is stated."""
+    duration_h = None
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    ds = ti.get("delaySeconds")
+    if isinstance(ds, (int, float)) and not isinstance(ds, bool) and ds > 0:
+        duration_h = ds / 3600.0  # the primary tool states its (harness-clamped) delay here
+    if duration_h is None:
+        nb = _orch_parse_utc(ti.get("not_before")) if isinstance(ti.get("not_before"), str) else None
+        if nb is not None:
+            secs = (nb - _orch_now()).total_seconds()
+            if secs > 0:
+                duration_h = secs / 3600.0
+    if duration_h is None and isinstance(prompt, str):
+        m = _ORCH_QUIET_CLAIM_RE.search(prompt)
+        if m:
+            try:
+                duration_h = float(m.group(1)) / 60.0
+            except (ValueError, OverflowError):
+                duration_h = None
+    if duration_h is not None and duration_h > 0:
+        window = max(2.0 * duration_h, duration_h + 1.0)
+    else:
+        window = fallback_hours
+    if not isinstance(window, (int, float)) or isinstance(window, bool) \
+            or not math.isfinite(window) or window <= 0:
+        window = _ORCH_MAX_HORIZON_HOURS
+    return min(float(window), float(_ORCH_MAX_HORIZON_HOURS))
+
+
+def _orch_register_wake(root, ts, prompt, tool_input=None, fallback_hours=24):
+    """Record a CONFIRMED, self-expiring STRUCTURED wake record into turn-state wake_digests (bounded),
+    so the returning UserPromptSubmit is recognised as timer-originated by orch_prompt_stamp AND the
+    phantom-wait liveness check has authoritative evidence of a genuine pending wake. The record is
+    {digest, created_utc, expiry_utc, confirmed:true}; digest is the unchanged sha256 of the prompt (the
+    matching key orch_prompt_stamp consumes). Registration is on ScheduleWakeup SUCCESS only (the
+    PostToolUse path), never at PreToolUse-allow time, so an allowed-then-failed schedule leaves no live
+    token. Returns True on a successful persist. Legacy bare strings already in the list are preserved
+    (migration). REPLACEMENT semantics (FIX 2b, superseding the old CX-M6 multiset rule where two
+    identical wakes registered two records): a new confirmed record SUPERSEDES prior confirmed structured
+    records for this root, because the runtime replaces pending dynamic wakes, so a stale prior confirmed
+    record would be a dead record (exactly the dead-record bug); only the latest confirmed wake is kept
+    live. The window self-expires the record within a bounded, skew-tolerant horizon."""
     if not isinstance(prompt, str) or not prompt:
-        return
+        return False
+    now = _orch_now()
     digest = __import__("hashlib").sha256(prompt.encode("utf-8", "replace")).hexdigest()
+    window_h = _orch_wake_window_hours(tool_input, prompt, fallback_hours)
+    record = {"digest": digest, "created_utc": now.isoformat(),
+              "expiry_utc": (now + datetime.timedelta(hours=window_h)).isoformat(),
+              "confirmed": True}
     state = dict(ts or {})
     wd = state.get("wake_digests")
-    wd = [d for d in wd if isinstance(d, str)] if isinstance(wd, list) else []
-    wd.append(digest)  # a multiset: two identical wakes register two tokens, each consumed once (CX-M6)
+    wd = list(wd) if isinstance(wd, list) else []
+    # Supersede prior CONFIRMED records for this root before appending the new one (the runtime replaces
+    # pending dynamic wakes); legacy bare strings are preserved as-is (migration).
+    wd = [e for e in wd if not _orch_is_confirmed_wake(e)]
+    wd.append(record)
     state["wake_digests"] = wd[-64:]  # bounded so the list cannot grow without limit
-    _orch_save_turn_state(root, state)
+    return _orch_save_turn_state(root, state)
 
 
 def orch_yield_tool(data):
@@ -6354,14 +6696,15 @@ def orch_yield_tool(data):
         _orch_guard_event(root, "yield-tool", "deny", reason)
         return _deny(reason + (" " + spoof_warn if spoof_warn else ""),
                      "AIQT guardrail: denied a {} call past the enumerated backlog.".format(tool))
-    if kind == "schedule_idle":
-        # G1: register the ALLOWED wake's prompt digest so its returning UserPromptSubmit is classified
-        # timer-originated (not genuine human input), preserving the loop-guard counters across the wake.
-        _orch_register_wake(root, ts, tool_input.get("prompt"))
+    # The wake digest is NO LONGER registered here at PreToolUse-allow time: this hook cannot know
+    # whether the ScheduleWakeup actually succeeds, so a PreToolUse registration survives an
+    # allowed-then-failed schedule as a phantom live token. Registration moved to the PostToolUse
+    # orch_wake_register handler, which fires only on tool SUCCESS and writes a confirmed, self-expiring
+    # structured record (GD-137 PR2). This hook now only JUDGES the call.
     _orch_guard_event(root, "yield-tool", verdict.lower(), reason)
     if verdict == "ALLOW_WITH_FINDINGS":
         msg = "AIQT guardrail: {}".format(reason)
-        forced = ((kind == "stop" and (ctx["counter"] >= _ORCH_LOOP_BOUND or ctx["loop_signal"]))
+        forced = ((kind == "stop" and ctx["counter"] >= _ORCH_LOOP_BOUND)
                   or (kind == "schedule_idle" and ctx["schedule_denials"] >= _ORCH_SCHEDULE_CAP
                       and ctx["basis_unchanged"]))
         if forced and (_orch_open_dispositions(ctx) or ctx["enum_status"] != "ok"):
@@ -6858,6 +7201,104 @@ def orch_dispatch_ledger(data):
     return _allow()
 
 
+def _orch_response_is_error(response):
+    """Best-effort recognition of an error signal in a PostToolUse tool_response. The shape is UNPROVEN
+    (doc-confirmed only that PostToolUse fires on SUCCESS, a failure firing PostToolUseFailure instead),
+    so this is an OPPORTUNISTIC tightening, never load-bearing: an unknown shape is tolerated as
+    non-error and the expiry backstop covers a mis-read. True only when a dict carries a recognizable
+    error marker (is_error true, a truthy error field, or status == 'error')."""
+    if not isinstance(response, dict):
+        return False
+    if response.get("is_error") is True or response.get("error"):
+        return True
+    status = response.get("status")
+    return isinstance(status, str) and status.strip().lower() == "error"
+
+
+def _orch_response_scheduled(response):
+    """Positive proof that a ScheduleWakeup tool_response carries a REAL future schedule, the only basis
+    on which a wake is registered (FIX 1). PostToolUse firing (and non-error) does NOT prove a timer
+    exists: a gate-off or stop:true call is a SUCCESS that returns scheduledFor:0 and NO timer. True ONLY
+    when response is a dict carrying a positive numeric scheduledFor (accepted at the top level OR nested
+    under a 'data' key, to be robust to either delivery shape) AND is not a stop (stopped is not True at
+    the top level or nested under 'data'). Positive means an int/float (never a bool) strictly > 0.
+    Anything else (scheduledFor absent/0/non-numeric, stopped true, or response not a dict) is NOT
+    positively confirmed and registers nothing, so a phantom claim finds no live wake and is denied."""
+    if not isinstance(response, dict):
+        return False
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    if response.get("stopped") is True or data.get("stopped") is True:
+        return False
+    for src in (response, data):
+        sf = src.get("scheduledFor")
+        if isinstance(sf, (int, float)) and not isinstance(sf, bool) and sf > 0:
+            return True
+    return False
+
+
+def orch_wake_register(data):
+    """trkasy/tstamp, PostToolUse over the scheduling tools (recorder, never blocks): on a
+    ScheduleWakeup/CronCreate that POSITIVELY confirms a real future schedule, register a CONFIRMED,
+    self-expiring structured wake record so the phantom-wait liveness check has authoritative evidence of
+    a genuine pending wake, and the returning UserPromptSubmit is classified timer-originated.
+    Registration requires a positively-confirmed real future schedule (a positive scheduledFor and not
+    stopped, per _orch_response_scheduled), NOT mere success: PostToolUse fires on SUCCESS, but a gate-off
+    or stop:true call is a success that returns scheduledFor:0 with NO timer, so firing alone does not
+    prove a live wake (FIX 1). The tool_response error-shape check remains as defense in depth. A stop:true
+    call retires this root's pending confirmed records (FIX 2a). Registry- and lease-scoped exactly like
+    orch_dispatch_ledger; a failed persist surfaces as a non-blocking systemMessage (nocncl)."""
+    root = _orch_root(data)
+    if root is None:
+        return _allow()
+    status, reg = _orch_registry(root)
+    if status != "ok":
+        return _allow()
+    if not _orch_scope_live(reg, root, data.get("session_id")):
+        return _allow()  # only the holder session writes the shared turn-state (CX-M4b)
+    tool = data.get("tool_name")
+    declared = reg.get("yield_tools")
+    if not isinstance(declared, list) or tool not in declared:
+        return _allow()  # inside the matcher but outside the registry roster: out of scope
+    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    if tool_input.get("stop") is True:
+        # A stop=true call ENDS the loop and cancels pending dynamic wakes (the runtime's
+        # cancelledWakeups), so retire this root's pending CONFIRMED wake records (FIX 2a). Clearing
+        # FAILS SAFE: a later phantom claim then finds no live wake -> DENIED -> the orchestrator
+        # continues. Runs whether or not a prompt is present (a stop:true has no prompt); legacy bare
+        # strings are preserved as-is (they already contribute nothing to liveness).
+        state = dict(_orch_turn_state(root) or {})
+        wd = state.get("wake_digests")
+        wd = list(wd) if isinstance(wd, list) else []
+        state["wake_digests"] = [e for e in wd if not _orch_is_confirmed_wake(e)]
+        if not _orch_save_turn_state(root, state):
+            return (0, {"systemMessage": "AIQT guardrail: the wake-register write failed; a scheduled "
+                                         "wake may be invisible to the phantom-wait liveness check."}, None)
+        return _allow()  # a stop=true call ends the loop; it is not a schedule_idle wake to register
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        return _allow()  # no prompt to match a returning UserPromptSubmit against
+    if _orch_response_is_error(data.get("tool_response")):
+        # Defense in depth: skip registration on a recognizable error tool_response. Not load-bearing
+        # (the shape is unproven); the positive-confirmation gate below and the expiry window backstop it.
+        _orch_guard_event(root, "wake-register", "skip",
+                          "tool_response carries a recognizable error signal; no wake registered")
+        return _allow()
+    if not _orch_response_scheduled(data.get("tool_response")):
+        # Positive-confirmation gate (FIX 1): PostToolUse firing does NOT prove a timer exists. A
+        # gate-off or stop:true success returns scheduledFor:0 with no timer; register nothing unless a
+        # real future schedule is positively confirmed, so a phantom claim finds no live wake and is
+        # DENIED (the fail-safe direction). This closes the scheduledFor:0 (gate-off / stop) hole.
+        _orch_guard_event(root, "wake-register", "skip",
+                          "no positive schedule confirmation in tool_response; not a live wake")
+        return _allow()
+    task_hours = _orch_validate("staleness", reg.get("staleness"))[1]["task_hours"]
+    ts = _orch_turn_state(root)
+    if not _orch_register_wake(root, ts, prompt, tool_input, fallback_hours=task_hours):
+        return (0, {"systemMessage": "AIQT guardrail: the wake-register write failed; a scheduled "
+                                     "wake may be invisible to the phantom-wait liveness check."}, None)
+    return _allow()
+
+
 def orch_prompt_stamp(data):
     """tstamp/estsep, UserPromptSubmit (recorder, never blocks): stamp genuine human input from the
     clock, classify a prompt matching a registered wake as timer-originated, and inject the measured
@@ -6872,25 +7313,31 @@ def orch_prompt_stamp(data):
         return _allow()  # only the holder session stamps/resets the shared turn-state (CX-M4b)
     prompt = data.get("prompt")
     ts = _orch_turn_state(root) or {}
+    now = _orch_now()
     digest = __import__("hashlib").sha256(
         (prompt or "").encode("utf-8", "replace")).hexdigest() if isinstance(prompt, str) else ""
     _wds = ts.get("wake_digests")
-    _wds = _wds if isinstance(_wds, list) else []  # a non-list wake_digests never enables substring match
-    timer_originated = digest and digest in _wds
+    _wds = _wds if isinstance(_wds, list) else []  # a non-list wake_digests never enables a match
+    # Timer-origination matches a registered wake record (a structured dict OR a legacy bare string) by
+    # digest, EXPIRY-BLIND: this is only about preserving the loop-guard counters across a returning wake,
+    # not about authorizing a wait, so a genuine wake that returned after its liveness window still
+    # classifies timer-originated. Liveness (the strict confirmed+unexpired check) governs the stop.
+    timer_originated = bool(digest) and _orch_wake_has_digest(_wds, digest)
     prev = _orch_parse_utc(ts.get("last_human_input_utc"))
     if not timer_originated:
-        ts["last_human_input_utc"] = _orch_now().isoformat()
+        ts["last_human_input_utc"] = now.isoformat()
         ts["stop_denials"] = 0
         ts["schedule_denials"] = 0
         ts.pop("schedule_basis", None)
+        # Fold expiry into this write (cadence point 2): retire provably-expired wake records.
+        ts["wake_digests"] = _orch_reconcile_wakes(_wds, now)[0]
         _orch_save_turn_state(root, ts)
         return _allow()
-    # one-shot: consume the matched wake digest so a later prompt with identical text (including genuine
-    # human input) is not perpetually misclassified as timer-originated (R2-CM4/CX-M7).
-    wd = list(ts.get("wake_digests") or [])
-    if digest in wd:
-        wd.remove(digest)  # consume exactly ONE token, so a second identical wake is still recognized
-    ts["wake_digests"] = wd
+    # one-shot: consume EXACTLY ONE matching record (a structured dict or a legacy bare string) so a later
+    # prompt with identical text (including genuine human input) is not perpetually misclassified as
+    # timer-originated (R2-CM4/CX-M7); then fold expiry into the same write (cadence point 2).
+    wd = _orch_wake_consume(_wds, digest)
+    ts["wake_digests"] = _orch_reconcile_wakes(wd, now)[0]
     _orch_save_turn_state(root, ts)
     gap = "unknown (no prior stamp; an unknown duration authorizes nothing)"
     if prev is not None:
@@ -7316,16 +7763,41 @@ def _orch_pending_artefact_findings(root):
     return findings
 
 
+def _orch_reconcile_wakes_at_resume(root):
+    """Cadence point 3 (SessionStart once-per-session sweep): retire provably-expired wake records from
+    turn-state and record the count as a guard-event for visibility. Deliberately NOT a resume-divergence
+    FINDING: a benign self-expiry must not arm the resume barrier (a noisy layer that over-fires trains
+    its own bypass, per defence-in-depth), and the liveness reader is independent of this cleanup.
+    Best-effort: an unreadable turn-state is left untouched (the liveness reader maps it to
+    cannot-evaluate on its own)."""
+    ts = _orch_turn_state(root)
+    if not isinstance(ts, dict):
+        return
+    wd = ts.get("wake_digests")
+    if not isinstance(wd, list) or not wd:
+        return
+    kept, expired = _orch_reconcile_wakes(wd, _orch_now())
+    if not expired:
+        return
+    ts = dict(ts)
+    ts["wake_digests"] = kept
+    if _orch_save_turn_state(root, ts):
+        _orch_guard_event(root, "wake-reconcile", "expired",
+                          "{} expired wake record(s) retired at resume".format(expired))
+
+
 def orch_resume_audit(data):
     """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
-    clears it. Registry-scoped; silent with no registry."""
+    clears it. Registry-scoped; silent with no registry. Also runs the once-per-session wake-record
+    expiry sweep (non-blocking, never a barrier-arming finding)."""
     root = _orch_root(data)
     if root is None:
         return _allow()
     status, reg = _orch_registry(root)
     if status == "absent":
         return _allow()
+    _orch_reconcile_wakes_at_resume(root)  # cadence point 3: benign cleanup, never arms the barrier
     barrier_path = os.path.join(_orch_state_dir_for_root(root), "resume-barrier.json")
     if status == "bad":
         _orch_append_jsonl(barrier_path + ".unused", {})  # no-op path probe; keep posture simple
@@ -7940,6 +8412,7 @@ HANDLERS = {
     "orch_truncation_guard": orch_truncation_guard,
     "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
+    "orch_wake_register": orch_wake_register,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
     "orch_resume_barrier": orch_resume_barrier,
@@ -7948,8 +8421,8 @@ HANDLERS = {
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
 # without reading the (possibly unreadable) payload. This is the load-bearing half of the fail-closed
 # design: a Stop/SubagentStop handler must NEVER exit 2 ON AN ERROR PATH, because a hard Stop block could
-# re-fire on the forced continuation and wedge the session (no stop_hook_active field, no documented loop
-# bound), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
+# re-fire on the forced continuation and wedge the session (it re-fires until the harness's stop_hook_active override relents after 8 blocks,
+# v2.1.196+), so on ANY error (unreadable stdin, JSON parse failure, non-dict payload, or a handler crash) it
 # emits a non-blocking systemMessage warning and exits 0. A DELIBERATE backlog-deny is the intended
 # exception (the documented Stop block mechanism, bounded by the loop cap); only a PreToolUse handler
 # fails closed via exit 2 on error.
@@ -7974,6 +8447,7 @@ HANDLER_EVENT = {
     "orch_truncation_guard": PRETOOL,
     "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
+    "orch_wake_register": "PostToolUse",
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",
     "orch_resume_barrier": PRETOOL,
@@ -7994,7 +8468,7 @@ def main(argv):
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
     # via exit 2. But a KNOWN handler invoked with the wrong argv count must NOT reach exit 2 when it is
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
-    # wedge the session (no stop_hook_active field, no documented loop bound), so a bad-argv Stop
+    # wedge the session (it re-fires until the harness's stop_hook_active override relents after 8 blocks, v2.1.196+), so a bad-argv Stop
     # invocation WARNS on exit 0 like every other Stop error path (FIX 2). A bad-argv PreToolUse handler
     # still fails closed (exit 2).
     mode = argv[0] if argv else None

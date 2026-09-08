@@ -937,11 +937,30 @@ def main(report_path=None):
         check("stamp/human-input-stamped", bool(st.get("last_human_input_utc")), True)
         check("stamp/counters-reset", st.get("stop_denials", 0), 0)
 
+        # GD-137 PR2: timer-origination against a STRUCTURED record classifies the returning prompt as
+        # timer-originated (warn with the timer context), consumes exactly one record, and PRESERVES the
+        # loop-guard counter (a genuine wake return must not reset it). A legacy bare string still matches.
+        import hashlib as _hl_ps
+        _wp = "wake prompt text"
+        _wdig = _hl_ps.sha256(_wp.encode("utf-8")).hexdigest()
+        r.set_turn_state({"stop_denials": 2, "wake_digests": [
+            {"digest": _wdig, "created_utc": now_iso(0), "expiry_utc": now_iso(-1), "confirmed": True}]})
+        _pw = aiqt_hooks.orch_prompt_stamp(r.payload("UserPromptSubmit", extra={"prompt": _wp}))
+        check("stamp/timer-originated-warns", _verdict(_pw), "warn")
+        _ts_after = r.turn_state()
+        check("stamp/timer-consumes-record", _ts_after.get("wake_digests"), [])
+        check("stamp/timer-preserves-counter", _ts_after.get("stop_denials"), 2)
+        r.set_turn_state({"wake_digests": [_wdig]})
+        check("stamp/legacy-digest-timer-originated",
+              _verdict(aiqt_hooks.orch_prompt_stamp(
+                  r.payload("UserPromptSubmit", extra={"prompt": _wp}))), "warn")
+
         # ---------- pure-core spot checks (decide_yield directly) ----------
         base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
                 "enum_status": "ok", "enum_detail": "", "actionable": [], "waiting": [],
                 "blocked": [], "proposed": [], "wake_named": None,
-                "schedule_denials": 0, "basis_unchanged": False}
+                "schedule_denials": 0, "basis_unchanged": False,
+                "phantom_claim": False, "reentry": "none", "reentry_detail": ""}
         v, _r, _d = aiqt_hooks.decide_yield(dict(base))
         check("core/empty-backlog-stop-allows", v, "ALLOW")
         v, _r, _d = aiqt_hooks.decide_yield(dict(base, kind="schedule_idle",
@@ -972,6 +991,416 @@ def main(report_path=None):
         check("core/wake-hygiene-below-cap-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=3))
         check("core/wake-hygiene-at-cap-findings", v, "ALLOW_WITH_FINDINGS")
+
+        # GD-137 Layer A: the phantom deny is stop-only, after the actionable/cannot-evaluate checks.
+        pw = dict(base, phantom_claim=True)
+        check("core/phantom-none-denies", aiqt_hooks.decide_yield(dict(pw, reentry="none"))[0], "DENY")
+        check("core/phantom-cannot-eval-denies",
+              aiqt_hooks.decide_yield(dict(pw, reentry="cannot-evaluate", reentry_detail="ledger x"))[0], "DENY")
+        check("core/phantom-live-inert-allows", aiqt_hooks.decide_yield(dict(pw, reentry="live"))[0], "ALLOW")
+        check("core/no-claim-allows", aiqt_hooks.decide_yield(dict(base, reentry="none"))[0], "ALLOW")
+        # stop-only: a schedule_idle with a (spurious) claim is never phantom-denied on that basis
+        check("core/phantom-not-on-schedule",
+              aiqt_hooks.decide_yield(dict(pw, kind="schedule_idle", reentry="none",
+                                wake_named=True))[0] != "DENY"
+              or "actionable" in "", True)   # schedule path reaches clean ALLOW (no actionable, wake ok)
+        # phantom yields to the actionable check: a real actionable item denies with the setcmp reason,
+        # not the phantom reason (order proof)
+        v, r, _ = aiqt_hooks.decide_yield(dict(pw, actionable=[("A", "t", "no blocker")], reentry="none"))
+        check("core/actionable-precedes-phantom", (v, "setcmp" in r or "actionable" in r), ("DENY", True))
+        # phantom yields to the loop bound: at bound, ALLOW_WITH_FINDINGS, not a phantom re-deny
+        check("core/phantom-bounded-by-counter",
+              aiqt_hooks.decide_yield(dict(pw, reentry="none", counter=2))[0], "ALLOW_WITH_FINDINGS")
+
+        pwc = aiqt_hooks._orch_phantom_wait_claim
+        # phantom-wait claim positives: literal (check_id, text) rows (the execution-set gate resolves
+        # only string-literal or for-loop-literal check ids, never a .format()-composed id).
+        for check_id, s in (
+                ("claim/pos-0", "I'll resume when CI is green."),
+                ("claim/pos-1", "This session will continue once the workflow completes."),
+                ("claim/pos-2", "We'll pick up after the pipeline build finishes."),
+                ("claim/pos-3", "I am awaiting the CI run and will re-enter when it completes."),
+                ("claim/pos-4", "I'll land the merge when the job fires."),
+                ("claim/pos-5", "This agent will proceed after the scheduled cron runs.")):
+            check(check_id, pwc(s), True)
+        # negatives, each with the reason it must NOT read as a phantom-wait claim
+        for check_id, s in (
+                ("claim/neg-0", "I'll resume once you approve."),                      # human-wait object
+                ("claim/neg-1", "I'll continue after the CI run once you confirm."),   # human-wait near verb
+                ("claim/neg-2", "I will not wait for CI; continuing now."),            # negation
+                ("claim/neg-3", "If the workflow completes I'll resume."),             # conditional ("if")
+                ("claim/neg-4", "I'll resume when CI is green, but this must be resumed manually."),  # disclaimer
+                ("claim/neg-5", "Waiting on your review before I continue."),          # human review, no auto noun
+                ("claim/neg-6", "I will run the tests now."),                          # no wait marker + no verb pair
+                ("claim/neg-7", "```\nI'll resume when CI is green\n```"),             # inside a fenced block
+                ("claim/neg-8", "`I'll resume when CI completes`"),                    # inline code span (stripped)
+                ("claim/neg-9", "> I'll resume when CI is green"),                     # blockquote (stripped)
+                ("claim/neg-10", "The build completed successfully."),                 # no subject/marker/verb
+                ("claim/neg-11", "")):                                                 # empty
+            check(check_id, pwc(s), False)
+        check("claim/non-str", pwc(None), False)
+        check("claim/over-long", pwc("I'll resume when CI is green. " * 20000), False)  # > 200k chars
+
+        # GD-137 Layer A: _orch_reentry_live over {bg} x {crons} x {ledger} x {wake_digests}.
+        rl = Fixture(tmp, "reentry")
+        rsd = Path(aiqt_hooks._orch_state_dir_for_root(str(rl.root)))
+        rsd.mkdir(parents=True, exist_ok=True)
+        rledger = rsd / "dispatch-ledger.jsonl"
+        LIVE_ROW = json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-1",
+                               "tool": "Bash", "wake": True}) + "\n"
+        # array states: absent (contributes nothing), empty list, non-empty list, non-list (cannot-eval)
+        ARRAYS = {"absent": "__absent__", "empty": [], "nonempty": [{"id": "x"}], "nonlist": "oops"}
+        LEDGERS = {"live": LIVE_ROW, "empty": "", "unreadable": "null\n{broken\n"}
+        # "present" is a CONFIRMED, unexpired STRUCTURED record (live); a bare/expired/unconfirmed record
+        # no longer counts (covered by the dedicated wake-scorer unit block and the e2e legs below).
+        WAKES = {"present": [{"digest": "deadbeef", "created_utc": now_iso(0),
+                             "expiry_utc": now_iso(-1), "confirmed": True}],
+                 "absent": None}   # None -> key omitted from turn-state
+
+        def contrib_array(state):
+            return "live" if state == "nonempty" else ("cannot" if state == "nonlist" else "none")
+
+        def oracle(bg, cr, led, wk):
+            sig = [contrib_array(bg), contrib_array(cr),
+                   "live" if led == "live" else ("cannot" if led == "unreadable" else "none"),
+                   "live" if wk == "present" else "none"]
+            if "live" in sig:
+                return "live"
+            if "cannot" in sig:
+                return "cannot-evaluate"
+            return "none"
+
+        # Full {bg} x {crons} x {ledger} x {wake} cross product, flattened to a single loop over
+        # literal (check_id, keys...) rows so every check id is a resolvable string literal (the
+        # execution-set gate refuses a .format()-composed id); values are looked up by key below.
+        for check_id, bgk, crk, ledk, wkk in (
+                ("reentry/absent-absent-live-present", "absent", "absent", "live", "present"),
+                ("reentry/absent-absent-live-absent", "absent", "absent", "live", "absent"),
+                ("reentry/absent-absent-empty-present", "absent", "absent", "empty", "present"),
+                ("reentry/absent-absent-empty-absent", "absent", "absent", "empty", "absent"),
+                ("reentry/absent-absent-unreadable-present", "absent", "absent", "unreadable", "present"),
+                ("reentry/absent-absent-unreadable-absent", "absent", "absent", "unreadable", "absent"),
+                ("reentry/absent-empty-live-present", "absent", "empty", "live", "present"),
+                ("reentry/absent-empty-live-absent", "absent", "empty", "live", "absent"),
+                ("reentry/absent-empty-empty-present", "absent", "empty", "empty", "present"),
+                ("reentry/absent-empty-empty-absent", "absent", "empty", "empty", "absent"),
+                ("reentry/absent-empty-unreadable-present", "absent", "empty", "unreadable", "present"),
+                ("reentry/absent-empty-unreadable-absent", "absent", "empty", "unreadable", "absent"),
+                ("reentry/absent-nonempty-live-present", "absent", "nonempty", "live", "present"),
+                ("reentry/absent-nonempty-live-absent", "absent", "nonempty", "live", "absent"),
+                ("reentry/absent-nonempty-empty-present", "absent", "nonempty", "empty", "present"),
+                ("reentry/absent-nonempty-empty-absent", "absent", "nonempty", "empty", "absent"),
+                ("reentry/absent-nonempty-unreadable-present", "absent", "nonempty", "unreadable", "present"),
+                ("reentry/absent-nonempty-unreadable-absent", "absent", "nonempty", "unreadable", "absent"),
+                ("reentry/absent-nonlist-live-present", "absent", "nonlist", "live", "present"),
+                ("reentry/absent-nonlist-live-absent", "absent", "nonlist", "live", "absent"),
+                ("reentry/absent-nonlist-empty-present", "absent", "nonlist", "empty", "present"),
+                ("reentry/absent-nonlist-empty-absent", "absent", "nonlist", "empty", "absent"),
+                ("reentry/absent-nonlist-unreadable-present", "absent", "nonlist", "unreadable", "present"),
+                ("reentry/absent-nonlist-unreadable-absent", "absent", "nonlist", "unreadable", "absent"),
+                ("reentry/empty-absent-live-present", "empty", "absent", "live", "present"),
+                ("reentry/empty-absent-live-absent", "empty", "absent", "live", "absent"),
+                ("reentry/empty-absent-empty-present", "empty", "absent", "empty", "present"),
+                ("reentry/empty-absent-empty-absent", "empty", "absent", "empty", "absent"),
+                ("reentry/empty-absent-unreadable-present", "empty", "absent", "unreadable", "present"),
+                ("reentry/empty-absent-unreadable-absent", "empty", "absent", "unreadable", "absent"),
+                ("reentry/empty-empty-live-present", "empty", "empty", "live", "present"),
+                ("reentry/empty-empty-live-absent", "empty", "empty", "live", "absent"),
+                ("reentry/empty-empty-empty-present", "empty", "empty", "empty", "present"),
+                ("reentry/empty-empty-empty-absent", "empty", "empty", "empty", "absent"),
+                ("reentry/empty-empty-unreadable-present", "empty", "empty", "unreadable", "present"),
+                ("reentry/empty-empty-unreadable-absent", "empty", "empty", "unreadable", "absent"),
+                ("reentry/empty-nonempty-live-present", "empty", "nonempty", "live", "present"),
+                ("reentry/empty-nonempty-live-absent", "empty", "nonempty", "live", "absent"),
+                ("reentry/empty-nonempty-empty-present", "empty", "nonempty", "empty", "present"),
+                ("reentry/empty-nonempty-empty-absent", "empty", "nonempty", "empty", "absent"),
+                ("reentry/empty-nonempty-unreadable-present", "empty", "nonempty", "unreadable", "present"),
+                ("reentry/empty-nonempty-unreadable-absent", "empty", "nonempty", "unreadable", "absent"),
+                ("reentry/empty-nonlist-live-present", "empty", "nonlist", "live", "present"),
+                ("reentry/empty-nonlist-live-absent", "empty", "nonlist", "live", "absent"),
+                ("reentry/empty-nonlist-empty-present", "empty", "nonlist", "empty", "present"),
+                ("reentry/empty-nonlist-empty-absent", "empty", "nonlist", "empty", "absent"),
+                ("reentry/empty-nonlist-unreadable-present", "empty", "nonlist", "unreadable", "present"),
+                ("reentry/empty-nonlist-unreadable-absent", "empty", "nonlist", "unreadable", "absent"),
+                ("reentry/nonempty-absent-live-present", "nonempty", "absent", "live", "present"),
+                ("reentry/nonempty-absent-live-absent", "nonempty", "absent", "live", "absent"),
+                ("reentry/nonempty-absent-empty-present", "nonempty", "absent", "empty", "present"),
+                ("reentry/nonempty-absent-empty-absent", "nonempty", "absent", "empty", "absent"),
+                ("reentry/nonempty-absent-unreadable-present", "nonempty", "absent", "unreadable", "present"),
+                ("reentry/nonempty-absent-unreadable-absent", "nonempty", "absent", "unreadable", "absent"),
+                ("reentry/nonempty-empty-live-present", "nonempty", "empty", "live", "present"),
+                ("reentry/nonempty-empty-live-absent", "nonempty", "empty", "live", "absent"),
+                ("reentry/nonempty-empty-empty-present", "nonempty", "empty", "empty", "present"),
+                ("reentry/nonempty-empty-empty-absent", "nonempty", "empty", "empty", "absent"),
+                ("reentry/nonempty-empty-unreadable-present", "nonempty", "empty", "unreadable", "present"),
+                ("reentry/nonempty-empty-unreadable-absent", "nonempty", "empty", "unreadable", "absent"),
+                ("reentry/nonempty-nonempty-live-present", "nonempty", "nonempty", "live", "present"),
+                ("reentry/nonempty-nonempty-live-absent", "nonempty", "nonempty", "live", "absent"),
+                ("reentry/nonempty-nonempty-empty-present", "nonempty", "nonempty", "empty", "present"),
+                ("reentry/nonempty-nonempty-empty-absent", "nonempty", "nonempty", "empty", "absent"),
+                ("reentry/nonempty-nonempty-unreadable-present", "nonempty", "nonempty", "unreadable", "present"),
+                ("reentry/nonempty-nonempty-unreadable-absent", "nonempty", "nonempty", "unreadable", "absent"),
+                ("reentry/nonempty-nonlist-live-present", "nonempty", "nonlist", "live", "present"),
+                ("reentry/nonempty-nonlist-live-absent", "nonempty", "nonlist", "live", "absent"),
+                ("reentry/nonempty-nonlist-empty-present", "nonempty", "nonlist", "empty", "present"),
+                ("reentry/nonempty-nonlist-empty-absent", "nonempty", "nonlist", "empty", "absent"),
+                ("reentry/nonempty-nonlist-unreadable-present", "nonempty", "nonlist", "unreadable", "present"),
+                ("reentry/nonempty-nonlist-unreadable-absent", "nonempty", "nonlist", "unreadable", "absent"),
+                ("reentry/nonlist-absent-live-present", "nonlist", "absent", "live", "present"),
+                ("reentry/nonlist-absent-live-absent", "nonlist", "absent", "live", "absent"),
+                ("reentry/nonlist-absent-empty-present", "nonlist", "absent", "empty", "present"),
+                ("reentry/nonlist-absent-empty-absent", "nonlist", "absent", "empty", "absent"),
+                ("reentry/nonlist-absent-unreadable-present", "nonlist", "absent", "unreadable", "present"),
+                ("reentry/nonlist-absent-unreadable-absent", "nonlist", "absent", "unreadable", "absent"),
+                ("reentry/nonlist-empty-live-present", "nonlist", "empty", "live", "present"),
+                ("reentry/nonlist-empty-live-absent", "nonlist", "empty", "live", "absent"),
+                ("reentry/nonlist-empty-empty-present", "nonlist", "empty", "empty", "present"),
+                ("reentry/nonlist-empty-empty-absent", "nonlist", "empty", "empty", "absent"),
+                ("reentry/nonlist-empty-unreadable-present", "nonlist", "empty", "unreadable", "present"),
+                ("reentry/nonlist-empty-unreadable-absent", "nonlist", "empty", "unreadable", "absent"),
+                ("reentry/nonlist-nonempty-live-present", "nonlist", "nonempty", "live", "present"),
+                ("reentry/nonlist-nonempty-live-absent", "nonlist", "nonempty", "live", "absent"),
+                ("reentry/nonlist-nonempty-empty-present", "nonlist", "nonempty", "empty", "present"),
+                ("reentry/nonlist-nonempty-empty-absent", "nonlist", "nonempty", "empty", "absent"),
+                ("reentry/nonlist-nonempty-unreadable-present", "nonlist", "nonempty", "unreadable", "present"),
+                ("reentry/nonlist-nonempty-unreadable-absent", "nonlist", "nonempty", "unreadable", "absent"),
+                ("reentry/nonlist-nonlist-live-present", "nonlist", "nonlist", "live", "present"),
+                ("reentry/nonlist-nonlist-live-absent", "nonlist", "nonlist", "live", "absent"),
+                ("reentry/nonlist-nonlist-empty-present", "nonlist", "nonlist", "empty", "present"),
+                ("reentry/nonlist-nonlist-empty-absent", "nonlist", "nonlist", "empty", "absent"),
+                ("reentry/nonlist-nonlist-unreadable-present", "nonlist", "nonlist", "unreadable", "present"),
+                ("reentry/nonlist-nonlist-unreadable-absent", "nonlist", "nonlist", "unreadable", "absent"),):
+            bgv, crv, ledv, wkv = ARRAYS[bgk], ARRAYS[crk], LEDGERS[ledk], WAKES[wkk]
+            rledger.write_text(ledv, encoding="utf-8")
+            ts = {} if wkv is None else {"wake_digests": wkv}
+            tstate = aiqt_hooks._orch_validate("turn_state", ts)[1]
+            data = {}
+            if bgv != "__absent__":
+                data["background_tasks"] = bgv
+            if crv != "__absent__":
+                data["session_crons"] = crv
+            got = aiqt_hooks._orch_reentry_live(data, str(rl.root), 24, tstate)[0]
+            check(check_id, got, oracle(bgk, crk, ledk, wkk))
+
+        # ---------- GD-137 PR2: wake-lifecycle unit checks (reconcile, scorer, window, schema) ----------
+        _now = datetime.datetime.now(datetime.timezone.utc)
+
+        def _rec(dg, exp_hours, confirmed=True):
+            return {"digest": dg, "created_utc": now_iso(1),
+                    "expiry_utc": (_now + datetime.timedelta(hours=exp_hours)).isoformat(),
+                    "confirmed": confirmed}
+
+        # _orch_reconcile_wakes: DROP only confirmed+past-expiry; KEEP in-flight, legacy, unconfirmed,
+        # and malformed (unparseable-expiry) records.
+        recs = [_rec("a", -1), _rec("b", 5), "legacy", _rec("c", -1, confirmed=False),
+                {"digest": "d", "confirmed": True, "expiry_utc": "not-a-date"}, {"no": "digest"}]
+        kept, expired = aiqt_hooks._orch_reconcile_wakes(recs, _now)
+        check("wake/reconcile-expired-count", expired, 1)
+        check("wake/reconcile-keeps-inflight",
+              any(isinstance(x, dict) and x.get("digest") == "b" for x in kept), True)
+        check("wake/reconcile-keeps-legacy", "legacy" in kept, True)
+        check("wake/reconcile-keeps-unconfirmed",
+              any(isinstance(x, dict) and x.get("digest") == "c" for x in kept), True)
+        check("wake/reconcile-keeps-unparseable-expiry",
+              any(isinstance(x, dict) and x.get("digest") == "d" for x in kept), True)
+        check("wake/reconcile-nonlist-empty", aiqt_hooks._orch_reconcile_wakes("oops", _now), ([], 0))
+
+        # _orch_wake_live_state: live ONLY for confirmed+unexpired; malformed -> cannot-evaluate.
+        check("wake/scorer-live", aiqt_hooks._orch_wake_live_state([_rec("a", 5)], _now)[0], "live")
+        check("wake/scorer-expired-none", aiqt_hooks._orch_wake_live_state([_rec("a", -1)], _now)[0], "none")
+        check("wake/scorer-unconfirmed-none",
+              aiqt_hooks._orch_wake_live_state([_rec("a", 5, confirmed=False)], _now)[0], "none")
+        check("wake/scorer-legacy-none", aiqt_hooks._orch_wake_live_state(["deadbeef"], _now)[0], "none")
+        check("wake/scorer-empty-none", aiqt_hooks._orch_wake_live_state([], _now)[0], "none")
+        check("wake/scorer-nonstring-expiry-cannot",
+              aiqt_hooks._orch_wake_live_state(
+                  [{"digest": "a", "confirmed": True, "expiry_utc": 5}], _now)[0], "cannot-evaluate")
+        check("wake/scorer-unparseable-expiry-cannot",
+              aiqt_hooks._orch_wake_live_state(
+                  [{"digest": "a", "confirmed": True, "expiry_utc": "nope"}], _now)[0], "cannot-evaluate")
+        check("wake/scorer-nondict-nonstr-cannot",
+              aiqt_hooks._orch_wake_live_state([123], _now)[0], "cannot-evaluate")
+        check("wake/scorer-live-wins-over-cannot",
+              aiqt_hooks._orch_wake_live_state([_rec("a", 5), 123], _now)[0], "live")
+        # FIX 3: a CONFIRMED record missing digest/created_utc is cannot-evaluate, never live.
+        check("wake/scorer-fieldless-confirmed-cannot",
+              aiqt_hooks._orch_wake_live_state(
+                  [{"confirmed": True,
+                    "expiry_utc": (_now + datetime.timedelta(hours=5)).isoformat()}], _now)[0],
+              "cannot-evaluate")
+
+        # _orch_wake_window_hours: measured minutes -> tight window; not_before -> measured; else horizon.
+        check("wake/window-minutes-measured",
+              round(aiqt_hooks._orch_wake_window_hours({}, "recheck in 30 minutes", 24), 3), 1.5)
+        check("wake/window-fallback-horizon",
+              aiqt_hooks._orch_wake_window_hours({}, "no duration here", 24), 24.0)
+        check("wake/window-clamped",
+              aiqt_hooks._orch_wake_window_hours({}, "no duration", 1e9),
+              float(aiqt_hooks._ORCH_MAX_HORIZON_HOURS))
+        _nb = (_now + datetime.timedelta(hours=3)).isoformat()
+        check("wake/window-not-before",
+              aiqt_hooks._orch_wake_window_hours({"not_before": _nb}, "x", 24) >= 4.0, True)
+        # FIX 4: delaySeconds is a preferred MEASURED source -> a tight grace window, not the 24h fallback.
+        _dw = aiqt_hooks._orch_wake_window_hours({"delaySeconds": 600}, "no minutes here", 24)
+        check("wake/window-delayseconds-measured", round(_dw, 4), round(600 / 3600.0 + 1.0, 4))
+        check("wake/window-delayseconds-not-fallback", _dw < 24.0, True)
+
+        # _schema_turn_state migration: dict + legacy records preserved; non-list -> None; absent -> [].
+        sm = aiqt_hooks._orch_validate(
+            "turn_state", {"wake_digests": [_rec("a", 5), "legacy"]})[1]["wake_digests"]
+        check("wake/schema-keeps-dicts-and-strings", (len(sm), "legacy" in sm), (2, True))
+        check("wake/schema-nonlist-none",
+              aiqt_hooks._orch_validate("turn_state", {"wake_digests": "oops"})[1]["wake_digests"], None)
+        check("wake/schema-absent-empty",
+              aiqt_hooks._orch_validate("turn_state", {})[1]["wake_digests"], [])
+
+        e = Fixture(tmp, "phantom-e2e")
+        esd = Path(aiqt_hooks._orch_state_dir_for_root(str(e.root)))
+        esd.mkdir(parents=True, exist_ok=True)
+        eledger = esd / "dispatch-ledger.jsonl"
+        CLAIM = "I'll resume when CI is green."
+        NOCLAIM = "Done for now; nothing pending."
+        estop = lambda msg, **extra: aiqt_hooks.orch_stop_guard(
+            e.payload("Stop", extra=dict({"last_assistant_message": msg}, **extra)))
+        e.set_items([])
+
+        # claim + aggregate none (no arrays, absent ledger, no wakes) -> DENY
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/claim-none-denies", _verdict(estop(CLAIM)), "block2")
+        # no claim, same state -> clean ALLOW (byte-identical prior behaviour)
+        e.set_turn_state({})
+        check("e2e/no-claim-allows", _verdict(estop(NOCLAIM)), "allow")
+        # claim + live via background_tasks array -> inert ALLOW
+        e.set_turn_state({})
+        check("e2e/claim-live-array-allows",
+              _verdict(estop(CLAIM, background_tasks=[{"id": "bt-1"}])), "allow")
+        # claim + live via dispatch ledger -> inert ALLOW
+        e.set_turn_state({})
+        eledger.write_text(json.dumps({"ts": now_iso(1), "event": "launch", "task_id": "T-1",
+                                       "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
+        check("e2e/claim-live-ledger-allows", _verdict(estop(CLAIM)), "allow")
+        # claim + live via a wake registered through the PostToolUse path with a POSITIVELY-CONFIRMED
+        # real future schedule -> inert ALLOW. This replaces the old bare-digest seed: a genuine,
+        # confirmed, unexpired wake is a real wait. SCHED is the runtime's success-with-a-timer shape
+        # (a positive future scheduledFor); FIX 1 registers only on this, never on mere firing.
+        SCHED = {"scheduledFor": 9999999999, "clampedDelaySeconds": 1800, "wasClamped": False}
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        ewake = lambda ti, resp: aiqt_hooks.orch_wake_register(
+            e.payload("PostToolUse", "ScheduleWakeup", ti, extra={"tool_response": resp}))
+        check("e2e/wake-register-persists",
+              _verdict(ewake({"prompt": "recheck CI in 30 minutes"}, SCHED)), "allow")
+        check("e2e/claim-live-wake-allows", _verdict(estop(CLAIM)), "allow")
+
+        # THE CODEX VECTOR (the discriminating flip): a ScheduleWakeup ALLOWED at PreToolUse whose
+        # PostToolUse registrar never runs (the tool failed/canceled after the allow) leaves NO live
+        # token, so the later phantom claim is DENIED. Pre-fix (PreToolUse registration) this left a live
+        # digest and wrongly ALLOWED the phantom wait.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        esched = lambda ti: aiqt_hooks.orch_yield_tool(e.payload("PreToolUse", "ScheduleWakeup", ti))
+        check("e2e/allowed-schedule-registers-nothing", _verdict(esched({"prompt": "recheck later"})), "allow")
+        check("e2e/allowed-schedule-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-allowed-then-failed-denies", _verdict(estop(CLAIM)), "block2")
+
+        # a CONFIRMED but EXPIRED wake record no longer counts -> the phantom claim is DENIED
+        e.set_turn_state({"wake_digests": [{"digest": "deadbeef", "created_utc": now_iso(2),
+                                            "expiry_utc": now_iso(1), "confirmed": True}]})
+        eledger.unlink(missing_ok=True)
+        check("e2e/phantom-expired-wake-denies", _verdict(estop(CLAIM)), "block2")
+
+        # an error tool_response registers NOTHING -> a later phantom claim is DENIED
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/error-response-registers-nothing",
+              _verdict(ewake({"prompt": "recheck CI"}, {"is_error": True})), "allow")
+        check("e2e/error-response-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-error-response-denies", _verdict(estop(CLAIM)), "block2")
+
+        # a LEGACY bare-string digest (pre-migration shape) no longer protects a phantom wait -> DENIED
+        e.set_turn_state({"wake_digests": ["deadbeef"]}); eledger.unlink(missing_ok=True)
+        check("e2e/legacy-bare-digest-denies", _verdict(estop(CLAIM)), "block2")
+
+        # claim + cannot-evaluate (unreadable ledger) -> DENY variant
+        e.set_turn_state({})
+        eledger.write_text("null\n{broken\n", encoding="utf-8")
+        code, obj, err = estop(CLAIM)
+        check("e2e/claim-cannot-eval-denies", code, 2)
+        check("e2e/cannot-eval-names-source", "unreadable" in (err or "").lower(), True)
+        eledger.unlink(missing_ok=True)
+
+        # ---------- GD-137 PR2 FIX 1: positive schedule confirmation ----------
+        # A gate-off success (scheduledFor:0) registers NO live wake -> phantom DENIED. Without FIX 1
+        # this non-error response registered and wrongly ALLOWED the phantom wait (the discriminating flip).
+        GATEOFF = {"scheduledFor": 0, "clampedDelaySeconds": 0, "wasClamped": False}
+        STOPRESP = {"scheduledFor": 0, "clampedDelaySeconds": 0, "stopped": True, "cancelledWakeups": []}
+        eprompt = lambda p: aiqt_hooks.orch_prompt_stamp(e.payload("UserPromptSubmit", extra={"prompt": p}))
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/gateoff-response-registers-nothing",
+              _verdict(ewake({"prompt": "recheck CI"}, GATEOFF)), "allow")
+        check("e2e/gateoff-response-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-gateoff-denies", _verdict(estop(CLAIM)), "block2")
+        # A stop:true success (scheduledFor:0, stopped:true) likewise registers nothing -> DENIED.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/stop-response-registers-nothing",
+              _verdict(ewake({"prompt": "recheck CI"}, STOPRESP)), "allow")
+        check("e2e/stop-response-leaves-no-wake", e.turn_state().get("wake_digests"), None)
+        check("e2e/phantom-stop-response-denies", _verdict(estop(CLAIM)), "block2")
+        # A REAL positive schedule DOES register; the claim is inert-allowed and the returning matching
+        # prompt is stamped timer-originated (a warn, not a plain allow).
+        WPROMPT = "recheck CI in 30 minutes"
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/positive-schedule-registers",
+              _verdict(ewake({"prompt": WPROMPT}, SCHED)), "allow")
+        check("e2e/positive-schedule-persists-wake", bool(e.turn_state().get("wake_digests")), True)
+        check("e2e/positive-schedule-claim-allows", _verdict(estop(CLAIM)), "allow")
+        check("e2e/positive-schedule-returning-prompt-stamped", _verdict(eprompt(WPROMPT)), "warn")
+
+        # ---------- GD-137 PR2 FIX 2a: stop:true retires this root's confirmed records ----------
+        # A successful stop:true call clears pending confirmed wakes -> a later phantom claim is DENIED.
+        # Without the fix the record persists and wrongly ALLOWS.
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/stoptrue-register-persists-first",
+              _verdict(ewake({"prompt": WPROMPT}, SCHED)), "allow")
+        check("e2e/stoptrue-has-live-wake", bool(e.turn_state().get("wake_digests")), True)
+        check("e2e/stoptrue-retires-confirmed",
+              _verdict(ewake({"stop": True}, STOPRESP)), "allow")
+        check("e2e/stoptrue-cleared-wakes", e.turn_state().get("wake_digests"), [])
+        check("e2e/phantom-after-stoptrue-denies", _verdict(estop(CLAIM)), "block2")
+
+        # ---------- GD-137 PR2 FIX 2b: a new confirmed wake supersedes the prior one ----------
+        # Registering wake B after wake A leaves only B live (the runtime replaces pending dynamic wakes);
+        # A's returning prompt no longer finds a live wake (stamped genuine), B's does (timer-originated).
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        APROMPT, BPROMPT = "recheck A in 20 minutes", "recheck B in 40 minutes"
+        ewake({"prompt": APROMPT}, SCHED)
+        ewake({"prompt": BPROMPT}, SCHED)
+        check("e2e/supersede-only-one-record", len(e.turn_state().get("wake_digests")), 1)
+        check("e2e/supersede-A-prompt-not-timer", _verdict(eprompt(APROMPT)), "allow")
+        check("e2e/supersede-B-prompt-is-timer", _verdict(eprompt(BPROMPT)), "warn")
+
+        # ---------- GD-137 PR2 FIX 3: a fieldless confirmed record is cannot-evaluate, not live ----------
+        # {confirmed:true, expiry_utc:<far future>} with NO digest/created_utc scores cannot-evaluate ->
+        # the stop is DENIED. Without FIX 3 it scored live and wrongly ALLOWED.
+        e.set_turn_state({"wake_digests": [{"confirmed": True,
+              "expiry_utc": (_now + datetime.timedelta(hours=100)).isoformat()}]})
+        eledger.unlink(missing_ok=True)
+        check("e2e/phantom-fieldless-confirmed-denies", _verdict(estop(CLAIM)), "block2")
+
+        # stop_hook_active True + counter 0 + claim + aggregate none MUST deny (E2: loop_signal is
+        # diagnostic; before E2 the top-of-decide_yield relief allowed-with-findings on the signal alone).
+        e.set_turn_state({}); eledger.unlink(missing_ok=True)
+        check("e2e/cross-hook-trap-denies",
+              _verdict(estop(CLAIM, stop_hook_active=True)), "block2")
+
+        # unreadable/absent last_assistant_message -> no claim -> allow
+        e.set_turn_state({})
+        check("e2e/no-message-allows", _verdict(aiqt_hooks.orch_stop_guard(e.payload("Stop"))), "allow")
+        e.set_turn_state({})
+        check("e2e/nonstr-message-allows",
+              _verdict(estop({"not": "a string"})), "allow")   # claim rejects non-str -> inert
+        # unpersistable counter -> warned allow (existing _orch_record_denial False path); reuse the
+        # existing pattern: a claim+none that would DENY becomes a warn allow when the state dir is
+        # read-only. (Mirror the existing "denial counter could not be persisted" leg if one exists;
+        # otherwise assert code 0 + systemMessage.)
+        # unreadable registry -> warn + allow (shared _orch_stop_family bad-registry path, already tested)
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
