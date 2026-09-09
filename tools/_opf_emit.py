@@ -122,9 +122,11 @@ _SCALAR_TYPES = (str, bool, int, float,
 # escaped scalar. The scheduler renders each header at append time and no longer pre-materializes one
 # header string per array-of-tables element, so a wide array of tables adds no transient spike of K times
 # the header length; (2) the empty document's single trailing LF is charged as 0 bytes (immaterial at any
-# real ceiling); (3) a MemoryError from a model too large to hold is not caught here (that is an
-# environment failure, surfaced raw rather than dressed as a document reject). Any reduction of this
-# ceiling is a maintainer decision.
+# real ceiling); (3) a MemoryError from a model too large to hold is not caught by the ceiling accounting
+# here, but it is an ordinary Exception subclass, so the outermost emit() backstop converts it to a
+# fail-closed EmitError like any other non-control-flow BaseException; only the three genuine control-flow
+# signals (KeyboardInterrupt, SystemExit, GeneratorExit) are re-raised (honored) rather than converted. Any
+# reduction of this ceiling is a maintainer decision.
 _MAX_EMIT_BYTES = 64 * 1024 * 1024
 
 
@@ -157,20 +159,22 @@ def _safe_type_label(value):
     escape. A value whose class has a hostile metaclass (one whose __getattribute__ raises on the
     __name__ lookup) would make a bare `type(value).__name__` raise an uncontrolled exception while the
     reject message is being built, even though the exact-type gate has already decided to reject the
-    value. Reading the name inside a try/except and falling back to a constant on ANY exception means
-    forming a rejection message can never raise; the outermost emit() backstop closes the same class
-    definitively."""
+    value. Reading the name inside a try/except and falling back to a constant on any BaseException OTHER
+    than a genuine control-flow signal (KeyboardInterrupt, SystemExit, GeneratorExit) means forming a
+    rejection message can never raise a non-control-flow exception; a genuine control-flow signal is
+    re-raised (honored), matching the outermost emit() backstop, which closes the same class definitively."""
     try:
         label = type(value).__name__
-        if type(label) is not str:  # a hostile metaclass can return a non-str __name__ whose __format__ raises a
-            return "<unrenderable-type>"  # control-flow signal; reject it BEFORE a diagnostic ever formats the label
-        return label
-    except BaseException:  # noqa: BLE001 - any failure to read the type name (even a BaseException raised by a
-        # hostile metaclass during the __name__ lookup) falls back to a constant label. Catching BaseException
-        # here is safe: this helper neither loops nor blocks, it is a pure best-effort diagnostic label, and any
-        # escape would defeat the diagnostic; it honors no control-flow exception because forming a label never
-        # legitimately needs to.
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):  # a genuine control-flow signal raised during the
+        raise  # __name__ lookup is honored (re-raised), matching the emit() backstop, never swallowed to a constant
+    except BaseException:  # noqa: BLE001 - any OTHER failure to read the type name (including a non-control-flow
+        # BaseException raised by a hostile metaclass during the __name__ lookup) falls back to a constant label.
+        # Catching BaseException here is safe: this helper neither loops nor blocks, it is a pure best-effort
+        # diagnostic label, and any escape would defeat the diagnostic.
         return "<unrenderable-type>"
+    if type(label) is not str:  # a hostile metaclass can return a non-str __name__ whose __format__ raises a
+        return "<unrenderable-type>"  # control-flow signal; reject it BEFORE a diagnostic ever formats the label
+    return label
 
 
 def _render_key(key):
@@ -981,6 +985,37 @@ def self_test():
                 failures.append("reject/{}: was accepted but is outside the subset".format(name))
         except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
             failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+
+    # HONORED CONTROL-FLOW residual: a hostile metaclass whose __getattribute__ raises a GENUINE control-flow
+    # signal (KeyboardInterrupt) on the __name__ lookup. Unlike every hostile-input vector above (each a
+    # fail-closed EmitError), a genuine control-flow signal is HONORED: _safe_type_label re-raises it and the
+    # emit() backstop re-raises it, so it PROPAGATES unchanged out of emit() and emit_checked() rather than
+    # becoming an EmitError, and no document is returned. This pins the disclosed honored-control-flow residual:
+    # were the signal swallowed into an EmitError (or any document returned), this leg would fail.
+    class _HonoredSignalMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise KeyboardInterrupt("a genuine control-flow signal raised during the __name__ lookup")
+            return super().__getattribute__(name)
+
+    class _HonoredSignalInt(int, metaclass=_HonoredSignalMeta):
+        pass
+
+    honored_doc = {"k": _HonoredSignalInt(1)}
+    for fn_name, fn in (("emit", emit), ("emit_checked", emit_checked)):
+        try:
+            returned = fn(honored_doc)
+        except KeyboardInterrupt:
+            pass  # honored: the genuine control-flow signal propagated unchanged, as required
+        except EmitError as exc:
+            failures.append("honored-control-flow/{}: a genuine KeyboardInterrupt was converted to EmitError "
+                            "({}) instead of propagating".format(fn_name, exc))
+        except BaseException as exc:  # noqa: BLE001 - any other exception is a defect, not the honored signal
+            failures.append("honored-control-flow/{}: raised {!r} instead of propagating the KeyboardInterrupt"
+                            .format(fn_name, exc))
+        else:
+            failures.append("honored-control-flow/{}: returned a document ({!r}) instead of propagating the "
+                            "KeyboardInterrupt".format(fn_name, returned))
 
     # The table-cycle rejects must be caught by the active-chain cycle check specifically, not by the
     # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With the
