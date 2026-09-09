@@ -387,14 +387,14 @@ def _model_equal(a, b):
         if isinstance(x, dict):
             if not isinstance(y, dict) or x.keys() != y.keys():
                 return False
-            for k in x:
+            for k in reversed(x):  # push children reversed so they pop in positional (insertion) order
                 stack.append((x[k], y[k]))
             continue
         if isinstance(x, list):
             if not isinstance(y, list) or len(x) != len(y):
                 return False
-            for xi, yi in zip(x, y):
-                stack.append((xi, yi))
+            for i in range(len(x) - 1, -1, -1):  # push children reversed so they pop in positional order
+                stack.append((x[i], y[i]))
             continue
         if type(x) is not type(y):
             return False
@@ -439,13 +439,17 @@ def self_test():
     # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
     # duplicate is the guard-input-soundness failure this avoids). Fail closed if it cannot be imported:
     # byte-canon cleanliness cannot be asserted without the authority.
+    _saved_sys_path = list(sys.path)  # snapshot so the import (and its transitive imports) cannot leak sys.path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
-        import check_byte_canon
-    except Exception as exc:  # noqa: BLE001 - any import failure is fail-closed here
-        print("error: cannot import check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
-              file=sys.stderr)
-        return 2
+        try:
+            import check_byte_canon
+        except Exception as exc:  # noqa: BLE001 - any import failure is fail-closed here
+            print("error: cannot import check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
+                  file=sys.stderr)
+            return 2
+    finally:
+        sys.path[:] = _saved_sys_path  # restore whether the import succeeded, failed (return 2), or completed; check_byte_canon stays in sys.modules
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
     authority = set(check_byte_canon.FORBIDDEN.values())
