@@ -152,12 +152,26 @@ def _escape_basic(s):
     return '"' + "".join(out) + '"'
 
 
+def _safe_type_label(value):
+    """A human label for a value's type for a rejection diagnostic, formed WITHOUT letting attacker code
+    escape. A value whose class has a hostile metaclass (one whose __getattribute__ raises on the
+    __name__ lookup) would make a bare `type(value).__name__` raise an uncontrolled exception while the
+    reject message is being built, even though the exact-type gate has already decided to reject the
+    value. Reading the name inside a try/except and falling back to a constant on ANY exception means
+    forming a rejection message can never raise; the outermost emit() backstop closes the same class
+    definitively."""
+    try:
+        return type(value).__name__
+    except Exception:  # noqa: BLE001 - any failure to read the type name falls back to a constant label
+        return "<unrenderable-type>"
+
+
 def _render_key(key):
     """A single key component: bare where it matches the bare-key grammar, else a quoted basic string.
     A non-string key is outside the subset (tomllib only ever produces string keys, so a non-string key
     could never round-trip)."""
     if type(key) is not str:  # exact type, not isinstance: a str subclass is rejected before it is iterated
-        raise EmitError("table key must be a string, got {}".format(type(key).__name__))
+        raise EmitError("table key must be a string, got {}".format(_safe_type_label(key)))
     if _BARE_KEY_RE.fullmatch(key):
         return key
     return _escape_basic(key)
@@ -332,7 +346,7 @@ def _emit_table(table, path, lines):
                 leaves.append((key, value))
             else:
                 raise EmitError("value for key {!r} is outside the subset: {}".format(
-                    key, type(value).__name__))
+                    key, _safe_type_label(value)))
         for key, value in sorted(leaves, key=lambda kv: kv[0]):
             rendered = _render_scalar_array(value) if type(value) is list else _render_scalar(value)
             _append("{} = {}".format(_render_key(key), rendered))
@@ -357,13 +371,27 @@ def _emit_table(table, path, lines):
 def emit(document):
     """Serialize `document` (a dict) to a canonical, byte-canonical TOML string ending in exactly one
     LF. Fail-closed (EmitError) on anything outside the constrained subset. The result reparses to a
-    model equal to `document`; emit_checked() proves that on every emission before it can stage."""
-    if type(document) is not dict:  # exact type: a dict subclass is rejected before its .items() runs
-        raise EmitError("the document must be a table (dict) at top level, got {}".format(
-            type(document).__name__))
-    lines = []
-    _emit_table(document, [], lines)
-    return "\n".join(lines) + "\n"
+    model equal to `document`; emit_checked() proves that on every emission before it can stage.
+
+    The whole body runs inside a fail-closed backstop: this is the outermost boundary of emit() and it
+    closes the hostile-input exception-leak class definitively. An EmitError propagates unchanged; ANY
+    other Exception (for example a value whose hostile metaclass raises while a diagnostic is built, or
+    any other pathological input) is converted to a fail-closed EmitError with a constant, value-free
+    message, never one that formats or introspects the offending value or type. `except Exception` is
+    deliberate: KeyboardInterrupt, SystemExit, and any other BaseException are NOT caught. This
+    guarantees no hostile or pathological input can escape emit() (and therefore emit_checked, which
+    calls emit()) as an uncontrolled exception."""
+    try:
+        if type(document) is not dict:  # exact type: a dict subclass is rejected before its .items() runs
+            raise EmitError("the document must be a table (dict) at top level, got {}".format(
+                _safe_type_label(document)))
+        lines = []
+        _emit_table(document, [], lines)
+        return "\n".join(lines) + "\n"
+    except EmitError:
+        raise
+    except Exception:  # noqa: BLE001 - fail-closed backstop: any non-EmitError becomes a value-free EmitError
+        raise EmitError("emit failed on an out-of-subset or hostile input (fail-closed)")
 
 
 def _model_equal(a, b):
@@ -861,6 +889,31 @@ def self_test():
     rejects["hostile-datetime-subclass"] = {"k": _HostileDatetime(2026, 1, 1)}
     rejects["hostile-list-subclass"] = {"k": _HostileList([1, 2])}
     rejects["hostile-dict-subclass"] = {"k": _HostileDict({"a": 1})}
+
+    # A hostile METACLASS whose __getattribute__ raises on the __name__ lookup: a bare type(value).__name__
+    # while a rejection diagnostic is built would otherwise leak an uncontrolled RuntimeError out of emit()
+    # (and emit_checked) even though the exact-type gate has already decided to reject the value. The guarded
+    # diagnostic (_safe_type_label) and the outermost fail-closed emit() backstop each independently turn
+    # this into a clean EmitError, as a VALUE, as a KEY, and as the top-level DOCUMENT. This is the third
+    # instance of the hostile-input exception-leak class, after the hostile subclasses and hostile tzinfo.
+    class _HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise RuntimeError("hostile metaclass __name__ lookup must never reach a reject diagnostic")
+            return super().__getattribute__(name)
+
+    class _HostileMetaInt(int, metaclass=_HostileMeta):
+        pass
+
+    class _HostileMetaStr(str, metaclass=_HostileMeta):
+        pass
+
+    class _HostileMetaDict(dict, metaclass=_HostileMeta):
+        pass
+
+    rejects["hostile-metaclass-value"] = {"k": _HostileMetaInt(1)}
+    rejects["hostile-metaclass-key"] = {_HostileMetaStr("bad"): "x"}
+    rejects["hostile-metaclass-document"] = _HostileMetaDict({"a": 1})
     for name, document in rejects.items():
         try:
             if not _rejects(document):
