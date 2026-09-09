@@ -240,30 +240,125 @@ def _read_toml(store_root_fd, rel):
         raise _cannot("cannot read {} ({})".format(rel, exc))
 
 
+def _close_fd(fd, rel):
+    """CLASS 1: close a directory/file handle opened for a store read, converting a close-time OSError
+    (EIO, EBADF) to the module's fail-closed CANNOT-EVALUATE. Safe in a `finally`: on the normal path it is
+    a clean no-op; when os.close itself errors it raises _cannot, so a read whose handle could not be closed
+    cleanly fails closed rather than returning as though it had completed. Both a _cannot already in flight
+    and a close-time _cannot carry the same CANNOT-EVALUATE verdict, so no fs error is silently swallowed and
+    the verdict never degrades to a clean pass."""
+    try:
+        os.close(fd)
+    except OSError as exc:
+        raise _cannot("cannot close a store-read handle for {} ({})".format(rel, exc))
+
+
+def _validate_module_envelope(rec, expected_type, module_ns, where):
+    """CLASS 3(ii): the spec-8.3 COMMON envelope validation for a KNOWN module-tier record whose per-state
+    grammar and type-specific extra fields are not modelled in this build (the disclosed residual). Every
+    non-worklog record carries the common envelope (spec 8.3), so a module-tier record is held to it, reusing
+    the SAME shared _opf_schema field validators the baseline path uses so the checks cannot drift:
+      - id: a well-formed <NS>-<n> whose namespace is the module type's normative namespace (spec 8.1/8.2);
+      - type: agrees with the file's declared type (spec 8.3);
+      - status: present and a non-empty string (the per-state grammar is the residual, unmodelled here);
+      - title: a non-empty single line;
+      - actor: a well-formed actor table (spec 8.3);
+      - created_at: RFC 3339 UTC, with the spec-8.3 importer exception (an importer MAY omit it when it
+        carries an import-provenance ref); updated_at: RFC 3339 UTC and required with NO importer exception,
+        mirroring _opf_schema.validate_record EXACTLY, so the module-tier and baseline paths agree on what an
+        importer omission accepts. (Extending the importer exception to updated_at is held out-of-scope for
+        the maintainer's spec-8.3 adjudication and is NOT applied here.)
+      - links/refs: well-formed when present.
+    The keyset is left OPEN (module-specific extra fields are unmodelled, so a legitimate module field such as
+    a release version is never false-rejected); the closed keyset and the state machine are the disclosed
+    residual. Returns a findings list (empty == a valid module envelope). Strictly stronger than the former
+    identity-only read: a module record missing or malforming any common envelope field is now a refusing
+    finding rather than an id-only pass."""
+    findings = []
+    rid = rec.get("id")
+    shape = _opf_schema._valid_id_shape(rid)
+    if shape is None:
+        findings.append("id {!r} is not a well-formed <NS>-<n> id (spec 8.2)".format(rid))
+    elif shape[0] != module_ns:
+        findings.append("id namespace {!r} is not the {!r} namespace bound to module type {!r} "
+                        "(spec 8.1/8.2)".format(shape[0], module_ns, expected_type))
+    if rec.get("type") != expected_type:
+        findings.append("type {!r} disagrees with the file's declared type {!r} (spec 8.3)".format(
+            rec.get("type"), expected_type))
+    status = rec.get("status")
+    if not isinstance(status, str) or not status:
+        findings.append("missing or non-string required field: status (spec 8.3)")
+    if "title" not in rec:
+        findings.append("missing required field: title")
+    else:
+        title = rec.get("title")
+        if not isinstance(title, str) or not title or "\n" in title or "\r" in title:
+            findings.append("title must be a non-empty single line")
+    actor_kind = _opf_schema._validate_actor(rec, findings)
+    refs = rec.get("refs")
+    has_provenance_ref = isinstance(refs, list) and bool(refs)
+    if "created_at" not in rec:
+        if actor_kind != "importer":
+            findings.append("missing required field: created_at")
+        elif not has_provenance_ref:
+            findings.append("an importer that omits created_at must carry an import-provenance reference "
+                            "(spec 8.3)")
+    elif not _opf_schema._valid_timestamp(rec.get("created_at")):
+        findings.append("created_at must be an RFC 3339 UTC timestamp")
+    if "updated_at" not in rec:
+        findings.append("missing required field: updated_at")
+    elif not _opf_schema._valid_timestamp(rec.get("updated_at")):
+        findings.append("updated_at must be an RFC 3339 UTC timestamp")
+    _opf_schema._validate_links(rec, findings)
+    _opf_schema._validate_refs(rec, findings)
+    return findings
+
+
+def _validate_tier_record(rec, expected_type, roster, registered_vendors, where):
+    """CLASS 3: the SINGLE full-contract validator EVERY id-bearing tier routes each record through
+    (baseline sibling, module-tier sibling, active index, and the duplicate/link existence authority; the
+    active worklog routes through _opf_release.validate_worklog, the same authoritative full contract).
+    Returns a findings list (empty == the record satisfies its complete contract); a non-empty list is the
+    caller's CANNOT-EVALUATE reason, so a malformed record ANYWHERE fails closed rather than being read
+    id-only or seated as a valid duplicate/link target.
+
+      - a roster type (the nine baseline types + legacy_fragment) is held to its COMPLETE envelope via
+        _opf_schema.validate_record, with file/type agreement and the manifest x-<vendor> allow-set;
+      - a KNOWN module-tier type has no modelled state machine (disclosed residual), so it is held to the
+        strongest contract a spec-less type admits: the full spec-8.3 common envelope (_validate_module_
+        envelope), narrowing the former identity-only read;
+      - any other type name is unknown: a refusing finding, fail-closed."""
+    spec = roster.get(expected_type)
+    if spec is not None:
+        rv = _opf_schema.validate_record(rec, expected_type=expected_type, specs=roster,
+                                         registered_vendors=registered_vendors)
+        if rv.status != _opf_store.VALID:
+            return list(rv.findings) or ["record is not VALID for type {!r}".format(expected_type)]
+        return []
+    module = _opf_store.MODULE_TYPES.get(expected_type)
+    if module is not None:
+        return _validate_module_envelope(rec, expected_type, module[0], where)
+    return ["unsupported type {!r}: no schema to validate it against (fail-closed)".format(expected_type)]
+
+
 def _record_ids(data, where, roster=None, expected_type=None, registered_vendors=frozenset()):
     """Extract the ids of a `{schema = 1, record: [[record]]}` index file, fail-closed. An ABSENT file is
     zero records (absence outside the declared set is clean). A PRESENT file is held to the declared index
-    contract (module docstring): ONLY the `schema` and `record` top-level keys, a `schema = 1`, a `record`
-    array of tables, each row a table with a well-formed id; any violation is CANNOT-EVALUATE naming the
-    file (a present-but-contract-malformed index is a refusing failure, never silent absence). An explicit
-    `schema = 1` with `record = []` is a genuine empty index and reads as zero records.
+    contract: ONLY the `schema` and `record` top-level keys (CLASS 3(i): closed keyset), a `schema = 1`, a
+    `record` array of tables, each row a table with a well-formed id; any violation is CANNOT-EVALUATE naming
+    the file. An explicit `schema = 1` with `record = []` is a genuine empty index of a SUPPORTED type and
+    reads as zero records.
 
-    CLASS 3: every record the uniqueness union or the existence/target authority reads is routed through
-    THIS one validator, so no tier (baseline sibling, module-tier sibling, active index) can silently
-    accept a malformed record or seat it as a valid duplicate/link target. When `roster` and
-    `expected_type` are supplied (every union/existence caller supplies them):
-      - a type the roster carries a spec for (the nine baseline types + legacy_fragment) is held to its
-        COMPLETE envelope contract via _opf_schema.validate_record, with file/type agreement and the
-        manifest's registered x-<vendor> allow-set; a non-VALID record is CANNOT-EVALUATE, never a silent
-        id-only read (subsumes B4);
-      - a type with no spec is legitimate ONLY as a KNOWN module-tier type. Its state machine is not
-        modelled in this build (a disclosed residual, per disclose-guard-residuals), so it is held to the
-        strongest contract a spec-less type admits: an identity check (its `type` field equals the file's
-        declared type AND its id namespace is the module type's normative namespace). A mismatch is
-        CANNOT-EVALUATE. The module record's per-state envelope completeness is the disclosed residual;
-      - any OTHER unspecced type name is unknown and is CANNOT-EVALUATE, fail-closed.
-    A caller that supplies no roster/expected_type (none remain in-tree after this change) falls back to
-    the legacy structural id-only read."""
+    CLASS 3: when `roster` and `expected_type` are supplied (every union/existence caller supplies them):
+      - CLASS 3(iii): the index TYPE itself must be a supported type (a roster spec OR a known module-tier
+        type), checked BEFORE the per-record loop, so an empty OR unsupported index is CANNOT-EVALUATE rather
+        than silently zero records (closes the empty-unsupported-index bypass);
+      - CLASS 3(i/ii): every record is routed through the ONE full-contract validator _validate_tier_record
+        (a spec'd type gets its COMPLETE envelope with the manifest vendor allow-set; a module-tier record
+        gets the full spec-8.3 envelope; an unknown type a refusing finding), so no tier can seat a malformed
+        record in the union or as a valid duplicate/link target.
+    A caller that supplies no roster/expected_type (none remain in-tree after this change) falls back to the
+    legacy structural id-only read."""
     if data is None:
         return []
     extra = set(data) - {"schema", "record"}
@@ -279,41 +374,25 @@ def _record_ids(data, where, roster=None, expected_type=None, registered_vendors
         raise _cannot("{}: a present index must carry a `record` array of tables (missing or non-list "
                       "`record` is malformed, not zero records)".format(where))
     have_authority = roster is not None and expected_type is not None
-    spec = roster.get(expected_type) if have_authority else None
-    module_ns = (_opf_store.MODULE_TYPES[expected_type][0]
-                 if have_authority and expected_type in _opf_store.MODULE_TYPES else None)
+    if have_authority and expected_type not in roster and expected_type not in _opf_store.MODULE_TYPES:
+        # CLASS 3(iii): the index type is unsupported. An empty or unsupported index is never zero records:
+        # refuse the type here, BEFORE the per-record loop, so an unsupported index with an empty (or absent)
+        # `record` list cannot slip past as a clean id-free read (the former empty-index bypass).
+        raise _cannot("{}: index type {!r} is not a supported record type; an empty or unsupported index is "
+                      "not zero records (fail-closed)".format(where, expected_type))
     ids = []
     for i, r in enumerate(recs):
         if not isinstance(r, dict):
             raise _cannot("{}: record[{}] is not a table".format(where, i))
         rid = r.get("id")
-        shape = _opf_schema._valid_id_shape(rid)
-        if shape is None:
+        if _opf_schema._valid_id_shape(rid) is None:
             raise _cannot("{}: record[{}] carries a malformed id {!r}".format(where, i, rid))
-        if spec is not None:
-            # A record whose COMPLETE contract the roster can judge: full envelope validation with
-            # file/type agreement and the manifest's registered vendor allow-set. A non-VALID record is a
-            # refusing failure, not a silent id read.
-            rv = _opf_schema.validate_record(r, expected_type=expected_type, specs=roster,
-                                             registered_vendors=registered_vendors)
-            if rv.status != _opf_store.VALID:
+        if have_authority:
+            tier_findings = _validate_tier_record(r, expected_type, roster, registered_vendors,
+                                                  "{} record[{}]".format(where, i))
+            if tier_findings:
                 raise _cannot("{}: record[{}] does not satisfy its complete {} contract ({})".format(
-                    where, i, expected_type, "; ".join(rv.findings)))
-        elif have_authority:
-            # No spec: only a KNOWN module-tier type is a legitimate spec-less record (its state machine is
-            # not modelled here: disclosed residual). Validate the strongest identity the store can answer;
-            # any other spec-less type name is unknown and is refused.
-            if module_ns is None:
-                raise _cannot("{}: record[{}] has unsupported type {!r}: no schema to validate it against "
-                              "(fail-closed)".format(where, i, expected_type))
-            tfield = r.get("type")
-            if tfield != expected_type:
-                raise _cannot("{}: record[{}] type {!r} disagrees with its file's declared type {!r} "
-                              "(spec 8.3)".format(where, i, tfield, expected_type))
-            if shape[0] != module_ns:
-                raise _cannot("{}: record[{}] id {!r} namespace {!r} is not the {!r} namespace bound to "
-                              "module type {!r} (spec 8.1/8.2)".format(
-                                  where, i, rid, shape[0], module_ns, expected_type))
+                    where, i, expected_type, "; ".join(tier_findings)))
         ids.append(rid)
     return ids
 
@@ -363,15 +442,25 @@ def _archive_ids(store_root_fd, machine_rel):
         if not isinstance(moved, list):
             raise _cannot("{}: `moved` must be an array of record ids (spec 12)".format(rel))
         for mid in moved:
-            if _opf_schema._valid_id_shape(mid) is None:
+            shape = _opf_schema._valid_id_shape(mid)
+            if shape is None:
                 raise _cannot("{}: moved id {!r} is malformed".format(rel, mid))
+            if shape[0] not in _opf_schema.RECORD_NAMESPACES:
+                # CLASS 3(iv): a moved id whose namespace is bound to NO record type is a PHANTOM archive
+                # entry (spec 8.1/8.2): it can correspond to no real archived record, so it is never seated in
+                # the uniqueness union nor resolved as an existing duplicate/link target. Fail-closed, so a
+                # duplicate/link targeting a phantom archived id is refused rather than falsely resolving.
+                raise _cannot("{}: moved id {!r} uses namespace {!r} bound to no record type (a phantom "
+                              "archive entry; spec 8.1/8.2)".format(rel, mid, shape[0]))
             ids.append(mid)
     return ids
 
 
 def _list_contained(store_root_fd, rel):
     """The immediate entry names of a directory beneath the store root, listed no-follow, or None when the
-    directory is absent. CANNOT-EVALUATE on any read error or a refused symlink (fail-closed listing)."""
+    directory is absent. CANNOT-EVALUATE on any read error or a refused symlink (fail-closed listing). CLASS
+    1: os.listdir and the handle closes are converted to CANNOT-EVALUATE at their own sites, so an EACCES/EIO
+    listing never reads as an empty directory and a close error never returns as though the read completed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, rel)
     except FileNotFoundError:
@@ -386,19 +475,25 @@ def _list_contained(store_root_fd, rel):
         except OSError as exc:
             raise _cannot("cannot list {} no-follow ({})".format(rel, exc))
         try:
-            return sorted(os.listdir(dfd))
+            try:
+                names = os.listdir(dfd)   # CLASS 1: an EACCES/EIO here is fail-closed, never empty
+            except OSError as exc:
+                raise _cannot("cannot list {} ({})".format(rel, exc))
         finally:
-            os.close(dfd)
+            _close_fd(dfd, rel)
+        return sorted(names)
     finally:
-        os.close(pfd)
+        _close_fd(pfd, rel)
 
 
 def _dir_entries_no_symlink(store_root_fd, rel):
     """The immediate entry names of a directory beneath the store root, listed no-follow, or None when the
     directory is absent. A SYMLINK, or any non-directory entry, is CANNOT-EVALUATE (fail-closed): an entry
-    that cannot be classified as a real subdirectory must refuse rather than vanish from the uniqueness
-    union, where U1's _immediate_subdirs would silently drop it (correct for store DISCOVERY, wrong for the
-    union; F4/B3). Used for BOTH the `imports/` sibling-run sweep and the `archive/` year enumeration."""
+    that cannot be classified as a real subdirectory must refuse rather than vanish from the uniqueness union,
+    where U1's _immediate_subdirs would silently drop it (correct for store DISCOVERY, wrong for the union;
+    F4/B3). Used for BOTH the `imports/` sibling-run sweep and the `archive/` year enumeration. CLASS 1:
+    os.listdir, os.stat, and the handle closes are each converted to CANNOT-EVALUATE at their own sites, so an
+    EACCES/EIO on the enumeration never reads as an empty directory."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, rel)
     except FileNotFoundError:
@@ -413,8 +508,12 @@ def _dir_entries_no_symlink(store_root_fd, rel):
         except OSError as exc:
             raise _cannot("cannot list {} no-follow ({})".format(rel, exc))
         try:
+            try:
+                entries = os.listdir(dfd)   # CLASS 1: an EACCES/EIO here is fail-closed, never empty
+            except OSError as exc:
+                raise _cannot("cannot list {} ({})".format(rel, exc))
             out = []
-            for entry in sorted(os.listdir(dfd)):
+            for entry in sorted(entries):
                 try:
                     est = os.stat(entry, dir_fd=dfd, follow_symlinks=False)
                 except OSError as exc:
@@ -428,9 +527,9 @@ def _dir_entries_no_symlink(store_root_fd, rel):
                 out.append(entry)
             return out
         finally:
-            os.close(dfd)
+            _close_fd(dfd, rel)
     finally:
-        os.close(pfd)
+        _close_fd(pfd, rel)
 
 
 def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozenset(), skip_run_id=None):
@@ -473,43 +572,29 @@ def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozense
 
 
 def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=frozenset()):
-    """The WL ids of the ACTIVE worklog.toml (`[[entry]]` rows, spec 6.2), fail-closed. Absent -> zero; a
-    present file whose schema, `entry` array, or an entry id is malformed is CANNOT-EVALUATE. CLASS 3: when
-    a roster is supplied (every union/existence caller supplies one), each present entry is additionally
-    held to its COMPLETE reduced-worklog contract via validate_record, so a malformed active worklog entry
-    is CANNOT-EVALUATE, never accepted into the union or resolved as a valid duplicate/link target. The
-    active worklog is NOT an `{schema, record}` index (its rows are `[[entry]]` and its `schema` is optional
-    per U3), so _record_ids does not read it; this reader honours the U3 worklog.toml shape. Disclosed
-    residual: manifest-registered custom worklog kinds are outside this build's manifest surface, so the
-    built-in kind vocabulary is the complete accepted set here (a promoted entry using a custom registered
-    kind would fail closed to CANNOT-EVALUATE rather than be wrongly accepted)."""
+    """The WL ids of the ACTIVE worklog.toml (`[[entry]]` rows, spec 6.2), fail-closed. Absent -> zero. CLASS
+    3(i/ii): the present worklog is held to its COMPLETE contract via _opf_release.validate_worklog, the
+    authoritative U3 worklog validator, so it fails closed on exactly what the release module fails closed on:
+    an unknown top-level key (the closed {schema, entry} keyset, which the former hand-rolled reader did NOT
+    enforce), a malformed schema, a non-list `entry`, a malformed entry, or a duplicate WL id. A non-VALID
+    worklog is CANNOT-EVALUATE, never accepted into the uniqueness union or resolved as a valid duplicate/link
+    target. The active worklog is NOT an `{schema, record}` index (its rows are `[[entry]]`), so _record_ids
+    does not read it; this reader honours the U3 worklog.toml shape and returns the canonical WL-<n> id
+    strings validate_worklog proved well-formed. The `roster` parameter is retained for call-site symmetry
+    with the other tier readers; worklog is a baseline type, so validate_worklog validates it against U2's
+    baseline worklog spec directly and does not need the extended roster. Disclosed residual: manifest-
+    registered custom worklog kinds are outside this build's manifest surface (validate_worklog's built-in
+    kind vocabulary is the accepted set here), so a promoted entry using a custom registered kind fails closed
+    to CANNOT-EVALUATE rather than being wrongly accepted."""
     rel = "{}/worklog.toml".format(machine_rel)
     data = _read_toml(store_root_fd, rel)
     if data is None:
         return []
-    schema = data.get("schema")
-    if schema is not None and (type(schema) is not int or schema != SCHEMA):
-        raise _cannot("{}: worklog schema {!r} is not the supported schema {}".format(rel, schema, SCHEMA))
-    entries = data.get("entry")
-    if entries is None:
-        return []
-    if not isinstance(entries, list):
-        raise _cannot("{}: `entry` must be an array of tables".format(rel))
-    ids = []
-    for i, e in enumerate(entries):
-        if not isinstance(e, dict):
-            raise _cannot("{}: entry[{}] is not a table".format(rel, i))
-        eid = e.get("id")
-        if _opf_schema._valid_id_shape(eid) is None:
-            raise _cannot("{}: entry[{}] carries a malformed id {!r}".format(rel, i, eid))
-        if roster is not None:
-            rv = _opf_schema.validate_record(e, expected_type="worklog", specs=roster,
-                                             registered_vendors=registered_vendors)
-            if rv.status != _opf_store.VALID:
-                raise _cannot("{}: entry[{}] does not satisfy its complete worklog contract ({})".format(
-                    rel, i, "; ".join(rv.findings)))
-        ids.append(eid)
-    return ids
+    wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors)
+    if wv.status != _opf_release.VALID:
+        raise _cannot("{}: worklog does not satisfy its complete contract ({})".format(
+            rel, "; ".join(wv.findings)))
+    return ["WL-{}".format(n) for n in wv.entry_ids]
 
 
 def _active_types(store_root_fd, machine_rel):
@@ -708,6 +793,14 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
         # unwrapped. Surface it as the module's CANNOT-EVALUATE verdict rather than let it escape
         # stage_import's outcome contract (never a raw error, never a silent clean pass).
         return StageResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    except OSError as exc:
+        # CLASS 1 (class-complete backstop): ANY OSError reaching here from ANY read path not already
+        # converted closer in (a raw os.fstat/os.dup/os.close on a store, source, sibling, or archive read,
+        # or a path a future edit adds) becomes the module's fail-closed CANNOT-EVALUATE verdict, never an
+        # uncaught escape from stage_import's outcome contract and never a silent clean pass. The primary
+        # readers convert their own os.read/os.listdir/os.close at the site (regions A/B/F); this backstop
+        # guarantees the remaining reachable os.* calls (enumerated in the draft) cannot escape.
+        return StageResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
 
 
 def _read_sources(product_root_fd, import_set):
@@ -922,46 +1015,47 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                 # A mapped/split row mints its OWN id (B6 already refused a contradictory `target`). CLASS 5:
                 # the candidate is a DEEP, independent copy of the plan model, so the staged candidate never
                 # shares a mutable with the staged plan snapshot (plan.toml, emitted from `plan` above) and
-                # neither can be perturbed through the other; the staged record is a faithful, independent
-                # record of exactly what validate_record validates.
+                # neither can be perturbed through the other.
                 model = row.get("record")
                 ns = _validate_candidate_model(model, roster, where)
                 rtype = model["type"]
                 rid = mint(ns, where)
                 rec = copy.deepcopy(model)
                 rec["id"] = rid
-                # CLASS 2 (never fabricate a historical timestamp): created_at AND updated_at are the
-                # ORIGINAL item's history. When the plan model supplies neither, the record's original
-                # instants are UNKNOWN and are NEVER stamped from the staging clock (timestamp-from-clock: a
-                # date for an earlier event is never guessed from the current clock). An omitted created_at
-                # is recorded as unknown via the import-provenance ref below (the spec 8.3 importer exception
-                # then accepts the omission). An omitted updated_at, which the envelope requires with NO
-                # importer exception, is left absent so validate_record REFUSES the candidate as incomplete
-                # rather than U7 inventing a last-transition instant; the plan must carry updated_at from the
-                # source. (The legacy_fragment quarantine record below is a NEW importer artefact whose
-                # lifecycle begins at THIS import, so its created_at/updated_at legitimately read the clock:
-                # a genuine now-event, not a fabricated historical instant.)
-                if "created_at" not in rec:
-                    prov = {"kind": "path", "locator": source["path"],
-                            "note": "imported fragment [{}:{}] of {} (sha256:{}) in run {}; original "
-                                    "created_at unknown".format(start, end, source["path"],
-                                                                source["sha256"], run_id)}
-                    refs = rec.get("refs")
-                    if isinstance(refs, list):
-                        rec["refs"] = list(refs) + [prov]
-                    elif refs is None:
-                        rec["refs"] = [prov]
-                    # a non-list `refs` is left untouched for validate_record to reject as malformed
-                rv = _opf_schema.validate_record(rec, expected_type=rtype, specs=roster)
+                # CLASS 6 (record-level source provenance): EVERY mapped/split candidate carries a
+                # record-level provenance ref (source path + content digest + span + run id), whether or not
+                # the source supplied its timestamps, so nothing is staged without a traceable origin
+                # (reference-capture). CLASS 2 (never fabricate, stage with omission): created_at and
+                # updated_at are the ORIGINAL item's history; an instant the source omits is UNKNOWN and is
+                # NEVER stamped from the staging clock (timestamp-from-clock). The SAME provenance ref records
+                # each omitted instant as unknown, and the spec-8.3 importer exception (created_at today;
+                # updated_at once region G lands) then ACCEPTS the omission, so the candidate is STAGED with
+                # that field omitted (spec 14.1 import posture), never rejected and never fabricated. (The
+                # legacy_fragment quarantine record below is a NEW importer artefact whose lifecycle begins at
+                # THIS import, so its created_at/updated_at legitimately read the clock: a genuine now-event.)
+                omitted = [f for f in ("created_at", "updated_at") if f not in rec]
+                note = "imported fragment [{}:{}] of {} (sha256:{}) in run {}".format(
+                    start, end, source["path"], source["sha256"], run_id)
+                if omitted:
+                    note += "; original {} unknown".format(" and ".join(omitted))
+                prov = {"kind": "path", "locator": source["path"], "note": note}
+                refs = rec.get("refs")
+                if isinstance(refs, list):
+                    rec["refs"] = list(refs) + [prov]
+                elif refs is None:
+                    rec["refs"] = [prov]
+                # a non-list `refs` is left untouched for validate_record to reject as malformed
+                rv = _opf_schema.validate_record(rec, expected_type=rtype, specs=roster,
+                                                 registered_vendors=registered_vendors)   # MINOR (a)
                 if rv.status != _opf_store.VALID:
                     raise _finding("{}: candidate is not a valid {} ({})".format(
                         where, rtype, "; ".join(rv.findings)))
                 # B7: a candidate may LINK to an EXISTING record, but candidate-to-candidate links are
                 # unsupported: every links[].id must resolve in the active/archive existence authority (the
-                # same set a duplicate target resolves against). An unresolved link (a dangling id, or a
-                # link to an id minted only in this import set) is a finding: a candidate with a dangling
-                # link is not a fully-validated candidate (spec 14.1). validate_record already proved each
-                # link well-formed, so link.get("id") is a valid id string here.
+                # same set a duplicate target resolves against). An unresolved link (a dangling id, or a link
+                # to an id minted only in this import set) is a finding: a candidate with a dangling link is
+                # not a fully-validated candidate (spec 14.1). validate_record already proved each link
+                # well-formed, so link.get("id") is a valid id string here.
                 for link in rec.get("links", []):
                     lid = link.get("id")
                     if lid not in existing_ids():
@@ -1022,7 +1116,8 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             # worklog envelope requires `date` with NO importer exception, so an omitted date leaves
             # validate_record to REFUSE the entry as incomplete rather than U7 fabricating one; the plan must
             # carry the historical date from the source.
-            rv = _opf_schema.validate_record(rec, expected_type="worklog", specs=roster)
+            rv = _opf_schema.validate_record(rec, expected_type="worklog", specs=roster,
+                                             registered_vendors=registered_vendors)   # MINOR (a)
             if rv.status != _opf_store.VALID:
                 raise _finding("{}: candidate is not a valid worklog entry ({})".format(
                     where, "; ".join(rv.findings)))
@@ -1228,6 +1323,7 @@ def self_test():
     """Import-staging invariants over synthetic stores. Judged on the returned verdict values, never by
     grepping output. Fixtures live under a private tempdir removed in a finally; the injected instant and
     nonce are fixed, so ids and bytes are deterministic. Follows the U1 self-test idiom."""
+    import errno
     import tempfile
     import shutil
     import subprocess
@@ -1703,7 +1799,8 @@ def self_test():
         # self-test manifest) the MA (maintainer_action) index is active; a duplicate targeting a valid
         # MA-1 resolves (pre-fix it was falsely rejected, the module index never scanned).
         ma_ok = ('schema = 1\n\n[[record]]\nid = "MA-1"\ntype = "maintainer_action"\n'
-                 'status = "open"\ntitle = "x"\n')
+                 'status = "open"\ntitle = "x"\ncreated_at = "2026-01-01T00:00:00Z"\n'
+                 'updated_at = "2026-01-01T00:00:00Z"\nactor = { kind = "maintainer" }\n')
         rootB2, mB2 = build_store(sources={"a.txt": src},
                                   extra={"maintainer_action.index.toml": ma_ok})
         dup_ma = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "target": "MA-1"}]}}
@@ -1951,6 +2048,178 @@ def self_test():
             check("C5-plan-snapshot-original",
                   "id" not in staged_plan_rec
                   and staged_plan_rec.get("refs") == c5_before["fragments"]["a.txt"][0]["record"]["refs"])
+
+        # ======================= round-4 QA discriminating vectors =======================
+
+        # CLASS 1 (os.read): _journal._read_fd converts a read-time OSError to a JournalError at the one choke
+        # point every contained reader routes bytes through. Drive it directly with a patched os.read.
+        rpipe, wpipe = os.pipe()
+        _saved_osread = os.read
+        os.read = (lambda fd, n: (_ for _ in ()).throw(OSError(errno.EIO, "simulated read error")))
+        try:
+            try:
+                _journal._read_fd(rpipe)
+                vread = "no-raise"
+            except _journal.JournalError:
+                vread = "journal-error"
+            except OSError:
+                vread = "raw-oserror"
+        finally:
+            os.read = _saved_osread
+            os.close(rpipe); os.close(wpipe)
+        check("C1-osread-converts-to-journalerror", vread == "journal-error")
+
+        # CLASS 1 (os.listdir on imports/ and archive/): both directory enumerators, and _list_contained,
+        # convert an os.listdir OSError to the module's fail-closed CANNOT-EVALUATE (_StageError verdict 2),
+        # never an empty listing. Drive each directly with a patched os.listdir over real store dirs.
+        rootL, mL = build_store(sources={"a.txt": src})
+        (mL / "imports").mkdir(); (mL / "archive").mkdir()
+        resolL = _opf_store.resolve_store(rootL)
+        fdL = _opf_store._open_store_root_fd(resolL.store_root, resolL.pointer_source != "default")
+        _saved_listdir = os.listdir
+        def _probe_listdir(relsuffix):
+            try:
+                _dir_entries_no_symlink(fdL, "{}/{}".format(resolL.machine_rel, relsuffix))
+                return "no-raise"
+            except _StageError as exc:
+                return exc.verdict
+            except OSError:
+                return "escaped"
+        try:
+            os.listdir = (lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "simulated listdir error")))
+            v_imp, v_arc = _probe_listdir("imports"), _probe_listdir("archive")
+            try:
+                _list_contained(fdL, "{}/imports".format(resolL.machine_rel))
+                v_lc = "no-raise"
+            except _StageError as exc:
+                v_lc = exc.verdict
+            except OSError:
+                v_lc = "escaped"
+        finally:
+            os.listdir = _saved_listdir
+            os.close(fdL)
+        check("C1-listdir-imports-cannot-eval", v_imp == 2)
+        check("C1-listdir-archive-cannot-eval", v_arc == 2)
+        check("C1-listdir-list-contained-cannot-eval", v_lc == 2)
+
+        # CLASS 1 (boundary backstop): a RAW OSError from a read path NOT converted at its own site (here a
+        # patched _journal._read_contained, whose OSError bypasses _read_sources' JournalError-only catch) is
+        # caught by stage_import's top-level OSError backstop as verdict 2, never an uncaught escape.
+        # Reverting the backstop lets the raw OSError escape (caught here as "escaped").
+        rootBK, mBK = build_store(sources={"a.txt": src})
+        _saved_rc = _journal._read_contained
+        _journal._read_contained = (lambda root_fd, relpath:
+                                    (_ for _ in ()).throw(OSError(errno.EIO, "simulated raw read-path error")))
+        try:
+            try:
+                vbk = stage_import(rootBK, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
+            except OSError:
+                vbk = "escaped"
+        finally:
+            _journal._read_contained = _saved_rc
+        check("C1-boundary-backstop-cannot-eval", vbk == 2)
+        check("C1-boundary-backstop-no-run", not (mBK / "imports").exists())
+
+        # CLASS 3 (module-tier envelope): a module-tier sibling record is now held to the full spec-8.3 common
+        # envelope, not an identity-only read. A maintainer_action record with the right type+namespace but
+        # MISSING the envelope (no actor, no created_at/updated_at) is CANNOT-EVALUATE. Pre-fix the identity-
+        # only read accepted it (type+namespace agreed) and staged the non-colliding run (verdict 0).
+        sib_ma_env = {"imports/{}/candidate/maintainer_action.index.toml".format(sib_run):
+                      'schema = 1\n\n[[record]]\nid = "MA-1"\ntype = "maintainer_action"\n'
+                      'status = "open"\ntitle = "x"\n'}
+        rootC3e, mC3e = build_store(sources={"a.txt": src}, extra=sib_ma_env)
+        check("C3-module-envelope-malformed-cannot-eval",
+              stage_import(rootC3e, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # CLASS 3 (empty/unsupported sibling index): an index whose TYPE is unsupported is CANNOT-EVALUATE even
+        # when its record list is EMPTY (an empty or unsupported index is never zero records). Pre-fix an empty
+        # record list skipped the per-record type check, so the unsupported type slipped past as clean.
+        sib_unsup = {"imports/{}/candidate/not_a_type.index.toml".format(sib_run): "schema = 1\nrecord = []\n"}
+        rootC3u, mC3u = build_store(sources={"a.txt": src}, extra=sib_unsup)
+        check("C3-empty-unsupported-index-cannot-eval",
+              stage_import(rootC3u, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # CLASS 3 (active worklog unknown top-level key): the active worklog reader routes through
+        # _opf_release.validate_worklog, whose closed {schema, entry} keyset rejects an unknown top-level key
+        # as CANNOT-EVALUATE. Pre-fix the hand-rolled reader ignored unknown top-level keys and read ids anyway.
+        wl_unknown = ('schema = 1\nrogue_top = 1\n\n[[entry]]\nid = "WL-1"\ndate = "2026-01-01T00:00:00Z"\n'
+                      'kind = "added"\nsummary = "seed"\nactor = { kind = "maintainer" }\n')
+        rootC3w, mC3w = build_store(counters="BI=0,LF=0,WL=1", sources={"a.txt": src},
+                                    extra={"worklog.toml": wl_unknown})
+        check("C3-worklog-unknown-key-cannot-eval",
+              stage_import(rootC3w, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # CLASS 3 (phantom archive target): a moved id whose namespace is bound to NO record type is a phantom
+        # archive entry; the existence authority never resolves a duplicate against it. Pre-fix the shape-only
+        # check seated "ZZ-1" as an existing target (verdict 0); post-fix the phantom fails closed (verdict 2).
+        rootC3p, mC3p = build_store(sources={"a.txt": src},
+                                    extra={"archive/2026/archive.toml": 'moved = ["ZZ-1"]\n'})
+        dup_phantom = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
+                                                "target": "ZZ-1"}]}}
+        check("C3-phantom-archive-target-cannot-eval",
+              stage_import(rootC3p, ["a.txt"], dup_phantom, now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # CLASS 6 (record-level source provenance): a FULLY-timestamped mapped candidate (both created_at and
+        # updated_at supplied, so no importer omission) STILL carries a record-level source-provenance ref
+        # (source path + content digest + span + run id). Pre-fix a candidate that supplied its timestamps got
+        # NO ref (provenance was attached only on a created_at omission).
+        cand_full = {"type": "backlog_item", "status": "open", "title": "Imported item",
+                     "actor": {"kind": "importer"}, "created_at": "2026-01-01T00:00:00Z",
+                     "updated_at": "2026-01-02T00:00:00Z"}
+        rootC6, mC6 = build_store(sources={"a.txt": src})
+        resC6 = stage_import(rootC6, ["a.txt"],
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                                                       "record": cand_full}]}}, now=NOW, run_nonce=NONCE)
+        check("C6-fully-timestamped-clean", resC6.verdict == 0)
+        if resC6.run_id:
+            c6rec = tomllib.loads((mC6 / "imports" / resC6.run_id / "candidate"
+                                   / "backlog_item.index.toml").read_text())["record"][0]
+            src_digest = _sha256_hex(src.encode("utf-8"))
+            check("C6-candidate-provenance-present",
+                  isinstance(c6rec.get("refs"), list) and any(
+                      isinstance(rf, dict) and rf.get("kind") == "path"
+                      and src_digest in str(rf.get("note", ""))
+                      and "imported fragment" in str(rf.get("note", "")) for rf in c6rec["refs"]))
+
+        # MINOR (a): a manifest-registered x-<vendor> extension on an imported candidate is ACCEPTED (the
+        # candidate- and worklog-minting validate_record calls now receive the manifest's registered vendor
+        # set). Pre-fix the empty default false-rejected it (verdict 1). The SAME extension WITHOUT
+        # registration is rejected, proving the allow-set is enforced rather than ignored.
+        cand_vendor = {"type": "backlog_item", "status": "open", "title": "Imported item",
+                       "actor": {"kind": "importer"}, "updated_at": "2026-01-01T00:00:00Z",
+                       "x-acme": {"ticket": "ACME-1"}}
+        cand_vendor_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                                                     "record": cand_vendor}]}}
+        rootMV, mMV = build_store(sources={"a.txt": src})
+        (mMV / "manifest.toml").write_text(
+            manifest_text().replace("registered = []", 'registered = ["x-acme"]'), encoding="utf-8")
+        check("minor-a-registered-vendor-accepted",
+              stage_import(rootMV, ["a.txt"], cand_vendor_plan, now=NOW, run_nonce=NONCE).verdict == 0)
+        rootMVn, mMVn = build_store(sources={"a.txt": src})
+        check("minor-a-unregistered-vendor-rejected",
+              stage_import(rootMVn, ["a.txt"], cand_vendor_plan, now=NOW, run_nonce=NONCE).verdict == 1)
+
+        # MINOR (b): the candidate/worklog mint sites use copy.deepcopy, so a NESTED field of the staged record
+        # and of the plan model are independent objects; a shallow copy would share them. This discriminates
+        # deep vs shallow on the copy primitive the mint sites rely on: mutating a nested field of the copy
+        # never shows through to the source, and vice-versa (a shallow copy fails BOTH directions). (Scope
+        # note, kept honest: because the production mint path replaces only TOP-LEVEL keys on the copy, deep-
+        # vs-shallow has no black-box divergence through stage_import today; this pins the copy-depth contract
+        # the sites depend on so a later nested mutation cannot silently bleed across the plan/candidate
+        # boundary. The C5 vector above continues to lock the on-disk enrichment/snapshot separation.)
+        nested_model = {"type": "backlog_item", "status": "open", "title": "t",
+                        "actor": {"kind": "importer"}, "updated_at": "2026-01-01T00:00:00Z",
+                        "refs": [{"kind": "url", "locator": "https://example.invalid/x", "note": "orig"}]}
+        deep_fwd = copy.deepcopy(nested_model)
+        deep_fwd["actor"]["kind"] = "maintainer"
+        deep_fwd["refs"][0]["note"] = "MUTATED-COPY"
+        check("minor-b-deep-copy-forward-independent",
+              nested_model["actor"]["kind"] == "importer" and nested_model["refs"][0]["note"] == "orig")
+        deep_rev = copy.deepcopy(nested_model)
+        nested_model["actor"]["kind"] = "assistant"
+        nested_model["refs"][0]["note"] = "MUTATED-SOURCE"
+        check("minor-b-deep-copy-reverse-independent",
+              deep_rev["actor"]["kind"] == "importer" and deep_rev["refs"][0]["note"] == "orig")
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

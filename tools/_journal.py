@@ -152,7 +152,17 @@ def _open_parent(root_fd, relpath):
 def _read_fd(fd):
     chunks = []
     while True:
-        block = os.read(fd, _READ_CHUNK)
+        try:
+            block = os.read(fd, _READ_CHUNK)
+        except OSError as exc:
+            # CLASS 1: a read error (EIO, EBADF, ...) mid-read is fail-closed, never a truncated or empty
+            # result. Every contained reader (read_frames, read_lock_owner, _read_at, _read_contained)
+            # routes its bytes through here, so converting os.read at this one choke point makes an
+            # unreadable descriptor a JournalError at every call site, matching the broad-OSError posture of
+            # _lstat_at and _open_parent (check-fails-closed-on-unreadable). JournalError is not an OSError
+            # subclass, so a caller catching OSError does not swallow it, and a caller catching JournalError
+            # fails closed as it already does for every other contained-read failure.
+            raise JournalError("read error on a contained file descriptor ({})".format(exc))
         if not block:
             break
         chunks.append(block)
