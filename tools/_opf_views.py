@@ -47,13 +47,17 @@ manifest cannot rebind a known view or deliverable off its destination, and view
 through a no-follow CONTAINED write, so a symlinked destination is refused rather than followed.
 
 Scope and disclosed deferrals: U4 renders the `inline` store layout only. A manifest declaring
-`layout = "per-record"` is a CLEAR cannot-evaluate (per-record support is deferred), never mis-reported as
-a downstream malformed-record error, and never silently rendered as if inline. The `<TYPE>-INDEX.md`
-mirrors cover the baseline record types only; module-type mirrors are DEFERRED until module-type record
-schemas ship (`_opf_schema.validate_record` knows only the baseline specs, so no module-type mirror can be
-rendered regardless). When `render` is wired (VC-4) it MUST additionally gate on the U6 `validate_store`
-store-integrity layer (cross-record uniqueness, coverage, and reconciliation) once that lands, a tracked
-spec-11 obligation; `validate_store` does not exist yet and `render` is unwired, so this fails safe today.
+`layout = "per-record"` is a CLEAR cannot-evaluate (per-record support is deferred, F7), never
+mis-reported as a downstream malformed-record error, and never silently rendered as if inline. The
+`<TYPE>-INDEX.md` mirrors cover the baseline record types only; module-type mirrors are DEFERRED until
+module-type record schemas ship (F8; `_opf_schema.validate_record` knows only the baseline specs, so no
+module-type mirror can be rendered regardless). A mutating render MUST gate on the U6 `validate_store`
+store-integrity layer (cross-record uniqueness, coverage, and reconciliation), a tracked spec-11
+obligation (F2); that layer does not exist yet and `render` does not compose it (VC-4, deferred), so
+WRITE mode FAILS CLOSED today: an ungated write through any entry (the unwired verb, the module
+`__main__`, or a direct `render(...)` call) is REFUSED (cannot-evaluate, exit 2) and writes nothing,
+while `--check` (read-only drift detection) keeps working and the CLI defaults to check-only. This is a
+refusal pending the real gate, never a fabricated one.
 """
 import hashlib
 import os
@@ -84,6 +88,13 @@ GENERATOR_NAME = "opf-views"
 GENERATOR_VERSION = "1"
 SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
 REGEN_COMMAND = "opf render"
+
+# spec 5.7/5.8/11: a mutating render must gate on the U6 store-integrity layer (validate_store:
+# cross-record uniqueness, coverage, reconciliation). That layer does not exist yet and render does
+# not compose it (VC-4, deferred), so WRITE mode fails closed: an ungated write is refused. VC-4 flips
+# this to True only WHEN it wires the actual gate invocation; until then every write is refused. The
+# CLI runs check-only meanwhile. This is not a fabricated gate; it is a refusal pending the real one.
+_WRITE_GATE_COMPOSED = False
 
 WORKING_DIRNAME = _opf_store.WORKING_DIRNAME     # ".working": public targets sit OUTSIDE it, at product root
 
@@ -262,36 +273,81 @@ def _links_of(record, rel):
 
 # --- the closed transform vocabulary (spec 10.2) -----------------------------------------------------
 
-def t_filter(records, predicate):
-    """Filter on a declared field predicate: keep each record for which predicate(record) is true. The
-    predicate is drawn from the closed set of field predicates the renderers build (a state membership, a
-    status membership, an actionability flag); no ad hoc composition enters here (spec 10.2)."""
+# The CLOSED, versioned transform vocabulary (spec 10.2). Every predicate, sort key, group field, and
+# projection column a renderer may name is registered here; a name outside a registry is a ViewsError
+# (a cannot-evaluate), never a silent empty group, empty projection, or "" sort key. TRANSFORM_VOCAB
+# bumps when the set changes (a new composition shape is a spec version bump, not ad hoc logic).
+TRANSFORM_VOCAB_VERSION = "1"
+
+# group fields resolve through an accessor so a DECLARED derived field (lifecycle state) is part of the
+# closed vocabulary rather than an ad hoc bypass; a raw field reads r.get(field).
+_GROUP_ACCESSORS = {
+    "status": lambda r: str(r.get("status", "")),
+    "state": _state,                      # declared derived lifecycle field (spec 8.4)
+}
+GROUP_FIELDS = frozenset(_GROUP_ACCESSORS)
+SORT_KEYS = frozenset({"status"})
+PROJECT_COLUMNS = frozenset({
+    "type", "status", "title", "created_at", "updated_at", "date", "kind", "severity",
+    "decision", "decided_at", "decided_by", "classification", "action", "scopes",
+})
+# named predicate factories (t_filter takes a NAME, not an arbitrary callable). The inner lambdas look
+# up is_actionable / _state at CALL time, so this dict can be defined before is_actionable below.
+_FILTER_PREDICATES = {
+    "is_actionable": lambda hidden: (lambda r: is_actionable(r, hidden)),
+    "state_in": lambda states: (lambda r: _state(r) in states),
+}
+FILTER_PREDICATES = frozenset(_FILTER_PREDICATES)
+
+
+def t_filter(records, name, **kwargs):
+    """Filter on a DECLARED, named predicate from the closed vocabulary (spec 10.2). `name` selects a
+    registered predicate factory; `kwargs` binds its context. An unknown predicate name is a
+    ViewsError, never a silent pass-through of an arbitrary callable."""
+    factory = _FILTER_PREDICATES.get(name)
+    if factory is None:
+        raise ViewsError("unknown filter predicate {!r} (spec 10.2 closed transform vocabulary "
+                         "v{})".format(name, TRANSFORM_VOCAB_VERSION))
+    predicate = factory(**kwargs)
     return [r for r in records if predicate(r)]
 
 
 def t_sort(records, keys=()):
-    """Sort on declared keys with the record ID as the FINAL tie-breaker (spec 10.2). `keys` is a tuple of
-    field names, compared as their string values in order; the ID numeric key always terminates the sort so
-    the order is total and deterministic even when the declared keys tie."""
+    """Sort on DECLARED keys with the record ID as the FINAL tie-breaker (spec 10.2). Each key must be
+    a registered sort key; an unknown key is a ViewsError, never a silent "" comparison."""
+    for k in keys:
+        if k not in SORT_KEYS:
+            raise ViewsError("unknown sort key {!r} (spec 10.2 closed transform vocabulary v{})".format(
+                k, TRANSFORM_VOCAB_VERSION))
     return sorted(records, key=lambda r: tuple(str(r.get(k, "")) for k in keys) + (_id_key(r),))
 
 
 def t_group(records, field, order=None):
-    """Group by a declared field (spec 10.2). Returns a list of (value, records) pairs; `order` fixes the
-    leading group order and any remaining values follow sorted, so grouping is deterministic. Records
-    within a group are ID-sorted."""
+    """Group by a DECLARED field (spec 10.2), which may be a raw record field or a declared derived
+    field (lifecycle state). An unknown group field is a ViewsError, never a silent empty-name group.
+    Returns (value, records) pairs; `order` fixes the leading group order, remaining values follow
+    sorted; records within a group are ID-sorted."""
+    accessor = _GROUP_ACCESSORS.get(field)
+    if accessor is None:
+        raise ViewsError("unknown group field {!r} (spec 10.2 closed transform vocabulary v{})".format(
+            field, TRANSFORM_VOCAB_VERSION))
     buckets = {}
     for r in records:
-        buckets.setdefault(str(r.get(field, "")), []).append(r)
+        buckets.setdefault(str(accessor(r)), []).append(r)
     keys = list(order or ())
     keys += sorted(k for k in buckets if k not in keys)
     return [(k, t_sort(buckets[k])) for k in keys if k in buckets]
 
 
 def t_project(record, columns):
-    """Project declared columns (spec 10.2). Returns an ordered list of (column, value) pairs, omitting a
-    column the record does not carry, so a view renders a stable, declared column set rather than the whole
-    record."""
+    """Project DECLARED columns (spec 10.2). Each requested column must be a registered projection
+    column; an unknown column is a ViewsError, never a silent []. A registered column the record does
+    not carry is still omitted (a stable declared column set), which is distinct from an unregistered
+    column name."""
+    for c in columns:
+        if c not in PROJECT_COLUMNS:
+            raise ViewsError("unknown projection column {!r} (spec 10.2 closed transform vocabulary "
+                             "v{})".format(c, TRANSFORM_VOCAB_VERSION))
     return [(c, record[c]) for c in columns if c in record]
 
 
@@ -363,7 +419,7 @@ def join_resolution(decisions):
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
     for d in decisions:
         did = d.get("id")
-        targets = sorted(t for t in _links_of(d, "supersedes") if t in ids)
+        targets = sorted(set(t for t in _links_of(d, "supersedes") if t in ids))
         supersedes_map[did] = targets
         superseded.update(targets)
     # Spec 8.5/10.2: exactly ONE current effective resolution per supersession chain. A FORK (one decision
@@ -394,6 +450,16 @@ def join_resolution(decisions):
 # worklog/version ledgers, their loaded rows) and returns the markdown BODY (the header is prepended by
 # the driver, except for the header-exempt root VERSION deliverable). Bodies are deterministic: every
 # iteration is over an explicitly sorted or grouped sequence.
+
+# F4 class-wide probe (spec 10.3): every record/ledger field value interpolated into a rendered body
+# passes through _md_text, so a free-text field cannot forge a heading, a list item, or the do-not-edit
+# header comment. Author-declared probe token, reconciled by hand against these renderers (the file is
+# small):
+#   grep -nE 'r\[|r\.get\(|e\.get\(|s\.get\(|ref\.get\(|actor\[' tools/_opf_views.py
+#   then confirm every hit reaching an output/format string is wrapped in _md_text.
+# Current run of this probe shows ZERO unescaped record-field sinks in a rendered body. Schema-
+# constrained fields (id, status/state, timestamps) are routed through _md_text too, as defence in
+# depth per guard-input-soundness; _md_text is a no-op on conformant values, so no golden changes.
 
 _EMPTY = "_No records._"
 
@@ -426,9 +492,10 @@ def render_todo(src):
     then an ID-tie-broken sort). An item an unqualified active block scopes is hidden."""
     items, blocks = src["backlog_item"], src["block"]
     _blocked_by, hidden = join_actionability(items, blocks)
-    actionable = t_filter(items, lambda r: is_actionable(r, hidden))
+    actionable = t_filter(items, "is_actionable", hidden=hidden)
     ordered = t_sort(actionable, keys=("status",))
-    lines = ["- {} ({}) {}".format(r["id"], _state(r), _md_text(r.get("title", ""))) for r in ordered]
+    lines = ["- {} ({}) {}".format(_md_text(r["id"]), _md_text(_state(r)), _md_text(r.get("title", "")))
+             for r in ordered]
     return _lines("TODO", lines)
 
 
@@ -440,35 +507,27 @@ def render_backlog(src):
     lines = []
     for r in t_sort(items):
         note = "actionable" if is_actionable(r, hidden) else (
-            "blocked by {}".format(", ".join(blocked_by[r["id"]])) if r.get("id") in hidden
-            else "not actionable ({})".format(_state(r)))
+            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r["id"]])) if r.get("id") in hidden
+            else "not actionable ({})".format(_md_text(_state(r))))
         lines.append("- {} ({}) {} -- {}".format(
-            r["id"], r.get("status", ""), _md_text(r.get("title", "")), note))
+            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
     return _lines("BACKLOG", lines)
 
 
 def render_pipeline(src):
-    """PIPELINE: one line per backlog item, grouped by state in the lifecycle order, with a blocked marker
-    from the block-actionability join."""
+    """PIPELINE: one line per backlog item, grouped by the DECLARED derived lifecycle state (spec
+    10.2/8.4) in lifecycle order, with a blocked marker from the block-actionability join. The state
+    grouping is expressed through the closed transform vocabulary (a registered derived group field),
+    not ad hoc generator logic."""
     items, blocks = src["backlog_item"], src["block"]
     blocked_by, hidden = join_actionability(items, blocks)
-    # PIPELINE deliberately groups by the derived lifecycle STATE, not the raw `status` field, so that
-    # `active` and `active/proposed` share one section. That is an INTENDED spec-10.2 grouping shape that
-    # t_group on the raw status field cannot express (t_group would split the two into separate sections);
-    # it is a deliberate derived-state grouping, not an ad hoc bypass of the closed transform vocabulary.
-    by_state = {}
-    for r in items:
-        by_state.setdefault(_state(r), []).append(r)
-    order = ["open", "active", "done", "dropped"]
-    keys = order + sorted(k for k in by_state if k not in order)
     out = []
-    for state in keys:
-        if state not in by_state:
-            continue
-        out.append("## {}".format(state))
-        for r in t_sort(by_state[state]):
-            marker = " [blocked by {}]".format(", ".join(blocked_by[r["id"]])) if r.get("id") in hidden else ""
-            out.append("- {} {}{}".format(r["id"], _md_text(r.get("title", "")), marker))
+    for state, group in t_group(items, "state", order=("open", "active", "done", "dropped")):
+        out.append("## {}".format(_md_text(state)))
+        for r in group:
+            marker = " [blocked by {}]".format(", ".join(_md_text(b) for b in blocked_by[r["id"]])) \
+                if r.get("id") in hidden else ""
+            out.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), marker))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("PIPELINE", body)
@@ -479,8 +538,8 @@ def render_done(src):
     lines = []
     for r in t_sort(src["done"]):
         recs = _links_of(r, "receipt_of")
-        suffix = " (receipt_of {})".format(", ".join(recs)) if recs else ""
-        lines.append("- {} {}{}".format(r["id"], _md_text(r.get("title", "")), suffix))
+        suffix = " (receipt_of {})".format(", ".join(_md_text(x) for x in recs)) if recs else ""
+        lines.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), suffix))
     return _lines("DONE", lines)
 
 
@@ -488,10 +547,10 @@ def render_findings(src):
     """FINDINGS: findings grouped by status, then ID-sorted, each with its graded severity when present."""
     out = []
     for status, group in t_group(src["finding"], "status"):
-        out.append("## {}".format(status))
+        out.append("## {}".format(_md_text(status)))
         for r in group:
-            sev = " (severity: {})".format(r["severity"]) if "severity" in r else ""
-            out.append("- {}{} {}".format(r["id"], sev, _md_text(r.get("title", ""))))
+            sev = " (severity: {})".format(_md_text(r["severity"])) if "severity" in r else ""
+            out.append("- {}{} {}".format(_md_text(r["id"]), sev, _md_text(r.get("title", ""))))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("FINDINGS", body)
@@ -502,23 +561,23 @@ def render_decisions(src):
     chain), the superseded resolutions, and the autonomous decisions, via the decision-resolution join."""
     pend, auto = src["pending_decision"], src["autonomous_decision"]
     current, superseded, supersedes_map = join_resolution(pend)
-    open_pd = t_sort(t_filter(pend, lambda r: _state(r) == "open"))
+    open_pd = t_sort(t_filter(pend, "state_in", states=("open",)))
     effective = t_sort([r for r in pend if _state(r) == "decided" and r.get("id") in current])
     gone = t_sort([r for r in pend if r.get("id") in superseded])
     out = ["## Pending decisions"]
-    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
     out += ["", "## Effective resolutions"]
     if effective:
         for r in effective:
             sup = supersedes_map.get(r["id"]) or []
-            tail = " (supersedes {})".format(", ".join(sup)) if sup else ""
-            out.append("- {} {}{}".format(r["id"], _md_text(r.get("title", "")), tail))
+            tail = " (supersedes {})".format(", ".join(_md_text(s) for s in sup)) if sup else ""
+            out.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), tail))
     else:
         out.append(_EMPTY)
     out += ["", "## Superseded resolutions"]
-    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
     out += ["", "## Autonomous decisions"]
-    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
     return "# {}\n\n{}\n".format("DECISIONS", "\n".join(out))
 
 
@@ -528,7 +587,7 @@ def render_blocks(src):
     for r in t_sort(src["block"]):
         scopes = ", ".join(_md_text(s) for s in (r.get("scopes", []) or []))
         lines.append("- {} ({}) scopes [{}] -- {}".format(
-            r["id"], r.get("status", ""), scopes, _md_text(r.get("title", ""))))
+            _md_text(r["id"]), _md_text(r.get("status", "")), scopes, _md_text(r.get("title", ""))))
     return _lines("BLOCKS", lines)
 
 
@@ -537,11 +596,11 @@ def render_handoff(src):
     in ID order."""
     handoffs = src["handoff"]
     out = ["## Current"]
-    cur = t_sort(t_filter(handoffs, lambda r: _state(r) == "current"))
-    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
+    cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
+    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
     out += ["", "## Superseded"]
-    old = t_sort(t_filter(handoffs, lambda r: _state(r) == "superseded"))
-    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
+    old = t_sort(t_filter(handoffs, "state_in", states=("superseded",)))
+    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
     return "# {}\n\n{}\n".format("HANDOFF", "\n".join(out))
 
 
@@ -549,7 +608,7 @@ def render_references(src):
     """REFERENCES: the captured references in ID order, each with its captured refs."""
     lines = []
     for r in t_sort(src["reference"]):
-        lines.append("- {} {}".format(r["id"], _md_text(r.get("title", ""))))
+        lines.append("- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))))
         for ref in r.get("refs", []) or []:
             if isinstance(ref, dict):
                 lines.append("  - {}: {}".format(
@@ -562,7 +621,8 @@ def render_worklog(src):
     one-line summary (spec 6.2)."""
     entries = sorted(src["worklog"], key=_id_key)
     lines = ["- {} ({}) [{}] {}".format(
-        e.get("id"), e.get("date", ""), e.get("kind", ""), _md_text(e.get("summary", ""))) for e in entries]
+        _md_text(e.get("id")), _md_text(e.get("date", "")), _md_text(e.get("kind", "")),
+        _md_text(e.get("summary", ""))) for e in entries]
     return _lines("WORKLOG", lines)
 
 
@@ -574,31 +634,37 @@ def render_version_md(src):
     if releases:
         for r in releases:
             span = r.get("worklog_span", [])
-            span_txt = "{}..{}".format(span[0], span[1]) if len(span) == 2 else "(none)"
-            out.append("- {} ({}) worklog {}".format(r.get("version"), r.get("date", ""), span_txt))
+            span_txt = "{}..{}".format(_md_text(span[0]), _md_text(span[1])) if len(span) == 2 else "(none)"
+            out.append("- {} ({}) worklog {}".format(
+                _md_text(r.get("version")), _md_text(r.get("date", "")), span_txt))
     else:
         out.append(_EMPTY)
     out += ["", "## Changelog summaries"]
     if summaries:
         for s in summaries:
-            out.append("- {} ({})".format(s.get("covers"), s.get("status")))
+            out.append("- {} ({})".format(_md_text(s.get("covers")), _md_text(s.get("status"))))
     else:
         out.append(_EMPTY)
     return "# {}\n\n{}\n".format("VERSION", "\n".join(out))
 
 
 def render_version_file(src):
-    """The root VERSION deliverable: the LATEST release's version string as EXACT bytes plus a trailing LF
-    (spec 6.1/5.8), matching the pack's own generated VERSION. HEADER-EXEMPT: its content is exact version
-    bytes, so a do-not-edit header would corrupt it. An empty ledger (no releases) renders EMPTY bytes, the
-    valid-empty state, rather than a fabricated version."""
+    """The root VERSION deliverable: the LATEST release's version string as EXACT bytes plus a
+    trailing LF (spec 6.1/5.8), matching the pack's own generated VERSION. HEADER-EXEMPT: its content
+    is exact version bytes, so a do-not-edit header would corrupt it. A declared VERSION with NO
+    release to render is a cannot-evaluate (fail-closed), never a zero-byte write: there is no latest
+    release whose bytes to emit, so an empty result would be a fabricated, spec-violating VERSION."""
     releases = src["version"]["releases"]
     latest, latest_key = None, None
     for r in releases:
         key = _opf_release.parse_semver(r.get("version"))
         if key is not None and (latest_key is None or key > latest_key):
             latest, latest_key = r.get("version"), key
-    return "" if latest is None else "{}\n".format(latest)
+    if latest is None:
+        raise ViewsError("VERSION deliverable declared but the version ledger has no release to "
+                         "render (spec 6.1: VERSION is the latest release's SemVer bytes); "
+                         "fail-closed, never a zero-byte write")
+    return "{}\n".format(latest)
 
 
 def render_mirror(type_name, records):
@@ -610,7 +676,7 @@ def render_mirror(type_name, records):
                "decision", "decided_at", "decided_by", "classification", "action", "scopes")
     out = []
     for r in t_sort(records):
-        out.append("## {}".format(r.get("id")))
+        out.append("## {}".format(_md_text(r.get("id"))))
         for col, val in t_project(r, columns):
             if isinstance(val, list):
                 val = "[{}]".format(", ".join(_md_text(x) for x in val))
@@ -765,14 +831,28 @@ def render(argv):
     Returns 0 clean, 1 on drift under --check, 2 cannot-evaluate. NOT-ADOPTED reports NOT APPLICABLE and
     exits 0 (the pack's own `--root .` case). Two-phase like run_generator: every payload is rendered
     before any target is written, so a fail-closed source aborts before a single file is touched."""
-    check = "--check" in argv
-    root = "."
-    if "--root" in argv:
-        i = argv.index("--root")
-        if i + 1 >= len(argv):
-            print("opf render: --root requires a directory argument", file=sys.stderr)
+    root = None
+    check = False
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--check":
+            check = True
+            i += 1
+        elif tok == "--root":
+            if i + 1 >= len(argv):
+                print("opf render: --root requires a directory argument", file=sys.stderr)
+                return EXIT_CANNOT_EVALUATE
+            if root is not None:
+                print("opf render: --root given more than once", file=sys.stderr)
+                return EXIT_CANNOT_EVALUATE
+            root = argv[i + 1]
+            i += 2
+        else:
+            print("opf render: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_CANNOT_EVALUATE
-        root = argv[i + 1]
+    if root is None:
+        root = "."
     product_root = Path(os.path.abspath(root))
 
     res = _opf_store.resolve_store(product_root)
@@ -782,6 +862,15 @@ def render(argv):
         return EXIT_OK
     if res.status != _opf_store.RESOLVED:
         print("opf render: cannot evaluate: {}".format(res.detail), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+
+    if not check and not _WRITE_GATE_COMPOSED:
+        # spec 5.7/5.8/11 (F1/F2): a mutating render must gate on the U6 store-integrity layer, which
+        # does not exist yet and render does not compose (VC-4, deferred). Refuse the ungated write here,
+        # BEFORE any fd is opened or any payload rendered, so nothing on disk is touched. --check reads
+        # only and is unaffected.
+        print("opf render: cannot evaluate: store-integrity gate (U6 validate_store) not available; "
+              "render write refused", file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
 
     store_root = res.store_root
@@ -935,6 +1024,7 @@ def self_test():
 
     failures = []
     checked = [0]
+    global _WRITE_GATE_COMPOSED   # F1 scaffold: write-dependent cases toggle this True, restored below
 
     def check(name, cond):
         checked[0] += 1
@@ -1006,309 +1096,439 @@ def self_test():
         write_toml(root, "version.toml", "schema = 1\n")
 
     try:
-        # --- a POPULATED store, exercising every transform and both joins -------------------------------
-        root = new_root()
-        write_toml(root, "manifest.toml", manifest)
-        write_toml(root, "backlog_item.index.toml", "\n".join([
-            "schema = 1",
-            _rec("BI-10", "backlog_item", "open", "ten open"),
-            _rec("BI-2", "backlog_item", "active", "two active"),
-            _rec("BI-3", "backlog_item", "open", "three open"),
-            _rec("BI-4", "backlog_item", "done", "four done"),
-        ]) + "\n")
-        write_toml(root, "block.index.toml", "\n".join([
-            "schema = 1",
-            _rec("BL-1", "block", "active", "grant", scopes=["BI-2"]),
-            _rec("BL-2", "block", "active/proposed", "proposal", actor="assistant", scopes=["BI-3"]),
-        ]) + "\n")
-        write_toml(root, "done.index.toml", "\n".join([
-            "schema = 1",
-            _rec("DN-1", "done", "recorded", "receipt", links=[("receipt_of", "BI-4")]),
-        ]) + "\n")
-        write_toml(root, "finding.index.toml", "\n".join([
-            "schema = 1",
-            _rec("FN-1", "finding", "open", "open finding"),
-            _rec("FN-2", "finding", "fixed", "fixed finding", severity="minor"),
-        ]) + "\n")
-        write_toml(root, "pending_decision.index.toml", "\n".join([
-            "schema = 1",
-            _rec("PD-1", "pending_decision", "decided", "first ruling",
-                 decision="do X", decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
-            _rec("PD-2", "pending_decision", "decided", "revised ruling",
-                 decision="do Y", decided_at="2026-09-02T00:00:00Z", decided_by="maintainer",
-                 links=[("supersedes", "PD-1")]),
-            _rec("PD-3", "pending_decision", "open", "still open"),
-        ]) + "\n")
-        write_toml(root, "autonomous_decision.index.toml", "\n".join([
-            "schema = 1",
-            _rec("AD-1", "autonomous_decision", "recorded", "acted",
-                 classification="ACT", action="did the thing"),
-        ]) + "\n")
-        write_toml(root, "handoff.index.toml", "\n".join([
-            "schema = 1",
-            _rec("HO-1", "handoff", "superseded", "old handoff"),
-            _rec("HO-2", "handoff", "current", "current handoff"),
-        ]) + "\n")
-        write_toml(root, "reference.index.toml", "\n".join([
-            "schema = 1",
-            _rec("RF-1", "reference", "recorded", "a source",
-                 refs=[("doc", "OPF-SPEC.md 10.2")]),
-        ]) + "\n")
-        write_toml(root, "worklog.toml", "\n".join([
-            "schema = 1",
-            _entry("WL-1", "added", "first change"),
-            _entry("WL-2", "fixed", "second change"),
-        ]) + "\n")
-        write_toml(root, "version.toml", "\n".join([
-            "schema = 1",
-            "",
-            "[[release]]",
-            'version = "1.3.0"',
-            'date = "2026-08-30T00:00:00Z"',
-            'worklog_span = ["WL-1", "WL-2"]',
-            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([
-                {"id": "WL-1", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
-                 "kind": "added", "summary": "first change"},
-                {"id": "WL-2", "date": "2026-01-02T00:00:00Z", "actor": {"kind": "maintainer"},
-                 "kind": "fixed", "summary": "second change"}])),
-            "",
-            "[[summary]]",
-            'covers = "unreleased"',
-            'status = "working"',
-        ]) + "\n")
+        # --- pure-unit discriminating vectors (no store, no write, gate-independent) -----------------
+        # F9(1): the source-set digest is a function of BOTH each source path and its bytes. The suite
+        # strips the header via body_of, so no golden observes the digest; a constant-digest mutant of
+        # _source_set_digest would pass every other check. These two flip to FAIL for such a mutant.
+        check("digest-source-sensitive", _source_set_digest({"p": b"A"}) != _source_set_digest({"p": b"B"}))
+        check("digest-path-sensitive", _source_set_digest({"p": b"A"}) != _source_set_digest({"q": b"A"}))
 
-        # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
-        check("populated-write-ok", render(["--root", str(root)]) == EXIT_OK)
-        check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
+        # F5: the closed transform vocabulary refuses an unknown filter/sort/group/project name.
+        def raises_views_error(fn):
+            try:
+                fn()
+                return False
+            except ViewsError:
+                return True
 
-        def read_view(name):
-            return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
+        check("sort-key-closed", raises_views_error(lambda: t_sort([{"id": "BI-1"}], keys=("bogus",))))
+        check("group-field-closed", raises_views_error(lambda: t_group([{"id": "BI-1"}], "bogus")))
+        check("project-column-closed", raises_views_error(lambda: t_project({"id": "BI-1"}, ("bogus",))))
+        check("filter-predicate-closed", raises_views_error(lambda: t_filter([], "bogus")))
 
-        todo = read_view("TODO.md")
-        check("join-block-hides-active-block", "BI-2" not in todo)
-        check("join-block-keeps-proposed-block", "BI-3" in todo)
-        check("todo-keeps-open", "BI-10" in todo)
-        check("todo-drops-done", "BI-4" not in todo)
-        check("sort-id-tiebreak-numeric", todo.index("BI-3") < todo.index("BI-10"))
-        check("header-present", todo.startswith("<!-- GENERATED by opf render"))
-        check("header-has-sources", "sources: .working/toml/backlog_item.index.toml" in todo)
-        check("header-has-digest", "source-set-digest: sha256:" in todo)
-        check("header-has-regen", "regenerate: opf render" in todo)
-        check("header-no-timestamp", not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", todo.split("-->", 1)[0]))
+        # F4 (cited sink): a spec-valid free-text severity cannot forge a heading or an HTML comment.
+        forged = {"id": "FN-9", "type": "finding", "status": "open",
+                  "severity": "minor)\n# FORGED\n<!-- injected -->", "title": "t"}
+        finj = render_findings({"finding": [forged]})
+        check("severity-injection-no-forged-heading", "\n# FORGED" not in finj)
+        check("severity-injection-no-injected-comment", "<!-- injected -->" not in finj)
+        # F4 (class width, a second sink): a forged changelog `covers` value is neutralized too.
+        vinj = render_version_md({"version": {"releases": [],
+            "summaries": [{"covers": "x)\n# FORGED\n<!-- injected -->", "status": "working"}]}})
+        check("covers-injection-no-forged-heading", "\n# FORGED" not in vinj)
+        check("covers-injection-no-injected-comment", "<!-- injected -->" not in vinj)
 
-        # --- INDEPENDENT expected-bytes goldens for EVERY view (F-09) ------------------------------------
-        # Each golden is a HAND-AUTHORED constant, NOT produced by this module's renderers; it pins the
-        # exact bytes AFTER the do-not-edit header (the header carries a source-set digest, so the body is
-        # the byte-stable region), compared with ==, so corrupting ANY renderer flips this to FAIL. A
-        # LIST-valued field (block scopes) and an ACTOR dict are golden-covered by the two mirror goldens.
-        def body_of(text):
-            marker = "-->\n"
-            return text[text.index(marker) + len(marker):]
+        # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork check.
+        pd1 = {"id": "PD-1", "links": []}
+        pd2 = {"id": "PD-2", "links": [{"rel": "supersedes", "id": "PD-1"},
+                                       {"rel": "supersedes", "id": "PD-1"}]}
+        try:
+            _cur, _sup, _smap = join_resolution([pd1, pd2])
+            dupok = (_cur == {"PD-2"} and _sup == {"PD-1"} and _smap["PD-2"] == ["PD-1"])
+        except ViewsError:
+            dupok = False
+        check("duplicate-supersedes-link-no-false-fork", dupok)
 
-        goldens = {
-            "TODO.md": "\n# TODO\n\n- BI-3 (open) three open\n- BI-10 (open) ten open\n",
-            "BACKLOG.md": ("\n# BACKLOG\n\n- BI-2 (active) two active -- blocked by BL-1\n"
-                           "- BI-3 (open) three open -- actionable\n"
-                           "- BI-4 (done) four done -- not actionable (done)\n"
-                           "- BI-10 (open) ten open -- actionable\n"),
-            "PIPELINE.md": ("\n# PIPELINE\n\n## open\n- BI-3 three open\n- BI-10 ten open\n\n"
-                            "## active\n- BI-2 two active [blocked by BL-1]\n\n## done\n- BI-4 four done\n"),
-            "DONE.md": "\n# DONE\n\n- DN-1 receipt (receipt_of BI-4)\n",
-            "FINDINGS.md": ("\n# FINDINGS\n\n## fixed\n- FN-2 (severity: minor) fixed finding\n\n"
-                            "## open\n- FN-1 open finding\n"),
-            "DECISIONS.md": ("\n# DECISIONS\n\n## Pending decisions\n- PD-3 still open\n\n"
-                             "## Effective resolutions\n- PD-2 revised ruling (supersedes PD-1)\n\n"
-                             "## Superseded resolutions\n- PD-1 first ruling\n\n"
-                             "## Autonomous decisions\n- AD-1 acted\n"),
-            "BLOCKS.md": ("\n# BLOCKS\n\n- BL-1 (active) scopes [BI-2] -- grant\n"
-                          "- BL-2 (active/proposed) scopes [BI-3] -- proposal\n"),
-            "HANDOFF.md": ("\n# HANDOFF\n\n## Current\n- HO-2 current handoff\n\n"
-                           "## Superseded\n- HO-1 old handoff\n"),
-            "REFERENCES.md": "\n# REFERENCES\n\n- RF-1 a source\n  - doc: OPF-SPEC.md 10.2\n",
-            "WORKLOG.md": ("\n# WORKLOG\n\n- WL-1 (2026-01-01T00:00:00Z) [added] first change\n"
-                           "- WL-2 (2026-01-01T00:00:00Z) [fixed] second change\n"),
-            "VERSION.md": ("\n# VERSION\n\n## Releases\n"
-                           "- 1.3.0 (2026-08-30T00:00:00Z) worklog WL-1..WL-2\n\n"
-                           "## Changelog summaries\n- unreleased (working)\n"),
-            "BACKLOG_ITEM-INDEX.md": (
-                "\n# BACKLOG_ITEM index\n\n"
-                "## BI-2\n- type: backlog_item\n- status: active\n- title: two active\n"
-                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                "## BI-3\n- type: backlog_item\n- status: open\n- title: three open\n"
-                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                "## BI-4\n- type: backlog_item\n- status: done\n- title: four done\n"
-                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                "## BI-10\n- type: backlog_item\n- status: open\n- title: ten open\n"
-                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n"),
-            "BLOCK-INDEX.md": (
-                "\n# BLOCK index\n\n"
-                "## BL-1\n- type: block\n- status: active\n- title: grant\n"
-                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-2]\n"
-                "- actor: maintainer\n\n"
-                "## BL-2\n- type: block\n- status: active/proposed\n- title: proposal\n"
-                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-3]\n"
-                "- actor: assistant\n"),
-        }
-        for gname, gbody in sorted(goldens.items()):
-            check("golden-body-" + gname, body_of(read_view(gname)) == gbody)
-        check("golden-version-file-bytes",
-              (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n")
+        _saved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True   # F1 test scaffold: exercise real rendered bytes and let the
+                                          # full-render fail-closed cases reach _render_resolved and
+                                          # fail for their intended reason, not merely the write gate.
+            # --- a POPULATED store, exercising every transform and both joins -------------------------------
+            root = new_root()
+            write_toml(root, "manifest.toml", manifest)
+            write_toml(root, "backlog_item.index.toml", "\n".join([
+                "schema = 1",
+                _rec("BI-10", "backlog_item", "open", "ten open"),
+                _rec("BI-2", "backlog_item", "active", "two active"),
+                _rec("BI-3", "backlog_item", "open", "three open"),
+                _rec("BI-4", "backlog_item", "done", "four done"),
+            ]) + "\n")
+            write_toml(root, "block.index.toml", "\n".join([
+                "schema = 1",
+                _rec("BL-1", "block", "active", "grant", scopes=["BI-2"]),
+                _rec("BL-2", "block", "active/proposed", "proposal", actor="assistant", scopes=["BI-3"]),
+            ]) + "\n")
+            write_toml(root, "done.index.toml", "\n".join([
+                "schema = 1",
+                _rec("DN-1", "done", "recorded", "receipt", links=[("receipt_of", "BI-4")]),
+            ]) + "\n")
+            write_toml(root, "finding.index.toml", "\n".join([
+                "schema = 1",
+                _rec("FN-1", "finding", "open", "open finding"),
+                _rec("FN-2", "finding", "fixed", "fixed finding", severity="minor"),
+            ]) + "\n")
+            write_toml(root, "pending_decision.index.toml", "\n".join([
+                "schema = 1",
+                _rec("PD-1", "pending_decision", "decided", "first ruling",
+                     decision="do X", decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+                _rec("PD-2", "pending_decision", "decided", "revised ruling",
+                     decision="do Y", decided_at="2026-09-02T00:00:00Z", decided_by="maintainer",
+                     links=[("supersedes", "PD-1")]),
+                _rec("PD-3", "pending_decision", "open", "still open"),
+            ]) + "\n")
+            write_toml(root, "autonomous_decision.index.toml", "\n".join([
+                "schema = 1",
+                _rec("AD-1", "autonomous_decision", "recorded", "acted",
+                     classification="ACT", action="did the thing"),
+            ]) + "\n")
+            write_toml(root, "handoff.index.toml", "\n".join([
+                "schema = 1",
+                _rec("HO-1", "handoff", "superseded", "old handoff"),
+                _rec("HO-2", "handoff", "current", "current handoff"),
+            ]) + "\n")
+            write_toml(root, "reference.index.toml", "\n".join([
+                "schema = 1",
+                _rec("RF-1", "reference", "recorded", "a source",
+                     refs=[("doc", "OPF-SPEC.md 10.2")]),
+            ]) + "\n")
+            write_toml(root, "worklog.toml", "\n".join([
+                "schema = 1",
+                _entry("WL-1", "added", "first change"),
+                _entry("WL-2", "fixed", "second change"),
+            ]) + "\n")
+            write_toml(root, "version.toml", "\n".join([
+                "schema = 1",
+                "",
+                "[[release]]",
+                'version = "1.3.0"',
+                'date = "2026-08-30T00:00:00Z"',
+                'worklog_span = ["WL-1", "WL-2"]',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([
+                    {"id": "WL-1", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
+                     "kind": "added", "summary": "first change"},
+                    {"id": "WL-2", "date": "2026-01-02T00:00:00Z", "actor": {"kind": "maintainer"},
+                     "kind": "fixed", "summary": "second change"}])),
+                "",
+                "[[summary]]",
+                'covers = "unreleased"',
+                'status = "working"',
+            ]) + "\n")
 
-        # Retained substring checks (redundant with the goldens, kept as readable anchors).
-        backlog = read_view("BACKLOG.md")
-        check("backlog-annotates-blocked", "blocked by BL-1" in backlog)
-        check("backlog-annotates-actionable", "actionable" in backlog)
-        pipeline = read_view("PIPELINE.md")
-        check("pipeline-groups-in-order",
-              0 < pipeline.index("## open") < pipeline.index("## active") < pipeline.index("## done"))
-        check("pipeline-blocked-marker", "[blocked by BL-1]" in pipeline)
-        decisions = read_view("DECISIONS.md")
-        eff = decisions.index("## Effective resolutions")
-        sup = decisions.index("## Superseded resolutions")
-        check("resolution-head-effective", "PD-2" in decisions[eff:sup])
-        check("resolution-head-names-superseded", "supersedes PD-1" in decisions[eff:sup])
-        check("resolution-superseded-listed", "PD-1" in decisions[sup:])
-        check("resolution-open-listed", "PD-3" in decisions[:eff])
-        check("resolution-autonomous-listed", "AD-1" in decisions)
-        done = read_view("DONE.md")
-        check("done-project-receipt", "receipt_of BI-4" in done)
-        findings = read_view("FINDINGS.md")
-        check("findings-project-severity", "severity: minor" in findings)
-        check("findings-group-status", "## open" in findings and "## fixed" in findings)
-        handoff = read_view("HANDOFF.md")
-        check("handoff-current-first", handoff.index("HO-2") < handoff.index("## Superseded"))
-        version_file = (root / "VERSION").read_text(encoding="utf-8")
-        check("version-file-exact-bytes", version_file == "1.3.0\n")
-        check("version-file-no-header", not version_file.startswith("<!--"))
-        mirror = read_view("BACKLOG_ITEM-INDEX.md")
-        check("mirror-title", "# BACKLOG_ITEM index" in mirror and mirror.startswith("<!-- GENERATED"))
-        check("mirror-projects-record", "## BI-2" in mirror and "- status: active" in mirror)
+            # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
+            check("populated-write-ok", render(["--root", str(root)]) == EXIT_OK)
+            check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
 
-        # drift: hand-edit a rendered view; --check must report exit 1 with a drift line.
-        (root / WORKING_DIRNAME / "TODO.md").write_text("hand edited\n", encoding="utf-8")
-        check("drift-detected", render(["--root", str(root), "--check"]) == EXIT_DRIFT)
+            def read_view(name):
+                return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
 
-        # --- an EMPTY store renders VALID EMPTY views (distinct from cannot-evaluate) -------------------
-        eroot = new_root()
-        write_toml(eroot, "manifest.toml", manifest)
-        empty_indexes(eroot)
-        check("empty-write-ok", render(["--root", str(eroot)]) == EXIT_OK)
-        etodo = (eroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
-        check("empty-todo-valid-empty", _EMPTY in etodo and etodo.startswith("<!-- GENERATED"))
-        check("empty-version-empty-bytes",
-              (eroot / "VERSION").read_text(encoding="utf-8") == "")
+            todo = read_view("TODO.md")
+            check("join-block-hides-active-block", "BI-2" not in todo)
+            check("join-block-keeps-proposed-block", "BI-3" in todo)
+            check("todo-keeps-open", "BI-10" in todo)
+            check("todo-drops-done", "BI-4" not in todo)
+            check("sort-id-tiebreak-numeric", todo.index("BI-3") < todo.index("BI-10"))
+            check("header-present", todo.startswith("<!-- GENERATED by opf render"))
+            check("header-has-sources", "sources: .working/toml/backlog_item.index.toml" in todo)
+            check("header-has-digest", "source-set-digest: sha256:" in todo)
+            check("header-has-regen", "regenerate: opf render" in todo)
+            check("header-no-timestamp", not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", todo.split("-->", 1)[0]))
 
-        # --- a MISSING declared source fails closed (exit 2) --------------------------------------------
-        mroot = new_root()
-        write_toml(mroot, "manifest.toml", manifest)
-        empty_indexes(mroot)
-        (mroot / WORKING_DIRNAME / "toml" / "block.index.toml").unlink()   # TODO/BACKLOG/BLOCKS/BLOCK-INDEX need it
-        check("missing-source-cannot-eval", render(["--root", str(mroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- INDEPENDENT expected-bytes goldens for EVERY view (F-09) ------------------------------------
+            # Each golden is a HAND-AUTHORED constant, NOT produced by this module's renderers; it pins the
+            # exact bytes AFTER the do-not-edit header (the header carries a source-set digest, so the body is
+            # the byte-stable region), compared with ==, so corrupting ANY renderer flips this to FAIL. A
+            # LIST-valued field (block scopes) and an ACTOR dict are golden-covered by the two mirror goldens.
+            def body_of(text):
+                marker = "-->\n"
+                return text[text.index(marker) + len(marker):]
 
-        # --- a MALFORMED record fails closed (exit 2), never a silent partial view ----------------------
-        broot = new_root()
-        write_toml(broot, "manifest.toml", manifest)
-        empty_indexes(broot)
-        write_toml(broot, "finding.index.toml", "\n".join([
-            "schema = 1",
-            _rec("FN-1", "finding", "not-a-state", "bad status"),   # illegal status: INVALID record
-        ]) + "\n")
-        check("malformed-record-cannot-eval", render(["--root", str(broot)]) == EXIT_CANNOT_EVALUATE)
+            goldens = {
+                "TODO.md": "\n# TODO\n\n- BI-3 (open) three open\n- BI-10 (open) ten open\n",
+                "BACKLOG.md": ("\n# BACKLOG\n\n- BI-2 (active) two active -- blocked by BL-1\n"
+                               "- BI-3 (open) three open -- actionable\n"
+                               "- BI-4 (done) four done -- not actionable (done)\n"
+                               "- BI-10 (open) ten open -- actionable\n"),
+                "PIPELINE.md": ("\n# PIPELINE\n\n## open\n- BI-3 three open\n- BI-10 ten open\n\n"
+                                "## active\n- BI-2 two active [blocked by BL-1]\n\n## done\n- BI-4 four done\n"),
+                "DONE.md": "\n# DONE\n\n- DN-1 receipt (receipt_of BI-4)\n",
+                "FINDINGS.md": ("\n# FINDINGS\n\n## fixed\n- FN-2 (severity: minor) fixed finding\n\n"
+                                "## open\n- FN-1 open finding\n"),
+                "DECISIONS.md": ("\n# DECISIONS\n\n## Pending decisions\n- PD-3 still open\n\n"
+                                 "## Effective resolutions\n- PD-2 revised ruling (supersedes PD-1)\n\n"
+                                 "## Superseded resolutions\n- PD-1 first ruling\n\n"
+                                 "## Autonomous decisions\n- AD-1 acted\n"),
+                "BLOCKS.md": ("\n# BLOCKS\n\n- BL-1 (active) scopes [BI-2] -- grant\n"
+                              "- BL-2 (active/proposed) scopes [BI-3] -- proposal\n"),
+                "HANDOFF.md": ("\n# HANDOFF\n\n## Current\n- HO-2 current handoff\n\n"
+                               "## Superseded\n- HO-1 old handoff\n"),
+                "REFERENCES.md": "\n# REFERENCES\n\n- RF-1 a source\n  - doc: OPF-SPEC.md 10.2\n",
+                "WORKLOG.md": ("\n# WORKLOG\n\n- WL-1 (2026-01-01T00:00:00Z) [added] first change\n"
+                               "- WL-2 (2026-01-01T00:00:00Z) [fixed] second change\n"),
+                "VERSION.md": ("\n# VERSION\n\n## Releases\n"
+                               "- 1.3.0 (2026-08-30T00:00:00Z) worklog WL-1..WL-2\n\n"
+                               "## Changelog summaries\n- unreleased (working)\n"),
+                "BACKLOG_ITEM-INDEX.md": (
+                    "\n# BACKLOG_ITEM index\n\n"
+                    "## BI-2\n- type: backlog_item\n- status: active\n- title: two active\n"
+                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                    "## BI-3\n- type: backlog_item\n- status: open\n- title: three open\n"
+                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                    "## BI-4\n- type: backlog_item\n- status: done\n- title: four done\n"
+                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                    "## BI-10\n- type: backlog_item\n- status: open\n- title: ten open\n"
+                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n"),
+                "BLOCK-INDEX.md": (
+                    "\n# BLOCK index\n\n"
+                    "## BL-1\n- type: block\n- status: active\n- title: grant\n"
+                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-2]\n"
+                    "- actor: maintainer\n\n"
+                    "## BL-2\n- type: block\n- status: active/proposed\n- title: proposal\n"
+                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-3]\n"
+                    "- actor: assistant\n"),
+            }
+            for gname, gbody in sorted(goldens.items()):
+                check("golden-body-" + gname, body_of(read_view(gname)) == gbody)
+            check("golden-version-file-bytes",
+                  (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n")
 
-        # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
-        troot = new_root()
-        write_toml(troot, "manifest.toml",
-                   manifest.replace('target = "{}/TODO.md"'.format(WORKING_DIRNAME), 'target = "README.md"'))
-        empty_indexes(troot)
-        check("target-rebind-cannot-eval", render(["--root", str(troot)]) == EXIT_CANNOT_EVALUATE)
-        check("target-rebind-not-written", not (troot / "README.md").exists())
+            # Retained substring checks (redundant with the goldens, kept as readable anchors).
+            backlog = read_view("BACKLOG.md")
+            check("backlog-annotates-blocked", "blocked by BL-1" in backlog)
+            check("backlog-annotates-actionable", "actionable" in backlog)
+            pipeline = read_view("PIPELINE.md")
+            check("pipeline-groups-in-order",
+                  0 < pipeline.index("## open") < pipeline.index("## active") < pipeline.index("## done"))
+            check("pipeline-blocked-marker", "[blocked by BL-1]" in pipeline)
+            decisions = read_view("DECISIONS.md")
+            eff = decisions.index("## Effective resolutions")
+            sup = decisions.index("## Superseded resolutions")
+            check("resolution-head-effective", "PD-2" in decisions[eff:sup])
+            check("resolution-head-names-superseded", "supersedes PD-1" in decisions[eff:sup])
+            check("resolution-superseded-listed", "PD-1" in decisions[sup:])
+            check("resolution-open-listed", "PD-3" in decisions[:eff])
+            check("resolution-autonomous-listed", "AD-1" in decisions)
+            done = read_view("DONE.md")
+            check("done-project-receipt", "receipt_of BI-4" in done)
+            findings = read_view("FINDINGS.md")
+            check("findings-project-severity", "severity: minor" in findings)
+            check("findings-group-status", "## open" in findings and "## fixed" in findings)
+            handoff = read_view("HANDOFF.md")
+            check("handoff-current-first", handoff.index("HO-2") < handoff.index("## Superseded"))
+            version_file = (root / "VERSION").read_text(encoding="utf-8")
+            check("version-file-exact-bytes", version_file == "1.3.0\n")
+            check("version-file-no-header", not version_file.startswith("<!--"))
+            mirror = read_view("BACKLOG_ITEM-INDEX.md")
+            check("mirror-title", "# BACKLOG_ITEM index" in mirror and mirror.startswith("<!-- GENERATED"))
+            check("mirror-projects-record", "## BI-2" in mirror and "- status: active" in mirror)
 
-        # --- F-01: a pre-planted symlink destination is refused (no-follow), the link target untouched ---
-        symroot = new_root()
-        write_toml(symroot, "manifest.toml", manifest)
-        empty_indexes(symroot)
-        outside = symroot / "outside.txt"
-        outside.write_text("original\n", encoding="utf-8")
-        (symroot / WORKING_DIRNAME / "TODO.md").symlink_to(outside)
-        check("symlink-dest-cannot-eval", render(["--root", str(symroot)]) == EXIT_CANNOT_EVALUATE)
-        check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
+            # drift: hand-edit a rendered view; --check must report exit 1 with a drift line.
+            (root / WORKING_DIRNAME / "TODO.md").write_text("hand edited\n", encoding="utf-8")
+            check("drift-detected", render(["--root", str(root), "--check"]) == EXIT_DRIFT)
 
-        # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
-        xroot = new_root()
-        write_toml(xroot, "manifest.toml",
-                   manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
-        empty_indexes(xroot)
-        check("extra-source-cannot-eval", render(["--root", str(xroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- an EMPTY store renders VALID EMPTY views; its declared VERSION carries one release ----------
+            eroot = new_root()
+            write_toml(eroot, "manifest.toml", manifest)
+            empty_indexes(eroot)
+            # The record indexes stay empty, but the DECLARED VERSION deliverable needs a latest release to
+            # render (spec 6.1): one release, empty span, empty-coverage digest (validate_version is structural
+            # and does not cross-check the worklog, so this is VALID).
+            write_toml(eroot, "version.toml", "\n".join([
+                "schema = 1", "", "[[release]]",
+                'version = "0.1.0"',
+                'date = "2026-01-01T00:00:00Z"',
+                'worklog_span = []',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+            ]) + "\n")
+            check("empty-write-ok", render(["--root", str(eroot)]) == EXIT_OK)
+            etodo = (eroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
+            check("empty-todo-valid-empty", _EMPTY in etodo and etodo.startswith("<!-- GENERATED"))
+            check("empty-store-version-bytes", (eroot / "VERSION").read_text(encoding="utf-8") == "0.1.0\n")
 
-        # --- F-03: the same extra declared source, now MALFORMED, also fails closed ----------------------
-        xmroot = new_root()
-        write_toml(xmroot, "manifest.toml",
-                   manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
-        empty_indexes(xmroot)
-        write_toml(xmroot, "finding.index.toml", "\n".join([
-            "schema = 1", _rec("FN-1", "finding", "not-a-state", "bad status")]) + "\n")
-        check("extra-source-malformed-cannot-eval", render(["--root", str(xmroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- F3: a declared VERSION with an EMPTY version ledger fails closed, never a zero-byte write ----
+            # (Runs under the scaffolded gate ON, so it reaches rendering and fails at F3, not the F1 write gate.)
+            vroot = new_root()
+            write_toml(vroot, "manifest.toml", manifest)
+            empty_indexes(vroot)                       # version.toml is "schema = 1\n": declared, but no release
+            check("empty-version-cannot-eval", render(["--root", str(vroot)]) == EXIT_CANNOT_EVALUATE)
+            check("empty-version-not-zero-byte", not (vroot / "VERSION").exists())
 
-        # --- F-04: a FORK in the decision-resolution graph (two heads for one chain) fails closed --------
-        fkroot = new_root()
-        write_toml(fkroot, "manifest.toml", manifest)
-        empty_indexes(fkroot)
-        write_toml(fkroot, "pending_decision.index.toml", "\n".join([
-            "schema = 1",
-            _rec("PD-1", "pending_decision", "decided", "base", decision="d",
-                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
-            _rec("PD-2", "pending_decision", "decided", "two", decision="d",
-                 decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
-            _rec("PD-3", "pending_decision", "decided", "three", decision="d",
-                 decided_at="2026-09-03T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
-        ]) + "\n")
-        check("resolution-fork-cannot-eval", render(["--root", str(fkroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- a MISSING declared source fails closed (exit 2) --------------------------------------------
+            mroot = new_root()
+            write_toml(mroot, "manifest.toml", manifest)
+            empty_indexes(mroot)
+            (mroot / WORKING_DIRNAME / "toml" / "block.index.toml").unlink()   # TODO/BACKLOG/BLOCKS/BLOCK-INDEX need it
+            check("missing-source-cannot-eval", render(["--root", str(mroot)]) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-04: a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------
-        cyroot = new_root()
-        write_toml(cyroot, "manifest.toml", manifest)
-        empty_indexes(cyroot)
-        write_toml(cyroot, "pending_decision.index.toml", "\n".join([
-            "schema = 1",
-            _rec("PD-1", "pending_decision", "decided", "one", decision="d",
-                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-2")]),
-            _rec("PD-2", "pending_decision", "decided", "two", decision="d",
-                 decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
-        ]) + "\n")
-        check("resolution-cycle-cannot-eval", render(["--root", str(cyroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- a MALFORMED record fails closed (exit 2), never a silent partial view ----------------------
+            broot = new_root()
+            write_toml(broot, "manifest.toml", manifest)
+            empty_indexes(broot)
+            write_toml(broot, "finding.index.toml", "\n".join([
+                "schema = 1",
+                _rec("FN-1", "finding", "not-a-state", "bad status"),   # illegal status: INVALID record
+            ]) + "\n")
+            check("malformed-record-cannot-eval", render(["--root", str(broot)]) == EXIT_CANNOT_EVALUATE)
 
-        # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
-        rroot = new_root()
-        write_toml(rroot, "manifest.toml", manifest)
-        empty_indexes(rroot)
-        deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
-        write_toml(rroot, "finding.index.toml", deep)
-        check("deep-toml-recursion-cannot-eval", render(["--root", str(rroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
+            troot = new_root()
+            write_toml(troot, "manifest.toml",
+                       manifest.replace('target = "{}/TODO.md"'.format(WORKING_DIRNAME), 'target = "README.md"'))
+            empty_indexes(troot)
+            check("target-rebind-cannot-eval", render(["--root", str(troot)]) == EXIT_CANNOT_EVALUATE)
+            check("target-rebind-not-written", not (troot / "README.md").exists())
 
-        # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
-        forgeroot = new_root()
-        write_toml(forgeroot, "manifest.toml", manifest)
-        empty_indexes(forgeroot)
-        write_toml(forgeroot, "reference.index.toml", "\n".join([
-            "schema = 1",
-            _rec("RF-1", "reference", "recorded", "a source",
-                 refs=[("doc", "safe\\n# Forged heading\\n<!-- injected -->")]),
-        ]) + "\n")
-        check("forged-field-write-ok", render(["--root", str(forgeroot)]) == EXIT_OK)
-        forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
-        check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
-        check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
+            # --- F-01: a pre-planted symlink destination is refused (no-follow), the link target untouched ---
+            symroot = new_root()
+            write_toml(symroot, "manifest.toml", manifest)
+            empty_indexes(symroot)
+            write_toml(symroot, "version.toml", "\n".join([
+                "schema = 1", "", "[[release]]",
+                'version = "0.1.0"',
+                'date = "2026-01-01T00:00:00Z"',
+                'worklog_span = []',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+            ]) + "\n")
+            outside = symroot / "outside.txt"
+            outside.write_text("original\n", encoding="utf-8")
+            (symroot / WORKING_DIRNAME / "TODO.md").symlink_to(outside)
+            check("symlink-dest-cannot-eval", render(["--root", str(symroot)]) == EXIT_CANNOT_EVALUATE)
+            check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
 
-        # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
-        prroot = new_root()
-        write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
-        empty_indexes(prroot)
-        check("per-record-deferred-cannot-eval", render(["--root", str(prroot)]) == EXIT_CANNOT_EVALUATE)
+            # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
+            xroot = new_root()
+            write_toml(xroot, "manifest.toml",
+                       manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
+            empty_indexes(xroot)
+            check("extra-source-cannot-eval", render(["--root", str(xroot)]) == EXIT_CANNOT_EVALUATE)
 
-        # --- an unresolvable / not-adopted root ---------------------------------------------------------
+            # --- F-03: the same extra declared source, now MALFORMED, also fails closed ----------------------
+            xmroot = new_root()
+            write_toml(xmroot, "manifest.toml",
+                       manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
+            empty_indexes(xmroot)
+            write_toml(xmroot, "finding.index.toml", "\n".join([
+                "schema = 1", _rec("FN-1", "finding", "not-a-state", "bad status")]) + "\n")
+            check("extra-source-malformed-cannot-eval", render(["--root", str(xmroot)]) == EXIT_CANNOT_EVALUATE)
+
+            # --- F-04: a FORK in the decision-resolution graph (two heads for one chain) fails closed --------
+            fkroot = new_root()
+            write_toml(fkroot, "manifest.toml", manifest)
+            empty_indexes(fkroot)
+            write_toml(fkroot, "pending_decision.index.toml", "\n".join([
+                "schema = 1",
+                _rec("PD-1", "pending_decision", "decided", "base", decision="d",
+                     decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+                _rec("PD-2", "pending_decision", "decided", "two", decision="d",
+                     decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+                _rec("PD-3", "pending_decision", "decided", "three", decision="d",
+                     decided_at="2026-09-03T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+            ]) + "\n")
+            check("resolution-fork-cannot-eval", render(["--root", str(fkroot)]) == EXIT_CANNOT_EVALUATE)
+
+            # --- F-04: a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------
+            cyroot = new_root()
+            write_toml(cyroot, "manifest.toml", manifest)
+            empty_indexes(cyroot)
+            write_toml(cyroot, "pending_decision.index.toml", "\n".join([
+                "schema = 1",
+                _rec("PD-1", "pending_decision", "decided", "one", decision="d",
+                     decided_at="2026-09-01T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-2")]),
+                _rec("PD-2", "pending_decision", "decided", "two", decision="d",
+                     decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+            ]) + "\n")
+            check("resolution-cycle-cannot-eval", render(["--root", str(cyroot)]) == EXIT_CANNOT_EVALUATE)
+
+            # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
+            rroot = new_root()
+            write_toml(rroot, "manifest.toml", manifest)
+            empty_indexes(rroot)
+            deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
+            write_toml(rroot, "finding.index.toml", deep)
+            check("deep-toml-recursion-cannot-eval", render(["--root", str(rroot)]) == EXIT_CANNOT_EVALUATE)
+
+            # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
+            forgeroot = new_root()
+            write_toml(forgeroot, "manifest.toml", manifest)
+            empty_indexes(forgeroot)
+            write_toml(forgeroot, "version.toml", "\n".join([
+                "schema = 1", "", "[[release]]",
+                'version = "0.1.0"',
+                'date = "2026-01-01T00:00:00Z"',
+                'worklog_span = []',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+            ]) + "\n")
+            write_toml(forgeroot, "reference.index.toml", "\n".join([
+                "schema = 1",
+                _rec("RF-1", "reference", "recorded", "a source",
+                     refs=[("doc", "safe\\n# Forged heading\\n<!-- injected -->")]),
+            ]) + "\n")
+            check("forged-field-write-ok", render(["--root", str(forgeroot)]) == EXIT_OK)
+            forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
+            check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
+            check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
+
+            # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
+            prroot = new_root()
+            write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
+            empty_indexes(prroot)
+            check("per-record-deferred-cannot-eval", render(["--root", str(prroot)]) == EXIT_CANNOT_EVALUATE)
+        finally:
+            _WRITE_GATE_COMPOSED = _saved_gate
+
+        # --- gate-OFF fail-safe region (F1 write gate at its default False) -------------------------
         na = base / "not-adopted"
         na.mkdir()
         check("not-adopted-not-applicable", render(["--root", str(na)]) == EXIT_OK)
+        # F1: an ungated WRITE via any entry is refused (cannot-evaluate) and writes nothing.
+        wroot = new_root()
+        write_toml(wroot, "manifest.toml", manifest)
+        empty_indexes(wroot)
+        check("write-refused-without-integrity-gate", render(["--root", str(wroot)]) == EXIT_CANNOT_EVALUATE)
+        check("write-refused-wrote-nothing", not (wroot / WORKING_DIRNAME / "TODO.md").exists())
+        # --check is unaffected by the write gate: eroot's views were already written under the scaffold
+        # above, and eroot is byte-stable (nothing edited it), so a read-only re-check is clean.
+        check("check-mode-works-without-gate", render(["--root", str(eroot), "--check"]) == EXIT_OK)
+        # F10 CLI fail-closed parse (parse precedes resolution; na isolates this from the write gate).
+        check("cli-dangling-root", render(["--root", str(na), "--root"]) == EXIT_CANNOT_EVALUATE)
+        check("cli-unknown-arg", render(["--root", str(na), "--bogus"]) == EXIT_CANNOT_EVALUATE)
+        check("cli-misspelled-check-refused", render(["--root", str(na), "--chek"]) == EXIT_CANNOT_EVALUATE)
+
+        # F9(4): individually record-valid but cross-record NONCONFORMANT stores can no longer be
+        # silently WRITTEN. These assert the F1 write-refusal fail-safe ONLY: the cross-record
+        # uniqueness / handoff / resolution GRADING remains U6 validate_store's job (F2, deferred).
+        # They do NOT claim U4 grades cross-record conformance now.
+        dupidroot = new_root()
+        write_toml(dupidroot, "manifest.toml", manifest)
+        empty_indexes(dupidroot)
+        write_toml(dupidroot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", "first"),
+            _rec("BI-1", "backlog_item", "open", "duplicate id"),   # cross-record duplicate ID
+        ]) + "\n")
+        check("duplicate-id-write-refused", render(["--root", str(dupidroot)]) == EXIT_CANNOT_EVALUATE)
+
+        dangroot = new_root()
+        write_toml(dangroot, "manifest.toml", manifest)
+        empty_indexes(dangroot)
+        write_toml(dangroot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-3", "pending_decision", "decided", "dangling", decision="d",
+                 decided_at="2026-09-03T00:00:00Z", decided_by="maintainer",
+                 links=[("supersedes", "PD-999")]),                 # target absent from the store
+        ]) + "\n")
+        check("dangling-supersedes-write-refused", render(["--root", str(dangroot)]) == EXIT_CANNOT_EVALUATE)
+
+        multihoroot = new_root()
+        write_toml(multihoroot, "manifest.toml", manifest)
+        empty_indexes(multihoroot)
+        write_toml(multihoroot, "handoff.index.toml", "\n".join([
+            "schema = 1",
+            _rec("HO-1", "handoff", "current", "one current"),
+            _rec("HO-2", "handoff", "current", "two current"),      # spec 8.5 allows at most one
+        ]) + "\n")
+        check("multiple-current-handoff-write-refused",
+              render(["--root", str(multihoroot)]) == EXIT_CANNOT_EVALUATE)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
@@ -1320,11 +1540,14 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return EXIT_DRIFT
     print("opf-views self-test: PASS ({} checks) -- independent expected-bytes goldens per view, drift "
-          "detection, the filter/sort/group/project transforms, the block-actionability and decision-"
-          "supersession joins (fork/cycle refused), spec-destination target binding and no-follow "
-          "contained writes, declared-source equality, deep-TOML and free-text fail-closed, per-record "
-          "deferral, missing-and-malformed-source fail-closed, and empty-store valid-empty views"
-          .format(checked[0]))
+          "detection, the closed transform vocabulary (unknown filter/sort/group/project refused), the "
+          "source-set-digest sensitivity, the block-actionability and decision-supersession joins "
+          "(fork/cycle refused, duplicate supersedes link tolerated), spec-destination target binding "
+          "and no-follow contained writes, declared-source equality, deep-TOML and free-text (severity "
+          "and covers) fail-closed, per-record and module-type deferrals, missing-and-malformed-source "
+          "fail-closed, empty-store valid-empty with a rendered VERSION, the empty-VERSION-ledger "
+          "fail-closed, the CLI fail-closed parse, and the F1 write-refusal fail-safe (ungated write "
+          "refused, --check unaffected)".format(checked[0]))
     return EXIT_OK
 
 
@@ -1385,4 +1608,12 @@ def _entry(wid, kind, summary):
 
 
 if __name__ == "__main__":
-    sys.exit(render(sys.argv[1:]))
+    _argv = sys.argv[1:]
+    # Until the U6 store-integrity gate lands, the CLI runs CHECK-only (drift detection, never a
+    # write): a write requires that gate, which does not exist yet, so default the command line to
+    # --check. A write invocation through any other entry still fails closed in render(). Appending
+    # --check is a deliberate default, not a parse relaxation; the F10 parser still refuses any
+    # unrecognized token alongside it.
+    if "--check" not in _argv:
+        _argv = _argv + ["--check"]
+    sys.exit(render(_argv))
