@@ -22,9 +22,10 @@ Out of the subset (rejected): None, bytes, set, a nested array (list in a list),
 and scalars, an inline table or an array of inline tables, a non-string key, a non-finite float, a string
 (value or key) carrying a lone surrogate (no UTF-8 encoding), a datetime or time with fold=1, a datetime
 whose tzinfo is not a plain fixed UTC offset (a named or variable zone), a datetime whose UTC offset is
-not a whole number of minutes (outside TOML offset syntax), and a timezone-aware `time` (TOML local time
-carries no offset). Each rejected state is one TOML cannot round-trip, so its closed-subset boundary keeps
-the staging proof sound. Inline tables and arrays of inline tables are
+not a whole number of minutes (outside TOML offset syntax), a timezone-aware `time` (TOML local time
+carries no offset), and a cyclic table reference (a table reachable from itself: no parsed TOML is
+cyclic, so a cycle cannot round-trip and would otherwise not terminate). Each rejected state is one TOML
+cannot round-trip, so its closed-subset boundary keeps the staging proof sound. Inline tables and arrays of inline tables are
 deliberately excluded: the record-envelope `links`/`refs` inline-table arrays (OPF-SPEC 8.3/8.6) are
 outside this minimal subset, matching the build plan's stated U8 coverage.
 
@@ -50,6 +51,12 @@ set, so the emitted bytes are dash-free by construction independent of what byte
 
 Staging contract (OPF-SPEC 14.1, build plan U8): emit_checked() emits, reparses, and proves the result
 model-equivalent to its input before returning it; nothing that does not round-trip can be staged.
+
+Output ceiling (OPF staging output policy, not a depth bound): a single emission is bounded by
+_MAX_EMIT_BYTES of canonical output. A document of any nesting depth succeeds while its canonical bytes
+fit under the ceiling; only an output that would exceed it is a fail-closed EmitError. Canonical headers
+repeat their full dotted path, so a deep chain's output is quadratic in its depth even from a small
+resident model, and this bounds that output rather than the structure.
 
   _opf_emit.py --self-test    round-trip fuzz, canonical-form determinism, subset coverage, byte-canon
 
@@ -100,6 +107,19 @@ _NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
 
 _SCALAR_TYPES = (str, bool, int, float,
                  datetime.datetime, datetime.date, datetime.time)
+
+# Staging output ceiling (OPF staging resource bound, NOT a depth bound): the total canonical bytes a
+# single emission may produce. A document of any nesting depth succeeds while its output fits; only an
+# output that would exceed this ceiling is a fail-closed EmitError. Canonical headers repeat their full
+# dotted path, so a deep chain's output is quadratic in its depth even from a small resident model, and
+# this caps that output, never the structure. Accounting is per appended line (len(utf-8) + 1 for the LF
+# that "\n".join adds), exact for the final text. Disclosed residuals: (1) a single line's string (one
+# header or one escaped scalar) is assembled before it is charged, so peak transient memory can exceed
+# the ceiling by roughly the largest single scalar or key already resident in the caller's model; (2) the
+# empty document's single trailing LF is charged as 0 bytes (immaterial at any real ceiling); (3) a
+# MemoryError from a model too large to hold is not caught here (that is an environment failure, surfaced
+# raw rather than dressed as a document reject). Any reduction of this ceiling is a maintainer decision.
+_MAX_EMIT_BYTES = 64 * 1024 * 1024
 
 
 def _escape_basic(s):
@@ -226,40 +246,89 @@ def _emit_table(table, path, lines):
     (scalars, dates, empty lists, and scalar arrays) are emitted first, both leaf and nested groups
     sorted by key, so a table's bytes do not depend on its dict insertion order and TOML's rule that a
     table's key-values precede any sub-header is always satisfied. Sub-tables (`[header]`) and arrays of
-    tables (`[[header]]`) then recurse, each preceded by a blank separator line except at the very top."""
-    leaves = []
-    nested = []
-    for key, value in table.items():
-        _render_key(key)  # validate the key up front (raises on a non-string key)
-        if isinstance(value, dict):
-            nested.append((key, value, "table"))
-        elif isinstance(value, list):
-            if _classify_list(value) == "aot":
-                nested.append((key, value, "aot"))
-            else:
-                leaves.append((key, value))  # empty or scalar array: an inline leaf
-        elif isinstance(value, _SCALAR_TYPES):
-            leaves.append((key, value))
-        else:
-            raise EmitError("value for key {!r} is outside the subset: {}".format(
-                key, type(value).__name__))
-    for key, value in sorted(leaves, key=lambda kv: kv[0]):
-        rendered = _render_scalar_array(value) if isinstance(value, list) else _render_scalar(value)
-        lines.append("{} = {}".format(_render_key(key), rendered))
-    for key, value, kind in sorted(nested, key=lambda t: t[0]):
-        child_path = path + [key]
-        header = ".".join(_render_key(p) for p in child_path)
-        if kind == "table":
+    tables (`[[header]]`) then follow, each preceded by a blank separator line except at the very top.
+
+    The walk is an explicit-stack pre-order traversal, not native recursion, so an arbitrarily deep
+    document emits without a RecursionError and no depth is rejected. The stack carries three tagged
+    frame kinds: a `process` frame renders one table body and schedules its blocks; a `block` frame
+    emits one header (with the leading blank separator, decided at the append moment from the current
+    non-emptiness of `lines`, exactly as the recursion did) and schedules that block's body above the
+    remaining siblings; a `leave` frame marks a table's subtree complete. Because each block's body is
+    scheduled above its siblings, a subtree finishes before the next sibling begins and the append order
+    is byte-identical to the recursive form. A table reached again while still on the active ancestor
+    chain is a cyclic reference (which no parsed TOML can contain and which would otherwise not
+    terminate) and is a fail-closed EmitError; a table shared acyclically leaves the active chain when
+    its subtree completes, so a shared DAG still emits. Emission is bounded by _MAX_EMIT_BYTES: an output
+    that would exceed the staging ceiling is a fail-closed EmitError."""
+    total = 0
+
+    def _append(line):
+        # Charge each appended line as len(utf-8) + 1 for the LF that "\n".join adds for it; this sum is
+        # exact for the final text (a scalar/key string is assembled before it is charged, so peak
+        # transient memory can exceed the ceiling by roughly one such value: a disclosed residual).
+        nonlocal total
+        total += len(line.encode("utf-8")) + 1
+        if total > _MAX_EMIT_BYTES:
+            raise EmitError("emitted document exceeds the staging output ceiling ({} bytes)".format(
+                _MAX_EMIT_BYTES))
+        lines.append(line)
+
+    # ("process", table, path): render one table body. ("block", header_line, table, path): emit one
+    # header and schedule its body. ("leave", id): the table with this id() has finished; unmark it.
+    stack = [("process", table, path)]
+    active = set()  # id() of every table currently on the ancestor chain, for cycle detection
+    while stack:
+        frame = stack.pop()
+        tag = frame[0]
+        if tag == "leave":
+            active.discard(frame[1])
+            continue
+        if tag == "block":
+            _, header_line, tbl, child_path = frame
             if lines:
-                lines.append("")
-            lines.append("[{}]".format(header))
-            _emit_table(value, child_path, lines)
-        else:  # an array of tables: one [[header]] block per element
-            for element in value:
-                if lines:
-                    lines.append("")
-                lines.append("[[{}]]".format(header))
-                _emit_table(element, child_path, lines)
+                _append("")
+            _append(header_line)
+            stack.append(("process", tbl, child_path))
+            continue
+        _, tbl, pth = frame  # a "process" frame
+        if id(tbl) in active:
+            raise EmitError("document contains a cyclic table reference (reached again at [{}])".format(
+                ".".join(_render_key(p) for p in pth)))
+        active.add(id(tbl))
+        stack.append(("leave", id(tbl)))
+        leaves = []
+        nested = []
+        for key, value in tbl.items():
+            _render_key(key)  # validate the key up front (raises on a non-string key)
+            if isinstance(value, dict):
+                nested.append((key, value, "table"))
+            elif isinstance(value, list):
+                if _classify_list(value) == "aot":
+                    nested.append((key, value, "aot"))
+                else:
+                    leaves.append((key, value))  # empty or scalar array: an inline leaf
+            elif isinstance(value, _SCALAR_TYPES):
+                leaves.append((key, value))
+            else:
+                raise EmitError("value for key {!r} is outside the subset: {}".format(
+                    key, type(value).__name__))
+        for key, value in sorted(leaves, key=lambda kv: kv[0]):
+            rendered = _render_scalar_array(value) if isinstance(value, list) else _render_scalar(value)
+            _append("{} = {}".format(_render_key(key), rendered))
+        # Build block frames in the exact order the recursion emitted them (sub-tables and array-of-table
+        # elements, sorted by key, elements in positional order), then push them reversed so the LIFO
+        # stack pops them back into that forward order.
+        blocks = []
+        for key, value, kind in sorted(nested, key=lambda t: t[0]):
+            child_path = pth + [key]
+            header = ".".join(_render_key(p) for p in child_path)
+            if kind == "table":
+                blocks.append(("block", "[{}]".format(header), value, child_path))
+            else:  # an array of tables: one [[header]] block per element
+                for element in value:
+                    blocks.append(("block", "[[{}]]".format(header), element, child_path))
+        for block in reversed(blocks):
+            stack.append(block)
 
 
 def emit(document):
@@ -278,20 +347,41 @@ def _model_equal(a, b):
     """Strict structural, type-aware equality between an input model and its reparse. Stricter than ==:
     bool is never equal to a bare int (Python's True == 1 would otherwise mask a bool-vs-int fidelity
     bug), int is never equal to float, and datetime is never equal to date. This is what makes the
-    round-trip proof in emit_checked meaningful rather than merely plausible."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        return isinstance(a, bool) and isinstance(b, bool) and a == b
-    if isinstance(a, dict):
-        if not isinstance(b, dict) or a.keys() != b.keys():
+    round-trip proof in emit_checked meaningful rather than merely plausible.
+
+    The comparison is an explicit-stack traversal, not native recursion, so an arbitrarily deep pair is
+    compared without a RecursionError. Every clause below is applied per pair in the same order the
+    recursive form used (bool-symmetric first, then dict, then list, then type, then ==), and the first
+    inequality short-circuits to False. Caller contract: both arguments are finite acyclic models. Every
+    in-module caller satisfies this (emit_checked reparses with tomllib, which yields a finite acyclic
+    model, and emit() has already rejected a cyclic input before this runs), so no in-module call can
+    loop. A direct external call with a cyclic argument does not terminate, exactly as the prior
+    recursive form raised RecursionError on one; identity memoization would change the equality semantics
+    for no in-module caller and is deliberately omitted."""
+    stack = [(a, b)]
+    while stack:
+        x, y = stack.pop()
+        if isinstance(x, bool) or isinstance(y, bool):
+            if not (isinstance(x, bool) and isinstance(y, bool) and x == y):
+                return False
+            continue
+        if isinstance(x, dict):
+            if not isinstance(y, dict) or x.keys() != y.keys():
+                return False
+            for k in x:
+                stack.append((x[k], y[k]))
+            continue
+        if isinstance(x, list):
+            if not isinstance(y, list) or len(x) != len(y):
+                return False
+            for xi, yi in zip(x, y):
+                stack.append((xi, yi))
+            continue
+        if type(x) is not type(y):
             return False
-        return all(_model_equal(a[k], b[k]) for k in a)
-    if isinstance(a, list):
-        if not isinstance(b, list) or len(a) != len(b):
+        if x != y:
             return False
-        return all(_model_equal(x, y) for x, y in zip(a, b))
-    if type(a) is not type(b):
-        return False
-    return a == b
+    return True
 
 
 def emit_checked(document):
@@ -452,6 +542,115 @@ def self_test():
         failures.append("signed-zero: -0.0 emitted a signed-zero literal instead of 0.0")
     _round_trips({"v": -0.0}, "signed-zero/negative")
 
+    # --- arbitrary-depth vectors: emission and equality without native recursion -----------------------
+    # These discriminate the iterative rewrite: on the pre-fix recursive code each raises RecursionError.
+    # Pin the recursion limit low so depth 2500 always exceeds the effective limit regardless of the
+    # ambient value (test-hermeticity), keeping output near 6.3 MB everywhere, and restore it afterwards.
+    deep_depth = 2500
+    saved_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(min(saved_limit, 2000))
+    try:
+        deep_table = {"leaf": 1}
+        for _ in range(deep_depth):
+            deep_table = {"t": deep_table}
+        _round_trips(deep_table, "deep/table")
+
+        deep_aot = {"leaf": 1}
+        for _ in range(deep_depth):
+            deep_aot = {"r": [deep_aot]}
+        _round_trips(deep_aot, "deep/aot")
+        # Walk the reparse to the bottom iteratively: element order and the leaf value must survive.
+        node = tomllib.loads(emit(deep_aot))
+        walked = 0
+        while isinstance(node, dict) and "r" in node:
+            node = node["r"][0]
+            walked += 1
+        if walked != deep_depth or not (isinstance(node, dict) and node.get("leaf") == 1):
+            failures.append("deep/aot: reparse did not preserve depth {} and the leaf value".format(deep_depth))
+
+        first = {"leaf": 1}
+        for _ in range(deep_depth):
+            first = {"t": first}
+        second = {"leaf": 1}
+        for _ in range(deep_depth):
+            second = {"t": second}
+        if not _model_equal(first, second):
+            failures.append("deep/model-equal: two independently built depth-{} models compared unequal".format(
+                deep_depth))
+        node = second
+        while "t" in node and isinstance(node["t"], dict):
+            node = node["t"]
+        node["leaf"] = 2
+        if _model_equal(first, second):
+            failures.append("deep/model-equal: a mutated deepest leaf was not detected as unequal")
+    except RecursionError as exc:
+        failures.append("deep/vectors: an arbitrary-depth path still recurses natively ({!r})".format(exc))
+    finally:
+        sys.setrecursionlimit(saved_limit)
+
+    # --- shared acyclic DAG: the cycle guard must not over-fire on a table with several parents ---------
+    shared = {"x": 1}
+    _round_trips({"p": shared, "q": shared, "rows": [shared, shared]}, "shared-dag")
+
+    # --- golden byte vector: a full parity lock over sorting, separators, empties, and dotted headers ---
+    # Built in a deliberately noncanonical insertion order; the literal was captured from this emitter.
+    golden = (
+        'a = [3, 1]\n'
+        'b = true\n'
+        'm = "x"\n'
+        '\n'
+        '[empty_table]\n'
+        '\n'
+        '[[rows]]\n'
+        'a = 1\n'
+        'z = 9\n'
+        '\n'
+        '[rows.inner]\n'
+        'k = "v"\n'
+        '\n'
+        '[[rows]]\n'
+        'empty = []\n'
+        '\n'
+        '[z_table]\n'
+        'alpha = 1\n'
+        'beta = 2\n'
+        '\n'
+        '[z_table.a_child]\n'
+        'q = "x"\n'
+    )
+    golden_doc = {}
+    golden_doc["m"] = "x"
+    golden_doc["rows"] = [{"z": 9, "inner": {"k": "v"}, "a": 1}, {"empty": []}]
+    golden_doc["b"] = True
+    golden_doc["empty_table"] = {}
+    golden_doc["a"] = [3, 1]
+    golden_doc["z_table"] = {"beta": 2, "a_child": {"q": "x"}, "alpha": 1}
+    if emit(golden_doc) != golden:
+        failures.append("golden/byte-vector: emit output is not byte-identical to the pinned golden")
+    if emit_checked(golden_doc) != emit(golden_doc):
+        failures.append("golden/emit-checked-parity: emit_checked text differs from emit text")
+
+    # --- output ceiling: the exact byte bound fails closed, and the production ceiling is restored ------
+    global _MAX_EMIT_BYTES
+    budget_doc = {"a": "x"}  # emits exactly 8 bytes: 'a = "x"\n'
+    if len(emit(budget_doc).encode("utf-8")) != 8:
+        failures.append("budget/premise: the ceiling probe document did not emit 8 bytes")
+    saved_ceiling = _MAX_EMIT_BYTES
+    try:
+        _MAX_EMIT_BYTES = 8
+        try:
+            if emit(budget_doc) != 'a = "x"\n':
+                failures.append("budget/at-ceiling: a document exactly at the ceiling did not emit")
+        except EmitError as exc:
+            failures.append("budget/at-ceiling: a document exactly at the ceiling was rejected ({})".format(exc))
+        _MAX_EMIT_BYTES = 7
+        if not _rejects(budget_doc):
+            failures.append("budget/over-ceiling: a document one byte over the ceiling was not rejected")
+    finally:
+        _MAX_EMIT_BYTES = saved_ceiling
+    if _MAX_EMIT_BYTES != saved_ceiling:
+        failures.append("budget/restore: the production ceiling was not restored")
+
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
         pass
@@ -492,6 +691,22 @@ def self_test():
         "non-dict-top-level-list": ["not", "a", "table"],
         "non-dict-top-level-scalar": "just a string",
     }
+    # Cyclic documents: a table reachable from itself does not round-trip (no parsed TOML is cyclic) and
+    # would otherwise not terminate; the iterative emitter rejects it fail-closed. The self-referential
+    # list is already rejected by _classify_list (a nested array), pinned here so that stays true.
+    cyclic_table = {}
+    cyclic_table["self"] = cyclic_table
+    cyclic_a = {}
+    cyclic_b = {"a": cyclic_a}
+    cyclic_a["b"] = cyclic_b
+    cyclic_aot = {}
+    cyclic_aot["r"] = [cyclic_aot]
+    cyclic_list = []
+    cyclic_list.append(cyclic_list)
+    rejects["self-referential-table"] = cyclic_table
+    rejects["indirect-cycle"] = cyclic_a
+    rejects["self-referential-aot"] = cyclic_aot
+    rejects["self-referential-list"] = {"k": cyclic_list}
     for name, document in rejects.items():
         try:
             if not _rejects(document):
@@ -509,8 +724,10 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: round-trip fuzz over adversarial bodies, canonical-form determinism, the "
-          "constrained-subset accepted and rejected shapes, and byte-canon cleanliness (verified "
-          "against check_byte_canon) all hold")
+          "constrained-subset accepted and rejected shapes, byte-canon cleanliness (verified against "
+          "check_byte_canon), arbitrary-depth iterative emission and equality (depth {}), cyclic-"
+          "reference rejection, shared-DAG acceptance, the output-ceiling bound, and the golden byte "
+          "vector all hold".format(deep_depth))
     return 0
 
 
