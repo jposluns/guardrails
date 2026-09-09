@@ -293,9 +293,13 @@ PROJECT_COLUMNS = frozenset({
 })
 # named predicate factories (t_filter takes a NAME, not an arbitrary callable). The inner lambdas look
 # up is_actionable / _state at CALL time, so this dict can be defined before is_actionable below.
+# `id_in` selects by membership in a caller-supplied ID set (the decision-resolution join's `current`
+# and `superseded` sets), so render_decisions routes its effective/superseded selections through the
+# CLOSED vocabulary rather than an ad hoc in-line predicate (F5/M1).
 _FILTER_PREDICATES = {
     "is_actionable": lambda hidden: (lambda r: is_actionable(r, hidden)),
     "state_in": lambda states: (lambda r: _state(r) in states),
+    "id_in": lambda ids: (lambda r: r.get("id") in ids),
 }
 FILTER_PREDICATES = frozenset(_FILTER_PREDICATES)
 
@@ -452,14 +456,17 @@ def join_resolution(decisions):
 # iteration is over an explicitly sorted or grouped sequence.
 
 # F4 class-wide probe (spec 10.3): every record/ledger field value interpolated into a rendered body
-# passes through _md_text, so a free-text field cannot forge a heading, a list item, or the do-not-edit
-# header comment. Author-declared probe token, reconciled by hand against these renderers (the file is
-# small):
+# passes through _md_text, so a free-text field cannot forge a heading, a list item, an active link, an
+# HTML comment, or any other inline Markdown/HTML structure. Author-declared probe token, reconciled by
+# hand against these renderers (the file is small):
 #   grep -nE 'r\[|r\.get\(|e\.get\(|s\.get\(|ref\.get\(|actor\[' tools/_opf_views.py
 #   then confirm every hit reaching an output/format string is wrapped in _md_text.
 # Current run of this probe shows ZERO unescaped record-field sinks in a rendered body. Schema-
-# constrained fields (id, status/state, timestamps) are routed through _md_text too, as defence in
-# depth per guard-input-soundness; _md_text is a no-op on conformant values, so no golden changes.
+# constrained fields (id, status/state, timestamps, scopes/link ids) are routed through _md_text too, as
+# defence in depth per guard-input-soundness; _md_text is a no-op on a conformant value that carries no
+# Markdown metacharacter, so the only conformant value it alters is one whose text legitimately contains
+# a metacharacter (e.g. the word-internal '_' of a type name like `backlog_item`, escaped to render
+# identically), which the mirror goldens pin exactly.
 
 _EMPTY = "_No records._"
 
@@ -473,17 +480,39 @@ def _lines(title, body_lines):
 
 _MD_CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# CommonMark 2.4 backslash-escapable ASCII punctuation that is structurally ACTIVE for a free-text value
+# in this sink's position. A view value is a single line (newlines are collapsed below) always emitted
+# behind a structural prefix (`- `, `## `, `<col>: `), never at column 0. In that position the active
+# inline constructs are emphasis/strong (* _), code spans (`), links, images and reference definitions
+# ([ ] ( )), and the GFM table (|) and strikethrough (~) marks; the list/heading/quote lead-ins (# + !)
+# and grouping braces ({ }) are escaped too, along with the escaping backslash itself. A backslash before
+# any of these renders it as that literal character with NO visible backslash (CommonMark 2.4), so
+# `[pwn](url)`, `*bold*`, backtick-code, `|pipe|`, `# head`, `!img`, `~strike~`, autolinks, and
+# reference-style links all render inert. The HTML metacharacters & < > are entity-escaped separately
+# below (belt-and-suspenders against a raw-HTML sink), so they are not in this set. Characters that carry
+# NO inline meaning in this always-prefixed, single-line position (-, ., :, /) are deliberately left
+# unescaped: no block construct can start below column 0 and no inline construct uses them once brackets
+# and pipes are neutralized, so escaping them would change no rendered output while churning every id,
+# timestamp, and SemVer the sink also carries (disclose-guard-residuals: this boundary is stated, not
+# implied). The class covered is therefore complete for this sink's grammar, not a best-effort denylist.
+_MD_ESCAPE_RE = re.compile(r"([\\`*_{}\[\]()#+!|~])")
+
 
 def _md_text(value):
     """Escape a free-text record field for the markdown/HTML view sink (spec 10.3). A record value is
-    DATA, never markdown or HTML structure: it must not forge a heading, a list item, or the do-not-edit
-    header comment. Newlines and carriage returns collapse to a single space (a view field is one line),
-    any other C0/DEL control character is dropped, and the HTML metacharacters `&`, `<`, `>` are
-    entity-escaped so an embedded `<!--` cannot open a comment. Deterministic, and a no-op on ordinary
-    text, so a value carrying none of these characters renders byte-for-byte unchanged."""
+    DATA, never markdown or HTML structure: it must render as LITERAL text and must not forge a heading,
+    a list item, a link, emphasis, code, a table cell, an autolink, or the do-not-edit header comment.
+    Newlines and carriage returns collapse to a single space (a view field is one line), any other C0/DEL
+    control character is dropped, every structurally-active inline Markdown metacharacter is backslash-
+    escaped per CommonMark 2.4 (rendering as the literal character with no visible backslash), and the
+    HTML metacharacters `&`, `<`, `>` are entity-escaped so an embedded `<!--` cannot open a comment and a
+    `<tag>` cannot pass through as raw HTML. Deterministic; a no-op on ordinary text that carries none of
+    these characters, so a plain value renders byte-for-byte unchanged. The backslash pass never emits
+    `&`, `<`, or `>`, so it and the entity pass touch disjoint characters and their order does not matter."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     s = _MD_CTRL_RE.sub("", s)
+    s = _MD_ESCAPE_RE.sub(r"\\\1", s)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -562,8 +591,11 @@ def render_decisions(src):
     pend, auto = src["pending_decision"], src["autonomous_decision"]
     current, superseded, supersedes_map = join_resolution(pend)
     open_pd = t_sort(t_filter(pend, "state_in", states=("open",)))
-    effective = t_sort([r for r in pend if _state(r) == "decided" and r.get("id") in current])
-    gone = t_sort([r for r in pend if r.get("id") in superseded])
+    # Route the effective-resolution and superseded selections through NAMED closed-vocabulary predicates
+    # (state_in + id_in), never an ad hoc in-line callable: effective = the decided decisions that are
+    # chain heads; gone = every superseded decision (M1). Output is identical to the prior comprehension.
+    effective = t_sort(t_filter(t_filter(pend, "state_in", states=("decided",)), "id_in", ids=current))
+    gone = t_sort(t_filter(pend, "id_in", ids=superseded))
     out = ["## Pending decisions"]
     out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
     out += ["", "## Effective resolutions"]
@@ -761,7 +793,17 @@ def _write_contained(root_fd, relpath, text, check):
     destination, a symlinked path component, or a non-regular destination is REFUSED (ViewsError, a
     cannot-evaluate), never followed, so a manifest or a planted link cannot redirect a write off-tree.
     Fail-closed: any read/write error, or a parent directory that cannot be opened, is a ViewsError, never
-    a silent skip. Byte-stable: an unchanged target is not rewritten."""
+    a silent skip. Byte-stable: an unchanged target is not rewritten.
+
+    This is the single choke point EVERY view and deliverable write passes through, so the F1 write-gate
+    refusal is enforced HERE at the write boundary, not only at the render() entry: while the U6 store-
+    integrity gate is uncomposed, no real write can open or truncate a file regardless of which helper
+    reached this sink (a direct _write_contained or _render_resolved call included). --check is read-only
+    and unaffected. The render() guard is retained as an early, before-any-fd refusal (defence in depth)."""
+    if not check and not _WRITE_GATE_COMPOSED:
+        raise ViewsError("refusing to write {}: store-integrity gate (U6 validate_store) not composed; a "
+                         "mutating render is refused at the write boundary until VC-4 wires the gate "
+                         "(fail-closed pending U6, spec 5.7/5.8/11)".format(relpath))
     new_bytes = text.encode("utf-8")
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
@@ -846,7 +888,15 @@ def render(argv):
             if root is not None:
                 print("opf render: --root given more than once", file=sys.stderr)
                 return EXIT_CANNOT_EVALUATE
-            root = argv[i + 1]
+            val = argv[i + 1]
+            if val == "" or val.startswith("-"):
+                # A directory argument is required: an empty string (which would normalize to the cwd) or
+                # an option-looking token (a swallowed next flag, e.g. `--root --check`) is a parser-level
+                # cannot-evaluate, never a silent default-to-cwd or a consumed option (fail-closed CLI, B3).
+                print("opf render: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_CANNOT_EVALUATE
+            root = val
             i += 2
         else:
             print("opf render: unrecognized argument {!r}".format(tok), file=sys.stderr)
@@ -1096,6 +1146,15 @@ def self_test():
         write_toml(root, "version.toml", "schema = 1\n")
 
     try:
+        # One Markdown-injection payload reused across the free-text-sink vectors below, and its EXACT
+        # escaped form. P mixes the inline metacharacter classes at once: link ([x](y)), emphasis (*b*),
+        # code span (`z`), table cell (|c|), strikethrough (~d~), heading/list lead-in (#e, !f), autolink/
+        # raw-HTML (<g>), and entity (&h). ESC is precisely what _md_text must render P to (backslash pass
+        # then entity pass). Pinned as constants so every sink assertion checks the SAME exact bytes, and
+        # so removing _md_text from ANY one free-text sink (or under-escaping any class) flips an assertion.
+        P = "[x](y)*b*`z`|c|~d~#e!f<g>&h"
+        ESC = r"\[x\]\(y\)\*b\*\`z\`\|c\|\~d\~\#e\!f&lt;g&gt;&amp;h"
+
         # --- pure-unit discriminating vectors (no store, no write, gate-independent) -----------------
         # F9(1): the source-set digest is a function of BOTH each source path and its bytes. The suite
         # strips the header via body_of, so no golden observes the digest; a constant-digest mutant of
@@ -1116,17 +1175,57 @@ def self_test():
         check("project-column-closed", raises_views_error(lambda: t_project({"id": "BI-1"}, ("bogus",))))
         check("filter-predicate-closed", raises_views_error(lambda: t_filter([], "bogus")))
 
-        # F4 (cited sink): a spec-valid free-text severity cannot forge a heading or an HTML comment.
-        forged = {"id": "FN-9", "type": "finding", "status": "open",
-                  "severity": "minor)\n# FORGED\n<!-- injected -->", "title": "t"}
+        # F4 (cited sink, B2 class): a spec-VALID free-text severity renders as LITERAL text, forging no
+        # link, emphasis, code, table cell, strikethrough, heading, or HTML comment. The record is a valid
+        # finding envelope: severity is graded at or after the fix decision, so status is terminal 'fixed'
+        # with the actor and timestamps a full envelope carries (the prior vector used status='open' with a
+        # severity, which the schema REJECTS, so it misrepresented a valid store; M3). The exact escaped
+        # bytes are pinned, so dropping _md_text from the severity sink flips the assertion.
+        forged = {"id": "FN-9", "type": "finding", "status": "fixed", "severity": P, "title": "t",
+                  "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+                  "actor": {"kind": "maintainer"}}
         finj = render_findings({"finding": [forged]})
-        check("severity-injection-no-forged-heading", "\n# FORGED" not in finj)
-        check("severity-injection-no-injected-comment", "<!-- injected -->" not in finj)
-        # F4 (class width, a second sink): a forged changelog `covers` value is neutralized too.
+        check("severity-injection-exact-escape", "(severity: " + ESC + ")" in finj)
+        check("severity-injection-no-active-link", "[x](y)" not in finj)
+        check("severity-injection-no-raw-payload", P not in finj)
+        # The original newline-collapse + comment-neutralization forge, now on a VALID 'fixed' envelope.
+        forged2 = {"id": "FN-8", "type": "finding", "status": "fixed",
+                   "severity": "minor)\n# FORGED\n<!-- injected -->", "title": "t",
+                   "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+                   "actor": {"kind": "maintainer"}}
+        finj2 = render_findings({"finding": [forged2]})
+        check("severity-injection-no-forged-heading", "\n# FORGED" not in finj2)
+        check("severity-injection-no-injected-comment", "<!-- injected -->" not in finj2)
+
+        # F4 (class width, version-summary sink): a forged/injecting changelog `covers` is neutralized.
+        # Exact escape pinned with P; the newline+comment forge checked separately. render_version_md is a
+        # unit call, so validate_version's covers grammar does not constrain the payload here.
         vinj = render_version_md({"version": {"releases": [],
+            "summaries": [{"covers": P, "status": "working"}]}})
+        check("covers-injection-exact-escape", "- " + ESC + " (working)" in vinj)
+        check("covers-injection-no-raw-payload", P not in vinj)
+        vinj2 = render_version_md({"version": {"releases": [],
             "summaries": [{"covers": "x)\n# FORGED\n<!-- injected -->", "status": "working"}]}})
-        check("covers-injection-no-forged-heading", "\n# FORGED" not in vinj)
-        check("covers-injection-no-injected-comment", "<!-- injected -->" not in vinj)
+        check("covers-injection-no-forged-heading", "\n# FORGED" not in vinj2)
+        check("covers-injection-no-injected-comment", "<!-- injected -->" not in vinj2)
+
+        # F4 (class width, MIRROR projection sinks): the decision / classification / action columns escape
+        # too. Exercised as unit render_mirror calls so no extra manifest mirror is needed; exact bytes
+        # pinned, so removing _md_text from a projected column flips an assertion.
+        pdm = render_mirror("pending_decision", [{
+            "id": "PD-1", "type": "pending_decision", "status": "decided", "title": "t",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+            "actor": {"kind": "maintainer"}, "decision": P,
+            "decided_at": "2026-01-02T00:00:00Z", "decided_by": "maintainer"}])
+        check("mirror-decision-exact-escape", "- decision: " + ESC in pdm)
+        check("mirror-decision-no-raw-payload", P not in pdm)
+        adm = render_mirror("autonomous_decision", [{
+            "id": "AD-1", "type": "autonomous_decision", "status": "recorded", "title": "t",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+            "actor": {"kind": "maintainer"}, "classification": P, "action": P}])
+        check("mirror-classification-exact-escape", "- classification: " + ESC in adm)
+        check("mirror-action-exact-escape", "- action: " + ESC in adm)
+        check("mirror-autonomous-no-raw-payload", P not in adm)
 
         # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork check.
         pd1 = {"id": "PD-1", "links": []}
@@ -1270,13 +1369,13 @@ def self_test():
                                "## Changelog summaries\n- unreleased (working)\n"),
                 "BACKLOG_ITEM-INDEX.md": (
                     "\n# BACKLOG_ITEM index\n\n"
-                    "## BI-2\n- type: backlog_item\n- status: active\n- title: two active\n"
+                    "## BI-2\n- type: backlog\\_item\n- status: active\n- title: two active\n"
                     "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                    "## BI-3\n- type: backlog_item\n- status: open\n- title: three open\n"
+                    "## BI-3\n- type: backlog\\_item\n- status: open\n- title: three open\n"
                     "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                    "## BI-4\n- type: backlog_item\n- status: done\n- title: four done\n"
+                    "## BI-4\n- type: backlog\\_item\n- status: done\n- title: four done\n"
                     "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                    "## BI-10\n- type: backlog_item\n- status: open\n- title: ten open\n"
+                    "## BI-10\n- type: backlog\\_item\n- status: open\n- title: ten open\n"
                     "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n"),
                 "BLOCK-INDEX.md": (
                     "\n# BLOCK index\n\n"
@@ -1473,6 +1572,78 @@ def self_test():
             write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
             empty_indexes(prroot)
             check("per-record-deferred-cannot-eval", render(["--root", str(prroot)]) == EXIT_CANNOT_EVALUATE)
+
+            # --- B2 class-wide: a VALID record in EVERY free-text sink carries the P payload; each view
+            # renders it as LITERAL text. This drives the FULL pipeline (validate -> render -> write ->
+            # read) under the scaffolded gate, so every record is a schema-valid envelope, not a hand-built
+            # dict. Each affected view is asserted to contain the EXACT escaped bytes ESC and NOT the raw
+            # payload P, so removing _md_text from any sink that feeds that view flips an assertion. The
+            # schema-CONSTRAINED sinks (id, status/state, scopes, link ids, timestamps) cannot carry a
+            # metacharacter, so their escaping is a verified no-op; the free-text sinks are the movable ones.
+            injroot = new_root()
+            write_toml(injroot, "manifest.toml", manifest)
+            empty_indexes(injroot)
+            write_toml(injroot, "backlog_item.index.toml", "\n".join([
+                "schema = 1",
+                _rec("BI-1", "backlog_item", "open", P),
+            ]) + "\n")
+            write_toml(injroot, "block.index.toml", "\n".join([
+                "schema = 1",
+                _rec("BL-1", "block", "active", P, scopes=["BI-2"]),   # scopes BI-2, not BI-1: BI-1 stays actionable
+            ]) + "\n")
+            write_toml(injroot, "done.index.toml", "\n".join([
+                "schema = 1",
+                _rec("DN-1", "done", "recorded", P, links=[("receipt_of", "BI-1")]),
+            ]) + "\n")
+            write_toml(injroot, "finding.index.toml", "\n".join([
+                "schema = 1",
+                _rec("FN-1", "finding", "fixed", "f", severity=P),
+            ]) + "\n")
+            write_toml(injroot, "pending_decision.index.toml", "\n".join([
+                "schema = 1",
+                _rec("PD-1", "pending_decision", "decided", P, decision=P,
+                     decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+            ]) + "\n")
+            write_toml(injroot, "autonomous_decision.index.toml", "\n".join([
+                "schema = 1",
+                _rec("AD-1", "autonomous_decision", "recorded", P, classification=P, action=P),
+            ]) + "\n")
+            write_toml(injroot, "handoff.index.toml", "\n".join([
+                "schema = 1",
+                _rec("HO-1", "handoff", "current", P),
+            ]) + "\n")
+            write_toml(injroot, "reference.index.toml", "\n".join([
+                "schema = 1",
+                _rec("RF-1", "reference", "recorded", P, refs=[("doc", P)]),
+            ]) + "\n")
+            write_toml(injroot, "worklog.toml", "\n".join([
+                "schema = 1",
+                _entry("WL-1", "added", P),
+            ]) + "\n")
+            write_toml(injroot, "version.toml", "\n".join([
+                "schema = 1", "", "[[release]]",
+                'version = "0.1.0"',
+                'date = "2026-01-01T00:00:00Z"',
+                'worklog_span = []',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+            ]) + "\n")
+            check("class-wide-injection-write-ok", render(["--root", str(injroot)]) == EXIT_OK)
+
+            def iview(name):
+                return body_of((injroot / WORKING_DIRNAME / name).read_text(encoding="utf-8"))
+
+            # Every view whose body carries a free-text sink fed by P must contain ESC and never the raw
+            # P: TODO/BACKLOG/PIPELINE (backlog title), DONE (done title), FINDINGS (severity), DECISIONS
+            # (pending + autonomous titles), BLOCKS (block title), HANDOFF (handoff title), REFERENCES
+            # (reference title + ref locator), WORKLOG (summary), and the two declared mirrors (title
+            # projection). VERSION/VERSION.md are covered by the unit render_version_md vector above
+            # (their release/summary fields are grammar-constrained).
+            for _vn in ("TODO.md", "BACKLOG.md", "PIPELINE.md", "DONE.md", "FINDINGS.md",
+                        "DECISIONS.md", "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "WORKLOG.md",
+                        "BACKLOG_ITEM-INDEX.md", "BLOCK-INDEX.md"):
+                _body = iview(_vn)
+                check("class-wide-esc-present-" + _vn, ESC in _body)
+                check("class-wide-no-raw-payload-" + _vn, P not in _body)
         finally:
             _WRITE_GATE_COMPOSED = _saved_gate
 
@@ -1480,10 +1651,21 @@ def self_test():
         na = base / "not-adopted"
         na.mkdir()
         check("not-adopted-not-applicable", render(["--root", str(na)]) == EXIT_OK)
-        # F1: an ungated WRITE via any entry is refused (cannot-evaluate) and writes nothing.
+        # F1: an ungated WRITE via any entry is refused (cannot-evaluate) and writes nothing. wroot carries
+        # a VALID one-release version.toml (like eroot/symroot), so that with the F1 sentinel flipped True
+        # the render would proceed to a clean write (exit 0) rather than fail at F3's empty-VERSION guard;
+        # that makes this pair FAIL for the F1 mutant (unmasking the write-gate test, M2), while at the real
+        # default (gate False) the write is refused at exit 2 and nothing is written.
         wroot = new_root()
         write_toml(wroot, "manifest.toml", manifest)
         empty_indexes(wroot)
+        write_toml(wroot, "version.toml", "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n")
         check("write-refused-without-integrity-gate", render(["--root", str(wroot)]) == EXIT_CANNOT_EVALUATE)
         check("write-refused-wrote-nothing", not (wroot / WORKING_DIRNAME / "TODO.md").exists())
         # --check is unaffected by the write gate: eroot's views were already written under the scaffold
@@ -1493,6 +1675,13 @@ def self_test():
         check("cli-dangling-root", render(["--root", str(na), "--root"]) == EXIT_CANNOT_EVALUATE)
         check("cli-unknown-arg", render(["--root", str(na), "--bogus"]) == EXIT_CANNOT_EVALUATE)
         check("cli-misspelled-check-refused", render(["--root", str(na), "--chek"]) == EXIT_CANNOT_EVALUATE)
+
+        # B3: `--root` requires a non-empty, non-option-looking directory argument. An empty value (which
+        # would silently normalize to the cwd) and an option-looking token (a swallowed next flag) are each
+        # a parser-level cannot-evaluate (exit 2), fail-closed. Parse precedes store resolution, so these
+        # are independent of the write gate.
+        check("cli-empty-root", render(["--root", ""]) == EXIT_CANNOT_EVALUATE)
+        check("cli-option-looking-root", render(["--root", "--bogus"]) == EXIT_CANNOT_EVALUATE)
 
         # F9(4): individually record-valid but cross-record NONCONFORMANT stores can no longer be
         # silently WRITTEN. These assert the F1 write-refusal fail-safe ONLY: the cross-record
