@@ -105,6 +105,9 @@ _HOUSE_STYLE_DASHES = frozenset((chr(0x2013), chr(0x2014)))
 _NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
                   "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
+# The admitted scalar/date-time built-ins. Admission is by EXACT type (`type(v) in _SCALAR_TYPES`, never
+# isinstance), so a hostile subclass of an admitted built-in is rejected as out-of-subset before any of its
+# methods runs; this is what closes the hostile-subclass exception-leak class.
 _SCALAR_TYPES = (str, bool, int, float,
                  datetime.datetime, datetime.date, datetime.time)
 
@@ -153,7 +156,7 @@ def _render_key(key):
     """A single key component: bare where it matches the bare-key grammar, else a quoted basic string.
     A non-string key is outside the subset (tomllib only ever produces string keys, so a non-string key
     could never round-trip)."""
-    if not isinstance(key, str):
+    if type(key) is not str:  # exact type, not isinstance: a str subclass is rejected before it is iterated
         raise EmitError("table key must be a string, got {}".format(type(key).__name__))
     if _BARE_KEY_RE.fullmatch(key):
         return key
@@ -174,11 +177,14 @@ def _canonical_float(value):
 
 
 def _render_scalar(value):
-    """A single scalar or date/time value as its canonical TOML literal. bool is tested before int
-    (bool is an int subclass) and datetime before date (datetime is a date subclass)."""
-    if isinstance(value, bool):
+    """A single scalar or date/time value as its canonical TOML literal. Admission is by EXACT type
+    (`type(value) is T`, not isinstance): only a plain admitted built-in is emitted and any subclass is
+    rejected as out-of-subset before any of its methods (__str__, __repr__, isoformat) runs, so a hostile
+    subclass cannot leak an uncontrolled exception. Exact typing also disambiguates bool from int and
+    datetime from date without relying on test order."""
+    if type(value) is bool:
         return "true" if value else "false"
-    if isinstance(value, int):
+    if type(value) is int:
         # Defence-in-depth for a currently-unreachable-from-TOML input: CPython raises ValueError on
         # str() of an int whose decimal length exceeds the interpreter's integer-string-conversion limit
         # (4300 digits by default). Such an int cannot arrive via tomllib (it rejects an over-limit int
@@ -190,11 +196,11 @@ def _render_scalar(value):
             return str(value)
         except ValueError as exc:
             raise EmitError("integer is too large to render ({})".format(exc))
-    if isinstance(value, float):
+    if type(value) is float:
         return _canonical_float(value)
-    if isinstance(value, str):
+    if type(value) is str:
         return _escape_basic(value)
-    if isinstance(value, datetime.datetime):
+    if type(value) is datetime.datetime:
         if value.fold:
             raise EmitError("a datetime with fold=1 has no TOML round trip (TOML carries no fold flag)")
         tz = value.tzinfo
@@ -221,9 +227,9 @@ def _render_scalar(value):
                 raise EmitError("a datetime UTC offset that is not a whole number of minutes ({}) is "
                                 "outside TOML offset syntax".format(offset))
         return value.isoformat()
-    if isinstance(value, datetime.date):
+    if type(value) is datetime.date:
         return value.isoformat()
-    if isinstance(value, datetime.time):
+    if type(value) is datetime.time:
         if value.tzinfo is not None:
             raise EmitError("a TOML local time cannot carry a timezone offset")
         if value.fold:
@@ -237,9 +243,9 @@ def _classify_list(items):
     tables). A mixed or nested array is outside the subset and fails closed."""
     if not items:
         return "empty"
-    if all(isinstance(e, dict) for e in items):
+    if all(type(e) is dict for e in items):  # exact type: a dict subclass is not admitted as a table
         return "aot"
-    if all(isinstance(e, _SCALAR_TYPES) for e in items):
+    if all(type(e) in _SCALAR_TYPES for e in items):  # exact type: a scalar subclass is rejected below
         return "scalar"
     raise EmitError("an array must be all tables or all scalars; a mixed or nested array is outside "
                     "the subset")
@@ -312,20 +318,23 @@ def _emit_table(table, path, lines):
         nested = []
         for key, value in tbl.items():
             _render_key(key)  # validate the key up front (raises on a non-string key)
-            if isinstance(value, dict):
+            # Exact-type dispatch (`type(value) is T` / `type(value) in _SCALAR_TYPES`, not isinstance): a
+            # hostile subclass of dict/list/an admitted scalar falls through to the out-of-subset branch
+            # below and is rejected before its .items()/iteration/render method can run.
+            if type(value) is dict:
                 nested.append((key, value, "table"))
-            elif isinstance(value, list):
+            elif type(value) is list:
                 if _classify_list(value) == "aot":
                     nested.append((key, value, "aot"))
                 else:
                     leaves.append((key, value))  # empty or scalar array: an inline leaf
-            elif isinstance(value, _SCALAR_TYPES):
+            elif type(value) in _SCALAR_TYPES:
                 leaves.append((key, value))
             else:
                 raise EmitError("value for key {!r} is outside the subset: {}".format(
                     key, type(value).__name__))
         for key, value in sorted(leaves, key=lambda kv: kv[0]):
-            rendered = _render_scalar_array(value) if isinstance(value, list) else _render_scalar(value)
+            rendered = _render_scalar_array(value) if type(value) is list else _render_scalar(value)
             _append("{} = {}".format(_render_key(key), rendered))
         # Build block frames in the exact order the recursion emitted them (sub-tables and array-of-table
         # elements, sorted by key, elements in positional order), then push them reversed so the LIFO
@@ -349,7 +358,7 @@ def emit(document):
     """Serialize `document` (a dict) to a canonical, byte-canonical TOML string ending in exactly one
     LF. Fail-closed (EmitError) on anything outside the constrained subset. The result reparses to a
     model equal to `document`; emit_checked() proves that on every emission before it can stage."""
-    if not isinstance(document, dict):
+    if type(document) is not dict:  # exact type: a dict subclass is rejected before its .items() runs
         raise EmitError("the document must be a table (dict) at top level, got {}".format(
             type(document).__name__))
     lines = []
@@ -386,18 +395,21 @@ def _model_equal(a, b):
         x, y = stack.pop()
         if x is y:  # the identical object is equal to itself; bounds a shared-DAG/cyclic both-args walk
             continue
-        if isinstance(x, bool) or isinstance(y, bool):
-            if not (isinstance(x, bool) and isinstance(y, bool) and x == y):
+        # Exact-type discrimination (type(...) is T, not isinstance), so a subclass of an admitted built-in
+        # cannot slip past here either; the strict semantics are unchanged (bool != bare int, int != float,
+        # datetime != date all fall through to the type(x) is not type(y) check below).
+        if type(x) is bool or type(y) is bool:
+            if not (type(x) is bool and type(y) is bool and x == y):
                 return False
             continue
-        if isinstance(x, dict):
-            if not isinstance(y, dict) or x.keys() != y.keys():
+        if type(x) is dict:
+            if type(y) is not dict or x.keys() != y.keys():
                 return False
             for k in reversed(x):  # push children reversed so they pop in positional (insertion) order
                 stack.append((x[k], y[k]))
             continue
-        if isinstance(x, list):
-            if not isinstance(y, list) or len(x) != len(y):
+        if type(x) is list:
+            if type(y) is not list or len(x) != len(y):
                 return False
             for i in range(len(x) - 1, -1, -1):  # push children reversed so they pop in positional order
                 stack.append((x[i], y[i]))
@@ -814,6 +826,41 @@ def self_test():
 
     rejects["hostile-tzinfo-out-of-range-offset"] = {
         "k": datetime.datetime(2026, 1, 1, tzinfo=_OutOfRangeTz())}
+    # A hostile SUBCLASS of each admitted built-in whose overridden method raises must be a fail-closed
+    # EmitError, never an uncontrolled RuntimeError escape: exact-type admission (type(value) is T, not
+    # isinstance) rejects the subclass BEFORE any of its methods (__str__, __repr__, __iter__, isoformat,
+    # iteration, .items()) is called. Each vector leaks a RuntimeError on the pre-fix isinstance code and is
+    # a clean EmitError after, so it discriminates the exact-type gate. The tzinfo reject above is retained.
+    class _HostileInt(int):
+        def __str__(self):
+            raise RuntimeError("hostile int __str__ must never be reached")
+
+    class _HostileFloat(float):
+        def __repr__(self):
+            raise RuntimeError("hostile float __repr__ must never be reached")
+
+    class _HostileStr(str):
+        def __iter__(self):
+            raise RuntimeError("hostile str __iter__ must never be reached")
+
+    class _HostileDatetime(datetime.datetime):
+        def isoformat(self, *args, **kwargs):
+            raise RuntimeError("hostile datetime isoformat must never be reached")
+
+    class _HostileList(list):
+        def __iter__(self):
+            raise RuntimeError("hostile list __iter__ must never be reached")
+
+    class _HostileDict(dict):
+        def items(self):
+            raise RuntimeError("hostile dict .items() must never be reached")
+
+    rejects["hostile-int-subclass"] = {"k": _HostileInt(5)}
+    rejects["hostile-float-subclass"] = {"k": _HostileFloat(1.5)}
+    rejects["hostile-str-subclass"] = {"k": _HostileStr("x")}
+    rejects["hostile-datetime-subclass"] = {"k": _HostileDatetime(2026, 1, 1)}
+    rejects["hostile-list-subclass"] = {"k": _HostileList([1, 2])}
+    rejects["hostile-dict-subclass"] = {"k": _HostileDict({"a": 1})}
     for name, document in rejects.items():
         try:
             if not _rejects(document):
