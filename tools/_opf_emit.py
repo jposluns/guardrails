@@ -199,7 +199,6 @@ def _render_scalar(value):
             raise EmitError("a datetime with fold=1 has no TOML round trip (TOML carries no fold flag)")
         tz = value.tzinfo
         if tz is not None:
-            offset = value.utcoffset()
             # A TOML offset datetime carries only a numeric UTC offset: no zone name, no DST rule. Accept
             # ONLY a plain datetime.timezone constructed WITHOUT a name; anything else (a custom name, even
             # one that matches the auto-generated "UTC+HH:MM" string, a variable/named zone, or a timezone
@@ -207,8 +206,15 @@ def _render_scalar(value):
             # equality and datetime equality ignore the tzinfo name, so the name can be caught neither by
             # comparing offsets nor by the round-trip proof; reconstruct the canonical unnamed instance for
             # this offset and require the input to render identically to it, which exposes a custom name
-            # (it appears in the repr) that an == comparison would miss.
-            if type(tz) is not datetime.timezone or repr(tz) != repr(datetime.timezone(offset)):
+            # (it appears in the repr) that an == comparison would miss. The type gate runs BEFORE
+            # utcoffset() so a hostile tzinfo subclass whose utcoffset() returns an out-of-range or
+            # non-timedelta value is rejected fail-closed here rather than raising outside EmitError; a
+            # genuine datetime.timezone's utcoffset() cannot raise once the type gate has passed.
+            if type(tz) is not datetime.timezone:
+                raise EmitError("a datetime whose tzinfo is not a plain unnamed fixed UTC offset (a named "
+                                "or variable zone) has no TOML round trip")
+            offset = value.utcoffset()
+            if repr(tz) != repr(datetime.timezone(offset)):
                 raise EmitError("a datetime whose tzinfo is not a plain unnamed fixed UTC offset (a named "
                                 "or variable zone) has no TOML round trip")
             if offset % datetime.timedelta(minutes=1) != datetime.timedelta(0):
@@ -793,6 +799,21 @@ def self_test():
     rejects["indirect-cycle"] = cyclic_a
     rejects["self-referential-aot"] = cyclic_aot
     rejects["self-referential-list"] = {"k": cyclic_list}
+    # A hostile custom tzinfo subclass whose utcoffset() returns an out-of-range timedelta must reject
+    # fail-closed with EmitError, not escape as an uncontrolled ValueError: the emitter's type gate runs
+    # before utcoffset() is ever called on the tzinfo, so the out-of-range value is never evaluated.
+    class _OutOfRangeTz(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return datetime.timedelta(hours=24)
+
+        def tzname(self, dt):
+            return None
+
+        def dst(self, dt):
+            return None
+
+    rejects["hostile-tzinfo-out-of-range-offset"] = {
+        "k": datetime.datetime(2026, 1, 1, tzinfo=_OutOfRangeTz())}
     for name, document in rejects.items():
         try:
             if not _rejects(document):
