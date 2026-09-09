@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest base/profile schema
 import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
 import _opf_release  # noqa: E402  U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
+import _opf_check  # noqa: E402  U6: store-level integrity validator (validate_store; the opf doctor engine)
 import _opf_emit  # noqa: E402  U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
 import _opf_fuzz  # noqa: E402  adversarial input-hardening proof (membership/type-guard class closure)
 
@@ -71,6 +72,7 @@ SELF_TESTS = (
     ("opf-release", _opf_release.self_test),
     ("opf-emit", _opf_emit.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
+    ("opf-check", _opf_check.self_test),
     ("opf-aggregator", _aggregator_self_test),
 )
 

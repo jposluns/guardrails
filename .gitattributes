@@ -508,6 +508,7 @@ site/theme.js text eol=lf
 tools/_containment.py text eol=lf
 tools/_gen_common.py text eol=lf
 tools/_journal.py text eol=lf
+tools/_opf_check.py text eol=lf
 tools/_opf_emit.py text eol=lf
 tools/_opf_fuzz.py text eol=lf
 tools/_opf_release.py text eol=lf
