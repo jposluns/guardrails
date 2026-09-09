@@ -7,11 +7,11 @@ U4 renders the composed views, the 1:1 index mirrors, and the root VERSION deliv
 adopter store whose views draw on SEVERAL sources at once (a backlog view joins backlog_item against
 block, a decisions view walks the pending_decision supersession chain). run_generator is single-source,
 so U4 does NOT fork it; it reuses the low-level primitives (the store resolution and contained no-follow
-reads of `_opf_store`/`_journal`, the record/ledger validators of `_opf_schema`/`_opf_release`, and the
-fail-closed `reconcile` of `_gen_common`) and drives them with the same render-all-then-reconcile-each
-two-phase ordering: every target's payload is rendered before any target is written, so a fail-closed
-source aborts the whole render before a single file is touched, and the targets are then reconciled in a
-stable (name-sorted) order.
+reads of `_opf_store`/`_journal`, the record/ledger validators of `_opf_schema`/`_opf_release`, and its
+OWN no-follow contained write, the write counterpart of those no-follow reads) and drives them with the
+same render-all-then-write-each two-phase ordering: every target's payload is rendered before any target
+is written, so a fail-closed source aborts the whole render before a single file is touched, and the
+targets are then written (or drift-reported under --check) in a stable (name-sorted) order.
 
 What it renders (spec 10.1, driven by the manifest [views.*] map):
   - the COMPOSED views TODO/BACKLOG/PIPELINE/DONE/FINDINGS/DECISIONS/BLOCKS/HANDOFF/REFERENCES, each
@@ -41,10 +41,24 @@ the assurance rides the `--self-test` render leg over synthetic stores, mirrorin
 legs. Fail-closed: an unresolvable store, or a declared source that is missing or unreadable, STOPS
 (exit 2), never a silent empty or partial view; an empty store (its index files present but carrying no
 records) renders VALID EMPTY views, which is distinct from cannot-evaluate.
+
+Every target is bound to the view's OWN spec destination (spec 5.8/9), never to the manifest `target`: a
+manifest cannot rebind a known view or deliverable off its destination, and view outputs are written
+through a no-follow CONTAINED write, so a symlinked destination is refused rather than followed.
+
+Scope and disclosed deferrals: U4 renders the `inline` store layout only. A manifest declaring
+`layout = "per-record"` is a CLEAR cannot-evaluate (per-record support is deferred), never mis-reported as
+a downstream malformed-record error, and never silently rendered as if inline. The `<TYPE>-INDEX.md`
+mirrors cover the baseline record types only; module-type mirrors are DEFERRED until module-type record
+schemas ship (`_opf_schema.validate_record` knows only the baseline specs, so no module-type mirror can be
+rendered regardless). When `render` is wired (VC-4) it MUST additionally gate on the U6 `validate_store`
+store-integrity layer (cross-record uniqueness, coverage, and reconciliation) once that lands, a tracked
+spec-11 obligation; `validate_store` does not exist yet and `render` is unwired, so this fails safe today.
 """
 import hashlib
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -53,7 +67,6 @@ import _journal          # noqa: E402  contained (dir-fd, no-follow) readers + J
 import _opf_store        # noqa: E402  store resolution + discovery + manifest base/profile schema
 import _opf_schema       # noqa: E402  record envelope + baseline type schemas + status parsing + id shape
 import _opf_release      # noqa: E402  version.toml + worklog.toml validators + SemVer
-from _gen_common import reconcile  # noqa: E402  the fail-closed write/drift primitive shared with opf_render
 
 try:
     import tomllib
@@ -117,7 +130,11 @@ def _read_raw_and_parsed(store_root_fd, relpath):
         raise ViewsError("cannot read {} ({})".format(relpath, exc))
     try:
         return raw, tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError, ValueError) as exc:
+        # RecursionError: deeply nested TOML (e.g. hundreds of nested arrays) trips tomllib's recursive
+        # descent; it is NOT a TOMLDecodeError, so catch it (and defensively ValueError) here and map it to
+        # a cannot-evaluate rather than letting an uncontrolled traceback escape. This is U4's OWN tomllib
+        # parse on the store's TOML, distinct from any emitter recursion elsewhere.
         raise ViewsError("cannot parse {} ({})".format(relpath, exc))
 
 
@@ -301,12 +318,46 @@ def is_actionable(item, hidden):
     return _state(item) in ("open", "active") and item.get("id") not in hidden
 
 
+def _detect_resolution_cycle(supersedes_map):
+    """Return one ID lying on a supersedes cycle, or None when the graph is acyclic. An iterative
+    three-colour DFS (never recursion), so a very long chain cannot exhaust the interpreter stack and a
+    cycle is found in bounded time rather than looping unboundedly (spec 8.5: a supersession chain is
+    acyclic). GREY marks a node on the current DFS path; an edge back to a GREY node is a cycle, and a
+    self-supersede (an edge from a node to itself) is caught as such."""
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = dict((n, WHITE) for n in supersedes_map)
+    for start in supersedes_map:
+        if color[start] != WHITE:
+            continue
+        stack = [(start, 0)]
+        while stack:
+            node, idx = stack[-1]
+            if idx == 0:
+                color[node] = GREY
+            targets = supersedes_map.get(node, ())
+            if idx < len(targets):
+                stack[-1] = (node, idx + 1)
+                nxt = targets[idx]
+                nxt_color = color.get(nxt, BLACK)
+                if nxt_color == GREY:
+                    return nxt                            # back-edge to a node on the current path: a cycle
+                if nxt_color == WHITE:
+                    stack.append((nxt, 0))
+            else:
+                color[node] = BLACK
+                stack.pop()
+    return None
+
+
 def join_resolution(decisions):
     """The decision-resolution supersession-chain join (spec 8.5): a decided decision may be superseded by
     a newer one linking `supersedes`, and exactly one current effective resolution exists per chain.
     Returns (current, superseded, supersedes_map): current is the set of decision IDs not superseded by any
     other decision in the set (the chain heads), superseded is the complementary set, and supersedes_map
-    maps each decision ID to the sorted IDs it directly supersedes."""
+    maps each decision ID to the sorted IDs it directly supersedes. A FORK (a decision superseded by more
+    than one other), a CYCLE, or any chain resolving to more than one head is an INVALID graph and raises
+    ViewsError (a cannot-evaluate), never returned as multiple current heads; the single-head happy path
+    returns unchanged."""
     supersedes_map = {}
     superseded = set()
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
@@ -315,6 +366,24 @@ def join_resolution(decisions):
         targets = sorted(t for t in _links_of(d, "supersedes") if t in ids)
         supersedes_map[did] = targets
         superseded.update(targets)
+    # Spec 8.5/10.2: exactly ONE current effective resolution per supersession chain. A FORK (one decision
+    # superseded by more than one other) forces a chain node with in-degree > 1 and leaves the chain with
+    # two heads; refusing that, together with refusing a CYCLE, is equivalent to requiring one head per
+    # connected chain, since any two-head connected chain must contain such an in-degree > 1 node. Both are
+    # cannot-evaluate: fail closed rather than render an invalid DECISIONS view with two effective heads.
+    indegree = {}
+    for _did, targets in supersedes_map.items():
+        for t in targets:
+            indegree[t] = indegree.get(t, 0) + 1
+    forked = sorted(t for t, count in indegree.items() if count > 1)
+    if forked:
+        raise ViewsError("decision resolution graph forks: {} superseded by more than one decision "
+                         "(spec 8.5 requires one current effective resolution per chain); fail-closed"
+                         .format(", ".join(forked)))
+    cycle_id = _detect_resolution_cycle(supersedes_map)
+    if cycle_id is not None:
+        raise ViewsError("decision resolution graph has a supersedes cycle at {} (spec 8.5: a supersession "
+                         "chain is acyclic); fail-closed".format(cycle_id))
     current = {d.get("id") for d in decisions if isinstance(d.get("id"), str)} - superseded
     return current, superseded, supersedes_map
 
@@ -336,6 +405,22 @@ def _lines(title, body_lines):
     return "# {}\n\n{}\n".format(title, body)
 
 
+_MD_CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _md_text(value):
+    """Escape a free-text record field for the markdown/HTML view sink (spec 10.3). A record value is
+    DATA, never markdown or HTML structure: it must not forge a heading, a list item, or the do-not-edit
+    header comment. Newlines and carriage returns collapse to a single space (a view field is one line),
+    any other C0/DEL control character is dropped, and the HTML metacharacters `&`, `<`, `>` are
+    entity-escaped so an embedded `<!--` cannot open a comment. Deterministic, and a no-op on ordinary
+    text, so a value carrying none of these characters renders byte-for-byte unchanged."""
+    s = str(value)
+    s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = _MD_CTRL_RE.sub("", s)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def render_todo(src):
     """TODO: the actionable open and active backlog items (block-actionability join, then a state filter,
     then an ID-tie-broken sort). An item an unqualified active block scopes is hidden."""
@@ -343,7 +428,7 @@ def render_todo(src):
     _blocked_by, hidden = join_actionability(items, blocks)
     actionable = t_filter(items, lambda r: is_actionable(r, hidden))
     ordered = t_sort(actionable, keys=("status",))
-    lines = ["- {} ({}) {}".format(r["id"], _state(r), r.get("title", "")) for r in ordered]
+    lines = ["- {} ({}) {}".format(r["id"], _state(r), _md_text(r.get("title", ""))) for r in ordered]
     return _lines("TODO", lines)
 
 
@@ -357,7 +442,8 @@ def render_backlog(src):
         note = "actionable" if is_actionable(r, hidden) else (
             "blocked by {}".format(", ".join(blocked_by[r["id"]])) if r.get("id") in hidden
             else "not actionable ({})".format(_state(r)))
-        lines.append("- {} ({}) {} -- {}".format(r["id"], r.get("status", ""), r.get("title", ""), note))
+        lines.append("- {} ({}) {} -- {}".format(
+            r["id"], r.get("status", ""), _md_text(r.get("title", "")), note))
     return _lines("BACKLOG", lines)
 
 
@@ -366,8 +452,10 @@ def render_pipeline(src):
     from the block-actionability join."""
     items, blocks = src["backlog_item"], src["block"]
     blocked_by, hidden = join_actionability(items, blocks)
-    groups = t_group(items, "status", order=[])
-    # Group by STATE, not the full status string, so `active` and `active/proposed` share a section.
+    # PIPELINE deliberately groups by the derived lifecycle STATE, not the raw `status` field, so that
+    # `active` and `active/proposed` share one section. That is an INTENDED spec-10.2 grouping shape that
+    # t_group on the raw status field cannot express (t_group would split the two into separate sections);
+    # it is a deliberate derived-state grouping, not an ad hoc bypass of the closed transform vocabulary.
     by_state = {}
     for r in items:
         by_state.setdefault(_state(r), []).append(r)
@@ -380,7 +468,7 @@ def render_pipeline(src):
         out.append("## {}".format(state))
         for r in t_sort(by_state[state]):
             marker = " [blocked by {}]".format(", ".join(blocked_by[r["id"]])) if r.get("id") in hidden else ""
-            out.append("- {} {}{}".format(r["id"], r.get("title", ""), marker))
+            out.append("- {} {}{}".format(r["id"], _md_text(r.get("title", "")), marker))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("PIPELINE", body)
@@ -392,7 +480,7 @@ def render_done(src):
     for r in t_sort(src["done"]):
         recs = _links_of(r, "receipt_of")
         suffix = " (receipt_of {})".format(", ".join(recs)) if recs else ""
-        lines.append("- {} {}{}".format(r["id"], r.get("title", ""), suffix))
+        lines.append("- {} {}{}".format(r["id"], _md_text(r.get("title", "")), suffix))
     return _lines("DONE", lines)
 
 
@@ -403,7 +491,7 @@ def render_findings(src):
         out.append("## {}".format(status))
         for r in group:
             sev = " (severity: {})".format(r["severity"]) if "severity" in r else ""
-            out.append("- {}{} {}".format(r["id"], sev, r.get("title", "")))
+            out.append("- {}{} {}".format(r["id"], sev, _md_text(r.get("title", ""))))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("FINDINGS", body)
@@ -418,19 +506,19 @@ def render_decisions(src):
     effective = t_sort([r for r in pend if _state(r) == "decided" and r.get("id") in current])
     gone = t_sort([r for r in pend if r.get("id") in superseded])
     out = ["## Pending decisions"]
-    out += (["- {} {}".format(r["id"], r.get("title", "")) for r in open_pd] or [_EMPTY])
+    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
     out += ["", "## Effective resolutions"]
     if effective:
         for r in effective:
             sup = supersedes_map.get(r["id"]) or []
             tail = " (supersedes {})".format(", ".join(sup)) if sup else ""
-            out.append("- {} {}{}".format(r["id"], r.get("title", ""), tail))
+            out.append("- {} {}{}".format(r["id"], _md_text(r.get("title", "")), tail))
     else:
         out.append(_EMPTY)
     out += ["", "## Superseded resolutions"]
-    out += (["- {} {}".format(r["id"], r.get("title", "")) for r in gone] or [_EMPTY])
+    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
     out += ["", "## Autonomous decisions"]
-    out += (["- {} {}".format(r["id"], r.get("title", "")) for r in t_sort(auto)] or [_EMPTY])
+    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
     return "# {}\n\n{}\n".format("DECISIONS", "\n".join(out))
 
 
@@ -438,9 +526,9 @@ def render_blocks(src):
     """BLOCKS: every block in ID order with its status, the records it scopes, and a proposed marker."""
     lines = []
     for r in t_sort(src["block"]):
-        scopes = ", ".join(str(s) for s in (r.get("scopes", []) or []))
+        scopes = ", ".join(_md_text(s) for s in (r.get("scopes", []) or []))
         lines.append("- {} ({}) scopes [{}] -- {}".format(
-            r["id"], r.get("status", ""), scopes, r.get("title", "")))
+            r["id"], r.get("status", ""), scopes, _md_text(r.get("title", ""))))
     return _lines("BLOCKS", lines)
 
 
@@ -450,10 +538,10 @@ def render_handoff(src):
     handoffs = src["handoff"]
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, lambda r: _state(r) == "current"))
-    out += (["- {} {}".format(r["id"], r.get("title", "")) for r in cur] or [_EMPTY])
+    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
     out += ["", "## Superseded"]
     old = t_sort(t_filter(handoffs, lambda r: _state(r) == "superseded"))
-    out += (["- {} {}".format(r["id"], r.get("title", "")) for r in old] or [_EMPTY])
+    out += (["- {} {}".format(r["id"], _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
     return "# {}\n\n{}\n".format("HANDOFF", "\n".join(out))
 
 
@@ -461,10 +549,11 @@ def render_references(src):
     """REFERENCES: the captured references in ID order, each with its captured refs."""
     lines = []
     for r in t_sort(src["reference"]):
-        lines.append("- {} {}".format(r["id"], r.get("title", "")))
+        lines.append("- {} {}".format(r["id"], _md_text(r.get("title", ""))))
         for ref in r.get("refs", []) or []:
             if isinstance(ref, dict):
-                lines.append("  - {}: {}".format(ref.get("kind", "?"), ref.get("locator", "")))
+                lines.append("  - {}: {}".format(
+                    _md_text(ref.get("kind", "?")), _md_text(ref.get("locator", ""))))
     return _lines("REFERENCES", lines)
 
 
@@ -473,7 +562,7 @@ def render_worklog(src):
     one-line summary (spec 6.2)."""
     entries = sorted(src["worklog"], key=_id_key)
     lines = ["- {} ({}) [{}] {}".format(
-        e.get("id"), e.get("date", ""), e.get("kind", ""), e.get("summary", "")) for e in entries]
+        e.get("id"), e.get("date", ""), e.get("kind", ""), _md_text(e.get("summary", ""))) for e in entries]
     return _lines("WORKLOG", lines)
 
 
@@ -514,7 +603,9 @@ def render_version_file(src):
 
 def render_mirror(type_name, records):
     """A 1:1 <TYPE>-INDEX.md mirror (spec 10.1): each record in ID order rendered as a projection of its
-    declared columns, mirroring the machine index for human reading."""
+    declared columns, mirroring the machine index for human reading. Every projected value is escaped for
+    the markdown/HTML sink so a free-text column (decision, classification, action, title, ...) cannot
+    forge structure or the do-not-edit header comment."""
     columns = ("type", "status", "title", "created_at", "updated_at", "date", "kind", "severity",
                "decision", "decided_at", "decided_by", "classification", "action", "scopes")
     out = []
@@ -522,11 +613,13 @@ def render_mirror(type_name, records):
         out.append("## {}".format(r.get("id")))
         for col, val in t_project(r, columns):
             if isinstance(val, list):
-                val = "[{}]".format(", ".join(str(x) for x in val))
+                val = "[{}]".format(", ".join(_md_text(x) for x in val))
+            else:
+                val = _md_text(val)
             out.append("- {}: {}".format(col, val))
         actor = r.get("actor")
         if isinstance(actor, dict) and actor.get("kind"):
-            out.append("- actor: {}".format(actor["kind"]))
+            out.append("- actor: {}".format(_md_text(actor["kind"])))
         out.append("")
     title = "{} index".format(type_name.upper())
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
@@ -583,13 +676,79 @@ def _resolve_view(view_name):
 
 # --- the driver --------------------------------------------------------------------------------------
 
-def _target_path(product_root, store_root, target):
-    """Resolve a view/deliverable target to an absolute path (spec 9): a target under `.working/` is
-    relative to the STORE repository root; a public target (VERSION) is relative to the PRODUCT repository
-    root, so the public deliverables land in the product repo whatever the store topology (spec 5.8)."""
-    if target == WORKING_DIRNAME or target.startswith(WORKING_DIRNAME + "/"):
-        return store_root / target
-    return product_root / target
+def _spec_destination(view_name):
+    """The spec-bound destination of a view, derived from the view's OWN identity, never from the manifest
+    `target` (spec 5.8/9). Every named view and every <TYPE>-INDEX.md mirror writes to `.working/<name>`
+    at the STORE root; the root VERSION deliverable is the one public target, at the PRODUCT root. Returns
+    (scope, relpath) where scope is "store" or "product" and relpath is the destination path relative to
+    that root. A manifest cannot rebind a known deliverable off this destination: the caller rejects a
+    declared target that does not match it, fail-closed."""
+    if view_name == "VERSION":
+        return "product", "VERSION"
+    return "store", "{}/{}".format(WORKING_DIRNAME, view_name)
+
+
+def _write_contained(root_fd, relpath, text, check):
+    """Write `text` (UTF-8) to a contained regular file beneath root_fd, no-follow, or (check mode) return
+    True when the on-disk bytes differ (the drift signal). This is U4's OWN view-write primitive, the
+    no-follow counterpart of the `_journal` contained READS the module already uses: a symlinked
+    destination, a symlinked path component, or a non-regular destination is REFUSED (ViewsError, a
+    cannot-evaluate), never followed, so a manifest or a planted link cannot redirect a write off-tree.
+    Fail-closed: any read/write error, or a parent directory that cannot be opened, is a ViewsError, never
+    a silent skip. Byte-stable: an unchanged target is not rewritten."""
+    new_bytes = text.encode("utf-8")
+    try:
+        pfd, name = _journal._open_parent(root_fd, relpath)
+    except OSError as exc:                                 # includes FileNotFoundError (a missing parent dir)
+        raise ViewsError("cannot open parent of {} for write ({})".format(relpath, exc))
+    try:
+        st = _journal._lstat_at(pfd, name)
+        if st is not None and not stat.S_ISREG(st.st_mode):
+            raise ViewsError("refusing to write {}: destination is not a regular file (a symlink or "
+                             "special file is never followed; fail-closed)".format(relpath))
+        current = _journal._read_at(pfd, name, relpath)[0] if st is not None else None
+        if check:
+            return current != new_bytes
+        if current == new_bytes:
+            return False                                  # already current: byte-stable, no rewrite
+        if st is None:
+            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
+        else:
+            fd = os.open(name, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, dir_fd=pfd)
+        try:
+            _journal._write_all(fd, new_bytes)
+        finally:
+            os.close(fd)
+        return False
+    except _journal.JournalError as exc:                  # a swapped-in non-regular file at read time
+        raise ViewsError("cannot write {} ({})".format(relpath, exc))
+    except OSError as exc:                                 # ELOOP (a component/target raced to a symlink), etc.
+        raise ViewsError("cannot write {} ({})".format(relpath, exc))
+    finally:
+        os.close(pfd)
+
+
+def _check_declared_sources(view_name, required, declared):
+    """Validate a view's manifest `sources` against its required set (spec 10.2): `sources` must be a list
+    of source-name strings equal AS A SET to `required`, with no missing, extra, duplicate, or ill-typed
+    entry. A mismatch is a ViewsError (a cannot-evaluate) naming the view and the offending source(s), so
+    an extra declared source, which is otherwise neither read, validated, nor entered into the header
+    digest, fails closed rather than being silently ignored."""
+    if not isinstance(declared, list) or any(not isinstance(s, str) for s in declared):
+        raise ViewsError("view {!r} [views] `sources` must be a list of source-name strings "
+                         "(spec 10.2)".format(view_name))
+    if len(declared) != len(set(declared)):
+        dupes = sorted(s for s in set(declared) if declared.count(s) > 1)
+        raise ViewsError("view {!r} declares duplicate source(s) {} (spec 10.2)".format(
+            view_name, ", ".join(dupes)))
+    declared_set = set(declared)
+    required_set = set(required)
+    if declared_set != required_set:
+        missing = sorted(required_set - declared_set)
+        extra = sorted(declared_set - required_set)
+        raise ViewsError("view {!r} declared sources {} do not equal its required set {} "
+                         "(missing {}, extra {}; spec 10.2)".format(
+                             view_name, sorted(declared_set), sorted(required_set), missing, extra))
 
 
 def _registered_vendors_and_kinds(manifest):
@@ -605,7 +764,7 @@ def render(argv):
     """`opf render [--root DIR] [--check]`: render every declared view of the store at a PRODUCT root.
     Returns 0 clean, 1 on drift under --check, 2 cannot-evaluate. NOT-ADOPTED reports NOT APPLICABLE and
     exits 0 (the pack's own `--root .` case). Two-phase like run_generator: every payload is rendered
-    before any target is reconciled, so a fail-closed source aborts before a single file is written."""
+    before any target is written, so a fail-closed source aborts before a single file is touched."""
     check = "--check" in argv
     root = "."
     if "--root" in argv:
@@ -634,17 +793,30 @@ def render(argv):
         print("opf render: cannot open store root {} ({})".format(store_root, exc), file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
     try:
+        product_root_fd = _opf_store._open_root_fd(product_root)   # no-follow fd for the public VERSION write
+    except OSError as exc:
+        os.close(store_root_fd)
+        print("opf render: cannot open product root {} ({})".format(product_root, exc), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+    try:
         try:
-            return _render_resolved(store_root_fd, product_root, store_root, machine_rel, check)
-        except ViewsError as exc:
+            return _render_resolved(store_root_fd, product_root_fd, machine_rel, check)
+        except (ViewsError, RecursionError, ValueError) as exc:
+            # ViewsError is U4's cannot-evaluate; RecursionError and (defensively) ValueError are widened
+            # here as defence in depth, so a parse recursion escaping any inner path becomes a controlled
+            # exit 2 rather than an uncontrolled traceback.
             print("opf render: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_CANNOT_EVALUATE
     finally:
         os.close(store_root_fd)
+        os.close(product_root_fd)
 
 
-def _render_resolved(store_root_fd, product_root, store_root, machine_rel, check):
-    """The resolved-store render, split out so its ViewsError maps to exit 2 in render()'s handler."""
+def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
+    """The resolved-store render, split out so its ViewsError maps to exit 2 in render()'s handler. Views
+    write beneath store_root_fd (`.working/<name>`); the one public VERSION deliverable writes beneath
+    product_root_fd. Every target is bound to its spec destination (never the manifest `target`) and
+    written through U4's no-follow contained write."""
     manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
     got = _read_raw_and_parsed(store_root_fd, manifest_rel)
     if got is None:
@@ -654,17 +826,32 @@ def _render_resolved(store_root_fd, product_root, store_root, machine_rel, check
     if mv.status != _opf_store.VALID:
         raise ViewsError("manifest is not valid: {}".format("; ".join(mv.findings) or mv.status))
 
+    # U4 renders the `inline` layout only. A `per-record` store is a CLEAR cannot-evaluate (deferred),
+    # detected here from the manifest rather than mis-reported as a downstream malformed-record error and
+    # never silently rendered as if inline.
+    devprocess = manifest.get("devprocess")
+    layout = devprocess.get("layout") if isinstance(devprocess, dict) else None
+    if layout == "per-record":
+        raise ViewsError("per-record layout not yet supported by U4 views; deferred")
+
     views = manifest.get("views", {})
     if not isinstance(views, dict):
         raise ViewsError("[views] is not a table")
     registered_vendors, registered_kinds = _registered_vendors_and_kinds(manifest)
 
-    # Load every source any declared view needs, ONCE, caching its raw bytes (for per-view digests) and its
-    # validated rows. A source that is missing, unreadable, or malformed raises ViewsError (exit 2).
+    # Validate each view's declared sources against its required set AND collect the union to load. Per view
+    # the declared `sources` must EQUAL the required set (no missing, extra, duplicate, or ill-typed entry);
+    # an extra declared source would otherwise be neither read, validated, nor entered into the header
+    # digest, so an unreadable extra could pass silently. Loading the union (== required after the equality
+    # check) reads every declared source, so an unreadable or malformed one fails closed.
     needed = set()
     for name, tbl in views.items():
+        if not isinstance(tbl, dict):
+            raise ViewsError("[views.{}] is not a table".format(name))
         _kind, required, _renderer = _resolve_view(name)
-        needed.update(required)
+        declared = tbl.get("sources", [])
+        _check_declared_sources(name, required, declared)
+        needed.update(declared)
     raw_by_relpath = {}
     rows_by_source = {}
     for name in sorted(needed):
@@ -680,8 +867,10 @@ def _render_resolved(store_root_fd, product_root, store_root, machine_rel, check
             rows_by_source[name] = records
         raw_by_relpath[relpath] = raw
 
-    # Phase 1: render every target's full text from the loaded sources, before any target is reconciled.
-    planned = []   # (label, abspath, text)
+    # Phase 1: render every target's full text from the loaded sources, before any target is written. Each
+    # target is bound to its OWN spec destination; a manifest `target` that does not match is rejected,
+    # never silently redirected.
+    planned = []   # (view_name, scope, dest_relpath, text)
     for name in sorted(views):
         tbl = views[name]
         kind, required, renderer = _resolve_view(name)
@@ -689,12 +878,12 @@ def _render_resolved(store_root_fd, product_root, store_root, machine_rel, check
         if declared_kind != kind:
             raise ViewsError("view {!r} is declared kind {!r} but this generator renders it as {!r} "
                              "(spec 10.1)".format(name, declared_kind, kind))
-        declared_sources = tbl.get("sources", [])
-        missing = [s for s in required if s not in (declared_sources or [])]
-        if missing:
-            raise ViewsError("view {!r} needs source(s) {} but its manifest [views] entry declares {} "
-                             "(spec 10.2)".format(name, missing, declared_sources))
-        target = tbl.get("target")
+        scope, dest_rel = _spec_destination(name)
+        declared_target = tbl.get("target")
+        if declared_target != dest_rel:
+            raise ViewsError("view {!r} declares target {!r} but its spec destination is {!r}; a manifest "
+                             "cannot rebind a view off its spec destination (fail-closed, spec 5.8/9)"
+                             .format(name, declared_target, dest_rel))
         src = {s: rows_by_source[s] for s in required}
         body = renderer(src)
         if name == "VERSION":
@@ -703,13 +892,16 @@ def _render_resolved(store_root_fd, product_root, store_root, machine_rel, check
             source_blobs = {_source_relpath(machine_rel, s): raw_by_relpath[_source_relpath(machine_rel, s)]
                             for s in required}
             text = _header(source_blobs) + "\n" + body
-        planned.append((target, _target_path(product_root, store_root, target), text))
+        planned.append((name, scope, dest_rel, text))
 
-    # Phase 2: reconcile each target in the stable (target-name) order, writing (or drift-reporting) each.
+    # Phase 2: write (or drift-report under --check) each target in the stable (view-name) order, through
+    # U4's no-follow contained write. `.working/<name>` writes beneath the store root; the public VERSION
+    # writes beneath the product root.
     drift = False
-    for label, abspath, text in sorted(planned, key=lambda p: p[0]):
-        if reconcile(abspath, text, check):
-            print("drift: {}".format(label))
+    for _name, scope, dest_rel, text in sorted(planned, key=lambda p: p[0]):
+        write_fd = product_root_fd if scope == "product" else store_root_fd
+        if _write_contained(write_fd, dest_rel, text, check):
+            print("drift: {}".format(dest_rel))
             drift = True
     if check and drift:
         print("run '{}' to regenerate".format(REGEN_COMMAND))
@@ -721,11 +913,17 @@ def _render_resolved(store_root_fd, product_root, store_root, machine_rel, check
 
 def self_test():
     """Render-leg self-test over SYNTHETIC stores. Judged on returned exit codes and rendered bytes, never
-    by grepping output. Exercises: a golden render per view; drift detection; each transform (predicate
-    filter, sort with ID tie-break, group, project); the block-actionability join (an unqualified active
-    block hides an item, an active/proposed block does not); the decision supersession-chain join; a
-    missing and a malformed declared source failing closed (exit 2); and an empty store rendering valid
-    empty views. The tempdir is removed in a finally. Exit 0 pass, 1 fail, 2 error."""
+    by grepping output. Exercises: INDEPENDENT expected-bytes goldens per view (a hand-authored expected
+    body pinned for EVERY view, so corrupting any renderer fails the test); drift detection; each transform
+    (predicate filter, sort with ID tie-break, group, project); the block-actionability join (an unqualified
+    active block hides an item, an active/proposed block does not); the decision supersession-chain join,
+    with a fork and a cycle refused fail-closed; spec-destination target binding (a rebinding manifest
+    target refused) and a no-follow contained write (a symlinked destination refused, its target left
+    untouched); per-view declared-source equality (an extra declared source refused); deeply nested TOML
+    mapped to cannot-evaluate; a free-text field that cannot forge markdown structure; a per-record layout
+    reported as a clear deferral; a missing and a malformed declared source failing closed (exit 2); and an
+    empty store rendering valid empty views. The tempdir is removed in a finally. Exit 0 pass, 1 fail,
+    2 error."""
     import tempfile
     import shutil
 
@@ -755,7 +953,7 @@ def self_test():
     def write_toml(root, name, text):
         (root / WORKING_DIRNAME / "toml" / name).write_text(text, encoding="utf-8")
 
-    # Every view and one mirror, declared with the kind/sources this generator renders.
+    # Every view and two mirrors, declared with the kind/sources this generator renders.
     manifest = "\n".join([
         "[devprocess]",
         'standard = "devprocess"',
@@ -797,6 +995,7 @@ def self_test():
         _view("VERSION.md", "deterministic", ["version"]),
         _view("VERSION", "deterministic", ["version"]),
         _view("BACKLOG_ITEM-INDEX.md", "deterministic", ["backlog_item"]),
+        _view("BLOCK-INDEX.md", "deterministic", ["block"]),                   # NEW: a list-field + actor mirror
     ]) + "\n"
 
     def empty_indexes(root):
@@ -810,8 +1009,6 @@ def self_test():
         # --- a POPULATED store, exercising every transform and both joins -------------------------------
         root = new_root()
         write_toml(root, "manifest.toml", manifest)
-        # backlog_item: BI-10 open (actionable), BI-2 active (hidden by an UNQUALIFIED active block BL-1),
-        # BI-3 open (scoped only by an active/PROPOSED block BL-2, so still actionable), BI-4 done.
         write_toml(root, "backlog_item.index.toml", "\n".join([
             "schema = 1",
             _rec("BI-10", "backlog_item", "open", "ten open"),
@@ -833,7 +1030,6 @@ def self_test():
             _rec("FN-1", "finding", "open", "open finding"),
             _rec("FN-2", "finding", "fixed", "fixed finding", severity="minor"),
         ]) + "\n")
-        # pending_decision: PD-2 supersedes PD-1, so PD-2 is the effective head and PD-1 is superseded.
         write_toml(root, "pending_decision.index.toml", "\n".join([
             "schema = 1",
             _rec("PD-1", "pending_decision", "decided", "first ruling",
@@ -889,32 +1085,84 @@ def self_test():
             return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
 
         todo = read_view("TODO.md")
-        # block-actionability join: BI-2 hidden by the unqualified active BL-1; BI-3 present (BL-2 proposed).
         check("join-block-hides-active-block", "BI-2" not in todo)
         check("join-block-keeps-proposed-block", "BI-3" in todo)
         check("todo-keeps-open", "BI-10" in todo)
         check("todo-drops-done", "BI-4" not in todo)
-        # sort with ID tie-break: BI-3 (number 3) precedes BI-10 (number 10) despite lexical order.
         check("sort-id-tiebreak-numeric", todo.index("BI-3") < todo.index("BI-10"))
-        # header contract: present, names sources, carries the digest + regen command, NO timestamp.
         check("header-present", todo.startswith("<!-- GENERATED by opf render"))
         check("header-has-sources", "sources: .working/toml/backlog_item.index.toml" in todo)
         check("header-has-digest", "source-set-digest: sha256:" in todo)
         check("header-has-regen", "regenerate: opf render" in todo)
         check("header-no-timestamp", not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", todo.split("-->", 1)[0]))
 
+        # --- INDEPENDENT expected-bytes goldens for EVERY view (F-09) ------------------------------------
+        # Each golden is a HAND-AUTHORED constant, NOT produced by this module's renderers; it pins the
+        # exact bytes AFTER the do-not-edit header (the header carries a source-set digest, so the body is
+        # the byte-stable region), compared with ==, so corrupting ANY renderer flips this to FAIL. A
+        # LIST-valued field (block scopes) and an ACTOR dict are golden-covered by the two mirror goldens.
+        def body_of(text):
+            marker = "-->\n"
+            return text[text.index(marker) + len(marker):]
+
+        goldens = {
+            "TODO.md": "\n# TODO\n\n- BI-3 (open) three open\n- BI-10 (open) ten open\n",
+            "BACKLOG.md": ("\n# BACKLOG\n\n- BI-2 (active) two active -- blocked by BL-1\n"
+                           "- BI-3 (open) three open -- actionable\n"
+                           "- BI-4 (done) four done -- not actionable (done)\n"
+                           "- BI-10 (open) ten open -- actionable\n"),
+            "PIPELINE.md": ("\n# PIPELINE\n\n## open\n- BI-3 three open\n- BI-10 ten open\n\n"
+                            "## active\n- BI-2 two active [blocked by BL-1]\n\n## done\n- BI-4 four done\n"),
+            "DONE.md": "\n# DONE\n\n- DN-1 receipt (receipt_of BI-4)\n",
+            "FINDINGS.md": ("\n# FINDINGS\n\n## fixed\n- FN-2 (severity: minor) fixed finding\n\n"
+                            "## open\n- FN-1 open finding\n"),
+            "DECISIONS.md": ("\n# DECISIONS\n\n## Pending decisions\n- PD-3 still open\n\n"
+                             "## Effective resolutions\n- PD-2 revised ruling (supersedes PD-1)\n\n"
+                             "## Superseded resolutions\n- PD-1 first ruling\n\n"
+                             "## Autonomous decisions\n- AD-1 acted\n"),
+            "BLOCKS.md": ("\n# BLOCKS\n\n- BL-1 (active) scopes [BI-2] -- grant\n"
+                          "- BL-2 (active/proposed) scopes [BI-3] -- proposal\n"),
+            "HANDOFF.md": ("\n# HANDOFF\n\n## Current\n- HO-2 current handoff\n\n"
+                           "## Superseded\n- HO-1 old handoff\n"),
+            "REFERENCES.md": "\n# REFERENCES\n\n- RF-1 a source\n  - doc: OPF-SPEC.md 10.2\n",
+            "WORKLOG.md": ("\n# WORKLOG\n\n- WL-1 (2026-01-01T00:00:00Z) [added] first change\n"
+                           "- WL-2 (2026-01-01T00:00:00Z) [fixed] second change\n"),
+            "VERSION.md": ("\n# VERSION\n\n## Releases\n"
+                           "- 1.3.0 (2026-08-30T00:00:00Z) worklog WL-1..WL-2\n\n"
+                           "## Changelog summaries\n- unreleased (working)\n"),
+            "BACKLOG_ITEM-INDEX.md": (
+                "\n# BACKLOG_ITEM index\n\n"
+                "## BI-2\n- type: backlog_item\n- status: active\n- title: two active\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                "## BI-3\n- type: backlog_item\n- status: open\n- title: three open\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                "## BI-4\n- type: backlog_item\n- status: done\n- title: four done\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                "## BI-10\n- type: backlog_item\n- status: open\n- title: ten open\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n"),
+            "BLOCK-INDEX.md": (
+                "\n# BLOCK index\n\n"
+                "## BL-1\n- type: block\n- status: active\n- title: grant\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-2]\n"
+                "- actor: maintainer\n\n"
+                "## BL-2\n- type: block\n- status: active/proposed\n- title: proposal\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-3]\n"
+                "- actor: assistant\n"),
+        }
+        for gname, gbody in sorted(goldens.items()):
+            check("golden-body-" + gname, body_of(read_view(gname)) == gbody)
+        check("golden-version-file-bytes",
+              (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n")
+
+        # Retained substring checks (redundant with the goldens, kept as readable anchors).
         backlog = read_view("BACKLOG.md")
         check("backlog-annotates-blocked", "blocked by BL-1" in backlog)
         check("backlog-annotates-actionable", "actionable" in backlog)
-
         pipeline = read_view("PIPELINE.md")
-        # group by state: the lifecycle sections appear in order.
         check("pipeline-groups-in-order",
               0 < pipeline.index("## open") < pipeline.index("## active") < pipeline.index("## done"))
         check("pipeline-blocked-marker", "[blocked by BL-1]" in pipeline)
-
         decisions = read_view("DECISIONS.md")
-        # supersession chain: PD-2 is the effective head naming PD-1; PD-1 is under Superseded; PD-3 open.
         eff = decisions.index("## Effective resolutions")
         sup = decisions.index("## Superseded resolutions")
         check("resolution-head-effective", "PD-2" in decisions[eff:sup])
@@ -922,22 +1170,16 @@ def self_test():
         check("resolution-superseded-listed", "PD-1" in decisions[sup:])
         check("resolution-open-listed", "PD-3" in decisions[:eff])
         check("resolution-autonomous-listed", "AD-1" in decisions)
-
         done = read_view("DONE.md")
         check("done-project-receipt", "receipt_of BI-4" in done)
-
         findings = read_view("FINDINGS.md")
         check("findings-project-severity", "severity: minor" in findings)
         check("findings-group-status", "## open" in findings and "## fixed" in findings)
-
         handoff = read_view("HANDOFF.md")
-        check("handoff-current-first",
-              handoff.index("HO-2") < handoff.index("## Superseded"))
-
+        check("handoff-current-first", handoff.index("HO-2") < handoff.index("## Superseded"))
         version_file = (root / "VERSION").read_text(encoding="utf-8")
         check("version-file-exact-bytes", version_file == "1.3.0\n")
         check("version-file-no-header", not version_file.startswith("<!--"))
-
         mirror = read_view("BACKLOG_ITEM-INDEX.md")
         check("mirror-title", "# BACKLOG_ITEM index" in mirror and mirror.startswith("<!-- GENERATED"))
         check("mirror-projects-record", "## BI-2" in mirror and "- status: active" in mirror)
@@ -960,7 +1202,7 @@ def self_test():
         mroot = new_root()
         write_toml(mroot, "manifest.toml", manifest)
         empty_indexes(mroot)
-        (mroot / WORKING_DIRNAME / "toml" / "block.index.toml").unlink()   # TODO/BACKLOG/BLOCKS need it
+        (mroot / WORKING_DIRNAME / "toml" / "block.index.toml").unlink()   # TODO/BACKLOG/BLOCKS/BLOCK-INDEX need it
         check("missing-source-cannot-eval", render(["--root", str(mroot)]) == EXIT_CANNOT_EVALUATE)
 
         # --- a MALFORMED record fails closed (exit 2), never a silent partial view ----------------------
@@ -972,6 +1214,96 @@ def self_test():
             _rec("FN-1", "finding", "not-a-state", "bad status"),   # illegal status: INVALID record
         ]) + "\n")
         check("malformed-record-cannot-eval", render(["--root", str(broot)]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
+        troot = new_root()
+        write_toml(troot, "manifest.toml",
+                   manifest.replace('target = "{}/TODO.md"'.format(WORKING_DIRNAME), 'target = "README.md"'))
+        empty_indexes(troot)
+        check("target-rebind-cannot-eval", render(["--root", str(troot)]) == EXIT_CANNOT_EVALUATE)
+        check("target-rebind-not-written", not (troot / "README.md").exists())
+
+        # --- F-01: a pre-planted symlink destination is refused (no-follow), the link target untouched ---
+        symroot = new_root()
+        write_toml(symroot, "manifest.toml", manifest)
+        empty_indexes(symroot)
+        outside = symroot / "outside.txt"
+        outside.write_text("original\n", encoding="utf-8")
+        (symroot / WORKING_DIRNAME / "TODO.md").symlink_to(outside)
+        check("symlink-dest-cannot-eval", render(["--root", str(symroot)]) == EXIT_CANNOT_EVALUATE)
+        check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
+
+        # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
+        xroot = new_root()
+        write_toml(xroot, "manifest.toml",
+                   manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
+        empty_indexes(xroot)
+        check("extra-source-cannot-eval", render(["--root", str(xroot)]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-03: the same extra declared source, now MALFORMED, also fails closed ----------------------
+        xmroot = new_root()
+        write_toml(xmroot, "manifest.toml",
+                   manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
+        empty_indexes(xmroot)
+        write_toml(xmroot, "finding.index.toml", "\n".join([
+            "schema = 1", _rec("FN-1", "finding", "not-a-state", "bad status")]) + "\n")
+        check("extra-source-malformed-cannot-eval", render(["--root", str(xmroot)]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-04: a FORK in the decision-resolution graph (two heads for one chain) fails closed --------
+        fkroot = new_root()
+        write_toml(fkroot, "manifest.toml", manifest)
+        empty_indexes(fkroot)
+        write_toml(fkroot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "decided", "base", decision="d",
+                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+            _rec("PD-2", "pending_decision", "decided", "two", decision="d",
+                 decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+            _rec("PD-3", "pending_decision", "decided", "three", decision="d",
+                 decided_at="2026-09-03T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+        ]) + "\n")
+        check("resolution-fork-cannot-eval", render(["--root", str(fkroot)]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-04: a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------
+        cyroot = new_root()
+        write_toml(cyroot, "manifest.toml", manifest)
+        empty_indexes(cyroot)
+        write_toml(cyroot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "decided", "one", decision="d",
+                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-2")]),
+            _rec("PD-2", "pending_decision", "decided", "two", decision="d",
+                 decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+        ]) + "\n")
+        check("resolution-cycle-cannot-eval", render(["--root", str(cyroot)]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
+        rroot = new_root()
+        write_toml(rroot, "manifest.toml", manifest)
+        empty_indexes(rroot)
+        deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
+        write_toml(rroot, "finding.index.toml", deep)
+        check("deep-toml-recursion-cannot-eval", render(["--root", str(rroot)]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
+        forgeroot = new_root()
+        write_toml(forgeroot, "manifest.toml", manifest)
+        empty_indexes(forgeroot)
+        write_toml(forgeroot, "reference.index.toml", "\n".join([
+            "schema = 1",
+            _rec("RF-1", "reference", "recorded", "a source",
+                 refs=[("doc", "safe\\n# Forged heading\\n<!-- injected -->")]),
+        ]) + "\n")
+        check("forged-field-write-ok", render(["--root", str(forgeroot)]) == EXIT_OK)
+        forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
+        check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
+        check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
+
+        # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
+        prroot = new_root()
+        write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
+        empty_indexes(prroot)
+        check("per-record-deferred-cannot-eval", render(["--root", str(prroot)]) == EXIT_CANNOT_EVALUATE)
 
         # --- an unresolvable / not-adopted root ---------------------------------------------------------
         na = base / "not-adopted"
@@ -987,9 +1319,12 @@ def self_test():
         for f in failures:
             print("  - " + f, file=sys.stderr)
         return EXIT_DRIFT
-    print("opf-views self-test: PASS ({} checks) -- golden renders, drift detection, the filter/sort/"
-          "group/project transforms, the block-actionability and decision-supersession joins, "
-          "missing-and-malformed-source fail-closed, and empty-store valid-empty views".format(checked[0]))
+    print("opf-views self-test: PASS ({} checks) -- independent expected-bytes goldens per view, drift "
+          "detection, the filter/sort/group/project transforms, the block-actionability and decision-"
+          "supersession joins (fork/cycle refused), spec-destination target binding and no-follow "
+          "contained writes, declared-source equality, deep-TOML and free-text fail-closed, per-record "
+          "deferral, missing-and-malformed-source fail-closed, and empty-store valid-empty views"
+          .format(checked[0]))
     return EXIT_OK
 
 
