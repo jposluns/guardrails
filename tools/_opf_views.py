@@ -442,8 +442,15 @@ def join_resolution(decisions):
     supersedes_map = {}
     superseded = set()
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
+    # Build supersedes edges from state == "decided" decisions ONLY, matching the effective/gone filters
+    # and this join's fork/cycle ownership: a supersedes link on a non-decided (open/withdrawn) decision
+    # does not yet resolve anything, so it must not remove a decided effective resolution from `current`
+    # and mislabel it "Superseded". Cross-record resolution GRADING otherwise remains U6 validate_store's
+    # remit (F2); this closes only the mislabel window. The all-decided case is unchanged.
     for d in decisions:
         did = d.get("id")
+        if _state(d) != "decided":
+            continue
         targets = _sorted_ids(t for t in _links_of(d, "supersedes") if t in ids)
         supersedes_map[did] = targets
         superseded.update(targets)
@@ -1038,6 +1045,11 @@ def render(argv):
 
     store_root = res.store_root
     machine_rel = res.machine_rel
+    # Disclosed residual (disclose-guard-residuals): OPF store paths are treated as UTF-8 by convention. A
+    # DISCOVERED machine-dir name that is not valid UTF-8 arrives here surrogate-escaped in machine_rel;
+    # encoding the rendered output to UTF-8 (in _write_contained) then raises, which render()'s ValueError
+    # handler maps to a fail-closed cannot-evaluate (exit 2). Such a store is REJECTED, never rendered: a
+    # deliberate, disclosed residual, not silently handled.
     pointer = res.pointer_source != "default"
     try:
         store_root_fd = _opf_store._open_store_root_fd(store_root, pointer)
@@ -1344,16 +1356,50 @@ def self_test():
         check("mirror-action-exact-escape", "- action: " + ESC in adm)
         check("mirror-autonomous-no-raw-payload", P not in adm)
 
-        # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork check.
-        pd1 = {"id": "PD-1", "links": []}
-        pd2 = {"id": "PD-2", "links": [{"rel": "supersedes", "id": "PD-1"},
-                                       {"rel": "supersedes", "id": "PD-1"}]}
+        # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork
+        # check. Both decisions are `decided`, so they source supersedes edges (per join_resolution's
+        # decided-only edge rule).
+        pd1 = {"id": "PD-1", "status": "decided", "links": []}
+        pd2 = {"id": "PD-2", "status": "decided", "links": [{"rel": "supersedes", "id": "PD-1"},
+                                                            {"rel": "supersedes", "id": "PD-1"}]}
         try:
             _cur, _sup, _smap = join_resolution([pd1, pd2])
             dupok = (_cur == {"PD-2"} and _sup == {"PD-1"} and _smap["PD-2"] == ["PD-1"])
         except ViewsError:
             dupok = False
         check("duplicate-supersedes-link-no-false-fork", dupok)
+
+        # FIX A (join_resolution supersedes-map ordering): a decision superseding several others lists them
+        # DEDUPED and in numeric id order (PD-2 before PD-10), the SINGLE _sorted_ids ordering every id-set
+        # annotation join uses. Reverting _sorted_ids in this sink to append/lexical order yields
+        # ["PD-10", "PD-2"] (or a duplicate PD-10), flipping this; the single-link populated-store golden
+        # below does not discriminate it (one target, no order or dup to observe).
+        _msrc = {"id": "PD-1", "status": "decided",
+                 "links": [{"rel": "supersedes", "id": "PD-10"},
+                           {"rel": "supersedes", "id": "PD-2"},
+                           {"rel": "supersedes", "id": "PD-10"}]}
+        try:
+            _mc, _ms, _msm = join_resolution([_msrc, {"id": "PD-2", "links": []},
+                                              {"id": "PD-10", "links": []}])
+            suporder_ok = (_msm["PD-1"] == ["PD-2", "PD-10"] and _mc == {"PD-1"})
+        except ViewsError:
+            suporder_ok = False
+        check("supersedes-map-dedup-numeric-order", suporder_ok)
+
+        # FIX B (supersedes-graph harden): a supersedes link on a NON-DECIDED (open/withdrawn) decision must
+        # NOT supersede its target, so a decided effective resolution is never mislabeled "Superseded" by a
+        # non-decided decision's link. PD-1 is a decided head; PD-2 is WITHDRAWN yet links supersedes PD-1.
+        # PD-1 must stay in `current` and out of `superseded`. Sourcing edges from every decision regardless
+        # of state would put PD-1 in `superseded`, flipping this. (Cross-record resolution GRADING otherwise
+        # remains U6 validate_store's remit, F2; this closes only the mislabel window.)
+        _decd = {"id": "PD-1", "status": "decided", "links": []}
+        _wdrw = {"id": "PD-2", "status": "withdrawn", "links": [{"rel": "supersedes", "id": "PD-1"}]}
+        try:
+            _wc, _ws, _wsm = join_resolution([_decd, _wdrw])
+            nondecided_ok = ("PD-1" in _wc and "PD-1" not in _ws)
+        except ViewsError:
+            nondecided_ok = False
+        check("nondecided-supersedes-does-not-mark-target", nondecided_ok)
 
         # CLASS 1 (B1): _md_text renders GFM EXTENDED autolinks INERT, not just CommonMark punctuation. A
         # bare http://, https://, www., or email trigger is broken with a numeric character reference for
@@ -1391,6 +1437,17 @@ def self_test():
             [{"id": "BL-10", "status": "active", "scopes": ["BI-5"]},
              {"id": "BL-2", "status": "active", "scopes": ["BI-5", "BI-5"]}])
         check("block-annotation-dedup-numeric-order", _bb.get("BI-5") == ["BL-2", "BL-10"])
+
+        # FIX A (render_done receipt ordering): a done record naming several receipts lists them DEDUPED and
+        # in numeric id order (BI-2 before BI-10), the same _sorted_ids ordering. Reverting _sorted_ids in
+        # render_done to append/lexical order yields "BI-10, BI-2" (or a duplicate), flipping this; the
+        # single-receipt populated-store golden (DN-1 receipt_of BI-4) does not discriminate it. Exercised
+        # as a unit render_done call, matching the other unit-level sink vectors.
+        _donebody = render_done({"done": [{"id": "DN-1", "title": "r", "links": [
+            {"rel": "receipt_of", "id": "BI-10"},
+            {"rel": "receipt_of", "id": "BI-2"},
+            {"rel": "receipt_of", "id": "BI-10"}]}]})
+        check("done-receipt-dedup-numeric-order", "(receipt_of BI-2, BI-10)" in _donebody)
 
         _saved_gate = _WRITE_GATE_COMPOSED
         try:
