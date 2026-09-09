@@ -1045,11 +1045,19 @@ def render(argv):
 
     store_root = res.store_root
     machine_rel = res.machine_rel
-    # Disclosed residual (disclose-guard-residuals): OPF store paths are treated as UTF-8 by convention. A
-    # DISCOVERED machine-dir name that is not valid UTF-8 arrives here surrogate-escaped in machine_rel;
-    # encoding the rendered output to UTF-8 (in _write_contained) then raises, which render()'s ValueError
-    # handler maps to a fail-closed cannot-evaluate (exit 2). Such a store is REJECTED, never rendered: a
-    # deliberate, disclosed residual, not silently handled.
+    # OPF store paths are UTF-8 by convention. A DISCOVERED machine-dir name that is not valid UTF-8 arrives
+    # here surrogate-escaped in machine_rel; validate it EXPLICITLY now, before rendering ANY view, so a
+    # non-UTF-8 machine-dir name is rejected fail-closed (exit 2) UNIVERSALLY and independent of which views
+    # are declared (a header-exempt VERSION-only store included), not only when a Markdown view's
+    # _source_set_digest encodes the path. The round-trip re-decodes cleanly for a valid-UTF-8 machine_rel
+    # and raises UnicodeError on a surrogate-escaped non-UTF-8 byte; that is mapped to a cannot-evaluate here
+    # (disclose-guard-residuals: an explicit refusal of a non-UTF-8 store path, never silently handled).
+    try:
+        machine_rel.encode("utf-8", "surrogateescape").decode("utf-8")
+    except UnicodeError:
+        print("opf render: cannot evaluate: store machine-directory name is not valid UTF-8 "
+              "(OPF store paths are UTF-8 by convention); render refused", file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
     pointer = res.pointer_source != "default"
     try:
         store_root_fd = _opf_store._open_store_root_fd(store_root, pointer)
@@ -1756,6 +1764,63 @@ def self_test():
             deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
             write_toml(rroot, "finding.index.toml", deep)
             check("deep-toml-recursion-cannot-eval", render(["--root", str(rroot)]) == EXIT_CANNOT_EVALUATE)
+
+            # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
+            # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered
+            # exit 0: the VERSION deliverable is header-exempt, so _source_set_digest never encoded the bad
+            # path and nothing else keyed on its UTF-8 validity. A discovered machine-dir name is UTF-8 by
+            # convention; a surrogate-escaped non-UTF-8 byte must be refused (exit 2) regardless of which
+            # views are declared. This vector FAILS if that early check is reverted.
+            nuroot = base / "case-nonutf8"
+            nuworking = nuroot / WORKING_DIRNAME
+            nuworking.mkdir(parents=True)
+            nu_machine = os.fsencode(str(nuworking)) + b"/bad-\xff-dir"   # non-UTF-8 machine-dir name (bytes)
+            os.mkdir(nu_machine)
+            version_only_manifest = "\n".join([
+                "[devprocess]",
+                'standard = "devprocess"',
+                'spec_version = "1.0.0"',
+                'layout = "inline"',
+                'posture = "required"',
+                'import_status = "none"',
+                "",
+                "[store]",
+                'sync_target = ""',
+                "",
+                "[modules]",
+                "governance = true",
+                "operational_policy = true",
+                "concurrent_operation = true",
+                "",
+                "[types.backlog_item]", 'namespace = "BI"',
+                "[types.done]", 'namespace = "DN"',
+                "[types.worklog]", 'namespace = "WL"',
+                "[types.finding]", 'namespace = "FN"',
+                "[types.pending_decision]", 'namespace = "PD"',
+                "[types.autonomous_decision]", 'namespace = "AD"',
+                "[types.block]", 'namespace = "BL"',
+                "[types.handoff]", 'namespace = "HO"',
+                "[types.reference]", 'namespace = "RF"',
+                "",
+                "[vendors]", "registered = []",
+                "",
+                _view("VERSION", "deterministic", ["version"]),
+            ]) + "\n"
+            with open(os.path.join(nu_machine, b"manifest.toml"), "w", encoding="utf-8") as _mf:
+                _mf.write(version_only_manifest)
+            with open(os.path.join(nu_machine, b"version.toml"), "w", encoding="utf-8") as _vf:
+                _vf.write("\n".join([
+                    "schema = 1", "", "[[release]]",
+                    'version = "0.1.0"',
+                    'date = "2026-01-01T00:00:00Z"',
+                    'worklog_span = []',
+                    'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+                ]) + "\n")
+            # A matching root VERSION, so pre-fix --check would drift-compare to exit 0; post-fix the early
+            # UTF-8 refusal returns exit 2 BEFORE any view is rendered or compared.
+            (nuroot / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+            check("nonutf8-machine-dir-cannot-eval",
+                  render(["--root", str(nuroot), "--check"]) == EXIT_CANNOT_EVALUATE)
 
             # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
             forgeroot = new_root()
