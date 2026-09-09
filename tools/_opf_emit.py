@@ -162,7 +162,11 @@ def _safe_type_label(value):
     definitively."""
     try:
         return type(value).__name__
-    except Exception:  # noqa: BLE001 - any failure to read the type name falls back to a constant label
+    except BaseException:  # noqa: BLE001 - any failure to read the type name (even a BaseException raised by a
+        # hostile metaclass during the __name__ lookup) falls back to a constant label. Catching BaseException
+        # here is safe: this helper neither loops nor blocks, it is a pure best-effort diagnostic label, and any
+        # escape would defeat the diagnostic; it honors no control-flow exception because forming a label never
+        # legitimately needs to.
         return "<unrenderable-type>"
 
 
@@ -374,13 +378,22 @@ def emit(document):
     model equal to `document`; emit_checked() proves that on every emission before it can stage.
 
     The whole body runs inside a fail-closed backstop: this is the outermost boundary of emit() and it
-    closes the hostile-input exception-leak class definitively. An EmitError propagates unchanged; ANY
-    other Exception (for example a value whose hostile metaclass raises while a diagnostic is built, or
-    any other pathological input) is converted to a fail-closed EmitError with a constant, value-free
-    message, never one that formats or introspects the offending value or type. `except Exception` is
-    deliberate: KeyboardInterrupt, SystemExit, and any other BaseException are NOT caught. This
-    guarantees no hostile or pathological input can escape emit() (and therefore emit_checked, which
-    calls emit()) as an uncontrolled exception."""
+    closes the hostile-input exception-leak class definitively. An EmitError propagates unchanged; the
+    genuine control-flow signals (KeyboardInterrupt, SystemExit, GeneratorExit) are re-raised untouched;
+    every OTHER BaseException (for example a value whose hostile metaclass raises a custom Exception OR a
+    custom BaseException subclass while a diagnostic is built, or any other pathological input) is
+    converted to a fail-closed EmitError with a constant, value-free message, never one that formats or
+    introspects the offending value or type. Catching BaseException (not merely Exception) is deliberate:
+    a hostile object whose metaclass __getattribute__ raises a BaseException subclass that is NOT an
+    Exception subclass would otherwise slip past an `except Exception` backstop and escape uncontrolled.
+    This guarantees no hostile or pathological input can escape emit() (and therefore emit_checked, which
+    calls emit()) as an uncontrolled exception.
+
+    DISCLOSURE (residual): the only input that is not converted is one that raises a GENUINE control-flow
+    signal (KeyboardInterrupt, SystemExit, GeneratorExit) from attribute access. Such a raise is honored
+    as control flow and propagates rather than becoming an EmitError. This is unavoidable and correct: a
+    control-flow signal raised during attribute access is indistinguishable from real control flow and
+    must be allowed to propagate, so it is never dressed up as a document reject."""
     try:
         if type(document) is not dict:  # exact type: a dict subclass is rejected before its .items() runs
             raise EmitError("the document must be a table (dict) at top level, got {}".format(
@@ -390,7 +403,9 @@ def emit(document):
         return "\n".join(lines) + "\n"
     except EmitError:
         raise
-    except Exception:  # noqa: BLE001 - fail-closed backstop: any non-EmitError becomes a value-free EmitError
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):  # genuine control flow re-raised, never converted
+        raise
+    except BaseException:  # noqa: BLE001 - fail-closed backstop: any OTHER BaseException becomes a value-free EmitError
         raise EmitError("emit failed on an out-of-subset or hostile input (fail-closed)")
 
 
@@ -914,6 +929,27 @@ def self_test():
     rejects["hostile-metaclass-value"] = {"k": _HostileMetaInt(1)}
     rejects["hostile-metaclass-key"] = {_HostileMetaStr("bad"): "x"}
     rejects["hostile-metaclass-document"] = _HostileMetaDict({"a": 1})
+
+    # The NARROWEST instance of the same exception-leak class: a hostile metaclass whose __getattribute__
+    # raises a custom BaseException SUBCLASS (deliberately NOT an Exception subclass) on the __name__ lookup.
+    # Such a raise slips past an `except Exception` backstop and would escape emit()/emit_checked
+    # uncontrolled; the BaseException-catching emit() backstop (and the BaseException-guarded
+    # _safe_type_label) convert it to a clean fail-closed EmitError instead. It must be a plain custom
+    # BaseException, not KeyboardInterrupt/SystemExit/GeneratorExit, since those genuine control-flow signals
+    # are re-raised rather than converted. Asserted rejected with EmitError, not escaping.
+    class _HostileEscape(BaseException):
+        pass
+
+    class _HostileBaseMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise _HostileEscape("hostile metaclass __name__ lookup raises a BaseException subclass")
+            return super().__getattribute__(name)
+
+    class _HostileBaseMetaInt(int, metaclass=_HostileBaseMeta):
+        pass
+
+    rejects["hostile-metaclass-baseexception-value"] = {"k": _HostileBaseMetaInt(1)}
     for name, document in rejects.items():
         try:
             if not _rejects(document):
