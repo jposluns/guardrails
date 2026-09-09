@@ -161,7 +161,10 @@ def _safe_type_label(value):
     forming a rejection message can never raise; the outermost emit() backstop closes the same class
     definitively."""
     try:
-        return type(value).__name__
+        label = type(value).__name__
+        if type(label) is not str:  # a hostile metaclass can return a non-str __name__ whose __format__ raises a
+            return "<unrenderable-type>"  # control-flow signal; reject it BEFORE a diagnostic ever formats the label
+        return label
     except BaseException:  # noqa: BLE001 - any failure to read the type name (even a BaseException raised by a
         # hostile metaclass during the __name__ lookup) falls back to a constant label. Catching BaseException
         # here is safe: this helper neither loops nor blocks, it is a pure best-effort diagnostic label, and any
@@ -389,11 +392,12 @@ def emit(document):
     This guarantees no hostile or pathological input can escape emit() (and therefore emit_checked, which
     calls emit()) as an uncontrolled exception.
 
-    DISCLOSURE (residual): the only input that is not converted is one that raises a GENUINE control-flow
-    signal (KeyboardInterrupt, SystemExit, GeneratorExit) from attribute access. Such a raise is honored
-    as control flow and propagates rather than becoming an EmitError. This is unavoidable and correct: a
-    control-flow signal raised during attribute access is indistinguishable from real control flow and
-    must be allowed to propagate, so it is never dressed up as a document reject."""
+    DISCLOSURE (residual): the sole non-EmitError escape is a GENUINE control-flow signal
+    (KeyboardInterrupt, SystemExit, GeneratorExit) raised by the input DURING emission, whether raised
+    directly or from an attribute or method the emitter legitimately invokes on a plain-typed value. Such
+    a raise is honored as control flow and propagates rather than becoming an EmitError, because it is
+    indistinguishable from a real interrupt or exit and must be allowed to propagate; it is never dressed
+    up as a document reject. It does not fail open: nothing is staged or returned on that path."""
     try:
         if type(document) is not dict:  # exact type: a dict subclass is rejected before its .items() runs
             raise EmitError("the document must be a table (dict) at top level, got {}".format(
@@ -950,6 +954,27 @@ def self_test():
         pass
 
     rejects["hostile-metaclass-baseexception-value"] = {"k": _HostileBaseMetaInt(1)}
+
+    # A hostile metaclass whose __name__ lookup returns a NON-STRING object whose __format__ raises a genuine
+    # control-flow signal (KeyboardInterrupt): if a rejection diagnostic ever FORMATTED that label (f-string /
+    # .format), the attacker's __format__ would run and manufacture the signal, which the emit() backstop
+    # re-raises unchanged, so a non-EmitError would escape for a hostile INPUT. _safe_type_label now accepts
+    # the label only when it is a plain str and returns the constant fallback otherwise, BEFORE the label is
+    # ever formatted, so the hostile __format__ never runs. Asserted rejected with EmitError, not escaping.
+    class _HostileFormatName:
+        def __format__(self, spec):
+            raise KeyboardInterrupt("hostile __format__ on a type label must never run")
+
+    class _HostileNameMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                return _HostileFormatName()
+            return super().__getattribute__(name)
+
+    class _HostileNameInt(int, metaclass=_HostileNameMeta):
+        pass
+
+    rejects["hostile-metaclass-nonstr-name-value"] = {"k": _HostileNameInt(1)}
     for name, document in rejects.items():
         try:
             if not _rejects(document):
