@@ -513,6 +513,7 @@ tools/_opf_fuzz.py text eol=lf
 tools/_opf_release.py text eol=lf
 tools/_opf_schema.py text eol=lf
 tools/_opf_store.py text eol=lf
+tools/_opf_views.py text eol=lf
 tools/_qa_adapter.py text eol=lf
 tools/_release_schema.py text eol=lf
 tools/_standards.py text eol=lf
