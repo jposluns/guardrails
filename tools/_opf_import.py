@@ -3,8 +3,10 @@
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
-byte-canonical candidate under `<machine>/imports/<run-id>/`. It writes NOTHING outside that new run
-directory: the active store, its `counters.toml`, its indexes, and the sources are read-only inputs. It
+byte-canonical candidate under `<machine>/imports/<run-id>/`. Its writes are confined to the `imports/`
+staging ROOT (created if absent; spec 14 stages under `imports/<run-id>/`, so the staging root is part of
+the staging area, not the active store) and the new run directory beneath it: the active store, its
+`counters.toml`, its indexes, its archive, and the sources are read-only inputs, never written. It
 composes U1 (store resolution + manifest), U2 (record envelope + counters + id helpers), U3 (the worklog
 release-boundary gate), and U8 (the constrained-subset canonical emitter) rather than re-deriving them.
 
@@ -16,7 +18,12 @@ the verb later is a conscious edit to this test rather than a silent drift.
 
 Promotion (mutating the active store, advancing counters.toml, flipping import_status) is OUT OF SCOPE:
 U7 stages proposals only. Staged ids are PROPOSALS; the sole durable reservation is counters.toml, which
-promotion advances under the store lease. R6 over the sibling-run union catches concurrent proposals.
+promotion advances under the store lease (a single writer). The R6 sibling-run union is checked once
+before the run-dir claim and RE-CHECKED after it (excluding this run's own dir), which NARROWS the
+concurrent-proposal window but, absent a lock, does not eliminate it: a true TOCTOU interleaving between
+two racing proposals can still leave both to fail closed or, narrowly, neither to block
+(disclose-guard-residuals). Concurrent proposals are durably reconciled only at promotion, under the
+counters.toml lease.
 
 Write mechanism: U7 composes `_journal.apply_ops` DIRECTLY (no store lock, no `run_transaction`): staging
 touches no shared mutable state, and the exclusive run-dir `mkdir` is the atomic pool claim. apply_ops
@@ -223,16 +230,22 @@ def _read_toml(store_root_fd, rel):
 
 
 def _record_ids(data, where):
-    """Extract the ids of a `{schema, record: [[record]]}` file, fail-closed. A non-list `record`, a
-    non-table row, or a malformed id is CANNOT-EVALUATE naming the file (a present-but-unparseable record
-    is a refusing failure, never silent absence)."""
+    """Extract the ids of a `{schema = 1, record: [[record]]}` index file, fail-closed. An ABSENT file is
+    zero records (absence outside the declared set is clean). A PRESENT file is held to the declared index
+    contract (module docstring): a missing/non-int/wrong `schema`, a missing or non-list `record`, a
+    non-table row, or a malformed id is CANNOT-EVALUATE naming the file (a present-but-contract-malformed
+    index is a refusing failure, never silent absence). An explicit `schema = 1` with `record = []` is a
+    genuine empty index and reads as zero records."""
     if data is None:
         return []
+    schema = data.get("schema")
+    if type(schema) is not int or schema != SCHEMA:
+        raise _cannot("{}: a present index must carry `schema = {}` (got {!r}); a malformed or absent "
+                      "schema is not zero records".format(where, SCHEMA, schema))
     recs = data.get("record")
-    if recs is None:
-        return []
     if not isinstance(recs, list):
-        raise _cannot("{}: `record` must be an array of tables".format(where))
+        raise _cannot("{}: a present index must carry a `record` array of tables (missing or non-list "
+                      "`record` is malformed, not zero records)".format(where))
     ids = []
     for i, r in enumerate(recs):
         if not isinstance(r, dict):
@@ -300,20 +313,61 @@ def _list_contained(store_root_fd, rel):
         os.close(pfd)
 
 
-def _sibling_ids(store_root_fd, machine_rel):
+def _dir_entries_no_symlink(store_root_fd, rel):
+    """The immediate entry names of a directory beneath the store root, listed no-follow, or None when the
+    directory is absent. A SYMLINK, or any non-directory entry, is CANNOT-EVALUATE (fail-closed): an
+    unclassifiable `imports/` entry must refuse rather than vanish from the R6 union, where U1's
+    _immediate_subdirs would silently drop it (correct for store DISCOVERY, wrong for the union; F4)."""
+    try:
+        pfd, name = _journal._open_parent(store_root_fd, rel)
+    except FileNotFoundError:
+        return None
+    except (OSError, _journal.JournalError) as exc:
+        raise _cannot("cannot open parent of {} ({})".format(rel, exc))
+    try:
+        try:
+            dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _cannot("cannot list {} no-follow ({})".format(rel, exc))
+        try:
+            out = []
+            for entry in sorted(os.listdir(dfd)):
+                try:
+                    est = os.stat(entry, dir_fd=dfd, follow_symlinks=False)
+                except OSError as exc:
+                    raise _cannot("cannot stat {}/{} ({})".format(rel, entry, exc))
+                if stat.S_ISLNK(est.st_mode):
+                    raise _cannot("{}/{} is a symlink; a symlinked staging run cannot enumerate its staged "
+                                  "ids (fail-closed, never silently omitted from the R6 union)".format(rel, entry))
+                if not stat.S_ISDIR(est.st_mode):
+                    raise _cannot("{}/{} is not a directory (an imports/ entry must be a run "
+                                  "directory)".format(rel, entry))
+                out.append(entry)
+            return out
+        finally:
+            os.close(dfd)
+    finally:
+        os.close(pfd)
+
+
+def _sibling_ids(store_root_fd, machine_rel, skip_run_id=None):
     """Every staged id across every sibling run under `<machine>/imports/` (spec 11: staging is a location
     the R6 union covers). A sibling's own on-disk `*.index.toml` and `worklog.toml` under `candidate/` and
     `fragments/` ARE the authoritative index of its staged ids, so an incomplete sibling (no report.toml)
-    still enumerates what it wrote; only an unreadable/unparseable sibling artefact is CANNOT-EVALUATE."""
+    still enumerates what it wrote; only an unreadable/unparseable sibling artefact is CANNOT-EVALUATE. A
+    symlinked (or otherwise non-directory) `imports/` entry is CANNOT-EVALUATE, never silently omitted (F4).
+    `skip_run_id`, when set, excludes this run's own just-claimed dir from the sweep so it does not
+    self-collide on its own indexes during the post-claim re-check (F2)."""
     imports_rel = "{}/{}".format(machine_rel, IMPORTS_DIRNAME)
-    try:
-        runs = _opf_store._immediate_subdirs(store_root_fd, imports_rel)
-    except _opf_store.StoreError as exc:
-        raise _cannot(str(exc))
+    runs = _dir_entries_no_symlink(store_root_fd, imports_rel)
     if runs is None:
         return []
     ids = []
     for run in runs:
+        if skip_run_id is not None and run == skip_run_id:
+            continue
         for sub in ("candidate", "fragments"):
             sub_rel = "{}/{}/{}".format(imports_rel, run, sub)
             names = _list_contained(store_root_fd, sub_rel)
@@ -325,6 +379,61 @@ def _sibling_ids(store_root_fd, machine_rel):
                 rel = "{}/{}".format(sub_rel, entry)
                 ids.extend(_record_ids(_read_toml(store_root_fd, rel), rel))
     return ids
+
+
+def _worklog_ids(store_root_fd, machine_rel):
+    """The WL ids of the ACTIVE worklog.toml (`[[entry]]` rows, spec 6.2), fail-closed. Absent -> zero; a
+    present file whose schema, `entry` array, or an entry id is malformed is CANNOT-EVALUATE. The active
+    worklog is NOT an `{schema, record}` index (its rows are `[[entry]]` and its `schema` is optional per
+    U3), so _record_ids does not read it; this reader honours the U3 worklog.toml shape."""
+    rel = "{}/worklog.toml".format(machine_rel)
+    data = _read_toml(store_root_fd, rel)
+    if data is None:
+        return []
+    schema = data.get("schema")
+    if schema is not None and (type(schema) is not int or schema != SCHEMA):
+        raise _cannot("{}: worklog schema {!r} is not the supported schema {}".format(rel, schema, SCHEMA))
+    entries = data.get("entry")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        raise _cannot("{}: `entry` must be an array of tables".format(rel))
+    ids = []
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            raise _cannot("{}: entry[{}] is not a table".format(rel, i))
+        eid = e.get("id")
+        if _opf_schema._valid_id_shape(eid) is None:
+            raise _cannot("{}: entry[{}] carries a malformed id {!r}".format(rel, i, eid))
+        ids.append(eid)
+    return ids
+
+
+def _active_store_ids(store_root_fd, machine_rel, roster):
+    """Every id in the WHOLE active store: each roster type's own `<type>.index.toml` PLUS the active
+    worklog.toml PLUS the archive (spec 11: uniqueness is whole-store, so an id sitting in a DIFFERENT
+    active index than its minting type is SEEN, not read as absent; F3). Fail-closed on any unreadable or
+    contract-malformed input."""
+    ids = []
+    for type_name in sorted(roster):
+        if type_name == "worklog":
+            continue                      # the active worklog is worklog.toml (`[[entry]]`), read below
+        ids.extend(_index_ids(store_root_fd, machine_rel, type_name))
+    ids.extend(_worklog_ids(store_root_fd, machine_rel))
+    ids.extend(_archive_ids(store_root_fd, machine_rel))
+    return ids
+
+
+def _uniqueness_union(store_root_fd, machine_rel, roster, minted_ids, skip_run_id=None):
+    """The R6 uniqueness union (spec 11): this run's minted ids plus every id already present anywhere a
+    minted id could collide, the WHOLE active store (every type index, the active worklog, the archive) and
+    every sibling staging run. One assembly path, shared by the pre-write check and the post-claim re-check
+    (F3/F4/F2). `skip_run_id`, when set, excludes that run's own dir from the sibling sweep (the re-check,
+    so a run does not self-collide on its just-written indexes)."""
+    union = list(minted_ids)
+    union.extend(_active_store_ids(store_root_fd, machine_rel, roster))
+    union.extend(_sibling_ids(store_root_fd, machine_rel, skip_run_id=skip_run_id))
+    return union
 
 
 # --- plan validation (spec 14.1) ---------------------------------------------------------------------
@@ -389,9 +498,10 @@ def _tile_spans(rows, source_len, where):
 
 def stage_import(product_root, import_set, plan, *, now, run_nonce):
     """Validate an enumerated import set against an untrusted mapping plan and, on a full pass, stage the
-    byte-canonical candidate under `<machine>/imports/<run-id>/`. Never touches the active store, its
-    counters, or the sources. Returns a StageResult; fail-closed on anything unreadable, malformed, exotic,
-    or outside the supported subset, never a silent clean pass."""
+    byte-canonical candidate under `<machine>/imports/<run-id>/`. Writes only the `imports/` staging root
+    (created if absent) and the new run directory beneath it; the active store, its counters, indexes,
+    archive, and the sources are read-only. Returns a StageResult; fail-closed on anything unreadable,
+    malformed, exotic, or outside the supported subset, never a silent clean pass."""
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -440,7 +550,13 @@ def _read_sources(product_root_fd, import_set):
         seen.add(rel)
         if not _opf_store._is_contained_relpath(rel):
             raise _cannot("source path {!r} is not a contained repo-relative path".format(rel))
-        st = _journal._lstat_contained(product_root_fd, rel)
+        try:
+            st = _journal._lstat_contained(product_root_fd, rel)
+        except _journal.JournalError as exc:
+            # _is_contained_relpath accepts a normalizable internal '..' (e.g. sub/../a.txt) that
+            # _open_parent's _check_rel then rejects. Convert that JournalError into the module's
+            # fail-closed StageResult contract rather than letting it escape stage_import (F10).
+            raise _cannot("source path {!r} is not a clean contained path ({})".format(rel, exc))
         if st is None:
             raise _cannot("declared source {!r} is absent (a declared member is never nothing-to-do)".format(rel))
         if not stat.S_ISREG(st.st_mode):
@@ -584,6 +700,12 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             where = "plan.fragments[{!r}] row {} ({})".format(sp, idx, state)
 
             if state in _CANDIDATE_STATES:
+                # F9: a mapped/split row mints its OWN id and must not also carry an external `target`. A
+                # target here is contradictory (the plan cannot name the not-yet-minted id), so it is a
+                # finding rather than a clean run whose mappings.toml references a non-minted id.
+                if target is not None:
+                    raise _finding("{}: a mapped/split row mints its own id and must not also name a "
+                                   "`target` (a minted row does not reference an external id)".format(where))
                 model = row.get("record")
                 ns = _validate_candidate_model(model, roster, where)
                 rtype = model["type"]
@@ -608,6 +730,16 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                                    "record".format(where, target))
             else:  # a quarantine state
                 rid = mint("LF", where)
+                # F6: extract the fragment body from the RAW BYTES using the byte offsets, THEN decode, so a
+                # byte span never indexes decoded code-points (which drops or corrupts a non-ASCII body). A
+                # span that splits a multi-byte UTF-8 sequence is a malformed span: decode fail-closed and
+                # raise a finding rather than emit corrupted or lossy text.
+                try:
+                    frag_body = source["raw"][start:end].decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise _finding("{}: span [{}, {}] splits a multi-byte UTF-8 sequence in {!r}; a "
+                                   "fragment span must fall on character boundaries ({})".format(
+                                       where, start, end, sp, exc))
                 lf = {
                     "id": rid, "type": LF_TYPE, "status": "quarantined",
                     "title": "Legacy fragment from {} [{}:{}]".format(sp, start, end),
@@ -615,7 +747,7 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                     "actor": {"kind": "importer"},
                     "source_path": sp, "source_digest": source["sha256"],
                     "span": [start, end], "run_id": run_id,
-                    "body": source["body"][start:end],
+                    "body": frag_body,
                 }
                 _validate_lf_provenance(lf, where)
                 rv = _opf_schema.validate_record(lf, expected_type=LF_TYPE, specs=roster)
@@ -644,29 +776,33 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                     where, "; ".join(rv.findings)))
             worklog_records.append(rec)
             minted_ids.append(rid)
-        # The one worklog gate that must block a staged candidate: a new entry never lands inside an
-        # already-released span (spec 6.2). The whole-store rotation/deletion partition is a promotion
-        # concern (U7 rotates and deletes nothing), disclosed.
+        # The worklog gates a staged candidate on TWO checks against the store's version ledger: U3's full
+        # structural validation of the ledger (a malformed EXISTING ledger is an unusable input, not a plan
+        # defect: CANNOT-EVALUATE), then the release-boundary check (a new entry never lands inside an
+        # already-released span, spec 6.2: a finding). The whole-store rotation/deletion partition is a
+        # promotion concern (U7 rotates and deletes nothing), disclosed.
         version_rel = "{}/version.toml".format(machine_rel)
         version_data = _read_toml(store_root_fd, version_rel)
         if version_data is None:
             raise _cannot("{}: worklog candidates need the store's version ledger (spec 6.2)".format(version_rel))
+        vv = _opf_release.validate_version(version_data)          # F8: U3's full structural validation first
+        if vv.status == _opf_release.CANNOT_EVALUATE:
+            raise _cannot("{}: version ledger does not evaluate ({})".format(
+                version_rel, "; ".join(vv.findings)))
+        if vv.status != _opf_release.VALID:
+            raise _cannot("{}: version ledger is structurally invalid ({})".format(
+                version_rel, "; ".join(vv.findings)))
         wl_numbers = [_opf_schema._valid_id_shape(r["id"])[1] for r in worklog_records]
         wl_findings = _opf_release.check_no_append_into_released(version_data, wl_numbers)
         if wl_findings:
             raise _finding("worklog release-boundary: {}".format("; ".join(wl_findings)))
 
-    # --- R6 uniqueness over the union (active + archive + siblings + minted) -------------------------
-    # A minted id can only collide within its own namespace, so reading the minting namespaces' active
-    # indexes plus the archive and every sibling run is complete for the minted-id collision hazard.
-    mint_types = set(candidate_records) | ({LF_TYPE} if lf_records else set()) \
-        | ({"worklog"} if worklog_records else set())
-    union = list(minted_ids)
-    for type_name in sorted(mint_types):
-        union.extend(_index_ids(store_root_fd, machine_rel, type_name))
-    union.extend(_archive_ids(store_root_fd, machine_rel))
-    union.extend(_sibling_ids(store_root_fd, machine_rel))
-    dup_findings = _opf_schema.check_unique_ids(union)
+    # --- R6 uniqueness over the WHOLE active store + archive + siblings + minted ids (spec 11) -------
+    # F3/F4: one assembly path scans the whole active store (every type index, the active worklog, the
+    # archive) plus every sibling run (a symlinked sibling is refused, not dropped), so an id in a
+    # non-minting active index, or in a symlinked sibling, is seen rather than read as absent.
+    dup_findings = _opf_schema.check_unique_ids(
+        _uniqueness_union(store_root_fd, machine_rel, roster, minted_ids))
     if dup_findings:
         raise _finding("R6 id uniqueness: {}".format("; ".join(dup_findings)))
 
@@ -678,10 +814,10 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
     if within:
         raise _finding("counters reservation: {}".format("; ".join(within)))
 
-    # --- build the byte-canonical run and stage it --------------------------------------------------
+    # --- build the byte-canonical run and stage it (two-pass claim + re-check, F2) -------------------
     run_rel_result = _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now,
                                 run_nonce, mapping_states, candidate_records, lf_records, worklog_records,
-                                working_high, state_counts)
+                                working_high, state_counts, roster, minted_ids)
     return StageResult(CLEAN, [], run_id=run_id, run_rel=run_rel_result, mapping_states=mapping_states,
                        staged_ids=minted_ids, new_high_water=working_high, promotion_ready=True,
                        migration_incomplete=bool(lf_records))
@@ -698,13 +834,20 @@ def _existing_id_set(store_root_fd, machine_rel, roster):
 
 
 def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now, run_nonce,
-               mapping_states, candidate_records, lf_records, worklog_records, working_high, state_counts):
-    """Emit every file as byte-canonical U8 output, then stage the whole run directory through one ordered
-    apply_ops op list (no lock, no journal). report.toml is written LAST and carries the other artefacts'
-    digests. The exclusive run-dir mkdir is the atomic claim: a pre-existing run directory is refused."""
+               mapping_states, candidate_records, lf_records, worklog_records, working_high, state_counts,
+               roster, minted_ids):
+    """Emit every file as byte-canonical U8 output (source BODIES verbatim), then stage the run directory
+    in two ordered apply_ops passes. Pass 1 claims the exclusive run-dir mkdir (the atomic pool claim: a
+    pre-existing run directory is refused) and writes this run's index and provenance files, so its minted
+    ids become visible on disk under its own run dir. The sibling+active union is then RE-CHECKED, EXCLUDING
+    this run's own dir, and only on a clean re-check is report.toml (the promotion-ready marker) written
+    last in pass 2. A colliding id surfaced by the re-check means a concurrent proposal raced this one: no
+    report.toml is written and the partial run dir is left as named evidence (CANNOT-EVALUATE). The
+    re-check NARROWS the concurrent-proposal window but, absent a lock, does not eliminate it (disclosed in
+    the module docstring; the sole durable reservation is counters.toml under the promotion lease)."""
     stamp = _rfc3339(now)
 
-    files = {}   # run-relative-suffix -> bytes
+    files = {}   # run-relative-suffix -> byte-canonical U8 TOML bytes
     files["run.toml"] = _emit_bytes({
         "schema": SCHEMA, "run_id": run_id, "staged_at": stamp, "nonce": run_nonce,
         "source": [{"path": s["path"], "sha256": s["sha256"], "size": s["size"]}
@@ -731,43 +874,49 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
         files["fragments/legacy_fragment.index.toml"] = _emit_bytes(
             {"schema": SCHEMA, "record": lf_records}, "fragments/legacy_fragment.index.toml")
 
+    # F7: preserve each source's FULL original bytes in the run, content-addressed as `sources/<sha256>`
+    # (spec 14.2: the original's full content is preserved in the import run). Stored VERBATIM, not through
+    # U8 (a raw body, not TOML), so a fully-mapped source's content still survives here; the digest is the
+    # source sha256, re-verified by apply_ops. Identical-content sources dedupe to one file.
+    source_bodies = {"sources/{}".format(s["sha256"]): s["raw"] for s in sources}
+
+    all_body = dict(files)
+    all_body.update(source_bodies)
+
     report = {
         "schema": SCHEMA, "run_id": run_id, "verdict": CLEAN, "promotion_ready": True,
         "migration_incomplete": bool(lf_records),
         "counts": {k: v for k, v in state_counts.items() if v},
         "artifact": [{"path": suffix, "sha256": _sha256_hex(data)}
-                     for suffix, data in sorted(files.items())],
+                     for suffix, data in sorted(all_body.items())],
     }
     files_report = _emit_bytes(report, "report.toml")
 
-    # Ordered op list: parent dirs first, files next, report.toml strictly last. imports/ is created only
-    # when a probe shows it absent (a race surfaces as a JournalError -> CANNOT-EVALUATE).
+    content = {run_rel + "/" + suffix: data for suffix, data in all_body.items()}
+
+    # --- pass 1: claim the exclusive run dir and stage every file EXCEPT report.toml ------------------
     ops = []
     imports_rel = "{}/{}".format(machine_rel, IMPORTS_DIRNAME)
     imports_st = _journal._lstat_contained(store_root_fd, imports_rel)
     if imports_st is None:
+        # The imports/ staging ROOT (spec 14) is created if absent: part of the staging area, not the
+        # active store (F1). A race surfaces as a JournalError -> CANNOT-EVALUATE.
         ops.append({"op": "mkdir", "path": imports_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
     elif not stat.S_ISDIR(imports_st.st_mode):
         raise _cannot("{} exists but is not a directory (fail-closed)".format(imports_rel))
     ops.append({"op": "mkdir", "path": run_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
     ops.append({"op": "mkdir", "path": run_rel + "/candidate",
                 "poststate": {"kind": "dir", "mode": DIR_MODE}})
+    ops.append({"op": "mkdir", "path": run_rel + "/sources",
+                "poststate": {"kind": "dir", "mode": DIR_MODE}})
     if lf_records:
         ops.append({"op": "mkdir", "path": run_rel + "/fragments",
                     "poststate": {"kind": "dir", "mode": DIR_MODE}})
-
-    content = {}
-    for suffix in sorted(k for k in files if k != "report.toml"):
+    for suffix in sorted(all_body):
         path = run_rel + "/" + suffix
-        content[path] = files[suffix]
         ops.append({"op": "create", "path": path,
                     "poststate": {"kind": "file", "mode": FILE_MODE,
-                                  "content-sha256": _sha256_hex(files[suffix])}})
-    report_path = run_rel + "/report.toml"
-    content[report_path] = files_report
-    ops.append({"op": "create", "path": report_path,
-                "poststate": {"kind": "file", "mode": FILE_MODE,
-                              "content-sha256": _sha256_hex(files_report)}})
+                                  "content-sha256": _sha256_hex(all_body[suffix])}})
 
     def staged_reader(op):
         return content[op["path"]]
@@ -776,9 +925,33 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
         _journal.apply_ops(store_root_fd, ops, staged_reader)
     except _journal.JournalError as exc:
         # A pre-existing run directory (exclusive mkdir refusal), a mid-write failure, or a racing tree:
-        # fail-closed. A partial run directory is left in place as named evidence (no report.toml), and its
-        # on-disk ids enumerate into a later R6 union.
-        raise _cannot("staging apply failed ({}); nothing promoted, any partial run left as evidence".format(exc))
+        # fail-closed. A partial run dir is left as named evidence (no report.toml); its on-disk ids
+        # enumerate into a later R6 union.
+        raise _cannot("staging apply failed ({}); nothing promoted, any partial run left as "
+                      "evidence".format(exc))
+
+    # F2: re-check the union AFTER the claim, EXCLUDING this run's own dir (else it self-collides on its
+    # just-written indexes). A collision now means a concurrent proposal raced this one: report.toml is
+    # withheld and the partial run dir stays as named evidence. A true TOCTOU interleaving remains
+    # (disclosed in the module docstring); it is not single-process reproducible, so the self-test drives
+    # _uniqueness_union directly.
+    recheck = _opf_schema.check_unique_ids(
+        _uniqueness_union(store_root_fd, machine_rel, roster, minted_ids, skip_run_id=run_id))
+    if recheck:
+        raise _cannot("R6 re-check after run-dir claim: a concurrent proposal collides ({}); report.toml "
+                      "withheld, partial run left as named evidence".format("; ".join(recheck)))
+
+    # --- pass 2: report.toml LAST, the promotion-ready marker, only on a clean re-check ---------------
+    report_path = run_rel + "/report.toml"
+    content[report_path] = files_report
+    report_ops = [{"op": "create", "path": report_path,
+                   "poststate": {"kind": "file", "mode": FILE_MODE,
+                                 "content-sha256": _sha256_hex(files_report)}}]
+    try:
+        _journal.apply_ops(store_root_fd, report_ops, staged_reader)
+    except _journal.JournalError as exc:
+        raise _cannot("report.toml write failed after a clean re-check ({}); partial run left as "
+                      "evidence".format(exc))
     return run_rel
 
 
@@ -808,6 +981,10 @@ def self_test():
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
     NONCE = "selftest-nonce"
+
+    # F11.2: an INDEPENDENT run-id oracle, a literal here rather than the production _RUN_ID_RE, so
+    # broadening the production regex (e.g. to `.*`) is caught instead of self-certifying.
+    INDEP_RUN_ID_RE = re.compile(r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$")
 
     def manifest_text():
         return "\n".join([
@@ -860,13 +1037,20 @@ def self_test():
         return {"fragments": {"a.txt": [
             {"span": [0, source_len], "state": "mapped", "record": bi_candidate()}]}}
 
-    def snapshot(machine):
-        """A byte snapshot of the isolation-sensitive inputs (manifest, counters, indexes) for a
-        before/after comparison, excluding anything under imports/."""
+    def snapshot(machine, include_imports=True):
+        """A byte snapshot of the machine tree for a before/after comparison. With include_imports=False it
+        covers only the ACTIVE store (manifest, counters, indexes, archive, version/worklog), excluding the
+        imports/ staging area, so an active-store-unchanged assertion can allow the new imports/<run-id>/
+        subtree while still pinning that nothing outside imports/ changed (F1/F11.3). Default INCLUDES
+        imports/ so an out-of-run-dir write becomes visible."""
         snap = {}
         for p in sorted(machine.rglob("*")):
-            if p.is_file() and "imports" not in p.relative_to(machine).parts:
-                snap[str(p.relative_to(machine))] = p.read_bytes()
+            if not p.is_file():
+                continue
+            rel = p.relative_to(machine)
+            if not include_imports and "imports" in rel.parts:
+                continue
+            snap[str(rel)] = p.read_bytes()
         return snap
 
     try:
@@ -874,12 +1058,12 @@ def self_test():
         # unmapped fragment carrying all four provenance fields, active store + counters unchanged.
         src = "hello world body"
         root, machine = build_store(sources={"a.txt": src})
-        before = snapshot(machine)
+        before = snapshot(machine, include_imports=False)
         rows = [{"span": [0, 5], "state": "mapped", "record": bi_candidate()},
                 {"span": [5, len(src)], "state": "unmapped"}]
         res = stage_import(root, ["a.txt"], {"fragments": {"a.txt": rows}}, now=NOW, run_nonce=NONCE)
         check("1-positive-clean", res.verdict == 0)
-        check("1-run-id-grammar", bool(res.run_id and _RUN_ID_RE.match(res.run_id)))
+        check("1-run-id-grammar", bool(res.run_id and INDEP_RUN_ID_RE.match(res.run_id)))
         check("1-migration-incomplete", res.migration_incomplete is True)
         run_dir = machine / "imports" / (res.run_id or "MISSING")
         check("1-run-dir-exists", run_dir.is_dir())
@@ -892,7 +1076,12 @@ def self_test():
             check("1-lf-provenance", all(k in rec0 for k in
                   ("source_path", "source_digest", "span", "run_id", "body")))
             check("1-lf-body", rec0["body"] == src[5:])
-        check("1-store-unchanged", snapshot(machine) == before)
+        check("1-store-unchanged", snapshot(machine, include_imports=False) == before)
+        # F1/F11.3: the ONLY new entry under imports/ is this run's dir (the staging root plus one run
+        # dir); nothing outside imports/<run-id>/ was written, and no active index/counter/archive byte
+        # changed (asserted above with include_imports=False).
+        imports_children = sorted(d.name for d in (machine / "imports").iterdir())
+        check("1-only-run-dir-under-imports", imports_children == [res.run_id])
         check("1-two-ids", len(res.staged_ids) == 2)
 
         # 2: determinism: identical inputs give a byte-identical id; a different nonce gives a different id.
@@ -1045,10 +1234,16 @@ def self_test():
               stage_import(root24, ["a.txt"], vplan, now=NOW, run_nonce=NONCE).verdict == 2)
 
         # 17: a duplicate whose target names no existing record -> verdict 1; one that resolves -> clean.
+        # F11.4: the active record is a fully valid backlog_item (all envelope fields), so the "clean"
+        # fixture is a genuine store, asserted with validate_record.
+        valid_bi_index = ('schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "backlog_item"\n'
+                          'status = "open"\ntitle = "x"\ncreated_at = "2026-01-01T00:00:00Z"\n'
+                          'updated_at = "2026-01-01T00:00:00Z"\nactor = { kind = "maintainer" }\n')
+        check("17-active-record-valid", _opf_schema.validate_record(
+            tomllib.loads(valid_bi_index)["record"][0], expected_type="backlog_item",
+            specs=_roster()).status == _opf_store.VALID)
         root25, machine25 = build_store(sources={"a.txt": src}, counters="BI=1,LF=0,WL=0",
-                                        extra={"backlog_item.index.toml":
-                                               'schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "backlog_item"\n'
-                                               'status = "open"\ntitle = "x"\n'})
+                                        extra={"backlog_item.index.toml": valid_bi_index})
         dup_bad = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
                                             "target": "BI-999"}]}}
         check("17-duplicate-dangling-finding",
@@ -1060,9 +1255,13 @@ def self_test():
 
         # 18: a worklog candidate minted INTO an already-released span -> verdict 1 via the release gate;
         # minted into the unreleased tail -> clean.
+        # F8: a GENUINELY valid ledger (no unknown `covers` release key; coverage_digest carries the
+        # mandatory sha256:<64 hex> prefix), so 18-worklog-tail-clean is clean for the right reason.
         version_text = ('schema = 1\n\n[[release]]\nversion = "1.0.0"\ndate = "2026-01-01T00:00:00Z"\n'
-                        'worklog_span = ["WL-1", "WL-5"]\ncovers = "1.0.0"\n'
-                        'coverage_digest = "' + ("0" * 64) + '"\n')
+                        'worklog_span = ["WL-1", "WL-5"]\n'
+                        'coverage_digest = "sha256:' + ("0" * 64) + '"\n')
+        check("18-ledger-valid", _opf_release.validate_version(
+            tomllib.loads(version_text)).status == _opf_release.VALID)
         wl_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]},
                    "worklog": [{"kind": "added", "summary": "imported note",
                                 "actor": {"kind": "importer"}}]}
@@ -1076,6 +1275,130 @@ def self_test():
         # WL high-water 5 -> minted WL-6, in the unreleased tail: clean.
         resw2 = stage_import(root27, ["a.txt"], wl_plan, now=NOW, run_nonce=NONCE)
         check("18-worklog-tail-clean", resw2.verdict == 0)
+
+        # F2: the post-claim re-check consults the SAME union helper (_uniqueness_union), excluding this
+        # run's own dir (skip_run_id) so it does not self-collide on its just-written indexes. Drive the
+        # helper directly (a true concurrent race is not single-process reproducible; residual disclosed in
+        # the module docstring). The integration proof that skip_run_id is honoured is test 1: without it,
+        # the re-check would see this run's own on-disk BI-1 twice and turn the clean stage into verdict 2.
+        sib_run = "imp-20260101T000000Z-0000000000000000"
+        sibx = {"imports/{}/candidate/backlog_item.index.toml".format(sib_run):
+                'schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "backlog_item"\nstatus = "open"\ntitle = "x"\n'}
+        rootA, machineA = build_store(sources={"a.txt": src}, extra=sibx)
+        resolA = _opf_store.resolve_store(rootA)
+        fdA = _opf_store._open_store_root_fd(resolA.store_root, resolA.pointer_source != "default")
+        try:
+            hit = _opf_schema.check_unique_ids(
+                _uniqueness_union(fdA, resolA.machine_rel, _roster(), ["BI-1"], skip_run_id=None))
+            miss = _opf_schema.check_unique_ids(
+                _uniqueness_union(fdA, resolA.machine_rel, _roster(), ["BI-1"], skip_run_id=sib_run))
+        finally:
+            os.close(fdA)
+        check("F2-recheck-detects-on-disk-collision", bool(hit))
+        check("F2-recheck-skips-own-run", not miss)
+
+        # F3: an id in a DIFFERENT active index than its minting type is seen by the whole-store union.
+        rootF3, machineF3 = build_store(sources={"a.txt": src},
+                                        extra={"done.index.toml": 'schema = 1\n\n[[record]]\nid = "BI-1"\n'})
+        resF3 = stage_import(rootF3, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+        check("F3-cross-index-collision-finding", resF3.verdict == 1)
+        check("F3-cross-index-no-run", not (machineF3 / "imports").exists())
+
+        # F4: a SYMLINKED sibling run is CANNOT-EVALUATE (fail-closed), never silently dropped.
+        realsib = base / "real-sibling"
+        (realsib / "candidate").mkdir(parents=True)
+        (realsib / "candidate" / "backlog_item.index.toml").write_text(
+            'schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "backlog_item"\nstatus = "open"\ntitle = "x"\n',
+            encoding="utf-8")
+        rootF4, machineF4 = build_store(sources={"a.txt": src})
+        (machineF4 / "imports").mkdir()
+        os.symlink(str(realsib), str(machineF4 / "imports" / sib_run))
+        check("F4-symlink-sibling-cannot-eval",
+              stage_import(rootF4, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # F5: a present-but-contract-malformed sibling index is CANNOT-EVALUATE, not zero records; an
+        # explicit empty index (schema = 1, record = []) still reads as zero and stages clean.
+        def _sib_index(text):
+            return {"imports/{}/candidate/backlog_item.index.toml".format(sib_run): text}
+        rootF5a, mF5a = build_store(sources={"a.txt": src}, extra=_sib_index("schema = 2\n"))
+        check("F5-bad-schema-cannot-eval",
+              stage_import(rootF5a, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+        rootF5b, mF5b = build_store(sources={"a.txt": src}, extra=_sib_index("schema = 1\n"))
+        check("F5-missing-record-cannot-eval",
+              stage_import(rootF5b, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+        rootF5c, mF5c = build_store(sources={"a.txt": src}, extra=_sib_index("schema = 1\nrecord = []\n"))
+        check("F5-empty-index-clean",
+              stage_import(rootF5c, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 0)
+
+        # F6: fragment bodies are extracted from RAW BYTES then decoded. Source "éX" (bytes c3 a9 58):
+        # mapped [0,2] (the é), quarantine [2,3] (X) -> the staged legacy_fragment body is "X".
+        eX = "éX"   # 3 UTF-8 bytes
+        rootF6, mF6 = build_store(sources={"a.txt": eX})
+        f6_plan = {"fragments": {"a.txt": [
+            {"span": [0, 2], "state": "mapped", "record": bi_candidate()},
+            {"span": [2, 3], "state": "unmapped"}]}}
+        resF6 = stage_import(rootF6, ["a.txt"], f6_plan, now=NOW, run_nonce=NONCE)
+        check("F6-byte-span-clean", resF6.verdict == 0)
+        if resF6.run_id:
+            lfp = mF6 / "imports" / resF6.run_id / "fragments" / "legacy_fragment.index.toml"
+            check("F6-byte-span-body-X",
+                  lfp.is_file() and tomllib.loads(lfp.read_text())["record"][0]["body"] == "X")
+        # a span splitting the multi-byte é ([0,1]) is refused fail-closed (not silently emptied).
+        rootF6b, mF6b = build_store(sources={"a.txt": eX})
+        f6b_plan = {"fragments": {"a.txt": [
+            {"span": [0, 1], "state": "unmapped"}, {"span": [1, 3], "state": "unmapped"}]}}
+        check("F6-split-multibyte-finding",
+              stage_import(rootF6b, ["a.txt"], f6b_plan, now=NOW, run_nonce=NONCE).verdict == 1)
+
+        # F7: a FULLY mapped source's full original content is preserved in the run (spec 14.2), under
+        # sources/. The marker appears in the preserved-source artefact, which pre-fix exists nowhere.
+        marker = "UNIQUE-LEGACY-BODY-7f1c9a"
+        rootF7, mF7 = build_store(sources={"a.txt": marker})
+        resF7 = stage_import(rootF7, ["a.txt"], plan_mapped(len(marker)), now=NOW, run_nonce=NONCE)
+        check("F7-fully-mapped-clean", resF7.verdict == 0)
+        if resF7.run_id:
+            run_dir7 = mF7 / "imports" / resF7.run_id
+            src_dir7 = run_dir7 / "sources"
+            hits = [p for p in run_dir7.rglob("*") if p.is_file() and marker.encode() in p.read_bytes()]
+            check("F7-source-preserved",
+                  src_dir7.is_dir() and bool(hits) and all(p.parent == src_dir7 for p in hits))
+
+        # F8: a STRUCTURALLY INVALID ledger (unknown `covers` release key + prefix-less coverage_digest)
+        # with a worklog candidate -> CANNOT-EVALUATE, even when the boundary check alone would pass.
+        invalid_version_text = ('schema = 1\n\n[[release]]\nversion = "1.0.0"\n'
+                                'date = "2026-01-01T00:00:00Z"\nworklog_span = ["WL-1", "WL-5"]\n'
+                                'covers = "1.0.0"\ncoverage_digest = "' + ("0" * 64) + '"\n')
+        rootF8, mF8 = build_store(counters="BI=0,LF=0,WL=5", sources={"a.txt": src},
+                                  extra={"version.toml": invalid_version_text})
+        check("F8-invalid-ledger-cannot-eval",
+              stage_import(rootF8, ["a.txt"], wl_plan, now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # F9: a `target` on a mapped/split row is contradictory -> a finding, nothing staged.
+        f9_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                                            "record": bi_candidate(), "target": "BI-999"}]}}
+        rootF9, mF9 = build_store(sources={"a.txt": src})
+        resF9 = stage_import(rootF9, ["a.txt"], f9_plan, now=NOW, run_nonce=NONCE)
+        check("F9-mapped-target-finding", resF9.verdict == 1)
+        check("F9-mapped-target-no-run", not (mF9 / "imports").exists())
+
+        # F10: an accepted lexical internal '..' source (sub/../a.txt) -> verdict 2, NO uncaught raise.
+        rootF10, mF10 = build_store(sources={"a.txt": src})
+        check("F10-internal-dotdot-cannot-eval",
+              stage_import(rootF10, ["sub/../a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # F11.1: apply_ops must not write THROUGH a symlink (fd-relative, no-follow). A run-id symlink to an
+        # external dir is refused and the external dir is never written into. Positive-property vector: an
+        # unsafe path-based writer would resolve the link and populate the target, failing this assertion.
+        rootS, machineS = build_store(sources={"a.txt": src})
+        rid_s = stage_import(rootS, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).run_id
+        shutil.rmtree(machineS / "imports")
+        external = base / "external-link-target"
+        external.mkdir()
+        (machineS / "imports").mkdir()
+        os.symlink(str(external), str(machineS / "imports" / rid_s))
+        resS = stage_import(rootS, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+        check("F11.1-symlink-run-dir-refused", resS.verdict == 2)
+        check("F11.1-symlink-target-untouched", list(external.iterdir()) == [])
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
