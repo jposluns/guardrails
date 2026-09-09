@@ -113,12 +113,15 @@ _SCALAR_TYPES = (str, bool, int, float,
 # output that would exceed this ceiling is a fail-closed EmitError. Canonical headers repeat their full
 # dotted path, so a deep chain's output is quadratic in its depth even from a small resident model, and
 # this caps that output, never the structure. Accounting is per appended line (len(utf-8) + 1 for the LF
-# that "\n".join adds), exact for the final text. Disclosed residuals: (1) a single line's string (one
-# header or one escaped scalar) is assembled before it is charged, so peak transient memory can exceed
-# the ceiling by roughly the largest single scalar or key already resident in the caller's model; (2) the
-# empty document's single trailing LF is charged as 0 bytes (immaterial at any real ceiling); (3) a
-# MemoryError from a model too large to hold is not caught here (that is an environment failure, surfaced
-# raw rather than dressed as a document reject). Any reduction of this ceiling is a maintainer decision.
+# that "\n".join adds), exact for the final text. Disclosed residuals: (1) a single line (one header or
+# one escaped scalar) is assembled just before it is charged, so peak transient memory can exceed the
+# ceiling by roughly one rendered line: a header line, whose length is its full dotted path, or one
+# escaped scalar. The scheduler renders each header at append time and no longer pre-materializes one
+# header string per array-of-tables element, so a wide array of tables adds no transient spike of K times
+# the header length; (2) the empty document's single trailing LF is charged as 0 bytes (immaterial at any
+# real ceiling); (3) a MemoryError from a model too large to hold is not caught here (that is an
+# environment failure, surfaced raw rather than dressed as a document reject). Any reduction of this
+# ceiling is a maintainer decision.
 _MAX_EMIT_BYTES = 64 * 1024 * 1024
 
 
@@ -264,8 +267,9 @@ def _emit_table(table, path, lines):
 
     def _append(line):
         # Charge each appended line as len(utf-8) + 1 for the LF that "\n".join adds for it; this sum is
-        # exact for the final text (a scalar/key string is assembled before it is charged, so peak
-        # transient memory can exceed the ceiling by roughly one such value: a disclosed residual).
+        # exact for the final text (a single line, scalar, key, or header, is assembled just before it is
+        # charged, so peak transient memory can exceed the ceiling by roughly one such line: a disclosed
+        # residual).
         nonlocal total
         total += len(line.encode("utf-8")) + 1
         if total > _MAX_EMIT_BYTES:
@@ -273,8 +277,10 @@ def _emit_table(table, path, lines):
                 _MAX_EMIT_BYTES))
         lines.append(line)
 
-    # ("process", table, path): render one table body. ("block", header_line, table, path): emit one
-    # header and schedule its body. ("leave", id): the table with this id() has finished; unmark it.
+    # ("process", table, path): render one table body. ("block", kind, header, table, path): emit one
+    # header, built from the shared dotted-path `header` string at the append moment (no per-element header
+    # string is pre-materialized), and schedule its body. ("leave", id): the table with this id() has
+    # finished; unmark it.
     stack = [("process", table, path)]
     active = set()  # id() of every table currently on the ancestor chain, for cycle detection
     while stack:
@@ -284,10 +290,10 @@ def _emit_table(table, path, lines):
             active.discard(frame[1])
             continue
         if tag == "block":
-            _, header_line, tbl, child_path = frame
+            _, kind, header, tbl, child_path = frame
             if lines:
                 _append("")
-            _append(header_line)
+            _append(("[[{}]]" if kind == "aot" else "[{}]").format(header))
             stack.append(("process", tbl, child_path))
             continue
         _, tbl, pth = frame  # a "process" frame
@@ -317,16 +323,18 @@ def _emit_table(table, path, lines):
             _append("{} = {}".format(_render_key(key), rendered))
         # Build block frames in the exact order the recursion emitted them (sub-tables and array-of-table
         # elements, sorted by key, elements in positional order), then push them reversed so the LIFO
-        # stack pops them back into that forward order.
+        # stack pops them back into that forward order. Each frame carries the ONE shared dotted-path
+        # `header` string (and the one child_path list), not a per-element formatted header; the bracketed
+        # header line is rendered at append time, so a wide array of tables materializes no K header copies.
         blocks = []
         for key, value, kind in sorted(nested, key=lambda t: t[0]):
             child_path = pth + [key]
             header = ".".join(_render_key(p) for p in child_path)
             if kind == "table":
-                blocks.append(("block", "[{}]".format(header), value, child_path))
+                blocks.append(("block", "table", header, value, child_path))
             else:  # an array of tables: one [[header]] block per element
                 for element in value:
-                    blocks.append(("block", "[[{}]]".format(header), element, child_path))
+                    blocks.append(("block", "aot", header, element, child_path))
         for block in reversed(blocks):
             stack.append(block)
 
@@ -352,15 +360,26 @@ def _model_equal(a, b):
     The comparison is an explicit-stack traversal, not native recursion, so an arbitrarily deep pair is
     compared without a RecursionError. Every clause below is applied per pair in the same order the
     recursive form used (bool-symmetric first, then dict, then list, then type, then ==), and the first
-    inequality short-circuits to False. Caller contract: both arguments are finite acyclic models. Every
-    in-module caller satisfies this (emit_checked reparses with tomllib, which yields a finite acyclic
-    model, and emit() has already rejected a cyclic input before this runs), so no in-module call can
-    loop. A direct external call with a cyclic argument does not terminate, exactly as the prior
-    recursive form raised RecursionError on one; identity memoization would change the equality semantics
-    for no in-module caller and is deliberately omitted."""
+    inequality short-circuits to False. An `x is y` identity short-circuit heads the loop: it bounds the
+    case where the SAME object is reached as both members of a pair, a shared DAG passed as both arguments
+    (which the guardless walk expands exponentially over the shared nodes) or a cyclic object passed as
+    both arguments (which it walks without ever terminating, whereas the prior recursive form terminated by
+    raising RecursionError). Both cases are unreachable in-module: emit_checked compares the input against a
+    fresh tomllib tree (a finite acyclic model, and emit() has already rejected a cyclic input before this
+    runs), so no in-module call can loop; the guard is cheap defence-in-depth for a direct external call.
+    The guard treats an identical object as equal, which matches == for every value emit admits and never
+    changes an in-module result: the reparse is a tree distinct from the input, so a shared container is
+    never identical across the two trees, and where an interned scalar (a small int, an interned str, True,
+    False) is identical across them it is reflexively equal, so the verdict is unchanged. The one value
+    whose identity does not imply == is a NaN (a shared NaN would be treated as equal though == calls it
+    unequal), but emit rejects a non-finite float before this function runs, so no NaN can reach it
+    in-module. Identity MEMOIZATION of distinct-but-equal pairs would change the equality semantics for no
+    in-module caller and is deliberately omitted."""
     stack = [(a, b)]
     while stack:
         x, y = stack.pop()
+        if x is y:  # the identical object is equal to itself; bounds a shared-DAG/cyclic both-args walk
+            continue
         if isinstance(x, bool) or isinstance(y, bool):
             if not (isinstance(x, bool) and isinstance(y, bool) and x == y):
                 return False
@@ -592,8 +611,23 @@ def self_test():
     shared = {"x": 1}
     _round_trips({"p": shared, "q": shared, "rows": [shared, shared]}, "shared-dag")
 
-    # --- golden byte vector: a full parity lock over sorting, separators, empties, and dotted headers ---
-    # Built in a deliberately noncanonical insertion order; the literal was captured from this emitter.
+    # MINOR-4 identity-guard pin: two DISTINCT lists that each hold the SAME deep shared object collapse
+    # under the `x is y` short-circuit, so _model_equal returns True in O(nodes). Each level is a diamond
+    # (one child shared under two keys); without the short-circuit the guardless walk expands the diamonds
+    # (2**64 pair-pushes) and does not return promptly, so removing the guard is caught here. Hermetic: no
+    # timers, no wall-clock, no host state; under the guard this runs in a handful of iterations.
+    shared_sub = {"leaf": 1}
+    for _ in range(64):
+        shared_sub = {"l": shared_sub, "r": shared_sub}
+    if not _model_equal([shared_sub, shared_sub], [shared_sub, shared_sub]):
+        failures.append("identity-guard/shared-dag: a shared DAG compared unequal to itself")
+
+    # --- golden byte vectors: parity locks over sorting, separators, empties, and dotted headers --------
+    # The leaf-rooted golden below (built in a deliberately noncanonical insertion order; the literal was
+    # captured from this emitter) has root-level leaf key-values, so it exercises the separator-PRESENT
+    # case (a blank line before a block that follows leaves). The leafless-rooted golden further down
+    # exercises the top-of-document separator-ABSENT case, together pinning the if-lines branch in both its
+    # taken and not-taken states.
     golden = (
         'a = [3, 1]\n'
         'b = true\n'
@@ -630,6 +664,30 @@ def self_test():
     if emit_checked(golden_doc) != emit(golden_doc):
         failures.append("golden/emit-checked-parity: emit_checked text differs from emit text")
 
+    # MINOR-1 pin: an array of tables under a multi-component dotted path renders each [[a.b]] header from
+    # the ONE shared dotted-path string at append time. A mutant that mis-orders, mangles, or drops the
+    # deferred [[header]] rendering (or loses the shared-header reference) produces different bytes, so
+    # this golden fails. No existing byte-pinned vector places an array of tables under a dotted path (the
+    # golden and coverage aots are single-component: [[rows]], [[release]]).
+    aot_dotted_doc = {"a": {"b": [{"x": 1}, {"y": 2}]}}
+    aot_dotted_golden = '[a]\n\n[[a.b]]\nx = 1\n\n[[a.b]]\ny = 2\n'
+    if emit(aot_dotted_doc) != aot_dotted_golden:
+        failures.append("golden/aot-dotted-path: an array of tables under a dotted path is not "
+                        "byte-identical to the pinned golden")
+    if emit_checked(aot_dotted_doc) != emit(aot_dotted_doc):
+        failures.append("golden/aot-dotted-path/emit-checked-parity: emit_checked text differs from emit")
+
+    # A leafless-root golden: the root table has NO leaf key-values, so the FIRST emitted line is a block
+    # header at top-of-document and the if-lines separator branch is exercised in its not-taken (no leading
+    # blank) state. An `if True:` mutant of that branch would emit a leading blank line here while the rest
+    # of the self-test stays green, so this vector turns that mutant red.
+    golden2_doc = {"outer": {"k": 1}}
+    golden2 = '[outer]\nk = 1\n'
+    if emit(golden2_doc) != golden2:
+        failures.append("golden/leafless-root: emit output is not byte-identical to the pinned golden")
+    if emit_checked(golden2_doc) != emit(golden2_doc):
+        failures.append("golden/leafless-root/emit-checked-parity: emit_checked text differs from emit")
+
     # --- output ceiling: the exact byte bound fails closed, and the production ceiling is restored ------
     global _MAX_EMIT_BYTES
     budget_doc = {"a": "x"}  # emits exactly 8 bytes: 'a = "x"\n'
@@ -650,6 +708,30 @@ def self_test():
         _MAX_EMIT_BYTES = saved_ceiling
     if _MAX_EMIT_BYTES != saved_ceiling:
         failures.append("budget/restore: the production ceiling was not restored")
+
+    # Multibyte budget boundary: the ceiling charges ENCODED bytes, not characters. This line carries a
+    # 2-byte character (U+00E9), so a len(line) mutant of the charge (line 270) under-counts and this leg
+    # fails. The emitted document 'a = "\u00e9"\n' is 9 bytes but 8 characters; \u00e9 is not escaped
+    # (_escape_basic leaves it literal), so the 2-byte char reaches the output line.
+    mb_doc = {"a": "\u00e9"}
+    if len(emit(mb_doc).encode("utf-8")) != 9:
+        failures.append("budget/multibyte-premise: the multibyte probe did not emit 9 bytes")
+    saved_ceiling_mb = _MAX_EMIT_BYTES
+    try:
+        _MAX_EMIT_BYTES = 9
+        try:
+            emit(mb_doc)
+        except EmitError as exc:
+            failures.append("budget/multibyte-at-ceiling: a document exactly at the ceiling was "
+                            "rejected ({})".format(exc))
+        _MAX_EMIT_BYTES = 8
+        if not _rejects(mb_doc):
+            failures.append("budget/multibyte-over-ceiling: a document one byte over the ceiling was not "
+                            "rejected (byte length vs character length)")
+    finally:
+        _MAX_EMIT_BYTES = saved_ceiling_mb
+    if _MAX_EMIT_BYTES != saved_ceiling_mb:
+        failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
@@ -713,6 +795,24 @@ def self_test():
                 failures.append("reject/{}: was accepted but is outside the subset".format(name))
         except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
             failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+
+    # The table-cycle rejects must be caught by the active-chain cycle check specifically, not by the
+    # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With the
+    # cycle check at line 294 removed, these instead grow the dotted header until _MAX_EMIT_BYTES raises a
+    # different (ceiling) message, so this leg turns red, distinguishing cycle detection from budget
+    # exhaustion. self-referential-list is excluded on purpose: it is rejected by _classify_list as a
+    # nested array, so its message legitimately does not name a cycle. Each leg terminates: the cycle check
+    # rejects at once, and even the neutralized-mutant path exhausts the 64 MiB ceiling in bounded work.
+    for name, document in (("self-referential-table", cyclic_table),
+                           ("indirect-cycle", cyclic_a),
+                           ("self-referential-aot", cyclic_aot)):
+        try:
+            emit(document)
+            failures.append("cycle-message/{}: a cyclic document was not rejected".format(name))
+        except EmitError as exc:
+            if "cyclic" not in str(exc):
+                failures.append("cycle-message/{}: rejected but the message does not name a cyclic "
+                                "reference ({})".format(name, exc))
 
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
