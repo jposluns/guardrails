@@ -11,6 +11,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
   bash_absolute_paths PreToolUse  abspth  ask on a relative cd/pushd operand or redirect target in Bash
+  git_explicit_binding PreToolUse expbnd ask on an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
   branch_root         PreToolUse  brnrot  block branch creation from an orphaned start point
   gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
@@ -27,8 +28,8 @@ blocking error whose stderr is fed back to Claude. The Stop payload carries the 
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
 Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
-deliberate boundary posture is stated next), gensrc_guard (a second stated exception, below), and
-commit_msg_subst (a third stated exception, below). A
+deliberate boundary posture is stated below), gensrc_guard (a second stated exception, below), and
+commit_msg_subst (a third stated exception, below), and git_explicit_binding (a fourth, below). A
 fail-closed control that cannot read the input it is meant
 to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
 through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
@@ -47,6 +48,11 @@ the failure surfaces as a gate the human must clear and can never read as clean.
 commit_msg_subst (sectvl) is the THIRD stated exception: its strongest normal finding is an ASK, so a
 missing or unreadable command string also fails safe to ASK rather than being punished more harshly than
 a confirmed substitution. Only a missing tool_name denies under the shared fail-closed contract; a
+mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
+
+git_explicit_binding (expbnd) is the FOURTH stated exception. Its strongest normal finding is an ASK, so
+an absent or unreadable command string fails safe to ASK rather than being punished more harshly than a
+confirmed ambient binding. Only a missing tool_name denies under the shared fail-closed contract; a
 mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
 
 git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
@@ -200,7 +206,7 @@ def _deny_missing_tool_name(rule):
 
 # --- shared raw-command tokenizer (quote/redirect-aware) ---------------------------------------------
 # ONE raw-character lexical pass over the Bash command, shared by every lexical Bash hook (diff-source,
-# commit-identity, protected-line, gate-weakening, and git-discard's lossy scan). It decides quoting and
+# commit-identity, protected-line, gate-weakening, git-explicit-binding, and git-discard's lossy scan). It
 # REDIRECTION from RAW character positions and quote provenance BEFORE any token stream exists, so a shell
 # redirection ANYWHERE in a command (leading, interspersed, or trailing: 'git >/dev/null commit', '>out
 # pytest') is recorded as redirect metadata and REMOVED from the argv the handlers judge, closing the
@@ -601,8 +607,8 @@ def _segments(command):
     quote-decoded words with shell REDIRECTION removed (so a leading/interspersed/trailing redirect no
     longer pollutes the token stream) and sep_after the ending operator or "". Raises ValueError on a
     parse error or unsupported construct so callers fall back conservatively. Existing consumers
-    (protected_line, gate_weakening, git_discard's lossy scan, find_ai_authorship) read redirect-free
-    argv automatically; diff_source_pretool uses the richer _Segment records directly."""
+    (protected_line, gate_weakening, git_explicit_binding, git_discard, find_ai_authorship) read
+    redirect-free argv automatically; diff_source_pretool uses the richer _Segment records directly."""
     return [(seg.argv, seg.sep_after) for seg in _lex_command(command)]
 
 
@@ -1833,6 +1839,403 @@ def _split_pre_post(args):
         if a in _EOO_TOKENS:
             return args[:idx], args[idx + 1:], True
     return args, [], False
+
+
+# --- expbnd: explicit git target and enumerated scope -----------------------------------------------
+_GIT_MUTATING_VERBS = frozenset((
+    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "config", "init",
+    "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
+    "switch", "tag", "update-index", "update-ref", "worktree"))
+_EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
+# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53; the long
+# universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
+# by the eb-e57..e147 differential self-test and an out-of-suite real-git differential; a future git
+# option-table change, such as a new write option absent from the table, is a DISCLOSED drift residual
+# caught by re-validating the table on a git upgrade, with a dedicated option-table drift-tripwire gate a
+# tracked follow-up, GD-158-T7). The classifier is FAIL-SAFE by
+# construction: it DEFAULTS to MUTATING and returns READ only when every token positively resolves to a
+# recognized read-neutral role and no create/rename/delete TARGET is present (before OR after '--'). A
+# missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
+# spelling form; a missed READ is only an over-ASK (safe), so READ recognition may be incomplete. Roles,
+# one char per long option: 'W' write (immediate mutating); 'L' list trigger (no value); 'V' tag verify
+# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'D'
+# display taking a REQUIRED value but NOT setting list mode (a following name still creates); 'O' optional
+# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). The long
+# universe is a conservative SUPERSET of git's real per-subcommand option table (hidden aliases, the
+# deprecated --set-upstream, and generated --no-* forms included): a MISSING entry could let a unique
+# prefix resolve to a read where real git sees a write or an ambiguity (a fail-open), while an EXTRA entry
+# only over-ASKs. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
+# --no-without, --no-show-current) are roled W: roling --no-list read would fail-open
+# 'git branch --list --no-list NAME' (a real create). Display negatives (--no-color, --no-sort, ...) are R
+# (no value, no mode; a positional beside them still catches the create).
+_GIT_REF_SPECS = {
+    "branch": {
+        "long": {
+            # W: write or write-capable. Any unique abbreviation of these resolves to W -> MUTATING.
+            "--delete": "W", "--no-delete": "W", "--move": "W", "--no-move": "W",
+            "--copy": "W", "--no-copy": "W", "--force": "W", "--no-force": "W",
+            "--track": "W", "--no-track": "W", "--set-upstream": "W",
+            "--set-upstream-to": "W", "--no-set-upstream-to": "W",
+            "--unset-upstream": "W", "--no-unset-upstream": "W",
+            "--edit-description": "W", "--no-edit-description": "W",
+            "--recurse-submodules": "W", "--no-recurse-submodules": "W",
+            "--no-list": "W", "--no-show-current": "W",
+            "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
+            # L / F: list trigger and filters (set list mode; F takes a value, optional only when last).
+            "--list": "L",
+            "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
+            "--points-at": "F", "--with": "F", "--without": "F",
+            # D: required value, NO list mode (a following name creates).
+            "--format": "D", "--sort": "D",
+            # O: optional '='-attached value only (never consumes a following token).
+            "--color": "O", "--abbrev": "O", "--column": "O",
+            # R: plain read, no value, no list mode (a name beside it -> positional -> create).
+            "--all": "R", "--no-all": "R", "--remotes": "R", "--no-remotes": "R",
+            "--verbose": "R", "--no-verbose": "R", "--quiet": "R", "--no-quiet": "R",
+            "--show-current": "R", "--ignore-case": "R", "--no-ignore-case": "R",
+            "--omit-empty": "R", "--no-omit-empty": "R",
+            "--no-color": "R", "--no-abbrev": "R", "--no-column": "R",
+            "--no-format": "R", "--no-sort": "R",
+            "--create-reflog": "R", "--no-create-reflog": "R", "--help": "R",
+        },
+        "short_write": frozenset("dDmMcCutf"),  # d/D/m/M/c/C delete/move/copy; u upstream; t track; f force
+        "short_list": frozenset("l"),           # -l list
+        "short_read": frozenset("arvqih"),       # a/r all/remotes; v verbose; q quiet; i ignore-case; h help
+        "short_optnum": frozenset(),             # branch has no -n
+    },
+    "tag": {
+        "long": {
+            # W
+            "--annotate": "W", "--no-annotate": "W", "--sign": "W", "--no-sign": "W",
+            "--message": "W", "--no-message": "W", "--file": "W", "--no-file": "W",
+            "--local-user": "W", "--no-local-user": "W", "--force": "W", "--no-force": "W",
+            "--delete": "W", "--no-delete": "W", "--edit": "W", "--no-edit": "W",
+            "--cleanup": "W", "--no-cleanup": "W", "--trailer": "W", "--no-trailer": "W",
+            "--no-list": "W", "--no-verify": "W",
+            "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
+            # V / L / F
+            "--verify": "V", "--list": "L",
+            "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
+            "--points-at": "F", "--with": "F", "--without": "F",
+            # D / O / R
+            "--format": "D", "--sort": "D",
+            "--color": "O", "--column": "O",
+            "--ignore-case": "R", "--no-ignore-case": "R", "--omit-empty": "R", "--no-omit-empty": "R",
+            "--no-color": "R", "--no-column": "R", "--no-format": "R", "--no-sort": "R",
+            "--create-reflog": "R", "--no-create-reflog": "R", "--help": "R",
+        },
+        "short_write": frozenset("asmFfedu"),  # a annotate; s sign; m message; F file; f force; e edit; d delete; u local-user
+        "short_list": frozenset("lv"),          # l list; v verify (verify is a READ mode)
+        "short_read": frozenset("ih"),          # i ignore-case; h help
+        "short_optnum": frozenset("n"),         # -n[N]: list-implying, optional ATTACHED decimal
+    },
+}
+_GIT_CONFIG_WRITE_FLAGS = frozenset((
+    "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
+    "-e", "--edit"))
+_EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
+_RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
+_RAW_EXPBND_MUTATE_RE = re.compile(
+    r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
+    r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
+_RAW_EXPBND_PRUNING_FETCH_RE = re.compile(
+    r"(?is)\bgit\b.*?\bfetch\b.*?(?:--prune(?:-tags)?\b|(?<!\S)-[^\s]*p)")
+_RAW_EXPBND_BREADTH_RE = re.compile(
+    r"(?is)\bgit\b.*?(?:\badd\b.*?(?:--all\b|(?<!\S)-[^\s]*A|(?<!\S)(?:\.|:/)(?!\S))|"
+    r"\bcommit\b.*?(?:--all\b|(?<!\S)-[^\s]*a))")
+_RAW_EXPBND_PUSH_RE = re.compile(r"(?is)\bgit\b.*?\bpush\b")
+
+
+def _is_abs_binding(value):
+    """A -C/--git-dir value counts as an explicit binding only when it is a non-empty ABSOLUTE path; a
+    relative or missing value still resolves against the ambient cwd and so is not a complete binding."""
+    return isinstance(value, str) and value != "" and _is_absolute(value)
+
+
+def _git_target_is_explicit(tokens):
+    """Whether git's global-option region carries a COMPLETE, ABSOLUTE explicit binding: an absolute -C
+    directory, or an absolute --git-dir (with or without --work-tree). A RELATIVE -C/--git-dir still
+    resolves against the ambient cwd, and a lone --work-tree without --git-dir does not name which
+    repository, so neither is a complete explicit binding; both leave the target ambient and are not
+    credited (they route to the same ASK a bare ambient mutation would)."""
+    i = _command_word_index(tokens) + 1
+    n = len(tokens)
+    dash_c = None
+    git_dir = None
+    while i < n:
+        token = tokens[i]
+        if not token.startswith("-"):
+            break  # the subcommand: the global-option region has ended
+        if token == "-C":
+            dash_c = tokens[i + 1] if i + 1 < n else None
+            i += 2
+            continue
+        if token in ("--git-dir", "--work-tree"):
+            if token == "--git-dir" and i + 1 < n:
+                git_dir = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith("--git-dir=") and token != "--git-dir=":
+            git_dir = token.split("=", 1)[1]
+            i += 1
+            continue
+        if "=" not in token and token in _GIT_ARG_OPTS:
+            i += 2
+            continue
+        i += 1
+    return _is_abs_binding(dash_c) or _is_abs_binding(git_dir)
+
+
+def _resolve_long_role(name, long_roles):
+    """Resolve a '--<name>' option to its role. Exact match first (git's own rule), else a UNIQUE prefix
+    over the FULL universe (every key, W entries included). Zero matches (unknown) or two-or-more
+    (ambiguous, exactly what real git rejects) resolve to None, which the caller treats as MUTATING. The
+    universe MUST be a superset of git's real option table: a missing entry could let a prefix resolve
+    uniquely to a read where git sees a write or an ambiguity (a fail-open); the table is validated against
+    git 2.53 by the eb differential self-test and an out-of-suite real-git differential, with the drift
+    residual disclosed and a dedicated option-table drift-tripwire gate tracked as follow-up GD-158-T7."""
+    if name in long_roles:
+        return long_roles[name]
+    matches = [k for k in long_roles if k.startswith(name)]
+    return long_roles[matches[0]] if len(matches) == 1 else None
+
+
+def _short_cluster_verdict(chars, spec):
+    """Classify a clustered short-flag body (the chars after a single leading '-'), scanning EVERY char
+    left to right. A WRITE char short-circuits to 'MUT' before any attached value is reached, so
+    '-uorigin/main' and '-mMSG' are caught by their leading write char. A list char latches list mode. The
+    tag optnum char ('n') takes an optional ATTACHED decimal: trailing digits are its value and end the
+    cluster ('-n'/'-n1' -> list mode); a non-digit tail is malformed -> 'MUT'. An unknown char is
+    fail-safe 'MUT'. Returns 'MUT', 'LIST' (a list char or a valid -n[N] was seen), or 'READ' (only
+    read-neutral chars, no list trigger)."""
+    saw_list = False
+    idx = 0
+    while idx < len(chars):
+        c = chars[idx]
+        if c in spec["short_write"]:
+            return "MUT"
+        if c in spec["short_list"]:
+            saw_list = True
+            idx += 1
+            continue
+        if c in spec["short_read"]:
+            idx += 1
+            continue
+        if c in spec["short_optnum"]:
+            rest = chars[idx + 1:]
+            if rest and not rest.isdigit():
+                return "MUT"  # -n with a non-digit tail (e.g. -nf) is malformed
+            return "LIST"     # -n / -nN: list mode, the attached digits are consumed as its value
+        return "MUT"          # unknown short char -> fail-safe
+    return "LIST" if saw_list else "READ"
+
+
+def _git_ref_cmd_mutating(sub, args):
+    """Fail-safe branch/tag mutation classifier (GD-158 rounds 1-6 + tri-family synthesis). DEFAULTS to
+    MUTATING (return True); returns READ (return False) ONLY when every option token resolves to a known
+    non-W role with a parseable value form, every positional is absent or covered by list/verify mode, and
+    the post-'--' region is empty or covered by list/verify mode. Any unknown, ambiguous, or malformed form
+    routes to True. Consumed by git_explicit_binding only. See _GIT_REF_SPECS for the role tables."""
+    spec = _GIT_REF_SPECS[sub]
+    long_roles = spec["long"]
+    pre, post, _had = _split_pre_post(args)  # existing helper: splits at '--'/'--end-of-options'
+    list_mode = False
+    i, n = 0, len(pre)
+    while i < n:
+        tok = pre[i]
+        i += 1
+        if not tok.startswith("-") or tok == "-":
+            if not list_mode:
+                return True  # a bare positional is a create/rename/delete TARGET (fail-safe)
+            continue         # list/verify mode: the positional is a pattern or verify operand
+        if tok.startswith("--"):
+            name, sep, _val = tok[2:].partition("=")
+            role = _resolve_long_role("--" + name, long_roles)
+            if role is None or role == "W":
+                return True  # unknown / ambiguous prefix / write -> MUTATING
+            if role in ("L", "V"):
+                if sep:
+                    return True  # '=' on a no-value option is malformed -> MUTATING
+                list_mode = True
+            elif role == "F":
+                list_mode = True
+                if not sep:
+                    if i < n and not pre[i].startswith("-"):
+                        i += 1       # separate filter value consumed
+                    elif i < n:
+                        return True  # a dash-leading separate value cannot be certified -> MUTATING
+                    # at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
+            elif role == "D":
+                if not sep:
+                    if i < n and not pre[i].startswith("-"):
+                        i += 1       # separate display value consumed
+                    else:
+                        return True  # missing OR dash-leading required value -> MUTATING (closes D-3)
+            elif role == "R":
+                if sep:
+                    return True  # '=' on a no-value option -> MUTATING
+            # role "O": optional '='-attached value only; consumes NOTHING following, sets no mode
+        else:
+            verdict = _short_cluster_verdict(tok[1:], spec)
+            if verdict == "MUT":
+                return True
+            if verdict == "LIST":
+                list_mode = True
+    if post and not list_mode:
+        return True  # a create/rename/delete target placed after '--' (git accepts the target there)
+    return False     # every token read-neutral and no target present -> READ
+
+
+def _git_is_mutating(sub, args):
+    """Conservative git mutation classifier, with only enumerated read-only forms exempted."""
+    if sub == "fetch":
+        return any(a in ("--prune", "--prune-tags", "-p") or
+                   (a.startswith("-") and not a.startswith("--") and "p" in a[1:])
+                   for a in args)
+    if sub not in _GIT_MUTATING_VERBS:
+        return False
+    if sub == "branch":
+        return _git_ref_cmd_mutating("branch", args)
+    if sub == "tag":
+        return _git_ref_cmd_mutating("tag", args)
+    if sub == "stash":
+        return not args or args[0] not in ("list", "show")
+    if sub == "config":
+        if any(a == "-l" or a == "--list" or a.startswith("--get") for a in args):
+            return False
+        if any(a in _GIT_CONFIG_WRITE_FLAGS for a in args):
+            return True
+        return len([a for a in args if not a.startswith("-")]) >= 2
+    if sub == "worktree":
+        return not args or args[0] != "list"
+    if sub == "notes":
+        return not args or args[0] not in ("list", "show")
+    return True
+
+
+def _git_is_breadth(sub, args):
+    """Whether add/commit takes scope from the ambient whole tree rather than enumerated paths. Option
+    recognition STOPS at a '--' end-of-options marker, so a file literally named '--all'/'-A' after '--'
+    is an operand, not a breadth selector; a genuine whole-tree pathspec ('.'/':/'') still counts on
+    either side of the marker."""
+    if sub == "add":
+        pre, post, _had = _split_pre_post(args)
+        for arg in pre:
+            if arg in (".", ":/", "--all"):
+                return True
+            if arg.startswith("-") and not arg.startswith("--") and "A" in arg[1:]:
+                return True
+        return any(arg in (".", ":/") for arg in post)
+    if sub == "commit":
+        pre, _post, _had = _split_pre_post(args)
+        for arg in pre:
+            if arg == "--all":
+                return True
+            if arg.startswith("-") and not arg.startswith("--") and "a" in arg[1:]:
+                return True
+    return False
+
+
+def _expbnd_effective_tokens(tokens):
+    """Peel a leading env-assignment prefix and any run of BARE command/exec/builtin/env/sudo wrappers,
+    returning the tokens from the real command word onward so a wrapped 'command git ...'/'sudo git ...'
+    /'command cd ...' is judged like the bare form. A wrapper carrying its own option or assignment
+    ('env -i', 'env FOO=1', 'sudo -u u') stops the run and is left in place, a disclosed residual whose
+    option grammar is never guessed."""
+    idx = _command_word_index(tokens)
+    while idx < len(tokens):
+        if tokens[idx].rsplit("/", 1)[-1] not in _EXPBND_WRAPPER_WORDS:
+            break
+        nxt = idx + 1
+        if nxt >= len(tokens):
+            break
+        following = tokens[nxt]
+        if following.startswith("-") or _ENV_ASSIGN_RE.match(following):
+            break
+        idx = nxt
+    return tokens[idx:]
+
+
+def _expbnd_target_ask(verb):
+    reason = ("AIQT rule expbnd: a directory change in this command feeds a git '{}' with no explicit "
+              "target; the mutation binds to wherever the shell landed. Reissue with "
+              "'git -C /absolute/repo {} ...' or confirm the working directory is the intended "
+              "repository.".format(verb, verb))
+    return _ask(reason, "AIQT guardrail: confirm the repository bound to git {} (rule expbnd)."
+                .format(verb))
+
+
+def _expbnd_breadth_ask(verb):
+    reason = ("AIQT rule expbnd: git '{}' takes its scope from the whole ambient tree and this command "
+              "relocates or publishes it. Stage enumerated pathspecs instead of -A/-a/'.', or confirm "
+              "the whole-tree scope is intended.".format(verb))
+    return _ask(reason, "AIQT guardrail: confirm the whole-tree git {} scope (rule expbnd)."
+                .format(verb))
+
+
+def _expbnd_fallback(command):
+    """Conservative ASK fallback for visible in-scope pairs in an unparseable shell command."""
+    if (_RAW_EXPBND_CD_RE.search(command) and
+            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
+        return _expbnd_target_ask("mutation")
+    if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
+        return _expbnd_breadth_ask("breadth operation")
+    return _allow()
+
+
+def git_explicit_binding(data):
+    """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash, ASK-strongest."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("expbnd")
+    if tool != "Bash":
+        return _allow()
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command:
+        return _ask("AIQT rule expbnd: the Bash command was absent or unreadable, so its git target and "
+                    "scope could not be checked; confirm the explicit target and enumerated scope.",
+                    "AIQT guardrail: confirm the unreadable Bash command's target and scope (rule expbnd).")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _expbnd_fallback(command)
+
+    # A cd/pushd/popd SHIFTS the target out of the session cwd (popd lands on an unknowable stack-top
+    # directory, so it too confuses a following git segment). The shift confuses a git segment only when it
+    # PRECEDES it, and the breadth+publish hazard is a whole-tree breadth op PRECEDING a push (a push before
+    # the breadth op publishes only the pre-breadth state). So saw_dir_change and breadth_sub are read at the
+    # point each git segment is processed (segments iterate in command order), not accumulated and tested at
+    # the end: "git commit && cd /x" and "git push && git add -A" leave the mutation unconfused and are
+    # exempt, while "cd /x && git commit", "popd && git commit", and "git add -A && git push" are not. A shift reached
+    # only through a "||" (git runs only on the prior command's failure, so the cwd is unchanged) or a "|"
+    # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow.
+    saw_dir_change = False
+    breadth_sub = None
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        word = _command_word(eff)
+        if word in _CD_BUILTINS or word == "popd":
+            saw_dir_change = True
+            continue
+        if word != "git":
+            continue
+        sub, args = _git_sub_and_args(eff)
+        if sub is None:
+            continue
+        if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
+                and saw_dir_change):
+            return _expbnd_target_ask(sub)
+        if _git_is_breadth(sub, args) and saw_dir_change:
+            return _expbnd_breadth_ask(sub)
+        if sub == "push" and breadth_sub is not None:
+            return _expbnd_breadth_ask(breadth_sub)
+        if _git_is_breadth(sub, args):
+            breadth_sub = sub
+    return _allow()
 
 
 def _has_short(tokens, ch):
@@ -6827,6 +7230,14 @@ def orch_dispatch_ledger(data):
         tid = tool_input.get("task_id") or tool_input.get("taskId")
         if isinstance(tid, str) and tid:
             row = {"event": "complete", "task_id": tid, "tool": tool, "wake": True}
+        else:
+            # expbnd (explicit-binding-over-ambient-context): an async result with no authoritative
+            # identifier is SURFACED as unbound, never correlated to a dispatch by recency or arrival
+            # order. Non-blocking (this recorder never blocks), so a genuinely id-less read is flagged
+            # rather than silently accepted.
+            return (0, {"systemMessage": "AIQT rule expbnd: this TaskOutput carried no task_id, so its "
+                        "result is UNBOUND and cannot be tied to a dispatch; correlate it by the "
+                        "dispatch's own id, never by which task completed most recently."}, None)
     else:
         dispatch_tools = reg.get("dispatch_tools") if isinstance(
             reg.get("dispatch_tools"), list) else []
@@ -7925,6 +8336,7 @@ HANDLERS = {
     "commit_identity": commit_identity,
     "absolute_paths": absolute_paths,
     "bash_absolute_paths": bash_absolute_paths,
+    "git_explicit_binding": git_explicit_binding,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "branch_root": branch_root,
@@ -7959,6 +8371,7 @@ HANDLER_EVENT = {
     "commit_identity": PRETOOL,
     "absolute_paths": PRETOOL,
     "bash_absolute_paths": PRETOOL,
+    "git_explicit_binding": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,

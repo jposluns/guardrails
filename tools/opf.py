@@ -29,9 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest base/profile schema
 import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
 import _opf_release  # noqa: E402  U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
+import _opf_changelog  # noqa: E402  U5: changelog range-coverage + freeze gates over version.toml + CHANGELOG.md
 import _opf_check  # noqa: E402  U6: store-level integrity validator (validate_store; the opf doctor engine)
 import _opf_emit  # noqa: E402  U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
+import _opf_views  # noqa: E402  U4: deterministic view generators + the closed transform vocabulary
 import _opf_fuzz  # noqa: E402  adversarial input-hardening proof (membership/type-guard class closure)
+import _opf_import  # noqa: E402  U7: import staging (module + self-test; the live import verb stays unwired)
 
 EXIT_OK = 0
 EXIT_FINDING = 1
@@ -70,7 +73,10 @@ SELF_TESTS = (
     ("opf-store", _opf_store.self_test),
     ("opf-schema", _opf_schema.self_test),
     ("opf-release", _opf_release.self_test),
+    ("opf-changelog", _opf_changelog.self_test),
     ("opf-emit", _opf_emit.self_test),
+    ("opf-views", _opf_views.self_test),
+    ("opf-import", _opf_import.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-aggregator", _aggregator_self_test),

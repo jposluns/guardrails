@@ -363,9 +363,16 @@ class = "adopter-state"
 note = "The documented adopter vendoring location; reserved, never a pack-immutable set-equality member."
 
 # --- checkout byte stability (3.3): every concern-1 path is `text eol=lf` except these ------------------
+# The two vendored-marko exemptions appended below are byte-exact third-party provenance that cannot satisfy
+# the pack text canon while staying identical to upstream: marko/py.typed is a 0-byte PEP 561 marker (a text
+# newline would diverge from the pinned wheel bytes and the adapter manifest sha256), and the CommonMark
+# 0.31.2 spec-examples fixture ships upstream with no trailing newline (the conformance replay pins its exact
+# bytes). They are marked binary so git preserves their bytes verbatim and byte-canon does not canonicalize
+# them; their integrity stays pinned by tools/_vendor/marko-2.2.4.manifest.sha256 and the release manifest.
+# The remaining vendored files are canonical text and stay text eol=lf.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.4.zip"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.4.zip", "tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "tools/_vendor/marko/py.typed"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 

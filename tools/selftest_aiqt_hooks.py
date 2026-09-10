@@ -4094,6 +4094,287 @@ def main():
                           "tool_input": {"command": "cd rel"}}) != "deny":
             failures.append("(ap-c33) missing tool_name must DENY (fail-closed contract)")
 
+        # === expbnd: explicit git target and enumerated scope (GD-157/158/159) =======================
+        # Failing-first coverage: before git_explicit_binding existed, the ASK cases below had no
+        # dedicated decider. Absolute cd operands avoid the sibling abspth relative-path ASK, while
+        # direct handler calls keep every verdict attributable to this control.
+        def ebexpect(label, command, want):
+            got = _decision(aiqt_hooks.git_explicit_binding, command)
+            if got != want:
+                failures.append("{}: expected {}, got {}".format(label, want, got))
+
+        ebexpect("(eb-e1) absolute cd feeding untargeted commit asks",
+                 "cd /abs/repo && git commit -m x", "ask")
+        ebexpect("(eb-e2) explicit -C target credits the binding",
+                 "cd /abs/repo && git -C /abs/repo commit -m x", "allow")
+        ebexpect("(eb-e3) inline --git-dir target credits the binding",
+                 "cd /abs/repo && git --git-dir=/abs/repo/.git commit -m x", "allow")
+        ebexpect("(eb-e4) breadth add feeding push asks", "git add -A && git push", "ask")
+        ebexpect("(eb-e5) relocated breadth stage and publish asks",
+                 "cd /abs/repo && git add --all && git commit -m x && git push", "ask")
+        ebexpect("(eb-e6) pushd feeding untargeted mutation asks",
+                 "pushd /abs/repo && git rm -r src && popd", "ask")
+        ebexpect("(eb-e7) dynamic cd still exposes the ambient binding",
+                 'cd "$D" && git commit -m x', "ask")
+        ebexpect("(eb-e8) lone bare mutation is a deliberate non-fire", "git commit -m x", "allow")
+        ebexpect("(eb-e9) lone breadth commit is a deliberate non-fire", "git commit -am x", "allow")
+        ebexpect("(eb-e10) dot pathspec feeding push asks", "git add . && git push", "ask")
+        ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
+        ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
+        ebexpect("(eb-e13) bare discard remains the git_discard control's boundary",
+                 "git reset --hard", "allow")
+        ebexpect("(eb-e14) quoted prose in a parseable command allows",
+                 'echo "cd /x && git commit -m y"', "allow")
+        ebexpect("(eb-e15) unparseable visible cd plus mutation fails safe to ask",
+                 "cd /abs && git commit -m x && (", "ask")
+        ebexpect("(eb-e16) unparseable command outside the visible patterns allows",
+                 'ls -la "unbalanced', "allow")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "ask":
+            failures.append("(eb-e17) absent command must ASK (cannot evaluate target or scope)")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_input": {"command": "git commit -m x"}}) != "deny":
+            failures.append("(eb-e18) missing tool_name must DENY (shared fail-closed contract)")
+        ebexpect("(eb-e19a) plain fetch under cd is deliberately non-mutating",
+                 "cd /abs && git fetch", "allow")
+        ebexpect("(eb-e19b) pruning fetch under cd asks", "cd /abs && git fetch --prune", "ask")
+        ebexpect("(eb-e20) branch list is an enumerated read-only form",
+                 "cd /abs && git branch --list", "allow")
+        # GD-158 QA round-1: an explicit binding is credited only when ABSOLUTE and complete; a relative
+        # -C/--git-dir or a lone --work-tree still leaves the target ambient and routes to the same ASK.
+        ebexpect("(eb-e23) relative -C is not a complete binding",
+                 "cd /abs/repo && git -C repo commit -m x", "ask")
+        ebexpect("(eb-e24) lone --work-tree without --git-dir is not credited",
+                 "cd /abs && git --work-tree=/abs commit -m x", "ask")
+        ebexpect("(eb-e25) relative --git-dir is not credited",
+                 "cd /abs && git --git-dir=rel/.git commit -m x", "ask")
+        # Common bare wrappers are peeled so they do not bypass the detector; an option/assignment-carrying
+        # wrapper is a disclosed residual left unpeeled.
+        ebexpect("(eb-e26) 'command git' wrapper under cd asks",
+                 "cd /abs && command git commit -m x", "ask")
+        ebexpect("(eb-e27) leading sudo git under cd asks",
+                 "cd /abs && sudo git commit -m x", "ask")
+        ebexpect("(eb-e28) wrapped 'command cd' feeding a mutation asks",
+                 "command cd /abs && git commit -m x", "ask")
+        ebexpect("(eb-e29) option-carrying wrapper is a disclosed residual (allows)",
+                 "cd /abs && env -i git commit -m x", "allow")
+        # Read-only forms stay exempt even under a cd (no false ASK).
+        ebexpect("(eb-e30) branch --show-current is read-only",
+                 "cd /abs && git branch --show-current", "allow")
+        ebexpect("(eb-e31) tag --points-at is read-only",
+                 "cd /abs && git tag --points-at HEAD", "allow")
+        ebexpect("(eb-e32) bare 'git config <key>' read is not a mutation",
+                 "cd /abs && git config user.name", "allow")
+        ebexpect("(eb-e33) 'git config <key> <value>' write under cd asks",
+                 "cd /abs && git config user.name value", "ask")
+        # GD-158 QA round-2: the cd-based triggers are ORDER-SENSITIVE -- a shift (cd/pushd/popd) confuses
+        # only a git segment it PRECEDES, and the breadth+publish hazard is a breadth op PRECEDING a push.
+        # A trailing shift, or a breadth op AFTER a push, cannot confuse the earlier mutation and must
+        # ALLOW; the forward forms above (eb-e1/e4/e6) still ASK. Each case below fails on the pre-fix,
+        # order-insensitive implementation.
+        ebexpect("(eb-e35) a cd AFTER the mutation does not confuse it",
+                 "git commit -m x && cd /abs/repo", "allow")
+        ebexpect("(eb-e36) a cd several segments after the mutation is exempt",
+                 "git commit -m x ; cd /var/log ; cat foo.log", "allow")
+        ebexpect("(eb-e37) popd BEFORE an untargeted mutation shifts the target",
+                 "popd && git commit -m x", "ask")
+        ebexpect("(eb-e38) breadth AFTER a push is not a pre-publish breadth",
+                 "git push && git add -A", "allow")
+        ebexpect("(eb-e39) branch --format listing under cd is read-only",
+                 "cd /abs && git branch --format=refname", "allow")
+        ebexpect("(eb-e40) tag --format listing under cd is read-only",
+                 "cd /abs && git tag --format=refname", "allow")
+        ebexpect("(eb-e41) branch --sort listing under cd is read-only",
+                 "cd /abs && git branch --sort=-committerdate", "allow")
+        # GD-158 round-3 (F-GD158-R2 classifier fail-open): a create/delete/move/copy is a MUTATION even
+        # when it carries a formatting flag (--format/--sort); a read token after '--' is an operand, not a
+        # flag. Each case fails on the pre-fix any(read_flag in args) classifier. The pure-listing ALLOWs
+        # (eb-e39..e41 above) still hold (no positional -> read).
+        ebexpect("(eb-e42) branch CREATE carrying --format is a mutation under cd",
+                 "cd /x && git branch --format=refname b1", "ask")
+        ebexpect("(eb-e43) branch delete carrying --format asks under cd",
+                 "cd /x && git branch --format=refname -D feature", "ask")
+        ebexpect("(eb-e44) branch move carrying --sort asks under cd",
+                 "cd /x && git branch --sort=x -m old new", "ask")
+        ebexpect("(eb-e45) branch copy carrying --format asks under cd",
+                 "cd /x && git branch --format=X -c old new", "ask")
+        ebexpect("(eb-e46) tag CREATE carrying --format is a mutation under cd",
+                 "cd /x && git tag --format=refname t1", "ask")
+        ebexpect("(eb-e47) tag delete carrying --format asks under cd",
+                 "cd /x && git tag --format=refname -d v1", "ask")
+        ebexpect("(eb-e48) a read token after -- is an operand, delete still asks under cd",
+                 "cd /x && git branch -D -- --format", "ask")
+        ebexpect("(eb-e49) branch LIST with a pattern is a read (allow under cd)",
+                 "cd /x && git branch --list 'feat/*'", "allow")
+        ebexpect("(eb-e50) branch filter with its value operand is a read (allow under cd)",
+                 "cd /x && git branch --contains HEAD", "allow")
+        ebexpect("(eb-e51) separate-form --format value is not a create target (allow under cd)",
+                 "cd /x && git branch --format 'refname'", "allow")
+        # GD-158 round-5 (F-GD158-R4 fail-open): a create/rename/delete TARGET placed AFTER '--' is still a
+        # mutation (git accepts the target there: "git branch -- name"/"git tag -- name" CREATE, real git
+        # 2.53); a list pattern after '--' with a list flag is a read. Each ASK case fails on the round-3
+        # (pre-only) classifier that discarded post-'--' operands.
+        ebexpect("(eb-e52) branch CREATE target after -- is a mutation under cd",
+                 "cd /x && git branch -- newb1", "ask")
+        ebexpect("(eb-e53) branch create + start-point after -- asks under cd",
+                 "cd /x && git branch -- b2 HEAD", "ask")
+        ebexpect("(eb-e54) branch force-create after -- asks under cd",
+                 "cd /x && git branch -f -- b5 HEAD", "ask")
+        ebexpect("(eb-e55) tag CREATE target after -- is a mutation under cd",
+                 "cd /x && git tag -- newt1", "ask")
+        ebexpect("(eb-e56) branch LIST with a pattern after -- is a read under cd",
+                 "cd /x && git branch --list -- 'new*'", "allow")
+        # GD-158 round-6 + tri-family synthesis: the branch/tag classifier is now FAIL-SAFE (defaults
+        # MUTATING; returns read only when every token resolves to a recognized read-neutral role and no
+        # create/rename/delete target is present). This table exercises _git_is_mutating directly against
+        # the git 2.53 ground truth: the plan's matrix classes, the six historical fail-open forms as
+        # regression teeth, and fail-safe probes asserting the default on unknown/ambiguous/malformed
+        # input. want=True is MUTATING (-> expbnd ASK); over-ASK is safe, a fail-open (want-True read as
+        # False) is the forbidden regression. This table is validated against git 2.53 by the in-suite eb
+        # differential above and an out-of-suite real-git differential; a future git option-table change is
+        # a disclosed drift residual, and a dedicated option-table drift-tripwire gate is a tracked
+        # follow-up (GD-158-T7), not a gate that exists yet.
+        _M, _R = True, False
+        for _rc_label, _rc_sub, _rc_args, _rc_want in (
+            # -- branch: writes (short, long, attached-short, abbreviated-long) --
+            ("eb-e57", "branch", ["newb"], _M),                        # bare positional creates
+            ("eb-e58", "branch", ["-d", "feature"], _M),
+            ("eb-e59", "branch", ["-D", "feature"], _M),
+            ("eb-e60", "branch", ["-m", "old", "new"], _M),
+            ("eb-e61", "branch", ["-c", "old", "new"], _M),
+            ("eb-e62", "branch", ["--delete", "feature"], _M),
+            ("eb-e63", "branch", ["--move", "old", "new"], _M),
+            ("eb-e64", "branch", ["-f", "b", "start"], _M),
+            ("eb-e65", "branch", ["-u", "origin/main"], _M),
+            ("eb-e66", "branch", ["--set-upstream-to=origin/main"], _M),
+            ("eb-e67", "branch", ["--unset-upstream", "b"], _M),
+            ("eb-e68", "branch", ["--edit-description"], _M),
+            ("eb-e69", "branch", ["-t", "b", "origin/main"], _M),
+            ("eb-e70", "branch", ["-uorigin/main"], _M),               # r6 attached-short value
+            ("eb-e71", "branch", ["--unset-upst", "b"], _M),           # r6 abbreviated long
+            ("eb-e72", "branch", ["--set-upstream-t=origin/main"], _M),
+            ("eb-e73", "branch", ["--edit-descript"], _M),
+            ("eb-e74", "branch", ["-dv", "f"], _M),                    # write char leads a cluster
+            ("eb-e75", "branch", ["-vd", "f"], _M),                    # write char after a read char
+            # -- branch: r1 write-beside-list (list mode must never mask a write) --
+            ("eb-e76", "branch", ["--format=%(refname)", "-D", "feature"], _M),
+            ("eb-e77", "branch", ["--list", "-D", "feature"], _M),
+            # -- branch: reads / lists --
+            ("eb-e78", "branch", [], _R),
+            ("eb-e79", "branch", ["--list"], _R),
+            ("eb-e80", "branch", ["-l"], _R),
+            ("eb-e81", "branch", ["--list", "feat/*"], _R),
+            ("eb-e82", "branch", ["-a"], _R),
+            ("eb-e83", "branch", ["-r"], _R),
+            ("eb-e84", "branch", ["-v"], _R),
+            ("eb-e85", "branch", ["--show-current"], _R),
+            ("eb-e86", "branch", ["--format=%(refname)"], _R),
+            ("eb-e87", "branch", ["--sort=-committerdate"], _R),
+            ("eb-e88", "branch", ["--contains", "HEAD"], _R),
+            ("eb-e89", "branch", ["--merged", "HEAD"], _R),
+            ("eb-e90", "branch", ["--no-contains", "HEAD"], _R),
+            ("eb-e91", "branch", ["--points-at", "HEAD"], _R),
+            ("eb-e92", "branch", ["--contains"], _R),                  # filter value optional-when-last (U-5)
+            ("eb-e93", "branch", ["--format", "refname"], _R),         # separate display value, no target
+            # -- branch: r4/5 --create-reflog is a create MODIFIER, not a standalone write --
+            ("eb-e94", "branch", ["--create-reflog"], _R),
+            ("eb-e95", "branch", ["--create-reflog", "newb"], _M),
+            # -- branch: r4/5 --color/--abbrev/--column consume NOTHING following (a name creates) --
+            ("eb-e96", "branch", ["--color", "bcolorsep"], _M),
+            ("eb-e97", "branch", ["--abbrev", "babbrev"], _M),
+            ("eb-e98", "branch", ["--column", "bcol"], _M),
+            # -- branch: D-3 tooth -- --format consumes the next argv verbatim, so foo is created --
+            ("eb-e99", "branch", ["--format", "--list", "foo"], _M),
+            ("eb-e100", "branch", ["--format"], _M),                   # missing required value
+            ("eb-e101", "branch", ["--sort", "refname", "NAME"], _M),
+            # -- branch: r3 post-'--' target; a list pattern after '--' stays a read --
+            ("eb-e102", "branch", ["--", "newb"], _M),
+            ("eb-e103", "branch", ["-D", "--", "feature"], _M),
+            ("eb-e104", "branch", ["--list", "--", "new*"], _R),
+            # -- branch: mode cancellers roled W (D-9) --
+            ("eb-e105", "branch", ["--list", "--no-list", "NAME"], _M),
+            ("eb-e106", "branch", ["--points-at", "HEAD", "--no-points-at", "NAME"], _M),
+            ("eb-e107", "branch", ["--show-current", "NAME"], _M),
+            # -- branch: D-2 (git rejects -a/-r NAME fatally; over-ASK) --
+            ("eb-e108", "branch", ["-a", "NAME"], _M),
+            # -- branch: fail-safe probes (assert the DEFAULT) --
+            ("eb-e109", "branch", ["--frobnicate"], _M),               # unknown long
+            ("eb-e110", "branch", ["-Z", "x"], _M),                    # unknown short
+            ("eb-e111", "branch", ["--co", "x"], _M),                  # ambiguous prefix
+            ("eb-e112", "branch", ["--for"], _M),                      # force/format ambiguity
+            ("eb-e113", "branch", ["--list=x"], _M),                   # '=' on a no-value option
+            # -- tag: writes --
+            ("eb-e114", "tag", ["-a", "-m", "msg", "v1"], _M),
+            ("eb-e115", "tag", ["-m", "msg", "v1"], _M),
+            ("eb-e116", "tag", ["-s", "v1"], _M),
+            ("eb-e117", "tag", ["v1"], _M),                            # lightweight tag create
+            ("eb-e118", "tag", ["-d", "v1"], _M),
+            ("eb-e119", "tag", ["--delete", "v1"], _M),
+            ("eb-e120", "tag", ["-f", "v1"], _M),
+            ("eb-e121", "tag", ["-e", "-m", "x", "v1"], _M),
+            ("eb-e122", "tag", ["-ammsg", "t1"], _M),                  # attached-short write cluster
+            ("eb-e123", "tag", ["--ann", "t1"], _M),                   # abbreviated write long
+            ("eb-e124", "tag", ["--sig", "t1"], _M),
+            ("eb-e125", "tag", ["--cleanup=whitespace"], _M),          # D-5: create-mode modifier
+            # -- tag: r6 --column/--no-column are NOT list triggers (a name beside them creates) --
+            ("eb-e126", "tag", ["--column", "tname"], _M),
+            ("eb-e127", "tag", ["--no-column", "tname"], _M),
+            # -- tag: r5 verify is a READ mode --
+            ("eb-e128", "tag", ["-v", "v2"], _R),
+            ("eb-e129", "tag", ["--verify", "v2"], _R),
+            ("eb-e130", "tag", ["--ver", "v2"], _R),                   # unique prefix of --verify
+            # -- tag: lists / -n[N] --
+            ("eb-e131", "tag", [], _R),
+            ("eb-e132", "tag", ["-l"], _R),
+            ("eb-e133", "tag", ["--list", "v*"], _R),
+            ("eb-e134", "tag", ["-n"], _R),
+            ("eb-e135", "tag", ["-n1", "v*"], _R),                     # D-6: attached decimal -> read
+            ("eb-e136", "tag", ["-nf", "v*"], _M),                     # non-digit tail -> fail-safe
+            ("eb-e137", "tag", ["-ln1", "v*"], _R),
+            # -- tag: reads / filters / create-reflog --
+            ("eb-e138", "tag", ["--format=%(refname)"], _R),
+            ("eb-e139", "tag", ["--format=%(refname)", "t1"], _M),
+            ("eb-e140", "tag", ["--points-at", "HEAD"], _R),
+            ("eb-e141", "tag", ["--contains", "v1"], _R),
+            ("eb-e142", "tag", ["--create-reflog"], _R),
+            ("eb-e143", "tag", ["--create-reflog", "v9"], _M),
+            # -- tag: r3 post-'--' target; fail-safe probes --
+            ("eb-e144", "tag", ["--", "newt"], _M),
+            ("eb-e145", "tag", ["--", "-v"], _M),                      # -v after '--' is an operand -> create
+            ("eb-e146", "tag", ["--frob"], _M),
+            ("eb-e147", "tag", ["-Z"], _M),
+        ):
+            _rc_got = aiqt_hooks._git_is_mutating(_rc_sub, _rc_args)
+            if _rc_got is not _rc_want:
+                failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
+        for _eb_sub, _eb_args, _eb_want in (
+                ("commit", ["-am", "x"], True),
+                ("add", ["-A"], True),
+                ("add", ["--", "src/a.c"], False),
+                ("add", ["--", "--all"], False),
+                ("add", ["--", "-A"], False),
+                ("add", ["--", "."], True),
+                ("commit", ["-m", "x"], False)):
+            _eb_got = aiqt_hooks._git_is_breadth(_eb_sub, _eb_args)
+            if _eb_got is not _eb_want:
+                failures.append("(eb-e21) _git_is_breadth({}, {!r}): expected {}, got {}"
+                                .format(_eb_sub, _eb_args, _eb_want, _eb_got))
+        for _tg_tokens, _tg_want in (
+                (["git", "-C", "/abs/repo", "commit"], True),
+                (["git", "-C", "repo", "commit"], False),
+                (["git", "--git-dir=/abs/.git", "commit"], True),
+                (["git", "--git-dir=rel/.git", "commit"], False),
+                (["git", "--work-tree=/abs", "commit"], False),
+                (["git", "--git-dir", "/abs/.git", "--work-tree", "/abs", "commit"], True),
+                (["git", "commit", "-m", "x"], False)):
+            if aiqt_hooks._git_target_is_explicit(_tg_tokens) is not _tg_want:
+                failures.append("(eb-e34) _git_target_is_explicit({!r}): expected {}"
+                                .format(_tg_tokens, _tg_want))
+        if (aiqt_hooks.HANDLERS.get("git_explicit_binding") is not aiqt_hooks.git_explicit_binding or
+                aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
+            failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
+
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
         # floor; inert on absence for slice confinement, fail-closed on cannot-evaluate once armed. Judged

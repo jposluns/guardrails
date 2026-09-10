@@ -5085,6 +5085,51 @@ canonical-text = "so the claim cannot rest on an unshown assertion that work is 
 source-digest = "567f21bafa5e88a0b3dd305ea29b837d08e322107b77478cf278092913d0acea"
 
 [[clause]]
+clause-id = "expbnd.1"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 13
+end-line = 15
+canonical-text = "An action that has an authoritative, explicit way to name what it acts on, its identity, its target,\nor its scope, binds to that explicit name rather than inheriting the binding from ambient context\nthat can silently point elsewhere."
+source-digest = "42fadd1cf7769a4af1114d91d461114a1859e7fc3aee1fe5feb081e33e38bd79"
+
+[[clause]]
+clause-id = "expbnd.2"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 21
+end-line = 25
+canonical-text = "An asynchronous result is correlated to the dispatch that\nproduced it only through the authoritative identifier that dispatch returns, a handle, a path, or an\nid, never by wall-clock proximity or arrival order, because two dispatches can complete out of order\nor at the same instant and ambient timing cannot tell them apart; a result with no identifier is\nsurfaced as unbound, never assigned to the nearest or most recent dispatch."
+source-digest = "42fadd1cf7769a4af1114d91d461114a1859e7fc3aee1fe5feb081e33e38bd79"
+
+[[clause]]
+clause-id = "expbnd.3"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 25
+end-line = 31
+canonical-text = "A command with side\neffects prefers to name its target on the command that performs the mutation, a repository or\nworking tree bound by an on-command flag rather than left to the current working directory. Where\nthe same command also shifts that target, a directory change chained ahead of the mutation or a\nwrapper that redirects the tool, the ambient binding is no longer the target named at the point of\nuse, so the explicit on-command binding is required there because the mutation would otherwise read\nits target from wherever the shell landed."
+source-digest = "42fadd1cf7769a4af1114d91d461114a1859e7fc3aee1fe5feb081e33e38bd79"
+
+[[clause]]
+clause-id = "expbnd.4"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 33
+end-line = 38
+canonical-text = "A destructive\nor broad operation takes its scope from the specific thing under change, an enumerated set of paths,\nrather than from ambient whole-tree state; a breadth selector that stages, commits, or discards\nwhatever the tree currently holds can sweep in unrelated work, and where committed state is needed\nfor a fixture or test, an isolated checkout provides it rather than reshaping the shared working\ntree in place."
+source-digest = "42fadd1cf7769a4af1114d91d461114a1859e7fc3aee1fe5feb081e33e38bd79"
+
+[[clause]]
+clause-id = "expbnd.5"
+corpus-id = "expbnd"
+source-path = ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md"
+start-line = 17
+end-line = 19
+canonical-text = "Where an explicit binding is available\nand unused, the action is bound to it; where only an ambient binding exists, the execution target is\nconfirmed by observation before the action runs, per the confirm-execution-target discipline."
+source-digest = "42fadd1cf7769a4af1114d91d461114a1859e7fc3aee1fe5feb081e33e38bd79"
+
+[[clause]]
 clause-id = "rvwpin.1"
 corpus-id = "rvwpin"
 source-path = ".aiqt/core/rules/integ-review-in-flight-pins-its-artefact.md"

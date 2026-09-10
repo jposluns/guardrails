@@ -225,6 +225,7 @@ expected-check-ids = [
   "ledger/launch-recorded",
   "ledger/launch-row",
   "ledger/complete-row",
+  "ledger/unbound-taskoutput-surfaced",
   # ---------- component 5: the resume audit and barrier ----------
   "resume/branch-divergence-warns",
   "resume/barrier-armed",
