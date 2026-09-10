@@ -1271,14 +1271,15 @@ _ASCII_PUNCT = frozenset("""!"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~""")
 # those two: cmark-gfm rewinds a URL to its scheme and autolinks email mid-text (e.g. `1http://a.example`),
 # so the oracle must NOT false-negative a digit/letter/punct-prefixed URL or email trigger. Over-detection
 # on raw input only STRENGTHENS teeth; it never causes a false-pass, because the production wrap code-spans
-# every token, so the oracle returns [] on the emitted output. The www recogniser, by contrast, KEEPS the
-# `(?<![A-Za-z0-9])` not-after-alphanumeric boundary, because cmark-gfm does NOT autolink www after an
-# alphanumeric (so `1www.x`/`xwww.x` stay plain); keeping the oracle www rule a SUBSET of the production www
-# matcher (same boundary) keeps the oracle [] on emitted output for www too. The URL schemes are cmark-gfm's
+# every token, so the oracle returns [] on the emitted output. The www recogniser is now IDENTICAL to the
+# production _MD_AUTOLINK_TOKEN_RE www arm (same `(?<![A-Za-z0-9])www\.[^\s<]+`), so the oracle detects
+# exactly the www tokens production wraps - no Unicode-host false-negative, and oracle-www can never diverge
+# from production-www. (URL stays http/https/ftp and email stays boundary-free, matching cmark-gfm's autolink
+# set.) The URL schemes are cmark-gfm's
 # http/https/ftp (GFM 6.9); the email form additionally recognises the optional mailto:/xmpp: prefix
 # cmark-gfm folds into the link. Tokens end at whitespace or `<`, as a GFM URL autolink does.
 _ORACLE_URL_RE = re.compile(r"(?:https?|ftp)://[^\s<]+", re.IGNORECASE)
-_ORACLE_WWW_RE = re.compile(r"(?<![A-Za-z0-9])www\.[A-Za-z0-9\-_][^\s<]*", re.IGNORECASE)
+_ORACLE_WWW_RE = re.compile(r"(?<![A-Za-z0-9])www\.[^\s<]+", re.IGNORECASE)
 _ORACLE_EMAIL_RE = re.compile(
     r"(?:mailto:|xmpp:)?[A-Za-z0-9.\-_+]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)+", re.IGNORECASE)
 # A `;`-terminated HTML entity reference, with numeric references limited to CommonMark's grammar: 1-7
@@ -1687,6 +1688,20 @@ def self_test():
         # `1www`/`xwww` plain and the oracle's restored www left boundary does not match them either.
         check("autolink-1www-inert", _gfm_autolinks(_md_text("1www.example.com")) == [])
         check("autolink-xwww-inert", _gfm_autolinks(_md_text("xwww.example.com")) == [])
+        # round-5: pin the www boundary on BOTH production and the oracle so a future change to either is caught.
+        # (a) production leaves an alphanumeric-prefixed www PLAIN (cmark-gfm does not autolink it):
+        check("md-text-1www-plain", _md_text("1www.example.com") == "1www.example.com")
+        check("md-text-xwww-plain", _md_text("xwww.example.com") == "xwww.example.com")
+        check("md-text-ourwww-plain", _md_text("ourwww.site.com") == "ourwww.site.com")
+        # (b) the oracle DETECTS a genuine www autolink at each valid boundary (raw-input teeth), incl Unicode host:
+        check("oracle-www-boundary-start", _gfm_autolinks("www.example.com") != [])
+        check("oracle-www-boundary-space", _gfm_autolinks("see www.example.com") != [])
+        check("oracle-www-boundary-dot", _gfm_autolinks(".www.example.com") != [])
+        check("oracle-www-boundary-hyphen", _gfm_autolinks("-www.example.com") != [])
+        check("oracle-www-boundary-paren", _gfm_autolinks("(www.example.com") != [])
+        check("oracle-www-unicode-host", _gfm_autolinks("www.é.com") != [])
+        # (c) the oracle does NOT match an alphanumeric-prefixed www (matches production + cmark-gfm):
+        check("oracle-www-no-alnum-prefix", _gfm_autolinks("1www.example.com") == [])
 
         # (b) The FIX renders each form inert (fails under the old entity _md_text, which still autolinks).
         check("autolink-www-inert", _gfm_autolinks(_md_text("www.example.com")) == [])
