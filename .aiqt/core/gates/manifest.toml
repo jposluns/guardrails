@@ -469,6 +469,24 @@ class = "a"
 residue = "It exercises the generic corpus-tool core (tools/aiqt_corpus.py) end to end: the discovery/targeting helpers (suffix and exempt-dir/exempt-file filtering, dedup-and-order iteration, the scan-root allow-list walker), the text/markdown primitives (table-row splitting, separator detection, multi-backtick code-span stripping, fence detection and non-code-line iteration over fenced/tilde/unterminated blocks), the ISO-date parser and month arithmetic (month-end clamp, leap February, year roll), the field-agnostic metadata parser (head-window bound, first-occurrence-wins, trailing-backslash strip, tolerated annotations), head_version field-name precedence, the whitespace-preserving git helper and git_show present/absent, and the genericity invariants the module exists to hold (the exempt-dir default carries only universal VCS/build directories, the scan-root walker refuses a module-level repo root, and __all__ is pinned to the exact public surface). It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. Every fixture is synthetic and assembled in a tempdir and the git helpers run against a throwaway repository; it asserts representative scenarios with exact expected values, not the module's whole input space."
 
 [[gate]]
+id = "commonmark-headings-selftest"
+script = "tools/selftest_commonmark_headings.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It exercises the vendored-Marko changelog heading adapter (tools/_commonmark_headings.py) end to end: direct-child H2 heading selection by source span over representative CommonMark inputs, and the fail-closed HeadingScanError cannot-evaluate on a parser fault, a structurally-degenerate parse result (a document with no children list or a heading node with no integer level), a missing or invalid source span, oversized input (over 1 MiB), a submodule or root import origin outside the vendored tree, and a version or provenance mismatch; and the verify_vendor_manifest byte-integrity logic, both over synthetic drift scenarios (a clean manifest verifies, while a mutated file, an extra file, a missing file, and an unreadable tree each fail closed) and against the REAL committed vendored tree under default arguments. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact expected values in a tempdir, not the adapter's whole input space; the standing per-push byte gate over the vendored tree is the release manifest (check_manifest against .aiqt/manifest.toml), which this complements rather than replaces. Marko's parse is worst-case superlinear on crafted pathological input within the 1 MiB byte ceiling, so a maliciously-shaped changelog can be slow (an availability residual, never a wrong verdict; the gate step carries no wall-clock timeout, and the changelog is maintainer-authored in-repo content)."
+
+[[gate]]
+id = "commonmark-conformance"
+script = "tools/selftest_commonmark_conformance.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It replays the CommonMark 0.31.2 example suite (652 examples) through the exact vendored Marko 2.2.4 bytes and asserts the observed render-divergence set equals the recorded per-interpreter baseline (16 known render-only divergences, none heading-related), failing closed if the divergence set differs, if a render raises on ANY example (a crash is never absorbed into the baseline), if the evaluated example identities are not unique and non-null, if the fixture example count is not the pinned 652, or if a required interpreter is absent (a signal-killed matrix leg counts as a failure, not a pass). It arguably serves the change-carries-a-check and trusted-pinned-provenance disciplines, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It exercises the vendored parser and renderer over the spec corpus, not the changelog adapter heading path (which uses the parser only); the baseline is measured and verified on CPython 3.14 only (the host and the quality CI workflow that gates U5 both run it on 3.14; a cross-version matrix was declined by the maintainer), and the replay characterizes render conformance rather than proving byte-integrity, which the release manifest and marko-2.2.4.manifest.sha256 own. Marko's parse is worst-case superlinear on crafted pathological input, so the replay carries no per-example wall-clock timeout (an availability residual over the pinned spec corpus, not adversary input)."
+
+[[gate]]
 id = "gensrc-failclose"
 script = "tools/check_gensrc_failclose.py"
 rules = ["gensrc"]

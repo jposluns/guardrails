@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c38bfacfd370d0ec406c933072690328883efd6469570c3d44cbb0175544d3d6"
+tree-sha256 = "23b477a527849435d00c46ffa2742704ca25ac2627cc91ab3fedc4946eb90c43"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -56,8 +56,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 87975
-sha256 = "a3d65fca83554c000bee6ff7acd9d238756ff78fa9262813a1e51727bcd71acd"
+bytes = 91310
+sha256 = "a41c7b9f260692c7b72c37fe553a6c86438613ec1dfe19f49cf349b12304c745"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -101,8 +101,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 12061
-sha256 = "394fbad381d864f05a5a01ca5db86e508f669bf2c03532d547221ad06a0e49db"
+bytes = 12880
+sha256 = "d7894401f025cd144047305ff80d808daddd8c03e7a9c26fbe58eb68e1711c65"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2181,8 +2181,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 35715
-sha256 = "1fb73f814a5986e1b7ca7b8b9b62a7061e41a3a62bc2fdcc2e043fff4d3fdfd7"
+bytes = 37264
+sha256 = "e751d2054c4655a4916c6bb304fc807319dbf762324237d4fbdbf5b2beccbb24"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2530,6 +2530,11 @@ bytes = 1122
 sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
+path = "tools/_commonmark_headings.py"
+bytes = 28539
+sha256 = "1d53c0c86bd141c27b0b233c5477294ef3483bb5ba40327b8d3467a040e316b0"
+
+[[sources]]
 path = "tools/_containment.py"
 bytes = 2365
 sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
@@ -2543,6 +2548,11 @@ sha256 = "817bdf856c6984fe01dc066e13b477af8328e44cf58fda04bce6b596d7bd920d"
 path = "tools/_journal.py"
 bytes = 66418
 sha256 = "f6652224e4bc4a52eba8d4f1fc784123cb6cd5d317d4366ab321dc5ff182b622"
+
+[[sources]]
+path = "tools/_opf_changelog.py"
+bytes = 64504
+sha256 = "5e7e7ea66b411a8f9b55ae7e322141650793ba9383d942b6f8e6edb3ebf89177"
 
 [[sources]]
 path = "tools/_opf_emit.py"
@@ -2593,6 +2603,151 @@ sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
 path = "tools/_standards.py"
 bytes = 15963
 sha256 = "bb78210a828dd29909a53aa393618a54b8dedd55687b96b9083d7da2c9e2eb4f"
+
+[[sources]]
+path = "tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json"
+bytes = 140487
+sha256 = "d431b29d97b6f73e69d547109cf5081578fac931e72afe95639ebe766c1b2a20"
+
+[[sources]]
+path = "tools/_vendor/licenses/marko-MIT.txt"
+bytes = 1067
+sha256 = "1da058ed0440fea5df1765b19a1418800439b18fd6f1c13c7d429cb81e9c6d47"
+
+[[sources]]
+path = "tools/_vendor/marko-2.2.4.manifest.sha256"
+bytes = 2599
+sha256 = "1aad575303d1b431b65b646a0a5fc8146eb2a2eeb9f9e62823d9be4b62ce0a0d"
+
+[[sources]]
+path = "tools/_vendor/marko-2.2.4.provenance.toml"
+bytes = 4744
+sha256 = "cb2ef7edd840ade5c0fe4c7a74563ac8eb8cd91c8b3cecb476c7b2421f33e2c5"
+
+[[sources]]
+path = "tools/_vendor/marko/__init__.py"
+bytes = 5277
+sha256 = "49c0a229d20406ff13e3b2f5fab0d2ce7d4b3d0e0f92ab7cc754c040c181d15d"
+
+[[sources]]
+path = "tools/_vendor/marko/__main__.py"
+bytes = 334
+sha256 = "735d875bce76d2b756ddc754ac2c46854f09ce85647ba05a666bbe3039f4a29b"
+
+[[sources]]
+path = "tools/_vendor/marko/ast_renderer.py"
+bytes = 3794
+sha256 = "d4619934348f4fac0031c29e6a01cd8015d32949128919a7821b93f019774751"
+
+[[sources]]
+path = "tools/_vendor/marko/block.py"
+bytes = 23385
+sha256 = "8fe2ce5820353b12b4e6c231fa9b670de65695470d90cdd9bb92f759ff18a5bc"
+
+[[sources]]
+path = "tools/_vendor/marko/cli.py"
+bytes = 2501
+sha256 = "08ea0718a1a561f8f3c88cfe7709103c48ff8488fdded58665b9275f6dd3efa5"
+
+[[sources]]
+path = "tools/_vendor/marko/element.py"
+bytes = 5928
+sha256 = "31b35ee787a882dad79d3cdbd6e08d62ce481763027113e4327a82d4bf33ca04"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/__init__.py"
+bytes = 105
+sha256 = "da47585e9382233bbc7505bb55033485bde8c2e42930ed93c6a9cf476764850f"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/codehilite.py"
+bytes = 2004
+sha256 = "ded37165d97a5522b1bb9bf234e89ec703fc99e2fd7c6012c44759064bf5aa0f"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/footnote.py"
+bytes = 3752
+sha256 = "0cbd5cc8f82bca0bc3c9283e5bf420e5389bb265c68635719212602e57e0ab2f"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/gfm/__init__.py"
+bytes = 814
+sha256 = "5fe0faab137d01b548368b3c9d61cc1dae9f184c889a9a531d4b691d3ab614ee"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/gfm/elements.py"
+bytes = 9888
+sha256 = "15fcb792feab1be80768363773065a3f50f971484bd047126336c99081c736a8"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/gfm/renderer.py"
+bytes = 4480
+sha256 = "e9de6628f1a0cbc345325e7e6f0daa1763d9f0fa6acbb3266f4cf3685dea63f7"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/latex_renderer.py"
+bytes = 5373
+sha256 = "24f1a4dbf363e2ef1c8282d2e0815f2a45471e881a2cbba5a3fd6276107b91cb"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/pangu.py"
+bytes = 1118
+sha256 = "67f924144560a473b5364c604aaeb3b50274c2cd2b36711dc9fed4604746a2ba"
+
+[[sources]]
+path = "tools/_vendor/marko/ext/toc.py"
+bytes = 2732
+sha256 = "e9d61d1480d26ed745ad158ec72a6305aef4ee4b595112b72827623c0d70527c"
+
+[[sources]]
+path = "tools/_vendor/marko/helpers.py"
+bytes = 6482
+sha256 = "2639fb84d6549acca696e5c7daa222a8cc754add82ff4e539d024a925bf84f2f"
+
+[[sources]]
+path = "tools/_vendor/marko/html_renderer.py"
+bytes = 5160
+sha256 = "2ec1d195c75ed996a4eb4ca7d6f4c10c16209d2412fd248eb4d9b06169131a78"
+
+[[sources]]
+path = "tools/_vendor/marko/inline.py"
+bytes = 8370
+sha256 = "488e23c67a095ad075c0b0f658c48af4b3101101dcf7ab6838ebf78ac880e853"
+
+[[sources]]
+path = "tools/_vendor/marko/inline_parser.py"
+bytes = 19762
+sha256 = "f4d765a593411eb308fdccc3e77e2cf350906c45d11b9535698b31b67af3a498"
+
+[[sources]]
+path = "tools/_vendor/marko/md_renderer.py"
+bytes = 6437
+sha256 = "9b146a8ae0010d935097db5aebf0c1bd30664828d8fae4b6da74332a50bc5589"
+
+[[sources]]
+path = "tools/_vendor/marko/parser.py"
+bytes = 5754
+sha256 = "3f9d0afd82b8afa3fc396e780bc9adc3be4d15ae1c533c853a08222077dbbd03"
+
+[[sources]]
+path = "tools/_vendor/marko/patterns.py"
+bytes = 1681
+sha256 = "d7db00bd63fa1b8f84690fd589f67b412b10d25348055281127ca1d533a2178f"
+
+[[sources]]
+path = "tools/_vendor/marko/py.typed"
+bytes = 0
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+[[sources]]
+path = "tools/_vendor/marko/renderer.py"
+bytes = 3633
+sha256 = "2c3253b86b12967bf69b9d3c6c5bd6f999431b2da4c3f82a4baa1c0426f2db7c"
+
+[[sources]]
+path = "tools/_vendor/marko/source.py"
+bytes = 5554
+sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -2946,8 +3101,8 @@ sha256 = "4693ead4768246230173c232a04ed3f19375fe4d0450e66612a82f8fd6babd2a"
 
 [[sources]]
 path = "tools/opf.py"
-bytes = 6764
-sha256 = "4af5f7a6c2d1f9f8f6789d13506c2a83eacdf1a470b38dc89a5ee780e58cc827"
+bytes = 6927
+sha256 = "8d5c31e41748ecfd929a148d9f042167d667feba8b36e0afb6055df73e2f95c0"
 
 [[sources]]
 path = "tools/opf_render.py"
@@ -2976,8 +3131,8 @@ sha256 = "92e16e3f72c22990b915b449894e023544d328798f1de9308cc4fbdb0c2dd35a"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 12968
-sha256 = "c513c591a1fd2ad1e1a2f297fa7686637f79731126e480020d5566c6c2078ce7"
+bytes = 13149
+sha256 = "171dbae3ec4408651906b4898e8234c375d07bafa61f5bbfa6a927efad27b946"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -2998,6 +3153,16 @@ sha256 = "94fe9da42cf306362ab91934d40581b7e46ac7cc64faabbdc2dfb45a44bed513"
 path = "tools/selftest_ci_status.py"
 bytes = 17032
 sha256 = "f58da9f64a5e9c21c7ede55c630d6f885ad2d81ab4c7094aadc29f96010342cc"
+
+[[sources]]
+path = "tools/selftest_commonmark_conformance.py"
+bytes = 14096
+sha256 = "4de70694dbf4d99d35fa172e72079927c1e69b3b1d46feebfe1974ccc24237cb"
+
+[[sources]]
+path = "tools/selftest_commonmark_headings.py"
+bytes = 15417
+sha256 = "897fdc65545c10343f860f50009057752bfd60b5bead9840e2e2c3077d75187d"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
