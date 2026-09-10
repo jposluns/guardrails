@@ -15,7 +15,7 @@
 # 2026-08-08 against commit 7666cff, whose Quality run had concluded `success`.
 # Anything treating it as the green signal hangs; anything inverting it merges on a lie.
 #
-# This reads `actions/runs?head_sha=`, which needs only Actions: Read.
+# This reads every paginated run from `actions/runs?head_sha=`, which needs only Actions: Read.
 #
 # Usage:
 #   tools/ci-status.sh                 # current HEAD, report once
@@ -51,30 +51,129 @@ if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
 fi
 DEADLINE=$(( $(date +%s) + ${CI_STATUS_TIMEOUT:-900} ))
 
+POLL_SECONDS=15
+SETTLE_OBSERVATIONS=5
+# The Actions runs API uses non-atomic offset pagination. A same-count replacement while pages are
+# fetched can therefore present a stale-consistent, all-green snapshot: for example, a completed run
+# can disappear from an earlier page while a new pending run moves onto a page already fetched. Under
+# --wait, requiring an unchanged, all-success run-ID set across five observations (60 seconds) narrows
+# that race window but cannot eliminate it. Server-side branch protection remains the backstop.
+#
+# The API also cannot prove that no later run will be created. A workflow created after the settle
+# window, an event whose runs are delayed longer than the window, or a workflow suppressed by trigger,
+# path, type, or commit-message rules is outside this mechanism's coverage. Report-once evaluates only
+# its single observed snapshot. Deriving the exact expected set here would require the triggering event
+# payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
+# repository files alone cannot answer that question for pull_request base branches or paths.
+
 query() {
-  # Status and conclusion come FIRST, so a workflow whose NAME contains a "|" cannot shift the
-  # machine-read fields (the delimiter-injection false-green: a run named "x|completed|success"
-  # used to parse as status=completed). Name and url are free text and sit last, where an extra
-  # "|" only affects display, never the gating decision.
+  # Status and conclusion come FIRST in every TSV row. jq's @tsv escaping keeps tabs, newlines, and
+  # backslashes in display fields from becoming record delimiters, so a workflow name cannot move either
+  # gating field. Name and URL remain display-only.
   # The no-run case (empty array) gets an explicit sentinel rather than a rendered "null", because
   # a real run's .status is nullable in the schema and must not be mistaken for "no run yet".
-  gh api "repos/${REPO}/actions/runs?head_sha=${SHA}" \
-    --jq 'if (.workflow_runs | length) == 0 then "__NORUN__" else (.workflow_runs[0] | "\(.status)|\(.conclusion // "-")|\(.name)|\(.html_url)") end' 2>&1
+  # Pagination is part of the verdict: reject non-identical records sharing a run ID, collapse only
+  # identical duplicates, then reconcile the unique count with the reported total_count. This detects
+  # count changes and conflicting duplicates, but cannot detect the same-count replacement race
+  # described above.
+  {
+    gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp |
+      jq --arg requested_sha "$SHA" -r '
+      . as $pages
+      | if (($pages | type) != "array") or (($pages | length) == 0) then
+          error("malformed workflow-runs response")
+        elif any($pages[];
+            (type != "object")
+            or ((.total_count | type) != "number")
+            or (.total_count < 0)
+            or ((.total_count | floor) != .total_count)
+            or ((.workflow_runs | type) != "array")
+            or ((.workflow_runs | length) > 100)) then
+          error("malformed workflow-runs response")
+        else
+          ([$pages[] | .workflow_runs[]]) as $all_runs
+          | if any($all_runs[];
+              ((.id | type) != "number")
+              or (.id <= 0)
+              or ((.id | floor) != .id)
+              or ((.head_sha | type) != "string")
+              or (.head_sha != $requested_sha)
+              or ((.status != null)
+                  and (((.status | type) != "string") or ((.status | length) == 0)))
+              or ((.conclusion != null)
+                  and (((.conclusion | type) != "string") or ((.conclusion | length) == 0)))
+              or ((.name | type) != "string")
+              or ((.name | length) == 0)
+              or ((.html_url | type) != "string")
+              or ((.html_url | length) == 0)) then
+              error("malformed workflow run record")
+            else
+              ([$pages[].total_count] | unique) as $totals
+              | ($all_runs | sort_by(.id) | group_by(.id)) as $run_groups
+              | if any($run_groups[];
+                  (([.[].status] | unique | length) > 1)
+                  or (([.[].conclusion] | unique | length) > 1)) then
+                  error("conflicting duplicate workflow-run records")
+                elif any($run_groups[]; ((unique | length) > 1)) then
+                  error("non-identical duplicate workflow-run records")
+                else
+                  ($run_groups | map(.[0]) | sort_by(.id)) as $runs
+                  | if (($totals | length) != 1) or (($runs | length) != $totals[0]) then
+                    error("inconsistent paginated workflow-runs snapshot")
+                elif ($runs | length) == 0 then
+                  "__NORUN__"
+                else
+                  $runs[]
+                  | [(.status // "-"), (.conclusion // "-"), (.id | tostring), .name, .html_url]
+                  | @tsv
+                  end
+                end
+            end
+        end'
+  } 2>&1
 }
 
 report() {
-  local line="$1"
-  IFS='|' read -r status concl name url <<<"$line"
+  local status="$1" concl="$2" name="$3" url="$4"
   printf '%s  %s: %s / %s\n' "$(date -u +%H:%M:%SZ)" "$name" "$status" "$concl"
   [ -n "${url:-}" ] && [ "$url" != "-" ] && printf '  %s\n' "$url"
 }
 
+SETTLE_FINGERPRINT=""
+SETTLE_COUNT=0
+last_summary="no workflow run registered"
+
 while :; do
-  line="$(query)"
+  lines="$(query)"
+  query_rc=$?
+  # A failed query is an API error even if its output resembles a valid sentinel or run row.
+  # Report-once fails with exit 2. Under --wait, ride through a transient query failure until the
+  # deadline, keeping API diagnostics separate from display fields in successful run rows.
+  if [ "$query_rc" -ne 0 ] || [ -z "$lines" ]; then
+    SETTLE_FINGERPRINT=""
+    SETTLE_COUNT=0
+    last_summary="workflow-runs API query failed"
+    echo "ERROR: could not read workflow runs for ${SHA} in ${REPO}"
+    echo "  raw: ${lines}"
+    case "$lines" in
+      *"Resource not accessible"*|*"Not Found"*|*"404"*) exit 2 ;;
+    esac
+    [ "$WAIT" != "--wait" ] && exit 2
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+      echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
+      exit 1
+    fi
+    sleep "$POLL_SECONDS"
+    continue
+  fi
+
   # No workflow run registered yet (empty array): the query emits an explicit sentinel. This is
   # briefly true right after a push, and is distinct from "in progress", from an error, and from a
   # real run whose .status happens to be null (which falls through to the unrecognized-status path).
-  if [ "$line" = "__NORUN__" ]; then
+  if [ "$lines" = "__NORUN__" ]; then
+    SETTLE_FINGERPRINT=""
+    SETTLE_COUNT=0
+    last_summary="no workflow run registered"
     printf '%s  no workflow run registered for this commit yet\n' "$(date -u +%H:%M:%SZ)"
     [ "$WAIT" != "--wait" ] && exit 2
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -82,48 +181,86 @@ while :; do
       echo "  Check that a workflow is triggered by this event and branch."
       exit 1
     fi
-    sleep 15
+    sleep "$POLL_SECONDS"
     continue
   fi
-  if [[ "$line" == *"not accessible"* || "$line" == *"Not Found"* || -z "$line" ]]; then
-    echo "ERROR: could not read workflow runs for ${SHA} in ${REPO}"
-    echo "  raw: ${line}"
-    exit 2
-  fi
-  report "$line"
-  status="$(cut -d'|' -f1 <<<"$line")"
-  concl="$(cut -d'|' -f2 <<<"$line")"
 
-  case "$status" in
-    completed)
-      [ "$concl" = "success" ] && exit 0
-      echo "RESULT: CI concluded '${concl}', not success."
-      exit 1
-      ;;
-    queued|in_progress|waiting|requested|pending|action_required)
-      # A recognized NON-terminal status. Report-once must not read as success (exit 0 here
-      # was the fail-open: a caller gating with `ci-status.sh $sha && merge` merged on pending).
-      if [ "$WAIT" != "--wait" ]; then
-        echo "RESULT: run not terminal (status: '${status}'); use --wait to gate on completion."
-        exit 1
-      fi
-      ;;
-    *)
-      # Not a GitHub run status: an API error / rate-limit / unexpected text slipped past the
-      # guard above, leaving cut with a non-status field. Report-once fails loud as an API error
-      # (exit 2, not green). Under --wait this may be a transient blip, so ride through to the
-      # next poll exactly as before; a persistent one ends at the deadline as a timeout (exit 1).
-      if [ "$WAIT" != "--wait" ]; then
-        echo "ERROR: unrecognized run status '${status}' for ${SHA} in ${REPO}"
-        echo "  raw: ${line}"
-        exit 2
-      fi
-      ;;
-  esac
+  settled=0
+  run_ids=()
+  failure_names=()
+  failure_conclusions=()
+  nonterminal_names=()
+  unknown_statuses=()
+  while IFS=$'\t' read -r status concl id name url; do
+    report "$status" "$concl" "$name" "$url"
+    run_ids+=("$id")
+    case "$status" in
+      completed)
+        if [ "$concl" != "success" ]; then
+          failure_names+=("$name")
+          failure_conclusions+=("$concl")
+        fi
+        ;;
+      queued|in_progress|waiting|requested|pending|action_required)
+        nonterminal_names+=("${name} (${status})")
+        ;;
+      *)
+        unknown_statuses+=("$status")
+        ;;
+    esac
+  done <<<"$lines"
 
-  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-    echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; last status '${status}'."
+  if [ "${#failure_names[@]}" -ne 0 ]; then
+    echo "RESULT: CI concluded with non-success workflow runs:"
+    for ((i = 0; i < ${#failure_names[@]}; i++)); do
+      printf '  %s: %s\n' "${failure_names[i]}" "${failure_conclusions[i]}"
+    done
     exit 1
   fi
-  sleep 15
+
+  if [ "${#unknown_statuses[@]}" -ne 0 ]; then
+    SETTLE_FINGERPRINT=""
+    SETTLE_COUNT=0
+    last_summary="unrecognized run status '${unknown_statuses[0]}'"
+    if [ "$WAIT" != "--wait" ]; then
+      echo "ERROR: unrecognized run status '${unknown_statuses[0]}' for ${SHA} in ${REPO}"
+      echo "  raw: ${lines}"
+      exit 2
+    fi
+  elif [ "${#nonterminal_names[@]}" -ne 0 ]; then
+    SETTLE_FINGERPRINT=""
+    SETTLE_COUNT=0
+    last_summary="${#nonterminal_names[@]} workflow run(s) not terminal"
+    for item in "${nonterminal_names[@]}"; do
+      last_summary+="; ${item}"
+    done
+    if [ "$WAIT" != "--wait" ]; then
+      echo "RESULT: ${#nonterminal_names[@]} workflow run(s) not terminal; use --wait to gate on completion."
+      exit 1
+    fi
+  else
+    if [ "$WAIT" != "--wait" ]; then
+      exit 0
+    fi
+    fingerprint="$(IFS=,; printf '%s' "${run_ids[*]}")"
+    if [ "$fingerprint" = "$SETTLE_FINGERPRINT" ]; then
+      SETTLE_COUNT=$((SETTLE_COUNT + 1))
+    else
+      SETTLE_FINGERPRINT="$fingerprint"
+      SETTLE_COUNT=1
+    fi
+    last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    if [ "$SETTLE_COUNT" -ge "$SETTLE_OBSERVATIONS" ]; then
+      settled=1
+    else
+      echo "RESULT: ${last_summary}; waiting for late-created runs."
+    fi
+  fi
+
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
+    exit 1
+  fi
+  [ "$settled" -eq 1 ] && exit 0
+  sleep "$POLL_SECONDS"
 done

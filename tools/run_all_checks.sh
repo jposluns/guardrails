@@ -73,6 +73,7 @@ run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
+run_gate "opf-tooling-selftest" python3 -I -B tools/opf.py --self-test
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
@@ -130,6 +131,7 @@ run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
+run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
@@ -165,6 +167,20 @@ run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --s
 
 run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
 run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
+
+# QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
+# proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
+# harness is a real failure); the internal-name scan is gating too.
+run_gate "qa-adapter-selftest"      python3 -I -B tools/_qa_adapter.py --self-test
+run_gate "audit-reference-selftest" python3 -I -B tools/audit_reference.py --self-test
+run_gate "internal-names-selftest"  python3 -I -B tools/check_internal_names.py --self-test
+run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
+
+# ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
+# distinguishes a required-unavailable surface from an optional-disabled one. audit_reference.py --digest
+# always exits 0 on a finding, so an advisory FINDING never gates; only a tool CRASH (unexpected non-zero
+# exit) fails the build, which is the correct behaviour for a broken advisory tool.
+run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
   echo "RESULT: FAIL"

@@ -1,0 +1,75 @@
+# AIQT QA-suite discovery seam (dogfood binding for THIS repo).
+#
+# This file declares the assurance SURFACES the QA audits discover through tools/_qa_adapter.py. It is
+# the ordinary discovery plane only; it is NOT the authority plane for any stop/independence enforcement
+# (those read a separate operator-installed configuration that this file cannot override). See the schema
+# in .aiqt/assurance-schema.md.
+#
+# Each [surfaces.<name>] table selects a shipped adapter TYPE by name and marks the surface required or
+# optional and enabled or disabled. The adapter returns NORMALIZED records with provenance; no adopter
+# Python is imported. Resolution order and the four-value result contract (PASS/FAIL/UNVERIFIABLE/SKIP)
+# live in tools/_qa_adapter.py: a REQUIRED surface that is absent resolves to UNVERIFIABLE (loud), an
+# OPTIONAL surface that is disabled resolves to SKIP (a visible, declared no-op, never a silent omission).
+
+schema-version = 1
+
+# Backlog: the root TODO.md as a GFM task-list. The item grammar is an id token, a status token, and an
+# optional [BLOCKED:<reason>] tag. Declared REQUIRED and dogfood-bound to this repo. In the PUBLIC repo
+# the backlog lives orchestrator-side (not committed here), so this surface resolves UNVERIFIABLE in CI
+# by design: that is the intended required-unavailable signal, not a silent pass.
+[surfaces.backlog]
+adapter = "gfm-task-list"
+required = true
+enabled = true
+path = "TODO.md"
+id-field = "leading id after the list marker"
+status-field = "a bracketed GFM checkbox, [ ] open or [x] done"
+blocked-tag = "[BLOCKED:<reason>]"
+
+# Gate roster: the tools/check_*.py roster is the SINGLE source of truth for the pack's gates, shared with
+# the parity engine (never re-declared elsewhere). Present in this repo, so this surface resolves PASS.
+[surfaces.gate_roster]
+adapter = "glob-roster"
+required = true
+enabled = true
+dir = "tools"
+pattern = "check_*.py"
+
+# Git: repository root via `git rev-parse --show-toplevel`, the protected branch, and the remote-landing
+# provider used to prove a change actually landed. Present in this repo, so this surface resolves PASS.
+[surfaces.git]
+adapter = "git"
+required = true
+enabled = true
+protected-branch = "main"
+remote-landing-provider = "github"
+
+# Register: the decision/currency/history record store. DECLARED but disabled by default in the public
+# repo, because the assurance records live in the orchestrator's private store, not this checkout. The
+# orchestrator enables this locally and binds `path` to the private register; CI is public-only, so the
+# record audits run orchestrator-side at resume/handoff, never in CI. Disabled optional -> SKIP.
+[surfaces.register]
+adapter = "record-file"
+required = false
+enabled = false
+path = ""
+
+# Session state: the lease / operating-mode markers. DECLARED but disabled here for the same reason as
+# the register (private-store surface). Disabled optional -> SKIP.
+[surfaces.session_state]
+adapter = "record-file"
+required = false
+enabled = false
+path = ""
+
+# Session transcript / inbox adapter: OPTIONAL and absent by default (privacy posture: opt-in only).
+[surfaces.session]
+adapter = "transcript-inbox"
+required = false
+enabled = false
+
+# Held reference base for cited-claim checks: OPTIONAL and absent by default.
+[surfaces.reference]
+adapter = "held-source"
+required = false
+enabled = false
