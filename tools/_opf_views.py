@@ -1228,13 +1228,17 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
         # C0/DEL), which would render a view body whose bytes FAIL the authoritative byte-canon scan.
         # GUARANTEE clean output by FAILING CLOSED here, before any drift compare or write: never emit
         # invalid bytes, never silently alter the owner's text.
-        # Strip trailing whitespace from every rendered line: a schema-valid free-text field may end in a
-        # space, which would put benign trailing whitespace at a line end and (round-2) refuse the whole
-        # render. Trailing line whitespace is a rendering artefact, not owner content, so normalizing it is
-        # benign and deterministic; the byte-canon scan below then fails closed only on genuinely forbidden
-        # codepoints (zero-width/bidi) that _md_text does not strip. Goldens carry no trailing whitespace,
-        # so this is a no-op for them.
-        text = "\n".join(line.rstrip(" \t") for line in text.split("\n"))
+        # Strip trailing whitespace from every rendered line with Python's Unicode str.rstrip() (no arg),
+        # the SAME predicate check_byte_canon uses to detect a trailing-whitespace line (body != body
+        # .rstrip()): a schema-valid free-text field may end in a space OR another Unicode whitespace
+        # codepoint (U+00A0, U+1680, U+2000, U+202F, U+205F, U+3000, ...), which would put benign trailing
+        # whitespace at a line end and (round-2) refuse the whole render. Matching check_byte_canon's own
+        # predicate here normalizes out EVERY Unicode trailing-whitespace codepoint it would flag, not only
+        # ASCII space/tab. Trailing line whitespace is a rendering artefact, not owner content, so
+        # normalizing it is benign and deterministic; genuinely FORBIDDEN non-whitespace codepoints
+        # (zero-width/bidi, e.g. U+200B/U+202E) are NOT stripped by rstrip() and still fail closed in the
+        # byte-canon scan below. Goldens carry no trailing whitespace, so this is a no-op for them.
+        text = "\n".join(line.rstrip() for line in text.split("\n"))
         canon = check_byte_canon.scan_bytes(text.encode("utf-8"))
         if canon:
             raise ViewsError("view {!r} would emit byte-canon-invalid output ({}); refusing rather than "
@@ -1262,16 +1266,19 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
 # these yields the literal character (so `\`` is a literal backtick, NEVER a code-span fence).
 _ASCII_PUNCT = frozenset("""!"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~""")
 
-# The oracle's autolink recognisers, applied to a DECODED out-of-code text run. The left boundary is
-# intentionally DROPPED so the oracle is a SUPERSET of cmark-gfm's autolink detection: cmark-gfm rewinds a
-# URL to its scheme and autolinks after a digit, letter, or punctuation (e.g. `1http://a.example`), so the
-# oracle must NOT false-negative a digit/punct-prefixed trigger. Over-detection on raw input only
-# STRENGTHENS teeth; it never causes a false-pass, because the production wrap code-spans every token, so
-# the oracle returns [] on the emitted output. The URL schemes are cmark-gfm's http/https/ftp (GFM 6.9);
-# the email form additionally recognises the optional mailto:/xmpp: prefix cmark-gfm folds into the link.
-# Tokens end at whitespace or `<`, as a GFM URL autolink does.
+# The oracle's autolink recognisers, applied to a DECODED out-of-code text run. The URL and email
+# recognisers are intentionally BOUNDARY-FREE, making the oracle a SUPERSET of cmark-gfm's detection for
+# those two: cmark-gfm rewinds a URL to its scheme and autolinks email mid-text (e.g. `1http://a.example`),
+# so the oracle must NOT false-negative a digit/letter/punct-prefixed URL or email trigger. Over-detection
+# on raw input only STRENGTHENS teeth; it never causes a false-pass, because the production wrap code-spans
+# every token, so the oracle returns [] on the emitted output. The www recogniser, by contrast, KEEPS the
+# `(?<![A-Za-z0-9])` not-after-alphanumeric boundary, because cmark-gfm does NOT autolink www after an
+# alphanumeric (so `1www.x`/`xwww.x` stay plain); keeping the oracle www rule a SUBSET of the production www
+# matcher (same boundary) keeps the oracle [] on emitted output for www too. The URL schemes are cmark-gfm's
+# http/https/ftp (GFM 6.9); the email form additionally recognises the optional mailto:/xmpp: prefix
+# cmark-gfm folds into the link. Tokens end at whitespace or `<`, as a GFM URL autolink does.
 _ORACLE_URL_RE = re.compile(r"(?:https?|ftp)://[^\s<]+", re.IGNORECASE)
-_ORACLE_WWW_RE = re.compile(r"www\.[A-Za-z0-9\-_][^\s<]*", re.IGNORECASE)
+_ORACLE_WWW_RE = re.compile(r"(?<![A-Za-z0-9])www\.[A-Za-z0-9\-_][^\s<]*", re.IGNORECASE)
 _ORACLE_EMAIL_RE = re.compile(
     r"(?:mailto:|xmpp:)?[A-Za-z0-9.\-_+]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)+", re.IGNORECASE)
 # A `;`-terminated HTML entity reference, with numeric references limited to CommonMark's grammar: 1-7
@@ -1401,14 +1408,17 @@ def _gfm_autolinks(markdown):
          (why `www&#46;example.com` autolinks) but ONLY when `;`-terminated (why `www&#46example.com` does
          not). Entities inside a code span are NOT decoded, which is why decoding runs per out-of-code run,
          after code spans are removed.
-      3. The decoded run is scanned for the triggers at a valid LEFT BOUNDARY, and an email match is put
-         through the extended-email tail rule.
+      3. The decoded run is scanned for the triggers: the URL and email recognisers deliberately have NO
+         left-boundary precondition (a superset of cmark-gfm, which rewinds them), while the www recogniser
+         keeps the not-after-alphanumeric boundary to match cmark-gfm's www rule and the production matcher.
+         An email match is additionally put through the extended-email tail rule.
 
     Disclosed residual (disclose-guard-residuals): this oracle is a TEST instrument, not the production
     neutralizer. It was validated by a ONE-TIME differential against a real CommonMark+linkify renderer:
     production leaves ZERO active links across the adversarial inputs, and the oracle is a DELIBERATE
-    SUPERSET of cmark-gfm's detection (the dropped left boundary above) so it can only over-detect on raw
-    input, never false-pass on emitted output. Relatedly, the whole-body byte-canon scan in _render_resolved
+    SUPERSET of cmark-gfm's detection (the dropped URL/email left boundary above; the www rule keeps its
+    not-after-alphanumeric boundary) so it can only over-detect on raw input, never false-pass on emitted
+    output. Relatedly, the whole-body byte-canon scan in _render_resolved
     calls check_byte_canon.scan_bytes with allowances=(), which is correct because no view declares a
     byte-canon allowance today; a future per-view allowance would need threading through to that call.
 
@@ -1673,6 +1683,10 @@ def self_test():
         check("oracle-no-false-alarm-codespan", _gfm_autolinks("`www.example.com`") == [])
         check("oracle-no-false-alarm-plain", _gfm_autolinks("a normal sentence, no links.") == [])
         check("oracle-no-false-alarm-timestamp", _gfm_autolinks("2026-01-01T00:00:00Z") == [])
+        # A `www.` preceded by an alphanumeric is NOT autolinked by cmark-gfm, so production leaves
+        # `1www`/`xwww` plain and the oracle's restored www left boundary does not match them either.
+        check("autolink-1www-inert", _gfm_autolinks(_md_text("1www.example.com")) == [])
+        check("autolink-xwww-inert", _gfm_autolinks(_md_text("xwww.example.com")) == [])
 
         # (b) The FIX renders each form inert (fails under the old entity _md_text, which still autolinks).
         check("autolink-www-inert", _gfm_autolinks(_md_text("www.example.com")) == [])
@@ -1727,9 +1741,10 @@ def self_test():
         # oracle leaves it literal (no spurious decode -> no false autolink).
         check("oracle-overlong-entity-literal", _gfm_autolinks("http&#00000058;//x.example") == [])
         # round-3: a free-text field with TRAILING WHITESPACE renders CLEAN (not refused) - trailing line
-        # whitespace is normalized out before the byte-canon scan.
-        check("md-render-trailing-space-field-ok",
-              _md_text("title ").rstrip(" ") == _md_text("title ").rstrip(" "))
+        # whitespace is normalized out (by _render_resolved, not _md_text) before the byte-canon scan. The
+        # prior unit assertion here was a tautology (it compared an expression with itself); the real proof
+        # is the end-to-end `trailing-space-title-renders` / `trailing-nbsp-title-renders` cases in CLASS B,
+        # which drive a full render and read the emitted bytes.
 
         # FINDING C: adjacent autolink tokens (no text between) COALESCE into ONE code span over the
         # original substring, so no touching backtick run forms and no fence leaks into the content.
@@ -2300,9 +2315,10 @@ def self_test():
 
             # round-3 (CLASS B positive): a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
             # renders a body line ending in whitespace; _render_resolved now normalizes trailing line
-            # whitespace before the byte-canon scan, so the render is NO LONGER refused (exit != 2). Pre
-            # round-3 this failed closed at exit 2 over benign trailing whitespace. Modelled on the CLASS B
-            # store construction; proves the over-fire fix end to end, not only at the _md_text unit level.
+            # whitespace before the byte-canon scan, so the render SUCCEEDS (EXIT_OK) and writes a clean
+            # view. Pre round-3 this failed closed at exit 2 over benign trailing whitespace. Modelled on the
+            # CLASS B store construction; proves the over-fire fix end to end, not only at a unit level.
+            import check_byte_canon  # authoritative byte-canon leg; pure function over bytes
             _tsroot = new_root()
             write_toml(_tsroot, "manifest.toml", manifest)
             empty_indexes(_tsroot)
@@ -2312,7 +2328,37 @@ def self_test():
                 _rec("BI-1", "backlog_item", "open", "trailing space title "),
             ]) + "\n")
             check("trailing-space-title-renders",
-                  render(["--root", str(_tsroot)]) != EXIT_CANNOT_EVALUATE)
+                  render(["--root", str(_tsroot)]) == EXIT_OK)
+            _tstodo = (_tsroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
+            # (a) the title text survived, minus its trailing whitespace (no rendered line ends in space/tab);
+            # (b) exactly one terminal newline; (c) the emitted bytes pass the authoritative byte-canon scan.
+            check("trailing-space-title-text-survived", "trailing space title" in _tstodo)
+            check("trailing-space-title-no-trailing-ws",
+                  all(not ln.endswith((" ", "\t")) for ln in _tstodo.split("\n")))
+            check("trailing-space-title-one-terminal-newline",
+                  _tstodo.endswith("\n") and not _tstodo.endswith("\n\n"))
+            check("trailing-space-title-byte-canon-clean",
+                  check_byte_canon.scan_bytes(_tstodo.encode("utf-8")) == [])
+
+            # round-3 (Unicode fix): a title ending in a NON-BREAKING SPACE (U+00A0) is ALSO normalized out
+            # by _render_resolved's Unicode str.rstrip() (the SAME predicate check_byte_canon uses), so it
+            # renders clean (EXIT_OK) rather than over-firing the byte-canon refusal. This proves the fix
+            # covers the Unicode trailing-whitespace codepoints, not only ASCII space/tab.
+            _tsnbroot = new_root()
+            write_toml(_tsnbroot, "manifest.toml", manifest)
+            empty_indexes(_tsnbroot)
+            write_toml(_tsnbroot, "version.toml", _bc_version)
+            write_toml(_tsnbroot, "backlog_item.index.toml", "\n".join([
+                "schema = 1",
+                _rec("BI-1", "backlog_item", "open", "trailing nbsp title" + chr(0x00A0)),
+            ]) + "\n")
+            check("trailing-nbsp-title-renders",
+                  render(["--root", str(_tsnbroot)]) == EXIT_OK)
+            _tsnbtodo = (_tsnbroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
+            check("trailing-nbsp-title-text-survived", "trailing nbsp title" in _tsnbtodo)
+            check("trailing-nbsp-title-normalized", chr(0x00A0) not in _tsnbtodo)
+            check("trailing-nbsp-title-byte-canon-clean",
+                  check_byte_canon.scan_bytes(_tsnbtodo.encode("utf-8")) == [])
 
             # CLASS 3 (B3): /proposed is NONTERMINAL, and `withdrawn` is a valid terminal. In PIPELINE,
             # DECISIONS, and HANDOFF a proposed record is surfaced as AWAITING RATIFICATION (never under its
