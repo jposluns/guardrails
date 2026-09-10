@@ -535,8 +535,10 @@ _MD_ESCAPE_RE = re.compile(r"([\\`*_{}\[\]()#+!|~])")
 # and then autolinks it. The post-process does, however, scan only TEXT nodes and never CODE nodes, so a
 # trigger inside a CODE SPAN is never autolinked. A URL/email is therefore neutralized ROBUSTLY and
 # renderer-agnostically by wrapping it in a code span (backticks): every character is preserved
-# byte-for-byte (only the font becomes monospace), the output stays byte-canon clean (backticks and
-# spaces only, no zero-width or bidi character), and a raw `<` inside the token is rendered inert too.
+# byte-for-byte (only the font becomes monospace); the WRAP itself introduces only backticks and spaces
+# (no zero-width or bidi character), but it preserves whatever codepoints the token already carried, so
+# byte-canon-clean OUTPUT is guaranteed not here but by the view generator's whole-body fail-closed scan
+# (see _render_resolved); a raw `<` inside the token is rendered inert too.
 # The matcher is a deliberate SUPERSET of GFM's three trigger grammars, so every form GFM would autolink
 # -- and any additional URL scheme its extension may recognise -- is wrapped; over-wrapping a token GFM
 # would not have autolinked only renders it monospace, never leaves it active. A URL/www token ends at
@@ -592,22 +594,41 @@ def _md_text(value):
     every character preserved. Every non-token segment is escaped by `_md_escape_inline`. A value with no
     autolink trigger takes only the escape path and is byte-identical to the pre-F-U4AUTOLINK output.
 
+    Adjacent autolink tokens with no text between them (an email whose `+` starts the next address, say)
+    are COALESCED into ONE code span over the original contiguous substring, so two abutting spans never
+    put a closing and an opening fence flush and form a two-backtick run that CommonMark reads as a single
+    span with the fence backticks left visible inside it (fidelity: every character preserved).
+
     Disclosed residual (disclose-guard-residuals): a neutralized URL/email renders in MONOSPACE (a code
     span) rather than proportional text; its characters are byte-identical, only the font differs. The
     matcher is a superset of GFM's three trigger grammars (any `scheme://`, `www.`, `local@domain`), so
     schemes beyond http/https are wrapped too. The CommonMark angle-bracket autolink `<scheme:...>` is
-    still handled by the `<`/`>` entity escaping in `_md_escape_inline`, not here. This transform does
-    NOT strip zero-width/bidi characters that the store owner's own free text may carry (only C0/DEL are
-    dropped); that pre-existing concern is the whole-corpus byte-canon gate's remit, not this sink's."""
+    still handled by the `<`/`>` entity escaping in `_md_escape_inline`, not here. This transform strips
+    only C0/DEL controls; it does NOT strip the zero-width/bidi codepoints the store owner's own free text
+    may carry, and (like every field) preserves them inside the wrap. Byte-canon-clean OUTPUT is therefore
+    guaranteed NOT by this sink but by the view generator, which scans every fully-assembled view body with
+    the authoritative check_byte_canon.scan_bytes and FAILS CLOSED (cannot-evaluate) before any drift
+    compare or write, so a forbidden codepoint refuses the render rather than reaching a view (see
+    _render_resolved)."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     s = _MD_CTRL_RE.sub("", s)
+    # Coalesce CONTIGUOUS autolink matches (no text between them) into ONE code span over the original
+    # substring: two abutting code spans would sit fence-to-fence, forming a two-backtick run CommonMark
+    # reads as a single span with the fences left visible inside it (C). Merging keeps one clean span over
+    # the raw run, every character preserved and no autolink surviving.
+    spans = []
+    for m in _MD_AUTOLINK_TOKEN_RE.finditer(s):
+        if spans and m.start() == spans[-1][1]:
+            spans[-1] = (spans[-1][0], m.end())
+        else:
+            spans.append((m.start(), m.end()))
     out = []
     pos = 0
-    for m in _MD_AUTOLINK_TOKEN_RE.finditer(s):
-        out.append(_md_escape_inline(s[pos:m.start()]))
-        out.append(_md_code_span(m.group(1)))
-        pos = m.end()
+    for start, end in spans:
+        out.append(_md_escape_inline(s[pos:start]))
+        out.append(_md_code_span(s[start:end]))
+        pos = end
     out.append(_md_escape_inline(s[pos:]))
     return "".join(out)
 
@@ -1180,6 +1201,7 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
     # target is bound to its OWN spec destination; a manifest `target` that does not match is rejected,
     # never silently redirected.
     planned = []   # (view_name, scope, dest_relpath, text)
+    import check_byte_canon  # authoritative byte-canon leg; pure function over bytes, lazy like self_test
     for name in sorted(views):
         tbl = views[name]
         kind, required, renderer = _resolve_view(name)
@@ -1201,6 +1223,15 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
             source_blobs = {_source_relpath(machine_rel, s): raw_by_relpath[_source_relpath(machine_rel, s)]
                             for s in required}
             text = _header(source_blobs) + "\n" + body
+        # Defence in depth over the whole-corpus byte-canon gate (codex-B): a schema-valid free-text field
+        # may carry a zero-width or bidi-control codepoint that _md_text does NOT strip (it drops only
+        # C0/DEL), which would render a view body whose bytes FAIL the authoritative byte-canon scan.
+        # GUARANTEE clean output by FAILING CLOSED here, before any drift compare or write: never emit
+        # invalid bytes, never silently alter the owner's text.
+        canon = check_byte_canon.scan_bytes(text.encode("utf-8"))
+        if canon:
+            raise ViewsError("view {!r} would emit byte-canon-invalid output ({}); refusing rather than "
+                             "emitting or silently altering owner text".format(name, "; ".join(canon)))
         planned.append((name, scope, dest_rel, text))
 
     # Phase 2: write (or drift-report under --check) each target in the stable (view-name) order, through
@@ -1226,93 +1257,148 @@ _ASCII_PUNCT = frozenset("""!"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~""")
 
 # The oracle's autolink recognisers, applied to a DECODED out-of-code text run. The left-boundary set
 # `[\s*_~(]` is GFM's extended-autolink prefix set (6.9); start-of-run also counts (a text node's first
-# byte is a valid prefix in cmark-gfm). URL triggers are the canonical `http`/`https` schemes GFM's
-# extension recognises; the tokens end at whitespace or `<`, as a GFM URL autolink does.
-_ORACLE_URL_RE = re.compile(r"(?:^|(?<=[\s*_~(]))https?://[^\s<]+", re.IGNORECASE)
+# byte is a valid prefix in cmark-gfm). The URL schemes are cmark-gfm's http/https/ftp (GFM 6.9); the
+# email form additionally recognises the optional mailto:/xmpp: prefix cmark-gfm folds into the link.
+# Tokens end at whitespace or `<`, as a GFM URL autolink does.
+_ORACLE_URL_RE = re.compile(r"(?:^|(?<=[\s*_~(]))(?:https?|ftp)://[^\s<]+", re.IGNORECASE)
 _ORACLE_WWW_RE = re.compile(r"(?:^|(?<=[\s*_~(]))www\.[A-Za-z0-9\-_][^\s<]*", re.IGNORECASE)
 _ORACLE_EMAIL_RE = re.compile(
-    r"(?:^|(?<=[\s*_~(]))[A-Za-z0-9.\-_+]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)+", re.IGNORECASE)
+    r"(?:^|(?<=[\s*_~(]))(?:mailto:|xmpp:)?"
+    r"[A-Za-z0-9.\-_+]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)+", re.IGNORECASE)
+# A `;`-terminated HTML entity reference (numeric decimal, numeric hex, or named). cmark-gfm decodes a
+# reference ONLY when the terminating `;` is present, so `&#58` (no `;`) stays literal and does NOT break
+# an autolink; the oracle enforces the same by decoding only whole `&...;` tokens (guard-input-soundness).
+_ORACLE_ENTITY_RE = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
+
+
+def _oracle_find_closing_fence(s, start, runlen):
+    """The RAW index at or after `start` of the first backtick run of EXACTLY `runlen` (CommonMark 6.3
+    closing-fence rule), or None. The scan is RAW: a backslash never escapes a code-span backtick, so
+    backslashes are ignored when locating the closer (CommonMark example 349)."""
+    n = len(s)
+    k = start
+    while k < n:
+        if s[k] == "`":
+            m = k
+            while m < n and s[m] == "`":
+                m += 1
+            if m - k == runlen:
+                return k
+            k = m
+        else:
+            k += 1
+    return None
 
 
 def _oracle_text_runs(s):
-    """Split `s` into the maximal TEXT runs that lie OUTSIDE code spans, with backslash escapes resolved.
-    Models the two cmark-gfm facts the autolink decision turns on: (1) a code span is a run of N
-    unescaped backticks closed by the next run of EXACTLY N (CommonMark 6.3); its content is a CODE node,
-    excluded here because the autolink post-process never scans it; an unclosed opening run is literal
-    backtick text. (2) A backslash before an ASCII-punctuation character yields that literal character
-    (so `\\\\`` is literal, never a fence); a backslash before anything else is itself literal."""
-    # Pass 1: tokenize into ('text', str) / ('fence', n) atoms, honouring backslash escapes.
-    atoms, buf, i, n = [], [], 0, len(s)
-
-    def flush():
-        if buf:
-            atoms.append(("text", "".join(buf)))
-            buf.clear()
-
+    r"""Split `s` into the maximal RAW TEXT runs that lie OUTSIDE code spans (backslash escapes are NOT
+    resolved here; `_oracle_decode_run` does that per run). Models the cmark-gfm code-span fact the
+    autolink decision turns on: code spans are located by RAW backtick runs FIRST, because a backslash
+    never escapes a code-span backtick (CommonMark example 349, `\`` closes the span). An unescaped
+    opening run of N backticks is closed by the next RAW run of EXACTLY N; content between is a CODE node,
+    excluded because the autolink post-process never scans it. A backtick reached as a backslash escape is
+    NOT an opener (it is literal text, resolved later); an opening run with no equal-length closer is
+    literal backtick text."""
+    n = len(s)
+    i = 0
+    runs = []
+    cur = []
     while i < n:
         c = s[i]
         if c == "\\" and i + 1 < n:
-            nxt = s[i + 1]
-            if nxt in _ASCII_PUNCT:
-                buf.append(nxt)          # escaped punctuation -> literal char, backslash removed
-                i += 2
-            else:
-                buf.append("\\")         # lone backslash is literal
-                i += 1
+            # An escaped char (incl. an escaped backtick) is literal text, never a fence opener; keep both
+            # bytes RAW so _oracle_decode_run resolves the escape after code spans are removed.
+            cur.append(s[i])
+            cur.append(s[i + 1])
+            i += 2
             continue
         if c == "`":
             j = i
             while j < n and s[j] == "`":
                 j += 1
-            flush()
-            atoms.append(("fence", j - i))
-            i = j
-            continue
-        buf.append(c)
-        i += 1
-    flush()
-    # Pass 2: match code spans (first equal-length closing fence); emit only out-of-code text runs.
-    runs, cur, k = [], [], 0
-    while k < len(atoms):
-        kind, val = atoms[k]
-        if kind == "fence":
-            close = next((m for m in range(k + 1, len(atoms))
-                          if atoms[m][0] == "fence" and atoms[m][1] == val), None)
+            runlen = j - i
+            close = _oracle_find_closing_fence(s, j, runlen)
             if close is None:
-                cur.append("`" * val)    # unclosed run: literal backticks
-                k += 1
+                cur.append("`" * runlen)     # unclosed opener: literal backticks
+                i = j
             else:
-                if cur:
-                    runs.append("".join(cur)); cur = []
-                k = close + 1            # skip the code-span content and both fences
-        else:
-            cur.append(val)
-            k += 1
-    if cur:
-        runs.append("".join(cur))
+                runs.append("".join(cur)); cur = []
+                i = close + runlen           # skip the code-span content and both fences
+            continue
+        cur.append(c)
+        i += 1
+    runs.append("".join(cur))
     return runs
 
 
-def _gfm_autolinks(markdown):
-    """MINIMAL cmark-gfm autolink-extension oracle for the three EXTENDED forms (www / url / email) --
-    the only autolink forms this pack must defeat. It reproduces exactly the parts of cmark-gfm's
-    autolink POST-PROCESS that decide whether a bare URL/email becomes an active link, and nothing else
-    (it is NOT a general Markdown parser). Cites GFM spec 6.9 (Autolinks (extension)).
+def _oracle_decode_run(run):
+    r"""Resolve a RAW out-of-code text run to the text cmark-gfm autolinks over: a backslash before an
+    ASCII-punctuation char yields that literal char (and consumes it, so `\&#46;` cannot then form an
+    entity), a lone backslash is literal, and a `;`-terminated entity reference is decoded. The two are
+    mutually exclusive by position (a single left-to-right pass), matching CommonMark's inline scan."""
+    out = []
+    i = 0
+    n = len(run)
+    while i < n:
+        c = run[i]
+        if c == "\\" and i + 1 < n and run[i + 1] in _ASCII_PUNCT:
+            out.append(run[i + 1])
+            i += 2
+            continue
+        if c == "&":
+            m = _ORACLE_ENTITY_RE.match(run, i)
+            if m:
+                dec = html.unescape(m.group(0))
+                if dec != m.group(0):
+                    out.append(dec)
+                    i = m.end()
+                    continue
+            out.append("&")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
-      1. Code spans are located and their content EXCLUDED (a CODE node is never autolink-scanned).
-      2. In each remaining TEXT run, backslash escapes are resolved (pass 1 above) and HTML entity
-         references are DECODED with `html.unescape` (cmark-gfm consolidates text nodes and resolves
-         references BEFORE autolinking -- precisely why a numeric-character-reference break such as
-         `www&#46;example.com` still autolinks on GitHub). Entities inside a code span are NOT decoded,
-         which is why decoding runs per out-of-code run, after code spans are removed.
-      3. The decoded run is scanned for the three triggers at a valid LEFT BOUNDARY.
+
+def _oracle_trim_email(tok):
+    """Apply cmark-gfm's extended-email tail rule (GFM 6.9): a trailing `.` is not part of the address,
+    and the last character of the domain must not be `-` or `_`, else the address does NOT autolink.
+    Returns the autolinked email, or None when the tail rule rejects it."""
+    while tok.endswith("."):
+        tok = tok[:-1]
+    if not tok or tok[-1] in "-_":
+        return None
+    return tok
+
+
+def _gfm_autolinks(markdown):
+    """MINIMAL cmark-gfm autolink-extension oracle for the EXTENDED forms (www / url with schemes
+    http/https/ftp / email with an optional mailto:/xmpp: prefix) -- the autolink forms this pack must
+    defeat. It reproduces the parts of cmark-gfm's autolink POST-PROCESS that decide whether a bare
+    URL/email becomes an active link, and nothing else (it is NOT a general Markdown parser). Cites GFM
+    spec 6.9 (Autolinks (extension)).
+
+      1. Code spans are located by RAW backtick runs FIRST and their content EXCLUDED (a CODE node is
+         never autolink-scanned; a backslash never escapes a code-span backtick, CommonMark example 349).
+      2. Each remaining out-of-code TEXT run is decoded (backslash escapes, then `;`-terminated HTML
+         entity references) exactly once, left to right -- cmark-gfm resolves references BEFORE autolinking
+         (why `www&#46;example.com` autolinks) but ONLY when `;`-terminated (why `www&#46example.com` does
+         not). Entities inside a code span are NOT decoded, which is why decoding runs per out-of-code run,
+         after code spans are removed.
+      3. The decoded run is scanned for the triggers at a valid LEFT BOUNDARY, and an email match is put
+         through the extended-email tail rule.
 
     Returns the list of autolinked substrings (empty when nothing autolinks)."""
     found = []
     for run in _oracle_text_runs(markdown):
-        text = html.unescape(run)
-        for rx in (_ORACLE_URL_RE, _ORACLE_WWW_RE, _ORACLE_EMAIL_RE):
-            found.extend(m.group(0) for m in rx.finditer(text))
+        text = _oracle_decode_run(run)
+        found.extend(m.group(0) for m in _ORACLE_URL_RE.finditer(text))
+        found.extend(m.group(0) for m in _ORACLE_WWW_RE.finditer(text))
+        for m in _ORACLE_EMAIL_RE.finditer(text):
+            email = _oracle_trim_email(m.group(0))
+            if email is not None:
+                found.append(email)
     return found
 
 
@@ -1590,6 +1676,36 @@ def self_test():
               _md_text("http://x/`q`") == "`` http://x/`q` ``")
         check("autolink-token-with-backtick-inert", _gfm_autolinks(_md_text("http://x/`q`")) == [])
 
+        # (d) FINDING A: the oracle is faithful to cmark-gfm's autolink DECISION. Each vector FAILS on the
+        # pre-fix oracle and holds only for the faithful one.
+        # A.1 ORDERING: a backslash never escapes a code-span backtick; the span closes at the 2nd
+        # backtick, leaving the URL in a TEXT run and ACTIVE.
+        check("oracle-codespan-first-ordering", _gfm_autolinks("`x\\` http://e.com`") != [])
+        # A.2 PROTOCOLS: ftp:// and mailto:/xmpp: autolink; the oracle needs teeth, the wrap keeps inert.
+        check("oracle-teeth-ftp-raw", _gfm_autolinks("see ftp://x.example ok") != [])
+        check("oracle-teeth-mailto-raw", _gfm_autolinks("mail mailto:a@b.example ok") != [])
+        check("oracle-teeth-xmpp-raw", _gfm_autolinks("at xmpp:a@b.example ok") != [])
+        check("autolink-ftp-inert", _gfm_autolinks(_md_text("ftp://x.example")) == [])
+        check("autolink-mailto-inert", _gfm_autolinks(_md_text("mailto:a@b.example")) == [])
+        check("autolink-xmpp-inert", _gfm_autolinks(_md_text("xmpp:a@b.example")) == [])
+        # A.3 ENTITIES: a numeric reference decodes ONLY when `;`-terminated.
+        check("oracle-entity-requires-semicolon", _gfm_autolinks("http&#58//x.example") == [])
+        check("oracle-entity-with-semicolon-teeth", _gfm_autolinks("http&#58;//x.example") != [])
+        # A.4 EMAIL DOMAIN: a trailing `_` or `-` is not a valid autolink; a real one is.
+        check("oracle-email-trailing-underscore-rejected", _gfm_autolinks("mail a@b.c_ please") == [])
+        check("oracle-email-trailing-hyphen-rejected", _gfm_autolinks("mail a@b.c- please") == [])
+        check("oracle-email-normal-teeth", _gfm_autolinks("mail a@b.cd please") != [])
+
+        # FINDING C: adjacent autolink tokens (no text between) COALESCE into ONE code span over the
+        # original substring, so no touching backtick run forms and no fence leaks into the content.
+        # Pre-fix output was "`a@b.com``+a@c.com`" (visible double backtick).
+        check("autolink-adjacent-single-span", _md_text("a@b.com+a@c.com") == "`a@b.com+a@c.com`")
+        check("autolink-adjacent-no-double-backtick", "``" not in _md_text("a@b.com+a@c.com"))
+        check("autolink-adjacent-inert", _gfm_autolinks(_md_text("a@b.com+a@c.com")) == [])
+        # A single space between two addresses is real text, so they stay TWO separate spans (unchanged).
+        check("autolink-nonadjacent-two-spans",
+              _md_text("a@b.com a@c.com") == "`a@b.com` `a@c.com`")
+
         # F-U4AUTOLINK byte-canon: a rendered view carrying a URL free-text field is byte-canon clean
         # (no forbidden zero-width/bidi codepoint, no CR, single trailing newline, no trailing
         # whitespace) AND renders the URL inert. Byte-canon is judged by the AUTHORITATIVE gate's own
@@ -1609,6 +1725,20 @@ def self_test():
         # The URL's raw `&` inside the code span stays literal (code, not an entity), so the address
         # renders exactly; the value carried no autolink out.
         check("autolink-view-url-preserved", "`http://ex.example/a?b=1&c=2`" in url_body)
+
+        # FINDING B teeth (fix-independent): _md_text drops only C0/DEL, so a zero-width or bidi-control
+        # codepoint in a free-text field SURVIVES into the rendered text -- the bytes the byte-canon scan
+        # forbids. These document the hole the whole-body fail-closed scan (in _render_resolved) closes.
+        for _lbl, _cp in (("zwsp", 0x200B), ("zwnj", 0x200C), ("zwj", 0x200D),
+                          ("wj", 0x2060), ("bom", 0xFEFF), ("rlo", 0x202E)):
+            _mt = _md_text("a" + chr(_cp) + "b")
+            check("md-text-passes-forbidden-" + _lbl, chr(_cp) in _mt)
+            check("byte-canon-flags-forbidden-" + _lbl,
+                  check_byte_canon.scan_bytes(_mt.encode("utf-8")) != [])
+        # A lone CR is a DIFFERENT case: _md_text COLLAPSES it to a space, so it never reaches a body; the
+        # scan's CR leg is defence in depth for any non-_md_text path (schema also rejects a CR in title).
+        check("md-text-collapses-cr", _md_text("a\rb") == "a b")
+        check("byte-canon-cr-teeth", check_byte_canon.scan_bytes(b"a\rb\n") != [])
 
         # CLASS 2 (B2): the generated header interpolates DISCOVERED source paths into an HTML comment; a
         # machine-dir component bearing `-->` (or the abrupt `--!>`) must NOT close the comment early. Every
@@ -2105,6 +2235,34 @@ def self_test():
                 check("class-wide-esc-present-" + _vn, ESC in _body)
                 check("class-wide-no-raw-payload-" + _vn, P not in _body)
 
+            # CLASS B (codex, full-render fail-closed): a SCHEMA-VALID backlog_item whose title carries a
+            # zero-width or bidi-control codepoint renders a view body whose bytes fail the authoritative
+            # byte-canon scan. The generator FAILS CLOSED (cannot-evaluate) and writes NOTHING, rather than
+            # emitting an invalid view. Driven under the scaffolded write gate; pre-fix this rendered clean
+            # (exit 0) and wrote invalid bytes. A lone CR is excluded: _md_text collapses it upstream.
+            _bc_version = "\n".join([
+                "schema = 1", "", "[[release]]",
+                'version = "0.1.0"',
+                'date = "2026-01-01T00:00:00Z"',
+                'worklog_span = []',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+            ]) + "\n"
+            for _bcls, _bcp in (("zero-width-u200b", 0x200B), ("zero-width-u200c", 0x200C),
+                                ("zero-width-u200d", 0x200D), ("word-joiner-u2060", 0x2060),
+                                ("bom-ufeff", 0xFEFF), ("bidi-rlo-u202e", 0x202E)):
+                _bcroot = new_root()
+                write_toml(_bcroot, "manifest.toml", manifest)
+                empty_indexes(_bcroot)
+                write_toml(_bcroot, "version.toml", _bc_version)
+                write_toml(_bcroot, "backlog_item.index.toml", "\n".join([
+                    "schema = 1",
+                    _rec("BI-1", "backlog_item", "open", "title" + chr(_bcp) + "here"),
+                ]) + "\n")
+                check("byte-canon-fail-closed-" + _bcls,
+                      render(["--root", str(_bcroot)]) == EXIT_CANNOT_EVALUATE)
+                check("byte-canon-wrote-nothing-" + _bcls,
+                      not (_bcroot / WORKING_DIRNAME / "TODO.md").exists())
+
             # CLASS 3 (B3): /proposed is NONTERMINAL, and `withdrawn` is a valid terminal. In PIPELINE,
             # DECISIONS, and HANDOFF a proposed record is surfaced as AWAITING RATIFICATION (never under its
             # effective/terminal state, never omitted), and no valid status is dropped. This full VALID
@@ -2249,11 +2407,14 @@ def self_test():
           "detection, the closed transform vocabulary (unknown filter/sort/group/project refused), the "
           "source-set-digest sensitivity, the block-actionability join with deduped numeric-order "
           "annotations and the decision-supersession join (fork/cycle refused, duplicate supersedes link "
-          "tolerated), GFM extended-autolink neutralization (bare http/https/www/email inert), the "
+          "tolerated), GFM extended-autolink neutralization (bare http/https/www/email inert) via the "
+          "render-faithful autolink oracle (code-span-first ordering, http/https/ftp + mailto/xmpp, "
+          "strict entity termination, email tail rule) and adjacent-token coalescing, the "
           "header HTML-comment sink (interpolated -->/--!> neutralized), NONTERMINAL /proposed and valid "
           "withdrawn records surfaced as awaiting-ratification in PIPELINE/DECISIONS/HANDOFF, "
           "spec-destination target binding and no-follow contained writes, declared-source equality, "
-          "deep-TOML and free-text (severity and covers) fail-closed, per-record and module-type "
+          "deep-TOML and free-text (severity and covers) fail-closed AND whole-body byte-canon "
+          "fail-closed (zero-width/bidi refused, never emitted), per-record and module-type "
           "deferrals, missing-and-malformed-source fail-closed, empty-store valid-empty with a rendered "
           "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the F1 "
           "write-refusal fail-safe (ungated write refused, --check unaffected)".format(checked[0]))
