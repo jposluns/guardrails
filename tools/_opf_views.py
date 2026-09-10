@@ -591,10 +591,16 @@ def _md_code_span(token):
 def _md_text(value):
     """Escape a free-text record field for the markdown/HTML view sink (spec 10.3). A record value is
     DATA, never markdown or HTML structure: it must render as LITERAL text and must forge no heading,
-    list item, link, emphasis, code, table cell, raw HTML, header comment, or ACTIVE AUTOLINK.
+    list item, link, emphasis, code, table cell, raw HTML, header comment, or ACTIVE AUTOLINK. Inline
+    constructs are escaped and autolinks code-span-wrapped unconditionally; BLOCK-structure inertness
+    rests on the single-line output being emitted behind a structural prefix (never column 0), so a
+    leading `-`/`N.`/indent cannot begin a line -- and a first-position sink is additionally guarded by
+    the upstream schema constraining every first-position field (id, version, status, covers, span,
+    ref.kind), so the free-text fields (title, locator, note, summary) always render mid-line.
 
     Newlines/carriage returns collapse to a single space (a view field is one line) and other C0/DEL
-    control characters are dropped; then the value is split on the GFM extended-autolink triggers. Each
+    control characters are dropped (U+0009 TAB is preserved as inline whitespace, inert mid-line); then
+    the value is split on the GFM extended-autolink triggers. Each
     autolink token (a bare URL, `www.` domain, or email) is wrapped in a CODE SPAN, which a GFM renderer
     never autolinks and never treats as raw HTML, so the address renders as inert monospace text with
     every character preserved. Every non-token segment is escaped by `_md_escape_inline`. A value with no
@@ -655,7 +661,9 @@ _MD_COMMENT_DASHES_RE = re.compile(r"-(?=-)")
 def _html_comment_safe(value):
     """Encode a value for the HTML-comment sink of the generated header (spec 10.3), so no interpolated
     value (a discovered source path or machine-dir component especially) can close the comment early. See
-    the note above _MD_COMMENT_DASHES_RE for the mechanism and its disclosed residual."""
+    the note above _MD_COMMENT_DASHES_RE for the mechanism and its disclosed residual. Newlines/CR collapse
+    to a space and other C0/DEL controls are dropped (U+0009 TAB is preserved as inert whitespace inside the
+    comment), so a value cannot inject a fake header field line or an early closer."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     s = _MD_CTRL_RE.sub("", s)
@@ -1823,7 +1831,7 @@ def self_test():
         _rng = _random.Random(778812)
         _fz_atoms = ["http://a.ex", "www.b.ex", "c@d.ex", "`", "``", "```", "````", "benign", "x)", "&#38;",
                      "\\", "-", "--", "---", "_", "|", "<i>", "<details open>", "</x>", "[a]", "(b)", "*x*",
-                     "&", "<!--", "-->"]
+                     "&", "<!--", "-->", "\t"]
         _fz_ends = ["\n", "\r", "\r\n"]
         _fz_marks = ["- ", "+ ", "* ", "# ", "> ", "1. ", "`", "|", "    ", "~~"]
         _sl_ok = _al_ok = _rh_ok = True
@@ -1865,7 +1873,7 @@ def self_test():
         # a bounded collapse/strip/break leaves a survivor (a forged header field line, a surviving control, or
         # an active closer). Complete invariant: no -- run, no surviving newline, no control char.
         _hcs_ok = True
-        _hcs_atoms = ["-", "--", "-->", "--!>", "\n", "\r", "\r\n", "\x00", "\x07", "\x7f", "a", "/", "<x>", "."]
+        _hcs_atoms = ["-", "--", "-->", "--!>", "\n", "\r", "\r\n", "\x00", "\x07", "\x7f", "a", "/", "<x>", ".", "\t"]
         for _ in range(800):
             _r = _html_comment_safe("".join(_rng.choice(_hcs_atoms) for _ in range(_rng.randint(1, 14))))
             if "--" in _r or "\n" in _r or "\r" in _r or _MD_CTRL_RE.search(_r):
@@ -1873,6 +1881,18 @@ def self_test():
         check("fuzz-html-comment-safe-complete", _hcs_ok)
         check("html-comment-multi-newline-collapsed",
               "\n" not in _html_comment_safe("dir\nX\n digest: forged") and "\r" not in _html_comment_safe("a\rb\rc"))
+        # round-15 (codex round-14 MINOR-2): a bounded CRLF .replace(...,1) is security-neutral (the following
+        # unbounded \r/\n passes strip the remnant) but yields an extra space; pin the exact single-space
+        # collapse of MULTIPLE CRLF in both sinks so the redundant special-case cannot silently regress.
+        check("md-text-multi-crlf-single-space", _md_text("a\r\nb\r\nc") == "a b c")
+        check("html-comment-multi-crlf-single-space", _html_comment_safe("a\r\nb\r\nc") == "a b c")
+        # round-15 (codex round-14 MINOR-1): U+0009 TAB is DELIBERATELY preserved as inline whitespace (not a
+        # stripped C0/DEL control; _MD_CTRL_RE excludes it). It is inert in every sink position: the value is
+        # always emitted behind a structural prefix, never at column 0, so a TAB cannot indent a code block.
+        # Pin the preservation + inertness so the tolerance is explicit and exercised.
+        check("md-text-tab-preserved-inert",
+              _md_text("a\tb") == "a\tb" and _gfm_autolinks(_md_text("x\t- y\t# z")) == []
+              and "\n" not in _md_text("x\t- y\t# z") and "<" not in _md_text("x\t<i>y"))
         # round-13 discrete witnesses (codex round-12 MAJORs): raw-HTML inertness (a multi-tag value keeps no
         # raw `<`), escape completeness (no active metacharacter survives un-escaped), and a MULTI-SOURCE header.
         check("md-text-raw-html-inert", "<" not in _md_text("benign <i> <details open>ACTIVE</details>"))
