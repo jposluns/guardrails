@@ -271,6 +271,9 @@ def _validate_tier_record(rec, expected_type, roster, registered_vendors, where)
     are refused rather than partially validated because their complete state and type-specific schemas
     do not ship until the module-schemas release (spec 8.5). Unknown types are likewise refused.
     Returns a findings list; callers convert a non-empty list to CANNOT-EVALUATE."""
+    if not isinstance(expected_type, str) or not expected_type:
+        return ["{}: record type is missing or not a non-empty string ({!r}); cannot validate it "
+                "(fail-closed)".format(where, expected_type)]
     spec = roster.get(expected_type)
     if spec is not None:
         rv = _opf_schema.validate_record(rec, expected_type=expected_type, specs=roster,
@@ -297,6 +300,15 @@ def _record_ids(data, where, roster=None, expected_type=None, registered_vendors
 
     have_authority = roster is not None and expected_type is not None
     raw_records = data.get("record")
+    # Guard-input-soundness: in an authority context (roster present) a non-empty record array whose
+    # expected type is missing, None, or not a non-empty string cannot be validated or module-screened;
+    # fail closed BEFORE any roster.get / `in MODULE_TYPES` membership test (a non-string/unhashable type
+    # would otherwise disable authority or raise an uncaught TypeError).
+    if (roster is not None and isinstance(raw_records, list) and raw_records
+            and (not isinstance(expected_type, str) or not expected_type)):
+        raise _cannot("{}: a present index's record type is missing or not a non-empty string ({!r}); "
+                      "U7 cannot validate or module-screen untyped records (fail-closed)".format(
+                          where, expected_type))
     if (have_authority and expected_type in _opf_store.MODULE_TYPES
             and isinstance(raw_records, list) and raw_records):
         raise _cannot("{}: {}".format(where, _MODULE_SCHEMA_REFUSAL))
@@ -388,6 +400,9 @@ def _archived_destination_ids(data, where, roster, registered_vendors=frozenset(
             return _record_ids(data, where)
         first = recs[0]
         expected_type = first.get("type") if isinstance(first, dict) else None
+        if not isinstance(expected_type, str) or not expected_type:
+            raise _cannot("{}: an archived index's first record omits a valid string `type`; U7 cannot "
+                          "validate or module-screen an untyped archived record (fail-closed)".format(where))
         ids = _record_ids(data, where, roster, expected_type, registered_vendors)
         duplicate_findings = _opf_schema.check_unique_ids(ids)
         if duplicate_findings:
@@ -2398,6 +2413,46 @@ def self_test():
         check("B3-archive-real-destination-collision-finding",
               stage_import(rootB3x, ["a.txt"], plan_mapped(len(src)),
                            now=NOW, run_nonce=NONCE).verdict == 1)
+
+        # Guard-input-soundness: an archived destination whose record `type` is a non-hashable TOML value
+        # (type = []) must be CANNOT-EVALUATE, never an uncaught TypeError from roster.get([]) /
+        # `[] in MODULE_TYPES` (codex's escape). An archived INDEX whose first record OMITS `type` must
+        # likewise be CANNOT-EVALUATE, never a typeless record seated unvalidated (claude's module bypass,
+        # and the broader baseline bypass). The non-hashable `type = []` is written as inline TOML text (the
+        # fixture writer emits raw text verbatim), so the exotic value is cleanly constructible.
+        rootB3nh, mB3nh = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={
+                "archive/2026/archive.toml": arc_entry,
+                arc_path: 'id = "BI-1"\ntype = []\n',
+            })
+        check("B3-archive-nonhashable-type-cannot-eval",
+              stage_import(rootB3nh, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+
+        ma_arc_path = "archive/2026/maintainer_action/MA-1.toml"
+        rootB3tm, mB3tm = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={
+                "archive/2026/archive.toml":
+                    'moved = [{ id = "MA-1", destination = "' + ma_arc_path + '" }]\n',
+                ma_arc_path: 'schema = 1\n\n[[record]]\nid = "MA-1"\n',
+            })
+        check("B3-archive-index-typeless-module-cannot-eval",
+              stage_import(rootB3tm, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+
+        fn_arc_path = "archive/2026/finding/FN-1.toml"
+        rootB3tb, mB3tb = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={
+                "archive/2026/archive.toml":
+                    'moved = [{ id = "FN-1", destination = "' + fn_arc_path + '" }]\n',
+                fn_arc_path: 'schema = 1\n\n[[record]]\nid = "FN-1"\n',
+            })
+        check("B3-archive-index-typeless-baseline-cannot-eval",
+              stage_import(rootB3tb, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
 
         # M-a: the record-level source-provenance ref's COMPONENTS are discriminated exactly (kind, locator,
         # and the note's span + source path + content digest + run id). A missing or wrong component fails
