@@ -262,6 +262,13 @@ def _read_toml_contained(root_fd, relpath):
     st = _journal._lstat_contained(root_fd, relpath)
     if st is None:
         return None
+    # A non-regular entry (a FIFO, device, socket, or directory) is refused BEFORE any open: opening a
+    # FIFO O_RDONLY with no writer blocks the process forever, so the regular-file gate is checked on the
+    # lstat result rather than after _read_contained opens the target (check-fails-closed-on-unreadable,
+    # SECA resource-bounds; an unbounded block is worse than a crash for the doctor verb).
+    if not stat.S_ISREG(st.st_mode):
+        raise StoreError("{} is present but is not a regular file (an exotic entry; fail-closed, never "
+                         "opened)".format(relpath))
     try:
         data, _ = _journal._read_contained(root_fd, relpath)
     except _journal.JournalError as exc:
@@ -270,6 +277,12 @@ def _read_toml_contained(root_fd, relpath):
         return tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
+    except RecursionError as exc:
+        # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
+        # fail-closed StoreError (the caller routes it to CANNOT-EVALUATE), never an uncontrolled crash
+        # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
+        raise StoreError("cannot parse {} (input nesting is too deep; present but unparseable): {}".format(
+            relpath, exc))
 
 
 def _immediate_subdirs(store_root_fd, working_rel):

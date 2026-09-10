@@ -26,7 +26,10 @@ step; the self-test builds it directly). The module runs no git, subprocess, net
 and every declared input is read through U1's contained (dir-fd, no-follow) readers, so a swapped symlink is
 refused rather than followed off-tree. FAIL CLOSED EVERYWHERE: any unreadable, unparseable, exotic, or
 malformed declared input, and any malformed injected observation, is a CANNOT-EVALUATE that NAMES the input,
-never a silent empty pass. Time and memory are proportional to the bytes actually read through the contained
+never a silent empty pass; every declared read refuses a non-regular (FIFO/device/socket) entry before
+opening it, the containment walk is depth-bounded, and a top-level barrier turns any unexpected error into a
+CANNOT-EVALUATE, so a hostile-shaped store never crashes, hangs, or blocks the engine. Time and memory are
+proportional to the bytes actually read through the contained
 readers; NO loop is ever sized by a declared integer (a `WL-10**9` id, a `10**9` high-water, or a
 `["WL-1","WL-10**9"]` span never expands), so a declared numeric field cannot amplify the run.
 
@@ -76,6 +79,11 @@ LEASE_NAME = "lease.toml"                  # present only while the single-write
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_MANIFEST_NAME = "archive.toml"
 INDEX_SUFFIX = ".index.toml"
+
+# The containment walk is bounded by an explicit depth ceiling so a pathologically deep directory chain
+# fails closed to a CANNOT-EVALUATE rather than a RecursionError (B6). A real store tree is a few levels
+# deep (.working/<machine>/archive/<YYYY>/, imports/<run-id>/<sub>/), far below this ceiling.
+_CONTAINMENT_MAX_DEPTH = 64
 
 # Closed keysets for the shapes this unit defines (see the module docstring).
 INDEX_TOP_KEYS = frozenset({"schema", "record"})
@@ -305,6 +313,12 @@ def _read_toml(root_fd, relpath, rep):
     except StoreError as exc:
         rep.cant("cannot read {}: {}".format(relpath, exc))
         return None, "error"
+    except _journal.JournalError as exc:
+        # _read_toml_contained runs its lstat step OUTSIDE its StoreError wrapper, so a JournalError from
+        # _check_rel (a '.'/'..'/control-char/trailing-slash relpath) or a non-ENOENT stat surfaces here
+        # rather than escaping validate_store. Mirrors U7's _read_toml guard (guard-input-soundness; B5).
+        rep.cant("cannot read {} ({})".format(relpath, exc))
+        return None, "error"
     if data is None:
         return None, "absent"
     return data, "ok"
@@ -321,6 +335,12 @@ def _read_bytes(fd, relpath, rep):
         return None, "error"
     if st is None:
         return None, "absent"
+    if not stat.S_ISREG(st.st_mode):
+        # Refuse a FIFO/device/socket/dir BEFORE _read_contained opens it: a FIFO O_RDONLY with no writer
+        # blocks forever (B4; check-fails-closed-on-unreadable, SECA resource-bounds).
+        rep.cant("cannot read {} (present but not a regular file; an exotic entry, never opened)".format(
+            relpath))
+        return None, "error"
     try:
         raw, _st = _journal._read_contained(fd, relpath)
     except (_journal.JournalError, OSError) as exc:
@@ -396,6 +416,20 @@ def _under_any(p, prefixes):
         if p == u or p.startswith(u + "/"):
             return True
     return False
+
+
+def _remote_forms_of_target(target):
+    """The concrete git-remote URL forms a REMOTE target (spec 5.5) can name, so a github:/gitlab:
+    shorthand is matched against its canonical git@ and https forms rather than string-compared raw (a
+    naive strip-compare over-fires; B3). Returns a set of candidate remote strings, or None for a LOCAL
+    (dir:/path) target that names no git remote."""
+    if target.kind in ("github", "gitlab"):
+        host = "github.com" if target.kind == "github" else "gitlab.com"
+        val = target.value.strip().lstrip("/")
+        return {"git@{}:{}".format(host, val), "https://{}/{}".format(host, val), val}
+    if target.kind == "git":
+        return {target.value.strip()}
+    return None
 
 
 # --- index parsing (shape defined here) --------------------------------------------------------------
@@ -686,7 +720,20 @@ def _archived_rotatable(rec):
     return rec.state in spec.terminal and rec.qual is None
 
 
-def _validate_archive(root_fd, machine_rel, registered_vendors, rep):
+def _archive_unmanaged(rep, import_status, path):
+    """Grade an unregistered path found in the archive tree: a finding at required posture, a triage entry
+    at import_status = "partial" (spec 12/14.2). C-CONTAINMENT skips the archive subtree, so the archive's
+    own stray-path grading is owned here (B2), matching C-ARCHIVE-ENUM's existing unexpected-bucket-file
+    flag."""
+    if import_status == "partial":
+        rep.triage_path("unregistered path {!r} in the archive tree (an import or migration is in "
+                        "progress; triage per spec 14.2)".format(path))
+    else:
+        rep.finding("C-ARCHIVE-ENUM: unregistered path {!r} in the archive tree is neither an OPF-managed "
+                    "archive artefact nor a <YYYY> bucket (spec 12/14.2)".format(path))
+
+
+def _validate_archive(root_fd, machine_rel, registered_vendors, import_status, rep):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
@@ -698,18 +745,28 @@ def _validate_archive(root_fd, machine_rel, registered_vendors, rep):
     archive_worklogs = {}
     rotatable = []
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
-    years, _files = _list_dir(root_fd, archive_rel, rep)
+    years, top_files = _list_dir(root_fd, archive_rel, rep)
     if years is None:
         return archive_recs, archive_worklogs, rotatable   # no archive/ tree: no rotation has happened (clean)
+    for fn_ in (top_files or []):
+        # A regular file directly under archive/ is unmanaged: only <YYYY> bucket directories belong here.
+        # C-CONTAINMENT skips the archive subtree, so its stray-path grading lives here (spec 12/14.2; B2).
+        _archive_unmanaged(rep, import_status, _rel(archive_rel, fn_))
     for year in years:
         bucket = _rel(archive_rel, year)
+        bucket_rel = _rel(ARCHIVE_DIRNAME, year)      # bucket path RELATIVE to machine_rel (dest space)
         if not (year.isdigit() and len(year) == 4):
             rep.finding("C-ARCHIVE-ENUM: archive bucket {!r} is not a <YYYY> calendar-year directory "
                         "(spec 12)".format(year))
-        _sub, bfiles = _list_dir(root_fd, bucket, rep)
+        sub, bfiles = _list_dir(root_fd, bucket, rep)
         if bfiles is None:
             rep.cant("archive bucket {} could not be listed".format(bucket))
             continue
+        for d in (sub or []):
+            # A subdirectory inside a bucket is unmanaged: a bucket holds only files (archive.toml,
+            # worklog.toml, <type>.index.toml), and its contents are never listed, so the whole subtree is
+            # graded as one unregistered path (spec 12/14.2; B2).
+            _archive_unmanaged(rep, import_status, _rel(bucket, d))
         if ARCHIVE_MANIFEST_NAME not in bfiles:
             rep.cant("archive bucket {} has no {} (cannot evaluate the rotation; spec 12)".format(
                 bucket, ARCHIVE_MANIFEST_NAME))
@@ -778,10 +835,15 @@ def _validate_archive(root_fd, machine_rel, registered_vendors, rep):
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} (namespace {}) but the id "
                             "namespace is {} (spec 8.1)".format(mid, mtype, norm_ns, id_ns))
             want_base = "{}{}".format(mtype, INDEX_SUFFIX)
-            if dest.rsplit("/", 1)[-1] != want_base:
-                rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} basename is not {!r} (a moved "
-                            "record lands in its type index; spec 12)".format(mid, dest, want_base))
-            if not _dest_index_has_id(root_fd, machine_rel, dest, mid, rep):
+            expected_dest = _rel(bucket_rel, want_base)
+            if dest != expected_dest:
+                # M2(a): a rotation lands in its DECLARING bucket's own type index, never in the active tree
+                # or another bucket. Exact-path equality subsumes the basename check and confines the
+                # destination to archive/<year>/ (spec 12); the wrong destination is not then opened.
+                rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} is not this bucket's type index "
+                            "{!r} (a rotation lands in its declaring bucket; spec 12)".format(
+                                mid, dest, expected_dest))
+            elif not _dest_index_has_id(root_fd, machine_rel, dest, mid, rep):
                 rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
                             "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
             found_type = present_types.get(mid)
@@ -798,10 +860,18 @@ def _validate_archive(root_fd, machine_rel, registered_vendors, rep):
         # are parsed; spans are sorted and checked non-overlapping; a two-pointer sweep matches the sorted
         # PRESENT ids against the sorted spans, so cost is O(spans + present ids), never the span width.
         spans = []
+        expected_wl_dest = _rel(bucket_rel, WORKLOG_NAME)
         for span, dest in wl_moved:
             if not _is_contained_relpath(dest):
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved destination {!r} in {} is not a contained "
                             "store-relative path (spec 12); the destination is never opened".format(dest, bucket))
+            elif dest != expected_wl_dest:
+                # M2(b): the span reconciliation reads the bucket's OWN worklog.toml regardless of the
+                # declared destination, so a wrong destination is otherwise decorative. Require equality to
+                # the declaring bucket's worklog (spec 12).
+                rep.finding("C-ARCHIVE-ENUM: worklog_moved destination {!r} in {} is not this bucket's "
+                            "worklog {!r} (a worklog rotation lands in its bucket's own worklog; spec "
+                            "12)".format(dest, bucket, expected_wl_dest))
             a, b = _wl_num(span[0]), _wl_num(span[1])
             if a is None or b is None or a > b:
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved span {} in {} is not a well-formed [WL-a, WL-b] "
@@ -1082,7 +1152,14 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
 
     unmanaged_files = []
 
-    def walk(reldir):
+    def walk(reldir, depth):
+        if depth > _CONTAINMENT_MAX_DEPTH:
+            # A pathologically deep directory chain fails closed rather than overflowing the recursion
+            # (B6): the deeper tree is not evaluated, so this is a CANNOT-EVALUATE, never a silent pass.
+            rep.cant("C-CONTAINMENT: directory nesting under {!r} exceeds the containment-walk ceiling of "
+                     "{} (fail-closed; the deeper tree is not evaluated, so no RecursionError)".format(
+                         reldir, _CONTAINMENT_MAX_DEPTH))
+            return
         subdirs, files = _list_dir(root_fd, reldir, rep)
         if subdirs is None and files is None:
             return
@@ -1099,9 +1176,9 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                 if not _opf_import._RUN_ID_RE.match(d):
                     unmanaged_files.append(full)
                 continue
-            walk(full)
+            walk(full, depth + 1)
 
-    walk(WORKING_DIRNAME)
+    walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
         if import_status == "partial":
             rep.triage_path("unregistered path {!r} at the store location (an import or migration is in "
@@ -1124,6 +1201,20 @@ def _normalize_prior(prior):
     records = prior.get("records")
     if not isinstance(releases, list) or not isinstance(counters_high, dict) or not isinstance(records, dict):
         return None
+    # M1: validate CONTENTS, so a malformed prior routes to CANNOT-EVALUATE naming the observation rather
+    # than flowing into a graded INVALID that falsely accuses the store. A release row must be a table; a
+    # counter high-water must be a genuine non-negative int (never a bool); a record value must be a
+    # (type, status) pair of strings.
+    for row in releases:
+        if not isinstance(row, dict):
+            return None
+    norm_high = {}
+    for ns, val in counters_high.items():
+        if not isinstance(ns, str):
+            return None
+        if not (isinstance(val, int) and not isinstance(val, bool) and val >= 0):
+            return None
+        norm_high[ns] = val
     norm_records = {}
     for rid, val in records.items():
         if not isinstance(rid, str):
@@ -1132,7 +1223,7 @@ def _normalize_prior(prior):
                 and isinstance(val[0], str) and isinstance(val[1], str)):
             return None
         norm_records[rid] = (val[0], val[1])
-    return {"releases": releases, "counters_high": counters_high, "records": norm_records}
+    return {"releases": list(releases), "counters_high": norm_high, "records": norm_records}
 
 
 def _normalize_observations(observations):
@@ -1149,15 +1240,20 @@ def _normalize_observations(observations):
     tracked = observations.get("tracked")
     if isinstance(tracked, str) and tracked in ("tracked", "untracked"):
         obs["tracked"] = tracked
+    elif "tracked" in observations:
+        obs["tracked_malformed"] = True     # supplied but rejected: the cant says "malformed", not "absent"
     actual_remote = observations.get("actual_remote")
     if isinstance(actual_remote, str):
         obs["actual_remote"] = actual_remote
+    elif "actual_remote" in observations:
+        obs["actual_remote_malformed"] = True
     prior = observations.get("prior")
     if prior is not None:
         norm = _normalize_prior(prior)
         if norm is not None:
             obs["prior"] = norm
-        # a malformed prior is dropped; the history checks route to cannot-evaluate naming it
+        else:
+            obs["prior_malformed"] = True    # supplied but rejected; the history checks say "malformed"
     return obs, None
 
 
@@ -1198,10 +1294,18 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
             product_root_fd = _open_root_fd(product_root)
         except OSError:
             product_root_fd = None     # the product-scope checks route to cannot-evaluate naming the input
+    pointer_target = getattr(resolution, "target", None)   # the parsed committed/override pointer Target
     evaluated_profiles, unevaluated_profiles = [], []
     try:
         evaluated_profiles, unevaluated_profiles = _validate_opened_store(
-            root_fd, product_root_fd, machine_rel, supported_profiles, obs, rep)
+            root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target, rep)
+    except Exception as exc:
+        # Top-level fail-closed barrier (B6): any unexpected error (a RecursionError from a hostile-shaped
+        # store, or any other escape no specific guard anticipated) becomes a CANNOT-EVALUATE naming the
+        # failure, never a raw crash, so the "fail closed everywhere" contract holds
+        # (check-fails-closed-on-unreadable).
+        rep.cant("internal: store validation raised an unexpected {} and fails closed to CANNOT-EVALUATE "
+                 "({})".format(type(exc).__name__, exc))
     finally:
         os.close(root_fd)
         if product_root_fd is not None:
@@ -1209,7 +1313,8 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 
-def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, rep):
+def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
+                           rep):
     # --- C-MANIFEST: identify the store, derive enabled types / vendors / layout ----------------------
     rep.ran("C-MANIFEST")
     manifest_rel = _rel(machine_rel, MANIFEST_NAME)
@@ -1274,7 +1379,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, registered_vendors,
-                                                                  rep)
+                                                                  import_status, rep)
 
     # --- the merged worklog (active + archive together; spec 12:982-983) and the id maps --------------
     merged = {}
@@ -1394,9 +1499,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     rep.ran("C-NO-DELETION")
     # No expansion of the high-water into an expected range (F15): an id is never deleted or reused, so the
-    # present WL ids must equal 1..high-water. Contiguity checks the 1..max side; this O(1) arithmetic
-    # overhang catches the max..high-water side, reporting the COUNT of allocated ids absent from both
-    # locations, never an enumerated list.
+    # present ids of a namespace must equal 1..high-water. For WL, C-CONTIGUITY checks the 1..max side and
+    # this O(1) arithmetic overhang catches the max..high-water side, reporting the COUNT of allocated ids
+    # absent from both locations, never an enumerated list.
     present_wl = sorted(merged)
     wl_hw = high.get("WL")
     if isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
@@ -1405,6 +1510,37 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-NO-DELETION: {} allocated worklog id(s) above WL-{} are absent from both the "
                         "active worklog and the archive (counters WL high-water is {}; nothing is ever "
                         "deleted, spec 12/13)".format(wl_hw - max_present, max_present, wl_hw))
+    # Every OTHER roster namespace has no contiguity check, so C-NO-DELETION owns BOTH sides here: an
+    # overhang above the max present id AND any gap below it (an id deleted from between). The present set
+    # is the committed active + archive records for the namespace (B1); staging is excluded because it
+    # legitimately mints ids above the committed high-water pending promotion (not durable). Both scans are
+    # O(present) arithmetic, never a range() expansion of the high-water (F15).
+    present_by_ns = {}
+    for r in active_recs + archive_recs:
+        if isinstance(r.id, str):
+            sh = _valid_id_shape(r.id)
+            if sh is not None:
+                present_by_ns.setdefault(sh[0], set()).add(sh[1])
+    for ns in sorted(known_ns):
+        if ns == "WL":
+            continue
+        hw = high.get(ns)
+        if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
+            continue     # an absent / malformed counter is C-COUNTERS' finding, not this check's
+        nums = sorted(present_by_ns.get(ns, ()))
+        max_present = nums[-1] if nums else 0
+        if hw > max_present:
+            rep.finding("C-NO-DELETION: {} allocated {}-<n> id(s) above {}-{} are absent from both the "
+                        "active store and the archive (counters {} high-water is {}; nothing is ever "
+                        "deleted, spec 12/13)".format(hw - max_present, ns, ns, max_present, ns, hw))
+        expected = 1
+        for n in nums:
+            if n != expected:
+                rep.finding("C-NO-DELETION: {}-{} is absent from both the active store and the archive (an "
+                            "allocated id between 1 and {}-{} cannot be deleted; spec 12/13)".format(
+                                ns, expected, ns, max_present))
+                break
+            expected += 1
 
     rep.ran("C-PARTITION")
     for f in check_ids_partition(active_wl_ids, archive_wl_ids):
@@ -1417,8 +1553,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-TRACKED")
     tracked = obs.get("tracked")
     if tracked is None:
-        rep.cant("C-TRACKED: no `tracked` observation supplied; the tracked-store requirement (spec 5.1) "
-                 "is not evaluable by a parse-only engine")
+        reason = ("the `tracked` observation was supplied but malformed" if obs.get("tracked_malformed")
+                  else "no `tracked` observation was supplied")
+        rep.cant("C-TRACKED: {}; the tracked-store requirement (spec 5.1) is not evaluable by a parse-only "
+                 "engine".format(reason))
     elif tracked == "untracked":
         rep.finding("C-TRACKED: the resolved store is not under version control (spec 5.1)")
 
@@ -1427,22 +1565,54 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     sync_target = store_tbl.get("sync_target") if isinstance(store_tbl, dict) else ""
     if sync_target is None:
         sync_target = ""
+    actual = obs.get("actual_remote")
+    actual_reason = ("the `actual_remote` observation was supplied but malformed"
+                     if obs.get("actual_remote_malformed") else "no `actual_remote` observation was supplied")
     if not isinstance(sync_target, str):
         rep.cant("C-SYNC-AGREE: [store].sync_target is not a string")
     elif sync_target == "":
-        pass     # no dedicated target (in-repo / local-only durability residual disclosed; spec 5.7/17)
+        # Local-only claim: the manifest names no sync target. A REAL remote observed on the store
+        # repository is an unrecorded push destination (a spec-5.6 disagreement), not a bare pass; an
+        # absent observation is the disclosed local-only durability residual (spec 5.7/17), not a cant. A
+        # committed pointer that itself names a remote likewise contradicts the local-only claim.
+        if actual is not None and actual.strip():
+            rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (local-only) but the store "
+                        "repository has an actual remote {!r} (an unrecorded push destination; spec "
+                        "5.6)".format(actual))
+        if pointer_target is not None and not pointer_target.local:
+            rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (local-only) but the committed "
+                        "pointer names a remote {} target {!r} (spec 5.6)".format(
+                            pointer_target.kind, pointer_target.value))
     else:
+        # Leg 1: the declared sync_target classifies as a target (spec 5.5).
         try:
-            classify_target(sync_target)
+            tgt = classify_target(sync_target)
         except StoreError as exc:
             rep.finding("C-SYNC-AGREE: [store].sync_target {!r} does not classify as a target (spec "
                         "5.5): {}".format(sync_target, exc))
         else:
-            actual = obs.get("actual_remote")
+            forms = _remote_forms_of_target(tgt)     # concrete remote URL forms, or None for a local target
+            # Leg 2: the committed pointer agrees with the sync_target. resolve_store resolves only a LOCAL
+            # store, so a resolvable store's pointer is local (or absent by default), which does not
+            # contradict a declared remote mirror; a committed pointer that names a REMOTE disagreeing with
+            # the sync_target is graded here (this reads resolution.target, previously never consulted; B3).
+            if pointer_target is not None and not pointer_target.local and forms is not None:
+                pforms = _remote_forms_of_target(pointer_target) or set()
+                if pforms.isdisjoint(forms):
+                    rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
+                                "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
+            # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. The
+            # github:/gitlab: shorthand is resolved to its canonical git@/https remote forms before the
+            # comparison, so a valid shorthand is not wrongly rejected by a naive strip-compare (over-fire).
             if actual is None:
-                rep.cant("C-SYNC-AGREE: no `actual_remote` observation supplied; the sync-target / remote "
-                         "agreement (spec 5.6) is not evaluable by a parse-only engine")
-            elif actual.strip() != sync_target.strip():
+                rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is not evaluable "
+                         "by a parse-only engine".format(actual_reason))
+            elif forms is None:
+                # a local dir:/path sync target with an observed remote cannot be canonicalized to compare
+                if actual.strip():
+                    rep.finding("C-SYNC-AGREE: [store].sync_target {!r} is a local target but the store "
+                                "repository has an actual remote {!r} (spec 5.6)".format(sync_target, actual))
+            elif actual.strip() not in forms:
                 rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
                             "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
 
@@ -1490,7 +1660,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     else:
         releases = version_data.get("release") if isinstance(version_data, dict) else None
         releases = releases if isinstance(releases, list) else []
-        if releases:     # with no release there is no VERSION to render, and none is required
+        if releases:
             try:
                 expected = _opf_views.render_version_file({"version": {"releases": releases}})
             except _opf_views.ViewsError as exc:
@@ -1503,6 +1673,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 elif bst == "ok" and raw != expected.encode("utf-8"):
                     rep.finding("C-VERSION-FILE: the root VERSION deliverable has drifted from the latest "
                                 "release's bytes (spec 6.1/5.8)")
+        else:
+            # Zero releases: no VERSION is rendered and none is required, so a PRESENT root VERSION file is
+            # byte drift (a stale deliverable), not an ungraded skip (spec 6.1/5.8; N3). An absent VERSION
+            # is correct here.
+            raw, bst = _read_bytes(product_root_fd, "VERSION", rep)
+            if bst == "ok":
+                rep.finding("C-VERSION-FILE: a root VERSION deliverable is present but the version ledger "
+                            "has no release; no VERSION is rendered with zero releases (spec 6.1/5.8)")
 
     # --- C-CHANGELOG-GATES: compose U5 over the MERGED worklog (spec 7.1/7.2, F1) ---------------------
     rep.ran("C-CHANGELOG-GATES")
@@ -1535,10 +1713,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- the across-time checks, from the injected prior committed snapshot (spec 6.1/8.2/8.4/13) -----
     prior = obs.get("prior")
+    prior_reason = ("the prior committed snapshot observation was supplied but malformed"
+                    if obs.get("prior_malformed") else "no prior committed snapshot was supplied")
     rep.ran("C-HISTORY-APPEND-ONLY")
     if prior is None:
-        rep.cant("C-HISTORY-APPEND-ONLY: no prior committed snapshot supplied; across-time release "
-                 "immutability (spec 6.1/13) is not evaluated")
+        rep.cant("C-HISTORY-APPEND-ONLY: {}; across-time release immutability (spec 6.1/13) is not "
+                 "evaluated".format(prior_reason))
     elif version_data is None:
         rep.cant("C-HISTORY-APPEND-ONLY: the current version ledger did not evaluate; append-only across "
                  "time is not checkable")
@@ -1552,8 +1732,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     rep.ran("C-HISTORY-COUNTERS")
     if prior is None:
-        rep.cant("C-HISTORY-COUNTERS: no prior committed snapshot supplied; counter non-regression (spec "
-                 "8.2) is not evaluated")
+        rep.cant("C-HISTORY-COUNTERS: {}; counter non-regression (spec 8.2) is not evaluated".format(
+            prior_reason))
     elif not counters_ok:
         rep.cant("C-HISTORY-COUNTERS: the current counters did not evaluate; counter non-regression is not "
                  "checkable")
@@ -1563,8 +1743,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     rep.ran("C-HISTORY-RESURRECTION")
     if prior is None:
-        rep.cant("C-HISTORY-RESURRECTION: no prior committed snapshot supplied; no-resurrection across time "
-                 "(spec 8.4) is not evaluated")
+        rep.cant("C-HISTORY-RESURRECTION: {}; no-resurrection across time (spec 8.4) is not "
+                 "evaluated".format(prior_reason))
     else:
         _check_resurrection(prior["records"], by_id, all_ids, rep)
 
@@ -1605,8 +1785,12 @@ def self_test():
     leg, an unanchored fail-closed leg, and at least one discriminating vector per invariant class). Judged
     ONLY on the returned status / finding / check VALUES, never by grepping printed output (the
     isolate-verifiers rule). Each violation vector is a one-dimension mutation of a fixture that first
-    validates VALID; removing the enforcing branch flips its vector back to VALID or drops its check id,
-    which the registry reconciliation then fails. No real git is used: validate_store reads no git, and the
+    validates VALID. The closed-roster reconciliation fails whenever a required check's `rep.ran(...)` is
+    removed; each SOLE-layer enforcing branch additionally has a discriminating vector that flips back to
+    VALID (or to a per-check FINDING verdict) when only its enforcement is removed. An overlapping
+    defence-in-depth branch (for example C-PARTITION over a cross-location worklog duplicate that
+    C-ID-SPACE also catches) is covered by its sibling layer rather than a sole vector, by design. No real
+    git is used: validate_store reads no git, and the
     observation seam is exactly what is under test. Returns 0 clean, 1 on a failed check, 2 on a fail-closed
     error."""
     import tempfile
@@ -2120,6 +2304,152 @@ def self_test():
         res2 = rep2.result()
         check("registry-missing-check-cannot-eval", res2.status == CANNOT_EVALUATE)
         check("registry-missing-check-named", any("C-LINKS" in m for m in res2.cannot_evaluate))
+
+        # --- N1 sole-layer discrimination vectors ----------------------------------------------------
+        # C-ROSTER (sole layer): a baseline type missing from the manifest [types] is caught by C-ROSTER
+        # alone (validate_manifest only requires at least one registered type).
+        rmf = clean_machine()
+        rmf["manifest.toml"] = base_manifest(types={t: {"namespace": ns} for t, ns in (
+            ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"),
+            ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
+            ("autonomous_decision", "AD"), ("block", "BL"))})   # 'finding' registration omitted
+        rmr = run(rmf)
+        check("c-roster-missing-type-registration-invalid", rmr is not None and rmr.status == INVALID)
+        check("c-roster-missing-type-registration-named",
+              rmr is not None and any("C-ROSTER" in f for f in rmr.findings))
+
+        # C-NO-DELETION (non-worklog namespace, B1): FN-2 allocated (high-water 2) but only FN-1 present in
+        # active + archive and not named in the prior snapshot: a deleted non-worklog id.
+        b1f = clean_machine()
+        b1f["finding.index.toml"] = idx([envelope("FN-1", "finding", "open")])
+        b1f["counters.toml"] = counters(FN=2)
+        b1r = run(b1f)
+        check("b1-nonwl-deleted-id-invalid", b1r is not None and b1r.status == INVALID)
+        check("b1-nonwl-deleted-id-named",
+              b1r is not None and any("C-NO-DELETION" in f and "FN" in f for f in b1r.findings))
+
+        # C-CONTIGUITY (pure worklog gap, sole layer): WL-1, WL-3 present with high-water 3 and no
+        # duplicate, over a zero-release store so no frozen span / coverage / rotation check co-fires.
+        cgf = copy.deepcopy(pr_machine)
+        cgf["worklog.toml"] = {"schema": 1, "entry": [wl(1), wl(3)]}
+        cgf["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        cg_obs = {"tracked": "tracked",
+                  "prior": {"releases": [],
+                            "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                            "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")}}}
+        cgr = run(cgf, product=pr_product, obs=cg_obs)
+        check("c-contiguity-pure-gap-invalid", cgr is not None and cgr.status == INVALID)
+        check("c-contiguity-pure-gap-named",
+              cgr is not None and any("C-CONTIGUITY" in f for f in cgr.findings))
+
+        # C-COUNTERS (absent high-water): a known namespace missing its counter is flagged at the check
+        # level (the overall status is dominated by the correlated history-counters cant, so discriminate
+        # on the per-check verdict).
+        ccf = clean_machine()
+        ccf["counters.toml"] = {"schema": 1, "counters": {
+            "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1}}   # 'RF' omitted
+        ccr = run(ccf)
+        check("c-counters-missing-namespace-flagged",
+              ccr is not None and ccr.checks.get("C-COUNTERS") == "FINDING")
+
+        # C-STAGING (enumeration): a staged sibling id that collides with a committed id is only caught
+        # because the staging enumerator contributes it to the uniqueness union; removing that enumeration
+        # makes the store validate clean.
+        stf = clean_machine()
+        stf["imports/imp-20260601T000000Z-0123456789abcdef/candidate/backlog_item.index.toml"] = \
+            idx([bi(1, "open")])
+        stfr = run(stf)
+        check("c-staging-collision-not-valid", stfr is not None and stfr.status != VALID)
+
+        # --- M2: archive destinations confined + verified --------------------------------------------
+        m2a = clean_machine()
+        m2a["archive/2026/archive.toml"] = {
+            "schema": 1,
+            "moved": [{"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"}],
+            "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
+        check("m2-moved-dest-outside-bucket-invalid", run(m2a).status == INVALID)
+        m2b = clean_machine()
+        m2b["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
+                                            "worklog_moved": [{"span": ["WL-1", "WL-2"],
+                                                               "destination": "counters.toml"}]}
+        check("m2-worklog-dest-wrong-invalid", run(m2b).status == INVALID)
+
+        # --- B2: an unregistered path anywhere in the archive tree is a containment finding -----------
+        b2a = clean_machine()
+        b2a["archive/stray.txt"] = "x\n"
+        b2ar = run(b2a)
+        check("b2-stray-file-under-archive-invalid",
+              b2ar.status == INVALID and any("archive tree" in f for f in b2ar.findings))
+        b2b = clean_machine()
+        b2b["archive/2026/junkdir/smuggled.toml"] = idx([])
+        b2br = run(b2b)
+        check("b2-subdir-in-bucket-invalid",
+              b2br.status == INVALID and any("archive tree" in f for f in b2br.findings))
+
+        # --- N3: a stray root VERSION with an empty release ledger ------------------------------------
+        n3m = copy.deepcopy(pr_machine)
+        n3p = {"CHANGELOG.md": make_changelog([]), "VERSION": "9.9.9\n"}
+        n3r = run(n3m, product=n3p, obs=pr_obs)
+        check("n3-empty-release-stray-version-invalid", n3r is not None and n3r.status == INVALID)
+        check("n3-empty-release-stray-version-named",
+              n3r is not None and any("C-VERSION-FILE" in f for f in n3r.findings))
+
+        # --- B3: C-SYNC-AGREE three legs -------------------------------------------------------------
+        gm = clean_machine()
+        gm["manifest.toml"] = base_manifest()
+        gm["manifest.toml"]["store"] = {"sync_target": "github:org/repo.git"}
+        check("sync-shorthand-match-valid",
+              run(gm, obs={"tracked": "tracked", "actual_remote": "git@github.com:org/repo.git",
+                           "prior": clean_prior()["prior"]}).status == VALID)
+        check("sync-local-only-but-remote-invalid",
+              run(clean_machine(), obs={"tracked": "tracked", "actual_remote": "git@github.com:x/y.git",
+                                        "prior": clean_prior()["prior"]}).status == INVALID)
+
+        # --- M1: a malformed prior observation is CANNOT-EVALUATE (naming it malformed), not INVALID ---
+        mp = copy.deepcopy(clean_prior())
+        mp["prior"]["releases"] = [None] + mp["prior"]["releases"]
+        mpr = run(clean_machine(), obs=mp)
+        check("m1-malformed-prior-releases-cannot-eval", mpr is not None and mpr.status == CANNOT_EVALUATE)
+        check("m1-malformed-prior-named",
+              mpr is not None and any("malformed" in m for m in mpr.cannot_evaluate))
+        mp2 = copy.deepcopy(clean_prior())
+        mp2["prior"]["counters_high"]["WL"] = "four"
+        check("m1-malformed-prior-counters-cannot-eval",
+              run(clean_machine(), obs=mp2).status == CANNOT_EVALUATE)
+
+        # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
+        b5 = clean_machine()
+        b5["archive/2026/archive.toml"] = {
+            "schema": 1,
+            "moved": [{"id": "RF-9", "type": "reference",
+                       "destination": "archive/2026/../2026/reference.index.toml"}],
+            "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
+        b5["archive/2026/reference.index.toml"] = idx([ref(9)])
+        b5["counters.toml"] = counters(RF=9)
+        b5r = run(b5)   # must RETURN, not crash
+        check("b5-dotdot-moved-dest-no-crash",
+              b5r is not None and b5r.status in (INVALID, CANNOT_EVALUATE))
+
+        # --- B4: a FIFO planted as a declared read target fails closed, never an unbounded block ------
+        if hasattr(os, "mkfifo"):
+            fifo_root = build(clean_machine(), clean_product())
+            (fifo_root / "CHANGELOG.md").unlink()
+            os.mkfifo(str(fifo_root / "CHANGELOG.md"))
+            fr = validate_store(resolve_store(fifo_root), observations=clean_prior())
+            check("b4-fifo-target-cannot-eval-not-hang",
+                  fr is not None and fr.status == CANNOT_EVALUATE
+                  and any("regular file" in m for m in fr.cannot_evaluate))
+
+        # --- B6: a pathologically deep directory chain fails closed, never a RecursionError -----------
+        deep_root = build(clean_machine(), clean_product())
+        deep = deep_root / ".working" / "toml" / "deepdir"
+        for _ in range(_CONTAINMENT_MAX_DEPTH + 16):
+            deep = deep / "d"
+        deep.mkdir(parents=True)
+        dr = validate_store(resolve_store(deep_root), observations=clean_prior())
+        check("b6-deep-nesting-cannot-eval-not-crash",
+              dr is not None and dr.status == CANNOT_EVALUATE
+              and any("ceiling" in m for m in dr.cannot_evaluate))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
