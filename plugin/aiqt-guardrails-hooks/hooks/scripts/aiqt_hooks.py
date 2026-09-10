@@ -1847,30 +1847,85 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 rounds 3-5, flag behaviour validated against real git 2.53). A command
-# is a MUTATION when a WRITE flag is present (delete/move/copy/create-modify), or when a bare positional
-# (a create/rename/delete TARGET, before OR after '--') is present with no LIST-mode flag. A filtered or
-# explicit LISTING (-l/--list or a --contains/--merged/--points-at filter; for tag also -v/--verify) is a
-# read; a bare 'git branch'/'git tag' (no args) lists. A formatting flag (--format/--sort) does NOT force
-# list mode (git creates when a name is given) but DOES consume its separate-form value; --color/--abbrev
-# take only an optional '=' value and do NOT consume a following token (so a name after them is a create
-# target, not their value); --create-reflog is a create MODIFIER, not a standalone mutation (bare it
-# lists). WRITE flags take precedence and only they are position-relevant (must precede '--').
-_GIT_BRANCH_WRITE_FLAGS = frozenset((
-    "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "--edit-description",
-    "-u", "--set-upstream-to", "--unset-upstream", "-t", "--track", "--no-track"))
-_GIT_BRANCH_LIST_FLAGS = frozenset((
-    "-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"))
-_GIT_BRANCH_ARG_READ = frozenset((
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"))
-_GIT_TAG_WRITE_FLAGS = frozenset((
-    "-d", "--delete", "-a", "--annotate", "-s", "--sign", "-m", "--message", "-F", "--file",
-    "-f", "--force", "-e", "--edit", "-u", "--local-user"))
-_GIT_TAG_LIST_FLAGS = frozenset((
-    "-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--merged", "--no-merged",
-    "--points-at", "--column", "--no-column"))
-_GIT_TAG_ARG_READ = frozenset((
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"))
+# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53 and
+# reconciled against the installed git at self-test time, section T-7). The classifier is FAIL-SAFE by
+# construction: it DEFAULTS to MUTATING and returns READ only when every token positively resolves to a
+# recognized read-neutral role and no create/rename/delete TARGET is present (before OR after '--'). A
+# missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
+# spelling form; a missed READ is only an over-ASK (safe), so READ recognition may be incomplete. Roles,
+# one char per long option: 'W' write (immediate mutating); 'L' list trigger (no value); 'V' tag verify
+# (read mode, no value); 'F' filter (sets list mode, takes a value that is optional only when last); 'D'
+# display taking a REQUIRED value but NOT setting list mode (a following name still creates); 'O' optional
+# '='-attached value only (consumes NOTHING following); 'R' plain read (no value, no list mode). The long
+# universe is a conservative SUPERSET of git's real per-subcommand option table (hidden aliases, the
+# deprecated --set-upstream, and generated --no-* forms included): a MISSING entry could let a unique
+# prefix resolve to a read where real git sees a write or an ambiguity (a fail-open), while an EXTRA entry
+# only over-ASKs. Mode and filter CANCELLERS (--no-list, --no-verify, --no-points-at, --no-with,
+# --no-without, --no-show-current) are roled W: roling --no-list read would fail-open
+# 'git branch --list --no-list NAME' (a real create). Display negatives (--no-color, --no-sort, ...) are R
+# (no value, no mode; a positional beside them still catches the create).
+_GIT_REF_SPECS = {
+    "branch": {
+        "long": {
+            # W: write or write-capable. Any unique abbreviation of these resolves to W -> MUTATING.
+            "--delete": "W", "--no-delete": "W", "--move": "W", "--no-move": "W",
+            "--copy": "W", "--no-copy": "W", "--force": "W", "--no-force": "W",
+            "--track": "W", "--no-track": "W", "--set-upstream": "W",
+            "--set-upstream-to": "W", "--no-set-upstream-to": "W",
+            "--unset-upstream": "W", "--no-unset-upstream": "W",
+            "--edit-description": "W", "--no-edit-description": "W",
+            "--recurse-submodules": "W", "--no-recurse-submodules": "W",
+            "--no-list": "W", "--no-show-current": "W",
+            "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
+            # L / F: list trigger and filters (set list mode; F takes a value, optional only when last).
+            "--list": "L",
+            "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
+            "--points-at": "F", "--with": "F", "--without": "F",
+            # D: required value, NO list mode (a following name creates).
+            "--format": "D", "--sort": "D",
+            # O: optional '='-attached value only (never consumes a following token).
+            "--color": "O", "--abbrev": "O", "--column": "O",
+            # R: plain read, no value, no list mode (a name beside it -> positional -> create).
+            "--all": "R", "--no-all": "R", "--remotes": "R", "--no-remotes": "R",
+            "--verbose": "R", "--no-verbose": "R", "--quiet": "R", "--no-quiet": "R",
+            "--show-current": "R", "--ignore-case": "R", "--no-ignore-case": "R",
+            "--omit-empty": "R", "--no-omit-empty": "R",
+            "--no-color": "R", "--no-abbrev": "R", "--no-column": "R",
+            "--no-format": "R", "--no-sort": "R",
+            "--create-reflog": "R", "--no-create-reflog": "R", "--help": "R",
+        },
+        "short_write": frozenset("dDmMcCutf"),  # d/D/m/M/c/C delete/move/copy; u upstream; t track; f force
+        "short_list": frozenset("l"),           # -l list
+        "short_read": frozenset("arvqih"),       # a/r all/remotes; v verbose; q quiet; i ignore-case; h help
+        "short_optnum": frozenset(),             # branch has no -n
+    },
+    "tag": {
+        "long": {
+            # W
+            "--annotate": "W", "--no-annotate": "W", "--sign": "W", "--no-sign": "W",
+            "--message": "W", "--no-message": "W", "--file": "W", "--no-file": "W",
+            "--local-user": "W", "--no-local-user": "W", "--force": "W", "--no-force": "W",
+            "--delete": "W", "--no-delete": "W", "--edit": "W", "--no-edit": "W",
+            "--cleanup": "W", "--no-cleanup": "W", "--trailer": "W", "--no-trailer": "W",
+            "--no-list": "W", "--no-verify": "W",
+            "--no-points-at": "W", "--no-with": "W", "--no-without": "W",
+            # V / L / F
+            "--verify": "V", "--list": "L",
+            "--contains": "F", "--no-contains": "F", "--merged": "F", "--no-merged": "F",
+            "--points-at": "F", "--with": "F", "--without": "F",
+            # D / O / R
+            "--format": "D", "--sort": "D",
+            "--color": "O", "--column": "O",
+            "--ignore-case": "R", "--no-ignore-case": "R", "--omit-empty": "R", "--no-omit-empty": "R",
+            "--no-color": "R", "--no-column": "R", "--no-format": "R", "--no-sort": "R",
+            "--create-reflog": "R", "--no-create-reflog": "R", "--help": "R",
+        },
+        "short_write": frozenset("asmFfedu"),  # a annotate; s sign; m message; F file; f force; e edit; d delete; u local-user
+        "short_list": frozenset("lv"),          # l list; v verify (verify is a READ mode)
+        "short_read": frozenset("ih"),          # i ignore-case; h help
+        "short_optnum": frozenset("n"),         # -n[N]: list-implying, optional ATTACHED decimal
+    },
+}
 _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
     "-e", "--edit"))
@@ -1927,33 +1982,103 @@ def _git_target_is_explicit(tokens):
     return _is_abs_binding(dash_c) or _is_abs_binding(git_dir)
 
 
-def _git_ref_cmd_mutating(args, write_flags, write_prefixes, list_flags, list_prefixes, arg_read_flags):
-    """Shared branch/tag mutation classifier (GD-158 rounds 3-5). Mutating when a WRITE flag is present, or
-    when a bare positional (a create/rename/delete TARGET) is present with NO list-mode flag. The target is
-    a positional operand and git accepts it either before OR after a '--' end-of-options marker
-    ('git branch -- name' and 'git tag -- name' both CREATE, real git 2.53), so a non-list-mode operand in
-    the post-'--' region counts too; only a WRITE FLAG is position-relevant (it must precede '--'). A
-    separate-form arg-taking read option's value (--contains REF, --format FMT) and a list pattern are not
-    targets. A listing flag with a positional means the positional is a pattern (read); a formatting flag
-    alone (--format/--sort) does not force list mode. Conservative: an ambiguous positional beside a
-    non-list flag reads as mutating (a safe ASK under a shift), never a silent allow."""
-    pre, post, _had = _split_pre_post(args)
-    if any(a in write_flags or a.startswith(write_prefixes) for a in pre):
-        return True
-    list_mode = any(a in list_flags or a.startswith(list_prefixes) for a in pre)
-    if post and not list_mode:
-        return True  # a create/rename/delete target placed after '--' (git accepts the target there)
-    i = 0
-    n = len(pre)
+def _resolve_long_role(name, long_roles):
+    """Resolve a '--<name>' option to its role. Exact match first (git's own rule), else a UNIQUE prefix
+    over the FULL universe (every key, W entries included). Zero matches (unknown) or two-or-more
+    (ambiguous, exactly what real git rejects) resolve to None, which the caller treats as MUTATING. The
+    universe MUST be a superset of git's real option table: a missing entry could let a prefix resolve
+    uniquely to a read where git sees a write or an ambiguity (a fail-open); the T-7 self-test gate is the
+    drift tripwire."""
+    if name in long_roles:
+        return long_roles[name]
+    matches = [k for k in long_roles if k.startswith(name)]
+    return long_roles[matches[0]] if len(matches) == 1 else None
+
+
+def _short_cluster_verdict(chars, spec):
+    """Classify a clustered short-flag body (the chars after a single leading '-'), scanning EVERY char
+    left to right. A WRITE char short-circuits to 'MUT' before any attached value is reached, so
+    '-uorigin/main' and '-mMSG' are caught by their leading write char. A list char latches list mode. The
+    tag optnum char ('n') takes an optional ATTACHED decimal: trailing digits are its value and end the
+    cluster ('-n'/'-n1' -> list mode); a non-digit tail is malformed -> 'MUT'. An unknown char is
+    fail-safe 'MUT'. Returns 'MUT', 'LIST' (a list char or a valid -n[N] was seen), or 'READ' (only
+    read-neutral chars, no list trigger)."""
+    saw_list = False
+    idx = 0
+    while idx < len(chars):
+        c = chars[idx]
+        if c in spec["short_write"]:
+            return "MUT"
+        if c in spec["short_list"]:
+            saw_list = True
+            idx += 1
+            continue
+        if c in spec["short_read"]:
+            idx += 1
+            continue
+        if c in spec["short_optnum"]:
+            rest = chars[idx + 1:]
+            if rest and not rest.isdigit():
+                return "MUT"  # -n with a non-digit tail (e.g. -nf) is malformed
+            return "LIST"     # -n / -nN: list mode, the attached digits are consumed as its value
+        return "MUT"          # unknown short char -> fail-safe
+    return "LIST" if saw_list else "READ"
+
+
+def _git_ref_cmd_mutating(sub, args):
+    """Fail-safe branch/tag mutation classifier (GD-158 rounds 1-6 + tri-family synthesis). DEFAULTS to
+    MUTATING (return True); returns READ (return False) ONLY when every option token resolves to a known
+    non-W role with a parseable value form, every positional is absent or covered by list/verify mode, and
+    the post-'--' region is empty or covered by list/verify mode. Any unknown, ambiguous, or malformed form
+    routes to True. Consumed by git_explicit_binding only. See _GIT_REF_SPECS for the role tables."""
+    spec = _GIT_REF_SPECS[sub]
+    long_roles = spec["long"]
+    pre, post, _had = _split_pre_post(args)  # existing helper: splits at '--'/'--end-of-options'
+    list_mode = False
+    i, n = 0, len(pre)
     while i < n:
         tok = pre[i]
-        if not tok.startswith("-"):
-            return not list_mode  # a bare positional: a create/rename/delete target unless list mode
-        if tok in arg_read_flags:
-            i += 2  # a separate-form arg-taking read option consumes its value
-            continue
         i += 1
-    return False
+        if not tok.startswith("-") or tok == "-":
+            if not list_mode:
+                return True  # a bare positional is a create/rename/delete TARGET (fail-safe)
+            continue         # list/verify mode: the positional is a pattern or verify operand
+        if tok.startswith("--"):
+            name, sep, _val = tok[2:].partition("=")
+            role = _resolve_long_role("--" + name, long_roles)
+            if role is None or role == "W":
+                return True  # unknown / ambiguous prefix / write -> MUTATING
+            if role in ("L", "V"):
+                if sep:
+                    return True  # '=' on a no-value option is malformed -> MUTATING
+                list_mode = True
+            elif role == "F":
+                list_mode = True
+                if not sep:
+                    if i < n and not pre[i].startswith("-"):
+                        i += 1       # separate filter value consumed
+                    elif i < n:
+                        return True  # a dash-leading separate value cannot be certified -> MUTATING
+                    # at end: the filter value is optional-when-last (defaults HEAD) -> stays list mode
+            elif role == "D":
+                if not sep:
+                    if i < n and not pre[i].startswith("-"):
+                        i += 1       # separate display value consumed
+                    else:
+                        return True  # missing OR dash-leading required value -> MUTATING (closes D-3)
+            elif role == "R":
+                if sep:
+                    return True  # '=' on a no-value option -> MUTATING
+            # role "O": optional '='-attached value only; consumes NOTHING following, sets no mode
+        else:
+            verdict = _short_cluster_verdict(tok[1:], spec)
+            if verdict == "MUT":
+                return True
+            if verdict == "LIST":
+                list_mode = True
+    if post and not list_mode:
+        return True  # a create/rename/delete target placed after '--' (git accepts the target there)
+    return False     # every token read-neutral and no target present -> READ
 
 
 def _git_is_mutating(sub, args):
@@ -1965,15 +2090,9 @@ def _git_is_mutating(sub, args):
     if sub not in _GIT_MUTATING_VERBS:
         return False
     if sub == "branch":
-        return _git_ref_cmd_mutating(
-            args, _GIT_BRANCH_WRITE_FLAGS, ("--set-upstream-to=",), _GIT_BRANCH_LIST_FLAGS,
-            ("--contains=", "--no-contains=", "--merged=", "--no-merged=", "--points-at="),
-            _GIT_BRANCH_ARG_READ)
+        return _git_ref_cmd_mutating("branch", args)
     if sub == "tag":
-        return _git_ref_cmd_mutating(
-            args, _GIT_TAG_WRITE_FLAGS, ("--message=", "--file=", "--local-user="), _GIT_TAG_LIST_FLAGS,
-            ("--contains=", "--no-contains=", "--merged=", "--no-merged=", "--points-at="),
-            _GIT_TAG_ARG_READ)
+        return _git_ref_cmd_mutating("tag", args)
     if sub == "stash":
         return not args or args[0] not in ("list", "show")
     if sub == "config":

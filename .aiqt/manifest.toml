@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "220b71dbf60631bd2c8b10d878071234968c5667959c83d8fe74b9e7da881ade"
+tree-sha256 = "685f381f3451a8a743ce114ad8c97653e770390232f83106f6d8628cba5b82d9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -66,13 +66,13 @@ sha256 = "bf6ba1a09a9488b7b951fdb6c65506d01fd8d24a83a2bb2f3b1a8dc791557637"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 114938
-sha256 = "90c101ae49a6e639103fede1d79d6ad2fc816871d7e56ba7203b4f5bfd1894d4"
+bytes = 115243
+sha256 = "562a8fa3f09131eaa1121ab71c95251ae69642f3449b75af247ad8718b98dae0"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 533167
-sha256 = "dd8441c6f4f4ab32b8c3f8f4c7da096c6a7e2f8dc201d277eb0e21cf888303b8"
+bytes = 539877
+sha256 = "b7442ef1ec4fc12aa5969de5ce0f0fbee7d85539000deaf20e7f247d80022d3b"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -771,8 +771,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 279042
-sha256 = "075d44c1183f3fb02c13cca79193ae0349b43e629e1c5dfd36c81eed1511c347"
+bytes = 279347
+sha256 = "a464cd2fdc9466c89b7677a8608f12466c463e77de0d45aa328051a9cd6a09a2"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2341,8 +2341,8 @@ sha256 = "18753794b9438846aff40658337b5a211664b2579d976df2087aea143e4d206c"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 533167
-sha256 = "dd8441c6f4f4ab32b8c3f8f4c7da096c6a7e2f8dc201d277eb0e21cf888303b8"
+bytes = 539877
+sha256 = "b7442ef1ec4fc12aa5969de5ce0f0fbee7d85539000deaf20e7f247d80022d3b"
 
 [[sources]]
 path = "roadmap.toml"
@@ -2986,8 +2986,8 @@ sha256 = "e02e15325a1da2cfad5da68ad1ca7456fedab1fc272f8f8648ca4a21758fd40f"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 358001
-sha256 = "26df4a48e90f06fffebb7e97403cd0d8ec7d6850df4aff7c70f0b46f7dd1f681"
+bytes = 366542
+sha256 = "e4a1be2fa8cccffab4daa2c5823980daaba11ce61cf53bed2d3aa4d47000269a"
 
 [[sources]]
 path = "tools/selftest_checks.toml"

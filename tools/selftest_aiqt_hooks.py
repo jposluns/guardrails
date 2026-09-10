@@ -4224,6 +4224,128 @@ def main():
                  "cd /x && git tag -- newt1", "ask")
         ebexpect("(eb-e56) branch LIST with a pattern after -- is a read under cd",
                  "cd /x && git branch --list -- 'new*'", "allow")
+        # GD-158 round-6 + tri-family synthesis: the branch/tag classifier is now FAIL-SAFE (defaults
+        # MUTATING; returns read only when every token resolves to a recognized read-neutral role and no
+        # create/rename/delete target is present). This table exercises _git_is_mutating directly against
+        # the git 2.53 ground truth: the plan's matrix classes, the six historical fail-open forms as
+        # regression teeth, and fail-safe probes asserting the default on unknown/ambiguous/malformed
+        # input. want=True is MUTATING (-> expbnd ASK); over-ASK is safe, a fail-open (want-True read as
+        # False) is the forbidden regression. The authoritative 99-row fixture and the real-git
+        # differential + T-7 universe-reconciliation gate are folded in separately (see integration note).
+        _M, _R = True, False
+        for _rc_label, _rc_sub, _rc_args, _rc_want in (
+            # -- branch: writes (short, long, attached-short, abbreviated-long) --
+            ("eb-e57", "branch", ["newb"], _M),                        # bare positional creates
+            ("eb-e58", "branch", ["-d", "feature"], _M),
+            ("eb-e59", "branch", ["-D", "feature"], _M),
+            ("eb-e60", "branch", ["-m", "old", "new"], _M),
+            ("eb-e61", "branch", ["-c", "old", "new"], _M),
+            ("eb-e62", "branch", ["--delete", "feature"], _M),
+            ("eb-e63", "branch", ["--move", "old", "new"], _M),
+            ("eb-e64", "branch", ["-f", "b", "start"], _M),
+            ("eb-e65", "branch", ["-u", "origin/main"], _M),
+            ("eb-e66", "branch", ["--set-upstream-to=origin/main"], _M),
+            ("eb-e67", "branch", ["--unset-upstream", "b"], _M),
+            ("eb-e68", "branch", ["--edit-description"], _M),
+            ("eb-e69", "branch", ["-t", "b", "origin/main"], _M),
+            ("eb-e70", "branch", ["-uorigin/main"], _M),               # r6 attached-short value
+            ("eb-e71", "branch", ["--unset-upst", "b"], _M),           # r6 abbreviated long
+            ("eb-e72", "branch", ["--set-upstream-t=origin/main"], _M),
+            ("eb-e73", "branch", ["--edit-descript"], _M),
+            ("eb-e74", "branch", ["-dv", "f"], _M),                    # write char leads a cluster
+            ("eb-e75", "branch", ["-vd", "f"], _M),                    # write char after a read char
+            # -- branch: r1 write-beside-list (list mode must never mask a write) --
+            ("eb-e76", "branch", ["--format=%(refname)", "-D", "feature"], _M),
+            ("eb-e77", "branch", ["--list", "-D", "feature"], _M),
+            # -- branch: reads / lists --
+            ("eb-e78", "branch", [], _R),
+            ("eb-e79", "branch", ["--list"], _R),
+            ("eb-e80", "branch", ["-l"], _R),
+            ("eb-e81", "branch", ["--list", "feat/*"], _R),
+            ("eb-e82", "branch", ["-a"], _R),
+            ("eb-e83", "branch", ["-r"], _R),
+            ("eb-e84", "branch", ["-v"], _R),
+            ("eb-e85", "branch", ["--show-current"], _R),
+            ("eb-e86", "branch", ["--format=%(refname)"], _R),
+            ("eb-e87", "branch", ["--sort=-committerdate"], _R),
+            ("eb-e88", "branch", ["--contains", "HEAD"], _R),
+            ("eb-e89", "branch", ["--merged", "HEAD"], _R),
+            ("eb-e90", "branch", ["--no-contains", "HEAD"], _R),
+            ("eb-e91", "branch", ["--points-at", "HEAD"], _R),
+            ("eb-e92", "branch", ["--contains"], _R),                  # filter value optional-when-last (U-5)
+            ("eb-e93", "branch", ["--format", "refname"], _R),         # separate display value, no target
+            # -- branch: r4/5 --create-reflog is a create MODIFIER, not a standalone write --
+            ("eb-e94", "branch", ["--create-reflog"], _R),
+            ("eb-e95", "branch", ["--create-reflog", "newb"], _M),
+            # -- branch: r4/5 --color/--abbrev/--column consume NOTHING following (a name creates) --
+            ("eb-e96", "branch", ["--color", "bcolorsep"], _M),
+            ("eb-e97", "branch", ["--abbrev", "babbrev"], _M),
+            ("eb-e98", "branch", ["--column", "bcol"], _M),
+            # -- branch: D-3 tooth -- --format consumes the next argv verbatim, so foo is created --
+            ("eb-e99", "branch", ["--format", "--list", "foo"], _M),
+            ("eb-e100", "branch", ["--format"], _M),                   # missing required value
+            ("eb-e101", "branch", ["--sort", "refname", "NAME"], _M),
+            # -- branch: r3 post-'--' target; a list pattern after '--' stays a read --
+            ("eb-e102", "branch", ["--", "newb"], _M),
+            ("eb-e103", "branch", ["-D", "--", "feature"], _M),
+            ("eb-e104", "branch", ["--list", "--", "new*"], _R),
+            # -- branch: mode cancellers roled W (D-9) --
+            ("eb-e105", "branch", ["--list", "--no-list", "NAME"], _M),
+            ("eb-e106", "branch", ["--points-at", "HEAD", "--no-points-at", "NAME"], _M),
+            ("eb-e107", "branch", ["--show-current", "NAME"], _M),
+            # -- branch: D-2 (git rejects -a/-r NAME fatally; over-ASK) --
+            ("eb-e108", "branch", ["-a", "NAME"], _M),
+            # -- branch: fail-safe probes (assert the DEFAULT) --
+            ("eb-e109", "branch", ["--frobnicate"], _M),               # unknown long
+            ("eb-e110", "branch", ["-Z", "x"], _M),                    # unknown short
+            ("eb-e111", "branch", ["--co", "x"], _M),                  # ambiguous prefix
+            ("eb-e112", "branch", ["--for"], _M),                      # force/format ambiguity
+            ("eb-e113", "branch", ["--list=x"], _M),                   # '=' on a no-value option
+            # -- tag: writes --
+            ("eb-e114", "tag", ["-a", "-m", "msg", "v1"], _M),
+            ("eb-e115", "tag", ["-m", "msg", "v1"], _M),
+            ("eb-e116", "tag", ["-s", "v1"], _M),
+            ("eb-e117", "tag", ["v1"], _M),                            # lightweight tag create
+            ("eb-e118", "tag", ["-d", "v1"], _M),
+            ("eb-e119", "tag", ["--delete", "v1"], _M),
+            ("eb-e120", "tag", ["-f", "v1"], _M),
+            ("eb-e121", "tag", ["-e", "-m", "x", "v1"], _M),
+            ("eb-e122", "tag", ["-ammsg", "t1"], _M),                  # attached-short write cluster
+            ("eb-e123", "tag", ["--ann", "t1"], _M),                   # abbreviated write long
+            ("eb-e124", "tag", ["--sig", "t1"], _M),
+            ("eb-e125", "tag", ["--cleanup=whitespace"], _M),          # D-5: create-mode modifier
+            # -- tag: r6 --column/--no-column are NOT list triggers (a name beside them creates) --
+            ("eb-e126", "tag", ["--column", "tname"], _M),
+            ("eb-e127", "tag", ["--no-column", "tname"], _M),
+            # -- tag: r5 verify is a READ mode --
+            ("eb-e128", "tag", ["-v", "v2"], _R),
+            ("eb-e129", "tag", ["--verify", "v2"], _R),
+            ("eb-e130", "tag", ["--ver", "v2"], _R),                   # unique prefix of --verify
+            # -- tag: lists / -n[N] --
+            ("eb-e131", "tag", [], _R),
+            ("eb-e132", "tag", ["-l"], _R),
+            ("eb-e133", "tag", ["--list", "v*"], _R),
+            ("eb-e134", "tag", ["-n"], _R),
+            ("eb-e135", "tag", ["-n1", "v*"], _R),                     # D-6: attached decimal -> read
+            ("eb-e136", "tag", ["-nf", "v*"], _M),                     # non-digit tail -> fail-safe
+            ("eb-e137", "tag", ["-ln1", "v*"], _R),
+            # -- tag: reads / filters / create-reflog --
+            ("eb-e138", "tag", ["--format=%(refname)"], _R),
+            ("eb-e139", "tag", ["--format=%(refname)", "t1"], _M),
+            ("eb-e140", "tag", ["--points-at", "HEAD"], _R),
+            ("eb-e141", "tag", ["--contains", "v1"], _R),
+            ("eb-e142", "tag", ["--create-reflog"], _R),
+            ("eb-e143", "tag", ["--create-reflog", "v9"], _M),
+            # -- tag: r3 post-'--' target; fail-safe probes --
+            ("eb-e144", "tag", ["--", "newt"], _M),
+            ("eb-e145", "tag", ["--", "-v"], _M),                      # -v after '--' is an operand -> create
+            ("eb-e146", "tag", ["--frob"], _M),
+            ("eb-e147", "tag", ["-Z"], _M),
+        ):
+            _rc_got = aiqt_hooks._git_is_mutating(_rc_sub, _rc_args)
+            if _rc_got is not _rc_want:
+                failures.append("({}) _git_is_mutating({!r}, {!r}): expected {}, got {}"
+                                .format(_rc_label, _rc_sub, _rc_args, _rc_want, _rc_got))
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
