@@ -22,9 +22,10 @@ Out of the subset (rejected): None, bytes, set, a nested array (list in a list),
 and scalars, an inline table or an array of inline tables, a non-string key, a non-finite float, a string
 (value or key) carrying a lone surrogate (no UTF-8 encoding), a datetime or time with fold=1, a datetime
 whose tzinfo is not a plain fixed UTC offset (a named or variable zone), a datetime whose UTC offset is
-not a whole number of minutes (outside TOML offset syntax), and a timezone-aware `time` (TOML local time
-carries no offset). Each rejected state is one TOML cannot round-trip, so its closed-subset boundary keeps
-the staging proof sound. Inline tables and arrays of inline tables are
+not a whole number of minutes (outside TOML offset syntax), a timezone-aware `time` (TOML local time
+carries no offset), and a cyclic table reference (a table reachable from itself: no parsed TOML is
+cyclic, so a cycle cannot round-trip and would otherwise not terminate). Each rejected state is one TOML
+cannot round-trip, so its closed-subset boundary keeps the staging proof sound. Inline tables and arrays of inline tables are
 deliberately excluded: the record-envelope `links`/`refs` inline-table arrays (OPF-SPEC 8.3/8.6) are
 outside this minimal subset, matching the build plan's stated U8 coverage.
 
@@ -50,6 +51,12 @@ set, so the emitted bytes are dash-free by construction independent of what byte
 
 Staging contract (OPF-SPEC 14.1, build plan U8): emit_checked() emits, reparses, and proves the result
 model-equivalent to its input before returning it; nothing that does not round-trip can be staged.
+
+Output ceiling (OPF staging output policy, not a depth bound): a single emission is bounded by
+_MAX_EMIT_BYTES of canonical output. A document of any nesting depth succeeds while its canonical bytes
+fit under the ceiling; only an output that would exceed it is a fail-closed EmitError. Canonical headers
+repeat their full dotted path, so a deep chain's output is quadratic in its depth even from a small
+resident model, and this bounds that output rather than the structure.
 
   _opf_emit.py --self-test    round-trip fuzz, canonical-form determinism, subset coverage, byte-canon
 
@@ -98,8 +105,29 @@ _HOUSE_STYLE_DASHES = frozenset((chr(0x2013), chr(0x2014)))
 _NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
                   "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
+# The admitted scalar/date-time built-ins. Admission is by EXACT type (`type(v) in _SCALAR_TYPES`, never
+# isinstance), so a hostile subclass of an admitted built-in is rejected as out-of-subset before any of its
+# methods runs; this is what closes the hostile-subclass exception-leak class.
 _SCALAR_TYPES = (str, bool, int, float,
                  datetime.datetime, datetime.date, datetime.time)
+
+# Staging output ceiling (OPF staging resource bound, NOT a depth bound): the total canonical bytes a
+# single emission may produce. A document of any nesting depth succeeds while its output fits; only an
+# output that would exceed this ceiling is a fail-closed EmitError. Canonical headers repeat their full
+# dotted path, so a deep chain's output is quadratic in its depth even from a small resident model, and
+# this caps that output, never the structure. Accounting is per appended line (len(utf-8) + 1 for the LF
+# that "\n".join adds), exact for the final text. Disclosed residuals: (1) a single line (one header or
+# one escaped scalar) is assembled just before it is charged, so peak transient memory can exceed the
+# ceiling by roughly one rendered line: a header line, whose length is its full dotted path, or one
+# escaped scalar. The scheduler renders each header at append time and no longer pre-materializes one
+# header string per array-of-tables element, so a wide array of tables adds no transient spike of K times
+# the header length; (2) the empty document's single trailing LF is charged as 0 bytes (immaterial at any
+# real ceiling); (3) a MemoryError from a model too large to hold is not caught by the ceiling accounting
+# here, but it is an ordinary Exception subclass, so the outermost emit() backstop converts it to a
+# fail-closed EmitError like any other non-control-flow BaseException; only the three genuine control-flow
+# signals (KeyboardInterrupt, SystemExit, GeneratorExit) are re-raised (honored) rather than converted. Any
+# reduction of this ceiling is a maintainer decision.
+_MAX_EMIT_BYTES = 64 * 1024 * 1024
 
 
 def _escape_basic(s):
@@ -126,12 +154,35 @@ def _escape_basic(s):
     return '"' + "".join(out) + '"'
 
 
+def _safe_type_label(value):
+    """A human label for a value's type for a rejection diagnostic, formed WITHOUT letting attacker code
+    escape. A value whose class has a hostile metaclass (one whose __getattribute__ raises on the
+    __name__ lookup) would make a bare `type(value).__name__` raise an uncontrolled exception while the
+    reject message is being built, even though the exact-type gate has already decided to reject the
+    value. Reading the name inside a try/except and falling back to a constant on any BaseException OTHER
+    than a genuine control-flow signal (KeyboardInterrupt, SystemExit, GeneratorExit) means forming a
+    rejection message can never raise a non-control-flow exception; a genuine control-flow signal is
+    re-raised (honored), matching the outermost emit() backstop, which closes the same class definitively."""
+    try:
+        label = type(value).__name__
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):  # a genuine control-flow signal raised during the
+        raise  # __name__ lookup is honored (re-raised), matching the emit() backstop, never swallowed to a constant
+    except BaseException:  # noqa: BLE001 - any OTHER failure to read the type name (including a non-control-flow
+        # BaseException raised by a hostile metaclass during the __name__ lookup) falls back to a constant label.
+        # Catching BaseException here is safe: this helper neither loops nor blocks, it is a pure best-effort
+        # diagnostic label, and any escape would defeat the diagnostic.
+        return "<unrenderable-type>"
+    if type(label) is not str:  # a hostile metaclass can return a non-str __name__ whose __format__ raises a
+        return "<unrenderable-type>"  # control-flow signal; reject it BEFORE a diagnostic ever formats the label
+    return label
+
+
 def _render_key(key):
     """A single key component: bare where it matches the bare-key grammar, else a quoted basic string.
     A non-string key is outside the subset (tomllib only ever produces string keys, so a non-string key
     could never round-trip)."""
-    if not isinstance(key, str):
-        raise EmitError("table key must be a string, got {}".format(type(key).__name__))
+    if type(key) is not str:  # exact type, not isinstance: a str subclass is rejected before it is iterated
+        raise EmitError("table key must be a string, got {}".format(_safe_type_label(key)))
     if _BARE_KEY_RE.fullmatch(key):
         return key
     return _escape_basic(key)
@@ -151,11 +202,14 @@ def _canonical_float(value):
 
 
 def _render_scalar(value):
-    """A single scalar or date/time value as its canonical TOML literal. bool is tested before int
-    (bool is an int subclass) and datetime before date (datetime is a date subclass)."""
-    if isinstance(value, bool):
+    """A single scalar or date/time value as its canonical TOML literal. Admission is by EXACT type
+    (`type(value) is T`, not isinstance): only a plain admitted built-in is emitted and any subclass is
+    rejected as out-of-subset before any of its methods (__str__, __repr__, isoformat) runs, so a hostile
+    subclass cannot leak an uncontrolled exception. Exact typing also disambiguates bool from int and
+    datetime from date without relying on test order."""
+    if type(value) is bool:
         return "true" if value else "false"
-    if isinstance(value, int):
+    if type(value) is int:
         # Defence-in-depth for a currently-unreachable-from-TOML input: CPython raises ValueError on
         # str() of an int whose decimal length exceeds the interpreter's integer-string-conversion limit
         # (4300 digits by default). Such an int cannot arrive via tomllib (it rejects an over-limit int
@@ -167,16 +221,15 @@ def _render_scalar(value):
             return str(value)
         except ValueError as exc:
             raise EmitError("integer is too large to render ({})".format(exc))
-    if isinstance(value, float):
+    if type(value) is float:
         return _canonical_float(value)
-    if isinstance(value, str):
+    if type(value) is str:
         return _escape_basic(value)
-    if isinstance(value, datetime.datetime):
+    if type(value) is datetime.datetime:
         if value.fold:
             raise EmitError("a datetime with fold=1 has no TOML round trip (TOML carries no fold flag)")
         tz = value.tzinfo
         if tz is not None:
-            offset = value.utcoffset()
             # A TOML offset datetime carries only a numeric UTC offset: no zone name, no DST rule. Accept
             # ONLY a plain datetime.timezone constructed WITHOUT a name; anything else (a custom name, even
             # one that matches the auto-generated "UTC+HH:MM" string, a variable/named zone, or a timezone
@@ -184,17 +237,24 @@ def _render_scalar(value):
             # equality and datetime equality ignore the tzinfo name, so the name can be caught neither by
             # comparing offsets nor by the round-trip proof; reconstruct the canonical unnamed instance for
             # this offset and require the input to render identically to it, which exposes a custom name
-            # (it appears in the repr) that an == comparison would miss.
-            if type(tz) is not datetime.timezone or repr(tz) != repr(datetime.timezone(offset)):
+            # (it appears in the repr) that an == comparison would miss. The type gate runs BEFORE
+            # utcoffset() so a hostile tzinfo subclass whose utcoffset() returns an out-of-range or
+            # non-timedelta value is rejected fail-closed here rather than raising outside EmitError; a
+            # genuine datetime.timezone's utcoffset() cannot raise once the type gate has passed.
+            if type(tz) is not datetime.timezone:
+                raise EmitError("a datetime whose tzinfo is not a plain unnamed fixed UTC offset (a named "
+                                "or variable zone) has no TOML round trip")
+            offset = value.utcoffset()
+            if repr(tz) != repr(datetime.timezone(offset)):
                 raise EmitError("a datetime whose tzinfo is not a plain unnamed fixed UTC offset (a named "
                                 "or variable zone) has no TOML round trip")
             if offset % datetime.timedelta(minutes=1) != datetime.timedelta(0):
                 raise EmitError("a datetime UTC offset that is not a whole number of minutes ({}) is "
                                 "outside TOML offset syntax".format(offset))
         return value.isoformat()
-    if isinstance(value, datetime.date):
+    if type(value) is datetime.date:
         return value.isoformat()
-    if isinstance(value, datetime.time):
+    if type(value) is datetime.time:
         if value.tzinfo is not None:
             raise EmitError("a TOML local time cannot carry a timezone offset")
         if value.fold:
@@ -208,9 +268,9 @@ def _classify_list(items):
     tables). A mixed or nested array is outside the subset and fails closed."""
     if not items:
         return "empty"
-    if all(isinstance(e, dict) for e in items):
+    if all(type(e) is dict for e in items):  # exact type: a dict subclass is not admitted as a table
         return "aot"
-    if all(isinstance(e, _SCALAR_TYPES) for e in items):
+    if all(type(e) in _SCALAR_TYPES for e in items):  # exact type: a scalar subclass is rejected below
         return "scalar"
     raise EmitError("an array must be all tables or all scalars; a mixed or nested array is outside "
                     "the subset")
@@ -226,72 +286,190 @@ def _emit_table(table, path, lines):
     (scalars, dates, empty lists, and scalar arrays) are emitted first, both leaf and nested groups
     sorted by key, so a table's bytes do not depend on its dict insertion order and TOML's rule that a
     table's key-values precede any sub-header is always satisfied. Sub-tables (`[header]`) and arrays of
-    tables (`[[header]]`) then recurse, each preceded by a blank separator line except at the very top."""
-    leaves = []
-    nested = []
-    for key, value in table.items():
-        _render_key(key)  # validate the key up front (raises on a non-string key)
-        if isinstance(value, dict):
-            nested.append((key, value, "table"))
-        elif isinstance(value, list):
-            if _classify_list(value) == "aot":
-                nested.append((key, value, "aot"))
-            else:
-                leaves.append((key, value))  # empty or scalar array: an inline leaf
-        elif isinstance(value, _SCALAR_TYPES):
-            leaves.append((key, value))
-        else:
-            raise EmitError("value for key {!r} is outside the subset: {}".format(
-                key, type(value).__name__))
-    for key, value in sorted(leaves, key=lambda kv: kv[0]):
-        rendered = _render_scalar_array(value) if isinstance(value, list) else _render_scalar(value)
-        lines.append("{} = {}".format(_render_key(key), rendered))
-    for key, value, kind in sorted(nested, key=lambda t: t[0]):
-        child_path = path + [key]
-        header = ".".join(_render_key(p) for p in child_path)
-        if kind == "table":
+    tables (`[[header]]`) then follow, each preceded by a blank separator line except at the very top.
+
+    The walk is an explicit-stack pre-order traversal, not native recursion, so an arbitrarily deep
+    document emits without a RecursionError and no depth is rejected. The stack carries three tagged
+    frame kinds: a `process` frame renders one table body and schedules its blocks; a `block` frame
+    emits one header (with the leading blank separator, decided at the append moment from the current
+    non-emptiness of `lines`, exactly as the recursion did) and schedules that block's body above the
+    remaining siblings; a `leave` frame marks a table's subtree complete. Because each block's body is
+    scheduled above its siblings, a subtree finishes before the next sibling begins and the append order
+    is byte-identical to the recursive form. A table reached again while still on the active ancestor
+    chain is a cyclic reference (which no parsed TOML can contain and which would otherwise not
+    terminate) and is a fail-closed EmitError; a table shared acyclically leaves the active chain when
+    its subtree completes, so a shared DAG still emits. Emission is bounded by _MAX_EMIT_BYTES: an output
+    that would exceed the staging ceiling is a fail-closed EmitError."""
+    total = 0
+
+    def _append(line):
+        # Charge each appended line as len(utf-8) + 1 for the LF that "\n".join adds for it; this sum is
+        # exact for the final text (a single line, scalar, key, or header, is assembled just before it is
+        # charged, so peak transient memory can exceed the ceiling by roughly one such line: a disclosed
+        # residual).
+        nonlocal total
+        total += len(line.encode("utf-8")) + 1
+        if total > _MAX_EMIT_BYTES:
+            raise EmitError("emitted document exceeds the staging output ceiling ({} bytes)".format(
+                _MAX_EMIT_BYTES))
+        lines.append(line)
+
+    # ("process", table, path): render one table body. ("block", kind, header, table, path): emit one
+    # header, built from the shared dotted-path `header` string at the append moment (no per-element header
+    # string is pre-materialized), and schedule its body. ("leave", id): the table with this id() has
+    # finished; unmark it.
+    stack = [("process", table, path)]
+    active = set()  # id() of every table currently on the ancestor chain, for cycle detection
+    while stack:
+        frame = stack.pop()
+        tag = frame[0]
+        if tag == "leave":
+            active.discard(frame[1])
+            continue
+        if tag == "block":
+            _, kind, header, tbl, child_path = frame
             if lines:
-                lines.append("")
-            lines.append("[{}]".format(header))
-            _emit_table(value, child_path, lines)
-        else:  # an array of tables: one [[header]] block per element
-            for element in value:
-                if lines:
-                    lines.append("")
-                lines.append("[[{}]]".format(header))
-                _emit_table(element, child_path, lines)
+                _append("")
+            _append(("[[{}]]" if kind == "aot" else "[{}]").format(header))
+            stack.append(("process", tbl, child_path))
+            continue
+        _, tbl, pth = frame  # a "process" frame
+        if id(tbl) in active:
+            raise EmitError("document contains a cyclic table reference (reached again at [{}])".format(
+                ".".join(_render_key(p) for p in pth)))
+        active.add(id(tbl))
+        stack.append(("leave", id(tbl)))
+        leaves = []
+        nested = []
+        for key, value in tbl.items():
+            _render_key(key)  # validate the key up front (raises on a non-string key)
+            # Exact-type dispatch (`type(value) is T` / `type(value) in _SCALAR_TYPES`, not isinstance): a
+            # hostile subclass of dict/list/an admitted scalar falls through to the out-of-subset branch
+            # below and is rejected before its .items()/iteration/render method can run.
+            if type(value) is dict:
+                nested.append((key, value, "table"))
+            elif type(value) is list:
+                if _classify_list(value) == "aot":
+                    nested.append((key, value, "aot"))
+                else:
+                    leaves.append((key, value))  # empty or scalar array: an inline leaf
+            elif type(value) in _SCALAR_TYPES:
+                leaves.append((key, value))
+            else:
+                raise EmitError("value for key {!r} is outside the subset: {}".format(
+                    key, _safe_type_label(value)))
+        for key, value in sorted(leaves, key=lambda kv: kv[0]):
+            rendered = _render_scalar_array(value) if type(value) is list else _render_scalar(value)
+            _append("{} = {}".format(_render_key(key), rendered))
+        # Build block frames in the exact order the recursion emitted them (sub-tables and array-of-table
+        # elements, sorted by key, elements in positional order), then push them reversed so the LIFO
+        # stack pops them back into that forward order. Each frame carries the ONE shared dotted-path
+        # `header` string (and the one child_path list), not a per-element formatted header; the bracketed
+        # header line is rendered at append time, so a wide array of tables materializes no K header copies.
+        blocks = []
+        for key, value, kind in sorted(nested, key=lambda t: t[0]):
+            child_path = pth + [key]
+            header = ".".join(_render_key(p) for p in child_path)
+            if kind == "table":
+                blocks.append(("block", "table", header, value, child_path))
+            else:  # an array of tables: one [[header]] block per element
+                for element in value:
+                    blocks.append(("block", "aot", header, element, child_path))
+        for block in reversed(blocks):
+            stack.append(block)
 
 
 def emit(document):
     """Serialize `document` (a dict) to a canonical, byte-canonical TOML string ending in exactly one
     LF. Fail-closed (EmitError) on anything outside the constrained subset. The result reparses to a
-    model equal to `document`; emit_checked() proves that on every emission before it can stage."""
-    if not isinstance(document, dict):
-        raise EmitError("the document must be a table (dict) at top level, got {}".format(
-            type(document).__name__))
-    lines = []
-    _emit_table(document, [], lines)
-    return "\n".join(lines) + "\n"
+    model equal to `document`; emit_checked() proves that on every emission before it can stage.
+
+    The whole body runs inside a fail-closed backstop: this is the outermost boundary of emit() and it
+    closes the hostile-input exception-leak class definitively. An EmitError propagates unchanged; the
+    genuine control-flow signals (KeyboardInterrupt, SystemExit, GeneratorExit) are re-raised untouched;
+    every OTHER BaseException (for example a value whose hostile metaclass raises a custom Exception OR a
+    custom BaseException subclass while a diagnostic is built, or any other pathological input) is
+    converted to a fail-closed EmitError with a constant, value-free message, never one that formats or
+    introspects the offending value or type. Catching BaseException (not merely Exception) is deliberate:
+    a hostile object whose metaclass __getattribute__ raises a BaseException subclass that is NOT an
+    Exception subclass would otherwise slip past an `except Exception` backstop and escape uncontrolled.
+    This guarantees no hostile or pathological input can escape emit() (and therefore emit_checked, which
+    calls emit()) as an uncontrolled exception.
+
+    DISCLOSURE (residual): the sole non-EmitError escape is a GENUINE control-flow signal
+    (KeyboardInterrupt, SystemExit, GeneratorExit) raised by the input DURING emission, whether raised
+    directly or from an attribute or method the emitter legitimately invokes on a plain-typed value. Such
+    a raise is honored as control flow and propagates rather than becoming an EmitError, because it is
+    indistinguishable from a real interrupt or exit and must be allowed to propagate; it is never dressed
+    up as a document reject. It does not fail open: nothing is staged or returned on that path."""
+    try:
+        if type(document) is not dict:  # exact type: a dict subclass is rejected before its .items() runs
+            raise EmitError("the document must be a table (dict) at top level, got {}".format(
+                _safe_type_label(document)))
+        lines = []
+        _emit_table(document, [], lines)
+        return "\n".join(lines) + "\n"
+    except EmitError:
+        raise
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):  # genuine control flow re-raised, never converted
+        raise
+    except BaseException:  # noqa: BLE001 - fail-closed backstop: any OTHER BaseException becomes a value-free EmitError
+        raise EmitError("emit failed on an out-of-subset or hostile input (fail-closed)")
 
 
 def _model_equal(a, b):
     """Strict structural, type-aware equality between an input model and its reparse. Stricter than ==:
     bool is never equal to a bare int (Python's True == 1 would otherwise mask a bool-vs-int fidelity
     bug), int is never equal to float, and datetime is never equal to date. This is what makes the
-    round-trip proof in emit_checked meaningful rather than merely plausible."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        return isinstance(a, bool) and isinstance(b, bool) and a == b
-    if isinstance(a, dict):
-        if not isinstance(b, dict) or a.keys() != b.keys():
+    round-trip proof in emit_checked meaningful rather than merely plausible.
+
+    The comparison is an explicit-stack traversal, not native recursion, so an arbitrarily deep pair is
+    compared without a RecursionError. Every clause below is applied per pair in the same order the
+    recursive form used (bool-symmetric first, then dict, then list, then type, then ==), and the first
+    inequality short-circuits to False. An `x is y` identity short-circuit heads the loop: it bounds the
+    case where the SAME object is reached as both members of a pair, a shared DAG passed as both arguments
+    (which the guardless walk expands exponentially over the shared nodes) or a cyclic object passed as
+    both arguments (which it walks without ever terminating, whereas the prior recursive form terminated by
+    raising RecursionError). Both cases are unreachable in-module: emit_checked compares the input against a
+    fresh tomllib tree (a finite acyclic model, and emit() has already rejected a cyclic input before this
+    runs), so no in-module call can loop; the guard is cheap defence-in-depth for a direct external call.
+    The guard treats an identical object as equal, which matches == for every value emit admits and never
+    changes an in-module result: the reparse is a tree distinct from the input, so a shared container is
+    never identical across the two trees, and where an interned scalar (a small int, an interned str, True,
+    False) is identical across them it is reflexively equal, so the verdict is unchanged. The one value
+    whose identity does not imply == is a NaN (a shared NaN would be treated as equal though == calls it
+    unequal), but emit rejects a non-finite float before this function runs, so no NaN can reach it
+    in-module. Identity MEMOIZATION of distinct-but-equal pairs would change the equality semantics for no
+    in-module caller and is deliberately omitted."""
+    stack = [(a, b)]
+    while stack:
+        x, y = stack.pop()
+        if x is y:  # the identical object is equal to itself; bounds a shared-DAG/cyclic both-args walk
+            continue
+        # Exact-type discrimination (type(...) is T, not isinstance), so a subclass of an admitted built-in
+        # cannot slip past here either; the strict semantics are unchanged (bool != bare int, int != float,
+        # datetime != date all fall through to the type(x) is not type(y) check below).
+        if type(x) is bool or type(y) is bool:
+            if not (type(x) is bool and type(y) is bool and x == y):
+                return False
+            continue
+        if type(x) is dict:
+            if type(y) is not dict or x.keys() != y.keys():
+                return False
+            for k in reversed(x):  # push children reversed so they pop in positional (insertion) order
+                stack.append((x[k], y[k]))
+            continue
+        if type(x) is list:
+            if type(y) is not list or len(x) != len(y):
+                return False
+            for i in range(len(x) - 1, -1, -1):  # push children reversed so they pop in positional order
+                stack.append((x[i], y[i]))
+            continue
+        if type(x) is not type(y):
             return False
-        return all(_model_equal(a[k], b[k]) for k in a)
-    if isinstance(a, list):
-        if not isinstance(b, list) or len(a) != len(b):
+        if x != y:
             return False
-        return all(_model_equal(x, y) for x, y in zip(a, b))
-    if type(a) is not type(b):
-        return False
-    return a == b
+    return True
 
 
 def emit_checked(document):
@@ -330,13 +508,17 @@ def self_test():
     # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
     # duplicate is the guard-input-soundness failure this avoids). Fail closed if it cannot be imported:
     # byte-canon cleanliness cannot be asserted without the authority.
+    _saved_sys_path = list(sys.path)  # snapshot so the import (and its transitive imports) cannot leak sys.path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
-        import check_byte_canon
-    except Exception as exc:  # noqa: BLE001 - any import failure is fail-closed here
-        print("error: cannot import check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
-              file=sys.stderr)
-        return 2
+        try:
+            import check_byte_canon
+        except Exception as exc:  # noqa: BLE001 - any import failure is fail-closed here
+            print("error: cannot import check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
+                  file=sys.stderr)
+            return 2
+    finally:
+        sys.path[:] = _saved_sys_path  # restore whether the import succeeded, failed (return 2), or completed; check_byte_canon stays in sys.modules
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
     authority = set(check_byte_canon.FORBIDDEN.values())
@@ -452,6 +634,215 @@ def self_test():
         failures.append("signed-zero: -0.0 emitted a signed-zero literal instead of 0.0")
     _round_trips({"v": -0.0}, "signed-zero/negative")
 
+    # --- arbitrary-depth vectors: emission and equality without native recursion -----------------------
+    # Two properties that the reparser forces apart onto two depths. ITERATIVENESS: emit() must handle
+    # nesting far deeper than the interpreter's recursion limit; the pre-fix recursive emitter raises
+    # RecursionError building these, so a depth well above the pinned limit discriminates the rewrite.
+    # This depth is emitted but never reparsed: a chain of depth D emits a D-part header (both a table,
+    # [t.t...], and an array-of-tables, [[r.r...]]), and tomllib caps a key at 1000 dotted parts, raising
+    # RecursionError on the giant key on the Pythons that enforce the cap (3.12/3.13) though not on those
+    # that do not (3.14). Handing the giant key to the reparser would misread that cap as native emitter
+    # recursion, so iterativeness is checked by emission and structure alone. FIDELITY: the tomllib
+    # round-trip runs at a depth under the cap, where every reparser accepts the key. Pin the recursion
+    # limit low so the iterativeness depth always exceeds the effective limit regardless of the ambient
+    # value (test-hermeticity, and keeping emitted output bounded), and restore it afterwards.
+    iterative_depth = 2500      # above the pinned limit; emitted and structurally checked, never reparsed
+    reparse_depth = 500         # well under tomllib's 1000-part-key cap; round-tripped through the reparser
+    saved_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(min(saved_limit, 2000))
+    try:
+        # Iterativeness: the recursive emitter raises RecursionError building these; the iterative one
+        # does not. Emission must be deterministic and match, byte for byte, an independently constructed
+        # canonical expected vector (built here from first principles, never by calling emit), so a
+        # regressed emitter that reached full depth but produced garbage, reordered, missing, extra, or
+        # non-canonical bytes is rejected without reparsing the >1000-part key. Byte-canon cleanliness is
+        # asserted on the emitted text too.
+        for wrap, open_tok, close_tok, part, label in (
+                (lambda n: {"t": n}, "[", "]", "t", "deep/table"),
+                (lambda n: {"r": [n]}, "[[", "]]", "r", "deep/aot")):
+            model = {"leaf": 1}
+            for _ in range(iterative_depth):
+                model = wrap(model)
+            expected = "\n\n".join(
+                open_tok + ".".join([part] * i) + close_tok for i in range(1, iterative_depth + 1)
+            ) + "\nleaf = 1\n"
+            text = emit(model)
+            if text != expected:
+                failures.append("{}: depth-{} emission does not match the canonical expected bytes".format(
+                    label, iterative_depth))
+            if emit(model) != text:
+                failures.append("{}: two emissions of a depth-{} model differ (non-deterministic)".format(
+                    label, iterative_depth))
+            _byte_canon_clean(text, label + "/deep")
+
+        # Fidelity: at a depth the reparser accepts, the table and array-of-tables forms round-trip
+        # canonically, and the array-of-tables reparse preserves the full depth and the leaf value.
+        deep_table = {"leaf": 1}
+        for _ in range(reparse_depth):
+            deep_table = {"t": deep_table}
+        _round_trips(deep_table, "deep/table-roundtrip")
+
+        deep_aot = {"leaf": 1}
+        for _ in range(reparse_depth):
+            deep_aot = {"r": [deep_aot]}
+        _round_trips(deep_aot, "deep/aot-roundtrip")
+        # Walk the reparse to the bottom iteratively: element order and the leaf value must survive.
+        node = tomllib.loads(emit(deep_aot))
+        walked = 0
+        while isinstance(node, dict) and "r" in node:
+            node = node["r"][0]
+            walked += 1
+        if walked != reparse_depth or not (isinstance(node, dict) and node.get("leaf") == 1):
+            failures.append("deep/aot: reparse did not preserve depth {} and the leaf value".format(reparse_depth))
+
+        # Model-equality holds at the full iterativeness depth (_model_equal is iterative): two
+        # independently built deep models compare equal, and a mutated deepest leaf compares unequal.
+        first = {"leaf": 1}
+        for _ in range(iterative_depth):
+            first = {"t": first}
+        second = {"leaf": 1}
+        for _ in range(iterative_depth):
+            second = {"t": second}
+        if not _model_equal(first, second):
+            failures.append("deep/model-equal: two independently built depth-{} models compared unequal".format(
+                iterative_depth))
+        node = second
+        while "t" in node and isinstance(node["t"], dict):
+            node = node["t"]
+        node["leaf"] = 2
+        if _model_equal(first, second):
+            failures.append("deep/model-equal: a mutated deepest leaf was not detected as unequal")
+    except (RecursionError, EmitError) as exc:
+        failures.append("deep/vectors: an arbitrary-depth path failed to emit iteratively ({!r})".format(exc))
+    finally:
+        sys.setrecursionlimit(saved_limit)
+
+    # --- shared acyclic DAG: the cycle guard must not over-fire on a table with several parents ---------
+    shared = {"x": 1}
+    _round_trips({"p": shared, "q": shared, "rows": [shared, shared]}, "shared-dag")
+
+    # MINOR-4 identity-guard pin: two DISTINCT lists that each hold the SAME deep shared object collapse
+    # under the `x is y` short-circuit, so _model_equal returns True in O(nodes). Each level is a diamond
+    # (one child shared under two keys); without the short-circuit the guardless walk expands the diamonds
+    # (2**64 pair-pushes) and does not return promptly, so removing the guard is caught here. Hermetic: no
+    # timers, no wall-clock, no host state; under the guard this runs in a handful of iterations.
+    shared_sub = {"leaf": 1}
+    for _ in range(64):
+        shared_sub = {"l": shared_sub, "r": shared_sub}
+    if not _model_equal([shared_sub, shared_sub], [shared_sub, shared_sub]):
+        failures.append("identity-guard/shared-dag: a shared DAG compared unequal to itself")
+
+    # --- golden byte vectors: parity locks over sorting, separators, empties, and dotted headers --------
+    # The leaf-rooted golden below (built in a deliberately noncanonical insertion order; the literal was
+    # captured from this emitter) has root-level leaf key-values, so it exercises the separator-PRESENT
+    # case (a blank line before a block that follows leaves). The leafless-rooted golden further down
+    # exercises the top-of-document separator-ABSENT case, together pinning the if-lines branch in both its
+    # taken and not-taken states.
+    golden = (
+        'a = [3, 1]\n'
+        'b = true\n'
+        'm = "x"\n'
+        '\n'
+        '[empty_table]\n'
+        '\n'
+        '[[rows]]\n'
+        'a = 1\n'
+        'z = 9\n'
+        '\n'
+        '[rows.inner]\n'
+        'k = "v"\n'
+        '\n'
+        '[[rows]]\n'
+        'empty = []\n'
+        '\n'
+        '[z_table]\n'
+        'alpha = 1\n'
+        'beta = 2\n'
+        '\n'
+        '[z_table.a_child]\n'
+        'q = "x"\n'
+    )
+    golden_doc = {}
+    golden_doc["m"] = "x"
+    golden_doc["rows"] = [{"z": 9, "inner": {"k": "v"}, "a": 1}, {"empty": []}]
+    golden_doc["b"] = True
+    golden_doc["empty_table"] = {}
+    golden_doc["a"] = [3, 1]
+    golden_doc["z_table"] = {"beta": 2, "a_child": {"q": "x"}, "alpha": 1}
+    if emit(golden_doc) != golden:
+        failures.append("golden/byte-vector: emit output is not byte-identical to the pinned golden")
+    if emit_checked(golden_doc) != emit(golden_doc):
+        failures.append("golden/emit-checked-parity: emit_checked text differs from emit text")
+
+    # MINOR-1 pin: an array of tables under a multi-component dotted path renders each [[a.b]] header from
+    # the ONE shared dotted-path string at append time. A mutant that mis-orders, mangles, or drops the
+    # deferred [[header]] rendering (or loses the shared-header reference) produces different bytes, so
+    # this golden fails. No existing byte-pinned vector places an array of tables under a dotted path (the
+    # golden and coverage aots are single-component: [[rows]], [[release]]).
+    aot_dotted_doc = {"a": {"b": [{"x": 1}, {"y": 2}]}}
+    aot_dotted_golden = '[a]\n\n[[a.b]]\nx = 1\n\n[[a.b]]\ny = 2\n'
+    if emit(aot_dotted_doc) != aot_dotted_golden:
+        failures.append("golden/aot-dotted-path: an array of tables under a dotted path is not "
+                        "byte-identical to the pinned golden")
+    if emit_checked(aot_dotted_doc) != emit(aot_dotted_doc):
+        failures.append("golden/aot-dotted-path/emit-checked-parity: emit_checked text differs from emit")
+
+    # A leafless-root golden: the root table has NO leaf key-values, so the FIRST emitted line is a block
+    # header at top-of-document and the if-lines separator branch is exercised in its not-taken (no leading
+    # blank) state. An `if True:` mutant of that branch would emit a leading blank line here while the rest
+    # of the self-test stays green, so this vector turns that mutant red.
+    golden2_doc = {"outer": {"k": 1}}
+    golden2 = '[outer]\nk = 1\n'
+    if emit(golden2_doc) != golden2:
+        failures.append("golden/leafless-root: emit output is not byte-identical to the pinned golden")
+    if emit_checked(golden2_doc) != emit(golden2_doc):
+        failures.append("golden/leafless-root/emit-checked-parity: emit_checked text differs from emit")
+
+    # --- output ceiling: the exact byte bound fails closed, and the production ceiling is restored ------
+    global _MAX_EMIT_BYTES
+    budget_doc = {"a": "x"}  # emits exactly 8 bytes: 'a = "x"\n'
+    if len(emit(budget_doc).encode("utf-8")) != 8:
+        failures.append("budget/premise: the ceiling probe document did not emit 8 bytes")
+    saved_ceiling = _MAX_EMIT_BYTES
+    try:
+        _MAX_EMIT_BYTES = 8
+        try:
+            if emit(budget_doc) != 'a = "x"\n':
+                failures.append("budget/at-ceiling: a document exactly at the ceiling did not emit")
+        except EmitError as exc:
+            failures.append("budget/at-ceiling: a document exactly at the ceiling was rejected ({})".format(exc))
+        _MAX_EMIT_BYTES = 7
+        if not _rejects(budget_doc):
+            failures.append("budget/over-ceiling: a document one byte over the ceiling was not rejected")
+    finally:
+        _MAX_EMIT_BYTES = saved_ceiling
+    if _MAX_EMIT_BYTES != saved_ceiling:
+        failures.append("budget/restore: the production ceiling was not restored")
+
+    # Multibyte budget boundary: the ceiling charges ENCODED bytes, not characters. This line carries a
+    # 2-byte character (U+00E9), so a len(line) mutant of the charge (line 270) under-counts and this leg
+    # fails. The emitted document 'a = "\u00e9"\n' is 9 bytes but 8 characters; \u00e9 is not escaped
+    # (_escape_basic leaves it literal), so the 2-byte char reaches the output line.
+    mb_doc = {"a": "\u00e9"}
+    if len(emit(mb_doc).encode("utf-8")) != 9:
+        failures.append("budget/multibyte-premise: the multibyte probe did not emit 9 bytes")
+    saved_ceiling_mb = _MAX_EMIT_BYTES
+    try:
+        _MAX_EMIT_BYTES = 9
+        try:
+            emit(mb_doc)
+        except EmitError as exc:
+            failures.append("budget/multibyte-at-ceiling: a document exactly at the ceiling was "
+                            "rejected ({})".format(exc))
+        _MAX_EMIT_BYTES = 8
+        if not _rejects(mb_doc):
+            failures.append("budget/multibyte-over-ceiling: a document one byte over the ceiling was not "
+                            "rejected (byte length vs character length)")
+    finally:
+        _MAX_EMIT_BYTES = saved_ceiling_mb
+    if _MAX_EMIT_BYTES != saved_ceiling_mb:
+        failures.append("budget/multibyte-restore: the production ceiling was not restored")
+
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
         pass
@@ -492,12 +883,194 @@ def self_test():
         "non-dict-top-level-list": ["not", "a", "table"],
         "non-dict-top-level-scalar": "just a string",
     }
+    # Cyclic documents: a table reachable from itself does not round-trip (no parsed TOML is cyclic) and
+    # would otherwise not terminate; the iterative emitter rejects it fail-closed. The self-referential
+    # list is already rejected by _classify_list (a nested array), pinned here so that stays true.
+    cyclic_table = {}
+    cyclic_table["self"] = cyclic_table
+    cyclic_a = {}
+    cyclic_b = {"a": cyclic_a}
+    cyclic_a["b"] = cyclic_b
+    cyclic_aot = {}
+    cyclic_aot["r"] = [cyclic_aot]
+    cyclic_list = []
+    cyclic_list.append(cyclic_list)
+    rejects["self-referential-table"] = cyclic_table
+    rejects["indirect-cycle"] = cyclic_a
+    rejects["self-referential-aot"] = cyclic_aot
+    rejects["self-referential-list"] = {"k": cyclic_list}
+    # A hostile custom tzinfo subclass whose utcoffset() returns an out-of-range timedelta must reject
+    # fail-closed with EmitError, not escape as an uncontrolled ValueError: the emitter's type gate runs
+    # before utcoffset() is ever called on the tzinfo, so the out-of-range value is never evaluated.
+    class _OutOfRangeTz(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return datetime.timedelta(hours=24)
+
+        def tzname(self, dt):
+            return None
+
+        def dst(self, dt):
+            return None
+
+    rejects["hostile-tzinfo-out-of-range-offset"] = {
+        "k": datetime.datetime(2026, 1, 1, tzinfo=_OutOfRangeTz())}
+    # A hostile SUBCLASS of each admitted built-in whose overridden method raises must be a fail-closed
+    # EmitError, never an uncontrolled RuntimeError escape: exact-type admission (type(value) is T, not
+    # isinstance) rejects the subclass BEFORE any of its methods (__str__, __repr__, __iter__, isoformat,
+    # iteration, .items()) is called. Each vector leaks a RuntimeError on the pre-fix isinstance code and is
+    # a clean EmitError after, so it discriminates the exact-type gate. The tzinfo reject above is retained.
+    class _HostileInt(int):
+        def __str__(self):
+            raise RuntimeError("hostile int __str__ must never be reached")
+
+    class _HostileFloat(float):
+        def __repr__(self):
+            raise RuntimeError("hostile float __repr__ must never be reached")
+
+    class _HostileStr(str):
+        def __iter__(self):
+            raise RuntimeError("hostile str __iter__ must never be reached")
+
+    class _HostileDatetime(datetime.datetime):
+        def isoformat(self, *args, **kwargs):
+            raise RuntimeError("hostile datetime isoformat must never be reached")
+
+    class _HostileList(list):
+        def __iter__(self):
+            raise RuntimeError("hostile list __iter__ must never be reached")
+
+    class _HostileDict(dict):
+        def items(self):
+            raise RuntimeError("hostile dict .items() must never be reached")
+
+    rejects["hostile-int-subclass"] = {"k": _HostileInt(5)}
+    rejects["hostile-float-subclass"] = {"k": _HostileFloat(1.5)}
+    rejects["hostile-str-subclass"] = {"k": _HostileStr("x")}
+    rejects["hostile-datetime-subclass"] = {"k": _HostileDatetime(2026, 1, 1)}
+    rejects["hostile-list-subclass"] = {"k": _HostileList([1, 2])}
+    rejects["hostile-dict-subclass"] = {"k": _HostileDict({"a": 1})}
+
+    # A hostile METACLASS whose __getattribute__ raises on the __name__ lookup: a bare type(value).__name__
+    # while a rejection diagnostic is built would otherwise leak an uncontrolled RuntimeError out of emit()
+    # (and emit_checked) even though the exact-type gate has already decided to reject the value. The guarded
+    # diagnostic (_safe_type_label) and the outermost fail-closed emit() backstop each independently turn
+    # this into a clean EmitError, as a VALUE, as a KEY, and as the top-level DOCUMENT. This is the third
+    # instance of the hostile-input exception-leak class, after the hostile subclasses and hostile tzinfo.
+    class _HostileMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise RuntimeError("hostile metaclass __name__ lookup must never reach a reject diagnostic")
+            return super().__getattribute__(name)
+
+    class _HostileMetaInt(int, metaclass=_HostileMeta):
+        pass
+
+    class _HostileMetaStr(str, metaclass=_HostileMeta):
+        pass
+
+    class _HostileMetaDict(dict, metaclass=_HostileMeta):
+        pass
+
+    rejects["hostile-metaclass-value"] = {"k": _HostileMetaInt(1)}
+    rejects["hostile-metaclass-key"] = {_HostileMetaStr("bad"): "x"}
+    rejects["hostile-metaclass-document"] = _HostileMetaDict({"a": 1})
+
+    # The NARROWEST instance of the same exception-leak class: a hostile metaclass whose __getattribute__
+    # raises a custom BaseException SUBCLASS (deliberately NOT an Exception subclass) on the __name__ lookup.
+    # Such a raise slips past an `except Exception` backstop and would escape emit()/emit_checked
+    # uncontrolled; the BaseException-catching emit() backstop (and the BaseException-guarded
+    # _safe_type_label) convert it to a clean fail-closed EmitError instead. It must be a plain custom
+    # BaseException, not KeyboardInterrupt/SystemExit/GeneratorExit, since those genuine control-flow signals
+    # are re-raised rather than converted. Asserted rejected with EmitError, not escaping.
+    class _HostileEscape(BaseException):
+        pass
+
+    class _HostileBaseMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise _HostileEscape("hostile metaclass __name__ lookup raises a BaseException subclass")
+            return super().__getattribute__(name)
+
+    class _HostileBaseMetaInt(int, metaclass=_HostileBaseMeta):
+        pass
+
+    rejects["hostile-metaclass-baseexception-value"] = {"k": _HostileBaseMetaInt(1)}
+
+    # A hostile metaclass whose __name__ lookup returns a NON-STRING object whose __format__ raises a genuine
+    # control-flow signal (KeyboardInterrupt): if a rejection diagnostic ever FORMATTED that label (f-string /
+    # .format), the attacker's __format__ would run and manufacture the signal, which the emit() backstop
+    # re-raises unchanged, so a non-EmitError would escape for a hostile INPUT. _safe_type_label now accepts
+    # the label only when it is a plain str and returns the constant fallback otherwise, BEFORE the label is
+    # ever formatted, so the hostile __format__ never runs. Asserted rejected with EmitError, not escaping.
+    class _HostileFormatName:
+        def __format__(self, spec):
+            raise KeyboardInterrupt("hostile __format__ on a type label must never run")
+
+    class _HostileNameMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                return _HostileFormatName()
+            return super().__getattribute__(name)
+
+    class _HostileNameInt(int, metaclass=_HostileNameMeta):
+        pass
+
+    rejects["hostile-metaclass-nonstr-name-value"] = {"k": _HostileNameInt(1)}
     for name, document in rejects.items():
         try:
             if not _rejects(document):
                 failures.append("reject/{}: was accepted but is outside the subset".format(name))
         except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
             failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+
+    # HONORED CONTROL-FLOW residual: a hostile metaclass whose __getattribute__ raises a GENUINE control-flow
+    # signal (KeyboardInterrupt) on the __name__ lookup. Unlike every hostile-input vector above (each a
+    # fail-closed EmitError), a genuine control-flow signal is HONORED: _safe_type_label re-raises it and the
+    # emit() backstop re-raises it, so it PROPAGATES unchanged out of emit() and emit_checked() rather than
+    # becoming an EmitError, and no document is returned. This pins the disclosed honored-control-flow residual:
+    # were the signal swallowed into an EmitError (or any document returned), this leg would fail.
+    class _HonoredSignalMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise KeyboardInterrupt("a genuine control-flow signal raised during the __name__ lookup")
+            return super().__getattribute__(name)
+
+    class _HonoredSignalInt(int, metaclass=_HonoredSignalMeta):
+        pass
+
+    honored_doc = {"k": _HonoredSignalInt(1)}
+    for fn_name, fn in (("emit", emit), ("emit_checked", emit_checked)):
+        try:
+            returned = fn(honored_doc)
+        except KeyboardInterrupt:
+            pass  # honored: the genuine control-flow signal propagated unchanged, as required
+        except EmitError as exc:
+            failures.append("honored-control-flow/{}: a genuine KeyboardInterrupt was converted to EmitError "
+                            "({}) instead of propagating".format(fn_name, exc))
+        except BaseException as exc:  # noqa: BLE001 - any other exception is a defect, not the honored signal
+            failures.append("honored-control-flow/{}: raised {!r} instead of propagating the KeyboardInterrupt"
+                            .format(fn_name, exc))
+        else:
+            failures.append("honored-control-flow/{}: returned a document ({!r}) instead of propagating the "
+                            "KeyboardInterrupt".format(fn_name, returned))
+
+    # The table-cycle rejects must be caught by the active-chain cycle check specifically, not by the
+    # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With the
+    # cycle check at line 294 removed, these instead grow the dotted header until _MAX_EMIT_BYTES raises a
+    # different (ceiling) message, so this leg turns red, distinguishing cycle detection from budget
+    # exhaustion. self-referential-list is excluded on purpose: it is rejected by _classify_list as a
+    # nested array, so its message legitimately does not name a cycle. Each leg terminates: the cycle check
+    # rejects at once, and even the neutralized-mutant path exhausts the 64 MiB ceiling in bounded work.
+    for name, document in (("self-referential-table", cyclic_table),
+                           ("indirect-cycle", cyclic_a),
+                           ("self-referential-aot", cyclic_aot)):
+        try:
+            emit(document)
+            failures.append("cycle-message/{}: a cyclic document was not rejected".format(name))
+        except EmitError as exc:
+            if "cyclic" not in str(exc):
+                failures.append("cycle-message/{}: rejected but the message does not name a cyclic "
+                                "reference ({})".format(name, exc))
 
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
@@ -509,8 +1082,10 @@ def self_test():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: round-trip fuzz over adversarial bodies, canonical-form determinism, the "
-          "constrained-subset accepted and rejected shapes, and byte-canon cleanliness (verified "
-          "against check_byte_canon) all hold")
+          "constrained-subset accepted and rejected shapes, byte-canon cleanliness (verified against "
+          "check_byte_canon), arbitrary-depth iterative emission and equality (depth {}), cyclic-"
+          "reference rejection, shared-DAG acceptance, the output-ceiling bound, and the golden byte "
+          "vector all hold".format(iterative_depth))
     return 0
 
 
