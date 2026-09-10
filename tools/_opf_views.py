@@ -1899,7 +1899,7 @@ def self_test():
         # above the tested count. Replace both with CONSTRUCT-AGNOSTIC high-count BEHAVIOUR pins that assert the
         # OUTPUT at N occurrences, so a pass bounded BELOW N by ANY construct leaves a survivor and trips.
         _HC = 4096
-        _N = _HC + 1  # N+1 occurrences so a bound of exactly _HC leaves one survivor (off-by-one, round-17 QA)
+        _N = _HC + 1  # _HC+1 occurrences so a bound of exactly _HC leaves one survivor (off-by-one, round-17 QA)
         check("md-text-hi-count-autolink-inert", _gfm_autolinks(_md_text(" ".join(["http://z.example"] * _N))) == [])
         check("md-text-hi-count-single-line",
               "\n" not in _md_text(("x\n- F") * _N) and "\r" not in _md_text(("a\r") * _N))
