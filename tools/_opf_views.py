@@ -544,17 +544,18 @@ _MD_ESCAPE_RE = re.compile(r"([\\`*_{}\[\]()#+!|~])")
 # would not have autolinked only renders it monospace, never leaves it active. A URL/www token ends at
 # whitespace or `<` (mirroring where GFM ends a URL autolink), so a following `<tag>` is left to the
 # `<`/`>` entity escaping rather than swallowed into the span.
-# Shared www-autolink fragment: production (_MD_AUTOLINK_TOKEN_RE) and the test oracle (_ORACLE_WWW_RE)
-# compile this SAME source, so the two www matchers cannot drift (round-5 QA: enforce identity by
-# construction, not by two equal literals). cmark-gfm does not autolink www after an alphanumeric, so
-# the not-after-alnum boundary matches cmark-gfm + production; [^\s<]+ accepts Unicode hosts.
-_WWW_AUTOLINK_FRAGMENT = r"(?<![A-Za-z0-9])www\.[^\s<]+"
+# Named autolink fragments: production (_MD_AUTOLINK_TOKEN_RE) composes these three arms, and the test
+# oracle compiles the SAME www source, so the two www matchers cannot drift (round-5 QA: identity by
+# construction). Each arm is its own named constant so the self-test can FREEZE it against a reviewed
+# literal: any edit to a neutralizer arm (url/www/email, not www alone) breaks a frozen pin, closing the
+# whole matcher-edit class (round-8 QA found the url/email arms unfrozen). cmark-gfm does not autolink www
+# after an alphanumeric, so the not-after-alnum boundary matches cmark-gfm + production; [^\s<]+ accepts
+# Unicode hosts.
+_URL_AUTOLINK_FRAGMENT = r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<]+"        # any scheme URL (http/https/...)
+_WWW_AUTOLINK_FRAGMENT = r"(?<![A-Za-z0-9])www\.[^\s<]+"              # bare www. autolink (shared fragment)
+_EMAIL_AUTOLINK_FRAGMENT = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+"  # bare email address
 _MD_AUTOLINK_TOKEN_RE = re.compile(
-    r"""(
-          [A-Za-z][A-Za-z0-9+.\-]*://[^\s<]+                          # any scheme URL (http/https/...)
-        | """ + _WWW_AUTOLINK_FRAGMENT + r"""                         # bare www. autolink (shared fragment)
-        | [A-Za-z0-9._%+\-]+@[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+    # bare email address
-    )""",
+    "(" + _URL_AUTOLINK_FRAGMENT + "|" + _WWW_AUTOLINK_FRAGMENT + "|" + _EMAIL_AUTOLINK_FRAGMENT + ")",
     re.IGNORECASE | re.VERBOSE,
 )
 
@@ -1732,6 +1733,36 @@ def self_test():
         check("oracle-wwwXy-literal-dot-no-match", _gfm_autolinks("wwwXy") == [])
         check("md-text-wwwxdotcom-literal-dot-plain", _md_text("wwwx.com") == "wwwx.com")
         check("oracle-wwwxdotcom-literal-dot-no-match", _gfm_autolinks("wwwx.com") == [])
+        # round-9: round-8 froze only www; codex found the email arm unfrozen, so a digit-leading-local-part
+        # edit regressed neutralization while the suite stayed green. Freeze EVERY production arm and assert
+        # the matcher is EXACTLY their composition, closing the whole matcher-edit class (any arm edit fires).
+        check("url-arm-frozen", _URL_AUTOLINK_FRAGMENT == r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<]+")
+        check("email-arm-frozen",
+              _EMAIL_AUTOLINK_FRAGMENT == r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+")
+        check("prod-token-re-composed-from-arms",
+              _MD_AUTOLINK_TOKEN_RE.pattern
+              == "(" + _URL_AUTOLINK_FRAGMENT + "|" + _WWW_AUTOLINK_FRAGMENT + "|" + _EMAIL_AUTOLINK_FRAGMENT + ")")
+        # Freeze the oracle's own detection patterns + flags: a weakened oracle would silently under-detect and
+        # make the broad inertness invariant pass more easily (a test-integrity regression), so pin each literal.
+        check("oracle-url-re-frozen",
+              _ORACLE_URL_RE.pattern == r"(?:https?|ftp)://[^\s<]+"
+              and _ORACLE_URL_RE.flags == (re.IGNORECASE | re.UNICODE))
+        check("oracle-email-re-frozen",
+              _ORACLE_EMAIL_RE.pattern == r"(?:mailto:|xmpp:)?[A-Za-z0-9.\-_+]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)+"
+              and _ORACLE_EMAIL_RE.flags == (re.IGNORECASE | re.UNICODE))
+        check("oracle-entity-re-frozen",
+              _ORACLE_ENTITY_RE.pattern == r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]*);"
+              and _ORACLE_ENTITY_RE.flags == re.UNICODE)
+        # round-9: control-strip teeth (round-8 QA: disabling _MD_CTRL_RE left the suite green, and byte-canon
+        # does not flag C0/DEL, so the strip was un-backstopped). Freeze the control class and pin the strip.
+        check("md-ctrl-re-frozen", _MD_CTRL_RE.pattern == "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+        check("md-text-strips-control", _md_text("a\x00b\x07c\x1bd\x7fe") == "abcde")
+        # behaviour pin for the exact codex round-8 witness: a digit-leading email local part is neutralized.
+        check("md-text-digit-email-inert", _gfm_autolinks(_md_text("1@b.example")) == [])
+        # Disclosed residual: the frozen pins close the matcher-edit class (any arm/flag/oracle edit is caught);
+        # the exact-byte/behaviour pins + broad fuzz cover the wrapping/escaping logic on exercised shapes. An
+        # edit that changes output only on an UNEXERCISED shape without touching a frozen matcher is the residual
+        # the broad fuzz mitigates.
         # (d) round-5: pin PRODUCTION (_md_text), not only the oracle, at every positive www boundary and a
         # Unicode host, so a production-side boundary/Unicode-host regression is caught. For each case,
         # production WRAPS the www token in a code span AND the emitted output is autolink-inert.
