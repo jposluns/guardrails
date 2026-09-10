@@ -1860,12 +1860,31 @@ def self_test():
             if _h.count("-->") != 1 or "--!>" in _h:
                 _hdr_ok = False
         check("fuzz-header-comment-single-terminator", _hdr_ok)
+        # round-14 (gemini round-13): _html_comment_safe has its OWN newline/control collapse and dash break;
+        # fuzz it DIRECTLY over a RICH atom set (dashes, newlines, controls, tags) at multiple occurrences, so
+        # a bounded collapse/strip/break leaves a survivor (a forged header field line, a surviving control, or
+        # an active closer). Complete invariant: no -- run, no surviving newline, no control char.
+        _hcs_ok = True
+        _hcs_atoms = ["-", "--", "-->", "--!>", "\n", "\r", "\r\n", "\x00", "\x07", "\x7f", "a", "/", "<x>", "."]
+        for _ in range(800):
+            _r = _html_comment_safe("".join(_rng.choice(_hcs_atoms) for _ in range(_rng.randint(1, 14))))
+            if "--" in _r or "\n" in _r or "\r" in _r or _MD_CTRL_RE.search(_r):
+                _hcs_ok = False
+        check("fuzz-html-comment-safe-complete", _hcs_ok)
+        check("html-comment-multi-newline-collapsed",
+              "\n" not in _html_comment_safe("dir\nX\n digest: forged") and "\r" not in _html_comment_safe("a\rb\rc"))
         # round-13 discrete witnesses (codex round-12 MAJORs): raw-HTML inertness (a multi-tag value keeps no
         # raw `<`), escape completeness (no active metacharacter survives un-escaped), and a MULTI-SOURCE header.
         check("md-text-raw-html-inert", "<" not in _md_text("benign <i> <details open>ACTIVE</details>"))
+        # round-14 (gemini round-13): escape-completeness covers ALL three entity chars (&, <, >) at multiple
+        # occurrences, not just <: after the backslash pass no bare metacharacter survives, no raw < or >
+        # remains, and every & begins one of the three named entities (a bounded .replace(...,1) leaves a bare
+        # one). Soup carries repeated &, <, >, and every _MD_ESCAPE_RE metacharacter.
+        _esc_soup = _md_escape_inline("[a](b)&c&d<e><f>*g*_h_~i~|j|#k!l")
         check("md-escape-completeness-no-bare-metachar",
-              not _MD_ESCAPE_RE.search(re.sub(r"\\.", "", _md_escape_inline("[a](b)[c](d)*e*_f_~g~|h|")))
-              and "<" not in _md_escape_inline("x<i><details>y"))
+              not _MD_ESCAPE_RE.search(re.sub(r"\\.", "", _esc_soup))
+              and "<" not in _esc_soup and ">" not in _esc_soup
+              and _esc_soup.count("&") == _esc_soup.count("&amp;") + _esc_soup.count("&lt;") + _esc_soup.count("&gt;"))
         check("header-comment-multi-source-single-terminator",
               _header({".working/x--a--><x open>A</x>/backlog_item.index.toml": b"d",
                        ".working/x--a--><x open>A</x>/block.index.toml": b"e"}).count("-->") == 1)
