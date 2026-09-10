@@ -1847,8 +1847,12 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53 and
-# reconciled against the installed git at self-test time, section T-7). The classifier is FAIL-SAFE by
+# branch/tag classification (GD-158 rounds 1-6, synthesis; flag behaviour pinned to git 2.53; the long
+# universe is a conservative SUPERSET of git 2.53's branch/tag option table, validated against git 2.53
+# by the eb-e57..e147 differential self-test and an out-of-suite real-git differential; a future git
+# option-table change, such as a new write option absent from the table, is a DISCLOSED drift residual
+# caught by re-validating the table on a git upgrade, with a dedicated option-table drift-tripwire gate a
+# tracked follow-up, GD-158-T7). The classifier is FAIL-SAFE by
 # construction: it DEFAULTS to MUTATING and returns READ only when every token positively resolves to a
 # recognized read-neutral role and no create/rename/delete TARGET is present (before OR after '--'). A
 # missed WRITE spelling would be a fail-open (forbidden), so WRITE recognition is complete across every
@@ -1987,8 +1991,9 @@ def _resolve_long_role(name, long_roles):
     over the FULL universe (every key, W entries included). Zero matches (unknown) or two-or-more
     (ambiguous, exactly what real git rejects) resolve to None, which the caller treats as MUTATING. The
     universe MUST be a superset of git's real option table: a missing entry could let a prefix resolve
-    uniquely to a read where git sees a write or an ambiguity (a fail-open); the T-7 self-test gate is the
-    drift tripwire."""
+    uniquely to a read where git sees a write or an ambiguity (a fail-open); the table is validated against
+    git 2.53 by the eb differential self-test and an out-of-suite real-git differential, with the drift
+    residual disclosed and a dedicated option-table drift-tripwire gate tracked as follow-up GD-158-T7."""
     if name in long_roles:
         return long_roles[name]
     matches = [k for k in long_roles if k.startswith(name)]

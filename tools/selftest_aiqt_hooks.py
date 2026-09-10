@@ -4230,8 +4230,10 @@ def main():
         # the git 2.53 ground truth: the plan's matrix classes, the six historical fail-open forms as
         # regression teeth, and fail-safe probes asserting the default on unknown/ambiguous/malformed
         # input. want=True is MUTATING (-> expbnd ASK); over-ASK is safe, a fail-open (want-True read as
-        # False) is the forbidden regression. The authoritative 99-row fixture and the real-git
-        # differential + T-7 universe-reconciliation gate are folded in separately (see integration note).
+        # False) is the forbidden regression. This table is validated against git 2.53 by the in-suite eb
+        # differential above and an out-of-suite real-git differential; a future git option-table change is
+        # a disclosed drift residual, and a dedicated option-table drift-tripwire gate is a tracked
+        # follow-up (GD-158-T7), not a gate that exists yet.
         _M, _R = True, False
         for _rc_label, _rc_sub, _rc_args, _rc_want in (
             # -- branch: writes (short, long, attached-short, abbreviated-long) --
