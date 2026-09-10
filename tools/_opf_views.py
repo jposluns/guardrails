@@ -1893,27 +1893,26 @@ def self_test():
         check("md-text-tab-preserved-inert",
               _md_text("a\tb") == "a\tb" and _gfm_autolinks(_md_text("x\t- y\t# z")) == []
               and "\n" not in _md_text("x\t- y\t# z") and "<" not in _md_text("x\t<i>y"))
-        # round-16 (codex round-15 MAJOR): a fixed-size fuzz cannot catch a regression bounded ABOVE its max
-        # occurrence count. Close the replace/sub count-bound class STRUCTURALLY (by AST: no count bound).
-        import ast as _ast, inspect as _inspect, textwrap as _textwrap
-        def _unbounded():
-            for _fn in (_md_text, _html_comment_safe, _md_code_span):
-                for _n in _ast.walk(_ast.parse(_textwrap.dedent(_inspect.getsource(_fn)))):
-                    _a = getattr(getattr(_n, "func", None), "attr", None)
-                    if _a == "replace" and len(_n.args) >= 3:
-                        return False
-                    if _a == "sub" and (len(_n.args) >= 3 or any(_k.arg == "count" for _k in _n.keywords)):
-                        return False
-            return True
-        check("sink-passes-structurally-unbounded", _unbounded())
-        # and exercise each pass at HIGH occurrence count (behavioural backstop, and the autolink LOOP bound
-        # which the AST check does not cover -- a loop/slice bound below the tested count leaves a survivor).
-        # Disclosed residual: a bound ABOVE the tested count is not caught here; no realistic regression bounds
-        # at hundreds of occurrences, and the replace/sub passes are structurally unbounded per the check above.
-        check("md-text-hi-count-autolink-inert", _gfm_autolinks(_md_text(" ".join(["http://z.example"] * 300))) == [])
-        check("md-text-hi-count-single-line", "\n" not in _md_text(("x\n- F") * 300) and "\r" not in _md_text(("a\r") * 300))
-        check("md-text-hi-count-raw-angle-inert", "<" not in _md_text("<i>" * 200))
-        check("html-comment-hi-count-dash-broken", "--" not in _html_comment_safe("-" * 600))
+        # round-17 (codex/gemini/claude round-16): the round-16 AST check was construct-specific (defeated by a
+        # str.replace(count=) keyword, re.subn, str.split maxsplit, a method alias, or a loop break/islice) and
+        # unsound (false-positive on module-level re.sub); the fixed 300-count pins missed a realistic cap at or
+        # above the tested count. Replace both with CONSTRUCT-AGNOSTIC high-count BEHAVIOUR pins that assert the
+        # OUTPUT at N occurrences, so a pass bounded BELOW N by ANY construct leaves a survivor and trips.
+        _HC = 4096
+        check("md-text-hi-count-autolink-inert", _gfm_autolinks(_md_text(" ".join(["http://z.example"] * _HC))) == [])
+        check("md-text-hi-count-single-line",
+              "\n" not in _md_text(("x\n- F") * _HC) and "\r" not in _md_text(("a\r") * _HC))
+        check("md-text-hi-count-raw-angle-inert", "<" not in _md_text("<i>" * _HC))
+        check("html-comment-hi-count-dash-broken", "--" not in _html_comment_safe("-" * (_HC * 2)))
+        check("html-comment-hi-count-single-line",
+              "\n" not in _html_comment_safe(("a\n") * _HC) and "\r" not in _html_comment_safe(("b\r") * _HC))
+        check("html-comment-hi-count-control-stripped", _MD_CTRL_RE.search(_html_comment_safe(("a\x07") * _HC)) is None)
+        # INHERENT RESIDUAL (disclose-guard-residuals): a finite corpus cannot prove the universal "every
+        # occurrence is neutralized" invariant against arbitrary future code. These pins catch a pass bounded
+        # below _HC occurrences by ANY construct (count/keyword-count/subn/maxsplit/alias/loop-break/islice);
+        # the production passes are all unbounded as shipped. A regression bounding a pass ABOVE _HC (beyond any
+        # realistic per-field cap, firing only on an input exceeding _HC occurrences) is caught by the MANDATORY
+        # review of any change to these security-critical sinks, not by this corpus.
         # round-13 discrete witnesses (codex round-12 MAJORs): raw-HTML inertness (a multi-tag value keeps no
         # raw `<`), escape completeness (no active metacharacter survives un-escaped), and a MULTI-SOURCE header.
         check("md-text-raw-html-inert", "<" not in _md_text("benign <i> <details open>ACTIVE</details>"))
