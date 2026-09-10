@@ -30,6 +30,7 @@ import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest bas
 import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
 import _opf_release  # noqa: E402  U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
 import _opf_emit  # noqa: E402  U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
+import _opf_views  # noqa: E402  U4: deterministic view generators + the closed transform vocabulary
 import _opf_fuzz  # noqa: E402  adversarial input-hardening proof (membership/type-guard class closure)
 import _opf_import  # noqa: E402  U7: import staging (module + self-test; the live import verb stays unwired)
 
@@ -71,6 +72,7 @@ SELF_TESTS = (
     ("opf-schema", _opf_schema.self_test),
     ("opf-release", _opf_release.self_test),
     ("opf-emit", _opf_emit.self_test),
+    ("opf-views", _opf_views.self_test),
     ("opf-import", _opf_import.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-aggregator", _aggregator_self_test),
