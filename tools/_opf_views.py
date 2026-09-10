@@ -1794,6 +1794,59 @@ def self_test():
         _nl_vectors = [nl + mk + "x" for nl in ("\n", "\r", "\r\n") for mk in _nl_markers]
         check("md-text-output-single-line",
               all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s) for s in _nl_vectors))
+        # round-12 (codex round-11 BLOCKER+2 MAJOR, each confirmed via a real CommonMark parser): the
+        # round-10/11 pins exercised only SINGLE-occurrence inputs, so a bounded-count regression
+        # (.replace(...,1) / sub(...,count=1) / first-backtick-run only) left a LATER occurrence to break out
+        # (forged list item, autolink breakout, early comment close). Close the repeated-occurrence / multi-run
+        # class: discrete multi-occurrence witnesses here, plus the seeded fuzz over the 3 invariants below.
+        check("md-text-multi-newline-single-line",
+              "\n" not in _md_text("minor)\nbenign\n- FORGED") and "\r" not in _md_text("a\rb\rc\r- X"))
+        check("md-text-collapses-crlf-single-space", _md_text("a\r\nb") == "a b")
+        check("md-code-span-multi-run-inert", _gfm_autolinks(_md_text("http://y/``a```http://z.example")) == [])
+        check("md-code-span-4run-inert", _gfm_autolinks(_md_text("http://y/````http://z.example")) == [])
+        check("md-text-adjacent-triple-single-span",
+              _md_text("a@b.com+a@c.com+a@d.com") == "`a@b.com+a@c.com+a@d.com`")
+        # header sink: freeze the dash-breaking regex and pin EXACT neutralization of REPEATED -- runs plus
+        # the newline and control legs in a discovered source path (codex: a count=1 dash break left a later
+        # -->, closing the comment early around active <details> HTML; gemini: the newline/control legs had
+        # no teeth). A multi-dash render pin asserts exactly one terminator survives.
+        check("md-comment-dashes-re-frozen", _MD_COMMENT_DASHES_RE.pattern == r"-(?=-)")
+        check("html-comment-breaks-multi-dash", _html_comment_safe("a--b--c") == "a- -b- -c")
+        check("html-comment-collapses-newlines", _html_comment_safe("a\r\nb\rc\nd") == "a b c d")
+        check("html-comment-strips-controls", _html_comment_safe("a\x00b\x07c\x7fd") == "abcd")
+        _hdr3 = _header({".working/x--benign--><details open>ACTIVE</details>/backlog_item.index.toml": b"d"})
+        check("header-comment-multi-dash-single-terminator", _hdr3.count("-->") == 1 and "--!>" not in _hdr3)
+        # Seeded deterministic fuzz (test-hermeticity: a fixed seed yields the same verdict everywhere) over
+        # the security invariants, with MULTI-occurrence inputs so any bounded-count / multi-run regression
+        # that leaves a survivor fails on some generated input (not just the single-occurrence pins above).
+        import random as _random
+        _rng = _random.Random(778812)
+        _fz_atoms = ["http://a.ex", "www.b.ex", "c@d.ex", "`", "``", "```", "````", "benign", "x)", "&#38;",
+                     "\\", "-", "--", "---", "_", "|"]
+        _fz_ends = ["\n", "\r", "\r\n"]
+        _fz_marks = ["- ", "+ ", "* ", "# ", "> ", "1. ", "`", "|", "    ", "~~"]
+        _sl_ok = _al_ok = True
+        for _ in range(1500):
+            _p = []
+            for _j in range(_rng.randint(1, 9)):
+                _p.append(_rng.choice(_fz_atoms))
+                if _rng.random() < 0.55:
+                    _p.append(_rng.choice(_fz_ends) + _rng.choice(_fz_marks))
+            _o = _md_text("v)" + "".join(_p))
+            if "\n" in _o or "\r" in _o:
+                _sl_ok = False
+            if _gfm_autolinks(_o) != []:
+                _al_ok = False
+        check("fuzz-md-text-single-line", _sl_ok)
+        check("fuzz-md-text-autolink-inert", _al_ok)
+        _hdr_ok = True
+        _dash_atoms = ["-", "--", "---", "-->", "--!>", "a", "b", "/", "x", "."]
+        for _ in range(800):
+            _path = ".working/" + "".join(_rng.choice(_dash_atoms) for _ in range(_rng.randint(1, 12))) + "/x.index.toml"
+            _h = _header({_path: b"d"})
+            if _h.count("-->") != 1 or "--!>" in _h:
+                _hdr_ok = False
+        check("fuzz-header-comment-single-terminator", _hdr_ok)
         # Disclosed residual: the frozen pins close the matcher-edit class (any arm/flag/oracle edit is caught);
         # the exact-byte/behaviour pins + broad fuzz cover the wrapping/escaping logic on exercised shapes. An
         # edit that changes output only on an UNEXERCISED shape without touching a frozen matcher is the residual
