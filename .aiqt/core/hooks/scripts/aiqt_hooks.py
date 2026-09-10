@@ -1847,14 +1847,30 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# Read-only forms of branch/tag exempted from the mutation classifier: a filtered LISTING is a read, not
-# a mutation, so pairing one with a cd must not ASK. A bare 'git branch'/'git tag' (no args) also lists.
-_GIT_BRANCH_READ_FLAGS = frozenset((
-    "-l", "--list", "--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"))
-_GIT_TAG_READ_FLAGS = frozenset((
-    "-l", "--list", "-n", "--column", "--no-column", "--contains", "--no-contains", "--merged",
-    "--no-merged", "--points-at", "--format", "--sort"))
+# branch/tag classification (GD-158 round 3). A command is a MUTATION when a WRITE flag is present
+# (delete/move/copy/create/modify), or when a bare positional (a create/rename/delete TARGET) is present
+# with no LIST-mode flag. A filtered or explicit LISTING (-l/--list or a --contains/--merged/--points-at
+# filter) is a read; a bare 'git branch'/'git tag' (no args) lists. A formatting flag (--format/--sort)
+# does NOT force list mode: git still creates when a name is given ('git branch --format=X b1' creates b1),
+# so formatting flags are arg-consuming READS, never a licence to treat a create as a listing (the round-2
+# fail-open, F-GD158-R2). WRITE flags take precedence and the scan stops at '--' (an operand, not a flag).
+_GIT_BRANCH_WRITE_FLAGS = frozenset((
+    "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "--edit-description",
+    "-u", "--set-upstream-to", "--unset-upstream", "-t", "--track", "--no-track", "--create-reflog"))
+_GIT_BRANCH_LIST_FLAGS = frozenset((
+    "-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"))
+_GIT_BRANCH_ARG_READ = frozenset((
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort",
+    "--abbrev", "--color"))
+_GIT_TAG_WRITE_FLAGS = frozenset((
+    "-d", "--delete", "-a", "--annotate", "-s", "--sign", "-m", "--message", "-F", "--file",
+    "-f", "--force", "--create-reflog", "-e", "--edit", "-u", "--local-user"))
+_GIT_TAG_LIST_FLAGS = frozenset((
+    "-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+    "--column", "--no-column"))
+_GIT_TAG_ARG_READ = frozenset((
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort",
+    "--color"))
 _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
     "-e", "--edit"))
@@ -1911,6 +1927,31 @@ def _git_target_is_explicit(tokens):
     return _is_abs_binding(dash_c) or _is_abs_binding(git_dir)
 
 
+def _git_ref_cmd_mutating(args, write_flags, write_prefixes, list_flags, list_prefixes, arg_read_flags):
+    """Shared branch/tag mutation classifier (GD-158 round 3). Mutating when a WRITE flag is present, or
+    when a bare positional (a create/rename/delete TARGET) is present with NO list-mode flag. Scans only
+    tokens BEFORE a '--' end-of-options marker (a token after '--' is an operand, never a flag), and skips
+    the value of a separate-form arg-taking read option (--contains REF, --format FMT) so neither is
+    misread as a target. A listing flag with a positional means the positional is a pattern (read); a
+    formatting flag alone does not force list mode. Conservative: an ambiguous positional beside a
+    non-list flag reads as mutating (a safe ASK under a shift), never a silent allow."""
+    pre, _post, _had = _split_pre_post(args)
+    if any(a in write_flags or a.startswith(write_prefixes) for a in pre):
+        return True
+    list_mode = any(a in list_flags or a.startswith(list_prefixes) for a in pre)
+    i = 0
+    n = len(pre)
+    while i < n:
+        tok = pre[i]
+        if not tok.startswith("-"):
+            return not list_mode  # a bare positional: a create/rename/delete target unless list mode
+        if tok in arg_read_flags:
+            i += 2  # a separate-form arg-taking read option consumes its value
+            continue
+        i += 1
+    return False
+
+
 def _git_is_mutating(sub, args):
     """Conservative git mutation classifier, with only enumerated read-only forms exempted."""
     if sub == "fetch":
@@ -1920,17 +1961,15 @@ def _git_is_mutating(sub, args):
     if sub not in _GIT_MUTATING_VERBS:
         return False
     if sub == "branch":
-        if not args:
-            return False
-        return not any(a in _GIT_BRANCH_READ_FLAGS or
-                       a.startswith(("--contains=", "--no-contains=", "--merged=", "--no-merged=",
-                                     "--points-at=", "--format=", "--sort=")) for a in args)
+        return _git_ref_cmd_mutating(
+            args, _GIT_BRANCH_WRITE_FLAGS, ("--set-upstream-to=",), _GIT_BRANCH_LIST_FLAGS,
+            ("--contains=", "--no-contains=", "--merged=", "--no-merged=", "--points-at="),
+            _GIT_BRANCH_ARG_READ)
     if sub == "tag":
-        if not args:
-            return False
-        return not any(a in _GIT_TAG_READ_FLAGS or
-                       a.startswith(("--list=", "--contains=", "--no-contains=", "--merged=",
-                                     "--no-merged=", "--points-at=", "--format=", "--sort=")) for a in args)
+        return _git_ref_cmd_mutating(
+            args, _GIT_TAG_WRITE_FLAGS, ("--message=", "--file=", "--local-user="), _GIT_TAG_LIST_FLAGS,
+            ("--contains=", "--no-contains=", "--merged=", "--no-merged=", "--points-at="),
+            _GIT_TAG_ARG_READ)
     if sub == "stash":
         return not args or args[0] not in ("list", "show")
     if sub == "config":
@@ -2043,7 +2082,9 @@ def git_explicit_binding(data):
     # the breadth op publishes only the pre-breadth state). So saw_dir_change and breadth_sub are read at the
     # point each git segment is processed (segments iterate in command order), not accumulated and tested at
     # the end: "git commit && cd /x" and "git push && git add -A" leave the mutation unconfused and are
-    # exempt, while "cd /x && git commit", "popd && git commit", and "git add -A && git push" are not.
+    # exempt, while "cd /x && git commit", "popd && git commit", and "git add -A && git push" are not. A shift reached
+    # only through a "||" (git runs only on the prior command's failure, so the cwd is unchanged) or a "|"
+    # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow.
     saw_dir_change = False
     breadth_sub = None
     for tokens, _sep in segments:

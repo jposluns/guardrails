@@ -4181,11 +4181,35 @@ def main():
         ebexpect("(eb-e38) breadth AFTER a push is not a pre-publish breadth",
                  "git push && git add -A", "allow")
         ebexpect("(eb-e39) branch --format listing under cd is read-only",
-                 "cd /abs && git branch --format=%(refname)", "allow")
+                 "cd /abs && git branch --format=refname", "allow")
         ebexpect("(eb-e40) tag --format listing under cd is read-only",
-                 "cd /abs && git tag --format=%(refname)", "allow")
+                 "cd /abs && git tag --format=refname", "allow")
         ebexpect("(eb-e41) branch --sort listing under cd is read-only",
                  "cd /abs && git branch --sort=-committerdate", "allow")
+        # GD-158 round-3 (F-GD158-R2 classifier fail-open): a create/delete/move/copy is a MUTATION even
+        # when it carries a formatting flag (--format/--sort); a read token after '--' is an operand, not a
+        # flag. Each case fails on the pre-fix any(read_flag in args) classifier. The pure-listing ALLOWs
+        # (eb-e39..e41 above) still hold (no positional -> read).
+        ebexpect("(eb-e42) branch CREATE carrying --format is a mutation under cd",
+                 "cd /x && git branch --format=refname b1", "ask")
+        ebexpect("(eb-e43) branch delete carrying --format asks under cd",
+                 "cd /x && git branch --format=refname -D feature", "ask")
+        ebexpect("(eb-e44) branch move carrying --sort asks under cd",
+                 "cd /x && git branch --sort=x -m old new", "ask")
+        ebexpect("(eb-e45) branch copy carrying --format asks under cd",
+                 "cd /x && git branch --format=X -c old new", "ask")
+        ebexpect("(eb-e46) tag CREATE carrying --format is a mutation under cd",
+                 "cd /x && git tag --format=refname t1", "ask")
+        ebexpect("(eb-e47) tag delete carrying --format asks under cd",
+                 "cd /x && git tag --format=refname -d v1", "ask")
+        ebexpect("(eb-e48) a read token after -- is an operand, delete still asks under cd",
+                 "cd /x && git branch -D -- --format", "ask")
+        ebexpect("(eb-e49) branch LIST with a pattern is a read (allow under cd)",
+                 "cd /x && git branch --list 'feat/*'", "allow")
+        ebexpect("(eb-e50) branch filter with its value operand is a read (allow under cd)",
+                 "cd /x && git branch --contains HEAD", "allow")
+        ebexpect("(eb-e51) separate-form --format value is not a create target (allow under cd)",
+                 "cd /x && git branch --format 'refname'", "allow")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
