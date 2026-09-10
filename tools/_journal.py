@@ -152,7 +152,17 @@ def _open_parent(root_fd, relpath):
 def _read_fd(fd):
     chunks = []
     while True:
-        block = os.read(fd, _READ_CHUNK)
+        try:
+            block = os.read(fd, _READ_CHUNK)
+        except OSError as exc:
+            # CLASS 1: a read error (EIO, EBADF, ...) mid-read is fail-closed, never a truncated or empty
+            # result. Every contained reader (read_frames, read_lock_owner, _read_at, _read_contained)
+            # routes its bytes through here, so converting os.read at this one choke point makes an
+            # unreadable descriptor a JournalError at every call site, matching the broad-OSError posture of
+            # _lstat_at and _open_parent (check-fails-closed-on-unreadable). JournalError is not an OSError
+            # subclass, so a caller catching OSError does not swallow it, and a caller catching JournalError
+            # fails closed as it already does for every other contained-read failure.
+            raise JournalError("read error on a contained file descriptor ({})".format(exc))
         if not block:
             break
         chunks.append(block)
@@ -177,11 +187,18 @@ def _lstat_at(pfd, name):
     """lstat the final component 'name' beneath an ALREADY-OPEN parent fd, or None when it is absent.
     Never follows a final-component symlink. E1: binds the prestate check to the SAME parent handle the
     mutation uses (9.3 step 4, spec 1291/1300: check AND mutate beneath one pre-opened directory handle),
-    so an ancestor swap between the check and the mutation cannot redirect either onto a different tree."""
+    so an ancestor swap between the check and the mutation cannot redirect either onto a different tree.
+    Only ENOENT (a genuinely absent final component) reads as absence (None); EVERY other OSError
+    (ENAMETOOLONG, EACCES, ELOOP, ENOTDIR, ...) is a fail-closed JournalError, mirroring _read_contained's
+    broad-OSError posture, so a stat that cannot answer its question is never silently read as 'absent' by
+    any caller (_lstat_contained -> _read_sources/_read_toml, _verify_prestate_at, the rollback restore),
+    per check-fails-closed-on-unreadable."""
     try:
         return os.stat(name, dir_fd=pfd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise JournalError("cannot lstat contained final component {!r} ({})".format(name, exc))
 
 
 def _read_at(pfd, name, relpath):
