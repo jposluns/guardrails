@@ -1847,30 +1847,30 @@ _GIT_MUTATING_VERBS = frozenset((
     "merge", "mv", "notes", "pull", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
     "switch", "tag", "update-index", "update-ref", "worktree"))
 _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
-# branch/tag classification (GD-158 round 3). A command is a MUTATION when a WRITE flag is present
-# (delete/move/copy/create/modify), or when a bare positional (a create/rename/delete TARGET) is present
-# with no LIST-mode flag. A filtered or explicit LISTING (-l/--list or a --contains/--merged/--points-at
-# filter) is a read; a bare 'git branch'/'git tag' (no args) lists. A formatting flag (--format/--sort)
-# does NOT force list mode: git still creates when a name is given ('git branch --format=X b1' creates b1),
-# so formatting flags are arg-consuming READS, never a licence to treat a create as a listing (the round-2
-# fail-open, F-GD158-R2). WRITE flags take precedence and the scan stops at '--' (an operand, not a flag).
+# branch/tag classification (GD-158 rounds 3-5, flag behaviour validated against real git 2.53). A command
+# is a MUTATION when a WRITE flag is present (delete/move/copy/create-modify), or when a bare positional
+# (a create/rename/delete TARGET, before OR after '--') is present with no LIST-mode flag. A filtered or
+# explicit LISTING (-l/--list or a --contains/--merged/--points-at filter; for tag also -v/--verify) is a
+# read; a bare 'git branch'/'git tag' (no args) lists. A formatting flag (--format/--sort) does NOT force
+# list mode (git creates when a name is given) but DOES consume its separate-form value; --color/--abbrev
+# take only an optional '=' value and do NOT consume a following token (so a name after them is a create
+# target, not their value); --create-reflog is a create MODIFIER, not a standalone mutation (bare it
+# lists). WRITE flags take precedence and only they are position-relevant (must precede '--').
 _GIT_BRANCH_WRITE_FLAGS = frozenset((
     "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "--edit-description",
-    "-u", "--set-upstream-to", "--unset-upstream", "-t", "--track", "--no-track", "--create-reflog"))
+    "-u", "--set-upstream-to", "--unset-upstream", "-t", "--track", "--no-track"))
 _GIT_BRANCH_LIST_FLAGS = frozenset((
     "-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"))
 _GIT_BRANCH_ARG_READ = frozenset((
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort",
-    "--abbrev", "--color"))
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"))
 _GIT_TAG_WRITE_FLAGS = frozenset((
     "-d", "--delete", "-a", "--annotate", "-s", "--sign", "-m", "--message", "-F", "--file",
-    "-f", "--force", "--create-reflog", "-e", "--edit", "-u", "--local-user"))
+    "-f", "--force", "-e", "--edit", "-u", "--local-user"))
 _GIT_TAG_LIST_FLAGS = frozenset((
-    "-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
-    "--column", "--no-column"))
+    "-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--merged", "--no-merged",
+    "--points-at", "--column", "--no-column"))
 _GIT_TAG_ARG_READ = frozenset((
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort",
-    "--color"))
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"))
 _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
     "-e", "--edit"))
@@ -1928,17 +1928,21 @@ def _git_target_is_explicit(tokens):
 
 
 def _git_ref_cmd_mutating(args, write_flags, write_prefixes, list_flags, list_prefixes, arg_read_flags):
-    """Shared branch/tag mutation classifier (GD-158 round 3). Mutating when a WRITE flag is present, or
-    when a bare positional (a create/rename/delete TARGET) is present with NO list-mode flag. Scans only
-    tokens BEFORE a '--' end-of-options marker (a token after '--' is an operand, never a flag), and skips
-    the value of a separate-form arg-taking read option (--contains REF, --format FMT) so neither is
-    misread as a target. A listing flag with a positional means the positional is a pattern (read); a
-    formatting flag alone does not force list mode. Conservative: an ambiguous positional beside a
+    """Shared branch/tag mutation classifier (GD-158 rounds 3-5). Mutating when a WRITE flag is present, or
+    when a bare positional (a create/rename/delete TARGET) is present with NO list-mode flag. The target is
+    a positional operand and git accepts it either before OR after a '--' end-of-options marker
+    ('git branch -- name' and 'git tag -- name' both CREATE, real git 2.53), so a non-list-mode operand in
+    the post-'--' region counts too; only a WRITE FLAG is position-relevant (it must precede '--'). A
+    separate-form arg-taking read option's value (--contains REF, --format FMT) and a list pattern are not
+    targets. A listing flag with a positional means the positional is a pattern (read); a formatting flag
+    alone (--format/--sort) does not force list mode. Conservative: an ambiguous positional beside a
     non-list flag reads as mutating (a safe ASK under a shift), never a silent allow."""
-    pre, _post, _had = _split_pre_post(args)
+    pre, post, _had = _split_pre_post(args)
     if any(a in write_flags or a.startswith(write_prefixes) for a in pre):
         return True
     list_mode = any(a in list_flags or a.startswith(list_prefixes) for a in pre)
+    if post and not list_mode:
+        return True  # a create/rename/delete target placed after '--' (git accepts the target there)
     i = 0
     n = len(pre)
     while i < n:

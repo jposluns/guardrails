@@ -4210,6 +4210,20 @@ def main():
                  "cd /x && git branch --contains HEAD", "allow")
         ebexpect("(eb-e51) separate-form --format value is not a create target (allow under cd)",
                  "cd /x && git branch --format 'refname'", "allow")
+        # GD-158 round-5 (F-GD158-R4 fail-open): a create/rename/delete TARGET placed AFTER '--' is still a
+        # mutation (git accepts the target there: "git branch -- name"/"git tag -- name" CREATE, real git
+        # 2.53); a list pattern after '--' with a list flag is a read. Each ASK case fails on the round-3
+        # (pre-only) classifier that discarded post-'--' operands.
+        ebexpect("(eb-e52) branch CREATE target after -- is a mutation under cd",
+                 "cd /x && git branch -- newb1", "ask")
+        ebexpect("(eb-e53) branch create + start-point after -- asks under cd",
+                 "cd /x && git branch -- b2 HEAD", "ask")
+        ebexpect("(eb-e54) branch force-create after -- asks under cd",
+                 "cd /x && git branch -f -- b5 HEAD", "ask")
+        ebexpect("(eb-e55) tag CREATE target after -- is a mutation under cd",
+                 "cd /x && git tag -- newt1", "ask")
+        ebexpect("(eb-e56) branch LIST with a pattern after -- is a read under cd",
+                 "cd /x && git branch --list -- 'new*'", "allow")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
