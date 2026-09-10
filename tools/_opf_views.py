@@ -1905,7 +1905,9 @@ def self_test():
               "\n" not in _md_text(("x\n- F") * _N) and "\r" not in _md_text(("a\r") * _N))
         check("md-text-hi-count-crlf-single-space", _md_text("a\r\n" * _N) == "a " * _N)
         check("md-text-hi-count-control-stripped", _MD_CTRL_RE.search(_md_text("a\x07" * _N)) is None)
-        _md_soup = _md_text("[&<>*_`!#|~" * _N)
+        # soup carries EVERY _MD_ESCAPE_RE metacharacter (incl. backslash -- round-18 QA: an omitted char let a
+        # per-char bound on it, e.g. backslash, escape the escape-completeness check) plus & < >.
+        _md_soup = _md_text("\\`*_{}[]()#+!|~&<>" * _N)
         check("md-text-hi-count-escape-complete",
               not _MD_ESCAPE_RE.search(re.sub(r"\\.", "", _md_soup)) and "<" not in _md_soup and ">" not in _md_soup
               and _md_soup.count("&") == _md_soup.count("&amp;") + _md_soup.count("&lt;") + _md_soup.count("&gt;"))
