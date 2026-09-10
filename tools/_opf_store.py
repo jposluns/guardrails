@@ -180,10 +180,10 @@ class StoreError(Exception):
 
 class Resolution:
     __slots__ = ("status", "detail", "store_root", "machine_dir", "machine_rel", "pointer_source",
-                 "target")
+                 "target", "product_root")
 
     def __init__(self, status, detail="", store_root=None, machine_dir=None, machine_rel=None,
-                 pointer_source=None, target=None):
+                 pointer_source=None, target=None, product_root=None):
         self.status = status              # RESOLVED / NOT_ADOPTED / CANNOT_EVALUATE
         self.detail = detail
         self.store_root = store_root      # Path to the resolved STORE repository root
@@ -191,6 +191,9 @@ class Resolution:
         self.machine_rel = machine_rel    # store-relative path to the machine store (".working/<dir>")
         self.pointer_source = pointer_source  # "local-override" / "committed" / "default"
         self.target = target              # the parsed Target the pointer named (or None for default)
+        self.product_root = product_root  # the PRODUCT repository root this store was resolved from (the
+                                          # authoritative binding for the product-scope deliverables VERSION
+                                          # and CHANGELOG.md; explicit-binding-over-ambient-context)
 
 
 class Target:
@@ -465,11 +468,16 @@ def resolve_store(product_root):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
-            return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source)
-        return _resolve_at(store_root, source, target, pointer=True)
+            return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
+                              product_root=product_root)
+        res = _resolve_at(store_root, source, target, pointer=True)
+        res.product_root = product_root
+        return res
 
     # Neither pointer file exists: try the default in-repo location.
-    return _resolve_at(product_root, "default", None, pointer=False)
+    res = _resolve_at(product_root, "default", None, pointer=False)
+    res.product_root = product_root
+    return res
 
 
 def _resolve_at(store_root, source, target, pointer):
