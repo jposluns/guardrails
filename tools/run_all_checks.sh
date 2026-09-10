@@ -163,6 +163,8 @@ run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
+run_gate "commonmark-headings-selftest" python3 -I -B tools/selftest_commonmark_headings.py
+run_gate "commonmark-conformance" python3 -I -B tools/selftest_commonmark_conformance.py
 run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --self-test
 
 run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
