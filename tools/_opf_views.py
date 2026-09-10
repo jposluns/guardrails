@@ -1781,6 +1781,19 @@ def self_test():
         check("md-code-span-2run-exact-fence", _md_text("http://y/``z") == "```http://y/``z```")
         check("md-code-span-2run-inert", _gfm_autolinks(_md_text("http://y/``http://z.example")) == [])
         check("md-code-span-3run-inert", _gfm_autolinks(_md_text("http://y/```http://z.example")) == [])
+        # round-11 (codex round-10 MAJOR): the newline collapse is LOAD-BEARING. It guarantees the value
+        # renders as a SINGLE LINE, so a line-start block marker in the value (- + * list, # heading, >
+        # quote, 1. ordered, ` fence, | table, 4-space indent) can never begin a new line and forge block
+        # structure. md-text-collapses-cr tested only CR, and the no-forged-heading pin actually tests
+        # #-escaping (which survives a newline regression), so a surgical LF-only regression forged a sibling
+        # list item while the suite stayed green. Pin LF collapse directly AND the single-line-output
+        # invariant over every CommonMark line-ending x block-marker pair (closes the whole class).
+        check("md-text-collapses-lf", _md_text("a\nb") == "a b")
+        check("md-text-lf-no-forged-list", _md_text("a\n- FORGED") == "a - FORGED")
+        _nl_markers = ["- ", "+ ", "* ", "# ", "> ", "1. ", "`", "|", "    "]
+        _nl_vectors = [nl + mk + "x" for nl in ("\n", "\r", "\r\n") for mk in _nl_markers]
+        check("md-text-output-single-line",
+              all("\n" not in _md_text("v)" + s) and "\r" not in _md_text("v)" + s) for s in _nl_vectors))
         # Disclosed residual: the frozen pins close the matcher-edit class (any arm/flag/oracle edit is caught);
         # the exact-byte/behaviour pins + broad fuzz cover the wrapping/escaping logic on exercised shapes. An
         # edit that changes output only on an UNEXERCISED shape without touching a frozen matcher is the residual
