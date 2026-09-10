@@ -94,6 +94,16 @@ Each entry follows the same shape:
 
 ---
 
+## 5. Bind a git mutation to an explicit target the environment cannot shift
+
+- **Guardrail:** Bind to the explicit target, not the ambient context (`aiqt/10-INTEG-explicit-binding-over-ambient-context`, rule `expbnd`), with confirm-execution-target (`aiqt/10-QUALI-confirm-execution-target`).
+- **What the pack does:** it ships the rule and a best-effort PreToolUse/Bash hook (`git_explicit_binding`) that returns a blocking `ask` when a directory shift (`cd`, `pushd`, or `popd`), a target-redirecting wrapper, or an ambient `GIT_*` override precedes an untargeted git mutation, or when a whole-tree breadth selector meets a relocation or a publish; an unparseable command falls back to a raw lexical scan of the common spellings. Its coverage is best-effort over an open shell grammar, a disclosed residual: arbitrary shell fragmentation, an unrecognized wrapper, or a construct the tokenizer cannot parse can carry a target shift past the matcher.
+- **The gap:** the hook reads the command string; it cannot bind the actual execution target. An adversary, or an honest but convoluted command, can shift the ambient working directory or environment in a form the matcher does not catch, so a mutation still binds to wherever the shell landed rather than to the intended repository. A client-side matcher over an open grammar raises the bar; it does not contain.
+- **What you set up:** bind the execution target at the operating-system level so an ambient shift cannot reach an unintended repository. Combine with entry 1's filesystem containment so that ONLY the intended repository is present in the task's working area and every other repository is ABSENT, not merely read-only, which removes the wrong-target surface rather than policing it; and/or have the launcher inject an explicit target onto the git invocation itself (a fixed absolute `-C` or `--git-dir` to the confined repository) rather than leaving it to the command string, and scrub inherited `GIT_*` variables from the task environment unless one is individually required. With only the intended repository reachable and the target named on the command, an ambient cwd or env shift has nothing else to bind to.
+- **What remains even then:** a repository you deliberately exposed inside the containment, a wrapper that legitimately needs broader reach, and the shared-kernel and allowed-path residuals of entry 1.
+
+---
+
 *More entries are added here as guardrails with a host-level component are identified. Likely next
 candidates: an enforced network egress allow-list (`security/SECC-egress-destinations`) and kernel-enforced
 resource bounds (`security/SECA-resource-bounds`). If an entry does not apply to your

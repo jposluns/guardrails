@@ -1851,15 +1851,15 @@ _EXPLICIT_GIT_TARGET_OPTS = frozenset(("-C", "--git-dir", "--work-tree"))
 # a mutation, so pairing one with a cd must not ASK. A bare 'git branch'/'git tag' (no args) also lists.
 _GIT_BRANCH_READ_FLAGS = frozenset((
     "-l", "--list", "--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
-    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"))
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"))
 _GIT_TAG_READ_FLAGS = frozenset((
     "-l", "--list", "-n", "--column", "--no-column", "--contains", "--no-contains", "--merged",
-    "--no-merged", "--points-at"))
+    "--no-merged", "--points-at", "--format", "--sort"))
 _GIT_CONFIG_WRITE_FLAGS = frozenset((
     "--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
     "-e", "--edit"))
 _EXPBND_WRAPPER_WORDS = frozenset(("command", "exec", "builtin", "env", "sudo"))
-_RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd)(?=$|[\s;&|()])")
+_RAW_EXPBND_CD_RE = re.compile(r"(?i)(?:^|[\s;&|()])(?:cd|pushd|popd)(?=$|[\s;&|()])")
 _RAW_EXPBND_MUTATE_RE = re.compile(
     r"(?is)\bgit\b.*?\b(?:add|am|apply|branch|checkout|cherry-pick|clean|commit|config|init|merge|mv|"
     r"notes|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|update-index|update-ref|worktree)\b")
@@ -1924,13 +1924,13 @@ def _git_is_mutating(sub, args):
             return False
         return not any(a in _GIT_BRANCH_READ_FLAGS or
                        a.startswith(("--contains=", "--no-contains=", "--merged=", "--no-merged=",
-                                     "--points-at=")) for a in args)
+                                     "--points-at=", "--format=", "--sort=")) for a in args)
     if sub == "tag":
         if not args:
             return False
         return not any(a in _GIT_TAG_READ_FLAGS or
                        a.startswith(("--list=", "--contains=", "--no-contains=", "--merged=",
-                                     "--no-merged=", "--points-at=")) for a in args)
+                                     "--no-merged=", "--points-at=", "--format=", "--sort=")) for a in args)
     if sub == "stash":
         return not args or args[0] not in ("list", "show")
     if sub == "config":
@@ -2037,31 +2037,35 @@ def git_explicit_binding(data):
     except ValueError:
         return _expbnd_fallback(command)
 
-    saw_cd = False
-    saw_push = False
-    untargeted = []
-    breadth = []
+    # A cd/pushd/popd SHIFTS the target out of the session cwd (popd lands on an unknowable stack-top
+    # directory, so it too confuses a following git segment). The shift confuses a git segment only when it
+    # PRECEDES it, and the breadth+publish hazard is a whole-tree breadth op PRECEDING a push (a push before
+    # the breadth op publishes only the pre-breadth state). So saw_dir_change and breadth_sub are read at the
+    # point each git segment is processed (segments iterate in command order), not accumulated and tested at
+    # the end: "git commit && cd /x" and "git push && git add -A" leave the mutation unconfused and are
+    # exempt, while "cd /x && git commit", "popd && git commit", and "git add -A && git push" are not.
+    saw_dir_change = False
+    breadth_sub = None
     for tokens, _sep in segments:
         eff = _expbnd_effective_tokens(tokens)
         word = _command_word(eff)
-        if word in _CD_BUILTINS:
-            saw_cd = True
+        if word in _CD_BUILTINS or word == "popd":
+            saw_dir_change = True
             continue
         if word != "git":
             continue
         sub, args = _git_sub_and_args(eff)
         if sub is None:
             continue
-        if sub == "push":
-            saw_push = True
-        if _git_is_mutating(sub, args) and not _git_target_is_explicit(eff):
-            untargeted.append(sub)
+        if (_git_is_mutating(sub, args) and not _git_target_is_explicit(eff)
+                and saw_dir_change):
+            return _expbnd_target_ask(sub)
+        if _git_is_breadth(sub, args) and saw_dir_change:
+            return _expbnd_breadth_ask(sub)
+        if sub == "push" and breadth_sub is not None:
+            return _expbnd_breadth_ask(breadth_sub)
         if _git_is_breadth(sub, args):
-            breadth.append(sub)
-    if saw_cd and untargeted:
-        return _expbnd_target_ask(untargeted[0])
-    if breadth and (saw_cd or saw_push):
-        return _expbnd_breadth_ask(breadth[0])
+            breadth_sub = sub
     return _allow()
 
 
@@ -7057,6 +7061,14 @@ def orch_dispatch_ledger(data):
         tid = tool_input.get("task_id") or tool_input.get("taskId")
         if isinstance(tid, str) and tid:
             row = {"event": "complete", "task_id": tid, "tool": tool, "wake": True}
+        else:
+            # expbnd (explicit-binding-over-ambient-context): an async result with no authoritative
+            # identifier is SURFACED as unbound, never correlated to a dispatch by recency or arrival
+            # order. Non-blocking (this recorder never blocks), so a genuinely id-less read is flagged
+            # rather than silently accepted.
+            return (0, {"systemMessage": "AIQT rule expbnd: this TaskOutput carried no task_id, so its "
+                        "result is UNBOUND and cannot be tied to a dispatch; correlate it by the "
+                        "dispatch's own id, never by which task completed most recently."}, None)
     else:
         dispatch_tools = reg.get("dispatch_tools") if isinstance(
             reg.get("dispatch_tools"), list) else []

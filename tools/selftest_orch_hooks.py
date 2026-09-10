@@ -878,6 +878,13 @@ def main(report_path=None):
                 text.splitlines()[0])["task_id"]}))
         text = (tsd / "dispatch-ledger.jsonl").read_text(encoding="utf-8")
         check("ledger/complete-row", '"complete"' in text, True)
+        # GD-158 QA round-2 (expbnd async-by-id form): a TaskOutput with NO task_id is SURFACED as unbound
+        # via a non-blocking systemMessage, never silently accepted or correlated to a dispatch by recency.
+        # Without the fix the handler returns a bare allow (no systemMessage) and this check fails.
+        _unb = aiqt_hooks.orch_dispatch_ledger(t.payload("PostToolUse", "TaskOutput", {}))
+        _unb_msg = _unb[1].get("systemMessage", "") if isinstance(_unb, tuple) \
+            and len(_unb) > 1 and isinstance(_unb[1], dict) else ""
+        check("ledger/unbound-taskoutput-surfaced", "unbound" in _unb_msg.lower(), True)
 
         # ---------- component 5: the resume audit and barrier ----------
         r = Fixture(tmp, "resume")

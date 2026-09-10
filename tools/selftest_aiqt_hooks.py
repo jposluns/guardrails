@@ -4167,6 +4167,25 @@ def main():
                  "cd /abs && git config user.name", "allow")
         ebexpect("(eb-e33) 'git config <key> <value>' write under cd asks",
                  "cd /abs && git config user.name value", "ask")
+        # GD-158 QA round-2: the cd-based triggers are ORDER-SENSITIVE -- a shift (cd/pushd/popd) confuses
+        # only a git segment it PRECEDES, and the breadth+publish hazard is a breadth op PRECEDING a push.
+        # A trailing shift, or a breadth op AFTER a push, cannot confuse the earlier mutation and must
+        # ALLOW; the forward forms above (eb-e1/e4/e6) still ASK. Each case below fails on the pre-fix,
+        # order-insensitive implementation.
+        ebexpect("(eb-e35) a cd AFTER the mutation does not confuse it",
+                 "git commit -m x && cd /abs/repo", "allow")
+        ebexpect("(eb-e36) a cd several segments after the mutation is exempt",
+                 "git commit -m x ; cd /var/log ; cat foo.log", "allow")
+        ebexpect("(eb-e37) popd BEFORE an untargeted mutation shifts the target",
+                 "popd && git commit -m x", "ask")
+        ebexpect("(eb-e38) breadth AFTER a push is not a pre-publish breadth",
+                 "git push && git add -A", "allow")
+        ebexpect("(eb-e39) branch --format listing under cd is read-only",
+                 "cd /abs && git branch --format=%(refname)", "allow")
+        ebexpect("(eb-e40) tag --format listing under cd is read-only",
+                 "cd /abs && git tag --format=%(refname)", "allow")
+        ebexpect("(eb-e41) branch --sort listing under cd is read-only",
+                 "cd /abs && git branch --sort=-committerdate", "allow")
         for _eb_sub, _eb_args, _eb_want in (
                 ("commit", ["-am", "x"], True),
                 ("add", ["-A"], True),
