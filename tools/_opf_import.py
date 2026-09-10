@@ -36,8 +36,11 @@ is disclosed for the finalizer, per disclose-guard-residuals):
   - a per-type index is `<machine>/<type>.index.toml` carrying `schema = 1` and a `[[record]]` array of
     full records; an absent file is zero records for that type, an unparseable one is CANNOT-EVALUATE;
   - an archive year is `<machine>/archive/<year>/archive.toml` carrying a NON-EMPTY `moved = [{id =
-    <id>, destination = <contained relpath>}, ...]` (spec 12 enumerates every moved id AND its
-    destination); a bare-id or empty `moved` is CANNOT-EVALUATE;
+    <id>, destination = <contained relpath>}, ...]`; each destination is machine-relative and must open
+    no-follow as a complete record or homogeneous record index carrying that exact id. Spec 12 also
+    requires worklog-span entries but does not define their on-disk entry schema; U7 explicitly refuses
+    every worklog-span archive entry until that schema releases. A bare-id, missing destination, missing
+    or mismatched destination payload, empty `moved`, or worklog-span entry is CANNOT-EVALUATE;
   - a sibling staging run mirrors this run's layout; every `*.index.toml` and `worklog.toml` under its
     `candidate/` and `fragments/` enumerates staged ids (an incomplete sibling, no report.toml, still
     enumerates what it wrote; an unreadable/unparseable sibling artefact is CANNOT-EVALUATE);
@@ -123,6 +126,12 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 # Closed plan keyset and closed fragment-row keyset.
 _PLAN_KEYS = frozenset({"fragments", "worklog", "version"})
 _FRAGMENT_ROW_KEYS = frozenset({"span", "state", "record", "target", "note"})
+
+
+_MODULE_SCHEMA_REFUSAL = (
+    "a module-tier record cannot be fully validated until the module schemas release, spec 8.5; "
+    "U7 stages only against base-tier stores"
+)
 
 
 class _LegacyFragmentSpec(_opf_schema.TypeSpec):
@@ -255,102 +264,13 @@ def _close_fd(fd, rel):
         raise _cannot("cannot close a store-read handle for {} ({})".format(rel, exc))
 
 
-def _validate_module_envelope(rec, expected_type, module_ns, where, registered_vendors=frozenset()):
-    """CLASS 3(ii) / B1: the spec-8.3 COMMON envelope validation for a KNOWN module-tier record whose
-    per-state grammar and type-specific extra fields are not modelled in this build (the disclosed
-    residual). Every non-worklog record carries the common envelope (spec 8.3), so a module-tier record is
-    held to it, reusing the SAME shared _opf_schema field validators the baseline path uses so the checks
-    cannot drift:
-      - id: a well-formed <NS>-<n> whose namespace is the module type's normative namespace (spec 8.1/8.2);
-      - type: agrees with the file's declared type (spec 8.3);
-      - keyset: CLOSED to the common envelope (+ registered x-<vendor>), via the SAME _check_keyset the
-        baseline path uses, so an unknown key is a refusing finding (B1), not silently admitted;
-      - status: present, and drawn from the GENERAL spec-8.4 status grammar (a single optional `/proposed`
-        qualifier, no other), the grammar shape parse_status enforces for every type. The module type's
-        PER-STATE grammar (which states exist, which are proposable) stays the disclosed residual, since no
-        module state machine is modelled here;
-      - title: a non-empty single line;
-      - actor: a well-formed actor table (spec 8.3);
-      - created_at: RFC 3339 UTC, with the spec-8.3 importer exception (an importer MAY omit it when it
-        carries an import-provenance ref); updated_at: RFC 3339 UTC and required with NO importer exception,
-        mirroring _opf_schema.validate_record EXACTLY.
-      - links/refs: well-formed when present.
-    Disclosed residual/consequence (B1): because a module type's extra fields are unmodelled, the closed
-    keyset admits ONLY the common envelope (+ registered vendors); an as-yet-unmodelled module-specific
-    field (for example a release version) is therefore fail-closed to CANNOT-EVALUATE rather than seated,
-    the SAFE direction (guard-input-soundness: U7 cannot judge an unmodelled field, so it refuses rather
-    than silently admits). Modelling module extra fields and their state machines is the proposed U2
-    follow-on; until it lands U7 stages only against a store whose module records carry the common envelope
-    alone. Returns a findings list (empty == a valid module envelope)."""
-    findings = []
-    rid = rec.get("id")
-    shape = _opf_schema._valid_id_shape(rid)
-    if shape is None:
-        findings.append("id {!r} is not a well-formed <NS>-<n> id (spec 8.2)".format(rid))
-    elif shape[0] != module_ns:
-        findings.append("id namespace {!r} is not the {!r} namespace bound to module type {!r} "
-                        "(spec 8.1/8.2)".format(shape[0], module_ns, expected_type))
-    if rec.get("type") != expected_type:
-        findings.append("type {!r} disagrees with the file's declared type {!r} (spec 8.3)".format(
-            rec.get("type"), expected_type))
-    # B1: the CLOSED common-envelope keyset, via the SAME shared validator the baseline path uses, so a
-    # module-tier record can no longer carry an unknown top-level key (the former open keyset).
-    _opf_schema._check_keyset(rec, _opf_schema.ENVELOPE_KEYS, registered_vendors, findings)
-    status = rec.get("status")
-    if not isinstance(status, str) or not status:
-        findings.append("missing or non-string required field: status (spec 8.3)")
-    else:
-        # B1: the GENERAL spec-8.4 status grammar holds for every type independent of its state set: a
-        # single optional `/proposed` qualifier and no other. Apply it so a module status is drawn from the
-        # allowed grammar, not merely any non-empty string. The per-state grammar is the disclosed residual.
-        parts = status.split("/")
-        if not parts[0]:
-            findings.append("status {!r} has an empty state (spec 8.4)".format(status))
-        if len(parts) > 2:
-            findings.append("status {!r} has more than one '/' qualifier (spec 8.4)".format(status))
-        elif len(parts) == 2 and parts[1] != "proposed":
-            findings.append("status qualifier {!r} is not 'proposed' (the only qualifier, spec 8.4)".format(
-                parts[1]))
-    if "title" not in rec:
-        findings.append("missing required field: title")
-    else:
-        title = rec.get("title")
-        if not isinstance(title, str) or not title or "\n" in title or "\r" in title:
-            findings.append("title must be a non-empty single line")
-    actor_kind = _opf_schema._validate_actor(rec, findings)
-    refs = rec.get("refs")
-    has_provenance_ref = isinstance(refs, list) and bool(refs)
-    if "created_at" not in rec:
-        if actor_kind != "importer":
-            findings.append("missing required field: created_at")
-        elif not has_provenance_ref:
-            findings.append("an importer that omits created_at must carry an import-provenance reference "
-                            "(spec 8.3)")
-    elif not _opf_schema._valid_timestamp(rec.get("created_at")):
-        findings.append("created_at must be an RFC 3339 UTC timestamp")
-    if "updated_at" not in rec:
-        findings.append("missing required field: updated_at")
-    elif not _opf_schema._valid_timestamp(rec.get("updated_at")):
-        findings.append("updated_at must be an RFC 3339 UTC timestamp")
-    _opf_schema._validate_links(rec, findings)
-    _opf_schema._validate_refs(rec, findings)
-    return findings
-
-
 def _validate_tier_record(rec, expected_type, roster, registered_vendors, where):
-    """CLASS 3: the SINGLE full-contract validator EVERY id-bearing tier routes each record through
-    (baseline sibling, module-tier sibling, active index, and the duplicate/link existence authority; the
-    active worklog routes through _opf_release.validate_worklog, the same authoritative full contract).
-    Returns a findings list (empty == the record satisfies its complete contract); a non-empty list is the
-    caller's CANNOT-EVALUATE reason, so a malformed record ANYWHERE fails closed rather than being read
-    id-only or seated as a valid duplicate/link target.
+    """Validate a record only when U7 has its complete schema.
 
-      - a roster type (the nine baseline types + legacy_fragment) is held to its COMPLETE envelope via
-        _opf_schema.validate_record, with file/type agreement and the manifest x-<vendor> allow-set;
-      - a KNOWN module-tier type has no modelled state machine (disclosed residual), so it is held to the
-        strongest contract a spec-less type admits: the full spec-8.3 common envelope (_validate_module_
-        envelope), narrowing the former identity-only read;
-      - any other type name is unknown: a refusing finding, fail-closed."""
+    Baseline and importer-tier records route through _opf_schema.validate_record. Module-tier records
+    are refused rather than partially validated because their complete state and type-specific schemas
+    do not ship until the module-schemas release (spec 8.5). Unknown types are likewise refused.
+    Returns a findings list; callers convert a non-empty list to CANNOT-EVALUATE."""
     spec = roster.get(expected_type)
     if spec is not None:
         rv = _opf_schema.validate_record(rec, expected_type=expected_type, specs=roster,
@@ -358,32 +278,29 @@ def _validate_tier_record(rec, expected_type, roster, registered_vendors, where)
         if rv.status != _opf_store.VALID:
             return list(rv.findings) or ["record is not VALID for type {!r}".format(expected_type)]
         return []
-    module = _opf_store.MODULE_TYPES.get(expected_type)
-    if module is not None:
-        return _validate_module_envelope(rec, expected_type, module[0], where, registered_vendors)
+    if expected_type in _opf_store.MODULE_TYPES:
+        return [_MODULE_SCHEMA_REFUSAL]
     return ["unsupported type {!r}: no schema to validate it against (fail-closed)".format(expected_type)]
 
 
 def _record_ids(data, where, roster=None, expected_type=None, registered_vendors=frozenset()):
-    """Extract the ids of a `{schema = 1, record: [[record]]}` index file, fail-closed. An ABSENT file is
-    zero records (absence outside the declared set is clean). A PRESENT file is held to the declared index
-    contract: ONLY the `schema` and `record` top-level keys (CLASS 3(i): closed keyset), a `schema = 1`, a
-    `record` array of tables, each row a table with a well-formed id; any violation is CANNOT-EVALUATE naming
-    the file. An explicit `schema = 1` with `record = []` is a genuine empty index of a SUPPORTED type and
-    reads as zero records.
+    """Extract ids from a closed `{schema = 1, record = [...]}` index, fail-closed.
 
-    CLASS 3: when `roster` and `expected_type` are supplied (every union/existence caller supplies them):
-      - CLASS 3(iii): the index TYPE itself must be a supported type (a roster spec OR a known module-tier
-        type), checked BEFORE the per-record loop, so an empty OR unsupported index is CANNOT-EVALUATE rather
-        than silently zero records (closes the empty-unsupported-index bypass);
-      - CLASS 3(i/ii): every record is routed through the ONE full-contract validator _validate_tier_record
-        (a spec'd type gets its COMPLETE envelope with the manifest vendor allow-set; a module-tier record
-        gets the full spec-8.3 envelope; an unknown type a refusing finding), so no tier can seat a malformed
-        record in the union or as a valid duplicate/link target.
-    A caller that supplies no roster/expected_type (none remain in-tree after this change) falls back to the
-    legacy structural id-only read."""
+    An absent file is zero records. A present file must contain only `schema` and `record`, carry the
+    supported schema, and provide an array of record tables. With a roster and expected type, baseline
+    and importer records receive their complete schema validation. A known module-tier index may be
+    absent or genuinely empty, but ANY non-empty module-tier index is CANNOT-EVALUATE because U7 cannot
+    validate those records until the module schemas release (spec 8.5). An unknown index type is refused
+    even when empty."""
     if data is None:
         return []
+
+    have_authority = roster is not None and expected_type is not None
+    raw_records = data.get("record")
+    if (have_authority and expected_type in _opf_store.MODULE_TYPES
+            and isinstance(raw_records, list) and raw_records):
+        raise _cannot("{}: {}".format(where, _MODULE_SCHEMA_REFUSAL))
+
     extra = set(data) - {"schema", "record"}
     if extra:
         raise _cannot("{}: a present index carries unknown top-level key(s): {} (a `{{schema, record}}` "
@@ -396,23 +313,21 @@ def _record_ids(data, where, roster=None, expected_type=None, registered_vendors
     if not isinstance(recs, list):
         raise _cannot("{}: a present index must carry a `record` array of tables (missing or non-list "
                       "`record` is malformed, not zero records)".format(where))
-    have_authority = roster is not None and expected_type is not None
     if have_authority and expected_type not in roster and expected_type not in _opf_store.MODULE_TYPES:
-        # CLASS 3(iii): the index type is unsupported. An empty or unsupported index is never zero records:
-        # refuse the type here, BEFORE the per-record loop, so an unsupported index with an empty (or absent)
-        # `record` list cannot slip past as a clean id-free read (the former empty-index bypass).
         raise _cannot("{}: index type {!r} is not a supported record type; an empty or unsupported index is "
                       "not zero records (fail-closed)".format(where, expected_type))
+
     ids = []
-    for i, r in enumerate(recs):
-        if not isinstance(r, dict):
+    for i, rec in enumerate(recs):
+        if not isinstance(rec, dict):
             raise _cannot("{}: record[{}] is not a table".format(where, i))
-        rid = r.get("id")
+        rid = rec.get("id")
         if _opf_schema._valid_id_shape(rid) is None:
             raise _cannot("{}: record[{}] carries a malformed id {!r}".format(where, i, rid))
         if have_authority:
-            tier_findings = _validate_tier_record(r, expected_type, roster, registered_vendors,
-                                                  "{} record[{}]".format(where, i))
+            tier_findings = _validate_tier_record(
+                rec, expected_type, roster, registered_vendors,
+                "{} record[{}]".format(where, i))
             if tier_findings:
                 raise _cannot("{}: record[{}] does not satisfy its complete {} contract ({})".format(
                     where, i, expected_type, "; ".join(tier_findings)))
@@ -421,33 +336,87 @@ def _record_ids(data, where, roster=None, expected_type=None, registered_vendors
 
 
 def _index_ids(store_root_fd, machine_rel, type_name, roster, registered_vendors=frozenset()):
-    # CLASS 3: an ACTIVE-store index record is now routed through the full record contract, not a
-    # structural id-only read. A baseline record gets complete envelope validation (with the manifest
-    # vendor allow-set); a module-tier record gets the identity check its missing spec allows; a
-    # present-but-malformed active record is CANNOT-EVALUATE, never seated in the union or as a valid
-    # duplicate/link target. The former structural-only residual is retired for spec'd types and narrowed
-    # to the disclosed module state-machine residual for spec-less types.
+    """Read an active inline index through _record_ids.
+
+    Complete schemas validate baseline/importer records. A non-empty module-tier index is refused,
+    while an absent or genuinely empty module-tier index contributes no ids."""
     rel = "{}/{}.index.toml".format(machine_rel, type_name)
     return _record_ids(_read_toml(store_root_fd, rel), rel, roster, type_name, registered_vendors)
 
 
-def _archive_ids(store_root_fd, machine_rel):
-    """Every id enumerated across `<machine>/archive/<year>/archive.toml` (spec 12: rotation enumerates
-    every moved id AND its destination). Archive-year dirs are enumerated with the no-follow-REFUSING helper
-    (B3), so a SYMLINKED or non-directory archive-year entry is CANNOT-EVALUATE. CLASS 3(c): an archive-year
-    directory name that is not a 4-digit year is a phantom partition, CANNOT-EVALUATE; an archive.toml
-    carrying any top-level key other than `moved`/`schema`, a malformed schema, or a `moved` that is not a
-    NON-EMPTY array of {id, destination} tables is CANNOT-EVALUATE. B3: spec 12 requires each rotation to
-    enumerate every moved ID and ITS DESTINATION, so a moved entry is a closed {id, destination} table (id a
-    well-formed record-namespaced id, destination a non-empty contained relpath naming the archived record's
-    location); a bare-id entry (no destination) or an empty `moved` (an archive year that archived nothing)
-    is a malformed/incomplete archive record, fail-closed. Disclosed residual: U7 requires the destination
-    field to be present and well-formed but does not itself open the destination file; confirming every id
-    resolves in exactly one active/archived location is a whole-store promotion concern (spec 12)."""
+def _refuse_nonempty_module_indexes(store_root_fd, machine_rel, roster,
+                                    registered_vendors=frozenset()):
+    """Preflight every known active module-index pathname before ordinary active-store readers run.
+
+    The scan covers _opf_store.MODULE_TYPES directly rather than trusting the enabled-type work-list.
+    Absent and well-formed empty indexes are allowed; malformed indexes and every non-empty module index
+    are CANNOT-EVALUATE. _record_ids repeats the same refusal on later reads, closing a preflight/read race."""
+    for type_name in sorted(_opf_store.MODULE_TYPES):
+        rel = "{}/{}.index.toml".format(machine_rel, type_name)
+        data = _read_toml(store_root_fd, rel)
+        if data is not None:
+            _record_ids(data, rel, roster, type_name, registered_vendors)
+
+
+def _archived_destination_ids(data, where, roster, registered_vendors=frozenset()):
+    """Return ids from one opened archived destination payload, validating its complete supported shape.
+
+    A destination is either one full record table or a homogeneous `{schema, record}` index. Baseline and
+    importer records are validated through their complete schemas. Module records are refused because
+    their complete schemas have not released. Worklog spans never reach this reader: _archive_ids refuses
+    them explicitly before opening a destination."""
+    if not isinstance(data, dict):
+        raise _cannot("{}: archived destination is not a TOML table".format(where))
+    if "id" in data and "record" in data:
+        raise _cannot("{}: archived destination ambiguously carries both a record id and an index".format(
+            where))
+
+    if "id" in data:
+        expected_type = data.get("type")
+        findings = _validate_tier_record(
+            data, expected_type, roster, registered_vendors, where)
+        if findings:
+            raise _cannot("{}: archived record does not satisfy its complete contract ({})".format(
+                where, "; ".join(findings)))
+        return [data["id"]]
+
+    if "record" in data:
+        recs = data.get("record")
+        if not isinstance(recs, list):
+            return _record_ids(data, where)
+        if not recs:
+            return _record_ids(data, where)
+        first = recs[0]
+        expected_type = first.get("type") if isinstance(first, dict) else None
+        ids = _record_ids(data, where, roster, expected_type, registered_vendors)
+        duplicate_findings = _opf_schema.check_unique_ids(ids)
+        if duplicate_findings:
+            raise _cannot("{}: archived destination index has duplicate ids ({})".format(
+                where, "; ".join(duplicate_findings)))
+        return ids
+
+    raise _cannot("{}: archived destination is neither a full record nor a `{{schema, record}}` "
+                  "index".format(where))
+
+
+def _archive_ids(store_root_fd, machine_rel, roster, registered_vendors=frozenset()):
+    """Enumerate ids across `<machine>/archive/<year>/archive.toml`, fail-closed.
+
+    Archive years are real no-follow directories named by four digits. Each archive.toml is a closed
+    `{schema, moved}` table whose `moved` value is a non-empty array. A record entry is exactly
+    `{id, destination}`; its destination is machine-relative, is prefixed with `machine_rel`, is opened
+    no-follow through _read_toml, and must be a complete supported record or homogeneous index carrying
+    that id exactly once.
+
+    Spec 12 additionally requires every moved worklog span, but does not define its archive-entry or
+    destination schema. U7 therefore explicitly refuses entries carrying `span` or `worklog_span`, and
+    refuses an individual WL id because worklog rotation is span-based. It never seats a partially
+    understood worklog archive entry."""
     archive_rel = "{}/{}".format(machine_rel, ARCHIVE_DIRNAME)
     years = _dir_entries_no_symlink(store_root_fd, archive_rel)
     if years is None:
         return []
+
     ids = []
     for year in years:
         if not _ARCHIVE_YEAR_RE.match(year):
@@ -458,6 +427,7 @@ def _archive_ids(store_root_fd, machine_rel):
         data = _read_toml(store_root_fd, rel)
         if data is None:
             raise _cannot("{}: an archive year must carry a parseable archive.toml (spec 12)".format(rel))
+
         unknown = set(data) - {"moved", "schema"}
         if unknown:
             raise _cannot("{}: an archive.toml carries unknown top-level key(s): {} (a `{{schema, moved}}` "
@@ -465,39 +435,58 @@ def _archive_ids(store_root_fd, machine_rel):
                               rel, ", ".join(_opf_store._sorted_key_names(unknown))))
         asc = data.get("schema")
         if asc is not None and (type(asc) is not int or asc != SCHEMA):
-            raise _cannot("{}: archive schema {!r} is not the supported schema {}".format(rel, asc, SCHEMA))
+            raise _cannot("{}: archive schema {!r} is not the supported schema {}".format(
+                rel, asc, SCHEMA))
         moved = data.get("moved")
         if not isinstance(moved, list) or not moved:
-            # B3: an archive year exists only because a rotation moved at least one record (spec 12), so an
-            # absent, non-list, or EMPTY `moved` is a malformed archive that archived nothing, fail-closed.
-            raise _cannot("{}: `moved` must be a NON-EMPTY array of {{id, destination}} tables enumerating "
-                          "every moved record and its destination (spec 12); an empty or non-list `moved` "
-                          "is an archive year with no archived records".format(rel))
+            raise _cannot("{}: `moved` must be a NON-EMPTY array enumerating every moved record or "
+                          "worklog span and its destination (spec 12); an empty or non-list `moved` is "
+                          "an archive year with no archived content".format(rel))
+
         for j, entry in enumerate(moved):
             if not isinstance(entry, dict):
-                raise _cannot("{}: moved[{}] must be a {{id, destination}} table enumerating a moved record "
-                              "and its destination (spec 12); a bare id carries no destination".format(
-                                  rel, j))
+                raise _cannot("{}: moved[{}] must be a table enumerating moved content and its "
+                              "destination (spec 12)".format(rel, j))
+            if "span" in entry or "worklog_span" in entry:
+                raise _cannot("{}: moved[{}] is a worklog-span archive entry; U7 cannot fully validate "
+                              "worklog-span archives until their on-disk entry and destination schemas "
+                              "release, so it refuses the archive (spec 12)".format(rel, j))
+
             entry_extra = set(entry) - {"id", "destination"}
             if entry_extra:
-                raise _cannot("{}: moved[{}] carries unknown key(s): {} (a moved entry is a closed "
+                raise _cannot("{}: moved[{}] carries unknown key(s): {} (a record entry is a closed "
                               "{{id, destination}}; spec 12)".format(
                                   rel, j, ", ".join(_opf_store._sorted_key_names(entry_extra))))
             mid = entry.get("id")
             shape = _opf_schema._valid_id_shape(mid)
             if shape is None:
                 raise _cannot("{}: moved[{}] id {!r} is malformed".format(rel, j, mid))
+            if shape[0] == "WL":
+                raise _cannot("{}: moved[{}] names individual worklog id {!r}, but spec 12 archives "
+                              "worklog spans; U7 cannot fully validate the undisclosed span shape and "
+                              "therefore refuses it".format(rel, j, mid))
             if shape[0] not in _opf_schema.RECORD_NAMESPACES:
-                # CLASS 3(iv): a moved id whose namespace is bound to NO record type is a PHANTOM archive
-                # entry (spec 8.1/8.2): it can correspond to no real archived record, so it is never seated
-                # in the uniqueness union nor resolved as an existing duplicate/link target. Fail-closed.
                 raise _cannot("{}: moved[{}] id {!r} uses namespace {!r} bound to no record type (a phantom "
                               "archive entry; spec 8.1/8.2)".format(rel, j, mid, shape[0]))
+
             dest = entry.get("destination")
             if not (isinstance(dest, str) and dest and _opf_store._is_contained_relpath(dest)):
                 raise _cannot("{}: moved[{}] ({}) must carry a `destination` naming its archived record's "
                               "contained location (spec 12); a moved id with no destination is a malformed "
                               "archive entry, fail-closed".format(rel, j, mid))
+
+            destination_rel = "{}/{}".format(machine_rel, dest)
+            destination_data = _read_toml(store_root_fd, destination_rel)
+            if destination_data is None:
+                raise _cannot("{}: moved[{}] ({}) names missing archived destination {}; an id cannot be "
+                              "seated without its archived record (spec 12)".format(
+                                  rel, j, mid, destination_rel))
+            destination_ids = _archived_destination_ids(
+                destination_data, destination_rel, roster, registered_vendors)
+            if destination_ids.count(mid) != 1:
+                raise _cannot("{}: moved[{}] names id {!r}, but archived destination {} carries that id "
+                              "{} times; the destination must carry the exact id once (spec 12)".format(
+                                  rel, j, mid, destination_rel, destination_ids.count(mid)))
             ids.append(mid)
     return ids
 
@@ -579,22 +568,18 @@ def _dir_entries_no_symlink(store_root_fd, rel):
 
 
 def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozenset(), skip_run_id=None):
-    """Every staged id across every sibling run under `<machine>/imports/` (spec 11: staging is a location
-    the R6 union covers). A sibling's own on-disk `*.index.toml` and `worklog.toml` under `candidate/` and
-    `fragments/` ARE the authoritative index of its staged ids, so an incomplete sibling (no report.toml)
-    still enumerates what it wrote; only an unreadable/unparseable/contract-malformed sibling artefact is
-    CANNOT-EVALUATE. Each present sibling index is held to its COMPLETE record contract via _record_ids,
-    the file's type taken from its name (`<type>.index.toml` -> `<type>`, `worklog.toml` -> `worklog`).
-    CLASS 3(a): a module-tier sibling index is held to the same identity contract as an active module
-    record, so a malformed (namespace/type-mismatched) module-tier sibling record is CANNOT-EVALUATE rather
-    than an id-only read; an unknown sibling index type is CANNOT-EVALUATE. A symlinked (or otherwise
-    non-directory) `imports/` entry is CANNOT-EVALUATE, never silently omitted (F4). `skip_run_id`, when
-    set, excludes this run's own just-claimed dir from the sweep so it does not self-collide on its own
-    indexes during the post-claim re-check (F2)."""
+    """Enumerate staged ids across sibling runs under `<machine>/imports/`.
+
+    Every candidate/fragments index is read through _record_ids. Baseline and importer records receive
+    complete validation; ANY non-empty module-tier sibling index is CANNOT-EVALUATE until the module
+    schemas release. Unknown index types and malformed sibling artefacts are refused. An incomplete
+    sibling still enumerates artefacts already written. Symlinked/non-directory entries are refused.
+    `skip_run_id` excludes this run during the post-claim re-check."""
     imports_rel = "{}/{}".format(machine_rel, IMPORTS_DIRNAME)
     runs = _dir_entries_no_symlink(store_root_fd, imports_rel)
     if runs is None:
         return []
+
     ids = []
     for run in runs:
         if skip_run_id is not None and run == skip_run_id:
@@ -606,14 +591,15 @@ def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozense
                 continue
             for entry in names:
                 if entry.endswith(".index.toml"):
-                    etype = entry[:-len(".index.toml")]
+                    expected_type = entry[:-len(".index.toml")]
                 elif entry == "worklog.toml":
-                    etype = "worklog"
+                    expected_type = "worklog"
                 else:
                     continue
                 rel = "{}/{}".format(sub_rel, entry)
-                ids.extend(_record_ids(_read_toml(store_root_fd, rel), rel, roster, etype,
-                                       registered_vendors))
+                ids.extend(_record_ids(
+                    _read_toml(store_root_fd, rel), rel, roster, expected_type,
+                    registered_vendors))
     return ids
 
 
@@ -713,19 +699,18 @@ def _registered_vendors(store_root_fd, machine_rel):
     return frozenset(registered)
 
 
-def _active_store_ids(store_root_fd, machine_rel, active_types, roster, registered_vendors=frozenset()):
-    """Every id in the WHOLE active store: each ENABLED active type's own `<type>.index.toml` PLUS the
-    active worklog.toml PLUS the archive (spec 11: uniqueness is whole-store, so an id sitting in a
-    DIFFERENT active index than its minting type, INCLUDING an enabled module-tier index, is SEEN, not read
-    as absent; B2/F3). `active_types` already excludes worklog (its ids come from worklog.toml, read via
-    _worklog_ids). CLASS 3: every active record is routed through the full record contract (baseline
-    complete, module-tier identity), so a present-but-malformed active record is CANNOT-EVALUATE.
-    Fail-closed on any unreadable or contract-malformed input."""
+def _active_store_ids(store_root_fd, machine_rel, active_types, roster,
+                      registered_vendors=frozenset()):
+    """Enumerate every supported id in the active inline store plus archive.
+
+    Baseline/importer indexes and worklog receive complete validation. Module indexes may be absent or
+    empty only; any non-empty module index is refused. Archive entries are seated only after their
+    destination payload opens and confirms the exact id."""
     ids = []
     for type_name in sorted(active_types):
         ids.extend(_index_ids(store_root_fd, machine_rel, type_name, roster, registered_vendors))
     ids.extend(_worklog_ids(store_root_fd, machine_rel, roster, registered_vendors))
-    ids.extend(_archive_ids(store_root_fd, machine_rel))
+    ids.extend(_archive_ids(store_root_fd, machine_rel, roster, registered_vendors))
     return ids
 
 
@@ -1021,6 +1006,11 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
     # existence/target authority, and the re-check so a malformed record at ANY tier is CANNOT-EVALUATE.
     registered_vendors = _registered_vendors(store_root_fd, machine_rel)
 
+    # Refuse every non-empty active module index before any ordinary active index, worklog, or archive
+    # reader can seat an id. _record_ids repeats the refusal during later reads to close a race.
+    _refuse_nonempty_module_indexes(
+        store_root_fd, machine_rel, roster, registered_vendors)
+
     # --- walk the plan, minting candidate and quarantine records ------------------------------------
     candidate_records = {}   # type_name -> [record model]
     lf_records = []
@@ -1096,16 +1086,12 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                 rec = copy.deepcopy(model)
                 rec["id"] = rid
                 # CLASS 6 (record-level source provenance): EVERY mapped/split candidate carries a
-                # record-level provenance ref (source path + content digest + span + run id), whether or not
-                # the source supplied its timestamps, so nothing is staged without a traceable origin
-                # (reference-capture). CLASS 2 (never fabricate, stage with omission): created_at and
-                # updated_at are the ORIGINAL item's history; an instant the source omits is UNKNOWN and is
-                # NEVER stamped from the staging clock (timestamp-from-clock). The SAME provenance ref records
-                # each omitted instant as unknown, and the spec-8.3 importer exception (created_at today;
-                # updated_at once region G lands) then ACCEPTS the omission, so the candidate is STAGED with
-                # that field omitted (spec 14.1 import posture), never rejected and never fabricated. (The
-                # legacy_fragment quarantine record below is a NEW importer artefact whose lifecycle begins at
-                # THIS import, so its created_at/updated_at legitimately read the clock: a genuine now-event.)
+                # record-level provenance ref (source path + content digest + span + run id), so nothing
+                # accepted has an untraceable origin. CLASS 2: created_at and updated_at describe the
+                # original item's history and are never fabricated from the staging clock. The importer
+                # exception may admit an omitted created_at when provenance is present; updated_at remains
+                # required by validate_record, so its omission is refused. A legacy_fragment is a new
+                # importer artefact and legitimately receives this import's observed clock instant.
                 # CLASS 2 (created_at set-once vs updated_at mutable, the omission asymmetry): created_at
                 # records a CREATION instant, set once and never rewritten, so spec 8.3 lets an importer
                 # OMIT it (recording the unknown via provenance) and the record still validates. updated_at
@@ -1232,10 +1218,9 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             raise _finding("worklog release-boundary: {}".format("; ".join(wl_findings)))
 
     # --- R6 uniqueness over the WHOLE active store + archive + siblings + minted ids (spec 11) -------
-    # B2/F3/F4: one assembly path scans every ENABLED active type index (baseline + enabled module-tier),
-    # the active worklog, and the archive, plus every sibling run (a symlinked sibling or archive year is
-    # refused, not dropped), so an id in a non-minting active index, a module-tier index, or a symlinked
-    # sibling is SEEN rather than read as absent.
+    # One assembly path scans every supported active index, the active worklog, verified archive
+    # destinations, and every sibling run. A non-empty module-tier index, unreadable/symlinked tier, or
+    # archive destination that cannot confirm its declared id is CANNOT-EVALUATE, never partially seated.
     dup_findings = _opf_schema.check_unique_ids(
         _uniqueness_union(store_root_fd, machine_rel, active_types, roster, minted_ids, registered_vendors))
     if dup_findings:
@@ -1259,20 +1244,18 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                        migration_incomplete=bool(lf_records))
 
 
-def _existing_id_set(store_root_fd, machine_rel, active_types, roster, registered_vendors=frozenset()):
-    """The set of ids that exist across the WHOLE active store (every ENABLED active type's index PLUS the
-    active worklog.toml) and the archive: the authority a `duplicate` target and a candidate link must
-    resolve against (B2/B7). CLASS 3: every active record is routed through the full record contract
-    (baseline complete, module-tier identity, worklog complete), so a present-but-malformed active record
-    is CANNOT-EVALUATE, never resolved as a valid target. Reuses the same enabled active-type set the R6
-    union scans, so a module-tier target (e.g. MA-1 under [modules] governance) resolves; the active
-    worklog is read via _worklog_ids, since `worklog.index.toml` does not exist, so a valid active WL-n
-    target resolves through the correct reader. Fail-closed on any unreadable/unparseable input."""
+def _existing_id_set(store_root_fd, machine_rel, active_types, roster,
+                     registered_vendors=frozenset()):
+    """Build the durable existing-id authority for duplicate targets and candidate links.
+
+    Baseline/importer active records and worklog entries are fully validated. Non-empty module indexes
+    are refused rather than used as targets. Archived ids enter the authority only after their destination
+    record/index opens and confirms that exact id."""
     ids = set()
     for type_name in active_types:
         ids.update(_index_ids(store_root_fd, machine_rel, type_name, roster, registered_vendors))
     ids.update(_worklog_ids(store_root_fd, machine_rel, roster, registered_vendors))
-    ids.update(_archive_ids(store_root_fd, machine_rel))
+    ids.update(_archive_ids(store_root_fd, machine_rel, roster, registered_vendors))
     return ids
 
 
@@ -1485,13 +1468,16 @@ def self_test():
         return {"type": "backlog_item", "status": "open", "title": "Imported item",
                 "actor": {"kind": "importer"}, "updated_at": "2026-01-01T00:00:00Z"}
 
+    def bi_record_text(rid="BI-1"):
+        """A complete backlog_item record suitable for an index row or archived record file."""
+        return ('id = "{}"\ntype = "backlog_item"\nstatus = "open"\ntitle = "x"\n'
+                'created_at = "2026-01-01T00:00:00Z"\n'
+                'updated_at = "2026-01-01T00:00:00Z"\n'
+                'actor = {{ kind = "maintainer" }}\n').format(rid)
+
     def bi_index_text(rid="BI-1"):
-        """A FULLY VALID backlog_item index (all envelope fields present), so a sibling or active fixture is
-        a genuine VALID store under the complete-contract sibling validation (B4) and the whole-store union
-        (M11: clean fixtures are VALID stores)."""
-        return ('schema = 1\n\n[[record]]\nid = "{}"\ntype = "backlog_item"\n'
-                'status = "open"\ntitle = "x"\ncreated_at = "2026-01-01T00:00:00Z"\n'
-                'updated_at = "2026-01-01T00:00:00Z"\nactor = {{ kind = "maintainer" }}\n').format(rid)
+        """A complete inline backlog_item index."""
+        return "schema = 1\n\n[[record]]\n" + bi_record_text(rid)
 
     def plan_mapped(source_len):
         return {"fragments": {"a.txt": [
@@ -1578,11 +1564,16 @@ def self_test():
         check("4-active-collision-finding", res5.verdict == 1)
         check("4-active-collision-no-run", not (machine5 / "imports").exists())
 
-        # 5: R6 archive collision: the minted id is enumerated in a synthetic archive.toml -> verdict 1.
-        root6, machine6 = build_store(sources={"a.txt": src},
-                                      extra={"archive/2026/archive.toml":
-                                             'moved = [{ id = "BI-1", destination = '
-                                             '"archive/2026/backlog_item/BI-1.toml" }]\n'})
+        # 5: an archived collision is real only when the declared machine-relative destination opens and
+        # carries the exact archived id.
+        root6, machine6 = build_store(
+            sources={"a.txt": src},
+            extra={
+                "archive/2026/archive.toml":
+                    'moved = [{ id = "BI-1", destination = '
+                    '"archive/2026/backlog_item/BI-1.toml" }]\n',
+                "archive/2026/backlog_item/BI-1.toml": bi_record_text("BI-1"),
+            })
         res6 = stage_import(root6, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("5-archive-collision-finding", res6.verdict == 1)
 
@@ -1878,30 +1869,6 @@ def self_test():
 
         # --- B2/B3/B4/B6/B7/M2 discrimination + the worklog-ledger relaxation (M11) ----------------------
 
-        # B2: the whole-store uniqueness union and the duplicate/candidate-link existence authority cover
-        # every ENABLED module-tier type, not just the baseline roster. Under [modules] governance (the
-        # self-test manifest) the MA (maintainer_action) index is active; a duplicate targeting a valid
-        # MA-1 resolves (pre-fix it was falsely rejected, the module index never scanned).
-        ma_ok = ('schema = 1\n\n[[record]]\nid = "MA-1"\ntype = "maintainer_action"\n'
-                 'status = "open"\ntitle = "x"\ncreated_at = "2026-01-01T00:00:00Z"\n'
-                 'updated_at = "2026-01-01T00:00:00Z"\nactor = { kind = "maintainer" }\n')
-        rootB2, mB2 = build_store(sources={"a.txt": src},
-                                  extra={"maintainer_action.index.toml": ma_ok})
-        dup_ma = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "target": "MA-1"}]}}
-        check("B2-module-tier-duplicate-resolves-clean",
-              stage_import(rootB2, ["a.txt"], dup_ma, now=NOW, run_nonce=NONCE).verdict == 0)
-        # B2b: an id whose namespace does not match the module index it sits in (a BI id in a
-        # maintainer_action index) is a malformed module-tier record under the identity contract (CLASS 3):
-        # CANNOT-EVALUATE, never an id-only read. A valid MA-n target still resolves (B2 first vector); a
-        # minted BI id can never validly collide inside a module index (its namespace would have to be MA),
-        # so the only such collision is a malformed record, and it fails closed.
-        ma_collide = ('schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "maintainer_action"\n'
-                      'status = "open"\ntitle = "x"\n')
-        rootB2b, mB2b = build_store(sources={"a.txt": src},
-                                    extra={"maintainer_action.index.toml": ma_collide})
-        check("B2-minted-collides-in-module-index-cannot-eval",
-              stage_import(rootB2b, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-
         # MINOR: a `duplicate` targeting a valid ACTIVE worklog WL-n resolves (the existence set reads
         # worklog.toml via _worklog_ids, not a nonexistent worklog.index.toml).
         wl_active = ('schema = 1\n\n[[entry]]\nid = "WL-1"\ndate = "2026-01-01T00:00:00Z"\n'
@@ -2061,17 +2028,6 @@ def self_test():
                                                      "record": cand_no_upd}]}},
                            now=NOW, run_nonce=NONCE).verdict == 1)
 
-        # CLASS 3 (a): a MODULE-TIER sibling index record is held to the identity contract its missing spec
-        # allows; a namespace-mismatched module record (BI-1 in a maintainer_action index) is
-        # CANNOT-EVALUATE. Pre-fix the sibling reader had no MA spec and read it id-only, so BI-1 entered the
-        # union and the minted BI-1 collided as a plain finding (verdict 1).
-        sib_ma = {"imports/{}/candidate/maintainer_action.index.toml".format(sib_run):
-                  'schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "maintainer_action"\n'
-                  'status = "open"\ntitle = "x"\n'}
-        rootC3a, mC3a = build_store(sources={"a.txt": src}, extra=sib_ma)
-        check("C3-module-sibling-malformed-cannot-eval",
-              stage_import(rootC3a, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-
         # CLASS 3 (b): a present-but-malformed ACTIVE record is CANNOT-EVALUATE, never a resolvable
         # duplicate/link target. A backlog_item with a bad status is invalid; a duplicate targeting it fails
         # closed. Pre-fix the structural id-only read seated it as a resolvable target (verdict 0).
@@ -2204,17 +2160,6 @@ def self_test():
         check("C1-boundary-backstop-cannot-eval", vbk == 2)
         check("C1-boundary-backstop-no-run", not (mBK / "imports").exists())
 
-        # CLASS 3 (module-tier envelope): a module-tier sibling record is now held to the full spec-8.3 common
-        # envelope, not an identity-only read. A maintainer_action record with the right type+namespace but
-        # MISSING the envelope (no actor, no created_at/updated_at) is CANNOT-EVALUATE. Pre-fix the identity-
-        # only read accepted it (type+namespace agreed) and staged the non-colliding run (verdict 0).
-        sib_ma_env = {"imports/{}/candidate/maintainer_action.index.toml".format(sib_run):
-                      'schema = 1\n\n[[record]]\nid = "MA-1"\ntype = "maintainer_action"\n'
-                      'status = "open"\ntitle = "x"\n'}
-        rootC3e, mC3e = build_store(sources={"a.txt": src}, extra=sib_ma_env)
-        check("C3-module-envelope-malformed-cannot-eval",
-              stage_import(rootC3e, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-
         # CLASS 3 (empty/unsupported sibling index): an index whose TYPE is unsupported is CANNOT-EVALUATE even
         # when its record list is EMPTY (an empty or unsupported index is never zero records). Pre-fix an empty
         # record list skipped the per-record type check, so the unsupported type slipped past as clean.
@@ -2309,60 +2254,62 @@ def self_test():
 
         # ======================= round-7 QA discriminating vectors =======================
 
-        # B1 (enumeration probe): EVERY id-bearing tier kind routes through the ONE validator
-        # _validate_tier_record, which now applies the CLOSED common-envelope keyset AND the general status
-        # grammar to a module-tier record (previously an OPEN keyset + any non-empty status). Enumerate
-        # every module-tier type and assert the one validator (a) accepts a clean common envelope, (b)
-        # rejects an UNKNOWN top-level key, (c) rejects an OUT-OF-GRAMMAR status; then assert a baseline tier
-        # is rejected on the same out-of-grammar status, so the probe covers every tier kind uniformly.
-        b1_roster = _roster()
-        b1_vendors = frozenset()
-        b1_all_ok = b1_unknown_caught = b1_status_caught = True
-        for _tname, (_ns, _module) in _opf_store.MODULE_TYPES.items():
-            _ok = {"id": "{}-1".format(_ns), "type": _tname, "status": "open", "title": "x",
-                   "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-                   "actor": {"kind": "maintainer"}}
-            if _validate_tier_record(_ok, _tname, b1_roster, b1_vendors, "probe"):
-                b1_all_ok = False
-            _bk = dict(_ok); _bk["surprise"] = 1
-            if not _validate_tier_record(_bk, _tname, b1_roster, b1_vendors, "probe"):
-                b1_unknown_caught = False
-            _bs = dict(_ok); _bs["status"] = "open/bogus"
-            if not _validate_tier_record(_bs, _tname, b1_roster, b1_vendors, "probe"):
-                b1_status_caught = False
-        check("B1-every-module-tier-clean-envelope-valid", b1_all_ok)
-        check("B1-every-module-tier-unknown-key-rejected", b1_unknown_caught)
-        check("B1-every-module-tier-out-of-grammar-status-rejected", b1_status_caught)
-        b1_base_bad = {"id": "BI-1", "type": "backlog_item", "status": "open/bogus", "title": "x",
-                       "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-                       "actor": {"kind": "maintainer"}}
-        check("B1-baseline-out-of-grammar-status-rejected",
-              bool(_validate_tier_record(b1_base_bad, "backlog_item", b1_roster, b1_vendors, "probe")))
+        # B1: any non-empty active or sibling module-tier index is refused because U7 has no complete
+        # module schemas. A base-tier-only store still stages. The active refusal must occur before any
+        # ordinary active index/worklog/archive reader is reached.
+        module_index = (
+            'schema = 1\n\n[[record]]\nid = "MA-9"\ntype = "maintainer_action"\n'
+            'status = "open"\ntitle = "x"\ncreated_at = "2026-01-01T00:00:00Z"\n'
+            'updated_at = "2026-01-01T00:00:00Z"\nactor = { kind = "maintainer" }\n')
+        rootB1a, mB1a = build_store(
+            sources={"a.txt": src},
+            extra={"maintainer_action.index.toml": module_index})
+        sibling_module = {
+            "imports/{}/candidate/maintainer_action.index.toml".format(sib_run): module_index
+        }
+        rootB1s, mB1s = build_store(sources={"a.txt": src}, extra=sibling_module)
+        rootB1b, mB1b = build_store(sources={"a.txt": src})
+        rootB1p, mB1p = build_store(sources={"a.txt": src})
+        (mB1p / "manifest.toml").write_text(
+            manifest_text().replace('layout = "inline"', 'layout = "per-record"'),
+            encoding="utf-8")
 
-        # B1 (end-to-end): a sibling module-tier record with an OUT-OF-GRAMMAR status, or an UNKNOWN key, is
-        # CANNOT-EVALUATE. Pre-fix the open module envelope accepted any non-empty status and any keyset, so
-        # MA-1 entered the union without colliding with the minted BI-1 and the run staged clean (verdict 0).
-        ma_env = ('created_at = "2026-01-01T00:00:00Z"\nupdated_at = "2026-01-01T00:00:00Z"\n'
-                  'actor = { kind = "maintainer" }\n')
-        sib_ma_badstatus = {"imports/{}/candidate/maintainer_action.index.toml".format(sib_run):
-                            'schema = 1\n\n[[record]]\nid = "MA-1"\ntype = "maintainer_action"\n'
-                            'status = "open/bogus"\ntitle = "x"\n' + ma_env}
-        rootB1a, mB1a = build_store(sources={"a.txt": src}, extra=sib_ma_badstatus)
-        check("B1-sibling-module-bad-status-cannot-eval",
-              stage_import(rootB1a, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-        sib_ma_unknownkey = {"imports/{}/candidate/maintainer_action.index.toml".format(sib_run):
-                             'schema = 1\n\n[[record]]\nid = "MA-1"\ntype = "maintainer_action"\n'
-                             'status = "open"\ntitle = "x"\n' + ma_env + 'surprise_key = 1\n'}
-        rootB1b, mB1b = build_store(sources={"a.txt": src}, extra=sib_ma_unknownkey)
-        check("B1-sibling-module-unknown-key-cannot-eval",
-              stage_import(rootB1b, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-        # a fully-valid sibling module record still validates and its id enters the union (non-colliding).
-        sib_ma_valid = {"imports/{}/candidate/maintainer_action.index.toml".format(sib_run):
-                        'schema = 1\n\n[[record]]\nid = "MA-9"\ntype = "maintainer_action"\n'
-                        'status = "open"\ntitle = "x"\n' + ma_env}
-        rootB1c, mB1c = build_store(sources={"a.txt": src}, extra=sib_ma_valid)
-        check("B1-sibling-module-valid-clean",
-              stage_import(rootB1c, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 0)
+        _b1_mod = sys.modules[__name__]
+        _b1_saved_readers = {
+            "_index_ids": _b1_mod._index_ids,
+            "_worklog_ids": _b1_mod._worklog_ids,
+            "_archive_ids": _b1_mod._archive_ids,
+        }
+        _b1_reader_hits = []
+
+        def _b1_spy(name, func):
+            def _wrapped(*args, **kwargs):
+                _b1_reader_hits.append(name)
+                return func(*args, **kwargs)
+            return _wrapped
+
+        for _reader_name, _reader_func in _b1_saved_readers.items():
+            setattr(_b1_mod, _reader_name, _b1_spy(_reader_name, _reader_func))
+        try:
+            resB1a = stage_import(
+                rootB1a, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+            resB1p = stage_import(
+                rootB1p, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+        finally:
+            for _reader_name, _reader_func in _b1_saved_readers.items():
+                setattr(_b1_mod, _reader_name, _reader_func)
+
+        check("B1-active-module-record-cannot-eval", resB1a.verdict == 2)
+        check("B1-active-module-refusal-is-explicit",
+              any(_MODULE_SCHEMA_REFUSAL in finding for finding in resB1a.findings))
+        check("B1-module-and-per-record-refuse-before-active-readers",
+              resB1p.verdict == 2 and _b1_reader_hits == [])
+        check("B1-sibling-module-record-cannot-eval",
+              stage_import(rootB1s, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+        check("B1-base-tier-store-stages",
+              stage_import(rootB1b, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 0)
 
         # B2: U7's inline active-store readers stage ONLY an `inline`-layout store; a `per-record`-layout
         # store is CANNOT-EVALUATE, fail-closed, before any active index is read. Pre-fix the layout was
@@ -2385,29 +2332,72 @@ def self_test():
         check("B2-per-record-hidden-collision-cannot-eval",
               stage_import(rootB2h, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
 
-        # B3: an archive.toml moved entry must carry its DESTINATION (spec 12), and an archive year must
-        # enumerate at least one moved record. A bare-id `moved = ["BI-1"]` (no destination) and an empty
-        # `moved = []` are each CANNOT-EVALUATE. Pre-fix both were accepted (a bare id enumerated with no
-        # destination; an empty list read as zero records), so a non-colliding archive staged clean.
-        arc_entry = ('moved = [{ id = "BI-1", destination = "archive/2026/backlog_item/BI-1.toml" }]\n')
-        rootB3n, mB3n = build_store(sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
-                                    extra={"archive/2026/archive.toml": 'moved = ["BI-1"]\n'})
+        # B3: record archive entries require a non-empty moved list, a destination, and an opened
+        # destination payload carrying the exact id. Worklog-span archives are explicitly refused until
+        # their on-disk schema releases.
+        arc_path = "archive/2026/backlog_item/BI-1.toml"
+        arc_entry = (
+            'moved = [{ id = "BI-1", destination = "'
+            + arc_path + '" }]\n')
+
+        rootB3n, mB3n = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={"archive/2026/archive.toml": 'moved = ["BI-1"]\n'})
         check("B3-archive-no-destination-cannot-eval",
-              stage_import(rootB3n, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-        rootB3e, mB3e = build_store(sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
-                                    extra={"archive/2026/archive.toml": 'moved = []\n'})
+              stage_import(rootB3n, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+
+        rootB3e, mB3e = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={"archive/2026/archive.toml": "moved = []\n"})
         check("B3-archive-empty-moved-cannot-eval",
-              stage_import(rootB3e, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-        # a well-formed {id, destination} archive still enumerates its id: non-colliding stages clean...
-        rootB3c, mB3c = build_store(sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
-                                    extra={"archive/2026/archive.toml": arc_entry})
-        check("B3-archive-with-destination-clean",
-              stage_import(rootB3c, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 0)
-        # ...and a minted id colliding with a well-formed archived id is still a finding (id is enumerated).
-        rootB3x, mB3x = build_store(sources={"a.txt": src},
-                                    extra={"archive/2026/archive.toml": arc_entry})
-        check("B3-archive-with-destination-collision-finding",
-              stage_import(rootB3x, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 1)
+              stage_import(rootB3e, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+
+        rootB3missing, mB3missing = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={"archive/2026/archive.toml": arc_entry})
+        check("B3-archive-missing-destination-cannot-eval",
+              stage_import(rootB3missing, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+
+        rootB3mismatch, mB3mismatch = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra={
+                "archive/2026/archive.toml": arc_entry,
+                arc_path: bi_record_text("BI-2"),
+            })
+        check("B3-archive-destination-id-mismatch-cannot-eval",
+              stage_import(rootB3mismatch, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 2)
+
+        rootB3span, mB3span = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=5",
+            extra={"archive/2026/archive.toml":
+                   'moved = [{ worklog_span = ["WL-1", "WL-5"], '
+                   'destination = "archive/2026/worklog.toml" }]\n'})
+        resB3span = stage_import(
+            rootB3span, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+        check("B3-worklog-span-explicitly-refused",
+              resB3span.verdict == 2
+              and any("worklog-span archive entry" in finding
+                      for finding in resB3span.findings))
+
+        archive_payload = {
+            "archive/2026/archive.toml": arc_entry,
+            arc_path: bi_record_text("BI-1"),
+        }
+        rootB3c, mB3c = build_store(
+            sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+            extra=archive_payload)
+        check("B3-archive-real-destination-clean",
+              stage_import(rootB3c, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 0)
+
+        rootB3x, mB3x = build_store(sources={"a.txt": src}, extra=archive_payload)
+        check("B3-archive-real-destination-collision-finding",
+              stage_import(rootB3x, ["a.txt"], plan_mapped(len(src)),
+                           now=NOW, run_nonce=NONCE).verdict == 1)
 
         # M-a: the record-level source-provenance ref's COMPONENTS are discriminated exactly (kind, locator,
         # and the note's span + source path + content digest + run id). A missing or wrong component fails
@@ -2451,42 +2441,68 @@ def self_test():
         check("M-b-worklog-unregistered-vendor-rejected",
               stage_import(rootMbN, ["a.txt"], wl_vendor_plan, now=NOW, run_nonce=NONCE).verdict == 1)
 
-        # M-c: the candidate AND worklog PRODUCTION mint sites snapshot the plan model by DEEP copy, so a
-        # later mutation of the caller's (nested) source object cannot leak into the staged record. A
-        # deepcopy spy captures each (source model, staged copy) pair at the real mint call; mutating the
-        # captured source's NESTED field afterwards must leave the staged deep copy unchanged. A shallow copy
-        # (or no copy) at a mint site fails BOTH the call-presence check and the no-leak check.
+        # M-c: capture each production deepcopy RESULT. Because stage_import enriches that same result
+        # after deepcopy returns, compare it after staging to the parsed candidate/worklog record, including
+        # the minted id and candidate provenance. Then mutate each source model to prove nested separation.
         mc_cand = {"type": "backlog_item", "status": "open", "title": "t",
                    "actor": {"kind": "importer"}, "updated_at": "2026-01-01T00:00:00Z"}
         mc_wl = {"date": "2026-02-01T00:00:00Z", "kind": "added", "summary": "n",
                  "actor": {"kind": "importer"}}
-        mc_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "record": mc_cand}]},
-                   "worklog": [mc_wl]}
-        rootMc, mMc = build_store(counters="BI=0,LF=0,WL=5", sources={"a.txt": src},
-                                  extra={"version.toml": version_text})
+        mc_plan = {
+            "fragments": {
+                "a.txt": [{"span": [0, len(src)], "state": "mapped", "record": mc_cand}]
+            },
+            "worklog": [mc_wl],
+        }
+        rootMc, mMc = build_store(
+            counters="BI=0,LF=0,WL=5", sources={"a.txt": src},
+            extra={"version.toml": version_text})
         mc_caps = []
         _mc_real_deepcopy = copy.deepcopy
-        def _mc_spy(obj, *a, **k):
-            _res = _mc_real_deepcopy(obj, *a, **k)
-            mc_caps.append((obj, _res))
-            return _res
+
+        def _mc_spy(obj, *args, **kwargs):
+            result = _mc_real_deepcopy(obj, *args, **kwargs)
+            mc_caps.append((obj, result))
+            return result
+
         copy.deepcopy = _mc_spy
         try:
             resMc = stage_import(rootMc, ["a.txt"], mc_plan, now=NOW, run_nonce=NONCE)
         finally:
             copy.deepcopy = _mc_real_deepcopy
-        mc_cand_caps = [(o, r) for (o, r) in mc_caps if o is mc_cand]
-        mc_wl_caps = [(o, r) for (o, r) in mc_caps if o is mc_wl]
+
+        mc_cand_caps = [(source, result) for source, result in mc_caps if source is mc_cand]
+        mc_wl_caps = [(source, result) for source, result in mc_caps if source is mc_wl]
+        mc_staged_cand = None
+        mc_staged_wl = None
+        if resMc.run_id:
+            mc_run = mMc / "imports" / resMc.run_id / "candidate"
+            mc_staged_cand = tomllib.loads(
+                (mc_run / "backlog_item.index.toml").read_text())["record"][0]
+            mc_staged_wl = tomllib.loads(
+                (mc_run / "worklog.toml").read_text())["record"][0]
+
         check("M-c-clean", resMc.verdict == 0)
-        check("M-c-candidate-mint-site-deepcopied", len(mc_cand_caps) == 1)
-        check("M-c-worklog-mint-site-deepcopied", len(mc_wl_caps) == 1)
+        check("M-c-candidate-mint-result-equals-parsed-staged-record",
+              len(mc_cand_caps) == 1
+              and mc_cand_caps[0][1] == mc_staged_cand
+              and isinstance(mc_staged_cand.get("id"), str)
+              and isinstance(mc_staged_cand.get("refs"), list)
+              and bool(mc_staged_cand["refs"]))
+        check("M-c-worklog-mint-result-equals-parsed-staged-record",
+              len(mc_wl_caps) == 1
+              and mc_wl_caps[0][1] == mc_staged_wl
+              and isinstance(mc_staged_wl.get("id"), str))
+
         mc_leaked = True
         if mc_cand_caps and mc_wl_caps:
-            _co, _cr = mc_cand_caps[0]
-            _wo, _wr = mc_wl_caps[0]
-            _co["actor"]["kind"] = "MUTATED-CAND"
-            _wo["actor"]["kind"] = "MUTATED-WL"
-            mc_leaked = (_cr["actor"]["kind"] != "importer") or (_wr["actor"]["kind"] != "importer")
+            cand_source, cand_result = mc_cand_caps[0]
+            wl_source, wl_result = mc_wl_caps[0]
+            cand_source["actor"]["kind"] = "MUTATED-CAND"
+            wl_source["actor"]["kind"] = "MUTATED-WL"
+            mc_leaked = (
+                cand_result["actor"]["kind"] != "importer"
+                or wl_result["actor"]["kind"] != "importer")
         check("M-c-nested-source-mutation-does-not-leak", not mc_leaked)
 
         # M-d: a handle-close OSError at the stage_import boundary (the raw os.close of the store-root fd,
