@@ -1710,14 +1710,28 @@ def self_test():
         check("oracle-www-unicode-host", _gfm_autolinks("www.é.com") != [])
         # (c) the oracle does NOT match an alphanumeric-prefixed www (matches production + cmark-gfm):
         check("oracle-www-no-alnum-prefix", _gfm_autolinks("1www.example.com") == [])
-        # round-7: the oracle compiles the shared www fragment with the SAME flags as production, so a future
-        # fragment edit (even one using verbose-sensitive chars) cannot diverge between the two. Pin the flag
-        # agreement, and a missing-dot negative case (no `www.` so neither wraps nor matches).
+        # round-8: the oracle compiles the shared www fragment with the SAME flags as production, so a future
+        # fragment edit (even one using verbose-sensitive chars) cannot diverge between the two. Pin EXACT flag
+        # -set equality (not mere containment: an added flag such as re.ASCII changes `\s` and would diverge the
+        # two while both still contain IGNORECASE|VERBOSE), AND that both carry the required IGNORECASE|VERBOSE.
         check("oracle-www-flags-match-production",
-              (_ORACLE_WWW_RE.flags & (re.IGNORECASE | re.VERBOSE)) == (re.IGNORECASE | re.VERBOSE)
-              and (_MD_AUTOLINK_TOKEN_RE.flags & (re.IGNORECASE | re.VERBOSE)) == (re.IGNORECASE | re.VERBOSE))
+              _ORACLE_WWW_RE.flags == _MD_AUTOLINK_TOKEN_RE.flags
+              and (_ORACLE_WWW_RE.flags & (re.IGNORECASE | re.VERBOSE)) == (re.IGNORECASE | re.VERBOSE))
+        # Frozen-literal closure of the whole fragment/flag-mutation class: ANY edit to the reviewed fragment
+        # source or to the compiled flag set breaks these pins, so a behaviour-changing edit cannot pass the
+        # suite green even when it mutates production and oracle together (which the equality pin alone allows).
+        check("www-fragment-frozen", _WWW_AUTOLINK_FRAGMENT == r"(?<![A-Za-z0-9])www\.[^\s<]+")
+        check("www-matcher-flags-frozen",
+              _ORACLE_WWW_RE.flags == (re.IGNORECASE | re.VERBOSE | re.UNICODE)
+              and _MD_AUTOLINK_TOKEN_RE.flags == (re.IGNORECASE | re.VERBOSE | re.UNICODE))
         check("md-text-wwwX-missing-dot-plain", _md_text("wwwX") == "wwwX")
         check("oracle-wwwX-missing-dot-no-match", _gfm_autolinks("wwwX") == [])
+        # `wwwXy` and `wwwx.com` pin the dot as LITERAL, not a wildcard (an unescaped-dot edit would wrap/match
+        # these, where the bare-`wwwX` pin stays blind: the fragment's trailing [^\s<]+ needs a char after it).
+        check("md-text-wwwXy-literal-dot-plain", _md_text("wwwXy") == "wwwXy")
+        check("oracle-wwwXy-literal-dot-no-match", _gfm_autolinks("wwwXy") == [])
+        check("md-text-wwwxdotcom-literal-dot-plain", _md_text("wwwx.com") == "wwwx.com")
+        check("oracle-wwwxdotcom-literal-dot-no-match", _gfm_autolinks("wwwx.com") == [])
         # (d) round-5: pin PRODUCTION (_md_text), not only the oracle, at every positive www boundary and a
         # Unicode host, so a production-side boundary/Unicode-host regression is caught. For each case,
         # production WRAPS the www token in a code span AND the emitted output is autolink-inert.
