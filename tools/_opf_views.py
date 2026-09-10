@@ -1899,20 +1899,28 @@ def self_test():
         # above the tested count. Replace both with CONSTRUCT-AGNOSTIC high-count BEHAVIOUR pins that assert the
         # OUTPUT at N occurrences, so a pass bounded BELOW N by ANY construct leaves a survivor and trips.
         _HC = 4096
-        check("md-text-hi-count-autolink-inert", _gfm_autolinks(_md_text(" ".join(["http://z.example"] * _HC))) == [])
+        _N = _HC + 1  # N+1 occurrences so a bound of exactly _HC leaves one survivor (off-by-one, round-17 QA)
+        check("md-text-hi-count-autolink-inert", _gfm_autolinks(_md_text(" ".join(["http://z.example"] * _N))) == [])
         check("md-text-hi-count-single-line",
-              "\n" not in _md_text(("x\n- F") * _HC) and "\r" not in _md_text(("a\r") * _HC))
-        check("md-text-hi-count-raw-angle-inert", "<" not in _md_text("<i>" * _HC))
-        check("html-comment-hi-count-dash-broken", "--" not in _html_comment_safe("-" * (_HC * 2)))
+              "\n" not in _md_text(("x\n- F") * _N) and "\r" not in _md_text(("a\r") * _N))
+        check("md-text-hi-count-crlf-single-space", _md_text("a\r\n" * _N) == "a " * _N)
+        check("md-text-hi-count-control-stripped", _MD_CTRL_RE.search(_md_text("a\x07" * _N)) is None)
+        _md_soup = _md_text("[&<>*_`!#|~" * _N)
+        check("md-text-hi-count-escape-complete",
+              not _MD_ESCAPE_RE.search(re.sub(r"\\.", "", _md_soup)) and "<" not in _md_soup and ">" not in _md_soup
+              and _md_soup.count("&") == _md_soup.count("&amp;") + _md_soup.count("&lt;") + _md_soup.count("&gt;"))
+        check("html-comment-hi-count-dash-broken", "--" not in _html_comment_safe("-" * (_N * 2)))
         check("html-comment-hi-count-single-line",
-              "\n" not in _html_comment_safe(("a\n") * _HC) and "\r" not in _html_comment_safe(("b\r") * _HC))
-        check("html-comment-hi-count-control-stripped", _MD_CTRL_RE.search(_html_comment_safe(("a\x07") * _HC)) is None)
-        # INHERENT RESIDUAL (disclose-guard-residuals): a finite corpus cannot prove the universal "every
-        # occurrence is neutralized" invariant against arbitrary future code. These pins catch a pass bounded
-        # below _HC occurrences by ANY construct (count/keyword-count/subn/maxsplit/alias/loop-break/islice);
-        # the production passes are all unbounded as shipped. A regression bounding a pass ABOVE _HC (beyond any
-        # realistic per-field cap, firing only on an input exceeding _HC occurrences) is caught by the MANDATORY
-        # review of any change to these security-critical sinks, not by this corpus.
+              "\n" not in _html_comment_safe(("a\n") * _N) and "\r" not in _html_comment_safe(("b\r") * _N))
+        check("html-comment-hi-count-crlf-single-space", _html_comment_safe("a\r\n" * _N) == "a " * _N)
+        check("html-comment-hi-count-control-stripped", _MD_CTRL_RE.search(_html_comment_safe("a\x07" * _N)) is None)
+        # INHERENT RESIDUAL (disclose-guard-residuals): record fields (e.g. refs[].locator/.note) carry NO
+        # schema size ceiling, so the neutralization passes MUST be unbounded and "every occurrence is
+        # neutralized" is a UNIVERSAL invariant a finite corpus cannot prove. These pins catch a pass bounded
+        # below _N occurrences by ANY construct (count/keyword-count/subn/maxsplit/alias/loop-break/islice);
+        # the production passes are all unbounded as shipped. A regression bounding a pass AT OR ABOVE _N,
+        # which fires only on a field with more than _N occurrences, is caught by the MANDATORY review of any
+        # change to these security-critical sinks, not by this corpus.
         # round-13 discrete witnesses (codex round-12 MAJORs): raw-HTML inertness (a multi-tag value keeps no
         # raw `<`), escape completeness (no active metacharacter survives un-escaped), and a MULTI-SOURCE header.
         check("md-text-raw-html-inert", "<" not in _md_text("benign <i> <details open>ACTIVE</details>"))
