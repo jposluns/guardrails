@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "ccc90128704f7688c3d293b8bb04813554678dbc8981d522c4c105f710fa7030"
+tree-sha256 = "c38bfacfd370d0ec406c933072690328883efd6469570c3d44cbb0175544d3d6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2241,8 +2241,8 @@ sha256 = "063bcfc743567f1b2438f33a0481453b065996f06172b17eea9f4047d41105a5"
 
 [[sources]]
 path = "SYSTEM-HARDENING.md"
-bytes = 21123
-sha256 = "9ecfe7b8abba39924f0d89d450ca858bbc44ea9e9272730724ebf34531414e2b"
+bytes = 21128
+sha256 = "98e5f2448fe25323996e8b57032ed654938aac4553929a9ea8bc7c51986923a0"
 
 [[sources]]
 path = "VERSION"
