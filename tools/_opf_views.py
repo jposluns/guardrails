@@ -1822,10 +1822,11 @@ def self_test():
         import random as _random
         _rng = _random.Random(778812)
         _fz_atoms = ["http://a.ex", "www.b.ex", "c@d.ex", "`", "``", "```", "````", "benign", "x)", "&#38;",
-                     "\\", "-", "--", "---", "_", "|"]
+                     "\\", "-", "--", "---", "_", "|", "<i>", "<details open>", "</x>", "[a]", "(b)", "*x*",
+                     "&", "<!--", "-->"]
         _fz_ends = ["\n", "\r", "\r\n"]
         _fz_marks = ["- ", "+ ", "* ", "# ", "> ", "1. ", "`", "|", "    ", "~~"]
-        _sl_ok = _al_ok = True
+        _sl_ok = _al_ok = _rh_ok = True
         for _ in range(1500):
             _p = []
             for _j in range(_rng.randint(1, 9)):
@@ -1837,16 +1838,37 @@ def self_test():
                 _sl_ok = False
             if _gfm_autolinks(_o) != []:
                 _al_ok = False
+            # raw-`<` inert: the matcher excludes `<` from every autolink token and the segment escaper
+            # entity-encodes it, so a raw `<` in output means a bounded/partial entity escape let an active
+            # tag survive (codex round-12). `>` legitimately appears inside a wrapped URL token, so only `<`
+            # (which opens a tag/comment) is the raw-HTML-inert signal.
+            if "<" in _o:
+                _rh_ok = False
         check("fuzz-md-text-single-line", _sl_ok)
         check("fuzz-md-text-autolink-inert", _al_ok)
+        check("fuzz-md-text-raw-angle-inert", _rh_ok)
+        # MULTIPLE source paths per header: a regression sanitizing only the first (or a subset) of the
+        # interpolated sources leaves a later path's --> to close the comment early (codex round-12).
         _hdr_ok = True
         _dash_atoms = ["-", "--", "---", "-->", "--!>", "a", "b", "/", "x", "."]
         for _ in range(800):
-            _path = ".working/" + "".join(_rng.choice(_dash_atoms) for _ in range(_rng.randint(1, 12))) + "/x.index.toml"
-            _h = _header({_path: b"d"})
+            _paths = {}
+            for _k in range(_rng.randint(1, 4)):
+                _seg = "".join(_rng.choice(_dash_atoms) for _ in range(_rng.randint(1, 12)))
+                _paths[".working/" + _seg + "/f" + str(_k) + ".index.toml"] = b"d"
+            _h = _header(_paths)
             if _h.count("-->") != 1 or "--!>" in _h:
                 _hdr_ok = False
         check("fuzz-header-comment-single-terminator", _hdr_ok)
+        # round-13 discrete witnesses (codex round-12 MAJORs): raw-HTML inertness (a multi-tag value keeps no
+        # raw `<`), escape completeness (no active metacharacter survives un-escaped), and a MULTI-SOURCE header.
+        check("md-text-raw-html-inert", "<" not in _md_text("benign <i> <details open>ACTIVE</details>"))
+        check("md-escape-completeness-no-bare-metachar",
+              not _MD_ESCAPE_RE.search(re.sub(r"\\.", "", _md_escape_inline("[a](b)[c](d)*e*_f_~g~|h|")))
+              and "<" not in _md_escape_inline("x<i><details>y"))
+        check("header-comment-multi-source-single-terminator",
+              _header({".working/x--a--><x open>A</x>/backlog_item.index.toml": b"d",
+                       ".working/x--a--><x open>A</x>/block.index.toml": b"e"}).count("-->") == 1)
         # Disclosed residual: the frozen pins close the matcher-edit class (any arm/flag/oracle edit is caught);
         # the exact-byte/behaviour pins + broad fuzz cover the wrapping/escaping logic on exercised shapes. An
         # edit that changes output only on an UNEXERCISED shape without touching a frozen matcher is the residual
