@@ -60,6 +60,7 @@ while `--check` (read-only drift detection) keeps working and the CLI defaults t
 refusal pending the real gate, never a fabricated one.
 """
 import hashlib
+import html
 import os
 import re
 import stat
@@ -525,54 +526,90 @@ _MD_CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # implied). The class covered is therefore complete for this sink's grammar, not a best-effort denylist.
 _MD_ESCAPE_RE = re.compile(r"([\\`*_{}\[\]()#+!|~])")
 
-# GFM EXTENDED autolinks (a GFM extension BEYOND CommonMark 2.4) turn a BARE trigger into a clickable link
-# with no surrounding angle brackets: `http://`/`https://` followed by a domain, a bare `www.` domain, and
-# a bare `email@domain`. Backslash-escaping punctuation does NOT reach these, because `:`, `/`, `.`, `@`
-# carry no inline meaning in CommonMark and are deliberately left unescaped above, so a free-text value
-# like `www.example.com` would still autolink under GFM. These patterns match each trigger so _md_text can
-# break its LITERAL form: the sub emits a numeric character reference for ONE pivotal character of the
-# trigger (`:`->`&#58;`, `.`->`&#46;`, `@`->`&#64;`), which a GFM renderer shows as that exact character,
-# so the visible text is unchanged while no literal `http://`, `https://`, `www.`, or `@` survives for the
-# autolink scanner to match. The `www`/scheme case is preserved (m.group(1)), so `WWW.`/`HTTPS://` keep
-# their casing.
-_MD_AUTOLINK_SCHEME_RE = re.compile(r"(?i)(https?)://")
-_MD_AUTOLINK_WWW_RE = re.compile(r"(?i)(www)\.")
+# GFM EXTENDED autolinks (a GFM extension beyond CommonMark 2.4) turn a BARE trigger into a clickable
+# link with no angle brackets: an `http(s)://...` URL, a bare `www.` domain, and a bare `email@domain`
+# (GFM spec 6.9, Autolinks (extension)). GitHub renders these with a POST-PROCESS that runs over the
+# parsed inline tree AFTER HTML entity references are resolved into text and adjacent text nodes are
+# consolidated, so replacing a trigger character with a numeric character reference (`&#46;`, `&#58;`,
+# `&#64;`) does NOT prevent the autolink: cmark-gfm decodes the reference back to the literal character
+# and then autolinks it. The post-process does, however, scan only TEXT nodes and never CODE nodes, so a
+# trigger inside a CODE SPAN is never autolinked. A URL/email is therefore neutralized ROBUSTLY and
+# renderer-agnostically by wrapping it in a code span (backticks): every character is preserved
+# byte-for-byte (only the font becomes monospace), the output stays byte-canon clean (backticks and
+# spaces only, no zero-width or bidi character), and a raw `<` inside the token is rendered inert too.
+# The matcher is a deliberate SUPERSET of GFM's three trigger grammars, so every form GFM would autolink
+# -- and any additional URL scheme its extension may recognise -- is wrapped; over-wrapping a token GFM
+# would not have autolinked only renders it monospace, never leaves it active. A URL/www token ends at
+# whitespace or `<` (mirroring where GFM ends a URL autolink), so a following `<tag>` is left to the
+# `<`/`>` entity escaping rather than swallowed into the span.
+_MD_AUTOLINK_TOKEN_RE = re.compile(
+    r"""(
+          [A-Za-z][A-Za-z0-9+.\-]*://[^\s<]+                          # any scheme URL (http/https/...)
+        | (?<![A-Za-z0-9])www\.[^\s<]+                                # bare www. autolink
+        | [A-Za-z0-9._%+\-]+@[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)+    # bare email address
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _md_escape_inline(s):
+    """CommonMark/HTML escape for a NON-autolink plain-text segment: backslash-escape every
+    structurally-active inline Markdown metacharacter (rendering it as the literal character with no
+    visible backslash), then entity-escape the HTML metacharacters `&`, `<`, `>` so an embedded `<!--`
+    cannot open a comment and a `<tag>` cannot pass through as raw HTML. Order is load-bearing: the
+    backslash pass never emits `&`/`<`/`>`, and the entity pass runs after it. A segment carrying none of
+    these renders byte-for-byte unchanged. This is byte-identical to the pre-F-U4AUTOLINK escape passes,
+    so every non-autolink value (every id, timestamp, SemVer, and the mixed-metacharacter goldens)
+    renders exactly as before."""
+    s = _MD_ESCAPE_RE.sub(r"\\\1", s)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _md_code_span(token):
+    """Wrap a raw autolink token in a CommonMark code span so a GFM renderer treats it as inert CODE
+    (never an autolink or raw HTML), preserving every character. The fence is one backtick longer than
+    the longest backtick run inside the token (CommonMark 6.3); when the token begins or ends with a
+    backtick, a single padding space is added inside each fence (CommonMark strips one leading + trailing
+    space from a code span that is not all-spaces), so a token that itself contains backticks still
+    renders exactly. The token is a single line (newlines already collapsed upstream) and never
+    all-spaces (it contains `://`, `www.`, or `@`), so the code span is well-formed and no padding space
+    reaches a line end (it sits before the closing fence, never trailing)."""
+    runs = re.findall(r"`+", token)
+    fence = "`" * ((max((len(r) for r in runs), default=0)) + 1)
+    pad = " " if token.startswith("`") or token.endswith("`") else ""
+    return "{f}{p}{t}{p}{f}".format(f=fence, p=pad, t=token)
 
 
 def _md_text(value):
     """Escape a free-text record field for the markdown/HTML view sink (spec 10.3). A record value is
-    DATA, never markdown or HTML structure: it must render as LITERAL text and must not forge a heading,
-    a list item, a link, emphasis, code, a table cell, an autolink, or the do-not-edit header comment.
-    Newlines and carriage returns collapse to a single space (a view field is one line), any other C0/DEL
-    control character is dropped, every structurally-active inline Markdown metacharacter is backslash-
-    escaped per CommonMark 2.4 (rendering as the literal character with no visible backslash), the HTML
-    metacharacters `&`, `<`, `>` are entity-escaped so an embedded `<!--` cannot open a comment and a
-    `<tag>` cannot pass through as raw HTML, and the GFM EXTENDED-AUTOLINK triggers (`http://`, `https://`,
-    a bare `www.`, and an email `@`) are broken with a numeric character reference for one pivotal
-    character each, so a bare URL or address renders as inert literal text rather than a clickable link.
+    DATA, never markdown or HTML structure: it must render as LITERAL text and must forge no heading,
+    list item, link, emphasis, code, table cell, raw HTML, header comment, or ACTIVE AUTOLINK.
 
-    Pass order is load-bearing. The backslash pass runs first and never emits `&`, `<`, or `>`; the entity
-    pass runs next; the autolink pass runs LAST, because it emits numeric character references (`&#58;`,
-    `&#46;`, `&#64;`) whose `&` must NOT be re-run through the `&`-entity pass, so it must follow it. The
-    autolink pass targets only `:` inside `http(s)://`, the `.` inside `www.`, and `@`, so it does not
-    touch a timestamp's `:` (no `://`) or any other value. Deterministic; a no-op on ordinary text that
-    carries none of the escapable metacharacters AND no autolink trigger, so such a value renders
-    byte-for-byte unchanged.
+    Newlines/carriage returns collapse to a single space (a view field is one line) and other C0/DEL
+    control characters are dropped; then the value is split on the GFM extended-autolink triggers. Each
+    autolink token (a bare URL, `www.` domain, or email) is wrapped in a CODE SPAN, which a GFM renderer
+    never autolinks and never treats as raw HTML, so the address renders as inert monospace text with
+    every character preserved. Every non-token segment is escaped by `_md_escape_inline`. A value with no
+    autolink trigger takes only the escape path and is byte-identical to the pre-F-U4AUTOLINK output.
 
-    Disclosed residual (disclose-guard-residuals): the autolink neutralization renders each of the four GFM
-    extended-autolink forms VISUALLY IDENTICAL via a numeric character reference, so no visible text is
-    corrupted; it relies on the consuming GFM renderer treating a numeric character reference as a node
-    boundary the autolink scanner does not cross (true for cmark-gfm / GitHub). A hypothetical renderer that
-    resolved character references BEFORE autolink scanning is outside this stated model. The CommonMark
-    angle-bracket autolink `<scheme:...>` is covered by the `<`/`>` entity pass above, not here."""
+    Disclosed residual (disclose-guard-residuals): a neutralized URL/email renders in MONOSPACE (a code
+    span) rather than proportional text; its characters are byte-identical, only the font differs. The
+    matcher is a superset of GFM's three trigger grammars (any `scheme://`, `www.`, `local@domain`), so
+    schemes beyond http/https are wrapped too. The CommonMark angle-bracket autolink `<scheme:...>` is
+    still handled by the `<`/`>` entity escaping in `_md_escape_inline`, not here. This transform does
+    NOT strip zero-width/bidi characters that the store owner's own free text may carry (only C0/DEL are
+    dropped); that pre-existing concern is the whole-corpus byte-canon gate's remit, not this sink's."""
     s = str(value)
     s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
     s = _MD_CTRL_RE.sub("", s)
-    s = _MD_ESCAPE_RE.sub(r"\\\1", s)
-    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    s = _MD_AUTOLINK_SCHEME_RE.sub(lambda m: m.group(1) + "&#58;//", s)
-    s = _MD_AUTOLINK_WWW_RE.sub(lambda m: m.group(1) + "&#46;", s)
-    return s.replace("@", "&#64;")
+    out = []
+    pos = 0
+    for m in _MD_AUTOLINK_TOKEN_RE.finditer(s):
+        out.append(_md_escape_inline(s[pos:m.start()]))
+        out.append(_md_code_span(m.group(1)))
+        pos = m.end()
+    out.append(_md_escape_inline(s[pos:]))
+    return "".join(out)
 
 
 # The generated header (spec 10.3) interpolates DISCOVERED source paths (the machine-dir component is NOT
@@ -1183,6 +1220,102 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
 
 # --- self-test (the opf.py --self-test render leg) ---------------------------------------------------
 
+# CommonMark ASCII punctuation escapable with a backslash (CommonMark 2.4); a backslash before one of
+# these yields the literal character (so `\`` is a literal backtick, NEVER a code-span fence).
+_ASCII_PUNCT = frozenset("""!"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~""")
+
+# The oracle's autolink recognisers, applied to a DECODED out-of-code text run. The left-boundary set
+# `[\s*_~(]` is GFM's extended-autolink prefix set (6.9); start-of-run also counts (a text node's first
+# byte is a valid prefix in cmark-gfm). URL triggers are the canonical `http`/`https` schemes GFM's
+# extension recognises; the tokens end at whitespace or `<`, as a GFM URL autolink does.
+_ORACLE_URL_RE = re.compile(r"(?:^|(?<=[\s*_~(]))https?://[^\s<]+", re.IGNORECASE)
+_ORACLE_WWW_RE = re.compile(r"(?:^|(?<=[\s*_~(]))www\.[A-Za-z0-9\-_][^\s<]*", re.IGNORECASE)
+_ORACLE_EMAIL_RE = re.compile(
+    r"(?:^|(?<=[\s*_~(]))[A-Za-z0-9.\-_+]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)+", re.IGNORECASE)
+
+
+def _oracle_text_runs(s):
+    """Split `s` into the maximal TEXT runs that lie OUTSIDE code spans, with backslash escapes resolved.
+    Models the two cmark-gfm facts the autolink decision turns on: (1) a code span is a run of N
+    unescaped backticks closed by the next run of EXACTLY N (CommonMark 6.3); its content is a CODE node,
+    excluded here because the autolink post-process never scans it; an unclosed opening run is literal
+    backtick text. (2) A backslash before an ASCII-punctuation character yields that literal character
+    (so `\\\\`` is literal, never a fence); a backslash before anything else is itself literal."""
+    # Pass 1: tokenize into ('text', str) / ('fence', n) atoms, honouring backslash escapes.
+    atoms, buf, i, n = [], [], 0, len(s)
+
+    def flush():
+        if buf:
+            atoms.append(("text", "".join(buf)))
+            buf.clear()
+
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt in _ASCII_PUNCT:
+                buf.append(nxt)          # escaped punctuation -> literal char, backslash removed
+                i += 2
+            else:
+                buf.append("\\")         # lone backslash is literal
+                i += 1
+            continue
+        if c == "`":
+            j = i
+            while j < n and s[j] == "`":
+                j += 1
+            flush()
+            atoms.append(("fence", j - i))
+            i = j
+            continue
+        buf.append(c)
+        i += 1
+    flush()
+    # Pass 2: match code spans (first equal-length closing fence); emit only out-of-code text runs.
+    runs, cur, k = [], [], 0
+    while k < len(atoms):
+        kind, val = atoms[k]
+        if kind == "fence":
+            close = next((m for m in range(k + 1, len(atoms))
+                          if atoms[m][0] == "fence" and atoms[m][1] == val), None)
+            if close is None:
+                cur.append("`" * val)    # unclosed run: literal backticks
+                k += 1
+            else:
+                if cur:
+                    runs.append("".join(cur)); cur = []
+                k = close + 1            # skip the code-span content and both fences
+        else:
+            cur.append(val)
+            k += 1
+    if cur:
+        runs.append("".join(cur))
+    return runs
+
+
+def _gfm_autolinks(markdown):
+    """MINIMAL cmark-gfm autolink-extension oracle for the three EXTENDED forms (www / url / email) --
+    the only autolink forms this pack must defeat. It reproduces exactly the parts of cmark-gfm's
+    autolink POST-PROCESS that decide whether a bare URL/email becomes an active link, and nothing else
+    (it is NOT a general Markdown parser). Cites GFM spec 6.9 (Autolinks (extension)).
+
+      1. Code spans are located and their content EXCLUDED (a CODE node is never autolink-scanned).
+      2. In each remaining TEXT run, backslash escapes are resolved (pass 1 above) and HTML entity
+         references are DECODED with `html.unescape` (cmark-gfm consolidates text nodes and resolves
+         references BEFORE autolinking -- precisely why a numeric-character-reference break such as
+         `www&#46;example.com` still autolinks on GitHub). Entities inside a code span are NOT decoded,
+         which is why decoding runs per out-of-code run, after code spans are removed.
+      3. The decoded run is scanned for the three triggers at a valid LEFT BOUNDARY.
+
+    Returns the list of autolinked substrings (empty when nothing autolinks)."""
+    found = []
+    for run in _oracle_text_runs(markdown):
+        text = html.unescape(run)
+        for rx in (_ORACLE_URL_RE, _ORACLE_WWW_RE, _ORACLE_EMAIL_RE):
+            found.extend(m.group(0) for m in rx.finditer(text))
+    return found
+
+
 def self_test():
     """Render-leg self-test over SYNTHETIC stores. Judged on returned exit codes and rendered bytes, never
     by grepping output. Exercises: INDEPENDENT expected-bytes goldens per view (a hand-authored expected
@@ -1409,22 +1542,73 @@ def self_test():
             nondecided_ok = False
         check("nondecided-supersedes-does-not-mark-target", nondecided_ok)
 
-        # CLASS 1 (B1): _md_text renders GFM EXTENDED autolinks INERT, not just CommonMark punctuation. A
-        # bare http://, https://, www., or email trigger is broken with a numeric character reference for
-        # one pivotal character, so no LITERAL autolink trigger survives while the visible text is
-        # unchanged. Exact bytes are pinned, so reverting the autolink pass (leaving the trigger literal)
-        # flips each assertion; the no-literal-trigger checks confirm the trigger substring is gone even
-        # mid-sentence (GFM autolinks after whitespace).
-        check("autolink-www-exact", _md_text("www.example.com") == "www&#46;example.com")
-        check("autolink-http-exact", _md_text("http://x.example") == "http&#58;//x.example")
-        check("autolink-https-exact", _md_text("https://x.example") == "https&#58;//x.example")
-        check("autolink-email-exact", _md_text("a@b.example") == "a&#64;b.example")
-        check("autolink-www-no-literal-trigger", "www." not in _md_text("see www.example.com now"))
-        check("autolink-http-no-literal-trigger", "http://" not in _md_text("at http://x.example ok"))
-        check("autolink-email-no-literal-at", "@" not in _md_text("mail a@b.example please"))
-        # Non-trigger punctuation is untouched: a timestamp's `:` (no `://`) and a plain dot must survive,
-        # so the autolink pass does not over-fire on ordinary schema-shaped text.
+        # CLASS 1 (B1, F-U4AUTOLINK): _md_text renders GFM EXTENDED autolinks INERT by wrapping each
+        # trigger in a CODE SPAN, which cmark-gfm never autolinks. Judged by RENDERING each sample through
+        # the minimal autolink oracle (_gfm_autolinks) and asserting NO active link -- not by source-byte
+        # matching, the prior test's flaw. The oracle decodes entities and skips code spans, so it models
+        # GitHub's post-process (GFM 6.9). Exact output bytes are also pinned (fidelity: characters
+        # preserved, only fenced), so reverting to the entity trick or dropping the wrap flips each check.
+
+        # (a) Oracle teeth: the RAW forms autolink, and -- decisively -- the OLD entity output STILL
+        # autolinks once entities are decoded (the render-aware proof the prior byte-only test was
+        # inadequate). These are fix-independent; they validate the oracle and document the defeat.
+        check("oracle-teeth-www-raw", _gfm_autolinks("see www.example.com now") != [])
+        check("oracle-teeth-http-raw", _gfm_autolinks("at http://x.example ok") != [])
+        check("oracle-teeth-https-raw", _gfm_autolinks("at https://x.example ok") != [])
+        check("oracle-teeth-email-raw", _gfm_autolinks("mail a@b.example please") != [])
+        check("oracle-teeth-old-entity-www", _gfm_autolinks("www&#46;example.com") != [])
+        check("oracle-teeth-old-entity-http", _gfm_autolinks("http&#58;//x.example") != [])
+        check("oracle-teeth-old-entity-email", _gfm_autolinks("a&#64;b.example") != [])
+        # The oracle does NOT over-fire on inert text (no false alarm), so a clean neutralization is
+        # trusted: a code span, a plain sentence, and a schema-shaped timestamp all yield no autolink.
+        check("oracle-no-false-alarm-codespan", _gfm_autolinks("`www.example.com`") == [])
+        check("oracle-no-false-alarm-plain", _gfm_autolinks("a normal sentence, no links.") == [])
+        check("oracle-no-false-alarm-timestamp", _gfm_autolinks("2026-01-01T00:00:00Z") == [])
+
+        # (b) The FIX renders each form inert (fails under the old entity _md_text, which still autolinks).
+        check("autolink-www-inert", _gfm_autolinks(_md_text("www.example.com")) == [])
+        check("autolink-http-inert", _gfm_autolinks(_md_text("http://x.example")) == [])
+        check("autolink-https-inert", _gfm_autolinks(_md_text("https://x.example")) == [])
+        check("autolink-email-inert", _gfm_autolinks(_md_text("a@b.example")) == [])
+        check("autolink-www-inert-midsentence", _gfm_autolinks(_md_text("see www.example.com now")) == [])
+        check("autolink-http-inert-midsentence", _gfm_autolinks(_md_text("at http://x.example ok")) == [])
+        check("autolink-email-inert-midsentence", _gfm_autolinks(_md_text("mail a@b.example please")) == [])
+        # A value mixing inline metacharacters AND an autolink: the metachars escape, the URL is fenced,
+        # and no autolink survives (exercises the escape/wrap interleave and the escaped-backtick guard).
+        check("autolink-mixed-inert", _gfm_autolinks(_md_text("*b* `c` www.x.com and a@b.example")) == [])
+
+        # (c) Exact-bytes pins (fidelity: every character preserved inside a code span). Each FAILS under
+        # the old entity output (e.g. "www&#46;example.com") and holds only for the code-span wrap.
+        check("autolink-www-exact", _md_text("www.example.com") == "`www.example.com`")
+        check("autolink-http-exact", _md_text("http://x.example") == "`http://x.example`")
+        check("autolink-https-exact", _md_text("https://x.example") == "`https://x.example`")
+        check("autolink-email-exact", _md_text("a@b.example") == "`a@b.example`")
+        # No over-fire: a schema-shaped timestamp (no `://`, `www.`, `@`) is untouched, byte-for-byte.
         check("autolink-no-overfire-timestamp", _md_text("2026-01-01T00:00:00Z") == "2026-01-01T00:00:00Z")
+        # A code-span token that itself contains backticks fences correctly (longer fence + padding).
+        check("autolink-token-with-backtick",
+              _md_text("http://x/`q`") == "`` http://x/`q` ``")
+        check("autolink-token-with-backtick-inert", _gfm_autolinks(_md_text("http://x/`q`")) == [])
+
+        # F-U4AUTOLINK byte-canon: a rendered view carrying a URL free-text field is byte-canon clean
+        # (no forbidden zero-width/bidi codepoint, no CR, single trailing newline, no trailing
+        # whitespace) AND renders the URL inert. Byte-canon is judged by the AUTHORITATIVE gate's own
+        # scan_bytes over the real body bytes, not a reimplementation; the whole-view CI byte-canon gate
+        # is the standing guarantee, this pins it at the unit level. The control body (raw URL, no wrap)
+        # is what the oracle WOULD autolink, giving the check teeth.
+        import check_byte_canon  # authoritative byte-canon leg; pure function over bytes
+        url_finding = {"id": "FN-7", "type": "finding", "status": "fixed",
+                       "title": "see http://ex.example/a?b=1&c=2 and mail a@ex.example",
+                       "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+                       "actor": {"kind": "maintainer"}}
+        url_body = render_findings({"finding": [url_finding]})
+        check("autolink-view-byte-canon-clean", check_byte_canon.scan_bytes(url_body.encode("utf-8")) == [])
+        check("autolink-view-no-active-link", _gfm_autolinks(url_body) == [])
+        check("autolink-view-oracle-teeth",
+              _gfm_autolinks("see http://ex.example/a?b=1&c=2 and mail a@ex.example") != [])
+        # The URL's raw `&` inside the code span stays literal (code, not an entity), so the address
+        # renders exactly; the value carried no autolink out.
+        check("autolink-view-url-preserved", "`http://ex.example/a?b=1&c=2`" in url_body)
 
         # CLASS 2 (B2): the generated header interpolates DISCOVERED source paths into an HTML comment; a
         # machine-dir component bearing `-->` (or the abrupt `--!>`) must NOT close the comment early. Every
