@@ -635,48 +635,85 @@ def self_test():
     _round_trips({"v": -0.0}, "signed-zero/negative")
 
     # --- arbitrary-depth vectors: emission and equality without native recursion -----------------------
-    # These discriminate the iterative rewrite: on the pre-fix recursive code each raises RecursionError.
-    # Pin the recursion limit low so depth 2500 always exceeds the effective limit regardless of the
-    # ambient value (test-hermeticity), keeping output near 6.3 MB everywhere, and restore it afterwards.
-    deep_depth = 2500
+    # Two properties that the reparser forces apart onto two depths. ITERATIVENESS: emit() must handle
+    # nesting far deeper than the interpreter's recursion limit; the pre-fix recursive emitter raises
+    # RecursionError building these, so a depth well above the pinned limit discriminates the rewrite.
+    # This depth is emitted but never reparsed: a chain of depth D emits a D-part header (both a table,
+    # [t.t...], and an array-of-tables, [[r.r...]]), and tomllib caps a key at 1000 dotted parts, raising
+    # RecursionError on the giant key on the Pythons that enforce the cap (3.12/3.13) though not on those
+    # that do not (3.14). Handing the giant key to the reparser would misread that cap as native emitter
+    # recursion, so iterativeness is checked by emission and structure alone. FIDELITY: the tomllib
+    # round-trip runs at a depth under the cap, where every reparser accepts the key. Pin the recursion
+    # limit low so the iterativeness depth always exceeds the effective limit regardless of the ambient
+    # value (test-hermeticity, and keeping emitted output bounded), and restore it afterwards.
+    iterative_depth = 2500      # above the pinned limit; emitted and structurally checked, never reparsed
+    reparse_depth = 500         # well under tomllib's 1000-part-key cap; round-tripped through the reparser
     saved_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(min(saved_limit, 2000))
     try:
+        # Iterativeness: the recursive emitter raises RecursionError building these; the iterative one
+        # does not. Emission must be deterministic and match, byte for byte, an independently constructed
+        # canonical expected vector (built here from first principles, never by calling emit), so a
+        # regressed emitter that reached full depth but produced garbage, reordered, missing, extra, or
+        # non-canonical bytes is rejected without reparsing the >1000-part key. Byte-canon cleanliness is
+        # asserted on the emitted text too.
+        for wrap, open_tok, close_tok, part, label in (
+                (lambda n: {"t": n}, "[", "]", "t", "deep/table"),
+                (lambda n: {"r": [n]}, "[[", "]]", "r", "deep/aot")):
+            model = {"leaf": 1}
+            for _ in range(iterative_depth):
+                model = wrap(model)
+            expected = "\n\n".join(
+                open_tok + ".".join([part] * i) + close_tok for i in range(1, iterative_depth + 1)
+            ) + "\nleaf = 1\n"
+            text = emit(model)
+            if text != expected:
+                failures.append("{}: depth-{} emission does not match the canonical expected bytes".format(
+                    label, iterative_depth))
+            if emit(model) != text:
+                failures.append("{}: two emissions of a depth-{} model differ (non-deterministic)".format(
+                    label, iterative_depth))
+            _byte_canon_clean(text, label + "/deep")
+
+        # Fidelity: at a depth the reparser accepts, the table and array-of-tables forms round-trip
+        # canonically, and the array-of-tables reparse preserves the full depth and the leaf value.
         deep_table = {"leaf": 1}
-        for _ in range(deep_depth):
+        for _ in range(reparse_depth):
             deep_table = {"t": deep_table}
-        _round_trips(deep_table, "deep/table")
+        _round_trips(deep_table, "deep/table-roundtrip")
 
         deep_aot = {"leaf": 1}
-        for _ in range(deep_depth):
+        for _ in range(reparse_depth):
             deep_aot = {"r": [deep_aot]}
-        _round_trips(deep_aot, "deep/aot")
+        _round_trips(deep_aot, "deep/aot-roundtrip")
         # Walk the reparse to the bottom iteratively: element order and the leaf value must survive.
         node = tomllib.loads(emit(deep_aot))
         walked = 0
         while isinstance(node, dict) and "r" in node:
             node = node["r"][0]
             walked += 1
-        if walked != deep_depth or not (isinstance(node, dict) and node.get("leaf") == 1):
-            failures.append("deep/aot: reparse did not preserve depth {} and the leaf value".format(deep_depth))
+        if walked != reparse_depth or not (isinstance(node, dict) and node.get("leaf") == 1):
+            failures.append("deep/aot: reparse did not preserve depth {} and the leaf value".format(reparse_depth))
 
+        # Model-equality holds at the full iterativeness depth (_model_equal is iterative): two
+        # independently built deep models compare equal, and a mutated deepest leaf compares unequal.
         first = {"leaf": 1}
-        for _ in range(deep_depth):
+        for _ in range(iterative_depth):
             first = {"t": first}
         second = {"leaf": 1}
-        for _ in range(deep_depth):
+        for _ in range(iterative_depth):
             second = {"t": second}
         if not _model_equal(first, second):
             failures.append("deep/model-equal: two independently built depth-{} models compared unequal".format(
-                deep_depth))
+                iterative_depth))
         node = second
         while "t" in node and isinstance(node["t"], dict):
             node = node["t"]
         node["leaf"] = 2
         if _model_equal(first, second):
             failures.append("deep/model-equal: a mutated deepest leaf was not detected as unequal")
-    except RecursionError as exc:
-        failures.append("deep/vectors: an arbitrary-depth path still recurses natively ({!r})".format(exc))
+    except (RecursionError, EmitError) as exc:
+        failures.append("deep/vectors: an arbitrary-depth path failed to emit iteratively ({!r})".format(exc))
     finally:
         sys.setrecursionlimit(saved_limit)
 
@@ -1048,7 +1085,7 @@ def self_test():
           "constrained-subset accepted and rejected shapes, byte-canon cleanliness (verified against "
           "check_byte_canon), arbitrary-depth iterative emission and equality (depth {}), cyclic-"
           "reference rejection, shared-DAG acceptance, the output-ceiling bound, and the golden byte "
-          "vector all hold".format(deep_depth))
+          "vector all hold".format(iterative_depth))
     return 0
 
 
