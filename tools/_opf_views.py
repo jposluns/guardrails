@@ -1759,6 +1759,28 @@ def self_test():
         check("md-text-strips-control", _md_text("a\x00b\x07c\x1bd\x7fe") == "abcde")
         # behaviour pin for the exact codex round-8 witness: a digit-leading email local part is neutralized.
         check("md-text-digit-email-inert", _gfm_autolinks(_md_text("1@b.example")) == [])
+        # round-10 (codex round-9 MAJOR): freeze the ORACLE www PATTERN too, not just its flags. It must
+        # compile the shared frozen fragment; an oracle-only www edit (e.g. restricting to .com) weakened
+        # detection and made the inertness invariant pass more easily while every existing pin stayed green.
+        check("oracle-www-re-frozen",
+              _ORACLE_WWW_RE.pattern == _WWW_AUTOLINK_FRAGMENT
+              and _ORACLE_WWW_RE.flags == (re.IGNORECASE | re.VERBOSE | re.UNICODE))
+        # round-10 (gemini round-9 7.1): freeze the inline-escape set. The golden P below omits \ _ { } +,
+        # so dropping any of those from _MD_ESCAPE_RE passed green (markdown injection in a free-text value).
+        check("md-escape-re-frozen", _MD_ESCAPE_RE.pattern == r"([\\`*_{}\[\]()#+!|~])")
+        # and exercise the escaping of each metacharacter the golden P omits (backslash/underscore/plus/braces),
+        # so a regression in _md_escape_inline or the set is caught at the behaviour level too.
+        check("md-text-escapes-backslash", _md_text("a\\b") == "a\\\\b")
+        check("md-text-escapes-underscore", _md_text("_a_") == "\\_a\\_")
+        check("md-text-escapes-plus", _md_text("a+b") == "a\\+b")
+        check("md-text-escapes-braces", _md_text("a{b}c") == "a\\{b\\}c")
+        # round-10 (gemini round-9 7.2, codex corroborated): the code-span fence must exceed the LONGEST
+        # backtick run in the token. The single-backtick autolink test could not distinguish a fence that is
+        # always 2 wide, so a url with a 2-backtick run broke out of the span and autolinked. Pin the exact
+        # fence width for a multi-run token AND the emitted-output inertness for 2- and 3-backtick-run urls.
+        check("md-code-span-2run-exact-fence", _md_text("http://y/``z") == "```http://y/``z```")
+        check("md-code-span-2run-inert", _gfm_autolinks(_md_text("http://y/``http://z.example")) == [])
+        check("md-code-span-3run-inert", _gfm_autolinks(_md_text("http://y/```http://z.example")) == [])
         # Disclosed residual: the frozen pins close the matcher-edit class (any arm/flag/oracle edit is caught);
         # the exact-byte/behaviour pins + broad fuzz cover the wrapping/escaping logic on exercised shapes. An
         # edit that changes output only on an UNEXERCISED shape without touching a frozen matcher is the residual
