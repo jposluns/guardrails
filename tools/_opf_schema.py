@@ -82,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
-    _str_token_set, _is_str_token_control, _is_item_collection, _sorted_key_names, _safe_display,
+    _str_token_set, _is_str_token_control, _is_item_collection, _safe_display,
 )
 
 # The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
@@ -266,9 +266,11 @@ def _instant_key(value):
 
 
 def _is_single_line(value):
-    """Non-empty single-line string under EVERY Unicode line boundary (splitlines catches \u2028/\u2029
-    and \x85 a plain \n/\r scan misses; Fable-10)."""
-    return isinstance(value, str) and bool(value) and value.splitlines() == [value]
+    """Non-blank single-line string under EVERY Unicode line boundary (splitlines catches \u2028/\u2029
+    and \x85 a plain \n/\r scan misses; Fable-10). Non-blank, not merely non-empty: a whitespace-only
+    title or worklog summary is rejected, harmonizing with the fix5b rejection-reason `.strip()` stance
+    (Fable-M4)."""
+    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
 
 
 def _genuine_high_water(value):
@@ -329,6 +331,16 @@ def _valid_id_shape(value):
         return None
 
 
+def _safe_key_names(keys):
+    """Order surplus keys for a finding message, each rendered through _safe_display, so a control
+    character embedded in an (untrusted) key name cannot forge an extra finding line and an oversized
+    non-decimal int key cannot crash the render. It is the newline-safe, oversized-safe render for this
+    validator's unknown-key joins (the module's own _safe_display convention); _safe_display yields a
+    total-orderable, byte-stable string for every key so the sort itself cannot raise
+    (guard-input-soundness; Fable-M2, gemini finding 3)."""
+    return sorted(_safe_display(k) for k in keys)
+
+
 def _validate_actor(record, findings):
     """Validate the `actor` table (spec 8.3). Returns the actor kind string, or None when it is absent or
     malformed (so the caller can apply the importer created_at exception on a KNOWN kind only)."""
@@ -341,7 +353,7 @@ def _validate_actor(record, findings):
         return None
     extra = set(actor) - ACTOR_KEYS
     if extra:
-        findings.append("actor unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
+        findings.append("actor unknown key(s): {}".format(", ".join(_safe_key_names(extra))))
     kind = actor.get("kind")
     if not isinstance(kind, str):
         # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the tuple
@@ -372,7 +384,7 @@ def _validate_links(record, findings):
             continue
         extra = set(link) - LINK_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_safe_key_names(extra))))
         if not isinstance(link.get("rel"), str):
             # A non-string rel (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
@@ -407,7 +419,7 @@ def _validate_refs(record, findings):
             continue
         extra = set(ref) - REF_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_safe_key_names(extra))))
         if not isinstance(ref.get("kind"), str):
             # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
@@ -650,9 +662,15 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     # exact-token frozenset at the boundary so _check_keyset's `key not in registered_vendors` is always
     # an exact-token membership over a set, never a SUBSTRING match against a bare string (a fail-open
     # that admitted an unregistered x- extension) and never a crash on a non-collection (spec 8.7; M-round3).
-    registered_vendors = _str_token_set(registered_vendors)
-
     findings = []
+    if not _is_str_token_control(registered_vendors):
+        # A malformed control (a bare string, an int, a non-string element) is SURFACED with a finding,
+        # not silently normalized to the empty set and swallowed: a manifest whose [vendors].registered is
+        # malformed must not read as "no vendors registered" without the operator learning the control was
+        # unreadable, mirroring the malformed-known_namespaces surfacing in validate_counters (guard-input-
+        # soundness; Fable-M5). The normalization below still fails closed and admits no extension.
+        findings.append("registered_vendors must be a collection of x-<vendor> strings (fail-closed)")
+    registered_vendors = _str_token_set(registered_vendors)
     tval = record.get("type")
     espec = specs.get(expected_type) if expected_type is not None else None
     if isinstance(tval, str) and tval:
@@ -867,7 +885,8 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
                                     "{!r} (spec 8.4)".format(actor_kind, to_status))
             elif to_qual is not None:
                 findings.append("a terminal transition by a {} actor lands unqualified, not {!r} "
-                                "(only assistant/automation propose, spec 8.4)".format(actor_kind, to_status))
+                                "(only assistant/automation propose, spec 8.4)".format(
+                                    _safe_display(actor_kind), to_status))
         elif to_qual is not None:
             findings.append("a non-terminal transition does not carry '/proposed', got {!r}".format(to_status))
 
@@ -896,7 +915,7 @@ def validate_counters(data, known_namespaces=None):
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(
-            ", ".join(_sorted_key_names(extra))))
+            ", ".join(_safe_key_names(extra))))
     if "schema" in data:
         if type(data.get("schema")) is not int:
             findings.append("counters.toml schema must be an integer")
@@ -1006,6 +1025,13 @@ def next_id(high, ns, known_complete=False):
                          "known_namespaces=...) and pass known_complete=True, so an absent counter cannot "
                          "read as high-water 0 and reuse an existing id (spec 8.2)".format(ns))
     n = high_water(high, ns) + 1
+    if not _genuine_high_water(n):
+        # The high-water passed _genuine_high_water (within the 4300-digit int-to-str limit), but the id it
+        # allocates is high-water + 1, which at exactly the limit overflows one digit past it; refuse with
+        # the module's OWN named message rather than let str(n) in the format below raise the raw CPython
+        # int-to-str ValueError (range-bounds closed at its root; guard-input-soundness; Fable-M3).
+        raise ValueError("cannot allocate an id for namespace {!r}: the next id number is not expressible "
+                         "under the runtime int-to-str limit ({}; spec 8.2)".format(ns, _safe_display(n)))
     return "{}-{}".format(ns, n), n
 
 
@@ -1603,7 +1629,9 @@ def self_test():
     check("g1-ratified-block-release-ok",
           validate_transition("block", "active", "released", "maintainer").status == VALID)
 
-    # ----- reconcile-draft fixes (U2 retro: Fable + codex; each vector fails pre-fix, passes post-fix) -
+    # ----- reconcile-draft fixes (U2 retro: Fable + codex). The fixN1/fixA3/fixA4-distinct/fix10/fix8/
+    # fixB1 vectors discriminate a fix landed in THIS commit (they fail or crash pre-fix); the remaining
+    # fix2/fix3/fix4/fix5*/fix6/fixC6/fixD1 vectors are retained regression guards, not fail-to-pass. -----
     _big = 10 ** 5000
     nl_env = envelope("backlog_item", 1, "open", id="BI-1" + chr(10), created_at=TS + chr(10), updated_at=TS + chr(10))
     check("fixN1-newline-record-invalid", validate_record(nl_env).status == INVALID)
@@ -1669,6 +1697,43 @@ def self_test():
     check("fixD1-reject-to-terminal-isolated-invalid", _d1.status == INVALID)
     check("fixD1-reject-to-terminal-isolated-named",
           any("rejection to a working state" in f for f in _d1.findings))
+    # ----- round-2 reconcile additions (Fable ff-QA MINOR 1-5 + gemini finding 3 at this module's
+    # shared-helper call sites). Each fix has a discriminating vector that fails or crashes pre-fix;
+    # r2fix4-normal-title-still-ok and r2fix5-wellformed-vendors-no-finding are over-reach guards. -------
+    _nines = int("9" * 4300)
+    _a_nl = dict(kind="maintainer"); _a_nl["x" + chr(10) + "y"] = 1
+    _r2f1 = validate_record(envelope("finding", 50, "open", actor=_a_nl))
+    check("r2fix1-unknownkey-newline-escaped",
+          _r2f1.status == INVALID and all(chr(10) not in f for f in _r2f1.findings))
+    _a_big = dict(kind="maintainer"); _a_big[_big] = 1
+    check("r2fix1-oversized-int-key-no-crash",
+          validate_record(envelope("finding", 51, "open", actor=_a_big)).status == INVALID)
+    _d_big = dict(); _d_big[_big] = 1
+    check("r2fix1-counters-oversized-int-key-no-crash", bool(validate_counters(_d_big)[1]))
+    _tc_nl = validate_transition("finding", "open", "fixed/proposed", "m" + chr(10) + "FORGED")
+    check("r2fix2-txn-actorkind-newline-escaped",
+          _tc_nl.status == INVALID and all(chr(10) not in f for f in _tc_nl.findings))
+    try:
+        next_id(dict(BI=_nines), "BI", known_complete=True)
+        check("r2fix3-next-id-boundary-refused", False)
+    except ValueError as _e:
+        check("r2fix3-next-id-boundary-refused",
+              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+    check("r2fix4-blank-title-invalid",
+          validate_record(envelope("finding", 52, "open", title="   ")).status == INVALID)
+    check("r2fix4-blank-summary-invalid",
+          validate_record(dict(wl, summary="   "), expected_type="worklog").status == INVALID)
+    check("r2fix4-normal-title-still-ok",
+          validate_record(envelope("finding", 53, "open", title="A real title")).status == VALID)
+    _r2f5 = validate_record(envelope("finding", 54, "open"), registered_vendors="x-aiqt")
+    check("r2fix5-malformed-vendors-surfaced",
+          _r2f5.status == INVALID and any("registered_vendors must be a collection" in f
+                                          for f in _r2f5.findings))
+    _r2f5b = envelope("finding", 55, "open")
+    _r2f5b["x-aiqt"] = dict(v="ok")
+    check("r2fix5-wellformed-vendors-no-finding",
+          not any("registered_vendors must be a collection" in f
+                  for f in validate_record(_r2f5b, registered_vendors=REG).findings))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
