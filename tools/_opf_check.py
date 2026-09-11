@@ -407,6 +407,17 @@ def _read_bytes(fd, relpath, rep):
     return raw, "ok"
 
 
+def _close_fd_quietly(fd):
+    """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
+    (EINTR / EIO / EBADF) during teardown cannot crash the validator. The store verdict is already computed
+    (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
+    never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3)."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
 def _list_contained(root_fd, reldir):
     """The immediate real subdirectory and regular-file names of `reldir` beneath root_fd, listed
     no-follow. Returns (subdirs, files) sorted, or (None, None) when `reldir` is absent. Raises StoreError
@@ -430,7 +441,14 @@ def _list_contained(root_fd, reldir):
             raise StoreError("cannot open {} no-follow ({})".format(reldir, exc))
         try:
             subdirs, files = [], []
-            for entry in sorted(os.listdir(dfd)):
+            try:
+                entries = sorted(os.listdir(dfd))
+            except OSError as exc:
+                # An I/O error listing the opened directory (EIO, ENOMEM, EBADF from an exotic fd) is a
+                # fail-closed StoreError naming the directory, never a raw OSError escaping the barrier
+                # (S1-F1); it routes through _list_dir to a named CANNOT-EVALUATE like the os.stat case.
+                raise StoreError("cannot list {} no-follow ({})".format(reldir, exc))
+            for entry in entries:
                 try:
                     est = os.stat(entry, dir_fd=dfd, follow_symlinks=False)
                 except OSError as exc:
@@ -444,9 +462,9 @@ def _list_contained(root_fd, reldir):
                                      "entry; fail-closed)".format(reldir, entry))
             return subdirs, files
         finally:
-            os.close(dfd)
+            _close_fd_quietly(dfd)
     finally:
-        os.close(pfd)
+        _close_fd_quietly(pfd)
 
 
 def _list_dir(root_fd, reldir, rep):
@@ -527,10 +545,11 @@ def _canonical_remote(url):
         # '::22' consumed as a default port (F5b).
         _default_port = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}.get(scheme.lower())
         if host.startswith("["):
-            # A bracketed IPv6 literal: a missing ']' or junk before the ':' is unresolvable (ROUND-2
-            # codex-2), never a mis-canonicalized ('[::1', path) pair that could falsely agree.
+            # A bracketed IPv6 literal: a missing ']', an EMPTY '[]' authority, or junk before the ':' is
+            # unresolvable (ROUND-2 codex-2 / Fable F3), never a mis-canonicalized ('[::1', path) or ('[]',
+            # path) pair that could falsely agree. '[' is at index 0, so rb == 1 means empty brackets.
             rb = host.find("]")
-            if rb == -1 or host[rb + 1:rb + 2] not in ("", ":"):
+            if rb <= 1 or host[rb + 1:rb + 2] not in ("", ":"):
                 return None
             hostpart, portsep, hport = host[:rb + 1], host[rb + 1:rb + 2], host[rb + 2:]
         else:
@@ -547,7 +566,13 @@ def _canonical_remote(url):
         if portsep:
             if not (hostpart and hport.isascii() and hport.isdigit()):
                 return None
-            port_i = int(hport)
+            try:
+                port_i = int(hport)
+            except ValueError:
+                # An all-ASCII-digit run long enough to trip CPython's int-conversion digit limit (>4300
+                # digits) is not a real port: unresolvable rather than a ValueError escaping the barrier
+                # (ROUND-2 codex-2, the LENGTH sibling of the Unicode-digit case the isdigit guard closes).
+                return None
             if _default_port is not None and port_i == int(_default_port):
                 host = hostpart
             else:
@@ -563,7 +588,9 @@ def _canonical_remote(url):
         lb = s.find("[")
         if lb != -1 and (lb == 0 or s[lb - 1] == "@"):
             rb = s.find("]", lb)
-            if rb == -1 or s[rb + 1:rb + 2] != ":":
+            # A missing ']', an EMPTY '[]' authority (rb == lb + 1), or a bracket not immediately followed
+            # by the host:path colon is unresolvable rather than a mis-split ('[]', path) pair (Fable F3).
+            if rb == -1 or rb == lb + 1 or s[rb + 1:rb + 2] != ":":
                 return None
             colon = rb + 1
         else:
@@ -1838,9 +1865,11 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
         rep.cant("internal: store validation raised an unexpected {} and fails closed to CANNOT-EVALUATE "
                  "({})".format(type(exc).__name__, exc))
     finally:
-        os.close(root_fd)
+        # The store verdict is already computed by the barrier above; a descriptor close that raises
+        # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (S4-F3, outside B6).
+        _close_fd_quietly(root_fd)
         if product_root_fd is not None:
-            os.close(product_root_fd)
+            _close_fd_quietly(product_root_fd)
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 
@@ -2133,6 +2162,15 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
+                elif pcanon and tcanon is None:
+                    # A dedicated LOCAL sync_target (dir:/path -> tcanon is None) names NO remote, so a
+                    # committed pointer that names a canonicalizable REMOTE contradicts it. Symmetric with
+                    # the actual-remote leg's local-target-with-a-remote finding (leg 3) and the
+                    # relocated-local committed-pointer-remote finding, so leg 2 does not silently pass a
+                    # remote pointer against a local sync_target (Fable F2).
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a local target but the "
+                                "committed pointer names a remote {} target {!r} (spec 5.6)".format(
+                                    sync_target, pointer_target.kind, pointer_target.value))
             # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
             # URL forms (https / ssh scp-style git@host:path, with or without a trailing .git) compare by
             # canonical host+path, so a valid shorthand is not rejected by a naive strip-compare (F8).
@@ -2553,6 +2591,58 @@ def self_test():
             return None
         observations = clean_prior() if obs == "clean" else obs
         return validate_store(res, observations=observations)
+
+    def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
+        """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
+        str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
+        'CHILD-DIED', or 'ERROR:<Type>' (thunk raised). Some vectors drive the whole engine over a declared
+        10**9 high-water/span (S7-F1) or a blocking FIFO read target (S7-F2); run in-process a range-expansion
+        or blocking-read REGRESSION would HANG or OOM the whole self-test. This watchdog turns such a
+        regression into a deterministic sentinel the assertion catches, without weakening the assertion (a
+        correct engine returns its real verdict token well inside the bounds). Test-harness only (self_test is
+        the sole caller); the production validator forks nothing. Requires os.fork; the caller fails closed
+        where it is absent."""
+        import signal
+        rfd, wfd = os.pipe()
+        pid = os.fork()
+        if pid == 0:                                    # child: bounded, writes one short token, never returns
+            os.close(rfd)
+            try:
+                import resource
+                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            except Exception:
+                pass
+            try:
+                signal.setitimer(signal.ITIMER_REAL, timeout_s)   # SIGALRM default-terminates the child
+            except Exception:
+                pass
+            try:
+                payload = str(thunk()).encode("utf-8", "replace")[:200]
+            except MemoryError:
+                payload = b"OOM"
+            except BaseException as exc:                 # noqa: BLE001 (child boundary: any failure -> token)
+                payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
+            try:
+                os.write(wfd, payload)
+            except OSError:
+                pass
+            os._exit(0)
+        os.close(wfd)                                    # parent
+        data = b""
+        try:
+            while True:
+                chunk = os.read(rfd, 200)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            os.close(rfd)
+        _wpid, wstatus = os.waitpid(pid, 0)
+        if not data:
+            if os.WIFSIGNALED(wstatus) and os.WTERMSIG(wstatus) == signal.SIGALRM:
+                return "TIMEOUT"
+            return "CHILD-DIED"
+        return data.decode("utf-8", "replace")
 
     try:
         # --- clean inline store ----------------------------------------------------------------------
@@ -3138,26 +3228,37 @@ def self_test():
         check("history-resurrection-invalid", r.status == INVALID)
         check("history-resurrection-named", any("C-HISTORY-RESURRECTION" in x for x in r.findings))
 
-        # --- range-bounding: a huge declared high-water and span must NOT expand (F15) ----------------
-        f = clean_machine()
-        f["counters.toml"] = counters(WL=10 ** 9)
-        big_obs = copy.deepcopy(clean_prior())
-        big_obs["prior"]["counters_high"]["WL"] = 10 ** 9
-        r = run(f, obs=big_obs)   # terminates promptly; the overhang finding carries a COUNT, not a list
-        check("f15-huge-high-water-bounded-invalid", r.status == INVALID)
-        f = clean_machine()
-        one_cl2 = make_changelog(["1.0.0"])
-        one_digs2 = freeze_digests(one_cl2, ["1.0.0"])
-        f["version.toml"] = {"schema": 1, "release": [rel_row("1.0.0", 1, 2, dig12)],
-                             "summary": [{"covers": "1.0.0", "status": "published",
-                                          "digest": one_digs2["1.0.0"]},
-                                         {"covers": "unreleased", "status": "working"}]}
-        f["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4)]}
-        f["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
-                                          "worklog_moved": [{"span": ["WL-1", "WL-1000000000"],
-                                                             "destination": "archive/2026/worklog.toml"}]}
-        r = run(f, product={"VERSION": "1.0.0\n", "CHANGELOG.md": one_cl2})   # span WL-1..WL-1e9 over 2 present
-        check("f15-huge-span-bounded-invalid", r.status == INVALID)
+        # --- range-bounding: a huge declared high-water and span must NOT expand (F15). The engine must
+        # terminate promptly (the overhang finding carries a COUNT, not a list), so the two vectors run
+        # behind a bounded child (S7-F1): a range-expansion REGRESSION would otherwise hang or OOM the
+        # suite in-process; here it trips a deterministic TIMEOUT/OOM sentinel the INVALID assertion
+        # catches. Requires os.fork; a fork-less host fails the setup check closed. ----------------------
+        if not hasattr(os, "fork"):
+            check("f15-bounded-runner-available", False)   # fail-closed: the range vectors need a bounded child
+        else:
+            f = clean_machine()
+            f["counters.toml"] = counters(WL=10 ** 9)
+            big_obs = copy.deepcopy(clean_prior())
+            big_obs["prior"]["counters_high"]["WL"] = 10 ** 9
+            _hw_root = build(f)
+            _hw_status = run_bounded(
+                lambda: validate_store(resolve_store(_hw_root), observations=big_obs).status)
+            check("f15-huge-high-water-bounded-invalid", _hw_status == INVALID)
+            f = clean_machine()
+            one_cl2 = make_changelog(["1.0.0"])
+            one_digs2 = freeze_digests(one_cl2, ["1.0.0"])
+            f["version.toml"] = {"schema": 1, "release": [rel_row("1.0.0", 1, 2, dig12)],
+                                 "summary": [{"covers": "1.0.0", "status": "published",
+                                              "digest": one_digs2["1.0.0"]},
+                                             {"covers": "unreleased", "status": "working"}]}
+            f["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4)]}
+            f["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
+                                              "worklog_moved": [{"span": ["WL-1", "WL-1000000000"],
+                                                                 "destination": "archive/2026/worklog.toml"}]}
+            _sp_root = build(f, product={"VERSION": "1.0.0\n", "CHANGELOG.md": one_cl2})   # span WL-1..WL-1e9
+            _sp_status = run_bounded(
+                lambda: validate_store(resolve_store(_sp_root), observations=clean_prior()).status)
+            check("f15-huge-span-bounded-invalid", _sp_status == INVALID)
 
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()
@@ -3412,15 +3513,112 @@ def self_test():
         check("b5-dotdot-moved-dest-no-crash",
               b5r is not None and b5r.status in (INVALID, CANNOT_EVALUATE))
 
-        # --- B4: a FIFO planted as a declared read target fails closed, never an unbounded block ------
-        if hasattr(os, "mkfifo"):
+        # --- B4: a FIFO planted as a declared read target fails closed to CANNOT-EVALUATE, never an
+        # unbounded BLOCK on the reader. The validate_store call runs behind a bounded child (S7-F2): a
+        # regression that opened the FIFO for a blocking read would HANG the suite in-process; here it trips
+        # a TIMEOUT sentinel the assertion rejects. The setup needs os.mkfifo AND os.fork, so a host missing
+        # either fails the setup check closed rather than silently skipping the no-hang guarantee. ---------
+        if not (hasattr(os, "mkfifo") and hasattr(os, "fork")):
+            check("b4-fifo-setup-available", False)   # fail-closed: cannot assert the no-hang property here
+        else:
             fifo_root = build(clean_machine(), clean_product())
             (fifo_root / "CHANGELOG.md").unlink()
             os.mkfifo(str(fifo_root / "CHANGELOG.md"))
-            fr = validate_store(resolve_store(fifo_root), observations=clean_prior())
-            check("b4-fifo-target-cannot-eval-not-hang",
-                  fr is not None and fr.status == CANNOT_EVALUATE
-                  and any("regular file" in m for m in fr.cannot_evaluate))
+
+            def _fifo_probe():
+                fr = validate_store(resolve_store(fifo_root), observations=clean_prior())
+                if (fr is not None and fr.status == CANNOT_EVALUATE
+                        and any("regular file" in m for m in fr.cannot_evaluate)):
+                    return "CANT-REGFILE"
+                return "status={}".format(None if fr is None else fr.status)
+
+            check("b4-fifo-target-cannot-eval-not-hang", run_bounded(_fifo_probe) == "CANT-REGFILE")
+
+        # --- S1-F1: an OSError from os.listdir inside _list_contained maps to a fail-closed StoreError
+        # (routed by _list_dir to a named CANNOT-EVALUATE), never a raw OSError escaping the walk; pre-fix
+        # only the os.stat leg was wrapped. Exercised by forcing os.listdir to raise over a real dir fd. ---
+        _s1_dir = base / "s1-listdir"
+        (_s1_dir / "sub").mkdir(parents=True)
+        _s1_fd = os.open(str(_s1_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _s1_orig_listdir = os.listdir
+
+        def _s1_boom_listdir(*_a, **_k):
+            raise OSError(5, "EIO (self-test injected)")
+
+        try:
+            os.listdir = _s1_boom_listdir
+            try:
+                _list_contained(_s1_fd, "sub")
+                _s1_outcome = "no-raise"
+            except StoreError:
+                _s1_outcome = "storeerror"
+            except OSError:
+                _s1_outcome = "oserror"
+        finally:
+            os.listdir = _s1_orig_listdir
+            _close_fd_quietly(_s1_fd)
+        check("s1-listdir-oserror-is-storeerror", _s1_outcome == "storeerror")
+
+        # --- S1-F1 (close leg): the _list_contained `finally` closes are guarded, so a teardown close that
+        # raises does not escape as a raw OSError; pre-fix the raw os.close there propagated (reaching a
+        # CANNOT-EVALUATE only via the far B6 barrier, spuriously downgrading a VALID store). Patch os.close
+        # to really-close-then-raise over a real dir walk and confirm _list_contained still returns its
+        # listing without raising. ------------------------------------------------------------------------
+        _s1c_dir = base / "s1-close"
+        (_s1c_dir / "sub" / "child").mkdir(parents=True)
+        (_s1c_dir / "sub" / "afile").write_text("x\n", encoding="utf-8")
+        _s1c_fd = os.open(str(_s1c_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _s1c_real_close = os.close
+
+        def _s1c_boom_close(fd):
+            try:
+                _s1c_real_close(fd)
+            except OSError:
+                pass
+            raise OSError(9, "EBADF (self-test injected)")
+
+        try:
+            os.close = _s1c_boom_close
+            try:
+                _s1c_sub, _s1c_files = _list_contained(_s1c_fd, "sub")
+                _s1c_outcome = "returned"
+            except BaseException:                          # noqa: BLE001 (any escape means the guard failed)
+                _s1c_sub = _s1c_files = None
+                _s1c_outcome = "raised"
+        finally:
+            os.close = _s1c_real_close
+            _s1c_real_close(_s1c_fd)
+        check("s1-listcontained-finally-close-guarded",
+              _s1c_outcome == "returned" and _s1c_sub == ["child"] and _s1c_files == ["afile"])
+
+        # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
+        # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
+        # swallowed rather than crash the validator after the verdict is already computed. Exercised by
+        # patching os.close to really close then raise for the whole call: post-fix the guarded finally
+        # swallows it and validate_store still returns a verdict; pre-fix the raw os.close propagated. Every
+        # production close routes through _close_fd_quietly, so the ONLY unguarded raw close pre-fix is the
+        # finally under test. -----------------------------------------------------------------------------
+        _s4_root = build(clean_machine(), clean_product())
+        _s4_res_in = resolve_store(_s4_root)               # resolve BEFORE patching os.close
+        _s4_real_close = os.close
+
+        def _s4_boom_close(fd):
+            try:
+                _s4_real_close(fd)                         # really release the fd (no leak) ...
+            except OSError:
+                pass
+            raise OSError(9, "EBADF (self-test injected)")  # ... then raise, as a hostile teardown close would
+
+        try:
+            os.close = _s4_boom_close
+            try:
+                _s4r = validate_store(_s4_res_in, observations=clean_prior())
+                _s4_outcome = "returned" if _s4r is not None else "none"
+            except OSError:
+                _s4_outcome = "raised"
+        finally:
+            os.close = _s4_real_close
+        check("s4-validate-store-finally-close-guarded", _s4_outcome == "returned")
 
         # --- B6: a pathologically deep directory chain UNDER A RECURSED namespace (the imports interior)
         # fails closed to CANNOT-EVALUATE, never a RecursionError. A deep chain OUTSIDE a managed namespace
@@ -3669,6 +3867,23 @@ def self_test():
               _f6cr is not None and any("committed pointer remote" in f and "does not agree" in f
                                         for f in _f6cr.findings))
 
+        # Fable F2: a dedicated LOCAL sync_target (dir:/path -> tcanon is None) whose committed pointer names
+        # a canonicalizable REMOTE is a C-SYNC-AGREE finding (leg 2), symmetric with the actual-remote leg's
+        # local-target-with-a-remote finding. Pre-fix leg 2 short-circuited on `tcanon and pcanon` (tcanon
+        # None) and passed the remote pointer silently. Hand-set the remote Target, since resolve_store
+        # rejects a remote committed pointer before validate_store sees it.
+        _lt = clean_machine()
+        _lt["manifest.toml"] = base_manifest()
+        _lt["manifest.toml"]["store"] = {"sync_target": "dir:/some/where"}
+        _ltres = resolve_store(build(_lt))
+        _ltres.target = classify_target("github:org/repo")
+        _ltr = validate_store(_ltres, observations={"tracked": "tracked", "actual_remote": "",
+                                                    "prior": clean_prior()["prior"]})
+        check("sync-local-target-remote-pointer-invalid", _ltr is not None and _ltr.status == INVALID)
+        check("sync-local-target-remote-pointer-named",
+              _ltr is not None and any("is a local target but the" in f
+                                       and "committed pointer names a remote" in f for f in _ltr.findings))
+
         # F-5: _canonical_remote exotic edges.
         # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon
         # inside the brackets; it canonicalizes to the same (host, path) as the ssh:// equivalent.
@@ -3700,6 +3915,19 @@ def self_test():
         check("r2-canonical-ipv6-scp-at-path-preserved",
               _canonical_remote("git@[2001:db8::1]:path@x") == ("[2001:db8::1]", "path@x"))
         check("r2-canonical-unicode-port-none", _canonical_remote("ssh://h:\u00b2/p") is None)
+        # Fable F1: an ASCII-digit port long enough to trip CPython's int() digit limit (>4300) is
+        # unresolvable, never a ValueError escaping the canonicalizer (the LENGTH sibling of the Unicode
+        # case above). Pre-fix this call raised ValueError out of _canonical_remote.
+        check("r2-canonical-long-port-none",
+              _canonical_remote("ssh://h:" + "1" * 5000 + "/p") is None)
+        # Fable F3: an EMPTY bracketed authority '[]' is unresolvable in every form (scheme with/without a
+        # port, and scp), never a mis-canonicalized ('[]', path) pair. Pre-fix these returned ('[]', 'p').
+        check("f3-canonical-empty-bracket-scheme-port-none", _canonical_remote("ssh://[]:22/p") is None)
+        check("f3-canonical-empty-bracket-scheme-noport-none", _canonical_remote("ssh://[]/p") is None)
+        check("f3-canonical-empty-bracket-scp-none", _canonical_remote("git@[]:p") is None)
+        # regression: a real bracketed IPv6 authority still canonicalizes (the empty-bracket guard is tight)
+        check("f3-canonical-nonempty-bracket-preserved",
+              _canonical_remote("ssh://[2001:db8::1]/p") == ("[2001:db8::1]", "p"))
         _r2wd = build(pr_machine, product=pr_product)
         os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
         _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)
