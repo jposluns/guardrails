@@ -10,12 +10,12 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
-  bash_absolute_paths PreToolUse  abspth  ask on a relative cd/pushd operand or redirect target in Bash
-  git_explicit_binding PreToolUse expbnd ask on an ambient git target or broad scope before relocation/publish
-  git_discard         PreToolUse  prsunc  allow/ask/deny a git command that would discard uncommitted work
-  branch_root         PreToolUse  brnrot  block branch creation from an orphaned start point
-  gate_weakening      PreToolUse  gatdis  deny a git hook bypass; ask a swallowed or truncated checker
-  commit_msg_subst    PreToolUse  sectvl  ask on shell substitution in a git commit argument
+  bash_absolute_paths PreToolUse  abspth  allow+note a relative cd/pushd operand or redirect target in Bash
+  git_explicit_binding PreToolUse expbnd allow+note an ambient git target or broad scope before relocation/publish
+  git_discard         PreToolUse  prsunc  allow / snapshot-then-allow / deny a git command that discards work
+  branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
+  gate_weakening      PreToolUse  gatdis  deny a git hook bypass; deny a swallowed or truncated checker
+  commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
 
@@ -27,37 +27,66 @@ the user's own permission flow is never bypassed, and a deny decision blocks the
 blocking error whose stderr is fed back to Claude. The Stop payload carries the final assistant text
 as last_assistant_message (there is NO stop_hook_active field in the current Stop payload).
 
-Error posture at the PreToolUse layer: FAIL CLOSED, for every control EXCEPT git_discard (whose
-deliberate boundary posture is stated below), gensrc_guard (a second stated exception, below), and
-commit_msg_subst (a third stated exception, below), and git_explicit_binding (a fourth, below). A
-fail-closed control that cannot read the input it is meant
-to cover, or is invoked in a context it does not understand, DENIES rather than waving the action
-through (per integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command
-string, or an unreadable required field all deny. A detected violation denies the same way. A clean
-pass emits NO decision and exits 0 silently.
+NO-ASK POSTURE (maintainer directive): these hooks NEVER return permissionDecision "ask". An unattended
+orchestrator must never stall waiting on a human, so there is no ask constructor at all and every decision
+is one of exactly THREE outcomes:
+  * ALLOW - a clean pass (exit 0 silent), or ALLOW-with-an-informational-note (_allow_note: exit 0 with a
+    systemMessage and NO permissionDecision, so the user's own permission flow still governs) where a
+    former ask hedged something that is BENIGN or a convention/style nudge, not a real hazard.
+  * SNAPSHOT-THEN-ALLOW - a RECOVERABLE-destructive discard: the inert refs/aiqt-recovery/ snapshot is
+    taken, then the discard is ALLOWED with a note pointing at the recovery ref; it DENIES only if the
+    warranted snapshot itself could not be created (an unrecoverable discard).
+  * DENY-and-educate - a CONFIRMED hazard (a security/integrity violation) whose message NAMES the reachable
+    correct action, so the orchestrator self-corrects and continues rather than stalling. A genuinely
+    AMBIGUOUS hazard-class action (a fallback/parse-error on a dangerous command, an unprovable
+    protected-line rewrite) denies fail-safe on the same terms.
 
-gensrc_guard (gensrc) is the SECOND stated exception: it is a registry-driven path ASK whose strongest
-outcome on a confirmed violation is itself an ask (the human approving IS the opt-out), so every branch
-it cannot clear fails SAFE to ASK rather than deny, because a branch that denied on uncertainty would
-punish uncertainty harder than certainty. An unreadable, malformed, or unknown-version registry, an
-unresolvable repo root, a target that canonicalizes outside the repo, and an unreadable payload field
-all ASK; an absent registry is the inert ALLOW; and only a missing tool_name denies (the shared
-fail-closed contract). The ASK still satisfies integ-check-fails-closed-on-unreadable in substance:
-the failure surfaces as a gate the human must clear and can never read as clean.
+READING KEY FOR "ASK"/"ASKS" BELOW (disclose-accuracy): several of these guards were ORIGINALLY built as
+three-outcome allow/ask/deny controls, and the words "ASK" and "ASKS" still appear throughout this module's
+docstrings and inline comments as HISTORICAL shorthand for that retired ask outcome and the option-classifier
+scopes it once fed. Every such occurrence is historical, not a live decision: read it as its no-ask
+resolution above - a benign or convention-level case ALLOWS (with an informational note), a recoverable
+discard is SNAPSHOT-THEN-ALLOWED, and a confirmed or genuinely-ambiguous hazard DENIES-and-educates. NO code
+path in this module emits permissionDecision "ask" (the _ask constructor is removed and the self-test's
+global invariant asserts it), so wherever the prose says a form "ASKS", "routes to ASK", "over-ASKS", or
+"fails safe to ASK", the LIVE behaviour is that no-ask resolution. Each top-level guard's own docstring
+states its current outcome explicitly under a "NO-ASK posture" heading; this key governs the finer-grained
+option-classifier and helper narration that still uses the historical term.
 
-commit_msg_subst (sectvl) is the THIRD stated exception: its strongest normal finding is an ASK, so a
-missing or unreadable command string also fails safe to ASK rather than being punished more harshly than
-a confirmed substitution. Only a missing tool_name denies under the shared fail-closed contract; a
-mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
+Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read the input it is meant to
+cover, or is invoked in a context it does not understand, DENIES rather than waving the action through (per
+integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command string, or an
+unreadable required field deny (except where the check is a pure convention nudge - abspth, expbnd - whose
+unreadable-input case allows with a note, since there is no hazard to fail closed on). A confirmed violation
+denies. A clean pass emits NO decision and exits 0 silently.
 
-git_explicit_binding (expbnd) is the FOURTH stated exception. Its strongest normal finding is an ASK, so
-an absent or unreadable command string fails safe to ASK rather than being punished more harshly than a
-confirmed ambient binding. Only a missing tool_name denies under the shared fail-closed contract; a
-mis-wired event still hard-blocks because no structured PreToolUse decision can safely be formed.
+gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
+and names the source to edit and the regenerate command. Its cannot-evaluate branches (an unreadable,
+malformed, or unknown-version registry, an unresolvable repo root, a target outside the repo, an unreadable
+payload field, a non-git session) are NOT confirmed generated-artefact edits and have no reachable "edit the
+source" action to name, and denying them would block legitimate Write/Edit/MultiEdit calls, so they ALLOW
+with a note; the CI generated-artefact drift gate remains the authoritative backstop. An absent registry is
+the inert ALLOW; only a missing tool_name denies under the shared fail-closed contract.
 
-git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" exception
-to that fail-closed rule (EN-6). It has THREE outcomes: ALLOW (exit 0 silent), DENY, and ASK
-(permissionDecision "ask", which prompts the human). UNLIKE the fail-closed controls above, it fails OPEN
+commit_msg_subst (sectvl): a backtick or $( command substitution in a git commit argument is a
+command-injection hazard the shell runs before git sees the argument, so it DENIES and names the safe
+re-issue (single quotes, escape the marker, or git commit -F <file>); the unparseable-fallback and unreadable
+-command cases deny fail-safe on the same terms. Only a mis-wired event hard-blocks (no structured decision).
+
+git_explicit_binding (expbnd): an ambient git target or a whole-tree breadth+publish is a binding CONVENTION
+where the orchestrator normally binds its own target, not a hazard, so every former ask (including the
+unreadable-command case) ALLOWS with a note.
+
+git_discard (prsunc) is a DELIBERATE, ULTRA-CONSERVATIVE "recover then allow" guard (EN-6). NO-ASK
+TRANSLATION: this control was originally an "ask unless PRISTINE and provably clean" three-outcome
+(allow/ask/deny) guard; under the no-ask directive every former ASK is now resolved WITHOUT prompting -
+a recoverable-destructive discard is SNAPSHOT-THEN-ALLOWED (the inert refs/aiqt-recovery/ snapshot is taken,
+then it is allowed with a recovery-pointer note), and it DENIES only when a warranted recovery snapshot
+cannot be created (an unrecoverable discard) or when the command cannot be classified or resolved at all (an
+inline alias, an unrecognized flagged subcommand, an unresolvable worktree). The DENY of a confirmed
+whole-tree clobber on a dirty tree is unchanged (it too carries a recovery snapshot when one could be made).
+So wherever the detailed prose below says a form "ASKS", read it as "snapshot-then-allows when recoverable,
+else denies-and-educates". UNLIKE the fail-closed controls above, it fails OPEN
 (ALLOW) at the TRUE BOUNDARY - a non-Bash or absent tool, a malformed or missing tool_input.command it
 cannot read as a discard, a non-git command, or no recognized lossy verb - because none of those is a
 discard it can reason about, and it never silently allows a recognized WORKING-TREE-CONTENT discard (a
@@ -68,10 +97,12 @@ guarantee is bounded to WORKING-TREE CONTENT and is best-effort, not categorical
 merged-branch delete, reset --soft moving HEAD) are reflog-recoverable, and the obfuscation/config residuals
 disclosed below (a fragmented git command word or verb, a git alias, ambient config) can hide a discard the
 lexical scan never sees. An UNPARSEABLE command
-(unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and ASKS when one is
-present. WITHIN scope (a recognized lossy verb: checkout/switch/restore/reset/clean/stash/
-rm/branch) the outcome is ASK unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND the
-tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive). PRISTINE
+(unbalanced quote) is not a free pass, it is scanned raw for a lossy verb keyword and, when one is present,
+takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN scope (a recognized lossy
+verb: checkout/switch/restore/reset/clean/stash/
+rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
+the tree is provably clean (or the leading opt-out is set, or the form is genuinely non-destructive), in
+which case it ALLOWS. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
 assignments the command is exactly 'git <args>' as ONE simple command, and the RAW string carries NO shell
 metacharacter anywhere EVEN INSIDE QUOTES (none of ; | & < > ( ) { } $ backtick backslash ! newline, which
@@ -169,15 +200,16 @@ def _deny(reason, banner):
             None)
 
 
-def _ask(reason, banner):
-    """A PreToolUse ASK: permissionDecision ask on exit 0, which prompts the human to confirm rather
-    than blocking outright. The recoverable middle of the git_discard three-outcome posture (allow /
-    ask / deny): used when a recognized lossy verb cannot be PROVEN safe but is not confirmed lossy."""
-    return (0, {"hookSpecificOutput": {"hookEventName": PRETOOL,
-                                       "permissionDecision": "ask",
-                                       "permissionDecisionReason": reason},
-                "systemMessage": banner},
-            None)
+def _allow_note(message):
+    """A clean pass that ALSO surfaces an informational systemMessage. permissionDecision is deliberately
+    OMITTED (so the user's own permission flow governs, exactly as _allow does), while the note explains
+    what the guard observed. This is the replacement for the retired ASK outcome on a BENIGN or
+    convention-level observation: hooks NEVER ask (an unattended orchestrator must never stall waiting on a
+    human), so where an ASK once hedged something that is not a real hazard, the call PROCEEDS and this note
+    is surfaced instead of prompting. A genuine hazard denies-and-educates (_deny); a recoverable-destructive
+    discard is snapshotted then allowed with this note. There is no ask constructor: the module cannot emit
+    permissionDecision "ask" from any path."""
+    return (0, {"systemMessage": message}, None)
 
 
 def _stop_warn(banner):
@@ -687,32 +719,49 @@ def _git_subcommand(tokens):
     return _git_subcommand_rest(tokens)[0]
 
 
+def _blob_selector_token(tok):
+    """True when a single git-show operand is a BLOB SELECTOR: the '<ref>:<path>' or ':<path>' form that
+    names a file at a revision (it contains a ':' and does NOT begin ':/'). The ':/<text>' form is git's
+    commit-MESSAGE SEARCH, which resolves to a commit and renders a diff, not a file, so it is excluded."""
+    return ":" in tok and not tok.startswith(":/")
+
+
 def _show_blob_selector(args):
-    """True when the FIRST non-option argument of a git-show argument list (the tokens AFTER the 'show'
-    subcommand) is a BLOB SELECTOR: a '<ref>:<path>' or ':<path>' form, detected as a non-option token
-    containing a ':'. In that form 'git show' prints ONE file's contents at a revision (it is `cat` against
-    a revision, the normal way to read a file on an un-checked-out branch) - no diff, no @@ hunk headers,
-    no +/- lines - so it renders no console diff. Detection stops at the first non-option token, which is
-    where git show reads its object argument; leading options ('-'/'--opt') are skipped, and an
-    end-of-options '--' makes the NEXT token the first operand, tested for the colon. A best-effort lexical
-    heuristic (colon = blob) with two disclosed residuals (disclose-guard-residuals), both a SAFE-DIRECTION
-    over-allow of at worst a small console dump for this quality guard, never an under-read: (1) a separated
-    option VALUE that happens to contain a ':' (the F-119-class limit the sibling detectors carry); (2) the
-    'git show :/<text>' commit-MESSAGE-SEARCH form, which carries a colon yet renders a commit diff rather
-    than a file (it is neither the <ref>:<path> nor the :<path> blob form). Detection errs toward reading a
-    file, not toward a false diff-dump deny."""
+    """True when a git-show argument list (the tokens AFTER the 'show' subcommand) is a pure BLOB READ:
+    it has AT LEAST ONE non-option operand and EVERY non-option operand is a blob selector (a
+    '<ref>:<path>' or ':<path>' form, per _blob_selector_token). In that form 'git show' prints each
+    named file's contents at a revision - no diff, no @@ hunk headers, no +/- lines - so it renders no
+    console diff (it is `cat` against a revision, the normal way to read a file on an un-checked-out
+    branch). git show consumes N object arguments, so a SINGLE bare ref/commit operand (no colon), or a
+    ':/<text>' commit-message SEARCH operand, among the arguments means git renders a full commit diff:
+    the command is then a diff producer, not this blob read, and falls through to DENY/ASK exactly as a
+    bare 'git show <commit>' does. Leading and interspersed options ('-'/'--opt') are skipped; an
+    end-of-options '--'/'--end-of-options' makes every following token an operand. A best-effort lexical
+    heuristic with ONE disclosed residual (disclose-guard-residuals), a SAFE-DIRECTION over-allow of at
+    worst a small console dump for this quality guard, never an under-read: a separated option VALUE that
+    happens to contain a ':' and stands as the sole apparent operand (e.g. 'git show -O opt:val' with no
+    object) could be misread as a blob selector (the F-119-class limit the sibling detectors carry).
+    Detection errs toward reading a file, not toward a false diff-dump deny."""
     i = 0
     n = len(args)
+    seen_operand = False
     while i < n:
         tok = args[i]
         if tok in _DIFF_END_OF_OPTIONS:
-            # after '--'/'--end-of-options' every token is an operand; the next is the object argument
-            return i + 1 < n and ":" in args[i + 1]
+            # after '--'/'--end-of-options' every remaining token is an operand
+            for operand in args[i + 1:]:
+                if not _blob_selector_token(operand):
+                    return False
+                seen_operand = True
+            return seen_operand
         if tok.startswith("-"):
             i += 1
             continue
-        return ":" in tok  # the first non-option operand IS git show's object argument
-    return False
+        if not _blob_selector_token(tok):
+            return False  # a bare ref/commit or ':/' search operand -> git renders a diff
+        seen_operand = True
+        i += 1
+    return seen_operand
 
 
 # --- cnsdif (Stop): the diff-wall shape --------------------------------------------------------------
@@ -1208,14 +1257,19 @@ def _diff_proof_log_listing(command):
 
 
 def _diff_proof_show_blob(command):
-    """Proof F: an EXACT 'git show <ref>:<path>' (or 'git show :<path>') BLOB READ. In this form git show
-    prints ONE file's contents at a revision - no diff, no @@ hunk headers, no +/- lines - so it is `cat`
-    against a revision, the normal way to read a file on an un-checked-out branch, and renders no console
-    diff. Requires a metacharacter-free single simple command (the conservative charset, no shell reserved
-    word, so no redirect and no pipe), the first resolved words literally 'git' and 'show', and a blob
-    selector as the first non-option argument after 'show' (_show_blob_selector). A bare 'git show <commit>'
-    (no colon-bearing first operand) is NOT this proof and stays covered (ASK, or DENY on a confirmed
-    patch). This mirrors proof B/E: EXACT-form, never a fuzzy allow."""
+    """Proof F: a 'git show' BLOB READ, admitted ONLY when EVERY non-option operand after 'show' is a
+    blob selector (a '<ref>:<path>' or ':<path>' form, per _show_blob_selector). In that form git show
+    prints each named file's contents at a revision - no diff, no @@ hunk headers, no +/- lines - so it is
+    `cat` against a revision, the normal way to read a file on an un-checked-out branch, and renders no
+    console diff. Requires a metacharacter-free single simple command (the conservative charset, no shell
+    reserved word, so no redirect and no pipe) and the first resolved words literally 'git' and 'show'.
+    If ANY non-option operand is a bare ref/commit (no colon) or a ':/<text>' commit-message SEARCH, git
+    renders a full commit diff, so the command is NOT this proof and stays covered (ASK, or DENY on a
+    confirmed patch) exactly as a bare 'git show <commit>' does; 'git show HEAD:a HEAD' and 'git show :/x'
+    are therefore not admitted. Residual (disclose-guard-residuals): a colon-bearing separated option VALUE
+    standing as the sole apparent operand (e.g. 'git show -O opt:val' with no object) could still be misread
+    as a blob selector; this is a SAFE-DIRECTION over-allow of at worst a small console dump for this quality
+    guard, never an under-read."""
     if not _DIFF_PLAIN_RE.fullmatch(command):
         return False
     words = command.split()
@@ -1274,14 +1328,12 @@ def _diff_source_fallback(command):
     summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
     unparseable command is surfaced for confirmation rather than proven either way."""
     if _RAW_DIFF_PRODUCER_RE.search(command):
-        return _ask(
-            "AIQT rule cnsdif (no-console-diff-dumps): the shared tokenizer could not parse this command "
-            "(an unbalanced quote, or a heredoc/process-substitution/other construct it does not model) "
-            "and it appears to invoke a git diff-producer. This guard deliberately does not parse the "
-            "full shell/git grammar, so it cannot prove where the output lands; confirm, or re-issue a "
-            "parseable summary form (--stat), a redirect to a real file (> file), or a pager (| less).",
-            "AIQT guardrail: asked on an unparseable command that appears to invoke a git diff-producer "
-            "(rule cnsdif).")
+        return _allow_note(
+            "AIQT guardrail (rule cnsdif, no-console-diff-dumps): the shared tokenizer could not parse this "
+            "command and it appears to invoke a git diff-producer. This is a console-readability convention, "
+            "not a hazard, so the command is allowed. If it renders a diff to the console, prefer a summary "
+            "form (--stat, --name-only), a redirect to a real file (> file), or a pager (| less) to keep the "
+            "review surface readable.")
     return _allow()
 
 
@@ -1290,9 +1342,12 @@ def diff_source_pretool(data):
     is ALLOWED only when the WHOLE command matches one of six closed proofs (exact help, exact summary, a
     benign 'git log' commit listing, an exact 'git show <ref>:<path>' blob read, a single simple command
     proven to redirect stdout to a real file, or an exact terminal pager pipeline);
-    a producer confirmed to emit a console patch and fitting no proof DENIES; any other producer-capable but
-    unproven form ASKS. Across a compound or multiple producers, DENY outranks ASK: every possible producer
-    must clear a proof, and a multi-command form is never admitted merely because one segment is safe."""
+    a producer confirmed to emit a console patch and fitting no proof DENIES-and-educates (use --stat or a
+    redirect/pager). NO-ASK posture: any other producer-capable but unproven form (a wrapper, pathed git,
+    quotes, a compound, an extra option, a dynamic redirect, a non-pager pipe) is a console-readability
+    CONVENTION, not a hazard, so it ALLOWS with an informational note rather than prompting. Across a compound
+    or multiple producers, a CONFIRMED console dump anywhere still DENIES (deny outranks the allow-note), so a
+    multi-command form is never admitted on one safe segment when another is a confirmed dump."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -1329,15 +1384,13 @@ def diff_source_pretool(data):
                 "--name-only, --name-status, --numstat), redirect the diff to a real file (> file), or "
                 "pipe it into a pager (| less), not the console.",
                 "AIQT guardrail: denied a bare console diff dump (rule cnsdif).")
-    return _ask(
-        "AIQT rule cnsdif (no-console-diff-dumps): this command is producer-capable (it can render a "
-        "version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed git, "
-        "quotes, a compound, an extra option, a dynamic redirect target, or a pipe to a non-pager. This "
-        "guard deliberately does not parse the complete shell/git option grammar; confirm it is not a "
-        "console dump, or re-issue an exact summary form (--stat), a redirect to a real file (> file), or "
-        "an exact pager pipeline (git diff | less).",
-        "AIQT guardrail: asked on a producer-capable command outside the guard's proven-safe forms "
-        "(rule cnsdif).")
+    return _allow_note(
+        "AIQT guardrail (rule cnsdif, no-console-diff-dumps): this command is producer-capable (it can "
+        "render a version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed "
+        "git, quotes, a compound, an extra option, a dynamic redirect target, or a pipe to a non-pager. "
+        "Burying the review surface is a convention, not a hazard, so it is allowed (a bare console dump the "
+        "guard CAN confirm is still denied above). If it dumps a diff to the console, prefer a summary form "
+        "(--stat), a redirect to a real file (> file), or an exact pager pipeline (git diff | less).")
 
 
 # --- cmtidn: AI identity in a git authoring command --------------------------------------------------
@@ -1666,12 +1719,12 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
 
 
 def bash_absolute_paths(data):
-    """abspth (quali/absolute-paths) Bash floor, PreToolUse on Bash: ASK when a Bash command shifts the
-    working directory through a relative cd/pushd operand, or names a relative redirection target, since
-    either resolves against a working directory that can silently differ between calls. Conservative
-    floor: it judges only those two cwd-dependent positions, defaults any relative or unresolvable one to
-    ASK (never a silent allow of such a position), does not judge an arbitrary command operand, and does
-    not deny."""
+    """abspth (quali/absolute-paths) Bash floor, PreToolUse on Bash: NO-ASK posture. Where a Bash command
+    shifts the working directory through a relative cd/pushd operand, or names a relative redirection target
+    (either resolves against a working directory that can silently differ between calls), it ALLOWS with an
+    informational note. Absolute paths are a convention, not a hazard, so this floor never asks and never
+    denies: it judges only those two cwd-dependent positions, notes any relative or unresolvable one, and
+    does not judge an arbitrary command operand."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -1683,11 +1736,12 @@ def bash_absolute_paths(data):
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command:
-        # Cannot read the command to resolve either position: the floor asks rather than silently allows.
-        return _ask(
-            "AIQT rule abspth (absolute-paths): the Bash payload carried no readable command string, so "
-            "the relative-cwd check could not run; confirm the command uses absolute paths.",
-            "AIQT guardrail: asked on a Bash call with no readable command (rule abspth).")
+        # Cannot read the command to resolve either position: allow with a note (absolute-paths is a
+        # convention nudge, not a hazard; hooks never ask).
+        return _allow_note(
+            "AIQT guardrail (rule abspth, absolute-paths): the Bash payload carried no readable command "
+            "string, so the relative-cwd check could not run. Allowing; prefer absolute paths so a command "
+            "cannot resolve against a working directory that differs between calls.")
     # Partial lex so an unparseable construct (a heredoc, here-string, process substitution, {fd} redirect,
     # or an unbalanced quote or escape) no longer discards every segment before it: a resolvable relative
     # cd/redirect in the parseable PREFIX still ASKS. Only a cd/redirect position WITHIN or AFTER the
@@ -1713,22 +1767,28 @@ def bash_absolute_paths(data):
         for reason in reasons:  # de-duplicate while preserving order so the banner stays bounded
             if reason not in seen:
                 seen.append(reason)
-        return _ask(
-            "AIQT rule abspth (absolute-paths): this command carries {} that resolve(s) against the "
-            "current working directory, which can silently differ between calls. Re-issue with absolute "
-            "paths, or confirm the working directory is the intended one.".format("; ".join(seen)),
-            "AIQT guardrail: asked on a relative cd or redirection target in a Bash command "
-            "(rule abspth).")
+        return _allow_note(
+            "AIQT guardrail (rule abspth, absolute-paths): this command carries {} that resolve(s) against "
+            "the current working directory, which can silently differ between calls. This is a convention "
+            "nudge, not a hazard, so it is allowed; prefer absolute paths, or ensure the working directory is "
+            "the intended one.".format("; ".join(seen)))
     return _allow()
 
 
 # --- prsunc: a git discard that would lose uncommitted work ------------------------------------------
-# ULTRA-CONSERVATIVE "ask unless PRISTINE and provably clean" guard (EN-6, EN-6 hardening pass over the
-# GD-41 coarse cut). For a command that names any recognized lossy git verb (checkout incl -B force-create,
-# switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force delete/move/copy/reset)
-# the outcome is ASK unless the command is a PRISTINE SINGLE
-# BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING opt-out
-# is set). Three outcomes:
+# ULTRA-CONSERVATIVE "recover then allow" guard (EN-6, EN-6 hardening pass over the GD-41 coarse cut).
+# NO-ASK TRANSLATION (maintainer directive): this control was originally an "ask unless PRISTINE and provably
+# clean" three-outcome (allow/ask/deny) guard. Under the no-ask directive it NEVER prompts: every former ASK
+# is resolved WITHOUT a human - a recoverable-destructive discard is SNAPSHOT-THEN-ALLOWED (an inert
+# refs/aiqt-recovery/ snapshot is taken, then it is allowed with a recovery-pointer note), and it DENIES when
+# no warranted recovery snapshot can be created (an unrecoverable discard) or when the command cannot be
+# classified/resolved (an inline alias, an unrecognized flagged subcommand, an unresolvable worktree). The
+# text below still uses "ASK" for the recoverable middle; read every such "ASK" as "snapshot-then-allow when
+# recoverable, else deny-and-educate". For a command that names any recognized lossy git verb (checkout incl
+# -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
+# delete/move/copy/reset) the outcome is ASK(->recover-then-allow/deny) unless the command is a PRISTINE
+# SINGLE BARE 'git <verb>' invocation on a PROVABLY CLEAN tree (or, for that same pristine form, the LEADING
+# opt-out is set). Three outcomes:
 #   ALLOW  exit 0 silent  - the true boundary (a non-git command, no recognized lossy verb, an
 #                           unparseable command with no lossy verb keyword); OR a PRISTINE SINGLE BARE
 #                           'git <verb>' whose FORM is genuinely non-destructive (a bare no-op, reset
@@ -1739,7 +1799,8 @@ def bash_absolute_paths(data):
 #   DENY   permissionDecision deny - a PRISTINE SINGLE BARE WHOLE-TREE-clobbering verb (reset --hard,
 #                           checkout -f with no pathspec, switch --force/--discard-changes) on a tree the
 #                           probe confirms is dirty: the loss is certain.
-#   ASK    permissionDecision ask  - EVERYTHING else in scope. This is deliberately the common outcome:
+#   ASK(->recover-then-allow/deny) - EVERYTHING else in scope. This is deliberately the common branch, now
+#                           resolved WITHOUT a prompt (snapshot-then-allow when recoverable, else deny):
 #                           ANY command that is not a pristine single bare git invocation - ANY shell
 #                           metacharacter anywhere (even quoted), ANY wrapper/redirect/reserved-word/
 #                           compound, a first command word that is not literally 'git', or an option the
@@ -2215,20 +2276,20 @@ def _expbnd_effective_tokens(tokens):
 
 
 def _expbnd_target_ask(verb):
-    reason = ("AIQT rule expbnd: a directory change in this command feeds a git '{}' with no explicit "
-              "target; the mutation binds to wherever the shell landed. Reissue with "
-              "'git -C /absolute/repo {} ...' or confirm the working directory is the intended "
-              "repository.".format(verb, verb))
-    return _ask(reason, "AIQT guardrail: confirm the repository bound to git {} (rule expbnd)."
-                .format(verb))
+    return _allow_note(
+        "AIQT guardrail (rule expbnd, explicit-binding): a directory change in this command feeds a git "
+        "'{}' with no explicit target, so the mutation binds to wherever the shell landed. This is a "
+        "binding convention where the orchestrator normally binds its own target, not a hazard, so it is "
+        "allowed; prefer 'git -C /absolute/repo {} ...' or ensure the working directory is the intended "
+        "repository.".format(verb, verb))
 
 
 def _expbnd_breadth_ask(verb):
-    reason = ("AIQT rule expbnd: git '{}' takes its scope from the whole ambient tree and this command "
-              "relocates or publishes it. Stage enumerated pathspecs instead of -A/-a/'.', or confirm "
-              "the whole-tree scope is intended.".format(verb))
-    return _ask(reason, "AIQT guardrail: confirm the whole-tree git {} scope (rule expbnd)."
-                .format(verb))
+    return _allow_note(
+        "AIQT guardrail (rule expbnd, explicit-binding): git '{}' takes its scope from the whole ambient "
+        "tree and this command relocates or publishes it. This is a binding convention, not a hazard, so it "
+        "is allowed; prefer enumerated pathspecs over -A/-a/'.', or ensure the whole-tree scope is "
+        "intended.".format(verb))
 
 
 def _expbnd_fallback(command):
@@ -2242,7 +2303,10 @@ def _expbnd_fallback(command):
 
 
 def git_explicit_binding(data):
-    """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash, ASK-strongest."""
+    """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash. NO-ASK posture: an ambient git
+    target or a whole-tree breadth+publish is a binding CONVENTION where the orchestrator normally binds its
+    own target, not a hazard, so every in-scope case (and an unreadable command) ALLOWS with an informational
+    note rather than prompting; it never denies."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -2254,9 +2318,10 @@ def git_explicit_binding(data):
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command:
-        return _ask("AIQT rule expbnd: the Bash command was absent or unreadable, so its git target and "
-                    "scope could not be checked; confirm the explicit target and enumerated scope.",
-                    "AIQT guardrail: confirm the unreadable Bash command's target and scope (rule expbnd).")
+        return _allow_note(
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
+            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
+            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         segments = _segments(command)
     except ValueError:
@@ -2936,21 +3001,33 @@ def _git_discard_fallback(command, cwd=None):
     snap = None
     if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
         snap = _record_recovery(base, "discard")
-    reason = (
-        "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell lexer "
-        "(likely an unbalanced quote) and it names a git work-losing verb this guard cannot prove safe; "
-        "asking rather than silently allowing. {}{}".format(_DISCARD_ALTS, _OPTOUT_REISSUE))
-    banner = (
-        "AIQT guardrail: an unparseable git command names a work-losing verb this guard could not prove "
-        "safe - confirm this discard. The GUARDRAIL_ALLOW_DISCARD opt-out is NOT honoured on an unparseable "
-        "command (the guard cannot parse it); to opt out, re-issue the discard as a parseable bare git "
-        "command with the leading prefix (rule prsunc, fail-safe).")
+    # SNAPSHOT-THEN-ALLOW: a recoverable discard proceeds once its recovery point exists (hooks never ask).
     if snap is not None and snap[0] == "ok":
-        reason = reason + " " + _recovery_pointer(snap[1])
-    elif snap is not None and snap[0] == "fail":
-        reason = reason + (" NOTE: no pre-command recovery snapshot could be created ({}), so this discard "
-                           "would not be recoverable by this guard.".format(snap[1]))
-    return _ask(reason, banner)
+        return _allow_note(
+            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): the command could not be parsed by the "
+            "shell lexer and it names a git work-losing verb this guard cannot prove safe. A pre-command "
+            "recovery snapshot was saved, so it is allowed. {}".format(_recovery_pointer(snap[1])))
+    if snap is not None and snap[0] == "fail":
+        # A warranted recovery point could NOT be created: an unrecoverable discard denies-and-educates.
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
+            "lexer and it names a git work-losing verb on a tree that is not provably clean, and no "
+            "pre-command recovery snapshot could be created ({}), so this discard would be unrecoverable; "
+            "denied. Commit or stash your work first, then retry. {}".format(snap[1], _DISCARD_ALTS),
+            "AIQT guardrail: denied an unparseable, unrecoverable git discard (rule prsunc); commit or stash "
+            "first, then retry.")
+    if base is None:
+        # No session cwd, so no recovery snapshot could even be attempted for this unparseable lossy command.
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
+            "lexer and it names a git work-losing verb, but no session working directory is available to "
+            "take a recovery snapshot, so this discard would be unrecoverable; denied. Re-issue it as a "
+            "parseable bare 'git <verb>' command from the target repository (a leading "
+            "GUARDRAIL_ALLOW_DISCARD=1 prefix then opts out), or commit or stash your work first. {}"
+            .format(_DISCARD_ALTS),
+            "AIQT guardrail: denied an unparseable git discard with no recoverable snapshot (rule prsunc).")
+    # base is set and the tree is provably clean: nothing to discard.
+    return _allow()
 
 
 def _pristine_single_bare_git(command, segments):
@@ -3330,25 +3407,35 @@ def _recovery_pointer(info):
                 covered, info["ref"], info["restore"], info["ref"]))
 
 
-def _ask_with_recovery(kind, detail, snap, optout=None):
-    """An ASK whose reason folds in the recovery outcome: a restore pointer on a successful snapshot, or
-    the failure surfaced (decision stays ASK) on a snapshot failure. snap is None (no snapshot warranted),
-    ('ok', info), or ('fail', reason). `optout` is passed through to _discard_ask_reason to select the
-    path-aware opt-out guidance (default pristine; the non-pristine caller passes _OPTOUT_REISSUE, while the
-    ambient/view-redirected caller passes _OPTOUT_PRISTINE because a pristine redirected form is opted out by
-    prefixing the command as issued)."""
-    reason, banner = _discard_ask_reason(kind, detail, optout)
+def _discard_recovery_result(kind, detail, snap, optout=None):
+    """The SNAPSHOT-THEN-ALLOW outcome for a recoverable-destructive discard (hooks never ask). snap is
+    ('ok', info) (a recovery snapshot was saved), ('fail', reason) (a warranted snapshot could NOT be made),
+    or None (no snapshot warranted: a ref-level move or a stash/branch asset a working-tree snapshot cannot
+    hold, which is typically reflog-recoverable). On 'ok' or None the discard is ALLOWED with an
+    informational note; on 'fail' the discard would be unrecoverable, so it is DENIED-and-educated (commit or
+    stash first). `optout` selects the path-aware opt-out guidance folded into the deny wording only (an
+    allow needs none)."""
+    if snap is not None and snap[0] == "fail":
+        reason, _banner = _discard_ask_reason(kind, detail, optout)
+        return _deny(
+            reason + " NOTE: no pre-command recovery snapshot could be created ({}), so this discard would "
+                     "be unrecoverable; it is denied rather than run. Commit or stash your work first, then "
+                     "retry.".format(snap[1]),
+            "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
+            "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
-        reason = reason + " " + _recovery_pointer(snap[1])
-    elif snap is not None and snap[0] == "fail":
-        reason = reason + (" NOTE: no pre-command recovery snapshot could be created ({}), so this "
-                           "discard would not be recoverable by this guard.".format(snap[1]))
-    return _ask(reason, banner)
+        return _allow_note(
+            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
+            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])))
+    return _allow_note(
+        "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
+        "it (a ref-level or stash/branch asset a working-tree snapshot cannot capture, typically "
+        "reflog-recoverable), so it is allowed; ensure any work you need is saved.".format(kind, detail))
 
 
 def _deny_with_recovery(kind, snap):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
-    mirroring _ask_with_recovery."""
+    mirroring _discard_recovery_result."""
     code, obj, err = _discard_deny(kind)
     if snap is not None and snap[0] == "ok":
         obj["hookSpecificOutput"]["permissionDecisionReason"] += " " + _recovery_pointer(snap[1])
@@ -3359,10 +3446,16 @@ def _deny_with_recovery(kind, snap):
 
 
 def git_discard(data):
-    """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "ask unless PRISTINE
-    and provably clean" guard (EN-6). For a command that names any recognized lossy git verb (checkout incl
+    """prsunc (integ/preserve-uncommitted-work), PreToolUse/Bash. ULTRA-CONSERVATIVE "recover then allow"
+    guard (EN-6). NO-ASK posture: every former ASK is resolved WITHOUT prompting - a recoverable-destructive
+    discard is SNAPSHOT-THEN-ALLOWED (an inert refs/aiqt-recovery/ snapshot, then allow with a recovery note),
+    and it DENIES-and-educates only when a warranted recovery snapshot cannot be made (an unrecoverable
+    discard) or the command cannot be classified/resolved (an inline alias, an unrecognized flagged
+    subcommand, an unresolvable worktree); a confirmed whole-tree clobber on a dirty tree still DENIES (with a
+    snapshot when one could be made). Read every "ASK" below as that recover-then-allow/deny resolution. For a
+    command that names any recognized lossy git verb (checkout incl
     -B force-create, switch incl -C/--force-create, restore/reset/clean/stash drop-clear/rm/branch force
-    delete/move/copy/reset) the outcome is ASK unless the command
+    delete/move/copy/reset) the outcome is ASK(->recover-then-allow/deny) unless the command
     is a PRISTINE SINGLE BARE 'git <verb>' invocation (see _pristine_single_bare_git: no shell metacharacter
     anywhere even quoted, no reserved word, no wrapper/redirect/compound, and the sole command word literally
     'git') AND either its FORM is genuinely non-destructive, or the working tree is PROVABLY CLEAN (the
@@ -3387,9 +3480,10 @@ def git_discard(data):
     outside the recognized set AND unflagged by the raw scan ('git worktree remove -f' of a dirty linked
     worktree, where 'worktree' matches no lossy keyword) is allowed at the true boundary - disclosed, not
     closed this round. BUT a command the raw scan DOES flag whose resolved subcommand is outside the
-    recognized set ('git checkout-index -a -f', 'git read-tree -u --reset HEAD') now ASKS (F-97): a flagged
-    sub the classifier cannot resolve to a known verb cannot be proven non-destructive, so it never wins the
-    catch-all allow. The status probe (git status --porcelain,
+    recognized set ('git checkout-index -a -f', 'git read-tree -u --reset HEAD') is DENIED-and-educated (F-97;
+    historically this ASKED): a flagged sub the classifier cannot resolve to a known verb cannot be proven
+    non-destructive and cannot be snapshotted, so it never wins the catch-all allow. The status probe (git
+    status --porcelain,
     config-forced to report untracked) is read-only and offline.
 
     SIDE-EFFECTING (EN-6 recovery layer): this handler is NO LONGER pure-decision. Before returning its
@@ -3485,7 +3579,7 @@ def git_discard(data):
         if np_base is not None and _tree_is_clean(np_base) is not True:
             np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
             np_snap = _record_recovery(np_base, np_verb)
-        return _ask_with_recovery(
+        return _discard_recovery_result(
             kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
                   "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
                   "that is not literally 'git'), so this guard will not trust a clean probe on it", np_snap,
@@ -3519,7 +3613,7 @@ def git_discard(data):
         ao_snap = None
         if ao_base is not None and sub in _SNAPSHOTTABLE_VERBS and _tree_is_clean(ao_base) is not True:
             ao_snap = _record_recovery(ao_base, sub)
-        return _ask_with_recovery(
+        return _discard_recovery_result(
             kind or "a git work-losing verb",
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
             "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment), so this guard "
@@ -3529,9 +3623,14 @@ def git_discard(data):
             "a redirected tree", ao_snap, _OPTOUT_PRISTINE)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
-        return _ask(*_discard_ask_reason(
-            "a git inline alias ('-c alias.<name>=...')",
-            "may expand to a work-losing verb this guard cannot resolve"))
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command sets a git inline alias "
+            "('-c alias.<name>=...') that may expand to a work-losing verb this guard cannot resolve or "
+            "snapshot; denied rather than run on an unknown discard. Re-issue the command the alias expands "
+            "to explicitly (without '-c alias.<name>='), so this guard can classify it, or commit or stash "
+            "your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied an unresolvable git inline alias that may discard work (rule prsunc); "
+            "run the aliased command explicitly, or commit or stash first.")
 
     # Resolve the session worktree ONCE: both the recovery layer and the clean probe need it. A non-cosmetic
     # ambient GIT_* override AND a command-local redirect (a -C/--git-dir/--work-tree/-c global option or a
@@ -3564,11 +3663,15 @@ def git_discard(data):
     # A genuine safe FORM of a RECOGNIZED verb (checkout -b, reset --soft, clean -n) is unaffected: its sub IS
     # recognized, so this never fires for it.
     if raw_lossy and sub is not None and sub not in _RECOGNIZED_VERBS:
-        return _ask(*_discard_ask_reason(
-            kind or "a git command the raw scan flags as work-losing",
-            "resolves to the git subcommand {!r}, which is outside the recognized lossy-verb set "
-            "(checkout/switch/restore/reset/rm/clean/stash/branch), so this guard cannot prove it "
-            "non-destructive".format(sub)))
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): this command resolves to the git subcommand "
+            "{!r}, which is outside the recognized lossy-verb set "
+            "(checkout/switch/restore/reset/rm/clean/stash/branch); this guard cannot prove it "
+            "non-destructive and cannot snapshot it, so it is denied rather than run on a possible discard. "
+            "Re-issue as a recognized, provable form, or commit or stash your work first. {}"
+            .format(sub, _DISCARD_ALTS),
+            "AIQT guardrail: denied a git command whose subcommand this guard cannot prove non-destructive "
+            "(rule prsunc); commit or stash first, or re-issue in a recognized form.")
 
     if role == "allow":
         # A genuinely non-destructive bare form (bare no-op, reset --soft, unforced -b, plain switch, clean
@@ -3576,10 +3679,13 @@ def git_discard(data):
         # tree, a defensive backstop against a mis-parse) and it FAILED, downgrade the allow to ASK - never
         # silent-allow a not-provably-clean discard with no recovery point. Otherwise ALLOW stands.
         if snap is not None and snap[0] == "fail":
-            return _ask(*_discard_ask_reason(
-                kind or "a git work-losing verb",
-                "would run on a working tree that is not provably clean and no recovery point could be "
-                "created ({}), so this guard will not silently allow it".format(snap[1])))
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} would run on a working tree that is not "
+                "provably clean and no recovery point could be created ({}), so this discard would be "
+                "unrecoverable; denied rather than run. Commit or stash your work first, then retry. {}"
+                .format(kind or "a git work-losing verb", snap[1], _DISCARD_ALTS),
+                "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
+                "(rule prsunc); commit or stash first, then retry.")
         return _allow()
 
     if role == "ask":
@@ -3587,25 +3693,30 @@ def git_discard(data):
         # copy/reset): ASK regardless of the tracked-tree probe, which does not see the asset these verbs
         # destroy (a branch ref is a separate, reflog-recoverable asset). A clean may have been
         # snapshotted above (git add --all captures untracked); stash/branch are not snapshottable.
-        return _ask_with_recovery(kind, "cannot be proven safe offline", snap)
+        return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
 
     # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
     # session worktree.
     if not resolvable:
-        return _ask(*_discard_ask_reason(
-            kind, "targets a working tree this guard cannot resolve to the session directory with "
-                  "certainty, so it cannot prove the tree clean"))
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): {} targets a working tree this guard cannot "
+            "resolve to the session directory with certainty, so it can neither prove the tree clean nor "
+            "take a recovery snapshot; denied rather than run on a possible unrecoverable discard. Re-issue "
+            "it as a plain git command from the target repository, or commit or stash your work first. {}"
+            .format(kind, _DISCARD_ALTS),
+            "AIQT guardrail: denied a git discard whose working tree this guard cannot resolve to snapshot "
+            "(rule prsunc); re-issue from the target repo, or commit or stash first.")
     if clean is True:
         return _allow()  # pristine bare lossy verb on a PROVABLY CLEAN tree: nothing to lose, no snapshot
     if clean is None:
         # probe-uncertain: a snapshot was attempted above (snap set); fold its outcome into the ASK reason.
-        return _ask_with_recovery(
+        return _discard_recovery_result(
             kind, "targets a repository whose status probe did not complete, so this guard cannot prove "
                   "the working tree clean", snap)
     # clean is False: the tree holds uncommitted tracked changes or untracked files this verb could reach.
     if role == "clobber":
         return _deny_with_recovery(kind, snap)  # a confirmed whole-tree loss, still recoverable if approved
-    return _ask_with_recovery(kind, "may discard uncommitted changes in the working tree", snap)
+    return _discard_recovery_result(kind, "may discard uncommitted changes in the working tree", snap)
 
 
 _PROTECTED = frozenset(("main", "master"))  # the protected line(s); default {main, master}, source-level config
@@ -4086,28 +4197,30 @@ def _push_protected(tokens, args, cwd):
     return None  # HEAD provably a non-protected branch: the forced or deleted target is off the protected line
 
 def _commit_on_protected(tokens, cwd):
-    """The ASK detail when this git commit segment cannot be proven to land off the protected line, else
-    None (HEAD provably a non-protected branch). Fail-to-ASK posture throughout: an unprovable repository
-    view (a non-cosmetic ambient GIT_* var, or a command-local -C/--git-dir/--work-tree redirect or
-    leading env assignment, both via the shared _segment_dir_simple/_ambient_repo_view_override checks),
-    a missing session cwd, and an unresolvable HEAD (detached, a non-repository, a probe error) all ASK;
-    only a probe that positively names a non-protected branch allows. A 'cd' in an EARLIER segment of the
-    same compound command is NOT modelled (the probe reads the session cwd): the covered accidental case
-    is the plain add-and-commit chain in the session repo, and asking on every compound commit would
-    defeat the guard's own purpose (this is an ASK-level, fully-recoverable surface, so the lighter
-    posture than git_discard's compound handling is proportionate)."""
+    """Classify a git commit segment against the protected line. Returns None (HEAD provably a
+    non-protected branch: silent allow), ("deny", detail) when HEAD is PROVABLY a protected branch (a
+    confirmed direct commit on the protected line: deny-and-educate), or ("note", detail) when the guard
+    merely CANNOT PROVE the commit lands off the protected line (an unprovable repository view, a missing
+    session cwd, or an unresolvable HEAD: allow with an informational note). The split reflects the new
+    no-ask posture: only a CONFIRMED direct commit on the protected branch is a hazard denied-and-educated;
+    a cannot-prove case (a normal 'git -C <repo> commit', a detached-HEAD commit, a probe miss) is a
+    common, legitimate commit and is allowed with a note rather than blocked, since server-side branch
+    protection remains the real gate for the accidental direct commit this client guard targets. A 'cd' in
+    an EARLIER segment of the same compound command is NOT modelled (the probe reads the session cwd)."""
     if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
-        return ("runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
+        return ("note",
+                "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
                 "(-C/--git-dir/--work-tree or a leading env assignment), so this guard cannot prove "
                 "which repository's HEAD it would commit on")
     base = cwd if isinstance(cwd, str) and cwd else None
     head = _head_branch(base) if base is not None else None
     if head is None:
-        return ("targets a repository whose HEAD this guard could not resolve (no usable session "
+        return ("note",
+                "targets a repository whose HEAD this guard could not resolve (no usable session "
                 "directory, a detached HEAD, or a failed probe), so it cannot prove the commit lands "
                 "off the protected line")
     if _is_protected_ref(head):
-        return "would commit directly on the protected branch {!r}".format(head)
+        return ("deny", "would commit directly on the protected branch {!r}".format(head))
     return None
 
 
@@ -4118,30 +4231,32 @@ def _protected_line_fallback(command):
     to start, whitespace, or either quote character, so a quoted '+main:main' under sudo is caught), or
     an apparent branch DELETION (a '--de...' long flag or a '-d' cluster, protected-named or not - like
     the force spellings, the true target may be unreadable or shell-expanded - or an empty-source
-    ':<protected>' refspec, judged by its visible name), protected-named or not, ASKS; an apparent git
-    commit ASKS; anything else ALLOWS (the true boundary). It ASKS, NEVER a hard DENY (a recoverable
-    prompt, matching _git_discard_fallback) and NEVER a silent allow of an apparent force-push or
-    deletion. It OVER-MATCHES by design (a keyword in prose or an unrelated '+' or '-d' token asks),
-    the documented posture of the sibling fallbacks (_diff_source_fallback, _git_discard_fallback)."""
+    ':<protected>' refspec, judged by its visible name), protected-named or not, is a HAZARD-class
+    unparseable command that could rewrite the protected line and DENIES-and-educates (fail-safe: hooks
+    never ask, and an unparseable possible protected-line rewrite is blocked with the safe route named).
+    An apparent git commit is NOT hazard-class (a direct commit is recoverable and server-side protection is
+    the real gate), so it ALLOWS with a note. Anything else ALLOWS (the true boundary). It OVER-MATCHES by
+    design (a keyword in prose or an unrelated '+' or '-d' token trips it), the documented posture of the
+    sibling fallbacks (_diff_source_fallback, _git_discard_fallback)."""
     if _RAW_PUSH_RE.search(command) and (_RAW_PUSH_FORCE_RE.search(command)
                                          or _RAW_PUSH_DELETE_RE.search(command)
                                          or _RAW_PUSH_MIRRORCFG_RE.search(command)):
         named = " a protected branch" if _RAW_PROTECTED_RE.search(command) else " a target this guard cannot read"
-        return _ask(
+        return _deny(
             "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
             "shell lexer (unbalanced quotes) or hides git under a command-word wrapper, and it appears to "
-            "force-push or delete{}; confirm it cannot rewrite the protected line, or re-issue it as a "
-            "plain, parseable git command. {}".format(named, _PROTECTED_ALTS),
-            "AIQT guardrail: an apparent force-push or branch deletion this guard cannot fully parse - "
-            "confirm before proceeding (rule prtbrn, fail-safe).")
+            "force-push or delete{}; it is denied fail-safe because this guard cannot prove it will not "
+            "rewrite the protected line. The protected line changes only through a reviewed, verified merge. "
+            "Re-issue it as a plain, parseable, non-force git command. {}".format(named, _PROTECTED_ALTS),
+            "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot fully parse "
+            "(rule prtbrn, fail-safe); push to a feature branch and merge on green.")
     if _RAW_COMMIT_RE.search(command):
-        return _ask(
-            "AIQT rule artbr1 (branch-and-merge-on-green): the command could not be parsed by the shell "
-            "lexer (likely unbalanced quotes) and it appears to run git commit; this guard cannot prove "
-            "the commit lands off the protected line, so confirm, or re-issue it as a parseable "
-            "command. {}".format(_PROTECTED_ALTS),
-            "AIQT guardrail: an unparseable command appears to commit; this guard cannot prove it lands "
-            "off the protected branch - confirm before proceeding (rule artbr1, fail-safe).")
+        return _allow_note(
+            "AIQT guardrail (rule artbr1, branch-and-merge-on-green): the command could not be parsed by the "
+            "shell lexer and it appears to run git commit; this guard cannot prove the commit lands off the "
+            "protected line. A direct commit is recoverable and server-side branch protection is the real "
+            "gate, so it is allowed; develop on a feature branch and land on the protected line through a "
+            "reviewed merge. {}".format(_PROTECTED_ALTS))
     return _allow()
 
 def protected_line(data):
@@ -4155,21 +4270,22 @@ def protected_line(data):
     first bare operand is the repository, so a remote literally named 'main' is not a false deny),
     and flag detection is value-aware (a force or delete spelling in an option-value position,
     '-o --force', is not a flag). A refspec-less force-push and a forced or deleted HEAD/@ resolve
-    their target through the read-only HEAD probe (deny on a protected HEAD, fail-to-ASK when
+    their target through the read-only HEAD probe (deny on a protected HEAD, fail-safe DENY when
     unprovable; the deleted-HEAD deny is a harmless over-deny, git itself rejecting a HEAD delete as
-    a nonexistent ref). A sweep this guard cannot prove misses the protected names ASKS: a wildcard
-    force or delete refspec over the branch namespace, --mirror, a forced --all/--branches, the
-    matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec or --all/--branches (round-4: prune
-    deletes absent remote branches with no force flag). A force-push or delete to a non-protected
-    ref and a plain non-force push ALLOW. ASK a git commit segment while HEAD is a protected branch
-    (probed read-only under the ambient-GIT_* scrub; fail-to-ASK when HEAD cannot be resolved): the
-    protected line changes only through a reviewed merge, and the direct commit is the accidental
-    case this client guard catches - only the literal 'commit' subcommand (a merge, cherry-pick, or
-    revert that lands commits on the protected line is out of this accidental-case scope by design);
-    server-side branch protection is the real gate. A DENY found in any segment wins over a pending
-    ASK (a confirmed rewrite outranks the recoverable prompt, mirroring the git_discard posture). No
-    escape hatch prefix: the ASK outcomes are themselves the human gate, and the deny mirrors
-    commit_identity's absoluteness."""
+    a nonexistent ref). NO-ASK posture: a sweep this guard cannot prove misses the protected names is a
+    hazard-class possible protected-line rewrite, so it DENIES fail-safe (naming a push that misses the
+    protected branch): a wildcard force or delete refspec over the branch namespace, --mirror, a forced
+    --all/--branches, the matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec or
+    --all/--branches (round-4: prune deletes absent remote branches with no force flag). A force-push or
+    delete to a non-protected ref and a plain non-force push ALLOW. A git commit is treated by artbr1: a
+    commit PROVABLY on a protected branch (read-only HEAD probe under the ambient-GIT_* scrub) DENIES-and-
+    educates (switch to a feature branch); a commit the guard merely CANNOT PROVE lands off the protected
+    line (an unprovable repository view, a detached HEAD, a probe miss) is a common, recoverable case and
+    ALLOWS with a note, since server-side branch protection is the real gate for the accidental direct commit
+    this client guard targets (only the literal 'commit' subcommand; merge/cherry-pick/revert are out of
+    scope by design). A DENY in any segment wins over a pending allow-note (a confirmed or unprovable rewrite
+    outranks the recoverable commit note). No escape-hatch prefix; the deny mirrors commit_identity's
+    absoluteness."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -4189,7 +4305,15 @@ def protected_line(data):
     except ValueError:
         return _protected_line_fallback(command)
     cwd = data.get("cwd")
-    pending_ask = None  # the first ASK found; a DENY anywhere returns immediately and wins over it
+    # No-ask posture: a CONFIRMED protected-line rewrite (force-push/delete of a protected ref, or a commit
+    # provably on the protected branch) DENIES-and-educates and returns immediately. A push this guard cannot
+    # prove misses the protected line is a fail-safe DENY (hazard class: it could rewrite the protected line),
+    # held in pending_deny so a confirmed deny elsewhere wins first. A commit it merely cannot prove lands off
+    # the protected line is a common, recoverable case (a normal 'git -C <repo> commit', a detached HEAD) and
+    # ALLOWS with a note (held in pending_note), since server-side protection is the real gate for the
+    # accidental direct commit this client guard targets.
+    pending_deny = None
+    pending_note = None
     saw_git = False     # did any parsed segment have 'git' as its command word?
     for tokens, _sep in segments:
         if _command_word(tokens) != "git":
@@ -4210,26 +4334,40 @@ def protected_line(data):
                     "reviewed, verified merge (artbr1). {}".format(detail, _PROTECTED_ALTS),
                     "AIQT guardrail: denied a {} targeting a protected branch (rule prtbrn)."
                     .format(act_noun))
-            if pending_ask is None:
-                pending_ask = _ask(
-                    "AIQT rule prtbrn (protected-branch-integrity): this git push {}. Confirm it "
-                    "cannot rewrite the protected line before proceeding. {}"
+            if pending_deny is None:
+                pending_deny = _deny(
+                    "AIQT rule prtbrn (protected-branch-integrity): this git push {}. This guard cannot "
+                    "prove it will not rewrite the protected line, so it is denied fail-safe rather than "
+                    "run. Re-issue it as a push this guard can prove misses the protected branch (an "
+                    "explicit non-protected refspec, no --mirror/--all/wildcard/prune sweep). {}"
                     .format(detail, _PROTECTED_ALTS),
-                    "AIQT guardrail: a git push this guard cannot prove misses the protected branch - "
-                    "confirm before proceeding (rule prtbrn).")
+                    "AIQT guardrail: denied a git push this guard cannot prove misses the protected branch "
+                    "(rule prtbrn); push to a feature branch and merge on green.")
         elif sub == "commit":
-            detail = _commit_on_protected(tokens, cwd)
-            if detail is not None and pending_ask is None:
-                pending_ask = _ask(
-                    "AIQT rule artbr1 (branch-and-merge-on-green): this git commit {}. A change "
-                    "develops on a feature branch and lands on the protected line only through a "
-                    "reviewed merge (prtbrn); server-side branch protection remains the real gate, and "
-                    "this prompt covers the accidental direct commit. {}"
+            result = _commit_on_protected(tokens, cwd)
+            if result is None:
+                continue
+            severity, detail = result
+            if severity == "deny":
+                return _deny(
+                    "AIQT rule artbr1 (branch-and-merge-on-green): this git commit {}. A change develops "
+                    "on a feature branch and lands on the protected line only through a reviewed merge "
+                    "(prtbrn). Switch to a feature branch ('git switch -c <branch>') and commit there; "
+                    "server-side branch protection remains the real gate. {}"
                     .format(detail, _PROTECTED_ALTS),
-                    "AIQT guardrail: a direct commit on (or unprovably off) the protected branch - "
-                    "confirm, or move to a feature branch first (rule artbr1).")
-    if pending_ask is not None:
-        return pending_ask
+                    "AIQT guardrail: denied a direct commit on the protected branch - switch to a feature "
+                    "branch first (rule artbr1).")
+            if pending_note is None:  # severity == "note": cannot prove, but commit is recoverable -> allow
+                pending_note = _allow_note(
+                    "AIQT guardrail (rule artbr1, branch-and-merge-on-green): this git commit {}. A change "
+                    "develops on a feature branch and lands on the protected line only through a reviewed "
+                    "merge (prtbrn); server-side branch protection remains the real gate, so this commit is "
+                    "allowed. If this is the protected line, move to a feature branch first. {}"
+                    .format(detail, _PROTECTED_ALTS))
+    if pending_deny is not None:
+        return pending_deny
+    if pending_note is not None:
+        return pending_note
     # No parsed segment had 'git' as its command word, yet the raw command names git: a
     # command-word wrapper (env/sudo/command/xargs/timeout/nohup/sh -c) or obfuscation hides the
     # git call. Mirror git_discard's raw posture - an apparent wrapped force-push, deletion, or
@@ -4621,7 +4759,12 @@ def _branch_root_probe(repo, start):
 
 
 def branch_root(data):
-    """brnrot PreToolUse/Bash guard over recognized branch-creation forms."""
+    """brnrot PreToolUse/Bash guard over recognized branch-creation forms. NO-ASK posture: branch rooting is
+    a hazard class (an orphan/unrooted branch dispatches work onto a retired root), so a confirmed orphan
+    start DENIES, and a form this guard cannot prove rooted (an ambiguous/--track/--orphan creation form, a
+    dir-change or repository-view override, an unresolved ancestry) also DENIES-and-educates fail-safe,
+    naming the reachable correct action (an explicit start point, a plain command from the target repo, or
+    restoring origin/HEAD). It never asks."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -4650,13 +4793,18 @@ def branch_root(data):
         except ValueError:
             return _allow()  # even partial recovery failed: open grammar, best-effort
 
-    pending_ask = None
+    # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
+    # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
+    # correct action (an explicit start point, a plain command from the target repo, or restoring
+    # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny is held in pending_deny so a
+    # confirmed orphan elsewhere wins first.
+    pending_deny = None
     saw_dir_change = False
     for tokens, _sep in segments:
         word = _command_word(tokens)
         if word in _CD_BUILTINS or word == "popd":
             # a cd/pushd/popd BEFORE the git segment moves the target out of the session cwd; popd lands on
-            # an unknowable stack-top directory, so it too routes the following creation to a fail-safe ASK.
+            # an unknowable stack-top directory, so it too routes the following creation to a fail-safe deny.
             saw_dir_change = True
             continue
         if word != "git" or _has_info_flag(tokens):
@@ -4666,27 +4814,28 @@ def branch_root(data):
         if start is None:
             continue
         if start is _ASK_START:
-            if pending_ask is None:
-                pending_ask = _ask(
-                    "AIQT rule brnrot: this command uses a branch/worktree form this guard cannot classify "
-                    "with confidence (a --track/-t tracking form, an --orphan, an abbreviated or negated "
-                    "option, or an option of unknown arity); it may create a branch from an unverified "
-                    "start, so its ancestry cannot be checked here. Re-issue it "
-                    "with an explicit start point, or confirm to proceed; the CI branch-root gate remains "
-                    "the authoritative backstop.",
-                    "AIQT guardrail: confirm this branch-creation form; its start point is ambiguous "
-                    "(rule brnrot).")
+            if pending_deny is None:
+                pending_deny = _deny(
+                    "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
+                    "this guard cannot classify with confidence (a --track/-t tracking form, an --orphan, an "
+                    "abbreviated or negated option, or an option of unknown arity); it may create a branch "
+                    "from an unverified or orphaned start, so its ancestry cannot be checked here and it is "
+                    "denied fail-safe. Re-issue it with an explicit start point (e.g. 'git switch -c <name> "
+                    "origin/HEAD'); the CI branch-root gate remains the authoritative backstop.",
+                    "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
+                    "(rule brnrot); re-issue with an explicit start point.")
             continue
         if saw_dir_change or _ambient_repo_view_override() or not _segment_dir_simple(tokens):
-            if pending_ask is None:
-                pending_ask = _ask(
-                    "AIQT rule brnrot: this branch-creation command runs under a directory change or a "
-                    "repository-view override this guard cannot reconcile with the session repository (a "
-                    "cd/pushd in an earlier segment, a non-cosmetic ambient GIT_* variable, or a "
-                    "command-local -C/--git-dir/--work-tree redirect). Re-issue it as a plain git command "
-                    "from the target repository after confirming the target.",
-                    "AIQT guardrail: confirm the branch-creation repository before proceeding "
-                    "(rule brnrot).")
+            if pending_deny is None:
+                pending_deny = _deny(
+                    "AIQT rule brnrot (branch-rooted-on-live-main): this branch-creation command runs under "
+                    "a directory change or a repository-view override this guard cannot reconcile with the "
+                    "session repository (a cd/pushd in an earlier segment, a non-cosmetic ambient GIT_* "
+                    "variable, or a command-local -C/--git-dir/--work-tree redirect), so its ancestry cannot "
+                    "be checked and it is denied fail-safe. Re-issue it as a plain git command from the "
+                    "target repository.",
+                    "AIQT guardrail: denied a branch creation whose repository this guard cannot reconcile "
+                    "(rule brnrot); re-issue as a plain command from the target repo.")
             continue
         cwd = data.get("cwd")
         if not isinstance(cwd, str) or not cwd:
@@ -4699,14 +4848,15 @@ def branch_root(data):
                 "with origin/HEAD. Do not dispatch work onto the retired root; recut from origin/HEAD "
                 "or replay the branch's unique commits onto it first.".format(start),
                 "AIQT guardrail: denied branch creation from an orphaned start point (rule brnrot).")
-        if outcome == "unknown" and pending_ask is None:
-            pending_ask = _ask(
-                "AIQT rule brnrot: branch-root ancestry could not be evaluated ({}). Confirm the "
-                "repository and start point; if origin/HEAD is missing, run "
-                "`git remote set-head origin --auto`, then retry.".format(detail),
-                "AIQT guardrail: branch-root ancestry is unresolved; confirm before proceeding "
-                "(rule brnrot).")
-    return pending_ask if pending_ask is not None else _allow()
+        if outcome == "unknown" and pending_deny is None:
+            pending_deny = _deny(
+                "AIQT rule brnrot (branch-rooted-on-live-main): branch-root ancestry could not be evaluated "
+                "({}), so this guard cannot prove the start point is rooted and it is denied fail-safe. If "
+                "origin/HEAD is missing, run `git remote set-head origin --auto`, then retry; confirm the "
+                "repository and start point.".format(detail),
+                "AIQT guardrail: denied a branch creation whose root ancestry is unresolved (rule brnrot); "
+                "restore origin/HEAD, then retry.")
+    return pending_deny if pending_deny is not None else _allow()
 
 
 # --- gatdis (EN-5 PR-B): a Bash command that weakens a verification gate -------------------------------
@@ -4889,22 +5039,24 @@ def _gate_weakening_fallback(command):
             "AIQT guardrail: denied an unparseable command that appears to bypass git verification "
             "hooks (rule gatdis, fail-safe).")
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
-        return _ask(
+        return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to run git commit or git am with a short -n, "
-            "which on those verbs bypasses the verification hooks; confirm it does not, or re-issue "
-            "it as a parseable command. {}".format(_GATE_ALTS),
-            "AIQT guardrail: an unparseable git commit/am appears to carry -n (--no-verify) - confirm "
-            "before proceeding (rule gatdis, fail-safe).")
+            "which on those verbs bypasses the verification hooks; it is denied fail-safe. Never weaken a "
+            "gate to obtain a pass; re-issue it as a parseable command with no -n so the hooks run. {}"
+            .format(_GATE_ALTS),
+            "AIQT guardrail: denied an unparseable git commit/am that appears to carry -n (--no-verify) "
+            "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
     if _RAW_CHECKER_RE.search(command) and (
             _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)):
-        return _ask(
+        return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
             "(likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
-            "signal ('|| true', '|| :', '| head', '| tail'); confirm the checker's exit status still "
-            "gates, or re-issue it as a parseable command. {}".format(_GATE_ALTS),
-            "AIQT guardrail: an unparseable command appears to discard a checker's failure signal - "
-            "confirm before proceeding (rule gatdis, fail-safe).")
+            "signal ('|| true', '|| :', '| head', '| tail'); it is denied fail-safe. Run the checker bare "
+            "and let its exit status stand (redirect output to a file and read that if you need to page "
+            "it), rather than discarding its failure signal. {}".format(_GATE_ALTS),
+            "AIQT guardrail: denied an unparseable command that appears to discard a checker's failure "
+            "signal (rule gatdis, fail-safe); run the gate bare, do not swallow or truncate it.")
     return _allow()
 
 
@@ -4913,13 +5065,14 @@ def gate_weakening(data):
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
-    is deliberately not flagged there). ASK a checker-shaped segment whose failure signal is
-    discarded: swallowed by an immediately following '|| true' or '|| :', or piped into a truncating
-    sink (head, tail) whose exit status replaces the checker's under default pipeline semantics. The
-    split posture is deliberate: the hook bypass is lexical and zero-intent, so it DENIES with no
-    escape-hatch prefix (mirroring commit_identity's absoluteness); 'what is a gate' is not lexically
-    certain, so the heuristics only ASK and a mis-shaped name costs a prompt, never a block. A DENY
-    found in any segment wins over a pending ASK (mirrors protected_line)."""
+    is deliberately not flagged there). NO-ASK posture: also DENY-and-educate a checker-shaped segment whose
+    failure signal is discarded: swallowed by an immediately following '|| true' or '|| :', or piped into a
+    truncating sink (head, tail) whose exit status replaces the checker's under default pipeline semantics.
+    Gate discipline is a hazard class (a concealed failing check), so although 'what is a gate' is not
+    lexically certain, the reachable correct action is clear (run the gate bare and let its exit status
+    stand, or redirect to a file), so a mis-shaped name costs a deny the caller self-corrects, never a stall.
+    A --no-verify bypass deny is certain and returns immediately; the heuristic swallow/truncate deny is held
+    so the certain deny wins first (mirrors protected_line)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -4938,7 +5091,7 @@ def gate_weakening(data):
         segments = _segments(command)
     except ValueError:
         return _gate_weakening_fallback(command)
-    pending_ask = None  # the first ASK found; a DENY anywhere returns immediately and wins over it
+    pending_deny = None  # the first heuristic gate-weakening deny; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
@@ -4963,28 +5116,28 @@ def gate_weakening(data):
             nxt_index += 1
         nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
-            if pending_ask is None:
-                pending_ask = _ask(
+            if pending_deny is None:
+                pending_deny = _deny(
                     "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate and its "
-                    "failure is swallowed by the following '|| {}', so a failing check would read as "
-                    "a pass. If it gates this work, run it bare and let the exit status stand; "
-                    "confirm only when this command is genuinely not a gate. {}"
-                    .format(_command_word(tokens), _command_word(nxt), _GATE_ALTS),
-                    "AIQT guardrail: a checker-shaped command has its failure swallowed ('|| true') - "
-                    "confirm before proceeding (rule gatdis).")
+                    "failure is swallowed by the following '|| {}', so a failing check would read as a pass; "
+                    "it is denied. If it gates this work, run it bare and let the exit status stand. If this "
+                    "command is genuinely not a gate, run it without the '|| {}' swallow. {}"
+                    .format(_command_word(tokens), _command_word(nxt), _command_word(nxt), _GATE_ALTS),
+                    "AIQT guardrail: denied a checker-shaped command whose failure is swallowed ('|| true') "
+                    "(rule gatdis); run the gate bare and let its exit status stand.")
         elif sep_after == "|" and _command_word(nxt) in _TRUNCATING_SINKS:
-            if pending_ask is None:
-                pending_ask = _ask(
+            if pending_deny is None:
+                pending_deny = _deny(
                     "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate and is "
                     "piped into '{}', a truncating sink: under default pipeline semantics the "
                     "pipeline reports the sink's exit status, not the checker's, and the truncation "
-                    "can also cut the failing output, so the gate's failure signal is discarded. Run "
-                    "it bare, or redirect the output to a file and read that. {}"
+                    "can also cut the failing output, so the gate's failure signal is discarded; it is "
+                    "denied. Run it bare, or redirect the output to a file and read that. {}"
                     .format(_command_word(tokens), _command_word(nxt), _GATE_ALTS),
-                    "AIQT guardrail: a checker-shaped command is piped into a truncating sink "
-                    "(| head/tail) - confirm before proceeding (rule gatdis).")
-    if pending_ask is not None:
-        return pending_ask
+                    "AIQT guardrail: denied a checker-shaped command piped into a truncating sink "
+                    "(| head/tail) (rule gatdis); run the gate bare or redirect to a file.")
+    if pending_deny is not None:
+        return pending_deny
     return _allow()
 
 
@@ -5071,28 +5224,28 @@ def _commit_msg_subst_hit(seg):
 
 
 def _commit_msg_subst_fallback(command):
-    """Conservative raw fallback for an unparseable command: apparent git commit + substitution marker
-    ASKS; anything else ALLOWS at the true boundary. The probes intentionally over-match and can never
-    earn an allow proof for an apparent in-scope hit."""
+    """Conservative raw fallback for an unparseable command: an apparent git commit + substitution marker is
+    a HAZARD-class (command-injection) case this guard cannot parse, so it DENIES-and-educates (hooks never
+    ask; a possibly-executing substitution in a commit argument is blocked with the safe re-issue named).
+    Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
     if (_RAW_COMMIT_MSG_GIT_RE.search(command)
             and _RAW_COMMIT_MSG_MARKER_RE.search(command)):
-        return _ask(
+        return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
-            "lexer and appears to carry a backtick or $( command substitution in a git commit argument. "
-            "The shell may execute it BEFORE git processes the argument. Confirm it is deliberate, or "
-            "re-issue with single quotes, escape the marker as \\` or \\$(, or write the message to a "
-            "file and use git commit -F <file>. The shared lexer conservatively prompts on marker-bearing "
-            "$'...' values even though Bash does not substitute inside them.",
-            "AIQT guardrail: an unparseable git commit argument appears to carry an executable command "
-            "substitution; confirm it is deliberate or re-issue in a safe form (rule sectvl).")
+            "lexer and appears to carry a backtick or $( command substitution in a git commit argument, "
+            "which the shell may execute BEFORE git processes the argument; it is denied fail-safe. Re-issue "
+            "with single quotes, escape the marker as \\` or \\$(, or write the message to a file and use "
+            "git commit -F <file>.",
+            "AIQT guardrail: denied an unparseable git commit argument that appears to carry an executable "
+            "command substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
     return _allow()
 
 
 def commit_msg_subst(data):
-    """sectvl (security/tool-argument-validation), PreToolUse/Bash. ASK when a token after a recognized
-    git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or $( command
-    substitution. It never denies a detected substitution: legitimate uses exist, so the human confirms
-    intent or re-issues the command in a safe form."""
+    """sectvl (security/tool-argument-validation), PreToolUse/Bash. DENY-and-educate when a token after a
+    recognized git commit subcommand is double-quoted or unquoted and carries a shell-executed backtick or
+    $( command substitution (a command-injection hazard the shell runs before git sees the argument). Hooks
+    never ask; the caller self-corrects by re-issuing single-quoted, escaped, or via git commit -F <file>."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -5104,11 +5257,11 @@ def commit_msg_subst(data):
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
-        return _ask(
+        return _deny(
             "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
-            "string, so the git-commit argument substitution check could not run; confirm the call "
-            "before proceeding.",
-            "AIQT guardrail: a Bash call has no readable command; confirm before proceeding "
+            "string, so the git-commit argument substitution check could not run; it is denied fail-safe "
+            "(the payload could not be parsed safely). Re-issue a well-formed Bash command.",
+            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
             "(rule sectvl, fail-safe).")
     try:
         segments = _lex_command(command)
@@ -5119,16 +5272,16 @@ def commit_msg_subst(data):
         if hit is None:
             continue
         argument, marker = hit
-        return _ask(
+        return _deny(
             "AIQT rule sectvl (tool-argument-validation): this git commit argument {!r} carries {} in a "
             "lexical context that may substitute. Bash executes the marker BEFORE git processes the "
-            "argument when it is double-quoted or unquoted. If that is not deliberate, re-issue with "
-            "single quotes, escape the marker as \\` or \\$(, or write the message to a file and use "
-            "git commit -F <file>. The shared lexer conservatively prompts on marker-bearing $'...' values "
-            "even though Bash does not substitute inside them."
+            "argument when it is double-quoted or unquoted, so it is denied. Re-issue with single quotes, "
+            "escape the marker as \\` or \\$(, or write the message to a file and use git commit -F <file>. "
+            "The shared lexer conservatively flags marker-bearing $'...' values even though Bash does not "
+            "substitute inside them."
             .format(argument[:80], marker),
-            "AIQT guardrail: a git commit argument appears to carry an executable command substitution; "
-            "confirm it is deliberate or re-issue in a safe form (rule sectvl).")
+            "AIQT guardrail: denied a git commit argument that appears to carry an executable command "
+            "substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
     return _allow()
 
 
@@ -5385,17 +5538,18 @@ _GENSRC_MAX_BYTES = 1_000_000  # the real registry is ~5 KB; a larger one is mal
 
 
 def _gensrc_fail_ask(detail):
-    """A fail-SAFE ASK shared by every gensrc_guard branch that cannot PROVE no-match. UNLIKE the
-    fail-CLOSED PreToolUse controls above (which deny an unreadable input), gensrc_guard fails to ASK,
-    like git_discard's boundary posture: this control's strongest outcome on a CONFIRMED violation is
-    itself an ask (the human approving IS the opt-out), so a branch that DENIED on uncertainty would
-    punish uncertainty harder than certainty. The ask still satisfies integ-check-fails-closed-on-
-    unreadable in substance: the failure surfaces as a gate the human must clear and can never read as
-    clean. Only a missing tool_name denies (the shared _deny_missing_tool_name contract)."""
-    return _ask(
-        "AIQT rule gensrc (generated-artefact-source-only): {}; failing safe to ask.".format(detail),
-        "AIQT guardrail: asked because the generated-artefact edit guard could not clear this call "
-        "({}) (rule gensrc, fail-safe).".format(detail))
+    """The cannot-evaluate outcome shared by every gensrc_guard branch that cannot PROVE a registry match.
+    Hooks never ask, and these branches are NOT confirmed generated-artefact edits: they are cases where
+    the guard could not run (an unreadable/malformed payload, a non-git session, an outside-repo target, an
+    unreadable registry, a resolution fault). Denying them would block legitimate Write/Edit/MultiEdit calls
+    (an edit outside the repo, in a non-git session, or under a slightly-off registry) and stall an
+    unattended orchestrator, and there is no confirmed hazard or reachable "edit the source" action to
+    educate toward, so the edit is ALLOWED with an informational note. The CI generated-artefact drift gate
+    remains the authoritative backstop; only a CONFIRMED registry match (gensrc_guard) denies-and-educates."""
+    return _allow_note(
+        "AIQT guardrail (rule gensrc, generated-artefact-source-only): the generated-artefact edit guard "
+        "could not clear this call ({}), so it is allowed. If you are editing a generated artefact, edit its "
+        "source and regenerate instead; the CI drift gate remains the backstop.".format(detail))
 
 
 def _load_gensrc_registry(root):
@@ -5570,19 +5724,21 @@ def _gensrc_match(entries, target, root_c):
 
 
 def gensrc_guard(data):
-    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit: ASK before a
+    """gensrc (integ/generated-artefact-source-only), PreToolUse on Write|Edit|MultiEdit: DENY-and-educate a
     Write/Edit/MultiEdit that hand-edits a generated artefact registered in the per-repo
     .aiqt/gensrc.json, read AT DECISION TIME. A REGISTRY-DRIVEN PATH guard, not a content judge: it
     fires only when the file_path resolves onto a kind=file or kind=tree registry entry. Coverage is
     exactly the registry, so an ABSENT registry is the inert ALLOW by design; kind=block entries are
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
-    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. The decision
-    is an ASK, never a deny: the human approving the ask IS the opt-out, and where the drift gate is
-    configured an approved hand-edit fails it until source and derivative reconcile. Every fail branch
-    fails SAFE to ASK (see _gensrc_fail_ask); only a missing tool_name denies (the shared fail-closed
-    contract). A malformed (empty/list/bool) tool_name, a control-char payload field, an unresolvable
-    target, and a containment fault all ASK; only a None tool_name denies. The repo root
-    is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
+    (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. NO-ASK posture:
+    a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
+    correct action). The cannot-evaluate branches (see _gensrc_fail_ask: a malformed/empty/list/bool
+    tool_name, a control-char payload field, no session cwd, a non-git session, an outside-repo target, an
+    unreadable/malformed registry, an unresolvable target, a containment fault) are NOT confirmed
+    generated-artefact edits and have no "edit the source" action to name, so they ALLOW with an
+    informational note rather than block a legitimate edit; the CI generated-artefact drift gate remains the
+    authoritative backstop. Only a missing tool_name denies under the shared fail-closed contract. The repo
+    root is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
@@ -5646,13 +5802,12 @@ def gensrc_guard(data):
         return _allow()  # not a registered generated artefact
     entry_target, sources, regenerate = match
     reason = ("AIQT rule gensrc (generated-artefact-source-only): {} is a generated artefact ({} in "
-              ".aiqt/gensrc.json); it is changed only through its source. Edit {} and regenerate with "
-              "'{}' instead. Approve only to deliberately hand-edit a generated artefact; where the drift "
-              "gate is configured, it will fail until source and derivative are reconciled."
+              ".aiqt/gensrc.json); it is changed only through its source, so a hand-edit is denied. Edit {} "
+              "and regenerate with '{}' instead; source and derivative land in the same change."
               .format(file_path, entry_target, ", ".join(sources), regenerate))
-    banner = ("AIQT guardrail: asked before a {} to the generated artefact {} (rule gensrc): edit the "
+    banner = ("AIQT guardrail: denied a {} to the generated artefact {} (rule gensrc): edit the "
               "source and regenerate ({}).".format(tool_name, entry_target, regenerate))
-    return _ask(reason, banner)
+    return _deny(reason, banner)
 
 
 # --- the orchestrator-integrity suite ----------------------------------------------------------
@@ -6773,11 +6928,13 @@ def orch_yield_tool(data):
         return _allow()
     status, reg = _orch_registry(root)
     if status != "ok":
-        return _allow() if status == "absent" else _ask(
-            "AIQT guardrail: the orchestration registry could not be read ({}); a "
-            "scheduling call cannot be judged, so it asks rather than silently proceeding."
-            .format(reg),
-            "AIQT guardrail: asked on a scheduling call under an unreadable orchestration registry.")
+        return _allow() if status == "absent" else _deny(
+            "AIQT guardrail (setcmp/cntdef): the orchestration registry could not be read ({}); a "
+            "scheduling call that would park or end the run cannot be judged, so it is denied fail-closed "
+            "(ignorance refuses the wind-down). Fix the orchestration registry, or continue the actionable "
+            "work rather than parking or stopping the run.".format(reg),
+            "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
+            "(ignorance refuses the wind-down); fix the registry or keep working.")
     if not _orch_scope_live(reg, root, data.get("session_id")):
         return _allow()
     tool = data.get("tool_name")
@@ -6999,17 +7156,17 @@ def orch_truncation_guard(data):
     word (whose full stdout the harness binds to the TaskOutput completion signal); ANY shell metacharacter -
     a pipe, redirect, separator, quote, expansion, substitution, grouping, glob, comment, or newline - or a
     reserved word such as `coproc` (which backgrounds a coprocess) makes the capture unprovable by this
-    guard, and it ASKS the operator to confirm. It never proves capture through
-    shell syntax and never DENIES a parsed command; the cost is that a non-trivial background dispatch asks
-    for confirmation rather than being proven, a deliberate trade of coverage for a guarantee of no
-    shell-syntax false-allow; whether the output actually reaches durable capture is a run-time property
-    (the invoked program's own behaviour, or a platform limit such as the harness output ceiling) that is
-    out of view here and is confirmed by the post-execution delivery-marker discipline, a disclosed
-    residual. A foreground call is in scope only for one NARROW case (L-GS1 / trkasy): shell syntax that
-    DETACHES a child with a bare `&` still launches asynchronous work the foreground tool call does not
-    track, so a readable foreground command carrying such an operator ASKS the operator to use the tracked
-    background dispatch instead; every other foreground call remains out of scope (the harness returns its
-    output directly)."""
+    guard. NO-ASK posture: an unprovable background dispatch is NOT a hazard (a dispatch that redirects or
+    pipes its own output is a normal, legitimate form, and denying it would block the orchestrator's own
+    fan-out), and the post-execution delivery-marker discipline is the backstop, so it ALLOWS with an
+    informational note pointing at durable capture (redirect stdout to a real file, or make a real-file tee
+    the final stage) rather than prompting. Whether the output actually reaches durable capture is a run-time
+    property (the invoked program's own behaviour, or a platform limit such as the harness output ceiling)
+    out of view here. A foreground call is in scope only for one NARROW case (L-GS1 / trkasy): shell syntax
+    that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
+    and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
+    carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
+    and wait); every other foreground call remains out of scope (the harness returns its output directly)."""
     if data.get("tool_name") != "Bash":
         return _allow()
     root = _orch_root(data)
@@ -7024,19 +7181,20 @@ def orch_truncation_guard(data):
     if not rib:
         # Foreground scope is narrow: a plain foreground call returns its output directly and is out of
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
-        # are then lost. On a readable foreground command carrying such an operator, ASK the operator to use
-        # the platform's tracked background dispatch (run_in_background) and collect its completion, keep the
-        # command foreground and wait, or confirm the detached result is genuinely irrelevant. An unreadable
-        # or non-detaching foreground command stays out of scope (ALLOW): approving this ASK does not itself
-        # create tracking, and converting to run_in_background=true is what lets the dispatch ledger record it.
+        # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
+        # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable or
+        # non-detaching foreground command stays out of scope (ALLOW).
         if isinstance(command, str) and _orch_foreground_detach(command):
-            return _ask(
-                "AIQT rule trkasy: this foreground command detaches a child with a bare '&', launching "
-                "asynchronous work this tool call does not track, so its result and failure are lost. Use "
-                "the platform's tracked background dispatch (run_in_background) and collect its completion, "
-                "keep the command in the foreground and wait for it, or confirm the detached result and "
-                "completion are genuinely not needed.",
-                "AIQT guardrail: asked on a foreground bare-& detach (untracked asynchronous work).")
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
+                "bare '&', launching asynchronous work this tool call does not track, so its result and "
+                "failure would be lost; it is denied. Use the platform's tracked background dispatch "
+                "(run_in_background) and collect its completion, or keep the command in the foreground and "
+                "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
+                "and run it foreground.",
+                "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
+                "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
     if not isinstance(command, str) or not command:
         return _deny(
@@ -7044,12 +7202,13 @@ def orch_truncation_guard(data):
             "AIQT guardrail: denied an unreadable background dispatch (fail-closed).")
     if _ORCH_PLAIN_COMMAND_RE.fullmatch(command) and not (_ORCH_SHELL_KEYWORDS & set(command.split())):
         return _allow()  # no metacharacter and no reserved word: the full stdout reaches the harness capture
-    return _ask(
-        "AIQT rules trkasy/vrfdlv: this background dispatch uses shell syntax (a pipe, redirect, "
-        "separator, quote, expansion, or grouping), so this guard does not parse it to prove the full "
-        "output is captured. Confirm the full output lands in a durable capture - redirect the producer's "
-        "own stdout to a real file, or make a real-file tee the final stage - or run it in the foreground.",
-        "AIQT guardrail: asked on a background dispatch whose full-output capture it does not parse.")
+    return _allow_note(
+        "AIQT guardrail (rules trkasy/vrfdlv): this background dispatch uses shell syntax (a pipe, redirect, "
+        "separator, quote, expansion, or grouping), so this guard does not parse it to prove the full output "
+        "is captured. It is allowed (denying it would block legitimate background dispatches that redirect "
+        "or pipe their own output); to be sure the full output is durably captured, redirect the producer's "
+        "own stdout to a real file or make a real-file tee the final stage. The post-execution "
+        "delivery-marker discipline remains the backstop.")
 
 
 _ORCH_LOOP_HEADERS = frozenset(("for", "while", "until"))
@@ -7889,6 +8048,21 @@ _WRTSCP_DECL_REL = "write-scope.json"            # under the registry-declared <
 _WRTSCP_FLOOR_REL = os.path.join(".aiqt", "frozen.json")  # in-tree committed floor (gen_manifest-generated)
 _WRTSCP_VERSION = 1
 _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are small; a larger one is malformed
+# Hook-side ALWAYS-FROZEN entries (repo-root-relative, same grammar as the committed floor): frozen against
+# the constrained actor's own covered Write/Edit/MultiEdit in BOTH regimes and INDEPENDENT of the committed
+# .aiqt/frozen.json floor, so an absent, deleted, or permissive floor cannot unfreeze them and a permissive
+# scope declaration cannot lower them. The orchestration LOCAL registry (.aiqt/orchestration.local.json)
+# carries write-scope-adjacent GUARDRAIL CONFIGURATION: the `companion_stores` cross-repo allow-list and the
+# yield-tool roster. Declaring a companion store is a scope-widening, guardrail-configuration change under the
+# SAME human-authorization discipline as any other scope widening (guardrail-config-integrity), so the actor
+# must not be able to self-declare a companion-store widening through a covered write; freezing the registry
+# against its own covered writes closes that self-widening residual (raised independently by our own QA and
+# the cleanlanguage adopter). The committed .aiqt/orchestration.json is out of this set: it is an ordinary
+# committed artefact whose companion_stores declaration lands through pull-request review plus the drift
+# gate, which IS the human-authorization path. The general Bash-write residual (a `sed -i`, a shell redirect,
+# any write outside the Write|Edit|MultiEdit matcher) is UNCHANGED and stays the disclosed wrtscp residual;
+# this hook-side freeze is defence in depth on the covered-tool path, not a categorical lock on the file.
+_WRTSCP_ALWAYS_FROZEN = (("file", ".aiqt/orchestration.local.json"),)
 
 
 def _wrtscp_parse_entry(raw):
@@ -8222,7 +8396,18 @@ def write_scope_guard(data):
     stays open. The hook only HONOURS a validly-declared store, never self-widens: a malformed, unresolvable,
     non-repo, or non-root declaration is fail-closed (the cross-repo write still denies), and the exact-root
     match keeps a repo nested inside a declared store, or a sibling beside it, denied. The nested-in-session
-    and frozen-floor denials are unchanged by a declaration. The root is resolved FIRST, so this unresolvable-root denial
+    and frozen-floor denials are unchanged by a declaration. DECLARING A COMPANION STORE IS A
+    GUARDRAIL-CONFIGURATION CHANGE: `companion_stores` widens where covered writes may land (a cross-repo
+    scope widening), so it is governed by the SAME human-authorization discipline as any other scope widening
+    (guardrail-config-integrity) - the harness/adopter sets it on the registry surface, never the constrained
+    actor. For that reason the orchestration LOCAL registry (.aiqt/orchestration.local.json) is on the
+    hook-side ALWAYS-FROZEN set (_WRTSCP_ALWAYS_FROZEN): a covered Write/Edit/MultiEdit to it is DENIED in
+    BOTH regimes and independent of the committed floor, so the actor cannot self-declare a companion-store
+    widening through a guarded tool; the general Bash-write path stays the disclosed residual below. The
+    `companion_stores` declaration is honoured only inside a VERSION-1 registry OBJECT: _orch_registry reads
+    a registry with a missing or non-1 `version` as BAD (a cannot-evaluate), so a declaration lacking
+    `"version": 1` yields NO stores and the cross-repo write FAILS CLOSED (denies), never silently taking
+    effect. The root is resolved FIRST, so this unresolvable-root denial
     precedes any relative-path handling (a non-git relative-path write denies, it does not defer); only once
     the root resolves does an un-armed relative path defer to the sibling absolute_paths hook. The
     frozen-floor denial fires whenever a floor is PRESENT, and an
@@ -8419,6 +8604,27 @@ def write_scope_guard(data):
                             "this repo ({}); it is denied as a floor the scope declaration cannot lower. "
                             "Run the write from a session rooted in that repo.".format(target),
                             "denied a {} to a nested or foreign repository".format(tool_name))  # rows 7/16
+    # --- Hook-side ALWAYS-FROZEN denial (registry freeze): fires in BOTH regimes and independent of the
+    # committed floor, BEFORE the data-floor logic, so an absent/deleted/permissive .aiqt/frozen.json and a
+    # permissive scope declaration alike cannot let a covered write reach .aiqt/orchestration.local.json. This
+    # closes the companion-store self-widening residual (see _WRTSCP_ALWAYS_FROZEN). ---
+    always_frozen_hit = _wrtscp_target_matches(_WRTSCP_ALWAYS_FROZEN, target, root_c)
+    if always_frozen_hit is None:
+        return _wrtscp_deny(root, "always-frozen containment fault",
+                            "an always-frozen registry entry could not be resolved for containment, so a "
+                            "no-match cannot be proven",
+                            "denied a {} (always-frozen containment fault)".format(tool_name))
+    if always_frozen_hit:
+        return _wrtscp_deny(root, "frozen registry",
+                            "the write target is the orchestration LOCAL registry ({}), which carries "
+                            "guardrail configuration (the companion_stores cross-repo allow-list and the "
+                            "yield-tool roster). Declaring a companion store is a scope-widening, "
+                            "guardrail-configuration change under human authorization, so the registry is "
+                            "frozen against the actor's own covered writes in both regimes (independent of "
+                            "the committed frozen floor and un-lowerable by a scope declaration) and cannot "
+                            "be self-widened through a guarded tool; set it through the harness/adopter "
+                            "orchestration-registry surface instead.".format(target),
+                            "denied a {} to the frozen orchestration registry".format(tool_name))
     # --- Frozen-floor denial (rows 8, 9, 10, 17, 18): fires whenever a floor is PRESENT, and an armed
     # session additionally requires one; only an un-armed session with a genuinely-absent floor is inert ---
     floor_status, floor = _load_frozen_floor(root)
