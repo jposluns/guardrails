@@ -1316,7 +1316,9 @@ def _existing_id_set(store_root_fd, machine_rel, active_types, roster,
 
 def _counters_regressed_below_existing(durable_ids, high_water, where):
     """Findings for every namespace whose declared counters high-water is below a durable id already seated
-    in it (spec 8.2: counters never regress beneath an allocated id). `durable_ids` are the active-store and
+    in it, or that is absent from counters.toml entirely while a durable id is seated in it (an absent
+    counter reserves nothing, so it is below any allocated id: the class-sibling of the tracked-but-low
+    case) (spec 8.2: counters never regress beneath an allocated id). `durable_ids` are the active-store and
     archive ids (promoted, durable reservations); sibling staging ids are excluded (a proposal reserves
     nothing). A malformed durable id is not this gate's concern (the active/archive readers already refuse it
     to CANNOT-EVALUATE upstream), so it is skipped here. Returns a findings list; the caller routes a
@@ -1327,12 +1329,27 @@ def _counters_regressed_below_existing(durable_ids, high_water, where):
         if shape is None:
             continue
         ns, n = shape[0], shape[1]
-        if ns in high_water and n > high_water[ns] and n > worst.get(ns, 0):
+        # An absent counter reserves nothing, so a namespace MISSING from counters.toml is below any
+        # allocated id exactly as a tracked counter sitting beneath a seated id is (spec 8.2). Both leave
+        # counters under-stating the store: the absent-namespace door is the class-sibling of the
+        # tracked-but-low case and fails closed the same way (a durable id in an untracked namespace was
+        # otherwise skipped and the corrupt store certified promotion-ready).
+        if (ns not in high_water or n > high_water[ns]) and n > worst.get(ns, 0):
             worst[ns] = n
-    return ["{}: counters high-water {}={} is below the durable id {}-{} already seated in the store "
-            "(spec 8.2: a counter never regresses beneath an allocated id; a regressed counter is a corrupt "
-            "basis, fail-closed)".format(where, ns, high_water[ns], ns, worst[ns])
-            for ns in sorted(worst)]
+    findings = []
+    for ns in sorted(worst):
+        if ns in high_water:
+            findings.append(
+                "{}: counters high-water {}={} is below the durable id {}-{} already seated in the store "
+                "(spec 8.2: a counter never regresses beneath an allocated id; a regressed counter is a "
+                "corrupt basis, fail-closed)".format(where, ns, high_water[ns], ns, worst[ns]))
+        else:
+            findings.append(
+                "{}: counters.toml does not track namespace {!r}, but the durable id {}-{} is already "
+                "seated in the store (spec 8.2: a namespace with an allocated id must declare its counter; "
+                "an untracked namespace under-states the store, a corrupt basis, fail-closed)".format(
+                    where, ns, ns, worst[ns]))
+    return findings
 
 
 def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now, run_nonce,
@@ -2745,7 +2762,25 @@ def self_test():
                                    now=NOW, run_nonce=NONCE).verdict
             except TypeError:
                 vG5 = "escaped"
-            check("G5-nonpath-product-root-cannot-eval", vG5 == 2)
+            check("G5-nonpath-product-root-cannot-eval-{!r}".format(g5_bad), vG5 == 2)
+
+        # G6 (spec 8.2, counters absent-namespace regression: the class-sibling of G4 through the ABSENT
+        # counter door): counters.toml omits BI entirely while the active store carries BI-5; an LF-only
+        # plan never mints BI so the R6 union does not fire. Corrupt basis -> CANNOT-EVALUATE, nothing
+        # staged. Pre-fix the gate inspected only namespaces present in high_water, so the untracked
+        # namespace slipped through as verdict 0 promotion_ready with BI omitted from new_high_water.
+        lf_only = dict(fragments=dict())
+        lf_only["fragments"]["a.txt"] = [dict(span=[0, len(src)], state="unmapped")]
+        rootG6, mG6 = build_store(counters="LF=0,WL=0", sources=dict([("a.txt", src)]),
+                                  extra=dict([("backlog_item.index.toml", bi_index_text("BI-5"))]))
+        resG6 = stage_import(rootG6, ["a.txt"], lf_only, now=NOW, run_nonce=NONCE)
+        check("G6-counters-absent-namespace-regressed-cannot-eval", resG6.verdict == 2)
+        check("G6-counters-absent-namespace-no-run", not (mG6 / "imports").exists())
+        # the gate refuses ONLY a genuine untracked-namespace regression: an LF-only plan against a store
+        # with NO seated BI id (BI legitimately absent from counters) still stages clean.
+        rootG6b, mG6b = build_store(counters="LF=0,WL=0", sources=dict([("a.txt", src)]))
+        check("G6-absent-namespace-no-durable-id-clean",
+              stage_import(rootG6b, ["a.txt"], lf_only, now=NOW, run_nonce=NONCE).verdict == 0)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
